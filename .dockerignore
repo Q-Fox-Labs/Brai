@@ -1,0 +1,21 @@
+# ABOUTME: Исключает локальные и внутренние данные из Docker-контекста.
+# ABOUTME: Сохраняет контекст сборки только из файлов продукта.
+.git
+.secrets
+**/.secrets/
+.env
+.env.*
+*.env
+**/.env
+**/.env.*
+**/*.env
+node_modules
+**/node_modules
+.next
+**/.next
+dist
+**/dist
+tmp/
+.agents/
+.codex/
+.aws/

@@ -1,3 +1,5 @@
+# ABOUTME: Исключает локальные данные и результаты сборки Brai из Git.
+# ABOUTME: Не включает зависимости, конфигурацию экземпляра и артефакты.
 .secrets/
 .env
 .env.*
@@ -5,3 +7,10 @@
 .aws/
 .codex/
 tmp/
+# BEGIN BRAI NODE WORKSPACE
+node_modules/
+.next/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+# END BRAI NODE WORKSPACE

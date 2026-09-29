@@ -1,0 +1,22 @@
+{
+  "name": "brai",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "services/*"
+  ],
+  "scripts": {
+    "build:web": "npm run build --workspace=@brai/web",
+    "build:timer": "npm run build --workspace=@brai/timer",
+    "typecheck:web": "npm run typecheck --workspace=@brai/web",
+    "typecheck:timer": "npm run typecheck --workspace=@brai/timer",
+    "build": "npm run build:web && npm run build:timer",
+    "typecheck": "npm run typecheck:web && npm run typecheck:timer"
+  },
+  "engines": {
+    "node": "24.21.0",
+    "npm": "11.19.0"
+  },
+  "packageManager": "npm@11.19.0"
+}

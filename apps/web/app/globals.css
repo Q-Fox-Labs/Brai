@@ -1,0 +1,14 @@
+/* ABOUTME: Подключает Tailwind CSS и задаёт базовые стили веб-приложения. */
+/* ABOUTME: Компонентные стили принадлежат соответствующим компонентам. */
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: white;
+  color: #0f172a;
+}
