@@ -1,0 +1,26 @@
+# ABOUTME: Запускает закреплённый NATS с JetStream и явной конфигурацией.
+# ABOUTME: Имена проекта, сети, тома и защищённые файлы передаёт окружение.
+name: ${NATS_COMPOSE_PROJECT:?Set NATS_COMPOSE_PROJECT}
+services:
+  nats:
+    image: nats:2.15.0
+    container_name: nats
+    command: ["-c", "/etc/nats/nats.conf"]
+    restart: unless-stopped
+    env_file: ${NATS_SERVER_ENV_FILE:?Set NATS_SERVER_ENV_FILE}
+    ports:
+      - "127.0.0.1:4222:4222"
+    volumes:
+      - nats_data:/data
+      - ./nats.conf:/etc/nats/nats.conf:ro
+    networks:
+      messaging:
+        aliases: [nats]
+networks:
+  messaging:
+    name: ${BRAI_NATS_NETWORK:?Set BRAI_NATS_NETWORK}
+    external: true
+volumes:
+  nats_data:
+    name: ${NATS_DATA_VOLUME:?Set NATS_DATA_VOLUME}
+    external: true

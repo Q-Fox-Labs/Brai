@@ -1,0 +1,14 @@
+# ABOUTME: Добавляет только PostgreSQL в закрытую прикладную сеть.
+# ABOUTME: Studio и API остаются внутри Supabase; веб-приложение не видит БД.
+services:
+  db:
+    networks:
+      default: {}
+      database:
+        aliases: [supabase-db]
+networks:
+  default:
+    name: ${BRAI_SUPABASE_NETWORK:?Set BRAI_SUPABASE_NETWORK}
+  database:
+    name: ${BRAI_DATABASE_NETWORK:?Set BRAI_DATABASE_NETWORK}
+    external: true
