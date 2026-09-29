@@ -120,7 +120,8 @@
         "active",
         "version",
         "serverTime",
-        "recentCompleted"
+        "recentCompleted",
+        "nextCursor"
       ],
       "properties": {
         "active": {
@@ -145,6 +146,13 @@
           "items": {
             "$ref": "common.schema.json#/definitions/interval"
           }
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
         }
       }
     },
