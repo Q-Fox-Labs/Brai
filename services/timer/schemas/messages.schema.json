@@ -1,0 +1,250 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.invalid/contracts/timer/v1/messages.schema.json",
+  "title": "Brai timer events and query DTOs",
+  "oneOf": [
+    {
+      "$ref": "#/definitions/StartedEvent"
+    },
+    {
+      "$ref": "#/definitions/StoppedEvent"
+    },
+    {
+      "$ref": "#/definitions/RejectedEvent"
+    },
+    {
+      "$ref": "#/definitions/SnapshotResponse"
+    },
+    {
+      "$ref": "#/definitions/HistoryRequest"
+    },
+    {
+      "$ref": "#/definitions/HistoryResponse"
+    },
+    {
+      "$ref": "#/definitions/CommandLookupRequest"
+    },
+    {
+      "$ref": "#/definitions/CommandLookupResponse"
+    }
+  ],
+  "definitions": {
+    "StartedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eventId",
+        "commandId",
+        "version",
+        "timerId",
+        "startedAt"
+      ],
+      "properties": {
+        "eventId": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "commandId": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "version": {
+          "$ref": "common.schema.json#/definitions/version"
+        },
+        "timerId": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "startedAt": {
+          "$ref": "common.schema.json#/definitions/timestamp"
+        }
+      }
+    },
+    "StoppedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eventId",
+        "commandId",
+        "version",
+        "interval"
+      ],
+      "properties": {
+        "eventId": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "commandId": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "version": {
+          "$ref": "common.schema.json#/definitions/version"
+        },
+        "interval": {
+          "$ref": "common.schema.json#/definitions/interval"
+        }
+      }
+    },
+    "RejectedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eventId",
+        "commandId",
+        "correlationId",
+        "error"
+      ],
+      "properties": {
+        "eventId": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "commandId": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/definitions/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlationId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "error": {
+          "$ref": "common.schema.json#/definitions/error"
+        }
+      }
+    },
+    "SnapshotResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active",
+        "version",
+        "serverTime",
+        "recentCompleted"
+      ],
+      "properties": {
+        "active": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/definitions/activeTimer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "$ref": "common.schema.json#/definitions/version"
+        },
+        "serverTime": {
+          "$ref": "common.schema.json#/definitions/timestamp"
+        },
+        "recentCompleted": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "$ref": "common.schema.json#/definitions/interval"
+          }
+        }
+      }
+    },
+    "HistoryRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "limit"
+      ],
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      }
+    },
+    "HistoryResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "nextCursor"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/definitions/interval"
+          }
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "CommandLookupRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commandId"
+      ],
+      "properties": {
+        "commandId": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        }
+      },
+      "examples": [
+        {
+          "commandId": "91ae2be0-8d8f-4c50-9fd3-80b516b69a01"
+        }
+      ]
+    },
+    "CommandLookupResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commandId",
+        "status",
+        "result"
+      ],
+      "properties": {
+        "commandId": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "completed"
+          ]
+        },
+        "result": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/StartedEvent"
+            },
+            {
+              "$ref": "#/definitions/StoppedEvent"
+            },
+            {
+              "$ref": "#/definitions/RejectedEvent"
+            }
+          ]
+        }
+      }
+    },
+    "SnapshotRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    }
+  }
+}

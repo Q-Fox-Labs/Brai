@@ -1,0 +1,280 @@
+asyncapi: 3.1.0
+info:
+  title: Brai timer service
+  version: 1.0.0
+  description: Wire contract v1 for the durable timer command/event streams and brai_timer NATS Service. NATS Service
+    name brai_timer, service version 1.0.0, generated instance ID; PING, INFO and STATS are provided. Query replies
+    use the request replyTo inbox. Service errors use Nats-Service-Error and Nats-Service-Error-Code headers.
+servers:
+  brai:
+    host: '{host}:{port}'
+    protocol: nats
+    description: Private NATS endpoint supplied by runtime configuration.
+    variables:
+      host:
+        default: localhost
+      port:
+        default: '4222'
+defaultContentType: application/json
+channels:
+  startCommand:
+    address: brai.timer.v1.command.start
+    messages:
+      StartCommand:
+        $ref: '#/components/messages/StartCommand'
+  stopCommand:
+    address: brai.timer.v1.command.stop
+    messages:
+      StopCommand:
+        $ref: '#/components/messages/StopCommand'
+  startedEvent:
+    address: brai.timer.v1.event.started
+    messages:
+      StartedEvent:
+        $ref: '#/components/messages/StartedEvent'
+  stoppedEvent:
+    address: brai.timer.v1.event.stopped
+    messages:
+      StoppedEvent:
+        $ref: '#/components/messages/StoppedEvent'
+  rejectedEvent:
+    address: brai.timer.v1.event.rejected
+    messages:
+      RejectedEvent:
+        $ref: '#/components/messages/RejectedEvent'
+  snapshotQuery:
+    address: brai.timer.v1.query.snapshot
+    messages:
+      SnapshotRequest:
+        $ref: '#/components/messages/SnapshotRequest'
+      SnapshotResponse:
+        $ref: '#/components/messages/SnapshotResponse'
+  historyQuery:
+    address: brai.timer.v1.query.history
+    messages:
+      HistoryRequest:
+        $ref: '#/components/messages/HistoryRequest'
+      HistoryResponse:
+        $ref: '#/components/messages/HistoryResponse'
+  commandQuery:
+    address: brai.timer.v1.query.command
+    messages:
+      CommandLookupRequest:
+        $ref: '#/components/messages/CommandLookupRequest'
+      CommandLookupResponse:
+        $ref: '#/components/messages/CommandLookupResponse'
+  serviceReply:
+    address: null
+    messages:
+      SnapshotResponse:
+        $ref: '#/components/messages/SnapshotResponse'
+      HistoryResponse:
+        $ref: '#/components/messages/HistoryResponse'
+      CommandLookupResponse:
+        $ref: '#/components/messages/CommandLookupResponse'
+      ServiceError:
+        $ref: '#/components/messages/ServiceError'
+operations:
+  acceptStart:
+    action: receive
+    channel:
+      $ref: '#/channels/startCommand'
+    messages:
+    - $ref: '#/channels/startCommand/messages/StartCommand'
+    description: Durable JetStream command. Persist state and result, publish the saved event and wait for PubAck
+      before ACK.
+  acceptStop:
+    action: receive
+    channel:
+      $ref: '#/channels/stopCommand'
+    messages:
+    - $ref: '#/channels/stopCommand/messages/StopCommand'
+    description: Durable JetStream command. Persist state and result, publish the saved event and wait for PubAck
+      before ACK.
+  publishStarted:
+    action: send
+    channel:
+      $ref: '#/channels/startedEvent'
+    messages:
+    - $ref: '#/channels/startedEvent/messages/StartedEvent'
+  publishStopped:
+    action: send
+    channel:
+      $ref: '#/channels/stoppedEvent'
+    messages:
+    - $ref: '#/channels/stoppedEvent/messages/StoppedEvent'
+  publishRejected:
+    action: send
+    channel:
+      $ref: '#/channels/rejectedEvent'
+    messages:
+    - $ref: '#/channels/rejectedEvent/messages/RejectedEvent'
+  snapshot:
+    action: receive
+    channel:
+      $ref: '#/channels/snapshotQuery'
+    messages:
+    - $ref: '#/channels/snapshotQuery/messages/SnapshotRequest'
+    reply:
+      address:
+        location: $message.header#/replyTo
+        description: Reply is sent to the request NATS message reply subject; x-nats-reply-subject maps AsyncAPI
+          reply address to native NATS metadata. Clients do not set a JSON/HTTP header.
+        x-nats-reply-subject: message.reply
+      channel:
+        $ref: '#/channels/serviceReply'
+      messages:
+      - $ref: '#/channels/serviceReply/messages/SnapshotResponse'
+      - $ref: '#/channels/serviceReply/messages/ServiceError'
+    bindings:
+      nats:
+        queue: brai_timer
+        bindingVersion: 0.1.0
+  history:
+    action: receive
+    channel:
+      $ref: '#/channels/historyQuery'
+    messages:
+    - $ref: '#/channels/historyQuery/messages/HistoryRequest'
+    reply:
+      address:
+        location: $message.header#/replyTo
+        description: Reply is sent to the request NATS message reply subject; x-nats-reply-subject maps AsyncAPI
+          reply address to native NATS metadata. Clients do not set a JSON/HTTP header.
+        x-nats-reply-subject: message.reply
+      channel:
+        $ref: '#/channels/serviceReply'
+      messages:
+      - $ref: '#/channels/serviceReply/messages/HistoryResponse'
+      - $ref: '#/channels/serviceReply/messages/ServiceError'
+    bindings:
+      nats:
+        queue: brai_timer
+        bindingVersion: 0.1.0
+  commandLookup:
+    action: receive
+    channel:
+      $ref: '#/channels/commandQuery'
+    messages:
+    - $ref: '#/channels/commandQuery/messages/CommandLookupRequest'
+    reply:
+      address:
+        location: $message.header#/replyTo
+        description: Reply is sent to the request NATS message reply subject; x-nats-reply-subject maps AsyncAPI
+          reply address to native NATS metadata. Clients do not set a JSON/HTTP header.
+        x-nats-reply-subject: message.reply
+      channel:
+        $ref: '#/channels/serviceReply'
+      messages:
+      - $ref: '#/channels/serviceReply/messages/CommandLookupResponse'
+      - $ref: '#/channels/serviceReply/messages/ServiceError'
+    bindings:
+      nats:
+        queue: brai_timer
+        bindingVersion: 0.1.0
+components:
+  messages:
+    StartCommand:
+      name: StartCommand
+      payload:
+        $ref: ./schemas/commands.schema.json#/definitions/StartCommand
+    StopCommand:
+      name: StopCommand
+      payload:
+        $ref: ./schemas/commands.schema.json#/definitions/StopCommand
+    StartedEvent:
+      name: StartedEvent
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/StartedEvent
+    StoppedEvent:
+      name: StoppedEvent
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/StoppedEvent
+    RejectedEvent:
+      name: RejectedEvent
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/RejectedEvent
+    SnapshotRequest:
+      name: SnapshotRequest
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/SnapshotRequest
+    SnapshotResponse:
+      name: SnapshotResponse
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/SnapshotResponse
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          Nats-Service-Error:
+            type: string
+          Nats-Service-Error-Code:
+            type: string
+            enum:
+            - '400'
+            - '404'
+            - '500'
+            - '503'
+    HistoryRequest:
+      name: HistoryRequest
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/HistoryRequest
+    HistoryResponse:
+      name: HistoryResponse
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/HistoryResponse
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          Nats-Service-Error:
+            type: string
+          Nats-Service-Error-Code:
+            type: string
+            enum:
+            - '400'
+            - '404'
+            - '500'
+            - '503'
+    CommandLookupRequest:
+      name: CommandLookupRequest
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/CommandLookupRequest
+    CommandLookupResponse:
+      name: CommandLookupResponse
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/CommandLookupResponse
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          Nats-Service-Error:
+            type: string
+          Nats-Service-Error-Code:
+            type: string
+            enum:
+            - '400'
+            - '404'
+            - '500'
+            - '503'
+    ServiceError:
+      name: ServiceError
+      description: NATS Service error; the two error headers are required for this response.
+      headers:
+        type: object
+        required:
+        - Nats-Service-Error
+        - Nats-Service-Error-Code
+        properties:
+          Nats-Service-Error:
+            type: string
+            minLength: 1
+          Nats-Service-Error-Code:
+            type: string
+            enum:
+            - '400'
+            - '404'
+            - '500'
+            - '503'
+      payload:
+        $ref: ./schemas/common.schema.json#/definitions/error

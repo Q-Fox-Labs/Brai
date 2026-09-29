@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.invalid/contracts/timer/v1/commands.schema.json",
+  "title": "Brai timer commands",
+  "oneOf": [{"$ref": "#/definitions/StartCommand"}, {"$ref": "#/definitions/StopCommand"}],
+  "definitions": {
+    "StartCommand": {
+      "type": "object", "additionalProperties": false,
+      "required": ["commandId", "expectedVersion"],
+      "properties": {
+        "commandId": {"$ref": "common.schema.json#/definitions/uuid"},
+        "expectedVersion": {"$ref": "common.schema.json#/definitions/version"}
+      }
+    },
+    "StopCommand": {
+      "type": "object", "additionalProperties": false,
+      "required": ["commandId", "expectedVersion", "timerId"],
+      "properties": {
+        "commandId": {"$ref": "common.schema.json#/definitions/uuid"},
+        "expectedVersion": {"$ref": "common.schema.json#/definitions/version"},
+        "timerId": {"$ref": "common.schema.json#/definitions/uuid"}
+      }
+    }
+  }
+}
