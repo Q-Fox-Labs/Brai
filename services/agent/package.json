@@ -18,6 +18,8 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@ag-ui/client": "1.0.1",
+    "@ag-ui/encoder": "1.0.1",
     "@open-rpc/meta-schema": "1.14.9",
     "json-schema-to-typescript": "15.0.4",
     "@asyncapi/specs": "6.11.1",
