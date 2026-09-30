@@ -35,6 +35,40 @@ POST принимает JSON до 2048 bytes. Схемы, временные м�
 
 Перед каждым frame сервер заново проверяет сессию и совпадение её ID/владельца. Каждые две секунды heartbeat выполняет ту же проверку, даже если таймер не меняется. Потеря сессии или ошибка auth закрывают поток; успешный выход немедленно закрывает все потоки этой сессии в процессе. Уже переданные transport bytes нельзя отозвать. SSE не воспроизводит события v1.
 
+## Агент: HTTP/SSE
+
+Транспортный слой агента обращается к NATS только от имени web-сервера. DTO и их проверки принадлежат [контракту agent](../../services/agent/README.md) и пакету `@brai/agent/contracts`; используйте его `validateDto`, `validateEventEnvelope` и `validateAguiEvent`. Не копируйте схемы в web. NATS subjects и DTO перечислены в README владельца.
+
+Все HTTP-маршруты ниже требуют действующую сессию Better Auth и `X-Brai-User` с ID аккаунта текущего документа. Сервер сравнивает заголовок с проверенной сессией; отсутствие или несовпадение даёт 401. Заголовок не является полномочием. До запроса к agent сервер проверяет сессию; agent проверяет projectId по собственной конфигурации. Web не хранит второй реестр проектов или их путей. POST дополнительно требует совпадающий `Origin`; при несовпадении возвращается 403. Поля `userId` нет в DTO agent и его нельзя добавлять в NATS-запрос.
+
+SSE-маршрут использует проверенную сессию и `expectedUserId` в query; `X-Brai-User` для SSE не требуется. Отсутствующий или несовпадающий `expectedUserId` даёт 401. Список разрешённых проектов и их пути принадлежат agent.
+
+| HTTP | Суффикс subject (`brai.agent.v1.`) | Вход → владелецкий DTO | Успех → владелецкий DTO |
+| --- | --- | --- | --- |
+| GET `/api/agent/projects` | `query.projects` | пустой объект → `ProjectsRequest` | 200 `ProjectsResponse` |
+| GET `/api/agent/status` | `query.status` | пустой объект → `StatusRequest` | 200 `StatusResponse` |
+| GET `/api/agent/threads?projectId=…&cursor=…&limit=…` | `query.threads` | параметры → `ThreadsRequest` | 200 `ThreadsResponse` |
+| GET `/api/agent/threads/{threadId}?projectId=…` | `query.thread` | параметры → `ThreadReadRequest` | 200 `ThreadSnapshot` |
+| GET `/api/agent/threads/{threadId}/history?projectId=…&cursor=…&limit=…&turnId=…` | `query.history` | параметры → `HistoryRequest` | 200 `HistoryResponse` |
+| POST `/api/agent/threads` | `command.thread.create` | `ThreadCreateRequest` | 202 `ThreadCreateResponse` |
+| POST `/api/agent/turns/start` | `command.turn.start` | `TurnStartRequest` | 202 `TurnMutationResponse` |
+| POST `/api/agent/turns/steer` | `command.turn.steer` | `TurnSteerRequest` | 202 `TurnMutationResponse` |
+| POST `/api/agent/turns/interrupt` | `command.turn.interrupt` | `TurnInterruptRequest` | 202 `TurnMutationResponse` |
+| POST `/api/agent/requests/respond` | `command.request.respond` | `RequestRespondRequest` | 202 `RequestRespondResponse` |
+| GET `/api/agent/events?projectId=…&threadId=…&expectedUserId=…` | `event` (подписка) | SSE | 200: `ThreadSnapshot` и `EventEnvelope` |
+
+GET может загрузить проекцию треда или восстановить upstream-соединение. GET не создаёт тред или ход и не прерывает выполнение. Открытие страницы/чата, чтение истории, переподключение SSE и отмена HTTP/SSE не запускают новый ход и не останавливают текущий. Новый ход запускает только явный `turn/start`. Изменение активного хода делает только явный `turn/steer` с текущими `generation` и `expectedTurnId`; прерывание — только явный `turn/interrupt` с текущими `generation` и `turnId`. Ответ на форму отправляется отдельно с текущими `generation`, `requestId` и `kind`.
+
+Отказы проверки сессии/ожидаемого аккаунта (401) и Origin (403) принадлежат существующему auth-gate web и не являются `ErrorResponse` agent. Ответы agent проверяются владельческим валидатором. Ошибки agent имеют `ErrorResponse` с владельческими `code` и `outcome`: неверный ввод — 400, устаревшее поколение/ход/запрос или конфликт — 409, слишком большой запрос/элемент — 413, исчерпание ёмкости — 429 либо 503 с объяснением, недоступность — 503, тайм-аут — 504, отсутствие — 404, неподдерживаемая операция — 501. Ошибки чтения имеют `outcome: "query"`. Для мутаций `not-sent` означает, что отправка не состоялась; `unknown` означает неопределённый результат. При `unknown`, timeout или разрыве связи клиент не отправляет мутацию повторно автоматически и не объявляет её неудачной. Чтения имеют предел 10 секунд, принятие мутации — 12 секунд; `accepted` подтверждает только местное принятие, не завершение выполнения.
+
+SSE сначала подписывается на события и ставит их в ограниченную очередь до 64 элементов, затем получает свежий `ThreadSnapshot` с водяным знаком `seq`. Snapshot передаётся как событие `snapshot`, а событие владельца — как `agent` с проверенным `EventEnvelope`; `EventEnvelope.event` передаётся в `AbstractAgent.connectAgent`. Поле SSE `id` имеет вид `generation:streamEpoch:seq`. После снимка клиент отбрасывает буфер до включённой границы и принимает только непрерывные номера той же эпохи. Пропуск, смена generation/streamEpoch, сигнал resync или переполнение очереди требуют свежего снимка; Core NATS не воспроизводит пропущенные события. Перезагрузка браузера не меняет живую эпоху. Новое upstream-подключение создаёт новое поколение.
+
+Каждый SSE frame и двухсекундный heartbeat повторно проверяют ту же сессию и `expectedUserId`, что и обычный запрос. Потеря/смена аккаунта закрывает поток. Ограничения владельца действуют и для SSE: не более 128 клиентов, 64 событий очереди на клиента, 1 MiB на исходящий кадр; снимок и страница истории — не более 768 KiB каждый. Клиент также ограничивает свою очередь и при перегрузке переподключается со свежим снимком.
+
+Снимок показывает текущие сообщения, активный ход и формы ожидания. `command-approval`, `file-change-approval`, `permissions` и `question` отображаются как нативные формы. `unsupported` показывается компактным состоянием с причиной и доступностью явного прерывания; для него нельзя отправлять ответ. При двух вкладках первое принятое решение побеждает, поздний ответ получает `STALE_REQUEST` и не подтверждается интерфейсом.
+
+Пример потока: клиент явно отправил `TurnStartRequest` для уже существующего треда. POST отвечает `TurnMutationResponse` с `outcome: "accepted"`; затем SSE передаёт `RUN_STARTED`, `TEXT_MESSAGE_START`, `TEXT_MESSAGE_CONTENT`, `TEXT_MESSAGE_END` и финальное `MESSAGES_SNAPSHOT` в `EventEnvelope`, после чего `RUN_FINISHED` с `outcome: {"type":"success"}` и новый снимок. Прерывание завершает run как `RUN_FINISHED` с `outcome: {"type":"cancelled"}`; это не означает, что POST сам по себе уже подтвердил фактическое состояние Codex. Форма вопроса остаётся в том же открытом run: ответ на неё не вызывает новый `turn/start`.
+
 ## Локальный отсчёт и очередь
 
 START/STOP мгновенно меняют локальный отсчёт независимо от доступности timer. Подтверждённые интервалы приходят через snapshot, SSE или ledger. Время фиксируется при нажатии по serverTime + performance.now; задержка обработки не увеличивает интервал. Reload дополняет elapsed разницей wall-clock, внутри документа отсчёт монотонный.
