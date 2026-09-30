@@ -5,6 +5,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
 COPY services/timer/package.json services/timer/package.json
+COPY services/auth/package.json services/auth/package.json
 RUN npm ci
 COPY services/timer services/timer
 RUN npm run build --workspace=@brai/timer
@@ -15,6 +16,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
 COPY services/timer/package.json services/timer/package.json
+COPY services/auth/package.json services/auth/package.json
 RUN npm ci --omit=dev --workspace=@brai/timer
 WORKDIR /app/services/timer
 COPY --from=build /app/services/timer/package.json ./package.json

@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://brai.invalid/contracts/timer/v1/messages.schema.json",
+  "$id": "https://brai.invalid/contracts/timer/v2/messages.schema.json",
   "title": "Brai timer events and query DTOs",
   "oneOf": [
     {
@@ -37,7 +37,8 @@
         "commandId",
         "version",
         "timerId",
-        "startedAt"
+        "startedAt",
+        "userId"
       ],
       "properties": {
         "eventId": {
@@ -54,6 +55,9 @@
         },
         "startedAt": {
           "$ref": "common.schema.json#/definitions/timestamp"
+        },
+        "userId": {
+          "$ref": "common.schema.json#/definitions/userId"
         }
       }
     },
@@ -64,7 +68,8 @@
         "eventId",
         "commandId",
         "version",
-        "interval"
+        "interval",
+        "userId"
       ],
       "properties": {
         "eventId": {
@@ -78,6 +83,9 @@
         },
         "interval": {
           "$ref": "common.schema.json#/definitions/interval"
+        },
+        "userId": {
+          "$ref": "common.schema.json#/definitions/userId"
         }
       }
     },
@@ -88,7 +96,8 @@
         "eventId",
         "commandId",
         "correlationId",
-        "error"
+        "error",
+        "userId"
       ],
       "properties": {
         "eventId": {
@@ -110,6 +119,9 @@
         },
         "error": {
           "$ref": "common.schema.json#/definitions/error"
+        },
+        "userId": {
+          "$ref": "common.schema.json#/definitions/userId"
         }
       }
     },
@@ -121,7 +133,8 @@
         "version",
         "serverTime",
         "recentCompleted",
-        "nextCursor"
+        "nextCursor",
+        "userId"
       ],
       "properties": {
         "active": {
@@ -153,6 +166,9 @@
             "null"
           ],
           "minLength": 1
+        },
+        "userId": {
+          "$ref": "common.schema.json#/definitions/userId"
         }
       }
     },
@@ -160,7 +176,8 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "limit"
+        "limit",
+        "userId"
       ],
       "properties": {
         "limit": {
@@ -174,6 +191,9 @@
             "null"
           ],
           "minLength": 1
+        },
+        "userId": {
+          "$ref": "common.schema.json#/definitions/userId"
         }
       }
     },
@@ -182,7 +202,8 @@
       "additionalProperties": false,
       "required": [
         "items",
-        "nextCursor"
+        "nextCursor",
+        "userId"
       ],
       "properties": {
         "items": {
@@ -196,6 +217,9 @@
             "string",
             "null"
           ]
+        },
+        "userId": {
+          "$ref": "common.schema.json#/definitions/userId"
         }
       }
     },
@@ -203,16 +227,21 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "commandId"
+        "commandId",
+        "userId"
       ],
       "properties": {
         "commandId": {
           "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "userId": {
+          "$ref": "common.schema.json#/definitions/userId"
         }
       },
       "examples": [
         {
-          "commandId": "91ae2be0-8d8f-4c50-9fd3-80b516b69a01"
+          "commandId": "91ae2be0-8d8f-4c50-9fd3-80b516b69a01",
+          "userId": "user-a"
         }
       ]
     },
@@ -222,7 +251,8 @@
       "required": [
         "commandId",
         "status",
-        "result"
+        "result",
+        "userId"
       ],
       "properties": {
         "commandId": {
@@ -246,13 +276,23 @@
               "$ref": "#/definitions/RejectedEvent"
             }
           ]
+        },
+        "userId": {
+          "$ref": "common.schema.json#/definitions/userId"
         }
       }
     },
     "SnapshotRequest": {
       "type": "object",
       "additionalProperties": false,
-      "maxProperties": 0
+      "properties": {
+        "userId": {
+          "$ref": "common.schema.json#/definitions/userId"
+        }
+      },
+      "required": [
+        "userId"
+      ]
     }
   }
 }

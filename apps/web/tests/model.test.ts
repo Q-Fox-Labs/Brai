@@ -16,7 +16,7 @@ test("local clock is monotonic >24h; STOP is zero and late owner data is separat
 test("stale snapshot cannot reverse confirmed version; gap requires resync", () => {
  const view={...initialView(),version:4,connected:true};
  assert.equal(applySnapshot(view,{active:{timerId:"old",startedAt:stamp},version:1,serverTime:stamp,recentCompleted:[],nextCursor:null},10).active,null);
- assert.equal(applyEvent(view,{eventId:"gap",commandId:"x",version:6,timerId:"x",startedAt:stamp}).connected,false);
+ assert.equal(applyEvent(view,{userId: "account-a",eventId:"gap",commandId:"x",version:6,timerId:"x",startedAt:stamp}).connected,false);
 });
 test("snapshot/live dedup retain old loaded pages and owner cursor", () => {
  const view = { ...initialView(), items: [interval], paged: true, cursor: "owner-tail" };

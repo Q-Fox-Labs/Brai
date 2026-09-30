@@ -1,5 +1,6 @@
 // ABOUTME: Ограничивает HTTP вход и преобразует ошибки шлюза в безопасный ответ.
 // ABOUTME: Команда не публикуется при неверном origin, размере или JSON.
+import { requireTimerSession, checkOrigin } from "./auth";
 import { GatewayError, publish } from "./gateway";
 /** Возвращает safe JSON error без серверных адресов и секретов. */
 export function failure(error: unknown): Response {
@@ -9,11 +10,8 @@ export function failure(error: unknown): Response {
 /** Читает не более 2048 bytes и публикует только owner-valid DTO. */
 export async function postCommand(request: Request, type: "start" | "stop"): Promise<Response> {
  try {
-  const origin = request.headers.get("origin");
-  // AIDEV-NOTE: Next URL может содержать internal hostname; TLS proxy задаёт явный публичный origin.
-  const expectedOrigin = process.env.WEB_ORIGIN ? new URL(process.env.WEB_ORIGIN).origin
-   : new URL(`${new URL(request.url).protocol}//${request.headers.get("host") || new URL(request.url).host}`).origin;
-  if (origin && origin !== expectedOrigin) throw new GatewayError(403, "ORIGIN", "not-published");
+  checkOrigin(request);
+  const session = await requireTimerSession(request);
   if (!request.headers.get("content-type")?.startsWith("application/json")) throw new GatewayError(415, "CONTENT_TYPE", "not-published");
   const reader = request.body?.getReader();
   if (!reader) throw new GatewayError(400, "INVALID_ARGUMENT", "not-published");
@@ -27,7 +25,8 @@ export async function postCommand(request: Request, type: "start" | "stop"): Pro
   let body: unknown;
   try { body = JSON.parse(Buffer.concat(chunks).toString()); }
   catch { throw new GatewayError(400, "INVALID_ARGUMENT", "not-published"); }
-  await publish(type, body);
+  if (!body || typeof body !== "object" || Array.isArray(body) || "userId" in body) throw new GatewayError(400, "INVALID_ARGUMENT", "not-published");
+  await publish(type, { ...body, userId: session.user.id });
   return Response.json({ commandId: (body as { commandId: string }).commandId, status: "queued" }, { status: 202, headers: { "Cache-Control": "no-store" } });
  } catch (error) { return failure(error); }
 }

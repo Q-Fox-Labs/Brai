@@ -24,6 +24,7 @@ services:
       NATS_ADMIN_PASSWORD: fixture-admin
       NATS_WEB_PASSWORD: fixture-web
       NATS_TIMER_PASSWORD: fixture-timer
+      NATS_AUTH_PASSWORD: fixture-auth
     ports:
       - "127.0.0.1:${TIMER_TEST_NATS_PORT:-14239}:4222"
     tmpfs:

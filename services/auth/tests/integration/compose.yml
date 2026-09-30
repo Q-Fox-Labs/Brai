@@ -1,0 +1,19 @@
+# ABOUTME: Поднимает изолированную PostgreSQL для проверок Better Auth.
+# ABOUTME: Синтетические данные и пароли удаляются вместе с tmpfs стендом.
+name: brai-auth-tests
+services:
+  db:
+    image: postgres:17.6-alpine3.22
+    environment:
+      POSTGRES_PASSWORD: fixture-postgres
+    ports:
+      - "127.0.0.1:15459:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/01-auth.sql:ro
+    healthcheck:
+      test: [CMD, pg_isready, -U, auth_owner, -d, brai_auth_test]
+      interval: 1s
+      timeout: 3s
+      retries: 30

@@ -1,9 +1,8 @@
-// ABOUTME: Держит локальный секундомер отдельно от подтверждённой общей истории.
+// ABOUTME: Держит локальный секундомер отдельно от подтверждённой личной истории.
 // ABOUTME: Ограниченный FIFO сохраняет неизменные намерения до окончательного owner-результата.
 import type { Active, History, Pending, Snapshot, TimerEvent } from "./types";
 import { applyEvent, applySnapshot, duration, initialView, isPending, mergeIntervals, rejectionMessage, type View } from "./model.ts";
-export const PENDING_KEY = "brai.timer.pending.v1";
-export const OUTBOX_KEY = "brai.timer.outbox.v1";
+export const OUTBOX_KEY = "brai.timer.outbox.v2";
 export const OUTBOX_LIMIT = 512;
 type Entry = { command: Pending; accepted: boolean; uncertain: boolean };
 type Stored = { entries: Entry[]; local: Active | null; elapsed: number; savedAt: number; hold: boolean; barrier: number; localCommandId: string | null };
@@ -13,7 +12,13 @@ export type ClientPorts = {
  stream: (snapshot: (data: Snapshot) => void, event: (data: TimerEvent) => void, lost: () => void) => () => void;
 };
 /** Собирает браузерные I/O; локальные START/STOP доступны при любом состоянии связи. */
-export function createClient(ports: ClientPorts) {
+export function createClient(ports: ClientPorts, userId: string) {
+ if (!userId) throw new Error("USER_REQUIRED");
+ const accountFetch = (path: string, options: RequestInit = {}) => {
+  const headers = new Headers(options.headers); headers.set("X-Brai-User", userId);
+  return ports.fetch(path, { ...options, headers });
+ };
+ const storageKey = `${OUTBOX_KEY}:${encodeURIComponent(userId)}`;
  let view = initialView(), entries: Entry[] = [], disposed = false, close = () => {}, publishing = false, lookingUp = false;
  let hold = false, barrier = 0, pollIndex = 0, generation = 0, localCommandId: string | null = null, storageBlocked = false;
  let polling: ReturnType<typeof setInterval> | undefined, reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -28,7 +33,7 @@ export function createClient(ports: ClientPorts) {
   if (storageBlocked) return false;
   try {
    const data: Stored = { entries, local: view.local, elapsed: duration(view, ports.now()), savedAt: wall(), hold, barrier, localCommandId };
-   ports.storage.setItem(OUTBOX_KEY, JSON.stringify(data)); return true;
+   ports.storage.setItem(storageKey, JSON.stringify(data)); return true;
   } catch { update({ ...view, message: "Не удалось сохранить действия в этой вкладке. Не закрывайте её до сохранения истории." }); return false; }
  };
  const followOwner = () => {
@@ -60,7 +65,7 @@ export function createClient(ports: ClientPorts) {
   }, event => { if (!disposed && generation === current) onEvent(event); }, () => { if (!disposed && generation === current) reconnect(); });
  };
  const lookup = async (entry: Entry) => {
-  const response = await ports.fetch(`/api/timer/commands/${entry.command.commandId}`, { cache: "no-store", signal: signal() });
+  const response = await accountFetch(`/api/timer/commands/${entry.command.commandId}`, { cache: "no-store", signal: signal() });
   if (response.ok) { const data = await response.json(); if (!disposed) onEvent(data.result as TimerEvent); return true; }
   return response.status !== 404;
  };
@@ -75,7 +80,7 @@ export function createClient(ports: ClientPorts) {
     if (!entries.includes(entry)) continue;
     const { type, ...body } = entry.command;
     entry.uncertain = true; if (!persist()) break;
-    const response = await ports.fetch(`/api/timer/${type}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: signal() });
+    const response = await accountFetch(`/api/timer/${type}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: signal() });
     if (disposed) break;
     // AIDEV-NOTE: Результат SSE может удалить запись раньше задержанного HTTP ответа.
     if (!entries.includes(entry)) continue;
@@ -107,18 +112,15 @@ export function createClient(ports: ClientPorts) {
   getView: () => view,
   /** Подписывает страницу на изменения без ожидания сервера. */
   subscribe(listener: (view: View) => void) { listeners.add(listener); listener(view); return () => { listeners.delete(listener); }; },
-  /** Восстанавливает всю очередь и legacy body без изменения ID или содержимого. */
+  /** Восстанавливает только очередь текущего аккаунта; анонимные данные v1 не читает. */
   start() {
    try {
-    const raw = ports.storage.getItem(OUTBOX_KEY);
+    const raw = ports.storage.getItem(storageKey);
     if (raw) {
      const data = JSON.parse(raw) as Stored;
      if (!Array.isArray(data.entries) || data.entries.length > OUTBOX_LIMIT || !data.entries.every(item => isPending(item.command) && typeof item.accepted === "boolean" && typeof item.uncertain === "boolean") || !Number.isFinite(data.elapsed) || !Number.isFinite(data.savedAt) || !Number.isSafeInteger(data.barrier) || typeof data.hold !== "boolean" || data.local && (!data.local.timerId || !Number.isFinite(Date.parse(data.local.startedAt)))) throw new Error("BAD_STORAGE");
      entries = data.entries; hold = data.hold; barrier = data.barrier; localCommandId = data.localCommandId ?? null;
      update({ ...view, local: data.local, localElapsed: data.local ? data.elapsed + Math.max(0, initialEpoch - data.savedAt) : 0, localMono: ports.now() });
-    } else {
-     const legacy = ports.storage.getItem(PENDING_KEY);
-     if (legacy) { const command: unknown = JSON.parse(legacy); if (!isPending(command)) throw new Error("BAD_STORAGE"); entries = [{ command, accepted: false, uncertain: true }]; if (persist()) ports.storage.removeItem(PENDING_KEY); }
     }
    } catch { storageBlocked = true; hold = true; update({ ...view, message: "Сохранённые действия повреждены или недоступны. Не закрывайте вкладку; проверьте хранилище браузера." }); }
    connect(); polling = setInterval(() => { void recover(); }, 2000); void recover();
@@ -143,7 +145,7 @@ export function createClient(ports: ClientPorts) {
    if (!view.cursor || view.loading || !view.connected) return;
    const cursor = view.cursor; update({ ...view, loading: true });
    try {
-    const response = await ports.fetch(`/api/timer/history?cursor=${encodeURIComponent(cursor)}`, { cache: "no-store", signal: signal() });
+    const response = await accountFetch(`/api/timer/history?cursor=${encodeURIComponent(cursor)}`, { cache: "no-store", signal: signal() });
     if (!response.ok) throw new Error("HISTORY");
     const data = await response.json() as History;
     update({ ...view, items: mergeIntervals(view.items, data.items), cursor: data.nextCursor, paged: true, loading: false });

@@ -11,10 +11,15 @@
     "build:timer": "npm run build --workspace=@brai/timer",
     "typecheck:web": "npm run typecheck --workspace=@brai/web",
     "typecheck:timer": "npm run typecheck --workspace=@brai/timer",
-    "build": "npm run build:web && npm run build:timer",
-    "typecheck": "npm run typecheck:web && npm run typecheck:timer",
+    "build": "npm run build:web && npm run build:timer && npm run build:auth",
+    "typecheck": "npm run typecheck:web && npm run typecheck:timer && npm run typecheck:auth",
     "lint": "npm run lint --workspaces --if-present",
-    "test:web": "npm test --workspace=@brai/web"
+    "test:web": "npm test --workspace=@brai/web",
+    "build:auth": "npm run build --workspace=@brai/auth",
+    "typecheck:auth": "npm run typecheck --workspace=@brai/auth",
+    "test:auth": "npm test --workspace=@brai/auth",
+    "test:timer": "npm test --workspace=@brai/timer",
+    "test": "npm test --workspaces --if-present"
   },
   "engines": {
     "node": "24.21.0",

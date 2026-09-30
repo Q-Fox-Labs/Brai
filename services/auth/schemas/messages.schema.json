@@ -1,0 +1,150 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.example/schemas/auth/messages.schema.json",
+  "definitions": {
+    "Headers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cookie": {
+          "type": "string",
+          "maxLength": 16384
+        },
+        "origin": {
+          "type": "string",
+          "maxLength": 16384
+        },
+        "user-agent": {
+          "type": "string",
+          "maxLength": 16384
+        },
+        "x-forwarded-for": {
+          "type": "string",
+          "maxLength": 16384
+        },
+        "sec-fetch-site": {
+          "type": "string",
+          "maxLength": 16384
+        }
+      }
+    },
+    "SendCodeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "body"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "body": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "email"
+          ],
+          "properties": {
+            "email": {
+              "type": "string",
+              "maxLength": 320,
+              "pattern": "^\\S+@\\S+\\.\\S+$"
+            }
+          }
+        }
+      }
+    },
+    "VerifyCodeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "body"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "body": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "email",
+            "otp"
+          ],
+          "properties": {
+            "email": {
+              "type": "string",
+              "maxLength": 320,
+              "pattern": "^\\S+@\\S+\\.\\S+$"
+            },
+            "otp": {
+              "type": "string",
+              "pattern": "^[0-9]{6}$"
+            }
+          }
+        }
+      }
+    },
+    "SessionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "body"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "body": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {}
+        }
+      }
+    },
+    "SignOutRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "body"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "body": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {}
+        }
+      }
+    },
+    "Response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "body",
+        "setCookies"
+      ],
+      "properties": {
+        "status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "body": {},
+        "setCookies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

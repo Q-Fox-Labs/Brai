@@ -1,12 +1,12 @@
 # ABOUTME: Описывает публичные NATS маршруты и owner-схемы таймера.
-# ABOUTME: Новые timestamp намерения и legacy CAS используют один additive v1 контракт.
+# ABOUTME: Авторизованные команды и события v2 сохраняют неизменного владельца.
 asyncapi: 3.1.0
 info:
   title: Brai timer service
-  version: 1.0.0
-  description: Wire contract v1 for the durable timer command/event streams and brai_timer NATS Service. NATS Service
-    name brai_timer, service version 1.0.0, generated instance ID; PING, INFO and STATS are provided. Query replies
-    use the request replyTo inbox. Service errors use Nats-Service-Error and Nats-Service-Error-Code headers.
+  version: 2.0.0
+  description: Wire contract v2 for the durable timer command/event streams and brai_timer NATS Service. NATS Service
+    name brai_timer, service version 2.0.0, generated instance ID; PING, INFO and STATS are provided. Query replies
+    use the request replyTo inbox. Service errors use Nats-Service-Error and Nats-Service-Error-Code headers. Every command, query, event and successful reply requires userId supplied by trusted web after session validation. The accepted owner is immutable across logout and redelivery. All records and cursors are owner scoped; v1 subjects are disabled. Messages without valid owner are terminated without effect or event.
 servers:
   brai:
     host: '{host}:{port}'
@@ -20,46 +20,46 @@ servers:
 defaultContentType: application/json
 channels:
   startCommand:
-    address: brai.timer.v1.command.start
+    address: brai.timer.v2.command.start
     messages:
       StartCommand:
         $ref: '#/components/messages/StartCommand'
   stopCommand:
-    address: brai.timer.v1.command.stop
+    address: brai.timer.v2.command.stop
     messages:
       StopCommand:
         $ref: '#/components/messages/StopCommand'
   startedEvent:
-    address: brai.timer.v1.event.started
+    address: brai.timer.v2.event.started
     messages:
       StartedEvent:
         $ref: '#/components/messages/StartedEvent'
   stoppedEvent:
-    address: brai.timer.v1.event.stopped
+    address: brai.timer.v2.event.stopped
     messages:
       StoppedEvent:
         $ref: '#/components/messages/StoppedEvent'
   rejectedEvent:
-    address: brai.timer.v1.event.rejected
+    address: brai.timer.v2.event.rejected
     messages:
       RejectedEvent:
         $ref: '#/components/messages/RejectedEvent'
   snapshotQuery:
-    address: brai.timer.v1.query.snapshot
+    address: brai.timer.v2.query.snapshot
     messages:
       SnapshotRequest:
         $ref: '#/components/messages/SnapshotRequest'
       SnapshotResponse:
         $ref: '#/components/messages/SnapshotResponse'
   historyQuery:
-    address: brai.timer.v1.query.history
+    address: brai.timer.v2.query.history
     messages:
       HistoryRequest:
         $ref: '#/components/messages/HistoryRequest'
       HistoryResponse:
         $ref: '#/components/messages/HistoryResponse'
   commandQuery:
-    address: brai.timer.v1.query.command
+    address: brai.timer.v2.query.command
     messages:
       CommandLookupRequest:
         $ref: '#/components/messages/CommandLookupRequest'
@@ -84,7 +84,7 @@ operations:
     messages:
     - $ref: '#/channels/startCommand/messages/StartCommand'
     description: Durable immutable intention with client timerId and canonical UTC millisecond timestamp;
-      legacy expectedVersion command remains supported. Persist state and result, publish the saved event,
+      authenticated expectedVersion command remains supported. Persist state and result, publish the saved event,
       wait for PubAck before ACK. New intentions do not require the preceding owner version.
   acceptStop:
     action: receive
@@ -93,7 +93,7 @@ operations:
     messages:
     - $ref: '#/channels/stopCommand/messages/StopCommand'
     description: Durable immutable intention with client timerId and canonical UTC millisecond timestamp;
-      legacy expectedVersion command remains supported. Persist state and result, publish the saved event,
+      authenticated expectedVersion command remains supported. Persist state and result, publish the saved event,
       wait for PubAck before ACK. New intentions do not require the preceding owner version.
   publishStarted:
     action: send

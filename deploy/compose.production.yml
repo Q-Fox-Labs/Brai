@@ -1,4 +1,4 @@
-# ABOUTME: Запускает production образы web и timer рядом с Brai dependencies.
+# ABOUTME: Запускает production образы web, auth и timer рядом с Brai dependencies.
 # ABOUTME: Сети и отдельные runtime env-файлы задаёт оператор.
 name: brai
 services:
@@ -44,6 +44,38 @@ services:
       NODE_ENV: production
     networks:
       - messaging
+      - database
+
+  auth:
+    image: ${BRAI_AUTH_IMAGE:-brai-auth:production}
+    build:
+      context: ..
+      dockerfile: services/auth/Dockerfile
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${AUTH_ENV_FILE:-./auth.env}
+      - ${RESEND_ENV_FILE:-./resend.env}
+    environment:
+      NODE_ENV: production
+    networks:
+      - messaging
+      - database
+
+  auth-migrate:
+    image: ${BRAI_AUTH_IMAGE:-brai-auth:production}
+    profiles: [migration]
+    restart: "no"
+    init: true
+    working_dir: /app/services/auth
+    command: ["node", "dist/migrate.js"]
+    healthcheck:
+      disable: true
+    env_file:
+      - ${AUTH_MIGRATION_ENV_FILE:-./auth-migration.env}
+    environment:
+      NODE_ENV: production
+    networks:
       - database
 
   timer-migrate:

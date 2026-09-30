@@ -2,7 +2,7 @@
 // ABOUTME: Нет БД, внутренних импортов сервиса или отдельных процессов шлюза.
 import { Hub } from "./hub";
 import { eventConsumer, natsConnection, parseEvent } from "./gateway";
-const key = Symbol.for("brai.web.runtime.v1");
+const key = Symbol.for("brai.web.runtime.v2");
 type Runtime = { hub: Hub; ready: Promise<void> };
 const globals = globalThis as typeof globalThis & { [key]?: Runtime };
 /** Запускает один consumer для всех маршрутов и переподключает его с bounded delay. */

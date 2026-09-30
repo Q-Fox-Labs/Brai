@@ -1,5 +1,5 @@
-// ABOUTME: Собирает единственную страницу общего таймера Brai.
-// ABOUTME: Client lifecycle и представление находятся в компоненте Timer.
-import Timer from "./timer";
-/** Отображает страницу таймера без серверного state prefetch до SSE. */
-export default function HomePage() { return <Timer />; }
+// ABOUTME: Собирает вход по почте и личный таймер Brai.
+// ABOUTME: Сессию проверяет сервер; lifecycle аккаунта находится в Account.
+import Account from "./account";
+/** Показывает вход или таймер подтверждённого аккаунта. */
+export default function HomePage() { return <Account />; }

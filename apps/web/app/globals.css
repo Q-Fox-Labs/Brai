@@ -13,3 +13,6 @@ button:focus-visible { outline: 3px solid #2563eb; outline-offset: 5px; }
 .interval-details dt { color: #64748b; }
 .interval-details dd { text-align: right; overflow-wrap: anywhere; }
 @media (max-width: 400px) { .interval-details { grid-template-columns: 1fr; gap: 4px; } .interval-details dd { text-align: left; margin-bottom: 6px; } }
+
+.auth-input { min-height: 48px; width: 100%; border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px 14px; background: white; }
+.auth-input:focus-visible { outline: 3px solid #2563eb; outline-offset: 3px; }

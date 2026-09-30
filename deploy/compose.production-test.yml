@@ -10,6 +10,7 @@ services:
       - /var/lib/postgresql/data
     volumes:
       - ../services/timer/tests/integration/init.sql:/docker-entrypoint-initdb.d/01-timer.sql:ro
+      - ./auth-test-database.sql:/docker-entrypoint-initdb.d/02-auth.sql:ro
     healthcheck:
       test: [CMD, pg_isready, -U, timer_owner, -d, brai_timer_test]
       interval: 1s
@@ -25,6 +26,7 @@ services:
       NATS_ADMIN_PASSWORD: fixture-admin
       NATS_WEB_PASSWORD: fixture-web
       NATS_TIMER_PASSWORD: fixture-timer
+      NATS_AUTH_PASSWORD: fixture-auth
     tmpfs:
       - /data
     volumes:
@@ -64,6 +66,49 @@ services:
       NATS_INBOX_PREFIX: _INBOX.brai_timer
     depends_on:
       timer-migrate:
+        condition: service_completed_successfully
+      nats:
+        condition: service_started
+    networks:
+      - messaging
+      - database
+
+  auth-migrate:
+    build:
+      context: ..
+      dockerfile: services/auth/Dockerfile
+    command: ["node", "dist/migrate.js"]
+    healthcheck:
+      disable: true
+    environment:
+      AUTH_DATABASE_URL: postgresql://brai_auth_owner:fixture-auth-owner@db:5432/brai_auth_test
+      AUTH_SECRET: fixture-secret-stable-at-least-thirty-two-characters
+      AUTH_ORIGIN: http://127.0.0.1:13000
+      AUTH_EMAIL_FROM: fixture@example.test
+      AUTH_OWNER_ROLE: brai_auth_owner
+      AUTH_APP_ROLE: brai_auth_app
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - database
+
+  auth:
+    build:
+      context: ..
+      dockerfile: services/auth/Dockerfile
+    environment:
+      NODE_ENV: production
+      AUTH_DATABASE_URL: postgresql://brai_auth_app:fixture-auth-app@db:5432/brai_auth_test
+      AUTH_SECRET: fixture-secret-stable-at-least-thirty-two-characters
+      AUTH_ORIGIN: http://127.0.0.1:13000
+      AUTH_EMAIL_FROM: fixture@example.test
+      RESEND_API_KEY: fixture-no-real-email
+      NATS_URL: nats://nats:4222
+      NATS_USER: auth
+      NATS_PASSWORD: fixture-auth
+    depends_on:
+      auth-migrate:
         condition: service_completed_successfully
       nats:
         condition: service_started

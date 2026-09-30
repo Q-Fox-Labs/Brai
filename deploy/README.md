@@ -1,29 +1,37 @@
 # Production образы Brai
 
-`compose.production.yml` собирает web и timer из корня репозитория и запускает их в раздельных контейнерах. Сборка требует закреплённые Node.js и npm из корневого `package.json`. Внешние сети NATS, базы данных и reverse proxy создаёт инфраструктура до запуска стека.
+`compose.production.yml` собирает web, auth и timer из корня репозитория и запускает их в раздельных контейнерах. Сборка требует закреплённые Node.js и npm из корневого `package.json`. Внешние сети NATS, базы данных и reverse proxy создаёт инфраструктура до запуска стека.
 
-Web подключается к сети NATS и к сети reverse proxy. Timer подключается к NATS и закрытой сети базы данных. Внешний прокси должен направлять запросы к `web:3000`. Compose публикует web только на loopback хоста. Timer не публикует порт.
+Web подключается к сети NATS и к сети reverse proxy. Auth и timer подключаются к NATS и закрытой сети базы данных. Внешний прокси должен направлять запросы к `web:3000`. Compose публикует web только на loopback хоста. Auth и timer не публикуют порты.
 
-Перед запуском подготовьте три отдельные защищённые env-файла:
+Перед запуском подготовьте шесть отдельных защищённых env-файла:
 
 - `web.env`: `NATS_URL`, `NATS_USER`, `NATS_PASSWORD`, `NATS_INBOX_PREFIX=_INBOX.brai_web`, `WEB_ORIGIN`;
 - `timer.env`: `DATABASE_URL` прикладной роли, `NATS_URL`, `NATS_USER`, `NATS_PASSWORD`, `NATS_INBOX_PREFIX=_INBOX.brai_timer`;
-- `timer-migration.env`: `DATABASE_URL` владельца БД, `TIMER_OWNER_ROLE`, `TIMER_APP_ROLE`.
+- `timer-migration.env`: `DATABASE_URL` владельца БД, `TIMER_OWNER_ROLE`, `TIMER_APP_ROLE`;
+- `auth.env`: `AUTH_DATABASE_URL` собственной прикладной роли, `AUTH_SECRET` (не менее 32 символов, сохраняйте при перезапуске), `AUTH_ORIGIN`, `AUTH_EMAIL_FROM`, отдельные `NATS_URL`, `NATS_USER`, `NATS_PASSWORD`;
+- `auth-migration.env`: `AUTH_DATABASE_URL` собственного владельца БД, `AUTH_SECRET`, `AUTH_ORIGIN`, `AUTH_EMAIL_FROM`, `AUTH_OWNER_ROLE`, `AUTH_APP_ROLE`;
+- `resend.env`: `RESEND_API_KEY` существующего ключа Resend. Файл подключается непосредственно только к auth runtime.
 
-Передайте compose абсолютные пути к этим файлам через `WEB_ENV_FILE`, `TIMER_ENV_FILE` и `TIMER_MIGRATION_ENV_FILE`. Передайте имена созданных сетей через `BRAI_FRONTEND_NETWORK`, `BRAI_NATS_NETWORK` и `BRAI_DATABASE_NETWORK`. Не помещайте пароли в файлы интерполяции Compose или Git.
+Создайте auth БД и две отдельные минимальные login роли без административных флагов и членства. Ограничьте auth роли собственной БД, timer роли собственной БД; web не получает SQL входов. Владелец auth применяет штатные миграции Better Auth и выдаёт runtime только DML права.
+
+Передайте compose абсолютные пути к этим файлам через `WEB_ENV_FILE`, `TIMER_ENV_FILE` и `TIMER_MIGRATION_ENV_FILE`, `AUTH_ENV_FILE`, `AUTH_MIGRATION_ENV_FILE`, `RESEND_ENV_FILE`. Передайте имена созданных сетей через `BRAI_FRONTEND_NETWORK`, `BRAI_NATS_NETWORK` и `BRAI_DATABASE_NETWORK`. Не помещайте пароли в файлы интерполяции Compose или Git.
 
 Сначала соберите образы и примените миграцию отдельным одноразовым контейнером:
 
 ```sh
 docker compose --env-file /path/to/instance.compose.env -f deploy/compose.production.yml build
-docker compose --env-file /path/to/instance.compose.env -f deploy/compose.production.yml --profile migration run --rm timer-migrate
+docker compose --env-file /path/to/instance.compose.env -f deploy/compose.production.yml --profile migration run --rm --no-deps auth-migrate
+docker compose --env-file /path/to/instance.compose.env -f deploy/compose.production.yml --profile migration run --rm --no-deps timer-migrate
 docker compose --env-file /path/to/instance.compose.env -f deploy/compose.production.yml up -d
 docker compose --env-file /path/to/instance.compose.env -f deploy/compose.production.yml up -d --no-deps --wait web
 ```
 
-Migration container получает только owner env-файл и завершается после `node dist/migrate.js`. Web и timer получают отдельные runtime env-файлы. Web запускается без ожидания timer и проверяет готовность самой страницы через HTTP; локальные START/STOP доступны без backend. Timer отдельно проверяет PostgreSQL и JetStream без записи данных. Готовность общего API проверяется отдельно после восстановления backend. Один экземпляр web владеет durable consumer `web_events`.
+Миграторы получают только собственные owner env-файлы и завершаются после `node dist/migrate.js`. Runtime не применяет DDL. Web запускается независимо от backend и проверяет готовность страницы через HTTP. Auth проверяет собственную БД и NATS; timer проверяет PostgreSQL и JetStream без записи данных. Запросы и события таймера требуют действующую сессию. Один экземпляр web владеет durable consumer `web_events`.
 
-При выпуске нового контракта сначала обновите timer и подтвердите его готовность через `docker compose ... up -d --no-deps --wait timer`, затем обновите web через `docker compose ... up -d --no-deps --wait web`. Это исключает передачу новых команд прежнему владельцу.
+При выпуске сначала обновите auth и timer и дождитесь их готовности, затем обновите web. Если web получает запросы через доверенный proxy, задайте `WEB_TRUST_PROXY=true` только при закрытом прямом публичном доступе к web; proxy должен удалять подставленные клиентом forwarding headers.
+
+Переход с анонимного v1 несовместим. Остановите прежние web и timer, очистите только `timer.state`, `timer.commands`, `timer.intervals` (сохраните `timer.migrations`), удалите только старые `BRAI_TIMER_COMMANDS` и `BRAI_TIMER_EVENTS` штатным JetStream admin API. Зафиксируйте завершение этой одноразовой операции отдельно; повторный выпуск не очищает личные данные. Затем примените миграции, включите v2 ACL и запускайте новые сервисы. Новые streams — `BRAI_TIMER_COMMANDS_V2`, `BRAI_TIMER_EVENTS_V2`; старые subjects ACL запрещает. Не импортируйте старый клиентский outbox в аккаунт.
 
 PostgreSQL и NATS хранят данные в устойчивых томах конфигурации `dependencies/`. Production compose подключается к их сетям и не создаёт собственные тома данных. Останавливайте приложения командой `docker compose ... stop`; для удаления стека используйте `down` без `-v`.
 
@@ -33,7 +41,8 @@ PostgreSQL и NATS хранят данные в устойчивых томах 
 
 ```sh
 docker compose -f deploy/compose.production-test.yml up -d --build --wait
-curl --fail http://127.0.0.1:13000/api/timer
+curl --fail http://127.0.0.1:13000/
+# Без сессии /api/timer и /api/timer/events должны вернуть 401.
 docker compose -f deploy/compose.production-test.yml down -v --remove-orphans
 ```
 

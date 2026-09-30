@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://brai.invalid/contracts/timer/v1/commands.schema.json",
+  "$id": "https://brai.invalid/contracts/timer/v2/commands.schema.json",
   "title": "Brai timer commands",
   "oneOf": [
     {
@@ -18,7 +18,8 @@
           "additionalProperties": false,
           "required": [
             "commandId",
-            "expectedVersion"
+            "expectedVersion",
+            "userId"
           ],
           "properties": {
             "commandId": {
@@ -26,6 +27,9 @@
             },
             "expectedVersion": {
               "$ref": "common.schema.json#/definitions/version"
+            },
+            "userId": {
+              "$ref": "common.schema.json#/definitions/userId"
             }
           }
         },
@@ -35,7 +39,8 @@
           "required": [
             "commandId",
             "timerId",
-            "startedAt"
+            "startedAt",
+            "userId"
           ],
           "properties": {
             "commandId": {
@@ -46,6 +51,9 @@
             },
             "startedAt": {
               "$ref": "#/definitions/IntentTimestamp"
+            },
+            "userId": {
+              "$ref": "common.schema.json#/definitions/userId"
             }
           }
         }
@@ -59,7 +67,8 @@
           "required": [
             "commandId",
             "expectedVersion",
-            "timerId"
+            "timerId",
+            "userId"
           ],
           "properties": {
             "commandId": {
@@ -70,6 +79,9 @@
             },
             "timerId": {
               "$ref": "common.schema.json#/definitions/uuid"
+            },
+            "userId": {
+              "$ref": "common.schema.json#/definitions/userId"
             }
           }
         },
@@ -79,7 +91,8 @@
           "required": [
             "commandId",
             "timerId",
-            "stoppedAt"
+            "stoppedAt",
+            "userId"
           ],
           "properties": {
             "commandId": {
@@ -90,6 +103,9 @@
             },
             "stoppedAt": {
               "$ref": "#/definitions/IntentTimestamp"
+            },
+            "userId": {
+              "$ref": "common.schema.json#/definitions/userId"
             }
           }
         }

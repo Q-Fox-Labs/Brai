@@ -5,7 +5,7 @@ export type Interval = Active & { stoppedAt: string; durationMs: number };
 export type Snapshot = { active: Active | null; version: number; serverTime: string; recentCompleted: Interval[]; nextCursor: string | null };
 export type History = { items: Interval[]; nextCursor: string | null };
 export type ServiceError = { code: string; message: string; retryable: boolean; currentVersion?: number };
-export type TimerEvent = { eventId: string; commandId: string | null } & (
+export type TimerEvent = { userId: string; eventId: string; commandId: string | null } & (
  { version: number; timerId: string; startedAt: string } |
  { version: number; interval: Interval } |
  { correlationId: string; error: ServiceError });

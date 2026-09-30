@@ -1,0 +1,139 @@
+# ABOUTME: Описывает реальные NATS Services операции авторизации.
+# ABOUTME: OTP и токены передаются только request-reply без долговечного хранения.
+asyncapi: '3.1.0'
+info:
+  title: Brai authentication
+  version: '1.0.0'
+  description: >-
+    brai_auth NATS Services v1.0.0; queue brai_auth; PING, INFO and STATS.
+    Only trusted web calls these nonpersistent endpoints. Native HTTP errors are
+    encoded in Response; transport errors use Nats-Service-Error and
+    Nats-Service-Error-Code (400 INVALID_ARGUMENT; 503 AUTH_BUSY/AUTH_UNAVAILABLE).
+    Timeout 10s. Never automatically retry sendCode/verifyCode; after uncertain
+    verification inspect session, then request a fresh code. Session/signOut may retry.
+    All Set-Cookie values are separate array entries. Origin/CSRF checks remain enabled.
+servers:
+  privateNats:
+    host: '{host}:{port}'
+    protocol: nats
+    description: Private endpoint supplied by runtime configuration.
+    variables:
+      host:
+        default: localhost
+      port:
+        default: '4222'
+defaultContentType: application/json
+channels:
+  sendCode:
+    address: brai.auth.v1.send-code
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        $ref: "#/components/messages/SendCodeRequest"
+  verifyCode:
+    address: brai.auth.v1.verify-code
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        $ref: "#/components/messages/VerifyCodeRequest"
+  session:
+    address: brai.auth.v1.session
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        $ref: "#/components/messages/SessionRequest"
+  signOut:
+    address: brai.auth.v1.sign-out
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        $ref: "#/components/messages/SignOutRequest"
+  replies:
+    address: null
+    description: Transient replyTo inbox supplied by each NATS requester.
+    messages:
+      response:
+        $ref: "#/components/messages/Response"
+operations:
+  sendCode:
+    action: receive
+    channel:
+      $ref: "#/channels/sendCode"
+    messages:
+      - $ref: "#/channels/sendCode/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/response"
+  verifyCode:
+    action: receive
+    channel:
+      $ref: "#/channels/verifyCode"
+    messages:
+      - $ref: "#/channels/verifyCode/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/response"
+  session:
+    action: receive
+    channel:
+      $ref: "#/channels/session"
+    messages:
+      - $ref: "#/channels/session/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/response"
+  signOut:
+    action: receive
+    channel:
+      $ref: "#/channels/signOut"
+    messages:
+      - $ref: "#/channels/signOut/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/response"
+components:
+  messages:
+    SendCodeRequest:
+      name: SendCodeRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/SendCodeRequest"
+    VerifyCodeRequest:
+      name: VerifyCodeRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/VerifyCodeRequest"
+    SessionRequest:
+      name: SessionRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/SessionRequest"
+    SignOutRequest:
+      name: SignOutRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/SignOutRequest"
+    Response:
+      name: Response
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/Response"
