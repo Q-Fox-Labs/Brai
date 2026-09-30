@@ -17,9 +17,6 @@ services:
       PORT: "3000"
     ports:
       - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
-    depends_on:
-      timer:
-        condition: service_healthy
     networks:
       - frontend
       - messaging
@@ -28,7 +25,7 @@ services:
         - CMD
         - node
         - -e
-        - "fetch('http://127.0.0.1:3000/api/timer', {signal: AbortSignal.timeout(5000)}).then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1))"
+        - "fetch('http://127.0.0.1:3000/', {signal: AbortSignal.timeout(5000)}).then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1))"
       interval: 30s
       timeout: 6s
       start_period: 10s

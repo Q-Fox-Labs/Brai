@@ -17,10 +17,13 @@ Web подключается к сети NATS и к сети reverse proxy. Time
 ```sh
 docker compose --env-file /path/to/instance.compose.env -f deploy/compose.production.yml build
 docker compose --env-file /path/to/instance.compose.env -f deploy/compose.production.yml --profile migration run --rm timer-migrate
-docker compose --env-file /path/to/instance.compose.env -f deploy/compose.production.yml up -d --wait
+docker compose --env-file /path/to/instance.compose.env -f deploy/compose.production.yml up -d
+docker compose --env-file /path/to/instance.compose.env -f deploy/compose.production.yml up -d --no-deps --wait web
 ```
 
-Migration container получает только owner env-файл и завершается после `node dist/migrate.js`. Web и timer получают отдельные runtime env-файлы. Compose ждёт healthcheck timer и web; timer проверяет PostgreSQL и JetStream без записи данных, web проверяет HTTP API таймера. Один экземпляр web владеет durable consumer `web_events`.
+Migration container получает только owner env-файл и завершается после `node dist/migrate.js`. Web и timer получают отдельные runtime env-файлы. Web запускается без ожидания timer и проверяет готовность самой страницы через HTTP; локальные START/STOP доступны без backend. Timer отдельно проверяет PostgreSQL и JetStream без записи данных. Готовность общего API проверяется отдельно после восстановления backend. Один экземпляр web владеет durable consumer `web_events`.
+
+При выпуске нового контракта сначала обновите timer и подтвердите его готовность через `docker compose ... up -d --no-deps --wait timer`, затем обновите web через `docker compose ... up -d --no-deps --wait web`. Это исключает передачу новых команд прежнему владельцу.
 
 PostgreSQL и NATS хранят данные в устойчивых томах конфигурации `dependencies/`. Production compose подключается к их сетям и не создаёт собственные тома данных. Останавливайте приложения командой `docker compose ... stop`; для удаления стека используйте `down` без `-v`.
 
