@@ -6,7 +6,8 @@
   "scripts": {
     "test:contracts": "node --test tests/contracts/*.test.mjs",
     "generate:contracts": "node scripts/generate-contract-types.mjs",
-    "check:contracts": "node scripts/generate-contract-types.mjs --check && node --test tests/contracts/*.test.mjs",
+    "typecheck:contracts": "tsc --noEmit --strict --module NodeNext --moduleResolution NodeNext --target ES2022 --resolveJsonModule tests/contracts/types.fixture.mts",
+    "check:contracts": "node scripts/generate-contract-types.mjs --check && npm run typecheck:contracts && node --test tests/contracts/*.test.mjs",
     "generate:codex-contract": "node scripts/build-codex-contract.mjs"
   },
   "exports": {
@@ -29,6 +30,7 @@
     "@open-rpc/meta-schema": "1.14.9",
     "json-schema-to-typescript": "15.0.4",
     "@asyncapi/specs": "6.11.1",
-    "@json-schema-tools/meta-schema": "1.8.0"
+    "@json-schema-tools/meta-schema": "1.8.0",
+    "typescript": "5.9.3"
   }
 }
