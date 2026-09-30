@@ -12,7 +12,7 @@ export default function Timer() {
  const [mono, setMono] = useState(0);
  const client = useRef<ReturnType<typeof createClient> | null>(null);
  useEffect(() => {
-  const instance = createClient({ now: () => performance.now(), id: () => crypto.randomUUID(), storage: sessionStorage,
+  const instance = createClient({ now: () => performance.now(), id: () => crypto.randomUUID(), storage: { getItem: key => sessionStorage.getItem(key), setItem: (key, value) => sessionStorage.setItem(key, value), removeItem: key => sessionStorage.removeItem(key) },
    fetch: (path, options) => fetch(path, options),
    stream(snapshot, event, lost) {
     const source = new EventSource("/api/timer/events");
