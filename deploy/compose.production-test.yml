@@ -1,0 +1,109 @@
+# ABOUTME: Проверяет production images с отдельными PostgreSQL и NATS fixtures.
+# ABOUTME: Все тестовые данные живут в удаляемых tmpfs и изолированных сетях.
+name: brai-production-image-test
+services:
+  db:
+    image: postgres:17.6-alpine3.22
+    environment:
+      POSTGRES_PASSWORD: fixture-postgres
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - ../services/timer/tests/integration/init.sql:/docker-entrypoint-initdb.d/01-timer.sql:ro
+    healthcheck:
+      test: [CMD, pg_isready, -U, timer_owner, -d, brai_timer_test]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    networks:
+      - database
+
+  nats:
+    image: nats:2.15.0
+    command: ["--config", "/etc/nats/nats.conf"]
+    environment:
+      NATS_ADMIN_PASSWORD: fixture-admin
+      NATS_WEB_PASSWORD: fixture-web
+      NATS_TIMER_PASSWORD: fixture-timer
+    tmpfs:
+      - /data
+    volumes:
+      - ../dependencies/nats/nats.conf:/etc/nats/nats.conf:ro
+    networks:
+      messaging:
+        aliases: [nats]
+
+  timer-migrate:
+    build:
+      context: ..
+      dockerfile: services/timer/Dockerfile
+    command: ["node", "dist/migrate.js"]
+    healthcheck:
+      disable: true
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://timer_owner:fixture-owner@db:5432/brai_timer_test
+      TIMER_OWNER_ROLE: timer_owner
+      TIMER_APP_ROLE: timer_app
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - database
+
+  timer:
+    build:
+      context: ..
+      dockerfile: services/timer/Dockerfile
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://timer_app:fixture-app@db:5432/brai_timer_test
+      NATS_URL: nats://nats:4222
+      NATS_USER: timer
+      NATS_PASSWORD: fixture-timer
+      NATS_INBOX_PREFIX: _INBOX.brai_timer
+    depends_on:
+      timer-migrate:
+        condition: service_completed_successfully
+      nats:
+        condition: service_started
+    networks:
+      - messaging
+      - database
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+      WEB_ORIGIN: http://127.0.0.1:13000
+      NATS_URL: nats://nats:4222
+      NATS_USER: web
+      NATS_PASSWORD: fixture-web
+      NATS_INBOX_PREFIX: _INBOX.brai_web
+    ports:
+      - "127.0.0.1:13000:3000"
+    depends_on:
+      timer:
+        condition: service_healthy
+    networks:
+      - messaging
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/timer', {signal: AbortSignal.timeout(5000)}).then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 6s
+      start_period: 10s
+      retries: 3
+
+networks:
+  messaging:
+    internal: false
+  database:
+    internal: true

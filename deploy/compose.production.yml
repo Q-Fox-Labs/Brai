@@ -1,0 +1,77 @@
+# ABOUTME: Запускает production образы web и timer рядом с Brai dependencies.
+# ABOUTME: Сети и отдельные runtime env-файлы задаёт оператор.
+name: brai
+services:
+  web:
+    image: ${BRAI_WEB_IMAGE:-brai-web:production}
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${WEB_ENV_FILE:-./web.env}
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+    ports:
+      - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
+    depends_on:
+      timer:
+        condition: service_healthy
+    networks:
+      - frontend
+      - messaging
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/timer', {signal: AbortSignal.timeout(5000)}).then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1))"
+      interval: 30s
+      timeout: 6s
+      start_period: 10s
+      retries: 3
+
+  timer:
+    image: ${BRAI_TIMER_IMAGE:-brai-timer:production}
+    build:
+      context: ..
+      dockerfile: services/timer/Dockerfile
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${TIMER_ENV_FILE:-./timer.env}
+    environment:
+      NODE_ENV: production
+    networks:
+      - messaging
+      - database
+
+  timer-migrate:
+    image: ${BRAI_TIMER_IMAGE:-brai-timer:production}
+    profiles: [migration]
+    restart: "no"
+    init: true
+    working_dir: /app/services/timer
+    command: ["node", "dist/migrate.js"]
+    healthcheck:
+      disable: true
+    env_file:
+      - ${TIMER_MIGRATION_ENV_FILE:-./timer-migration.env}
+    environment:
+      NODE_ENV: production
+    networks:
+      - database
+
+networks:
+  frontend:
+    name: ${BRAI_FRONTEND_NETWORK:?Set BRAI_FRONTEND_NETWORK to the reverse-proxy bridge network}
+    external: true
+  messaging:
+    name: ${BRAI_NATS_NETWORK:?Set BRAI_NATS_NETWORK to the NATS bridge network}
+    external: true
+  database:
+    name: ${BRAI_DATABASE_NETWORK:?Set BRAI_DATABASE_NETWORK to the private database network}
+    external: true
