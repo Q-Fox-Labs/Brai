@@ -1,0 +1,32 @@
+# ABOUTME: Поднимает собственные PostgreSQL/NATS только для интеграционных тестов.
+# ABOUTME: Синтетические пароли публичны; хранилища tmpfs удаляются вместе со стендом.
+name: brai-timer-tests
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: fixture-postgres
+    ports:
+      - "127.0.0.1:${TIMER_TEST_PG_PORT:-15439}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/01-timer.sql:ro
+    healthcheck:
+      test: [CMD, pg_isready, -U, timer_owner, -d, brai_timer_test]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+  nats:
+    image: nats:2.15.0
+    command: [--config, /etc/nats/nats.conf]
+    environment:
+      NATS_ADMIN_PASSWORD: fixture-admin
+      NATS_WEB_PASSWORD: fixture-web
+      NATS_TIMER_PASSWORD: fixture-timer
+    ports:
+      - "127.0.0.1:${TIMER_TEST_NATS_PORT:-14239}:4222"
+    tmpfs:
+      - /data
+    volumes:
+      - ../../../../dependencies/nats/nats.conf:/etc/nats/nats.conf:ro

@@ -29,3 +29,30 @@ Command lookup по commandId возвращает сохранённый исх
 Минимальные логические данные: одна строка state с version и optional active timer; неизменяемые записи завершённых интервалов; ledger с уникальным `commandId` для первой валидной команды, subject/type, полным исходным JSON, исходом и сохранённым событием; для malformed и конфликтных доставок результат уникален по `(streamName, streamSequence)`. Это может быть одна таблица с nullable commandId и отдельным уникальным delivery key. Обычные повторы команды не создают новых записей. DB constraints запрещают более одного активного интервала и повтор commandId. Только сервис таймера читает и меняет эти таблицы; web общается через описанные subjects и не импортирует внутренние функции/схемы реализации. Приложение использует роль `timer_app` без DDL и без доступа к чужим данным. Не удалять автоматически историю, ledger или завершённые интервалы.
 
 Схемы покрывают валидные wire DTO; broker-delivered bytes, не соответствующие схеме, обрабатываются как malformed и приводят к явному `rejected`, а не к ошибке, которую можно бесконечно повторять. `rejected` валидной команды и инфраструктурная service error различаются: первое — окончательный сохранённый результат команды; второе — транспортный ответ с обоими стандартными заголовками ошибки. Не выдавать обещание exactly-once доставки; гарантируется идемпотентный эффект и повторная публикация одного сохранённого eventId.
+
+
+## Запуск и миграции
+
+Установить зависимости из корневого lockfile: `npm ci`. Собрать сервис: `npm run build:timer`. Запускать из `services/timer`: `npm start` (`node dist/main.js`). Для поставки нужны `dist/`, `schemas/`, `migrations/`, `package.json` и production зависимости npm workspace. Процесс не читает `admin` или файлы секретов; окружение передаёт оператор. Миграции при запуске приложения не выполняются.
+
+Обязательные переменные: `DATABASE_URL` (прямое подключение прикладной роли к отдельной БД) и `NATS_URL`. Для защищённого NATS задаются `NATS_USER`, `NATS_PASSWORD`, `NATS_INBOX_PREFIX`; таймер использует собственный inbox `_INBOX.brai_timer`. URL и пароли не включать в логи и публичные настройки. `TIMER_COMMAND_MAX_BYTES` (по умолчанию 268435456), `TIMER_EVENT_MAX_BYTES` (67108864), `TIMER_EVENT_MAX_AGE_MS` (604800000), `TIMER_ACK_WAIT_MS` (30000) позволяют оператору явно задать пределы. При запуске сервис создаёт или обновляет только свои два streams и командный consumer. Событийный stream использует `DiscardOld`; командный — `DiscardNew`.
+
+Оператор отдельно создаёт БД, её владельца и прикладную login-роль без SUPERUSER, CREATEDB, CREATEROLE, REPLICATION, BYPASSRLS и членства в привилегированных ролях. Роль приложения не является владельцем БД или schema. Миграционный entrypoint — `node dist/migrate.js` или `npm run migrate` из `services/timer`: `DATABASE_URL` здесь принадлежит владельцу БД, `TIMER_OWNER_ROLE` и `TIMER_APP_ROLE` задают явные разные имена существующих ролей. Мигратор проверяет владельца и флаги runtime роли, применяет `migrations/001.sql` в транзакции и выдаёт только CONNECT, schema USAGE, нужные SELECT/INSERT и UPDATE отдельных столбцов. PUBLIC лишается доступа к БД и schema; runtime не получает CREATE, DELETE, UPDATE журнала или доступ к миграциям. Повтор миграции безопасен. Учётную запись владельца не передавать процессу приложения. Права прикладной роли на другие БД и отсутствие наследуемых привилегий обеспечивает оператор.
+
+`npm run health` (`node dist/health.js`) проверяет настоящее подключение к таблице состояния и JetStream account info с runtime окружением. Код 0 означает доступность зависимостей; ненулевой — неготовность. Эта команда не создаёт streams и не меняет данные. NATS Services PING служит discovery, не заменяет эту проверку. Завершение SIGTERM прекращает приём чтений, завершает текущую команду и закрывает соединения. Чтения ограничены тремя одновременными запросами; перегрузка получает `503 INTERNAL` с `retryable: true`, сохраняя слот БД для команды.
+
+## Проверки реализации
+
+`npm test --workspace=@brai/timer` собирает сервис и проверяет прикладные переходы и порядок commit → PubAck → ACK. `npm run typecheck:timer` проверяет типы. Интеграционные тесты используют настоящий PostgreSQL и NATS с теми же прикладными ACL; production queues и БД для них не подходят.
+
+Из корня репозитория поднять отдельный стенд: `docker compose -f services/timer/tests/integration/compose.yml up -d --wait`. Его пароли синтетические и опубликованы в конфигурации, хранение — временное; использовать этот файл только для тестов. По умолчанию PostgreSQL доступен на loopback 15439, NATS — на 14239. Порты можно переопределить через `TIMER_TEST_PG_PORT` и `TIMER_TEST_NATS_PORT`.
+
+Передать в `npm run test:integration --workspace=@brai/timer` три явные переменные:
+
+- `TIMER_TEST_OWNER_URL=postgresql://timer_owner:fixture-owner@127.0.0.1:15439/brai_timer_test`
+- `TIMER_TEST_DATABASE_URL=postgresql://timer_app:fixture-app@127.0.0.1:15439/brai_timer_test`
+- `TIMER_TEST_NATS_URL=nats://127.0.0.1:14239`
+
+Тест отказывается работать без явных URL и имени БД `brai_timer_test`. После проверки удалить стенд: `docker compose -f services/timer/tests/integration/compose.yml down -v`. Каждый запуск требует свежей тестовой БД и очередей.
+
+Проверяются конкурентные команды и повторы, полный JSON и конфликты ID, откат до commit, реальная durable redelivery после commit и PubAck до ACK, согласованный snapshot и страницы истории, NATS Services discovery/error DTO, ограничение чтений, сохранение очереди при выключенном сервисе, отказ заполненного stream без вытеснения, права runtime и повтор миграции. Отдельный subprocess запуск проверяет сборку main, health и сохранение активного интервала после SIGTERM и перезапуска процесса. В рабочем коде нет специальных fault hooks.
