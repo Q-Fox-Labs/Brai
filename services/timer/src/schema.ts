@@ -3,7 +3,15 @@
 import { readFileSync } from "node:fs";
 import AjvImport, { type ValidateFunction } from "ajv";
 import formatsImport from "ajv-formats";
-import type { Command } from "./domain.js";
+import type { Command, EventKind } from "./domain.js";
+/** Отображает смысл события на публичный транспортный адрес. */
+export function eventSubject(kind: EventKind): string { return "brai.timer.v1.event." + kind; }
+/** Отображает проверенный транспортный адрес на операцию ядра. */
+export function commandType(subject: string): "start" | "stop" {
+ if (subject === "brai.timer.v1.command.start") return "start";
+ if (subject === "brai.timer.v1.command.stop") return "stop";
+ throw new Error("INVALID_ARGUMENT");
+}
 const Ajv = AjvImport as unknown as typeof AjvImport.default;
 const addFormats = formatsImport as unknown as typeof formatsImport.default;
 const ajv = new Ajv({ strict: false, allErrors: true });

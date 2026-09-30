@@ -30,7 +30,11 @@ export function runtime(): Runtime {
      try { hub.broadcast(parseEvent(message.data)); message.ack(); }
      catch { hub.disconnect(); message.term(); console.error(JSON.stringify({ operation: "web_events", error: "BAD_EVENT" })); }
     }
-   } catch { hub.disconnect(); }
+   } catch (error) {
+    hub.disconnect();
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "UNAVAILABLE";
+    console.error(JSON.stringify({ operation: "web_events.consume", code: /^[A-Z0-9_]+$/.test(code) ? code : "UNAVAILABLE" }));
+   }
    await new Promise(resolve => setTimeout(resolve, 1000));
   }
  })();

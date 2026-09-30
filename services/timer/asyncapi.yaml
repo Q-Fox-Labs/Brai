@@ -1,3 +1,5 @@
+# ABOUTME: Описывает публичные NATS маршруты и owner-схемы таймера.
+# ABOUTME: Новые timestamp намерения и legacy CAS используют один additive v1 контракт.
 asyncapi: 3.1.0
 info:
   title: Brai timer service
@@ -81,16 +83,18 @@ operations:
       $ref: '#/channels/startCommand'
     messages:
     - $ref: '#/channels/startCommand/messages/StartCommand'
-    description: Durable JetStream command. Persist state and result, publish the saved event and wait for PubAck
-      before ACK.
+    description: Durable immutable intention with client timerId and canonical UTC millisecond timestamp;
+      legacy expectedVersion command remains supported. Persist state and result, publish the saved event,
+      wait for PubAck before ACK. New intentions do not require the preceding owner version.
   acceptStop:
     action: receive
     channel:
       $ref: '#/channels/stopCommand'
     messages:
     - $ref: '#/channels/stopCommand/messages/StopCommand'
-    description: Durable JetStream command. Persist state and result, publish the saved event and wait for PubAck
-      before ACK.
+    description: Durable immutable intention with client timerId and canonical UTC millisecond timestamp;
+      legacy expectedVersion command remains supported. Persist state and result, publish the saved event,
+      wait for PubAck before ACK. New intentions do not require the preceding owner version.
   publishStarted:
     action: send
     channel:

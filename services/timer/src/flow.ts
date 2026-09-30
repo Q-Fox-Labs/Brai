@@ -1,7 +1,8 @@
 // ABOUTME: Соединяет сохранение результата, публикацию и подтверждение команды.
 // ABOUTME: ACK возможен только после успешного сохранения и подтверждённой публикации.
 export type Delivery = { subject: string; data: Uint8Array; key: string };
-import type { Saved } from "./domain.js";
+import type { Event } from "./domain.js";
+export type Saved = { subject: string; event: Event; duplicate: boolean };
 /** Выполняет save → publish/PubAck → ACK; любая ошибка оставляет доставку неподтверждённой. */
 export async function handleDelivery(delivery: Delivery, ports: {save:(delivery:Delivery)=>Promise<Saved>;publish:(saved:Saved)=>Promise<unknown>;ack:()=>void}) {
  const saved=await ports.save(delivery);

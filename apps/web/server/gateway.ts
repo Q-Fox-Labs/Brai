@@ -78,6 +78,9 @@ export function parseEvent(data: Uint8Array): TimerEvent {
  if (!["StartedEvent", "StoppedEvent", "RejectedEvent"].some(dto => valid(`messages.schema.json#/definitions/${dto}`, event))) throw new Error("BAD_EVENT");
  return event as TimerEvent;
 }
+/** Читает согласованный снимок владельца. */
 export const snapshot = () => query<Snapshot>("snapshot", {});
+/** Передаёт непрозрачный owner cursor без изменения. */
 export const history = (limit: number, cursor: string | null) => query<History>("history", { limit, cursor });
+/** Читает окончательный ledger result; NOT_FOUND не отменяет команду. */
 export const command = (commandId: string) => query<CommandResult>("command", { commandId });

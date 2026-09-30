@@ -1,6 +1,6 @@
 // ABOUTME: Подключает JetStream команды/события и NATS Services чтения.
 // ABOUTME: Прикладные переходы выполняет хранилище; публикация предшествует ACK команды.
-import { connect,nanos,AckPolicy,RetentionPolicy,StorageType,DiscardPolicy,DeliverPolicy,ReplayPolicy, type NatsConnection, type JsMsg, type ServiceMsg } from "nats";
+import { connect,nanos,AckPolicy,RetentionPolicy,StorageType,DiscardPolicy,DeliverPolicy,ReplayPolicy, type NatsConnection, type ConsumerMessages, type ServiceMsg } from "nats";
 import type { Config } from "./config.js";
 import type { Store } from "./storage.js";
 import { identity, parseQuery } from "./schema.js";
@@ -40,18 +40,29 @@ export async function runNats(nc:NatsConnection,cfg:Config,store:Store){
  }
  let stopped=false;
  const consumer=await js.consumers.get(commandsStream,commandsConsumer);
+ let messages:ConsumerMessages|undefined;
  const done=(async()=>{
   while(!stopped&&!nc.isClosed()){
-   let message:JsMsg|null=null;
-   const begin=performance.now();
    try{
-    message=await consumer.next({expires:1000});
-    if(!message)continue;
-    const info=message.info;
-    const saved=await handleDelivery({subject:message.subject,data:message.data,key:`${info.stream}:${info.streamSequence}`},{save:store.process,publish:result=>js.publish(result.subject,Buffer.from(JSON.stringify(result.event)),{msgID:result.event.eventId}),ack:()=>message!.ack()});
-    console.log(JSON.stringify({commandId:saved.event.commandId,executor:service.info().id,result:saved.event.error?.code??saved.subject,durationMs:Math.round(performance.now()-begin),redelivery:info.redeliveryCount,queueDelayMs:Math.max(0,Date.now()-info.timestampNanos/1e6)}));
-   }catch(error){if(stopped||nc.isClosed())break;console.error(JSON.stringify({operation:"command",error:safeError(error),executor:service.info().id,commandId:message?identity(message.data).commandId:null,deliveryKey:message?`${message.info.stream}:${message.info.streamSequence}`:null,durationMs:Math.round(performance.now()-begin),redelivery:message?.info.redeliveryCount,queueDelayMs:message?Math.max(0,Date.now()-message.info.timestampNanos/1e6):undefined}));if(message)message.nak(Math.min(30000,1000*2**Math.min(message.info.redeliveryCount,5)));else await new Promise(resolve=>setTimeout(resolve,1000));}
+    // AIDEV-NOTE: consume сохраняет inbox при idle/resume; next timeout мог отбросить доставку до чтения socket.
+    messages=await consumer.consume({max_messages:1,expires:1000});
+    for await(const message of messages){
+     if(stopped){message.nak();break;}
+     const begin=performance.now(),info=message.info;
+     const queueDelayMs=Math.max(0,Date.now()-info.timestampNanos/1e6);
+     try{
+      const saved=await handleDelivery({subject:message.subject,data:message.data,key:`${info.stream}:${info.streamSequence}`},{save:store.process,publish:result=>js.publish(result.subject,Buffer.from(JSON.stringify(result.event)),{msgID:result.event.eventId}),ack:()=>message.ack()});
+      console.log(JSON.stringify({commandId:saved.event.commandId,executor:service.info().id,result:saved.event.error?.code??saved.subject,durationMs:Math.round(performance.now()-begin),redelivery:info.redeliveryCount,queueDelayMs}));
+     }catch(error){
+      console.error(JSON.stringify({operation:"command",error:safeError(error),executor:service.info().id,commandId:identity(message.data).commandId,deliveryKey:`${info.stream}:${info.streamSequence}`,durationMs:Math.round(performance.now()-begin),redelivery:info.redeliveryCount,queueDelayMs}));
+      message.nak(Math.min(30000,1000*2**Math.min(info.redeliveryCount,5)));
+     }
+    }
+   }catch(error){
+    if(!stopped&&!nc.isClosed())console.error(JSON.stringify({operation:"command.consume",error:safeError(error)}));
+   }finally{messages?.stop();messages=undefined;}
+   if(!stopped&&!nc.isClosed())await new Promise(resolve=>setTimeout(resolve,1000));
   }
  })();
- return {service,done,async stop(){stopped=true;await service.stop();await done;}};
+ return {service,done,async stop(){stopped=true;messages?.stop();await service.stop();await done;}};
 }

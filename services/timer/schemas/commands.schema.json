@@ -2,24 +2,109 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://brai.invalid/contracts/timer/v1/commands.schema.json",
   "title": "Brai timer commands",
-  "oneOf": [{"$ref": "#/definitions/StartCommand"}, {"$ref": "#/definitions/StopCommand"}],
+  "oneOf": [
+    {
+      "$ref": "#/definitions/StartCommand"
+    },
+    {
+      "$ref": "#/definitions/StopCommand"
+    }
+  ],
   "definitions": {
     "StartCommand": {
-      "type": "object", "additionalProperties": false,
-      "required": ["commandId", "expectedVersion"],
-      "properties": {
-        "commandId": {"$ref": "common.schema.json#/definitions/uuid"},
-        "expectedVersion": {"$ref": "common.schema.json#/definitions/version"}
-      }
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commandId",
+            "expectedVersion"
+          ],
+          "properties": {
+            "commandId": {
+              "$ref": "common.schema.json#/definitions/uuid"
+            },
+            "expectedVersion": {
+              "$ref": "common.schema.json#/definitions/version"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commandId",
+            "timerId",
+            "startedAt"
+          ],
+          "properties": {
+            "commandId": {
+              "$ref": "common.schema.json#/definitions/uuid"
+            },
+            "timerId": {
+              "$ref": "common.schema.json#/definitions/uuid"
+            },
+            "startedAt": {
+              "$ref": "#/definitions/IntentTimestamp"
+            }
+          }
+        }
+      ]
     },
     "StopCommand": {
-      "type": "object", "additionalProperties": false,
-      "required": ["commandId", "expectedVersion", "timerId"],
-      "properties": {
-        "commandId": {"$ref": "common.schema.json#/definitions/uuid"},
-        "expectedVersion": {"$ref": "common.schema.json#/definitions/version"},
-        "timerId": {"$ref": "common.schema.json#/definitions/uuid"}
-      }
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commandId",
+            "expectedVersion",
+            "timerId"
+          ],
+          "properties": {
+            "commandId": {
+              "$ref": "common.schema.json#/definitions/uuid"
+            },
+            "expectedVersion": {
+              "$ref": "common.schema.json#/definitions/version"
+            },
+            "timerId": {
+              "$ref": "common.schema.json#/definitions/uuid"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "commandId",
+            "timerId",
+            "stoppedAt"
+          ],
+          "properties": {
+            "commandId": {
+              "$ref": "common.schema.json#/definitions/uuid"
+            },
+            "timerId": {
+              "$ref": "common.schema.json#/definitions/uuid"
+            },
+            "stoppedAt": {
+              "$ref": "#/definitions/IntentTimestamp"
+            }
+          }
+        }
+      ]
+    },
+    "IntentTimestamp": {
+      "allOf": [
+        {
+          "$ref": "common.schema.json#/definitions/timestamp"
+        },
+        {
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])T([01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}Z$",
+          "type": "string"
+        }
+      ]
     }
   }
 }

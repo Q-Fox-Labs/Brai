@@ -9,5 +9,5 @@ export type TimerEvent = { eventId: string; commandId: string | null } & (
  { version: number; timerId: string; startedAt: string } |
  { version: number; interval: Interval } |
  { correlationId: string; error: ServiceError });
-export type Pending = { commandId: string; type: "start" | "stop"; expectedVersion: number; timerId?: string };
+export type Pending = { commandId: string; type: "start" | "stop"; expectedVersion?: number; timerId?: string; startedAt?: string; stoppedAt?: string };
 export type CommandResult = { commandId: string; status: "completed"; result: TimerEvent };

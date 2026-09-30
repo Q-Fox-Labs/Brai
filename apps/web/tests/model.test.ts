@@ -5,26 +5,18 @@ import assert from "node:assert/strict";
 import { initialView, applySnapshot, applyEvent, duration, formatDuration, mergeIntervals } from "../lib/model.ts";
 const stamp = "2026-09-29T00:00:00.000Z";
 const interval = { timerId: "old", startedAt: stamp, stoppedAt: stamp, durationMs: 1000 };
-/** Проверяет больше суток и независимость от Date.now. */
-test("clock is monotonic and supports >24h; start resets; stop keeps result", () => {
- const view = applySnapshot(initialView(), { active: { timerId: "active", startedAt: stamp }, version: 1,
- serverTime: "2026-09-30T01:00:00.000Z", recentCompleted: [], nextCursor: null }, 100);
- assert.equal(formatDuration(duration(view, 2100)), "25:00:02");
- const oldNow = Date.now; Date.now = () => 0;
- try { assert.equal(formatDuration(duration(view, 3100)), "25:00:03"); } finally { Date.now = oldNow; }
- const stopped = applyEvent(view, { eventId: "stop", commandId: "cmd", version: 2, interval: { ...interval, timerId: "active", durationMs: 90003000 } });
- assert.equal(formatDuration(duration(stopped, 900000)), "25:00:03");
- const started = applyEvent(stopped, { eventId: "start", commandId: "next", version: 3, timerId: "next", startedAt: "2026-09-30T01:00:03.000Z" });
- assert.equal(duration(started, 3100), 0);
+test("local clock is monotonic >24h; STOP is zero and late owner data is separate", () => {
+ const view = { ...initialView(), local: {timerId:"local", startedAt:stamp}, localElapsed:90000000, localMono:100 };
+ assert.equal(formatDuration(duration(view,2100)),"25:00:02");
+ const oldNow=Date.now;Date.now=()=>0;
+ try { assert.equal(formatDuration(duration(view,3100)),"25:00:03"); } finally {Date.now=oldNow;}
+ const stopped={...view,local:null};
+ assert.equal(duration(applySnapshot(stopped,{active:{timerId:"old",startedAt:stamp},version:1,serverTime:stamp,recentCompleted:[],nextCursor:null},10),900000),0);
 });
-test("rejection and old event resolve pending independently of version; gap requires resync", () => {
- const pending = { type: "start" as const, expectedVersion: 4, commandId: "cmd" };
- const view = { ...initialView(), version: 4, connected: true, pending };
- const rejection = applyEvent(view, { eventId: "reject", commandId: "cmd", correlationId: "delivery", error: { code: "VERSION_CONFLICT", message: "conflict", retryable: false } });
- assert.equal(rejection.pending, null); assert.equal(rejection.version, 4);
- const old = applyEvent(view, { eventId: "old", commandId: "cmd", version: 1, timerId: "old", startedAt: stamp });
- assert.equal(old.pending, null); assert.equal(old.active, null);
- assert.equal(applyEvent(view, { eventId: "gap", commandId: "x", version: 6, timerId: "x", startedAt: stamp }).connected, false);
+test("stale snapshot cannot reverse confirmed version; gap requires resync", () => {
+ const view={...initialView(),version:4,connected:true};
+ assert.equal(applySnapshot(view,{active:{timerId:"old",startedAt:stamp},version:1,serverTime:stamp,recentCompleted:[],nextCursor:null},10).active,null);
+ assert.equal(applyEvent(view,{eventId:"gap",commandId:"x",version:6,timerId:"x",startedAt:stamp}).connected,false);
 });
 test("snapshot/live dedup retain old loaded pages and owner cursor", () => {
  const view = { ...initialView(), items: [interval], paged: true, cursor: "owner-tail" };

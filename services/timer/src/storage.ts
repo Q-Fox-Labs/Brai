@@ -2,9 +2,9 @@
 // ABOUTME: Все переходы сериализуются строкой state; чтения используют один снимок БД.
 import { randomUUID } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
-import { decide, rejected, type Active, type Interval, type Saved, type State } from "./domain.js";
-import type { Delivery } from "./flow.js";
-import { identity, parseCommand } from "./schema.js";
+import { decide, rejected, type Active, type Interval, type State } from "./domain.js";
+import type { Delivery, Saved } from "./flow.js";
+import { identity, parseCommand, commandType, eventSubject } from "./schema.js";
 const asISO = (value: Date) => value.toISOString();
 function interval(row: Record<string,any>): Interval { return {timerId:row.timer_id,startedAt:asISO(row.started_at),stoppedAt:asISO(row.stopped_at),durationMs:Number(row.duration_ms)}; }
 function state(row: Record<string,any>): State { return {version:Number(row.version),active:row.active_timer_id ? {timerId:row.active_timer_id,startedAt:asISO(row.started_at)} : null}; }
@@ -52,19 +52,22 @@ export function createStore(pool: Pool) {
         }
         let outcome;
         if (!command || conflict) {
-          outcome={state:current,subject:"brai.timer.v1.event.rejected",event:rejected(conflict?"COMMAND_ID_CONFLICT":"INVALID_ARGUMENT",randomUUID(),conflict?commandId:null,delivery.key,current.version)};
+          outcome={state:current,kind:"rejected" as const,event:rejected(conflict?"COMMAND_ID_CONFLICT":"INVALID_ARGUMENT",randomUUID(),conflict?commandId:null,delivery.key,current.version)};
         } else {
           const now=asISO((await client.query("SELECT date_trunc('milliseconds',clock_timestamp()) AS now")).rows[0].now);
-          outcome=decide(delivery.subject,command,current,now,{eventId:randomUUID(),timerId:randomUUID()});
+          const type=commandType(delivery.subject);
+          // AIDEV-NOTE: Повтор чужого timerId должен завершиться отказом, а не бесконечным PK retry.
+          const reused=type==="start" && command.timerId && (await client.query("SELECT 1 FROM timer.intervals WHERE timer_id=$1",[command.timerId])).rowCount;
+          outcome=decide(type,command,current,now,{eventId:randomUUID(),timerId:randomUUID(),timerIdExists:Boolean(reused)});
           if (outcome.state.version!==current.version) {
             if (outcome.state.active) await client.query("INSERT INTO timer.intervals(timer_id,started_at) VALUES($1,$2)",[outcome.state.active.timerId,outcome.state.active.startedAt]);
             else await client.query("UPDATE timer.intervals SET stopped_at=$2,duration_ms=$3 WHERE timer_id=$1",[outcome.interval!.timerId,outcome.interval!.stoppedAt,outcome.interval!.durationMs]);
             await client.query("UPDATE timer.state SET version=$1,active_timer_id=$2 WHERE singleton=true",[outcome.state.version,outcome.state.active?.timerId??null]);
           }
         }
-        await client.query("INSERT INTO timer.commands(command_id,delivery_key,subject,content,event_subject,result) VALUES($1,$2,$3,$4,$5,$6)",[command&&!conflict?command.commandId:null,delivery.key,delivery.subject,content,outcome.subject,outcome.event]);
+        await client.query("INSERT INTO timer.commands(command_id,delivery_key,subject,content,event_subject,result) VALUES($1,$2,$3,$4,$5,$6)",[command&&!conflict?command.commandId:null,delivery.key,delivery.subject,content,eventSubject(outcome.kind),outcome.event]);
         await client.query("COMMIT");
-        return {subject:outcome.subject,event:outcome.event,duplicate:false};
+        return {subject:eventSubject(outcome.kind),event:outcome.event,duplicate:false};
       } catch (error) { await client.query("ROLLBACK").catch(()=>{}); throw error; }
       finally {client.release();}
     },

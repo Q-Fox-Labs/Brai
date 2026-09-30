@@ -1,117 +1,157 @@
-// ABOUTME: Восстанавливает SSE и pending команду через браузерные HTTP порты.
-// ABOUTME: Повтор сохраняет исходный body/ID; ожидание ledger не имеет таймаута отмены.
-import type { History, Pending, Snapshot, TimerEvent } from "./types";
-import { applyEvent, applySnapshot, initialView, isPending, mergeIntervals, type View } from "./model.ts";
+// ABOUTME: Держит локальный секундомер отдельно от подтверждённой общей истории.
+// ABOUTME: Ограниченный FIFO сохраняет неизменные намерения до окончательного owner-результата.
+import type { Active, History, Pending, Snapshot, TimerEvent } from "./types";
+import { applyEvent, applySnapshot, duration, initialView, isPending, mergeIntervals, rejectionMessage, type View } from "./model.ts";
 export const PENDING_KEY = "brai.timer.pending.v1";
+export const OUTBOX_KEY = "brai.timer.outbox.v1";
+export const OUTBOX_LIMIT = 512;
+type Entry = { command: Pending; accepted: boolean; uncertain: boolean };
+type Stored = { entries: Entry[]; local: Active | null; elapsed: number; savedAt: number; hold: boolean; barrier: number; localCommandId: string | null };
 export type ClientPorts = {
- now: () => number; id: () => string; storage: Pick<Storage, "getItem" | "setItem" | "removeItem">;
+ now: () => number; wall?: () => number; id: () => string; storage: Pick<Storage, "getItem" | "setItem" | "removeItem">;
  fetch: (path: string, options?: RequestInit) => Promise<Response>;
  stream: (snapshot: (data: Snapshot) => void, event: (data: TimerEvent) => void, lost: () => void) => () => void;
 };
-/** Собирает lifecycle браузера; stop освобождает stream, poll и подписчиков. */
+/** Собирает браузерные I/O; локальные START/STOP доступны при любом состоянии связи. */
 export function createClient(ports: ClientPorts) {
- let view = initialView(), disposed = false, close = () => {}, busy = false, queued = false, ambiguous = false;
- let polling: ReturnType<typeof setInterval> | undefined;
- let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
- let generation = 0;
+ let view = initialView(), entries: Entry[] = [], disposed = false, close = () => {}, publishing = false, lookingUp = false;
+ let hold = false, barrier = 0, pollIndex = 0, generation = 0, localCommandId: string | null = null, storageBlocked = false;
+ let polling: ReturnType<typeof setInterval> | undefined, reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+ const lifetime = new AbortController();
+ const wall = ports.wall ?? Date.now;
+ // AIDEV-NOTE: Wall-clock нужен только для первоначального anchor и восстановления между документами.
+ const initialEpoch = wall(), initialMono = ports.now();
  const listeners = new Set<(view: View) => void>();
- const seen = new Set<string>();
- const sending = new Set<string>();
- const update = (next: View) => { if (!disposed) { view = next; for (const listener of listeners) listener(view); } };
- const persist = (pending: Pending | null) => {
-  try { if (pending) ports.storage.setItem(PENDING_KEY, JSON.stringify(pending)); else ports.storage.removeItem(PENDING_KEY); return true; }
-  catch { update({ ...view, message: "Не удалось сохранить команду в этой вкладке. Проверьте настройки хранилища браузера." }); return false; }
+ const update = (next: View) => { if (!disposed) { view = { ...next, queued: entries.length }; for (const listener of listeners) listener(view); } };
+ const signal = () => AbortSignal.any([lifetime.signal, AbortSignal.timeout(5000)]);
+ const persist = () => {
+  if (storageBlocked) return false;
+  try {
+   const data: Stored = { entries, local: view.local, elapsed: duration(view, ports.now()), savedAt: wall(), hold, barrier, localCommandId };
+   ports.storage.setItem(OUTBOX_KEY, JSON.stringify(data)); return true;
+  } catch { update({ ...view, message: "Не удалось сохранить действия в этой вкладке. Не закрывайте её до сохранения истории." }); return false; }
+ };
+ const followOwner = () => {
+  if (entries.length || hold || view.version < barrier || !view.connected) return;
+  update({ ...view, local: view.active, localElapsed: view.active ? Math.max(0, view.anchorServer + ports.now() - view.anchorMono - Date.parse(view.active.startedAt)) : 0, localMono: ports.now() });
  };
  const onEvent = (event: TimerEvent) => {
-  if (disposed || seen.has(event.eventId)) return;
-  seen.add(event.eventId); if (seen.size > 512) seen.delete(seen.values().next().value!);
-  const next = applyEvent(view, event);
-  if (view.pending && !next.pending) { persist(null); queued = false; ambiguous = false; }
-  update(next);
-  if (!next.connected) reconnect();
+  if (disposed) return;
+  const index = entries.findIndex(item => item.command.commandId === event.commandId);
+  view = applyEvent(view, event);
+  if (index >= 0) {
+   entries.splice(index, 1);
+   if ("error" in event) { if (event.commandId === localCommandId) hold = true; view = { ...view, message: rejectionMessage(event.error.code) }; }
+   else { barrier = Math.max(barrier, event.version); if (event.commandId === localCommandId) { hold = false; view = { ...view, message: "" }; } }
+   persist();
+  }
+  update(view); followOwner();
+  if (!view.connected) reconnect();
  };
+ const scheduleReconnect = () => { if (!disposed && !reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = undefined; connect(); }, 1000); };
+ const reconnect = () => { generation++; close(); update({ ...view, connected: false }); scheduleReconnect(); };
  const connect = () => {
   if (disposed) return;
   close(); update({ ...view, connected: false });
   const current = ++generation;
   close = ports.stream(data => {
    if (disposed || generation !== current) return;
-   update(applySnapshot(view, data, ports.now())); void recover();
-  }, event => { if (!disposed && generation === current) onEvent(event); }, () => { if (!disposed && generation === current) { generation++; close(); update({ ...view, connected: false }); scheduleReconnect(); } });
+   update(applySnapshot(view, data, ports.now())); followOwner(); void recover();
+  }, event => { if (!disposed && generation === current) onEvent(event); }, () => { if (!disposed && generation === current) reconnect(); });
  };
- const scheduleReconnect = () => {
-  if (!reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = undefined; connect(); }, 1000);
+ const lookup = async (entry: Entry) => {
+  const response = await ports.fetch(`/api/timer/commands/${entry.command.commandId}`, { cache: "no-store", signal: signal() });
+  if (response.ok) { const data = await response.json(); if (!disposed) onEvent(data.result as TimerEvent); return true; }
+  return response.status !== 404;
  };
- const reconnect = () => { generation++; close(); update({ ...view, connected: false }); scheduleReconnect(); };
- const send = async (pending: Pending) => {
-  if (sending.has(pending.commandId)) return;
-  sending.add(pending.commandId);
-  const { type, ...body } = pending;
+ const flush = async () => {
+  if (disposed || publishing) return;
+  publishing = true;
   try {
-   const response = await ports.fetch(`/api/timer/${type}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(5000) });
-   // AIDEV-NOTE: SSE мог уже завершить команду; поздний 202 не возвращает её в pending.
-   if (disposed || view.pending?.commandId !== pending.commandId) return;
-   if (response.status === 202) {
-    queued = true; update({ ...view, message: "Команда в очереди. Ожидаем обработки…" });
-   } else {
+   for (;;) {
+    const entry = entries.find(item => !item.accepted);
+    if (!entry || disposed) break;
+    if (entry.uncertain && await lookup(entry)) { if (!entries.includes(entry)) continue; break; }
+    if (!entries.includes(entry)) continue;
+    const { type, ...body } = entry.command;
+    entry.uncertain = true; if (!persist()) break;
+    const response = await ports.fetch(`/api/timer/${type}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: signal() });
+    if (disposed) break;
+    // AIDEV-NOTE: Результат SSE может удалить запись раньше задержанного HTTP ответа.
+    if (!entries.includes(entry)) continue;
+    if (response.status === 202) { entry.accepted = true; entry.uncertain = false; persist(); update(view); continue; }
     const failure = await response.json() as { outcome?: string };
-    if (disposed || view.pending?.commandId !== pending.commandId) return;
-    if (failure.outcome === "not-published" && !ambiguous && !queued) {
-     persist(null); update({ ...view, pending: null, message: "Команда не отправлена. Проверьте соединение и повторите действие." });
-    } else {
-     if (failure.outcome !== "not-published") ambiguous = true;
-     update({ ...view, message: "Проверяем результат отправки…" });
-    }
+    if (disposed || !entries.includes(entry)) continue;
+    if (failure.outcome === "not-published") entry.uncertain = false;
+    update({ ...view, message: "История пока не сохранена. Повторяем отправку тех же действий." }); persist(); break;
    }
-  } catch { if (!disposed && view.pending?.commandId === pending.commandId) { ambiguous = true; update({ ...view, message: "Проверяем результат отправки…" }); } }
-  finally { sending.delete(pending.commandId); }
+  } catch { if (!disposed) update({ ...view, message: "История пока не сохранена. Проверяем результат отправки." }); }
+  finally { publishing = false; }
  };
  const recover = async () => {
-  if (disposed || busy || !view.pending || sending.has(view.pending.commandId)) return;
-  const pending = view.pending; busy = true;
-  try {
-   const response = await ports.fetch(`/api/timer/commands/${pending.commandId}`, { cache: "no-store", signal: AbortSignal.timeout(5000) });
-   if (disposed || view.pending?.commandId !== pending.commandId) return;
-   if (response.ok) onEvent((await response.json()).result as TimerEvent);
-   else if (response.status === 404 && view.connected && !queued) await send(pending);
-  } catch { /* Pending сохраняется до окончательного ledger/SSE результата. */ }
-  finally { busy = false; }
+  if (disposed) return;
+  void flush();
+  if (lookingUp) return;
+  const accepted = entries.filter(item => item.accepted);
+  if (accepted.length) {
+   lookingUp = true;
+   try { for (let n = 0; n < Math.min(8, accepted.length); n++) {
+    const entry = accepted[pollIndex++ % accepted.length];
+    if (entries.includes(entry)) await lookup(entry);
+   } } catch { /* Принятая команда остаётся в ledger lookup, без повторной публикации. */ }
+   finally { lookingUp = false; }
+  }
  };
  return {
-  /** Возвращает последнее состояние. */
+  /** Возвращает локальный отсчёт и подтверждённую проекцию. */
   getView: () => view,
-  /** Подписывает UI на подтверждённые изменения. */
+  /** Подписывает страницу на изменения без ожидания сервера. */
   subscribe(listener: (view: View) => void) { listeners.add(listener); listener(view); return () => { listeners.delete(listener); }; },
-  /** Восстанавливает pending целиком и подключает SSE раньше любого state snapshot. */
+  /** Восстанавливает всю очередь и legacy body без изменения ID или содержимого. */
   start() {
-   try { const raw = ports.storage.getItem(PENDING_KEY); if (raw) { const pending: unknown = JSON.parse(raw);
-    if (isPending(pending)) { ambiguous = true; update({ ...view, pending, message: "Проверяем ранее отправленную команду…" }); }
-    else update({ ...view, message: "Сохранённая команда повреждена. Обновите хранилище вкладки." });
-   } } catch { update({ ...view, message: "Хранилище вкладки недоступно." }); }
-   connect(); polling = setInterval(() => { void recover(); }, 2000);
+   try {
+    const raw = ports.storage.getItem(OUTBOX_KEY);
+    if (raw) {
+     const data = JSON.parse(raw) as Stored;
+     if (!Array.isArray(data.entries) || data.entries.length > OUTBOX_LIMIT || !data.entries.every(item => isPending(item.command) && typeof item.accepted === "boolean" && typeof item.uncertain === "boolean") || !Number.isFinite(data.elapsed) || !Number.isFinite(data.savedAt) || !Number.isSafeInteger(data.barrier) || typeof data.hold !== "boolean" || data.local && (!data.local.timerId || !Number.isFinite(Date.parse(data.local.startedAt)))) throw new Error("BAD_STORAGE");
+     entries = data.entries; hold = data.hold; barrier = data.barrier; localCommandId = data.localCommandId ?? null;
+     update({ ...view, local: data.local, localElapsed: data.local ? data.elapsed + Math.max(0, initialEpoch - data.savedAt) : 0, localMono: ports.now() });
+    } else {
+     const legacy = ports.storage.getItem(PENDING_KEY);
+     if (legacy) { const command: unknown = JSON.parse(legacy); if (!isPending(command)) throw new Error("BAD_STORAGE"); entries = [{ command, accepted: false, uncertain: true }]; if (persist()) ports.storage.removeItem(PENDING_KEY); }
+    }
+   } catch { storageBlocked = true; hold = true; update({ ...view, message: "Сохранённые действия повреждены или недоступны. Не закрывайте вкладку; проверьте хранилище браузера." }); }
+   connect(); polling = setInterval(() => { void recover(); }, 2000); void recover();
   },
-  /** Блокирует новые команды до свежего снимка и сохраняет ID до первого POST. */
+  /** Мгновенно меняет отсчёт; очередь ограничена и не заменяет старые намерения. */
   command() {
-   if (!view.connected || view.pending || disposed) return;
-   const pending: Pending = { commandId: ports.id(), type: view.active ? "stop" : "start", expectedVersion: view.version,
-    ...(view.active ? { timerId: view.active.timerId } : {}) };
-   if (!persist(pending)) return;
-   queued = false; ambiguous = false; update({ ...view, pending, message: "Отправляем команду…" }); void send(pending);
+   if (disposed) return;
+   const mono = ports.now(), active = view.local;
+   const epoch = view.anchorServer ? view.anchorServer + mono - view.anchorMono : initialEpoch + mono - initialMono;
+   const command: Pending = active
+    ? { type: "stop", commandId: ports.id(), timerId: active.timerId, stoppedAt: new Date(Date.parse(active.startedAt) + Math.floor(duration(view, mono))).toISOString() }
+    : { type: "start", commandId: ports.id(), timerId: ports.id(), startedAt: new Date(epoch).toISOString() };
+   hold = true; localCommandId = command.commandId;
+   update({ ...view, local: active ? null : { timerId: command.timerId!, startedAt: command.startedAt! }, localElapsed: 0, localMono: mono, message: "" });
+   if (storageBlocked) { update({ ...view, message: "Это действие не сохранится: хранилище вкладки недоступно или повреждено." }); return; }
+   if (entries.length >= OUTBOX_LIMIT) { update({ ...view, message: "Очередь заполнена: это действие не сохранится в истории. Дождитесь сохранения предыдущих действий." }); persist(); return; }
+   entries.push({ command, accepted: false, uncertain: false });
+   update(view); if (persist()) void flush();
   },
   /** Загружает устойчивую следующую страницу без замены live истории. */
   async loadHistory() {
    if (!view.cursor || view.loading || !view.connected) return;
    const cursor = view.cursor; update({ ...view, loading: true });
    try {
-    const response = await ports.fetch(`/api/timer/history?cursor=${encodeURIComponent(cursor)}`, { cache: "no-store", signal: AbortSignal.timeout(5000) });
+    const response = await ports.fetch(`/api/timer/history?cursor=${encodeURIComponent(cursor)}`, { cache: "no-store", signal: signal() });
     if (!response.ok) throw new Error("HISTORY");
     const data = await response.json() as History;
     update({ ...view, items: mergeIntervals(view.items, data.items), cursor: data.nextCursor, paged: true, loading: false });
    } catch { update({ ...view, loading: false, message: "Не удалось загрузить историю. Повторите загрузку." }); }
   },
-  /** После visibility/resume обязательно обновляет serverTime anchor. */
+  /** Возвращение страницы обновляет только историю и anchor владельца. */
   resync: reconnect,
-  /** Останавливает I/O; уже сохранённую pending команду оставляет для reload. */
-  stop() { disposed = true; generation++; close(); clearInterval(polling); clearTimeout(reconnectTimer); listeners.clear(); },
+  /** Отменяет I/O; неизменная очередь остаётся для следующего документа. */
+  stop() { disposed = true; generation++; persist(); lifetime.abort(); close(); clearInterval(polling); clearTimeout(reconnectTimer); listeners.clear(); },
  };
 }
