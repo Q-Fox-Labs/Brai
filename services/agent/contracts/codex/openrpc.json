@@ -1,0 +1,1346 @@
+{
+  "openrpc": "1.2.6",
+  "info": {
+    "title": "Codex app-server used boundary",
+    "version": "0.159.2",
+    "description": "Observed raw WebSocket RPC subset. The app-server wire format omits the JSON-RPC 2.0 version member; these are descriptive RPC entries, not a claim of strict JSON-RPC conformance."
+  },
+  "servers": [
+    {
+      "name": "Connected app-server WebSocket",
+      "url": "wss://app-server.example.invalid"
+    }
+  ],
+  "methods": [
+    {
+      "name": "initialize",
+      "params": [
+        {
+          "name": "capabilities",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/InitializeParams/properties/capabilities"
+          }
+        },
+        {
+          "name": "clientInfo",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/InitializeParams/properties/clientInfo"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/InitializeResponse"
+        }
+      },
+      "x-wire": "request/response",
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/InitializeParams"
+      },
+      "paramStructure": "by-name"
+    },
+    {
+      "name": "thread/start",
+      "params": [
+        {
+          "name": "allowProviderModelFallback",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/allowProviderModelFallback"
+          }
+        },
+        {
+          "name": "approvalPolicy",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/approvalPolicy"
+          }
+        },
+        {
+          "name": "approvalsReviewer",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/approvalsReviewer"
+          }
+        },
+        {
+          "name": "baseInstructions",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/baseInstructions"
+          }
+        },
+        {
+          "name": "config",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/config"
+          }
+        },
+        {
+          "name": "cwd",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/cwd"
+          }
+        },
+        {
+          "name": "daybreakEnabled",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/daybreakEnabled"
+          }
+        },
+        {
+          "name": "developerInstructions",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/developerInstructions"
+          }
+        },
+        {
+          "name": "dynamicTools",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/dynamicTools"
+          }
+        },
+        {
+          "name": "environments",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/environments"
+          }
+        },
+        {
+          "name": "ephemeral",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/ephemeral"
+          }
+        },
+        {
+          "name": "experimentalRawEvents",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/experimentalRawEvents"
+          }
+        },
+        {
+          "name": "historyMode",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/historyMode"
+          }
+        },
+        {
+          "name": "mockExperimentalField",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/mockExperimentalField"
+          }
+        },
+        {
+          "name": "model",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/model"
+          }
+        },
+        {
+          "name": "modelProvider",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/modelProvider"
+          }
+        },
+        {
+          "name": "multiAgentMode",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/multiAgentMode"
+          }
+        },
+        {
+          "name": "permissions",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/permissions"
+          }
+        },
+        {
+          "name": "personality",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/personality"
+          }
+        },
+        {
+          "name": "projectId",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/projectId"
+          }
+        },
+        {
+          "name": "runtimeWorkspaceRoots",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/runtimeWorkspaceRoots"
+          }
+        },
+        {
+          "name": "sandbox",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/sandbox"
+          }
+        },
+        {
+          "name": "selectedCapabilityRoots",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/selectedCapabilityRoots"
+          }
+        },
+        {
+          "name": "serviceName",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/serviceName"
+          }
+        },
+        {
+          "name": "serviceTier",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/serviceTier"
+          }
+        },
+        {
+          "name": "sessionStartSource",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/sessionStartSource"
+          }
+        },
+        {
+          "name": "threadSource",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadStartParams/properties/threadSource"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ThreadStartResponse"
+        }
+      },
+      "x-wire": "request/response; creates a thread",
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ThreadStartParams"
+      },
+      "paramStructure": "by-name"
+    },
+    {
+      "name": "thread/read",
+      "params": [
+        {
+          "name": "includeTurns",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadReadParams/properties/includeTurns"
+          }
+        },
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadReadParams/properties/threadId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ThreadReadResponse"
+        }
+      },
+      "x-wire": "request/response; history before first turn may return -32600",
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ThreadReadParams"
+      },
+      "paramStructure": "by-name"
+    },
+    {
+      "name": "thread/list",
+      "params": [
+        {
+          "name": "ancestorThreadId",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/ancestorThreadId"
+          }
+        },
+        {
+          "name": "archived",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/archived"
+          }
+        },
+        {
+          "name": "cursor",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/cursor"
+          }
+        },
+        {
+          "name": "cwd",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/cwd"
+          }
+        },
+        {
+          "name": "limit",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/limit"
+          }
+        },
+        {
+          "name": "modelProviders",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/modelProviders"
+          }
+        },
+        {
+          "name": "originators",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/originators"
+          }
+        },
+        {
+          "name": "parentThreadId",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/parentThreadId"
+          }
+        },
+        {
+          "name": "projectId",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/projectId"
+          }
+        },
+        {
+          "name": "searchTerm",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/searchTerm"
+          }
+        },
+        {
+          "name": "sectionId",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/sectionId"
+          }
+        },
+        {
+          "name": "sortDirection",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/sortDirection"
+          }
+        },
+        {
+          "name": "sortKey",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/sortKey"
+          }
+        },
+        {
+          "name": "sourceKinds",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/sourceKinds"
+          }
+        },
+        {
+          "name": "useStateDbOnly",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadListParams/properties/useStateDbOnly"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ThreadListResponse"
+        }
+      },
+      "x-wire": "request/response",
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ThreadListParams"
+      },
+      "paramStructure": "by-name"
+    },
+    {
+      "name": "thread/resume",
+      "params": [
+        {
+          "name": "approvalPolicy",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/approvalPolicy"
+          }
+        },
+        {
+          "name": "approvalsReviewer",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/approvalsReviewer"
+          }
+        },
+        {
+          "name": "baseInstructions",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/baseInstructions"
+          }
+        },
+        {
+          "name": "config",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/config"
+          }
+        },
+        {
+          "name": "cwd",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/cwd"
+          }
+        },
+        {
+          "name": "developerInstructions",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/developerInstructions"
+          }
+        },
+        {
+          "name": "excludeTurns",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/excludeTurns"
+          }
+        },
+        {
+          "name": "history",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/history"
+          }
+        },
+        {
+          "name": "initialTurnsPage",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/initialTurnsPage"
+          }
+        },
+        {
+          "name": "model",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/model"
+          }
+        },
+        {
+          "name": "modelProvider",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/modelProvider"
+          }
+        },
+        {
+          "name": "path",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/path"
+          }
+        },
+        {
+          "name": "permissions",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/permissions"
+          }
+        },
+        {
+          "name": "personality",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/personality"
+          }
+        },
+        {
+          "name": "runtimeWorkspaceRoots",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/runtimeWorkspaceRoots"
+          }
+        },
+        {
+          "name": "sandbox",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/sandbox"
+          }
+        },
+        {
+          "name": "serviceTier",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/serviceTier"
+          }
+        },
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadResumeParams/properties/threadId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ThreadResumeResponse"
+        }
+      },
+      "x-wire": "request/response",
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ThreadResumeParams"
+      },
+      "paramStructure": "by-name"
+    },
+    {
+      "name": "thread/archive",
+      "params": [
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadArchiveParams/properties/threadId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ThreadArchiveResponse"
+        }
+      },
+      "x-wire": "mutation; a prior error -32600 occurred despite applied effect; outcome is unknown until read/reconciliation; never retry automatically",
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ThreadArchiveParams"
+      },
+      "paramStructure": "by-name"
+    },
+    {
+      "name": "thread/unsubscribe",
+      "params": [
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadUnsubscribeParams/properties/threadId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ThreadUnsubscribeResponse"
+        }
+      },
+      "x-wire": "request/response",
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ThreadUnsubscribeParams"
+      },
+      "paramStructure": "by-name"
+    },
+    {
+      "name": "thread/items/list",
+      "params": [
+        {
+          "name": "cursor",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadItemsListParams/properties/cursor"
+          }
+        },
+        {
+          "name": "limit",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadItemsListParams/properties/limit"
+          }
+        },
+        {
+          "name": "sortDirection",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadItemsListParams/properties/sortDirection"
+          }
+        },
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadItemsListParams/properties/threadId"
+          }
+        },
+        {
+          "name": "turnId",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadItemsListParams/properties/turnId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ThreadItemsListResponse"
+        }
+      },
+      "x-wire": "paged history; observed usable after first turn",
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ThreadItemsListParams"
+      },
+      "paramStructure": "by-name"
+    },
+    {
+      "name": "thread/turns/list",
+      "params": [
+        {
+          "name": "cursor",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadTurnsListParams/properties/cursor"
+          }
+        },
+        {
+          "name": "itemsView",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadTurnsListParams/properties/itemsView"
+          }
+        },
+        {
+          "name": "limit",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadTurnsListParams/properties/limit"
+          }
+        },
+        {
+          "name": "sortDirection",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadTurnsListParams/properties/sortDirection"
+          }
+        },
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadTurnsListParams/properties/threadId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ThreadTurnsListResponse"
+        }
+      },
+      "x-wire": "paged history; observed usable after first turn",
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ThreadTurnsListParams"
+      },
+      "paramStructure": "by-name"
+    },
+    {
+      "name": "turn/start",
+      "params": [
+        {
+          "name": "additionalContext",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/additionalContext"
+          }
+        },
+        {
+          "name": "approvalPolicy",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/approvalPolicy"
+          }
+        },
+        {
+          "name": "approvalsReviewer",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/approvalsReviewer"
+          }
+        },
+        {
+          "name": "clientUserMessageId",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/clientUserMessageId"
+          }
+        },
+        {
+          "name": "collaborationMode",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/collaborationMode"
+          }
+        },
+        {
+          "name": "cwd",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/cwd"
+          }
+        },
+        {
+          "name": "cyberAccessProgram",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/cyberAccessProgram"
+          }
+        },
+        {
+          "name": "disabledPluginIds",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/disabledPluginIds"
+          }
+        },
+        {
+          "name": "effort",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/effort"
+          }
+        },
+        {
+          "name": "environments",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/environments"
+          }
+        },
+        {
+          "name": "input",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/input"
+          }
+        },
+        {
+          "name": "model",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/model"
+          }
+        },
+        {
+          "name": "multiAgentMode",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/multiAgentMode"
+          }
+        },
+        {
+          "name": "outputSchema",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/outputSchema"
+          }
+        },
+        {
+          "name": "permissions",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/permissions"
+          }
+        },
+        {
+          "name": "personality",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/personality"
+          }
+        },
+        {
+          "name": "responsesapiClientMetadata",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/responsesapiClientMetadata"
+          }
+        },
+        {
+          "name": "runtimeWorkspaceRoots",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/runtimeWorkspaceRoots"
+          }
+        },
+        {
+          "name": "sandboxPolicy",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/sandboxPolicy"
+          }
+        },
+        {
+          "name": "serviceTier",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/serviceTier"
+          }
+        },
+        {
+          "name": "serviceTierForTurn",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/serviceTierForTurn"
+          }
+        },
+        {
+          "name": "summary",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/summary"
+          }
+        },
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/threadId"
+          }
+        },
+        {
+          "name": "toolOutput",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/toolOutput"
+          }
+        },
+        {
+          "name": "turnTrigger",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnStartParams/properties/turnTrigger"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/TurnStartResponse"
+        }
+      },
+      "x-wire": "mutation; timeout or disconnect has unknown outcome and is never automatically retried; immediate interrupt can race before active turn exists",
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/TurnStartParams"
+      },
+      "paramStructure": "by-name"
+    },
+    {
+      "name": "turn/steer",
+      "params": [
+        {
+          "name": "additionalContext",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnSteerParams/properties/additionalContext"
+          }
+        },
+        {
+          "name": "clientUserMessageId",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnSteerParams/properties/clientUserMessageId"
+          }
+        },
+        {
+          "name": "expectedTurnId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnSteerParams/properties/expectedTurnId"
+          }
+        },
+        {
+          "name": "input",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnSteerParams/properties/input"
+          }
+        },
+        {
+          "name": "responsesapiClientMetadata",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnSteerParams/properties/responsesapiClientMetadata"
+          }
+        },
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnSteerParams/properties/threadId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/TurnSteerResponse"
+        }
+      },
+      "x-wire": "mutation; steer targets the same turn ID; stale expected turn ID returned -32600; never automatically retry",
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/TurnSteerParams"
+      },
+      "paramStructure": "by-name"
+    },
+    {
+      "name": "turn/interrupt",
+      "params": [
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnInterruptParams/properties/threadId"
+          }
+        },
+        {
+          "name": "turnId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/TurnInterruptParams/properties/turnId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/TurnInterruptResponse"
+        }
+      },
+      "x-wire": "mutation; confirmed active turn returned empty result then turn/completed status interrupted; no-active race returned -32600; never automatically retry",
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/TurnInterruptParams"
+      },
+      "paramStructure": "by-name"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "RawRequest": {
+        "type": "object",
+        "required": [
+          "id",
+          "method",
+          "params"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "integer"
+            ],
+            "description": "Observed request IDs are strings or integers; live server request IDs were integers."
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": true,
+        "description": "Observed raw upstream packet; jsonrpc is not required."
+      },
+      "RawResponse": {
+        "type": "object",
+        "oneOf": [
+          {
+            "required": [
+              "id",
+              "result"
+            ],
+            "properties": {
+              "id": {
+                "type": [
+                  "string",
+                  "integer",
+                  "null"
+                ]
+              },
+              "result": {}
+            }
+          },
+          {
+            "required": [
+              "id",
+              "error"
+            ],
+            "properties": {
+              "id": {
+                "type": [
+                  "string",
+                  "integer",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "integer"
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          }
+        ],
+        "additionalProperties": true
+      },
+      "RpcError": {
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {}
+        },
+        "additionalProperties": true
+      },
+      "RawNotification": {
+        "type": "object",
+        "required": [
+          "method",
+          "params"
+        ],
+        "properties": {
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": true,
+        "description": "Observed server notification."
+      },
+      "ServerRequest": {
+        "type": "object",
+        "required": [
+          "id",
+          "method",
+          "params"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "Observed server-originated requests used integer IDs."
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": true,
+        "description": "Server-originated request requiring a response packet."
+      }
+    }
+  },
+  "x-notifications": [
+    {
+      "name": "turn/started",
+      "schema": {
+        "$ref": "schema.json#/definitions/TurnStartedNotification"
+      }
+    },
+    {
+      "name": "turn/completed",
+      "schema": {
+        "$ref": "schema.json#/definitions/TurnCompletedNotification"
+      }
+    },
+    {
+      "name": "item/started",
+      "schema": {
+        "$ref": "schema.json#/definitions/ItemStartedNotification"
+      }
+    },
+    {
+      "name": "item/completed",
+      "schema": {
+        "$ref": "schema.json#/definitions/ItemCompletedNotification"
+      }
+    },
+    {
+      "name": "item/agentMessage/delta",
+      "schema": {
+        "$ref": "schema.json#/definitions/AgentMessageDeltaNotification"
+      }
+    },
+    {
+      "name": "thread/status/changed",
+      "schema": {
+        "$ref": "schema.json#/definitions/ThreadStatusChangedNotification"
+      }
+    },
+    {
+      "name": "thread/tokenUsage/updated",
+      "schema": {
+        "$ref": "schema.json#/definitions/ThreadTokenUsageUpdatedNotification"
+      }
+    },
+    {
+      "name": "serverRequest/resolved",
+      "schema": {
+        "$ref": "schema.json#/definitions/ServerRequestResolvedNotification"
+      }
+    },
+    {
+      "name": "thread/archived",
+      "schema": {
+        "$ref": "schema.json#/definitions/ThreadArchivedNotification"
+      }
+    },
+    {
+      "name": "item/commandExecution/outputDelta",
+      "schema": {
+        "$ref": "schema.json#/definitions/CommandExecutionOutputDeltaNotification"
+      },
+      "evidence": "schema-only"
+    },
+    {
+      "name": "item/fileChange/outputDelta",
+      "schema": {
+        "$ref": "schema.json#/definitions/FileChangeOutputDeltaNotification"
+      },
+      "evidence": "schema-only"
+    },
+    {
+      "name": "turn/plan/updated",
+      "schema": {
+        "$ref": "schema.json#/definitions/TurnPlanUpdatedNotification"
+      },
+      "evidence": "schema-only"
+    }
+  ],
+  "x-serverRequests": [
+    {
+      "name": "item/commandExecution/requestApproval",
+      "params": {
+        "$ref": "schema.json#/definitions/CommandExecutionRequestApprovalParams"
+      },
+      "response": {
+        "$ref": "schema.json#/definitions/CommandExecutionRequestApprovalResponse"
+      },
+      "verified": "delivered to both connected clients; decline resolved for both"
+    },
+    {
+      "name": "item/tool/requestUserInput",
+      "params": {
+        "$ref": "schema.json#/definitions/ToolRequestUserInputParams"
+      },
+      "response": {
+        "$ref": "schema.json#/definitions/ToolRequestUserInputResponse"
+      },
+      "verified": "experimental API in plan mode worked; pending request replayed to reconnecting client with same RPC ID after 6 seconds; exact answers completed turn"
+    },
+    {
+      "name": "item/permissions/requestApproval",
+      "params": {
+        "$ref": "schema.json#/definitions/PermissionsRequestApprovalParams"
+      },
+      "response": {
+        "$ref": "schema.json#/definitions/PermissionsRequestApprovalResponse"
+      },
+      "verified": "schema only; response permissions/scope represents a granted profile, not an allow/deny decision"
+    },
+    {
+      "name": "item/fileChange/requestApproval",
+      "params": {
+        "$ref": "schema.json#/definitions/FileChangeRequestApprovalParams"
+      },
+      "response": {
+        "$ref": "schema.json#/definitions/FileChangeRequestApprovalResponse"
+      },
+      "verified": "schema-only; live flow not tested"
+    }
+  ],
+  "x-transport": {
+    "type": "raw websocket bytes",
+    "request": "{id,method,params}",
+    "response": "{id,result} or {id,error}",
+    "notification": "{method,params}",
+    "jsonrpcField": "not required by observed upstream wire",
+    "requestId": {
+      "clientRequest": "string or integer",
+      "observedServerRequest": "integer",
+      "response": "echo request ID; null allowed by envelope schema when request ID is unknown"
+    }
+  },
+  "x-retryPolicy": "Read calls may be retried by caller policy. No mutation is automatically retried after timeout or disconnect; matching RPC IDs do not prove idempotency or cancellation.",
+  "x-probeLimits": {
+    "rpcTimeoutMs": 12000,
+    "historyPages": 10,
+    "historyPageSize": 20,
+    "maxFrameBytes": 2097152,
+    "runTimeoutMs": 240000,
+    "cleanupTimeoutMs": 60000,
+    "note": "Limits used by operation 1 probes only; not product guarantees or evidence of overload behavior."
+  },
+  "x-untested": [
+    "file-change approval and permissions live flows",
+    "pending approval recovery after reconnect",
+    "stdout delta",
+    "overload behavior",
+    "indefinite pending question retention",
+    "daemon restart recovery",
+    "exactly-once server-request response"
+  ],
+  "x-clientNotifications": [
+    {
+      "name": "initialized",
+      "params": {
+        "type": "object",
+        "maxProperties": 0
+      },
+      "packet": {
+        "method": "initialized",
+        "params": {}
+      },
+      "hasRpcId": false,
+      "verified": "sent after initialize; notification packet has no RPC id"
+    }
+  ]
+}
