@@ -12,7 +12,9 @@
     "typecheck:web": "npm run typecheck --workspace=@brai/web",
     "typecheck:timer": "npm run typecheck --workspace=@brai/timer",
     "build": "npm run build:web && npm run build:timer",
-    "typecheck": "npm run typecheck:web && npm run typecheck:timer"
+    "typecheck": "npm run typecheck:web && npm run typecheck:timer",
+    "lint": "npm run lint --workspaces --if-present",
+    "test:web": "npm test --workspace=@brai/web"
   },
   "engines": {
     "node": "24.21.0",

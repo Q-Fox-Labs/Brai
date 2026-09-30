@@ -1,14 +1,15 @@
-/* ABOUTME: Подключает Tailwind CSS и задаёт базовые стили веб-приложения. */
-/* ABOUTME: Компонентные стили принадлежат соответствующим компонентам. */
+/* ABOUTME: Подключает Tailwind и стили доступного адаптивного таймера. */
+/* ABOUTME: Два равных столбца на desktop, вертикальная раскладка на мобильном экране. */
 @import "tailwindcss";
-
-:root {
-  color-scheme: light;
-  font-family: Arial, Helvetica, sans-serif;
-}
-
-body {
-  margin: 0;
-  background: white;
-  color: #0f172a;
-}
+:root { color-scheme: light; font-family: Arial, Helvetica, sans-serif; }
+body { margin: 0; background: #fafbfc; color: #0f172a; }
+button { cursor: pointer; }
+button:disabled { cursor: wait; opacity: .55; }
+button:focus-visible { outline: 3px solid #2563eb; outline-offset: 5px; }
+.timer-digits { font-size: clamp(2.75rem, 6.5vw, 7rem); overflow-wrap: anywhere; max-width: 100%; }
+.command-button { border-radius: 999px; min-height: 64px; min-width: 200px; padding: 16px 32px; color: white; font-size: 18px; font-weight: 600; letter-spacing: .12em; }
+.history-button { display: block; margin: 24px auto; border: 1px solid #cbd5e1; border-radius: 12px; padding: 12px 24px; min-height: 44px; }
+.interval-details { display: grid; grid-template-columns: auto 1fr; gap: 8px 20px; font-size: 14px; }
+.interval-details dt { color: #64748b; }
+.interval-details dd { text-align: right; overflow-wrap: anywhere; }
+@media (max-width: 400px) { .interval-details { grid-template-columns: 1fr; gap: 4px; } .interval-details dd { text-align: left; margin-bottom: 6px; } }

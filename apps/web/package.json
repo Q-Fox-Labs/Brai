@@ -6,13 +6,18 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "node --experimental-strip-types --test --test-isolation=none tests/*.test.ts"
   },
   "dependencies": {
     "@radix-ui/react-separator": "1.1.15",
     "next": "16.3.6",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "nats": "2.29.3",
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.3.3",
@@ -21,6 +26,9 @@
     "@types/react-dom": "19.3.0",
     "postcss": "8.5.18",
     "tailwindcss": "4.3.3",
-    "typescript": "5.9.3"
-  }
+    "typescript": "5.9.3",
+    "eslint": "9.39.1",
+    "typescript-eslint": "8.48.1"
+  },
+  "type": "module"
 }
