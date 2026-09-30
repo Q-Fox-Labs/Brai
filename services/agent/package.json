@@ -3,6 +3,12 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "scripts": {
+    "test:contracts": "node --test tests/contracts/*.test.mjs",
+    "generate:contracts": "node scripts/generate-contract-types.mjs",
+    "check:contracts": "node scripts/generate-contract-types.mjs --check && node --test tests/contracts/*.test.mjs",
+    "generate:codex-contract": "node scripts/build-codex-contract.mjs"
+  },
   "exports": {
     "./contracts": {
       "types": "./contracts/index.d.mts",

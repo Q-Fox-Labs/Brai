@@ -19,6 +19,10 @@
     "typecheck:auth": "npm run typecheck --workspace=@brai/auth",
     "test:auth": "npm test --workspace=@brai/auth",
     "test:timer": "npm test --workspace=@brai/timer",
+    "test:contracts": "npm run test:contracts --workspace=@brai/agent",
+    "generate:contracts": "npm run generate:contracts --workspace=@brai/agent",
+    "check:contracts": "npm run check:contracts --workspace=@brai/agent",
+    "generate:codex-contract": "npm run generate:codex-contract --workspace=@brai/agent --",
     "test": "npm test --workspaces --if-present"
   },
   "engines": {
