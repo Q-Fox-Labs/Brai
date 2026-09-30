@@ -13,3 +13,14 @@
 В `manifest.json` перечислены точные upstream-файлы и SHA-256. `schema.json` — Draft-07 замыкание используемых upstream типов. При компиляции upstream-схем Ajv отключает проверку именованных `format`: upstream использует `uint64` и аналогичные форматы, которым здесь не назначаются неподтверждённые валидаторы; ограничения `type`, `minimum` и остальные ключевые слова сохраняются. Пересборка: `node services/agent/scripts/build-codex-contract.mjs --source-directory <каталог схем 0.159.2>`. Не подменяйте источник CLI 0.157.1. OpenRPC отдельно перечисляет schema-only уведомления command execution output delta, file change output delta и turn plan, а также запрос `item/fileChange/requestApproval`; их упоминание не подтверждает live-поддержку. В выгрузке 0.159.2 нет отдельного определения с именем AvailableCollabItems.
 
 Числа в `x-probeLimits` — только пределы тестовых прогонов операции 1: RPC 12 секунд, история 10 страниц по 20 элементов, кадр 2 MiB, прогон 240 секунд и очистка 60 секунд. Это не обещания продукта. Ожидание pending question проверено только на 6 секунд; восстановление после перезапуска daemon, перегрузка, stdout delta и file-change/permissions flows не проверялись.
+
+
+## Authorization и готовность
+
+`account/read` вызывается с `refreshToken: false`: он читает состояние, но не инициирует обновление токена. `initialize` подтверждает только инициализацию протокола и не доказывает, что аккаунт авторизован. Используемое подмножество не включает login, token refresh, logout или чтение токена.
+
+Upstream-ответ `GetAccountResponse` сохраняется без изменений в контрактной схеме. Внешний статус агентского сервиса берёт только перечисление `authorization` из [контракта сообщений](../../schemas/messages.schema.json#/definitions/StatusResponse/properties/authorization); адаптер отображает состояние в `ready`, `required`, `failed` или `unknown`. Не передавайте наружу и не записывайте в журналы upstream account/email, plan или `workspaceRouting`. `account/updated` и `error` включены для точной трассировки типов; их live-поведение не заявляется.
+
+## Совместимость обновлённого daemon
+
+После обновления до 0.159.3 все 48 используемых source files побайтно совпали с выгрузкой 0.159.2; changed и missing пусты, проверка завершилась с кодом 0. Initialize/initialized через действующий сокет завершился с кодом 0 и подтвердил serverVersion 0.159.3 без создания чатов или ходов. Живые сценарии доказаны на 0.159.2 и не повторялись на 0.159.3. Manifest сохраняет исходную provenance 0.159.2 и отдельную compatibility запись, привязанную к хешам исходных файлов; генератор воспроизводит её и отклоняет изменившийся набор.

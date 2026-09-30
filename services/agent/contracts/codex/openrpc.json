@@ -49,6 +49,36 @@
       "paramStructure": "by-name"
     },
     {
+      "name": "account/read",
+      "params": [
+        {
+          "name": "refreshToken",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/GetAccountParams/properties/refreshToken"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/GetAccountResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "description": "Read the current account/auth state without requesting token refresh. The owning agent maps only the resulting authorization state to its public enum; do not expose or log raw account, plan, or workspace-routing fields. Calling initialize does not establish account authorization.",
+      "paramStructure": "by-name",
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/GetAccountParams"
+      },
+      "x-wire": "read-only request/response; use refreshToken=false; does not perform login, refresh, logout, or token read"
+    },
+    {
       "name": "thread/start",
       "params": [
         {
@@ -1251,6 +1281,20 @@
       "name": "turn/plan/updated",
       "schema": {
         "$ref": "schema.json#/definitions/TurnPlanUpdatedNotification"
+      },
+      "evidence": "schema-only"
+    },
+    {
+      "name": "account/updated",
+      "schema": {
+        "$ref": "schema.json#/definitions/AccountUpdatedNotification"
+      },
+      "evidence": "schema-only"
+    },
+    {
+      "name": "error",
+      "schema": {
+        "$ref": "schema.json#/definitions/ErrorNotification"
       },
       "evidence": "schema-only"
     }

@@ -17,9 +17,13 @@
     "ToolRequestUserInputResponse.json": "5073b245f741fa8ce62ec52e4dd1809b7831f9c4284c279a78abc9b171f8e3f2",
     "v1/InitializeParams.json": "b55124e7c0f36a1789396daa5578217a92be67f053903696236686e59f6f212e",
     "v1/InitializeResponse.json": "62ad689c2cb6379913c1d72749cfd8de5089d35760214123518eb92eef11acc9",
+    "v2/AccountUpdatedNotification.json": "268dba6977cc3adcced751a97367772a1e201a199c14f454741d851fe8bbacb1",
     "v2/AgentMessageDeltaNotification.json": "996e6c0ea65e57bed5a00f410b94381fe5ebf804333e5d00c2b6e6d47e5c55f6",
     "v2/CommandExecutionOutputDeltaNotification.json": "841fa94098ddb63a71acf1bf5f9e3fac1b0491f4ed3fa8ef86f9a6ca1260b539",
+    "v2/ErrorNotification.json": "ae1f4d6e0bb794211f28dc67b11885a1a0e0f8a198c6114b2ed27372f60a227c",
     "v2/FileChangeOutputDeltaNotification.json": "04c3df83d46725ffc048577e7a5aa25de9a6c8ea9eff713bbae2b408672481c5",
+    "v2/GetAccountParams.json": "30b545275f60975b55bd6fbaafd70f15505801d14168ee82d3931b6e93c78aab",
+    "v2/GetAccountResponse.json": "67ac3095b058a7d3c1627ff4dd9e52c8ee3c55f961cb1b980959ac15336d6827",
     "v2/ItemCompletedNotification.json": "d04b9153de38cd8302a2a418a44a65e8265d4c7586d46ea2cc801b594c6acf5b",
     "v2/ItemStartedNotification.json": "7574788d2a352747f50d44be3ef649011cb8de8069da4c655faff14d0aee32c4",
     "v2/ServerRequestResolvedNotification.json": "4f03d586a5af04edd912cad08cc97eceb658e7e06744565e6d41a93e04a55966",
@@ -55,6 +59,10 @@
   "rootTypes": [
     "InitializeParams",
     "InitializeResponse",
+    "GetAccountParams",
+    "GetAccountResponse",
+    "AccountUpdatedNotification",
+    "ErrorNotification",
     "ThreadStartParams",
     "ThreadStartResponse",
     "ThreadReadParams",
@@ -98,5 +106,15 @@
     "FileChangeRequestApprovalParams",
     "FileChangeRequestApprovalResponse"
   ],
-  "definitionCount": 172
+  "definitionCount": 181,
+  "versionCompatibility": [
+    {
+      "version": "0.159.3",
+      "sourceFilesCompared": 48,
+      "sourceFilesByteIdentical": true,
+      "sourceFilesSha256": "a6268cdfb7ba6310a8c021cca11258009bdd004f39bc035d38d7a4eafc9f43a9",
+      "initializeConfirmed": true,
+      "liveScenariosRepeated": false
+    }
+  ]
 }

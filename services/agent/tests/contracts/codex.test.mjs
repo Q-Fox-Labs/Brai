@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
 import { openrpcDocument } from '@open-rpc/meta-schema';
@@ -86,6 +87,21 @@ test('upstream start, steer, interrupt, approval, and question shapes validate e
   assert.equal(validate('ToolRequestUserInputResponse')({answers:{q1:{answer:'A'}}}),false);
 });
 
+test('account/read uses the upstream response and refreshToken=false without auth endpoint additions', () => {
+  const method = openrpc.methods.find(item=>item.name==='account/read');
+  assert.ok(method);
+  assert.deepEqual(method['x-paramsSchema'],{$ref:'schema.json#/definitions/GetAccountParams'});
+  assert.deepEqual(method.result.schema,{$ref:'schema.json#/definitions/GetAccountResponse'});
+  assert.deepEqual(method.params.map(({name,required})=>({name,required})),[{name:'refreshToken',required:false}]);
+  const ajv = new Ajv({allErrors:true,strict:false,validateFormats:false});
+  const validateParams = ajv.compile({$schema:schema.$schema,definitions:schema.definitions,$ref:'#/definitions/GetAccountParams'});
+  assert.ok(validateParams({refreshToken:false}));
+  assert.ok(validateParams({}));
+  assert.deepEqual(openrpc['x-notifications'].filter(item=>['account/updated','error'].includes(item.name)).map(item=>item.name).sort(),['account/updated','error']);
+  assert.match(method.description,/initialize/i);
+  assert.match(method['x-wire'],/refreshToken=false/);
+});
+
 test('initialized and schema-only notification/server-request mappings describe packet direction', () => {
   const initialized = openrpc['x-clientNotifications'].find(item=>item.name==='initialized');
   assert.deepEqual(initialized.packet,{method:'initialized',params:{}});
@@ -110,8 +126,20 @@ test('OpenRPC document validates against released meta-schema and external Draft
   const ajv = new Ajv({allErrors:true,strict:false});
   addFormats(ajv);
   ajv.addSchema(jsonSchemaMeta);
-  // OpenRPC 1.14.9 references the same official resource without its trailing slash.
+  // OpenRPC 1.14.9 ссылается на тот же официальный ресурс без завершающего слеша.
   ajv.addSchema({...jsonSchemaMeta, $id:'https://meta.json-schema.tools'}, 'https://meta.json-schema.tools');
   const validate = ajv.compile(openrpcDocument);
   assert.equal(validate(openrpc),true,JSON.stringify(validate.errors,null,2));
+});
+
+
+test('version compatibility remains bound to the exact source hashes without changing provenance',()=>{
+  assert.equal(manifest.upstreamVersion,'0.159.2');
+  const [proof]=manifest.versionCompatibility;
+  assert.equal(proof.version,'0.159.3');
+  assert.equal(proof.sourceFilesCompared,Object.keys(manifest.sourceFiles).length);
+  assert.equal(proof.sourceFilesByteIdentical,true);
+  assert.equal(proof.initializeConfirmed,true);
+  assert.equal(proof.liveScenariosRepeated,false);
+  assert.equal(proof.sourceFilesSha256,createHash('sha256').update(JSON.stringify(manifest.sourceFiles)).digest('hex'));
 });
