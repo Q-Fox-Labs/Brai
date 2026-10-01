@@ -102,7 +102,6 @@ export async function startAgent(config: AgentConfig, options: { factories?: Run
     onResync: (session, owner) => projection.onResync(session, owner),
   });
   let transport: Awaited<ReturnType<typeof createNats>> | undefined;
-  let closed = false;
   try {
     await codex.connect();
     nc = await (options.factories?.nats?.(config.nats) ?? connectNats(config.nats));
@@ -126,7 +125,6 @@ export async function startAgent(config: AgentConfig, options: { factories?: Run
     },
     close() {
       if (closePromise) return closePromise;
-      closed = true;
       reconnectEnabled = false;
       cancelReconnectTimer();
       closePromise = (async () => {

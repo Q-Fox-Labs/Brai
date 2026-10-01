@@ -100,6 +100,22 @@ test("raw oversized start returns REQUEST_TOO_LARGE before generic DTO validatio
   await runtime.close();
 });
 
+test("invalid owner reply preserves query outcome and unknown applied mutation without retry", async () => {
+  let queries = 0;
+  let mutations = 0;
+  const f = fixture({ projects() { queries++; return { invalid: true }; }, async turnStart() { mutations++; return { invalid: true }; } });
+  const runtime = await createNats(f.options());
+  const query = await f.request(subjects.projects, "{}");
+  assert.equal(query.payload.code, "CAPACITY_EXHAUSTED");
+  assert.equal(query.payload.outcome, "query");
+  const mutation = await f.request(subjects.turnStart, JSON.stringify({ projectId: "p", threadId: "t", generation, operationId: "550e8400-e29b-41d4-a716-446655440000", text: "test" }));
+  assert.equal(mutation.payload.code, "CAPACITY_EXHAUSTED");
+  assert.equal(mutation.payload.outcome, "unknown");
+  assert.equal(queries, 1);
+  assert.equal(mutations, 1);
+  await runtime.close();
+});
+
 test("query errors carry both NATS service headers before their safe payload", async () => {
   const f = fixture();
   const runtime = await createNats(f.options());

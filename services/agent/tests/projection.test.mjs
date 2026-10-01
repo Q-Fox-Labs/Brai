@@ -3,6 +3,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import Ajv from "ajv";
+import codexSchema from "../contracts/codex/schema.json" with { type: "json" };
 import { createState } from "../dist/state.js";
 import { createProjection } from "../dist/projection.js";
 import { validateAguiEvent, validateDto, validateEventEnvelope, serializedBytes } from "../contracts/index.mjs";
@@ -32,6 +34,26 @@ function validEvents(events) {
     assert.equal(validateAguiEvent(event.event), true, JSON.stringify(event.event));
   }
 }
+
+test("native tool completed results preserve initial trace order and safe text", async () => {
+  const f = fixture();
+  const mcp = { id: "mcp", type: "mcpToolCall", arguments: {}, server: "fixture", tool: "read", status: "inProgress" };
+  const dynamic = { id: "dynamic", type: "dynamicToolCall", arguments: {}, tool: "fixture", status: "inProgress" };
+  for (const item of [mcp, dynamic]) f.observe({ type: "notification", method: "item/started", params: { threadId: "thread-source", turnId: "turn-tool", item } });
+  f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "turn-tool", item: { ...mcp, status: "failed", result: { content: [{ type: "text", text: "native result" }, { type: "image", data: "BINARY" }], structuredContent: { secret: "HIDDEN" } }, error: { message: "native failure" } } } });
+  f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "turn-tool", item: { ...dynamic, status: "completed", success: false, contentItems: [{ type: "inputText", text: "native dynamic" }, { type: "inputImage", imageUrl: "BINARY" }] } } });
+  await flush();
+  const validateNativeItem = new Ajv({ strict: false, validateFormats: false }).compile({ definitions: codexSchema.definitions, $ref: "#/definitions/ThreadItem" });
+  for (const item of [mcp, dynamic, { ...mcp, status: "failed", result: { content: [{ type: "text", text: "native result" }] }, error: { message: "native failure" } }, { ...dynamic, status: "completed", success: false, contentItems: [{ type: "inputText", text: "native dynamic" }] }]) assert.ok(validateNativeItem(item), JSON.stringify(validateNativeItem.errors));
+  const view = f.state.view(f.session);
+  assert.deepEqual(view.traceItems.map((item) => item.order), [0, 1]);
+  const results = f.events.filter((entry) => entry.event.type === "TOOL_CALL_RESULT").map((entry) => entry.event.content);
+  assert.match(results[0], /status=failed\nnative result\nnative failure/);
+  assert.match(results[1], /success=false\nnative dynamic/);
+  assert.doesNotMatch(JSON.stringify(view), /BINARY|HIDDEN/);
+  validEvents(f.events);
+  f.projection.close();
+});
 
 test("agent message deltas precede exact phase and final replacement without duplicate text", async () => {
   const f = fixture();

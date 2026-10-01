@@ -40,6 +40,7 @@ const endpoints = [
 ] as const;
 const inputType = new Map<string, string>(endpoints.map(([key, , input]) => [key, input]));
 const outputType = new Map<string, string>(endpoints.map(([key, , , output]) => [key, output]));
+const isMutationEndpoint = (name: string): boolean => ["threadCreate", "turnStart", "turnSteer", "turnInterrupt", "requestRespond"].includes(name);
 
 type QueuedEvent = { envelope: EventEnvelope; bytes: number };
 type MarkerSource = Omit<EventEnvelope, "event">;
@@ -82,10 +83,8 @@ export async function createNats(options: { nc: NatsConnection; application: App
   let pendingFlush: Promise<void> | undefined;
   let projectionHealthy = true;
   let activeRequests = 0;
-  let reservedReplyBytes = 0;
   const drainedWaiters: (() => void)[] = [];
   const MAX_REQUESTS = limits.pendingRpc;
-  const MAX_REPLY_BYTES = MAX_REQUESTS * limits.natsSseFrameBytes;
   let service: Service | undefined;
   let eventCount = 0;
   let eventBytes = 0;
@@ -293,7 +292,7 @@ export async function createNats(options: { nc: NatsConnection; application: App
 
   let overflowErrors = 0;
   async function handle(name: string, message: ServiceMsg): Promise<void> {
-    if (activeRequests >= MAX_REQUESTS || reservedReplyBytes + limits.natsSseFrameBytes > MAX_REPLY_BYTES) {
+    if (activeRequests >= MAX_REQUESTS) {
       if (!message.reply || overflowErrors >= MAX_REQUESTS) {
         report(new Error("NATS_REQUEST_REJECTION_QUEUE_FULL"));
         return;
@@ -303,8 +302,6 @@ export async function createNats(options: { nc: NatsConnection; application: App
       return;
     }
     activeRequests++;
-    const reservedBytes = limits.natsSseFrameBytes;
-    reservedReplyBytes += reservedBytes;
     let request: any;
     let replyAttempted = false;
     try {
@@ -348,13 +345,14 @@ export async function createNats(options: { nc: NatsConnection; application: App
         default: throw Object.assign(new Error("Unknown endpoint"), { code: "UNSUPPORTED", outcome: "not-sent" });
       }
       const output = outputType.get(name)!;
-      if (!validateDto(output as any, result)) throw Object.assign(new Error("Invalid service response"), { code: "CAPACITY_EXHAUSTED", outcome: "unknown" });
+      const responseOutcome = isMutationEndpoint(name) ? "unknown" : "query";
+      if (!validateDto(output as any, result)) throw Object.assign(new Error("Invalid service response"), { code: "CAPACITY_EXHAUSTED", outcome: responseOutcome });
       const payload = Buffer.from(JSON.stringify(result));
-      if (payload.byteLength > limits.natsSseFrameBytes) throw Object.assign(new Error("Response too large"), { code: "CAPACITY_EXHAUSTED", outcome: "unknown" });
+      if (payload.byteLength > limits.natsSseFrameBytes) throw Object.assign(new Error("Response too large"), { code: "CAPACITY_EXHAUSTED", outcome: responseOutcome });
       await sendExclusive(async () => {
-        if (!brokerConnected || nc.isClosed() || !sendHealthy) throw Object.assign(new Error("NATS disconnected before reply"), { code: "UPSTREAM_UNAVAILABLE", outcome: name === "turnStart" || name === "turnSteer" || name === "turnInterrupt" || name === "threadCreate" || name === "requestRespond" ? "unknown" : "query" });
+        if (!brokerConnected || nc.isClosed() || !sendHealthy) throw Object.assign(new Error("NATS disconnected before reply"), { code: "UPSTREAM_UNAVAILABLE", outcome: responseOutcome });
         replyAttempted = true;
-        if (!message.respond(payload)) throw Object.assign(new Error("NATS reply unavailable"), { code: "UPSTREAM_UNAVAILABLE", outcome: name === "turnStart" || name === "turnSteer" || name === "turnInterrupt" || name === "threadCreate" || name === "requestRespond" ? "unknown" : "query" });
+        if (!message.respond(payload)) throw Object.assign(new Error("NATS reply unavailable"), { code: "UPSTREAM_UNAVAILABLE", outcome: responseOutcome });
         await flush();
       });
     } catch (error) {
@@ -364,7 +362,6 @@ export async function createNats(options: { nc: NatsConnection; application: App
       else await errorReply(message, error as ErrorSource, operationId);
     } finally {
       activeRequests--;
-      reservedReplyBytes -= reservedBytes;
       if (activeRequests === 0) for (const resolve of drainedWaiters.splice(0)) resolve();
     }
   }
@@ -424,11 +421,11 @@ export async function createNats(options: { nc: NatsConnection; application: App
   let closePromise: Promise<void> | undefined;
   return {
     instanceId: service.info().id,
-    /** Indicates transport health; readiness additionally checks Codex initialization and authorization. */
+    /** Проверяет транспорт, native инициализацию Codex и авторизацию. */
     status() {
       return readiness();
     },
-    /** Stops only this service's subscriptions and drains its event worker. */
+    /** Останавливает собственные подписки сервиса и завершает отправку событий. */
     close() {
       if (closePromise) return closePromise;
       closed = true;

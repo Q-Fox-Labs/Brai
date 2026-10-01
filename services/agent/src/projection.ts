@@ -5,6 +5,7 @@ import { limits, serializedBytes, validateDto, validateEventEnvelope } from "../
 import type { Event as AguiEvent, Message } from "@ag-ui/core";
 import type { CodexObservation } from "./ports.js";
 import type { Session, StateChange } from "./state.js";
+import { toolText } from "./tool-text.js";
 
 type Owner = ReturnType<typeof import("./state.js").createState>;
 export type EventEnvelope = {
@@ -58,6 +59,7 @@ function object(value: unknown): Record<string, any> {
 }
 
 function nativeText(item: Record<string, any>): string {
+  if (item.type === "mcpToolCall" || item.type === "dynamicToolCall") return toolText(item);
   if (item.type === "agentMessage") return typeof item.text === "string" ? item.text : "";
   if (item.type === "reasoning" && Array.isArray(item.summary)) return item.summary.filter((line: unknown) => typeof line === "string").join("\n");
   if (item.type === "collabAgentToolCall") return `${String(item.tool ?? "agent")}: ${String(item.status ?? "unknown")}`;
@@ -206,7 +208,7 @@ export function createProjection() {
     const status = typeof item.status === "string" ? item.status : "inProgress";
     const trace: Record<string, unknown> = {
       itemId: id,
-      order: session.trace.length,
+      order: object(session.trace.find((entry) => object(entry).itemId === id)).order ?? session.trace.length,
       kind,
       content: limited.text,
       truncated: limited.truncated,
@@ -254,6 +256,7 @@ export function createProjection() {
       ? `status=${String(item.status ?? "unknown")}; exitCode=${item.exitCode ?? "unknown"}\n${String(item.aggregatedOutput ?? "")}`
       : item.type === "fileChange"
         ? String(item.status ?? "")
+        : item.type === "mcpToolCall" || item.type === "dynamicToolCall" ? toolText(item)
         : typeof item.output === "string" ? item.output : JSON.stringify(item.output ?? item.status ?? "");
     const limited = boundedText(text);
     const resultId = `tool-result:${id}`;

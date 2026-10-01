@@ -5,6 +5,7 @@ import { validateDto, serializedBytes } from "../contracts/index.mjs";
 import type { HistoryRequest, HistoryResponse } from "../contracts/index.mjs";
 import type { CodexPort } from "./ports.js";
 import type { Session } from "./state.js";
+import { toolText } from "./tool-text.js";
 
 type Cursor = {
   p: string;
@@ -205,7 +206,7 @@ export async function readHistory(
                   )
                 : type === "webSearch"
                   ? safeText(item.query, 500)
-                  : safeText("");
+                  : safeText(toolText(item), 500);
     const traceType:
       "command" | "output" | "file-change" | "message" | "other" =
       type === "commandExecution"

@@ -15,15 +15,3 @@
 `projection.ts` принимает наблюдение Codex и сеанс владельца, возвращает конечные изменения и проверенные AG-UI события. Завершённый item заменяет дельты. Snapshot имеет одну синхронную границу seq; публикация не ждёт браузера. Переполнение явно требует нового снимка.
 
 `nats.ts` проверяет DTO, вызывает application, проверяет ответ и публикует проверенные envelopes через ограниченную очередь. Реализует NATS Services discovery/error headers. `main.ts` собирает зависимости и освобождает только собственные ресурсы. `config.ts` принимает явные проекты, socket и NATS inputs; экземпляр не зашит в продукт.
-
-## Области операций
-
-| Операция | Файлы | Проверки |
-| --- | --- | --- |
-| 1: Codex | src/ports.ts, src/codex.ts, src/errors.ts, минимальный tsconfig.json | tests/codex.test.mjs, tests/integration/codex.test.mjs |
-| 2: сценарии | src/application.ts, src/state.ts, src/history.ts | tests/application.test.mjs, tests/history.test.mjs |
-| 3: AG-UI | src/projection.ts; согласованное расширение state | tests/projection.test.mjs |
-| 4: сборка | src/nats.ts, src/config.ts, src/main.ts, src/health.ts | tests/config.test.mjs, tests/nats.test.mjs, tests/integration/nats.test.mjs |
-| 5: приёмка | tests/integration/service.test.mjs, README; необходимые локальные исправления | реальный Codex/NATS и повтор затронутых проверок |
-
-Каждая операция имеет отдельного исполнителя и начинается после приёмки предыдущей. Корневые manifests/lock и manifest agent меняет оркестратор цели. Принятые contracts, schemas, AsyncAPI и generators меняются только через него. Исполнители передают менеджеру точные пути коммита; Git-индекс согласуется с оркестратором цели.

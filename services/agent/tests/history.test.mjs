@@ -26,6 +26,18 @@ const entry = (id, item, turnId = "turn-1") => ({
   turnId,
 });
 
+test("history retains native tool text and status without binary or metadata", async () => {
+  const { codex } = harness([
+    entry("mcp", { type: "mcpToolCall", arguments: {}, server: "fixture", tool: "read", status: "failed", result: { content: [{ type: "text", text: "native result" }, { type: "image", data: "BINARY" }], structuredContent: { secret: "HIDDEN" } }, error: { message: "native failure" } }),
+    entry("dynamic", { type: "dynamicToolCall", arguments: {}, tool: "fixture", status: "completed", success: false, contentItems: [{ type: "inputText", text: "native dynamic" }, { type: "inputImage", imageUrl: "BINARY" }] }),
+  ]);
+  const out = await readHistory(codex, createState().put("p", "t", "/work"), { projectId: "p", threadId: "t" });
+  assert.match(out.items[0].content, /status=failed\nnative result\nnative failure/);
+  assert.match(out.items[1].content, /success=false\nnative dynamic/);
+  assert.doesNotMatch(JSON.stringify(out), /BINARY|HIDDEN/);
+  assert.ok(validateDto("HistoryResponse", out));
+});
+
 test("history preserves item order and ids, unwraps entries, redacts reasoning body", async () => {
   const { codex, calls } = harness([
     entry("r", {
