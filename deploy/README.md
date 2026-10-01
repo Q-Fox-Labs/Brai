@@ -35,6 +35,23 @@ docker compose --env-file /path/to/instance.compose.env -f deploy/compose.produc
 
 PostgreSQL и NATS хранят данные в устойчивых томах конфигурации `dependencies/`. Production compose подключается к их сетям и не создаёт собственные тома данных. Останавливайте приложения командой `docker compose ... stop`; для удаления стека используйте `down` без `-v`.
 
+## Supabase MCP
+
+`supabase-mcp` входит в Compose-проект `brai` как отдельная служба с профилем `supabase-mcp`. Обычный запуск web, auth и timer её не запускает. Служба подключается к закрытой сети PostgreSQL и к отдельной bridge-сети MCP. Инфраструктура заранее создаёт обе внешние сети; имя второй задаёт `BRAI_MCP_NETWORK` (по умолчанию `brai_mcp`). Внутри MCP-сети адрес службы — `supabase-mcp:3001/mcp`.
+
+Compose собирает образ из `services/supabase-mcp/Dockerfile` и даёт ему тег `BRAI_SUPABASE_MCP_IMAGE` (по умолчанию `brai-supabase-mcp:production`). Если используется готовый образ, передайте его тег этой переменной. Конфигурацию и пароль Compose подключает из внешних read-only файлов: `BRAI_SUPABASE_MCP_CONFIG_FILE` и `BRAI_SUPABASE_MCP_PASSWORD_FILE`. Значения по умолчанию нужны только для проверки общего Compose и не являются конфигурацией рабочего экземпляра.
+
+JSON-файл конфигурации должен задавать `host: "0.0.0.0"`, `port: 3001`, экземпляры PostgreSQL и `passwordFile: "/run/secrets/postgres_password"`. Добавьте в `allowedHosts` внутренний адрес `supabase-mcp:3001` и фактические loopback Host значения клиента. Loopback-порт хоста задаёт `BRAI_SUPABASE_MCP_HOST_PORT` (по умолчанию `3001`); конфигурация должна разрешать этот порт. Адреса БД, TLS и остальные параметры принадлежат внешнему config-файлу. Не помещайте пароль в JSON: отдельный файл содержит байты пароля и монтируется только для чтения.
+
+Соберите и запустите службу отдельно от основного набора:
+
+```sh
+docker compose --env-file /path/to/instance.compose.env -f deploy/compose.production.yml --profile supabase-mcp build supabase-mcp
+docker compose --env-file /path/to/instance.compose.env -f deploy/compose.production.yml --profile supabase-mcp up -d --no-deps --wait supabase-mcp
+```
+
+Compose публикует MCP только на `127.0.0.1`. Host-агент обращается к адресу `http://127.0.0.1:<BRAI_SUPABASE_MCP_HOST_PORT>/mcp`; контейнеры в сети MCP используют `http://supabase-mcp:3001/mcp`. Порт `BRAI_SUPABASE_MCP_HOST_PORT` должен входить в `allowedHosts`.
+
 ## Проверка production образов
 
 Изолированный `compose.production-test.yml` собирает те же Dockerfiles. Он запускает PostgreSQL и NATS с открытыми тестовыми учётными данными и данными в `tmpfs`; база недоступна через опубликованный порт, NATS отделён от неё сетью. Web доступен только на `127.0.0.1:13000`.

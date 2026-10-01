@@ -94,6 +94,36 @@ services:
     networks:
       - database
 
+  supabase-mcp:
+    image: ${BRAI_SUPABASE_MCP_IMAGE:-brai-supabase-mcp:production}
+    build:
+      context: ..
+      dockerfile: services/supabase-mcp/Dockerfile
+    profiles: [supabase-mcp]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    environment:
+      SUPABASE_MCP_CONFIG: /run/supabase-mcp/config.json
+    ports:
+      - "127.0.0.1:${BRAI_SUPABASE_MCP_HOST_PORT:-3001}:3001"
+    volumes:
+      - type: bind
+        source: ${BRAI_SUPABASE_MCP_CONFIG_FILE:-./supabase-mcp.json}
+        target: /run/supabase-mcp/config.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${BRAI_SUPABASE_MCP_PASSWORD_FILE:-./supabase-mcp-password}
+        target: /run/secrets/postgres_password
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - database
+      - mcp
+
 networks:
   frontend:
     name: ${BRAI_FRONTEND_NETWORK:?Set BRAI_FRONTEND_NETWORK to the reverse-proxy bridge network}
@@ -103,4 +133,7 @@ networks:
     external: true
   database:
     name: ${BRAI_DATABASE_NETWORK:?Set BRAI_DATABASE_NETWORK to the private database network}
+    external: true
+  mcp:
+    name: ${BRAI_MCP_NETWORK:-brai_mcp}
     external: true
