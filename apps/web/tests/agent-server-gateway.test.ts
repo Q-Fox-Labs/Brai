@@ -2,6 +2,7 @@
 // ABOUTME: Fake request port подтверждает owner validation и неизвестный исход мутаций.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { headers, ServiceErrorCodeHeader, ServiceErrorHeader } from "nats";
 import { createAgentRequester, AgentGatewayError, AgentTransportError } from "../server/agent-gateway.ts";
 import { createAgentFailureMapper, createAgentHttpHandlers } from "../server/agent-handler.ts";
 
@@ -91,8 +92,72 @@ test("distinguishes not-sent, unknown mutation and query timeout", async () => {
 });
 
 test("checks both service error headers before accepting a reply body", async () => {
-  const request = createAgentRequester(async () => ({ data: Buffer.from(JSON.stringify({ code: "STALE_GENERATION", outcome: "unknown" })), headers: { get: name => name === "Nats-Service-Error-Code" ? "STALE_GENERATION" : "stale" } }));
-  await assert.rejects(request("turnStart", start), error => error instanceof AgentGatewayError && error.status === 409 && error.body.code === "STALE_GENERATION");
+  const serviceHeaders = headers();
+  serviceHeaders.set(ServiceErrorHeader, "STALE_REQUEST");
+  serviceHeaders.set(ServiceErrorCodeHeader, "409");
+  const calls: string[] = [];
+  const request = createAgentRequester(async () => {
+    calls.push("turnStart");
+    return { data: Buffer.from(JSON.stringify({ code: "STALE_REQUEST", outcome: "not-sent" })), headers: serviceHeaders };
+  });
+  await assert.rejects(request("turnStart", start), error => error instanceof AgentGatewayError && error.status === 409 && error.body.code === "STALE_REQUEST" && error.body.outcome === "not-sent");
+  assert.deepEqual(calls, ["turnStart"]);
+});
+
+test("native NATS service headers preserve owner DTOs and keep the web 429 capacity mapping", async () => {
+  for (const [serviceCode, numericStatus, outcome, webStatus] of [
+    ["NOT_FOUND", "404", "query", 404],
+    ["CAPACITY_EXHAUSTED", "503", "not-sent", 429],
+  ] as const) {
+    const serviceHeaders = headers();
+    serviceHeaders.set(ServiceErrorHeader, serviceCode);
+    serviceHeaders.set(ServiceErrorCodeHeader, numericStatus);
+    let calls = 0;
+    const request = createAgentRequester(async () => {
+      calls++;
+      return { data: Buffer.from(JSON.stringify({ code: serviceCode, outcome })), headers: serviceHeaders };
+    });
+    await assert.rejects(request(serviceCode === "NOT_FOUND" ? "projects" : "turnStart", serviceCode === "NOT_FOUND" ? {} : start), error =>
+      error instanceof AgentGatewayError && error.status === webStatus && error.body.code === serviceCode && error.body.outcome === outcome);
+    assert.equal(calls, 1);
+  }
+});
+
+test("rejects absent, malformed, mismatched, and noncanonical native error headers once", async () => {
+  const malformed = [
+    { numeric: undefined, text: undefined, dto: { code: "STALE_REQUEST", outcome: "not-sent" } },
+    { numeric: "409", text: undefined, dto: { code: "STALE_REQUEST", outcome: "not-sent" } },
+    { numeric: undefined, text: "STALE_REQUEST", dto: { code: "STALE_REQUEST", outcome: "not-sent" } },
+    { numeric: "409", text: "STALE_REQUEST", dto: { code: "BOGUS", outcome: "not-sent" } },
+    { numeric: "409", text: "STALE_GENERATION", dto: { code: "STALE_REQUEST", outcome: "not-sent" } },
+    ...["399", "600", "0409", "409 ", "4e2"].map(numeric => ({ numeric, text: "STALE_REQUEST", dto: { code: "STALE_REQUEST", outcome: "not-sent" } })),
+  ];
+  for (const fixture of malformed) {
+    const serviceHeaders = headers();
+    if (fixture.text !== undefined) serviceHeaders.set(ServiceErrorHeader, fixture.text);
+    if (fixture.numeric !== undefined) serviceHeaders.set(ServiceErrorCodeHeader, fixture.numeric);
+    // headers() NATS обрезает пробелы; этот крайний случай подаём напрямую на границе ответа.
+    const replyHeaders = fixture.numeric === "409 " ? {
+      get: (name: string) => name === ServiceErrorHeader ? fixture.text : name === ServiceErrorCodeHeader ? fixture.numeric : undefined,
+    } : serviceHeaders;
+    let calls = 0;
+    const request = createAgentRequester(async () => {
+      calls++;
+      return { data: Buffer.from(JSON.stringify(fixture.dto)), headers: replyHeaders };
+    });
+    await assert.rejects(request("turnStart", start), error => error instanceof AgentGatewayError && error.status === 503 && error.body.code === "UPSTREAM_UNAVAILABLE" && error.body.outcome === "unknown");
+    assert.equal(calls, 1);
+  }
+});
+
+test("accepts canonical numeric service statuses at 400 and 599", async () => {
+  for (const numericStatus of ["400", "599"] as const) {
+    const serviceHeaders = headers();
+    serviceHeaders.set(ServiceErrorHeader, "INVALID_ARGUMENT");
+    serviceHeaders.set(ServiceErrorCodeHeader, numericStatus);
+    const request = createAgentRequester(async () => ({ data: Buffer.from(JSON.stringify({ code: "INVALID_ARGUMENT", outcome: "not-sent" })), headers: serviceHeaders }));
+    await assert.rejects(request("turnStart", start), error => error instanceof AgentGatewayError && error.status === 400 && error.body.code === "INVALID_ARGUMENT");
+  }
 });
 
 test("a malformed post-send response is unknown and the port is never retried", async () => {

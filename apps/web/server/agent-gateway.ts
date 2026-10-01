@@ -55,15 +55,15 @@ export function createAgentRequester(request: AgentRequestPort) {
     const reply = await request(subjects[operation], Buffer.from(JSON.stringify(body)), timeout);
     const responseLimit = operation === "thread" || operation === "history" ? limits.snapshotBytes : limits.natsSseFrameBytes;
     if (reply.data.byteLength > responseLimit) throw agentError(503, "UPSTREAM_UNAVAILABLE", mutating ? "unknown" : "query");
-    const serviceCode = reply.headers?.get("Nats-Service-Error-Code");
-    const serviceMessage = reply.headers?.get("Nats-Service-Error");
-    if (serviceCode && serviceMessage) {
+    const serviceErrorCode = reply.headers?.get("Nats-Service-Error");
+    const serviceErrorStatus = reply.headers?.get("Nats-Service-Error-Code");
+    if (serviceErrorCode && serviceErrorStatus) {
       let errorBody: unknown;
       try { errorBody = JSON.parse(Buffer.from(reply.data).toString("utf8")); } catch { errorBody = null; }
-      if (validateDto("ErrorResponse", errorBody) && serviceCode === errorBody.code) throw new AgentGatewayError(statusByCode[errorBody.code], errorBody);
+      if (validateDto("ErrorResponse", errorBody) && serviceErrorCode === errorBody.code && /^[45][0-9]{2}$/.test(serviceErrorStatus)) throw new AgentGatewayError(statusByCode[errorBody.code], errorBody);
       throw agentError(503, "UPSTREAM_UNAVAILABLE", mutating ? "unknown" : "query");
     }
-    if (serviceCode || serviceMessage) throw agentError(503, "UPSTREAM_UNAVAILABLE", mutating ? "unknown" : "query");
+    if (serviceErrorCode || serviceErrorStatus) throw agentError(503, "UPSTREAM_UNAVAILABLE", mutating ? "unknown" : "query");
     let result: unknown;
     try { result = JSON.parse(Buffer.from(reply.data).toString("utf8")); }
     catch { throw agentError(503, "UPSTREAM_UNAVAILABLE", mutating ? "unknown" : "query"); }
