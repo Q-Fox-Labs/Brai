@@ -18,7 +18,6 @@
   "projects": [
     { "projectId": "work", "name": "Work", "cwd": "/absolute/path/to/project" }
   ],
-  "allowedModels": ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"],
   "newThread": { "approvalsReviewer": "user" }
 }
 ```

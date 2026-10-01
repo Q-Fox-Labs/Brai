@@ -12,7 +12,7 @@ export function createAuth(cfg:Config,pool:Pool,send?:(email:string,otp:string)=
 
  return betterAuth({database:pool,baseURL:cfg.origin,basePath:"/api/auth",secret:cfg.secret,trustedOrigins:[cfg.origin],
   session:{expiresIn:15_552_000,disableSessionRefresh:true,cookieCache:{enabled:false}},
-  rateLimit:{enabled:true,storage:"database"},
+  rateLimit:{enabled:true,storage:"database",customRules:{"/get-session":false}},
   advanced:{useSecureCookies:cfg.origin.startsWith("https://"),defaultCookieAttributes:{httpOnly:true,sameSite:"lax"}},
   logger:{disabled:true},
   plugins:[emailOTP({otpLength:6,expiresIn:300,allowedAttempts:3,storeOTP:"hashed",disableSignUp:false,
