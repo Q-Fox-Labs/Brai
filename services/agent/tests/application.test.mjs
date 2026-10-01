@@ -23,6 +23,7 @@ const validateUpstream = (definition, value) => {
 const valid = validateUpstream;
 const threadFixture = (id = "t", cwd = "/work") => ({
   cliVersion: "1.0",
+  canAcceptDirectInput: true,
   createdAt: 1,
   cwd,
   ephemeral: false,
@@ -244,12 +245,12 @@ test("metadata cwd mismatch rejects before resume or turn start", async () => {
   );
 });
 
-test("new thread disables provider fallback and does not read its empty history", async () => {
+test("new thread disables provider fallback, routes approval review, and skips empty history", async () => {
   const codex = port({
     "thread/start": async () =>
       valid("ThreadStartResponse", startFixture("new")),
   });
-  const app = appPort(codex);
+  const app = appPort(codex, { newThread: { approvalsReviewer: "user" } });
   connected(codex);
   const r = await app.threadCreate({
     projectId: "p",
@@ -260,6 +261,7 @@ test("new thread disables provider fallback and does not read its empty history"
   assert.deepEqual(codex.calls[0].params, {
     cwd: "/work",
     allowProviderModelFallback: false,
+    approvalsReviewer: "user",
   });
   assert.equal(
     codex.calls.some((c) => c.method === "thread/read"),
@@ -538,6 +540,60 @@ test("opening an existing thread resumes after registration and never starts a t
   );
 });
 
+test("persisted in-progress turn with native idle status stays unavailable and is not restarted", async () => {
+  const codex = port({
+    "thread/read": async () => valid("ThreadReadResponse", readFixture()),
+    "thread/resume": async () => valid("ThreadResumeResponse", {
+      ...startFixture(),
+      thread: { ...threadFixture(), status: { type: "idle" }, canAcceptDirectInput: true },
+    }),
+    "thread/turns/list": async () => ({
+      data: [{ id: "turn-old", status: "inProgress", items: [] }],
+      nextCursor: null,
+    }),
+  });
+  const app = appPort(codex);
+  connected(codex);
+  const snapshot = await app.thread({ projectId: "p", threadId: "t" });
+  assert.equal(snapshot.state, "executor-unavailable");
+  assert.equal(snapshot.turnStatus, "inProgress");
+  assert.equal(snapshot.activeTurnId, null);
+  await assert.rejects(app.turnStart(startReq()), (error) => error.code === "OPERATION_CONFLICT");
+  assert.equal(codex.calls.some((call) => call.method === "turn/start"), false);
+});
+
+test("native active status and the current in-progress turn restore working state", async () => {
+  const codex = port({
+    "thread/read": async () => valid("ThreadReadResponse", readFixture()),
+    "thread/resume": async () => valid("ThreadResumeResponse", {
+      ...startFixture(),
+      thread: { ...threadFixture(), status: { type: "active", activeFlags: [] }, canAcceptDirectInput: true },
+    }),
+    "thread/turns/list": async () => ({ data: [{ id: "turn-live", status: "inProgress", items: [] }], nextCursor: null }),
+  });
+  const app = appPort(codex);
+  connected(codex);
+  const snapshot = await app.thread({ projectId: "p", threadId: "t" });
+  assert.equal(snapshot.state, "working");
+  assert.equal(snapshot.turnStatus, "inProgress");
+  assert.equal(snapshot.activeTurnId, "turn-live");
+});
+
+test("native false direct-input capability blocks a newly created thread before turn/start", async () => {
+  const codex = port({
+    "thread/start": async () => valid("ThreadStartResponse", {
+      ...startFixture("new"),
+      thread: { ...threadFixture("new"), canAcceptDirectInput: false },
+    }),
+  });
+  const app = appPort(codex);
+  connected(codex);
+  const created = await app.threadCreate({ projectId: "p", generation, operationId: "created" });
+  await assert.rejects(app.turnStart({ ...startReq("turn-op"), threadId: "new" }), (error) => error.code === "OPERATION_CONFLICT");
+  assert.equal(created.threadId, "new");
+  assert.equal(codex.calls.some((call) => call.method === "turn/start"), false);
+});
+
 test("unknown mutation outcome is cached and never automatically retried", async () => {
   let resumes = 0;
   const error = Object.assign(new Error("timeout"), {
@@ -690,6 +746,102 @@ test("LRU announces resync before removing only an idle session", () => {
   assert.deepEqual(resync, [true]);
   assert.equal(state.findThread("thread-0"), protectedSession);
   assert.equal(state.findThread("thread-1"), undefined);
+});
+
+test("async owner cleanup pins a victim until unsubscribe is confirmed", async () => {
+  let release;
+  const cleanup = new Promise((resolve) => { release = resolve; });
+  const state = createState(() => {}, async () => cleanup);
+  const sessions = [];
+  for (let i = 0; i < 16; i++) {
+    const session = await state.admit("p", `owned-${i}`, "/work");
+    state.setOpening(session, false);
+    sessions.push(session);
+  }
+  const admission = state.admit("p", "new", "/work");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.throws(() => state.reserveTurn(sessions[0]), (error) => error.code === "CAPACITY_EXHAUSTED");
+  release("released");
+  await admission;
+  const reopened = await state.admit("p", "owned-0", "/work");
+  assert.notEqual(reopened, sessions[0]);
+});
+
+test("generation change during unsubscribe cannot remove the replacement owner", async () => {
+  let release;
+  const cleanup = new Promise((resolve) => { release = resolve; });
+  const state = createState(() => {}, async () => cleanup);
+  for (let i = 0; i < 16; i++) {
+    const session = await state.admit("p", `thread-${i}`, "/work");
+    state.setOpening(session, false);
+  }
+  const admission = state.admit("p", "new", "/work");
+  await new Promise((resolve) => setImmediate(resolve));
+  const next = "00000000-0000-4000-8000-000000000099";
+  state.syncGeneration(next);
+  release("released");
+  await assert.rejects(admission, (error) => error.code === "STALE_GENERATION");
+  const replacement = state.get("p", "thread-0");
+  assert.equal(replacement.generation, next);
+  assert.equal(replacement.connectionLost, true);
+});
+
+test("async admission queue rejects work beyond its fixed bound", async () => {
+  let release;
+  const cleanup = new Promise((resolve) => { release = resolve; });
+  const state = createState(() => {}, async () => cleanup);
+  for (let i = 0; i < 16; i++) {
+    const session = await state.admit("p", `queue-${i}`, "/work");
+    state.setOpening(session, false);
+  }
+  const first = state.admit("p", "queued-first", "/work").catch((error) => error);
+  await new Promise((resolve) => setImmediate(resolve));
+  const queued = Array.from({ length: 63 }, (_, i) => state.admit("p", `queued-${i}`, "/work").catch((error) => error));
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(state.admit("p", "over-limit", "/work"), (error) => error.code === "CAPACITY_EXHAUSTED");
+  release("unresolved");
+  await first;
+  await Promise.all(queued);
+});
+
+test("thread-start tickets reserve owner capacity and unknown create keeps its slot", async () => {
+  const state = createState();
+  const tickets = [];
+  for (let i = 0; i < 16; i++) tickets.push(await state.reserveThreadStart());
+  await assert.rejects(state.reserveThreadStart(), (error) => error.code === "CAPACITY_EXHAUSTED");
+  await tickets[0].finish("unknown");
+  await assert.rejects(state.reserveThreadStart(), (error) => error.code === "CAPACITY_EXHAUSTED");
+  assert.equal(tickets[0].generation, state.generation());
+});
+
+test("session becoming active with a pending request during unsubscribe remains owned", async () => {
+  let releaseFirst;
+  let cleanupCalls = 0;
+  const state = createState(() => {}, async () => {
+    cleanupCalls++;
+    if (cleanupCalls === 1) return new Promise((resolve) => { releaseFirst = resolve; });
+    return "released";
+  });
+  const sessions = [];
+  for (let i = 0; i < 16; i++) {
+    const session = await state.admit("p", `cleanup-${i}`, "/work");
+    state.setOpening(session, false);
+    sessions.push(session);
+  }
+  const admission = state.admit("p", "replacement", "/work");
+  await new Promise((resolve) => setImmediate(resolve));
+  state.observe({ type: "notification", method: "turn/started", params: { threadId: "cleanup-0", turn: { id: "late-turn" } } });
+  state.observe({
+    type: "request", method: "item/commandExecution/requestApproval", id: 777,
+    params: { threadId: "cleanup-0", turnId: "late-turn", itemId: "late-item", startedAtMs: 1, command: "echo safe" },
+    supported: true,
+  });
+  releaseFirst("released");
+  await admission;
+  assert.equal(state.findThread("cleanup-0"), sessions[0]);
+  assert.equal(sessions[0].active, true);
+  assert.equal(sessions[0].pending.size, 1);
+  assert.equal(cleanupCalls, 2, "a different idle victim made room after the first victim became active");
 });
 
 test("resolved server request maps the original number ID without string coercion", () => {

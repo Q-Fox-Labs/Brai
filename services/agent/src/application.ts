@@ -37,6 +37,9 @@ export type ApplicationOptions = {
   codex: CodexPort;
   projects: ProjectDefinition[];
   allowedModels?: string[];
+  newThread?: { approvalsReviewer?: "user" | "auto_review" | "guardian_subagent" | null };
+  onSubscription?: (session: Session, generation: string) => void;
+  onEvict?: (session: Session, generation: string) => Promise<"released" | "unresolved">;
   onObservation?: (
     e: CodexObservation,
     s: Readonly<Session> | undefined,
@@ -124,7 +127,10 @@ export function toErrorResponse(
 }
 /** Создаёт сценарии сервиса. Проекты должны иметь явный абсолютный cwd. */
 export function createApplication(options: ApplicationOptions) {
-  const state = createState((session, owner) => options.onResync?.(session, owner));
+  const state = createState(
+    (session, owner) => options.onResync?.(session, owner),
+    (session, generation) => options.onEvict?.(session, generation) ?? Promise.resolve("released"),
+  );
   const projects = new Map(options.projects.map((p) => [p.projectId, p]));
   const openingThreads = new Set<string>();
   const openings = new Map<string, Promise<Session>>();
@@ -198,6 +204,7 @@ export function createApplication(options: ApplicationOptions) {
     const p = project(projectId);
     const openingGeneration = state.generation();
     let s = state.get(projectId, threadId);
+    if (s) state.assertNotClosing(s);
     if (s?.knownNew || s?.opened) return s;
     const key = `${projectId}\0${threadId}`;
     const pending = openings.get(key);
@@ -212,12 +219,15 @@ export function createApplication(options: ApplicationOptions) {
         assertCurrentGeneration(openingGeneration);
         if (metadata?.thread?.id !== threadId || metadata.thread.cwd !== p.cwd)
           fail("INVALID_ARGUMENT");
-        s = state.put(projectId, threadId, p.cwd);
+        s = await state.admit(projectId, threadId, p.cwd);
       }
       const bootstrapRevision = s.revision;
       const epoch = s.streamEpoch;
       state.setOpening(s, true);
       try {
+        // Resume can apply its subscription before its reply is lost. Track
+        // possible ownership before sending so LRU cleanup can unsubscribe it.
+        options.onSubscription?.(s, openingGeneration);
         const resumed: any = await call(
           "thread/resume",
           { threadId, cwd: p.cwd, excludeTurns: true },
@@ -226,6 +236,8 @@ export function createApplication(options: ApplicationOptions) {
         assertCurrentGeneration(openingGeneration, s, epoch, "unknown");
         if (resumed?.thread?.id !== threadId || resumed.cwd !== p.cwd)
           fail("INVALID_ARGUMENT");
+        const canAccept = typeof resumed.thread.canAcceptDirectInput === "boolean" ? resumed.thread.canAcceptDirectInput : null;
+        state.setCanAcceptDirectInput(s, canAccept);
         const page: any = await call(
           "thread/turns/list",
           { threadId, limit: 1, sortDirection: "desc", itemsView: "notLoaded" },
@@ -234,12 +246,15 @@ export function createApplication(options: ApplicationOptions) {
         assertCurrentGeneration(openingGeneration, s, epoch);
         const latest = Array.isArray(page?.data) ? page.data[0] : null;
         const turn = latest && typeof latest.id === "string" ? latest : null;
+        const confirmedActive = resumed.thread.status?.type === "active" && turn?.status === "inProgress";
         state.setOpened(
           s,
           typeof resumed.model === "string" ? resumed.model : null,
-          turn?.status === "inProgress" ? turn.id : null,
+          confirmedActive ? turn!.id : null,
           turn?.status ?? null,
           bootstrapRevision,
+          canAccept,
+          confirmedActive,
         );
         return s;
       } finally {
@@ -261,13 +276,18 @@ export function createApplication(options: ApplicationOptions) {
     s: Session,
   ): Promise<TurnMutationResponse> {
     const p = project(projectId);
+    state.assertNotClosing(s);
     assertCurrentGeneration(generation, s);
     if (s.cwd !== p.cwd) fail("INVALID_ARGUMENT");
+    if (s.canAcceptDirectInput === false) fail("OPERATION_CONFLICT");
+    if (s.turnStatus === "inProgress" && !s.active) fail("OPERATION_CONFLICT");
     state.reserveTurn(s);
     const epoch = s.streamEpoch;
     const startedGeneration = generation;
     if (!s.knownNew) {
       try {
+        // A timed-out resume may still have subscribed upstream.
+        options.onSubscription?.(s, startedGeneration);
         const resumed: any = await call(
           "thread/resume",
           { threadId: s.threadId, cwd: p.cwd, excludeTurns: true },
@@ -277,6 +297,12 @@ export function createApplication(options: ApplicationOptions) {
         if (resumed?.cwd !== p.cwd) {
           state.finishTurn(s, "failed");
           fail("INVALID_ARGUMENT");
+        }
+        const canAccept = typeof resumed.thread?.canAcceptDirectInput === "boolean" ? resumed.thread.canAcceptDirectInput : null;
+        state.setCanAcceptDirectInput(s, canAccept);
+        if (canAccept === false) {
+          state.finishTurn(s, "failed");
+          fail("OPERATION_CONFLICT");
         }
         state.setModel(
           s,
@@ -403,25 +429,37 @@ export function createApplication(options: ApplicationOptions) {
       if (!validateDto("ThreadCreateRequest", r)) fail("INVALID_ARGUMENT");
       return operation(r, async () => {
         const p = project(r.projectId);
-        const x: any = await call(
-          "thread/start",
-          { cwd: p.cwd, allowProviderModelFallback: false },
-          true,
-        );
-        assertCurrentGeneration(r.generation, undefined, undefined, "unknown");
-        const id = x?.thread?.id;
-        if (typeof id !== "string") fail("UNSUPPORTED", "unknown");
-        const s = state.put(r.projectId, id, p.cwd);
-        state.setModel(s, typeof x.model === "string" ? x.model : null, true);
-        const result = {
-          generation: r.generation,
-          operationId: r.operationId,
-          outcome: "accepted",
-          threadId: id,
-        };
-        if (!validateDto("ThreadCreateResponse", result))
-          fail("UNSUPPORTED", "unknown");
-        return result;
+        const ticket = await state.reserveThreadStart();
+        try {
+          const x: any = await call(
+            "thread/start",
+            {
+              cwd: p.cwd,
+              allowProviderModelFallback: false,
+              ...(options.newThread?.approvalsReviewer === undefined ? {} : { approvalsReviewer: options.newThread.approvalsReviewer }),
+            },
+            true,
+          );
+          assertCurrentGeneration(r.generation, undefined, undefined, "unknown");
+          const id = x?.thread?.id;
+          if (typeof id !== "string") fail("UNSUPPORTED", "unknown");
+          const s = await ticket.commit(r.projectId, id, p.cwd);
+          state.setCanAcceptDirectInput(s, typeof x.thread?.canAcceptDirectInput === "boolean" ? x.thread.canAcceptDirectInput : null);
+          state.setModel(s, typeof x.model === "string" ? x.model : null, true);
+          options.onSubscription?.(s, r.generation);
+          const result = {
+            generation: r.generation,
+            operationId: r.operationId,
+            outcome: "accepted",
+            threadId: id,
+          };
+          if (!validateDto("ThreadCreateResponse", result))
+            fail("UNSUPPORTED", "unknown");
+          return result;
+        } catch (error) {
+          await ticket.finish((error as { outcome?: unknown })?.outcome === "not-sent" ? "not-sent" : "unknown").catch(() => undefined);
+          throw error;
+        }
       });
     },
     /** Запускает ход после подтверждения существующего или нового thread metadata. */
@@ -444,7 +482,8 @@ export function createApplication(options: ApplicationOptions) {
             assertCurrentGeneration(r.generation);
             if (x?.thread?.id !== r.threadId || x.thread.cwd !== p.cwd)
               fail("INVALID_ARGUMENT");
-            s = state.put(r.projectId, r.threadId, p.cwd);
+            s = await state.admit(r.projectId, r.threadId, p.cwd);
+            state.setOpening(s, false);
           }
           return await start(
             r.projectId,
@@ -466,6 +505,7 @@ export function createApplication(options: ApplicationOptions) {
         const s = session(r.projectId, r.threadId);
         if (!s.active || s.activeTurnId !== r.expectedTurnId)
           fail("OPERATION_CONFLICT");
+        if (s.canAcceptDirectInput === false) fail("OPERATION_CONFLICT");
         const epoch = s.streamEpoch;
         assertCurrentGeneration(r.generation, s, epoch);
         let x: any;

@@ -41,6 +41,7 @@ type SessionData = {
   revision: number;
   activeTurnId: string | null;
   turnStatus: "completed" | "interrupted" | "failed" | "inProgress" | null;
+  canAcceptDirectInput: boolean | null;
   truncated: boolean;
   truncationReason: "byte-budget" | "item-limit" | "upstream-limit" | "none";
   opened: boolean;
@@ -80,6 +81,12 @@ type LedgerEntry = {
   promise?: Promise<unknown>;
   error?: unknown;
 };
+type EvictionResult = "released" | "unresolved";
+type ThreadStartTicket = {
+  readonly generation: string;
+  commit(projectId: string, threadId: string, cwd: string): Promise<Session>;
+  finish(outcome: "not-sent" | "unknown"): Promise<void>;
+};
 
 /** Изменения наблюдения, подтверждённые владельцем состояния. */
 export type StateChange = Readonly<{
@@ -92,6 +99,7 @@ export type StateChange = Readonly<{
 /** Создаёт bounded-владелец сеансов и immutable operation ledger. */
 export function createState(
   onResync: (session: Session, owner?: any) => void = () => undefined,
+  onEvict: (session: Session, generation: string) => Promise<EvictionResult> = async () => "released",
 ) {
   const sessions = new Map<string, MutableSession>();
   const ledger = new Map<string, LedgerEntry>();
@@ -99,9 +107,58 @@ export function createState(
   let pendingCount = 0;
   let activeCount = 0;
   let generation: string | null = null;
+  const closingSessions = new Set<MutableSession>();
+  const unresolvedSessions = new Set<MutableSession>();
+  const reservations = new Map<symbol, { generation: string; outcome: "pending" | "unknown" }>();
+  let admissionTail: Promise<void> = Promise.resolve();
+  let admissionCount = 0;
+  const ADMISSION_LIMIT = 64;
   const key = (projectId: string, threadId: string) =>
     `${projectId}\0${threadId}`;
   const effectiveGeneration = () => generation ?? (generation = randomUUID());
+  async function withAdmission<T>(work: () => Promise<T> | T): Promise<T> {
+    if (admissionCount >= ADMISSION_LIMIT)
+      throw Object.assign(new Error("Admission capacity exhausted"), { code: "CAPACITY_EXHAUSTED", outcome: "not-sent" });
+    admissionCount++;
+    let unlock!: () => void;
+    const previous = admissionTail;
+    admissionTail = new Promise<void>((resolve) => { unlock = resolve; });
+    await previous;
+    try { return await work(); }
+    finally { admissionCount--; unlock(); }
+  }
+  function newSession(projectId: string, threadId: string, cwd: string): MutableSession {
+    return {
+      projectId, threadId, cwd, generation: effectiveGeneration(), model: null, knownNew: false,
+      messagePhases: new Map(), itemLifecycles: new Map(), messageSourceBytes: new Map(), messageTruncated: new Set(),
+      streamEpoch: randomUUID(), seq: 0, revision: 0, activeTurnId: null, turnStatus: null, canAcceptDirectInput: null, truncated: false,
+      truncationReason: "none", opened: false, connectionLost: false, requestStorageFailed: false, active: false,
+      pending: new Map(), messages: [], trace: [], lastUsed: Date.now(), opening: null,
+    };
+  }
+  async function ensureSlot(): Promise<void> {
+    const startGeneration = effectiveGeneration();
+    while (sessions.size + reservations.size >= 16) {
+      const victim = [...sessions.values()]
+        .filter((item) => !item.active && !item.pending.size && !item.opening && !closingSessions.has(item) && !unresolvedSessions.has(item))
+        .sort((a, b) => a.lastUsed - b.lastUsed)[0];
+      if (!victim)
+        throw Object.assign(new Error("Session capacity exhausted"), { code: "CAPACITY_EXHAUSTED", outcome: "not-sent" });
+      const victimGeneration = victim.generation;
+      closingSessions.add(victim);
+      try { onResync(victim, owner); } catch { /* Resync listeners cannot cancel owner cleanup. */ }
+      let result: EvictionResult = "unresolved";
+      try { result = await onEvict(victim, victimGeneration); } catch { result = "unresolved"; }
+      if (generation !== startGeneration || victimGeneration !== startGeneration || sessions.get(key(victim.projectId, victim.threadId)) !== victim)
+        throw Object.assign(new Error("Session generation changed during cleanup"), { code: "STALE_GENERATION", outcome: "not-sent" });
+      if (result !== "released" || victim.active || victim.pending.size || victim.opening) {
+        unresolvedSessions.add(victim);
+        continue;
+      }
+      sessions.delete(key(victim.projectId, victim.threadId));
+      closingSessions.delete(victim);
+    }
+  }
   function owned(s: Session): MutableSession {
     const value = sessions.get(key(s.projectId, s.threadId));
     if (!value || value !== s || value.generation !== generation)
@@ -135,41 +192,81 @@ export function createState(
       onResync(victim, owner);
       sessions.delete(key(victim.projectId, victim.threadId));
     }
-    s = {
-      projectId,
-      threadId,
-      cwd,
-      generation: effectiveGeneration(),
-      model: null,
-      knownNew: false,
-      messagePhases: new Map(),
-      itemLifecycles: new Map(),
-      messageSourceBytes: new Map(),
-      messageTruncated: new Set(),
-      streamEpoch: randomUUID(),
-      seq: 0,
-      revision: 0,
-      activeTurnId: null,
-      turnStatus: null,
-      truncated: false,
-      truncationReason: "none",
-      opened: false,
-      connectionLost: false,
-      requestStorageFailed: false,
-      active: false,
-      pending: new Map(),
-      messages: [],
-      trace: [],
-      lastUsed: Date.now(),
-      opening: null,
-    };
+    if (sessions.size + reservations.size >= 16)
+      throw Object.assign(new Error("Session capacity exhausted"), { code: "CAPACITY_EXHAUSTED", outcome: "not-sent" });
+    s = newSession(projectId, threadId, cwd);
     sessions.set(id, s);
     return s;
+  }
+  async function admit(projectId: string, threadId: string, cwd: string): Promise<Session> {
+    const requestedGeneration = effectiveGeneration();
+    return withAdmission(async () => {
+      if (generation !== requestedGeneration)
+        throw Object.assign(new Error("Session generation changed while queued"), { code: "STALE_GENERATION", outcome: "not-sent" });
+      const id = key(projectId, threadId);
+      const existing = sessions.get(id);
+      if (existing) {
+        if (closingSessions.has(existing) || unresolvedSessions.has(existing))
+          throw Object.assign(new Error("Session cleanup is unresolved"), { code: "CAPACITY_EXHAUSTED", outcome: "not-sent" });
+        if (existing.opening)
+          throw Object.assign(new Error("Session is opening"), { code: "OPERATION_CONFLICT", outcome: "not-sent" });
+        if (existing.cwd !== cwd)
+          throw Object.assign(new Error("Thread project mismatch"), { code: "INVALID_ARGUMENT", outcome: "not-sent" });
+        existing.opening = Promise.resolve();
+        existing.lastUsed = Date.now();
+        return existing;
+      }
+      await ensureSlot();
+      if (generation !== requestedGeneration)
+        throw Object.assign(new Error("Session generation changed"), { code: "STALE_GENERATION", outcome: "not-sent" });
+      const session = newSession(projectId, threadId, cwd);
+      session.opening = Promise.resolve();
+      sessions.set(id, session);
+      return session;
+    });
+  }
+  async function reserveThreadStart(): Promise<ThreadStartTicket> {
+    const requestedGeneration = effectiveGeneration();
+    return withAdmission(async () => {
+      const capturedGeneration = requestedGeneration;
+      if (generation !== capturedGeneration)
+        throw Object.assign(new Error("Session generation changed while queued"), { code: "STALE_GENERATION", outcome: "not-sent" });
+      await ensureSlot();
+      if (generation !== capturedGeneration)
+        throw Object.assign(new Error("Session generation changed"), { code: "STALE_GENERATION", outcome: "not-sent" });
+      const token = Symbol("thread-start");
+      reservations.set(token, { generation: capturedGeneration, outcome: "pending" });
+      const ticket: ThreadStartTicket = Object.freeze({
+        generation: capturedGeneration,
+        async commit(projectId, threadId, cwd) {
+          const entry = reservations.get(token);
+          if (!entry || entry.generation !== generation || entry.outcome !== "pending")
+            throw Object.assign(new Error("Thread start reservation expired"), { code: "STALE_GENERATION", outcome: "unknown" });
+          const id = key(projectId, threadId);
+          if (sessions.has(id))
+            throw Object.assign(new Error("Created thread ID already has an owner"), { code: "OPERATION_CONFLICT", outcome: "unknown" });
+          reservations.delete(token);
+          const session = newSession(projectId, threadId, cwd);
+          sessions.set(id, session);
+          return session;
+        },
+        async finish(outcome) {
+          const entry = reservations.get(token);
+          if (!entry || entry.generation !== generation) return;
+          if (outcome === "not-sent") reservations.delete(token);
+          else entry.outcome = "unknown";
+        },
+      });
+      return ticket;
+    });
   }
   function syncGeneration(next: string | null): void {
     if (!next || next === generation) return;
     generation = next;
     ledger.clear();
+    reservations.clear();
+    closingSessions.clear();
+    unresolvedSessions.clear();
     pendingBytes = 0;
     pendingCount = 0;
     activeCount = 0;
@@ -190,11 +287,16 @@ export function createState(
         streamEpoch: randomUUID(),
         seq: 0,
         revision: 0,
+        opening: null,
       });
     }
   }
   function reserveTurn(session: Session): void {
     const s = owned(session);
+    if (closingSessions.has(s) || unresolvedSessions.has(s))
+      throw Object.assign(new Error("Session cleanup is unresolved"), { code: "CAPACITY_EXHAUSTED", outcome: "not-sent" });
+    if (s.opening)
+      throw Object.assign(new Error("Session is opening"), { code: "OPERATION_CONFLICT", outcome: "not-sent" });
     if (s.active)
       throw Object.assign(new Error("A turn is already active"), {
         code: "OPERATION_CONFLICT",
@@ -484,19 +586,26 @@ export function createState(
     activeTurnId: string | null,
     status: Session["turnStatus"],
     revision: number,
+    canAcceptDirectInput: boolean | null,
+    confirmedActive: boolean,
   ): void {
     const s = owned(session);
     const liveChanged = s.revision !== revision;
     const wasActive = s.active;
     s.model = model;
+    s.canAcceptDirectInput = canAcceptDirectInput;
     if (!liveChanged) {
       s.activeTurnId = activeTurnId;
       s.turnStatus = status;
-      s.active = status === "inProgress";
+      s.active = confirmedActive;
     }
     s.opened = true;
     s.connectionLost = false;
     if (!wasActive && s.active && activeCount < 4) activeCount++;
+  }
+  /** Сохраняет native direct-input capability; false запрещает новую мутацию. */
+  function setCanAcceptDirectInput(session: Session, value: boolean | null): void {
+    owned(session).canAcceptDirectInput = value;
   }
   /** Удерживает bootstrap-сеанс от LRU-вытеснения на время RPC. */
   function setOpening(session: Session, opening: boolean): void {
@@ -514,7 +623,7 @@ export function createState(
     const messagePhases = Object.fromEntries(
       [...s.messagePhases].filter(([id]) => retained.has(id)),
     );
-    return {
+  return {
       projectId: s.projectId,
       threadId: s.threadId,
       generation: s.generation,
@@ -523,6 +632,8 @@ export function createState(
       state: s.connectionLost
         ? "connection-lost"
         : s.requestStorageFailed
+          ? "executor-unavailable"
+        : s.opened && s.turnStatus === "inProgress" && !s.active
           ? "executor-unavailable"
         : s.pending.size > 0
           ? "waiting"
@@ -751,6 +862,14 @@ export function createState(
   }
   const owner = {
     get,
+    admit,
+    reserveThreadStart,
+    /** Rejects operations whose owner is currently being unsubscribed. */
+    assertNotClosing(session: Session): void {
+      const s = owned(session);
+      if (closingSessions.has(s) || unresolvedSessions.has(s))
+        throw Object.assign(new Error("Session cleanup is unresolved"), { code: "CAPACITY_EXHAUSTED", outcome: "not-sent" });
+    },
     put,
     runOperation,
     reserveTurn,
@@ -766,6 +885,7 @@ export function createState(
     appendTrace,
     nextSeq,
     setOpened,
+    setCanAcceptDirectInput,
     setOpening,
     view,
     pendingView,

@@ -1,5 +1,30 @@
 # Контракт сервиса agent
 
+## Запуск процесса
+
+Сервис читает настройки только из JSON-файла, указанного абсолютным путём в `BRAI_AGENT_CONFIG`. Сборка выполняется командой `npm run build`; обычный запуск — `npm start`, проверка готовности — `npm run health`. Health проверяет status endpoint и требует `ready: true`, поэтому одного ответа NATS PING недостаточно.
+
+Минимальная форма конфигурации:
+
+```json
+{
+  "codex": { "socketUrl": "ws+unix:/absolute/path/to/app-server-control.sock:/" },
+  "nats": {
+    "servers": ["nats://127.0.0.1:4222"],
+    "user": "agent",
+    "password": "replace-me",
+    "inboxPrefix": "_INBOX.brai_agent"
+  },
+  "projects": [
+    { "projectId": "work", "name": "Work", "cwd": "/absolute/path/to/project" }
+  ],
+  "allowedModels": ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"],
+  "newThread": { "approvalsReviewer": "user" }
+}
+```
+
+`allowedModels` необязателен и ограничивает модели, уже выбранные текущей конфигурацией Codex; сервис не подменяет модель и не включает fallback. `newThread.approvalsReviewer` задаёт маршрутизацию одобрений только при создании thread. Существующие threads не перенастраиваются. Секреты передавайте через файл с ограниченными правами доступа. Неизвестные ключи конфигурации отклоняются.
+
 Каталог владеет публичной границей агента Brai. DTO описаны в `schemas/messages.schema.json` (JSON Schema Draft-07); `contracts/index.mjs` предоставляет браузерно-безопасный API. Импортируйте валидаторы, subjects и limits из `@brai/agent/contracts`. Объявления TypeScript генерируются из схемы. Единственный источник форм upstream-запросов и ответов Codex app-server — `contracts/codex/`.
 
 ## Интерфейс NATS
