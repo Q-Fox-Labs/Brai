@@ -77,6 +77,14 @@ function traceKind(type: string): string {
   return "other";
 }
 
+function commandOutputMetadata(item: Record<string, any>): Record<string, unknown> {
+  return {
+    ...(typeof item.command === "string" ? { command: boundedText(item.command, 16 * 1024).text } : {}),
+    ...(typeof item.status === "string" ? { status: item.status } : {}),
+    ...(Object.hasOwn(item, "exitCode") && (typeof item.exitCode === "number" || item.exitCode === null) ? { exitCode: item.exitCode } : {}),
+  };
+}
+
 /** Создаёт проекцию с конечными очередями подписчиков; Codex callbacks не ждут listeners. */
 export function createProjection() {
   const subscribers = new Set<Subscriber>();
@@ -368,7 +376,8 @@ export function createProjection() {
         ? { text: previous, truncated: true, contentBytes: Number(prior.contentBytes ?? 0) + Buffer.byteLength(text, "utf8") }
         : boundedText(previous + text);
       owner.upsertTrace(session!, { ...(prior ?? { itemId: id, order: session!.trace.length, kind: "output", content: "", truncated: false, contentBytes: 0, turnId: turnId ?? "" }), contentBytes: bounded.contentBytes, truncated: bounded.truncated, turnId: turnId ?? "", trace: { ...(prior?.trace ?? { type: "output", status: "inProgress" }), output: bounded.text } });
-      emit(session, owner, { type: "CUSTOM", name: "brai.agent.output", value: { itemId: id, text: bounded.text, truncated: bounded.truncated, contentBytes: bounded.contentBytes } }, turnId);
+      const metadata = prior?.trace?.type === "command" ? commandOutputMetadata(prior.trace) : {};
+      emit(session, owner, { type: "CUSTOM", name: "brai.agent.output", value: { itemId: id, text: bounded.text, truncated: bounded.truncated, contentBytes: bounded.contentBytes, ...metadata } }, turnId);
       if (bounded.truncated) truncation(session!, owner, id, turnId ?? "", bounded);
       return;
     }
@@ -419,9 +428,9 @@ export function createProjection() {
         if (e.method === "item/started") toolStart(session!, owner, item, turnId ?? "");
         else toolResult(session!, owner, item, turnId ?? "");
         recordItem(session!, owner, item, turnId ?? "");
-        if (item.type === "commandExecution" && e.method === "item/completed") {
-          const limited = boundedText(String(item.aggregatedOutput ?? ""));
-          emit(session, owner, { type: "CUSTOM", name: "brai.agent.output", value: { itemId: item.id, text: limited.text, truncated: limited.truncated, contentBytes: limited.contentBytes } }, turnId);
+        if (item.type === "commandExecution" && (e.method === "item/completed" || typeof item.command === "string")) {
+          const limited = boundedText(typeof item.aggregatedOutput === "string" ? item.aggregatedOutput : "");
+          emit(session, owner, { type: "CUSTOM", name: "brai.agent.output", value: { itemId: item.id, text: limited.text, truncated: limited.truncated, contentBytes: limited.contentBytes, ...commandOutputMetadata(item) } }, turnId);
         }
         if (item.type === "fileChange" && e.method === "item/completed") {
           const diff = (Array.isArray(item.changes) ? item.changes.map((change: any) => `--- ${change.path}\n${change.diff}`).join("\n") : "");

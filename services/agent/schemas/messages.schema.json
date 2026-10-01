@@ -1026,6 +1026,19 @@
         "contentBytes": {
           "type": "integer",
           "minimum": 0
+        },
+        "command": {
+          "type": "string",
+          "maxLength": 16384
+        },
+        "status": {
+          "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/CommandExecutionStatus"
+        },
+        "exitCode": {
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       }
     },

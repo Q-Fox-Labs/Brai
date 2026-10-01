@@ -341,6 +341,16 @@ export interface EventEnvelope {
   event: AguiEvent;
 }
 
+export interface CustomOutput {
+  itemId: string;
+  text: string;
+  truncated?: boolean;
+  contentBytes?: number;
+  command?: string;
+  status?: CodexCommandExecutionStatus;
+  exitCode?: number | null;
+}
+
 export type PendingRequest =
   | {
       requestId: string;
@@ -533,6 +543,8 @@ export interface CodexToolRequestUserInputResponse {
   };
   [k: string]: unknown;
 }
+
+export type CodexCommandExecutionStatus = "inProgress" | "completed" | "failed" | "declined";
 
 export type ReadCommandActionType = "read";
 

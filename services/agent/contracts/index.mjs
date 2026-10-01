@@ -37,6 +37,7 @@ const replaceExternalRefs=value=>{
       delete value.$ref;
       // AIDEV-NOTE: Scalar phase берём из native схемы; формы запросов отдельно проверяет upstreamAjv.
       if(child.endsWith('/MessagePhase'))Object.assign(value,structuredClone(codexSchema.definitions.MessagePhase));
+      else if(child.endsWith('/CommandExecutionStatus'))Object.assign(value,structuredClone(codexSchema.definitions.CommandExecutionStatus));
       else value.type='object';
     }else replaceExternalRefs(child);
   }

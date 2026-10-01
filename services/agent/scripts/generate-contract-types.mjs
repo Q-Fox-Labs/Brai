@@ -34,7 +34,7 @@ const collect=rendered=>{
     blocks.set(name,block);
   }
 };
-const ownRoots=Object.keys(own.definitions).filter(name=>name.endsWith('Request')||name.endsWith('Response')||['ThreadSnapshot','PendingRequest','EventEnvelope','HistoryItem','Trace','Project','ThreadMetadata','Truncation','CustomMessagePhase'].includes(name));
+const ownRoots=Object.keys(own.definitions).filter(name=>name.endsWith('Request')||name.endsWith('Response')||['ThreadSnapshot','PendingRequest','EventEnvelope','HistoryItem','Trace','Project','ThreadMetadata','Truncation','CustomMessagePhase','CustomOutput'].includes(name));
 const references=(value,into=[])=>{if(!value||typeof value!=='object')return into;for(const [key,child] of Object.entries(value)){if(key==='$ref'&&typeof child==='string')into.push(child);else references(child,into);}return into;};
 const inline=(value,definitions,seen=new Set())=>{if(Array.isArray(value))return value.map(child=>inline(child,definitions,seen));if(!value||typeof value!=='object')return value;if(typeof value.$ref==='string'&&value.$ref.startsWith('#/definitions/')){const name=value.$ref.slice('#/definitions/'.length);if(seen.has(name))return {type:'object',additionalProperties:true};return inline(definitions[name],definitions,new Set([...seen,name]));}const copy={};for(const [key,child]of Object.entries(value))if(key!=='definitions')copy[key]=inline(child,definitions,seen);return copy;};
 for(const name of ownRoots){

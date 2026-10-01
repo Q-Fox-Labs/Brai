@@ -7,6 +7,7 @@ import { limits, validateDto, validateEventEnvelope } from "@brai/agent/contract
 import { createAgentClient, type AgentEventSource } from "../lib/agent/client.ts";
 import { initialAgentClientState } from "../lib/agent/types.ts";
 import { reduceAgentState } from "../lib/agent/state.ts";
+import { buildAgentTimeline } from "../app/agent/timeline.ts";
 
 const generation = "11111111-1111-4111-8111-111111111111";
 const nextGeneration = "22222222-2222-4222-8222-222222222222";
@@ -391,6 +392,115 @@ test("queue, text, history and trace remain within client memory limits", async 
   assert.ok(next.traceItems.length <= 200);
   assert.ok(JSON.stringify(next.traceItems).length < 128 * 1024);
   assert.equal(next.truncation?.truncated, true);
+  await client.dispose();
+});
+
+test("native command metadata survives validated output deltas and terminal trace updates", async () => {
+  const { client, sources } = await selectedClient();
+  const source = sources[0];
+  source.emit("snapshot", snapshot({
+    state: "working", activeTurnId: "turn-1", turnStatus: "inProgress",
+    traceItems: [
+      { itemId: "earlier", order: 6, kind: "output", content: "first", truncated: false, contentBytes: 5, turnId: "turn-1", trace: { type: "output", status: "completed", output: "first" } },
+      { itemId: "native-command", order: 7, kind: "command", content: "old", truncated: false, contentBytes: 3, turnId: "turn-1", trace: { type: "command", status: "inProgress", command: "echo ready", output: "old" } },
+      { itemId: "later", order: 8, kind: "output", content: "last", truncated: false, contentBytes: 4, turnId: "turn-1", trace: { type: "output", status: "completed", output: "last" } },
+    ],
+  }));
+  await tick();
+  assert.equal(client.getState().activeTurnId, "turn-1");
+
+  const sendOutput = async (seq: number, value: Record<string, unknown>, turnId: string | null = "turn-1") => {
+    const frame = envelope(seq, { type: "CUSTOM", name: "brai.agent.output", value }, { turnId });
+    assert.equal(validateEventEnvelope(frame), true);
+    source.emit("agent", frame);
+    await tick();
+  };
+  await sendOutput(1, { itemId: "native-command", text: "partial", command: "echo ready", status: "inProgress" });
+  assert.equal(client.getState().traceItems[1].turnId, "turn-1");
+  await sendOutput(2, { itemId: "native-command", text: "failed attempt", status: "failed", exitCode: 17 });
+  assert.equal(client.getState().traceItems[1].trace.exitCode, 17);
+  let item = client.getState().traceItems[1];
+  assert.equal(item.trace.exitCode, 17);
+  await sendOutput(3, { itemId: "native-command", text: "complete", status: "completed", exitCode: 0 });
+  item = client.getState().traceItems[1];
+  assert.equal(item.trace.exitCode, 0);
+  await sendOutput(4, { itemId: "native-command", text: "legacy replacement" });
+
+  item = client.getState().traceItems[1];
+  assert.equal(client.getState().traceItems.length, 3);
+  assert.equal(item.itemId, "native-command");
+  assert.equal(item.kind, "command");
+  assert.equal(item.order, 7);
+  assert.equal(item.turnId, "turn-1");
+  assert.equal(item.content, "legacy replacement");
+  assert.equal(item.trace.command, "echo ready");
+  assert.equal(item.trace.status, "completed");
+  assert.equal(item.trace.exitCode, 0);
+  assert.equal(item.trace.output, "legacy replacement");
+
+  await sendOutput(5, { itemId: "native-command", text: "unknown exit", exitCode: null });
+  await sendOutput(6, { itemId: "native-command", text: "final legacy replacement" });
+  await sendOutput(7, { itemId: "native-command", text: "null-turn legacy replacement" }, null);
+  item = client.getState().traceItems[1];
+  assert.equal(item.trace.exitCode, null);
+  assert.equal(item.trace.status, "completed");
+  assert.equal(item.trace.output, "null-turn legacy replacement");
+  assert.equal(item.turnId, "turn-1");
+
+  await sendOutput(8, { itemId: "empty-command", text: "", command: "", status: "declined", exitCode: null });
+  item = client.getState().traceItems[3];
+  assert.equal(item.kind, "command");
+  assert.equal(item.trace.type, "command");
+  assert.equal(item.trace.command, "");
+  assert.equal(item.trace.status, "declined");
+  assert.equal(item.trace.exitCode, null);
+
+  await sendOutput(9, { itemId: "status-only", text: "output", status: "failed" });
+  item = client.getState().traceItems[4];
+  assert.equal(item.kind, "output");
+  assert.equal(item.trace.type, "output");
+  assert.equal(item.trace.status, "failed");
+  assert.equal(Object.hasOwn(item.trace, "command"), false);
+  assert.equal(Object.hasOwn(item.trace, "exitCode"), false);
+
+  await sendOutput(10, { itemId: "new-final-command", text: "final", command: "echo final", status: "completed", exitCode: 0 });
+  item = client.getState().traceItems[5];
+  assert.equal(item.kind, "command");
+  assert.equal(item.trace.status, "completed");
+  assert.equal(item.trace.exitCode, 0);
+
+  await sendOutput(11, { itemId: "late-turn-command", text: "first", command: "echo late", status: "inProgress" }, null);
+  item = client.getState().traceItems[6];
+  assert.equal(item.turnId, "");
+  await sendOutput(12, { itemId: "late-turn-command", text: "identified", status: "completed" }, "turn-1");
+  item = client.getState().traceItems[6];
+  assert.equal(item.turnId, "turn-1");
+  await sendOutput(13, { itemId: "late-turn-command", text: "legacy null turn" }, null);
+  item = client.getState().traceItems[6];
+  assert.equal(item.turnId, "turn-1");
+
+  const timeline = buildAgentTimeline([], client.getState().traceItems, [], {});
+  assert.deepEqual(timeline.map(entry => entry.kind === "trace" ? entry.item.itemId : "message"), [
+    "earlier", "native-command", "later", "empty-command", "status-only", "new-final-command", "late-turn-command",
+  ]);
+
+  source.emit("agent", envelope(14, { type: "RUN_FINISHED", threadId: "thread", runId: "turn-1", outcome: { type: "success" } }, { turnId: "turn-1" }));
+  await tick();
+  await sendOutput(15, { itemId: "after-terminal", text: "plain output" });
+  item = client.getState().traceItems[7];
+  assert.equal(item.kind, "output");
+  assert.equal(item.trace.status, "updated");
+  assert.equal(Object.hasOwn(item.trace, "exitCode"), false);
+
+  await sendOutput(16, { itemId: "native-diff", text: "not a diff" });
+  const diff = envelope(17, { type: "CUSTOM", name: "brai.agent.diff", value: { itemId: "native-diff", diff: "patch" } }, { turnId: "turn-1" });
+  assert.equal(validateEventEnvelope(diff), true);
+  source.emit("agent", diff);
+  await tick();
+  item = client.getState().traceItems.find(traceItem => traceItem.itemId === "native-diff")!;
+  assert.equal(item.kind, "file-change");
+  assert.equal(item.content, "patch");
+  assert.equal(item.trace.diffSummary, "patch");
   await client.dispose();
 });
 

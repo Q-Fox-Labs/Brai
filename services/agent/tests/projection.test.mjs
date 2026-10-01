@@ -109,12 +109,25 @@ test("command output and file diff events replace the owner buffer with authorit
   f.observe({ type: "notification", method: "item/started", params: { threadId: "thread-source", turnId: "turn-output", item: { id: "cmd", type: "commandExecution", command: "printf", cwd: "/work", status: "inProgress" } } });
   f.observe({ type: "notification", method: "item/commandExecution/outputDelta", params: { threadId: "thread-source", turnId: "turn-output", itemId: "cmd", delta: "A" } });
   f.observe({ type: "notification", method: "item/commandExecution/outputDelta", params: { threadId: "thread-source", turnId: "turn-output", itemId: "cmd", delta: "B" } });
-  f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "turn-output", item: { id: "cmd", type: "commandExecution", command: "printf", cwd: "/work", commandActions: [], status: "exited", exitCode: 0, aggregatedOutput: "AB" } } });
+  f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "turn-output", item: { id: "cmd", type: "commandExecution", command: "printf", cwd: "/work", commandActions: [], status: "completed", exitCode: 0, aggregatedOutput: "AB" } } });
   f.observe({ type: "notification", method: "item/fileChange/outputDelta", params: { threadId: "thread-source", turnId: "turn-output", itemId: "patch", delta: "old" } });
   f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "turn-output", item: { id: "patch", type: "fileChange", changes: [{ path: "a.txt", kind: "update", diff: "new" }], status: "completed" } } });
   await flush();
   const outputs = f.events.filter((entry) => entry.event.type === "CUSTOM" && entry.event.name === "brai.agent.output").map((entry) => entry.event.value.text);
-  assert.deepEqual(outputs, ["A", "AB", "AB", "old"]);
+  assert.deepEqual(outputs, ["", "A", "AB", "AB", "old"]);
+  const outputValues = f.events.filter((entry) => entry.event.type === "CUSTOM" && entry.event.name === "brai.agent.output").map((entry) => entry.event.value);
+  assert.deepEqual(outputValues.slice(0, 4).map(({ command, status, exitCode }) => ({ command, status, exitCode })), [
+    { command: "printf", status: "inProgress", exitCode: undefined },
+    { command: "printf", status: "inProgress", exitCode: undefined },
+    { command: "printf", status: "inProgress", exitCode: undefined },
+    { command: "printf", status: "completed", exitCode: 0 },
+  ]);
+  assert.equal(Object.hasOwn(outputValues[4], "command"), false);
+  assert.equal(Object.hasOwn(outputValues[4], "status"), false);
+  const commandFrames = f.events.filter((entry) => entry.event.type === "CUSTOM" && entry.event.name === "brai.agent.output" && Object.hasOwn(entry.event.value, "command"));
+  assert.equal(commandFrames.length, 4);
+  assert.ok(commandFrames.every((entry) => entry.event.value.itemId === "cmd" && entry.turnId === "turn-output" && entry.generation === f.session.generation));
+  assert.ok(commandFrames.every((entry, index) => index === 0 || entry.seq > commandFrames[index - 1].seq));
   const diffs = f.events.filter((entry) => entry.event.type === "CUSTOM" && entry.event.name === "brai.agent.diff").map((entry) => entry.event.value.diff);
   assert.deepEqual(diffs, ["--- a.txt\nnew"]);
   const outputTrace = f.state.view(f.session).traceItems.find((item) => item.itemId === "cmd");
@@ -126,13 +139,35 @@ test("command output and file diff events replace the owner buffer with authorit
 test("the last native command delta is replaced by full final output, including failure status", async () => {
   const f = fixture();
   f.observe({ type: "notification", method: "item/commandExecution/outputDelta", params: { threadId: "thread-source", turnId: "t", itemId: "partial", delta: "LAST" } });
-  f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "t", item: { id: "partial", type: "commandExecution", command: "run", cwd: "/work", commandActions: [], status: "exited", exitCode: 7, aggregatedOutput: "FIRSTLAST" } } });
+  f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "t", item: { id: "partial", type: "commandExecution", command: "run", cwd: "/work", commandActions: [], status: "failed", exitCode: 7, aggregatedOutput: "FIRSTLAST" } } });
   await flush();
   const outputs = f.events.filter((entry) => entry.event.type === "CUSTOM" && entry.event.name === "brai.agent.output").map((entry) => entry.event.value.text);
   assert.deepEqual(outputs, ["LAST", "FIRSTLAST"]);
+  const outputValues = f.events.filter((entry) => entry.event.type === "CUSTOM" && entry.event.name === "brai.agent.output").map((entry) => entry.event.value);
+  assert.equal(Object.hasOwn(outputValues[0], "command"), false);
+  assert.deepEqual({ command: outputValues[1].command, status: outputValues[1].status, exitCode: outputValues[1].exitCode }, { command: "run", status: "failed", exitCode: 7 });
   const result = f.events.find((entry) => entry.event.type === "TOOL_CALL_RESULT");
-  assert.match(result.event.content, /status=exited; exitCode=7/);
+  assert.match(result.event.content, /status=failed; exitCode=7/);
   assert.match(result.event.content, /FIRSTLAST/);
+  validEvents(f.events);
+  f.projection.close();
+});
+
+test("command metadata preserves empty commands and null or absent exit codes within existing bounds", async () => {
+  const f = fixture();
+  f.observe({ type: "notification", method: "item/started", params: { threadId: "thread-source", turnId: "t", item: { id: "empty", type: "commandExecution", command: "", cwd: "/work", status: "inProgress" } } });
+  f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "t", item: { id: "empty", type: "commandExecution", command: "", cwd: "/work", commandActions: [], status: "declined", exitCode: null, aggregatedOutput: "" } } });
+  f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "t", item: { id: "late", type: "commandExecution", command: "late", cwd: "/work", commandActions: [], status: "failed", aggregatedOutput: "done" } } });
+  f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "t", item: { id: "large", type: "commandExecution", command: "😀".repeat(5000), cwd: "/work", commandActions: [], status: "completed", aggregatedOutput: "" } } });
+  await flush();
+  const outputs = f.events.filter((entry) => entry.event.type === "CUSTOM" && entry.event.name === "brai.agent.output").map((entry) => entry.event.value);
+  const empty = outputs.filter((value) => value.itemId === "empty");
+  assert.equal(empty[0].command, "");
+  assert.equal(empty[0].status, "inProgress");
+  assert.equal(Object.hasOwn(empty[0], "exitCode"), false);
+  assert.deepEqual({ command: empty[1].command, status: empty[1].status, exitCode: empty[1].exitCode }, { command: "", status: "declined", exitCode: null });
+  assert.deepEqual({ command: outputs.find((value) => value.itemId === "late").command, status: outputs.find((value) => value.itemId === "late").status, hasExitCode: Object.hasOwn(outputs.find((value) => value.itemId === "late"), "exitCode") }, { command: "late", status: "failed", hasExitCode: false });
+  assert.ok(Buffer.byteLength(outputs.find((value) => value.itemId === "large").command, "utf8") <= 16 * 1024);
   validEvents(f.events);
   f.projection.close();
 });
@@ -145,6 +180,8 @@ test("the producer stream is accepted by the pinned AbstractAgent connectAgent r
   f.observe({ type: "notification", method: "item/started", params: { threadId: "thread-source", turnId: "sdk-run", item: { id: "sdk-message", type: "agentMessage", text: "", phase: "commentary" } } });
   f.observe({ type: "notification", method: "item/agentMessage/delta", params: { threadId: "thread-source", turnId: "sdk-run", itemId: "sdk-message", delta: "hello" } });
   f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "sdk-run", item: { id: "sdk-message", type: "agentMessage", text: "hello", phase: "final_answer" } } });
+  f.observe({ type: "notification", method: "item/started", params: { threadId: "thread-source", turnId: "sdk-run", item: { id: "sdk-command", type: "commandExecution", command: "echo sdk", cwd: "/work", status: "inProgress" } } });
+  f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "sdk-run", item: { id: "sdk-command", type: "commandExecution", command: "echo sdk", cwd: "/work", commandActions: [], status: "completed", exitCode: 0, aggregatedOutput: "sdk" } } });
   f.observe({ type: "notification", method: "turn/completed", params: { threadId: "thread-source", turn: { id: "sdk-run", status: "completed", items: [] } } });
   await flush();
   const stream = f.events.map((entry) => entry.event);
@@ -157,8 +194,14 @@ test("the producer stream is accepted by the pinned AbstractAgent connectAgent r
   const observed = [];
   await agent.connectAgent({}, { onEvent: ({ event }) => observed.push(event) });
   assert.equal(runCalls, 0);
-  assert.deepEqual(agent.messages, [{ id: "sdk-message", role: "assistant", content: "hello" }]);
+  assert.deepEqual(agent.messages[0], { id: "sdk-message", role: "assistant", content: "hello" });
+  assert.equal(agent.messages.at(-1).role, "tool");
+  assert.match(agent.messages.at(-1).content, /status=completed; exitCode=0\nsdk/);
   assert.ok(observed.some((event) => event.type === "CUSTOM" && event.name === "brai.agent.message.phase"));
+  assert.deepEqual(observed.filter((event) => event.type === "CUSTOM" && event.name === "brai.agent.output").map((event) => ({ command: event.value.command, status: event.value.status, exitCode: event.value.exitCode })), [
+    { command: "echo sdk", status: "inProgress", exitCode: undefined },
+    { command: "echo sdk", status: "completed", exitCode: 0 },
+  ]);
   assert.ok(observed.some((event) => event.type === "RUN_FINISHED" && event.outcome.type === "success"));
   f.projection.close();
 });
@@ -187,7 +230,7 @@ test("tool argument end and tool result remain separate SDK events; native plans
   const f = fixture();
   f.observe({ type: "notification", method: "turn/started", params: { threadId: "thread-source", turn: { id: "turn-tool" } } });
   f.observe({ type: "notification", method: "item/started", params: { threadId: "thread-source", turnId: "turn-tool", item: { id: "tool-native", type: "commandExecution", command: "ls", cwd: "/work", status: "inProgress" } } });
-  f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "turn-tool", item: { id: "tool-native", type: "commandExecution", command: "ls", cwd: "/work", commandActions: [], status: "exited", exitCode: 0, aggregatedOutput: "done" } } });
+  f.observe({ type: "notification", method: "item/completed", params: { threadId: "thread-source", turnId: "turn-tool", item: { id: "tool-native", type: "commandExecution", command: "ls", cwd: "/work", commandActions: [], status: "completed", exitCode: 0, aggregatedOutput: "done" } } });
   f.observe({ type: "notification", method: "turn/plan/updated", params: { threadId: "thread-source", turnId: "turn-tool", plan: [{ step: "Check", status: "completed" }] } });
   await flush();
   const types = f.events.map((entry) => entry.event.type);

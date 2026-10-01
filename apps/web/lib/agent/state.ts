@@ -1,7 +1,7 @@
 // ABOUTME: Применяет ограниченные snapshot и AG-UI события к состоянию клиента.
 // ABOUTME: Здесь нет транспорта, команды, таймеров или состояния интерфейса React.
 import { limits, serializedBytes } from "@brai/agent/contracts";
-import type { CodexMessagePhase, EventEnvelope, HistoryItem, PendingRequest, Project, StatusResponse, ThreadMetadata, ThreadSnapshot } from "@brai/agent/contracts";
+import type { CodexMessagePhase, CustomOutput, EventEnvelope, HistoryItem, PendingRequest, Project, StatusResponse, ThreadMetadata, ThreadSnapshot } from "@brai/agent/contracts";
 import type { ActivityDeltaEvent, ActivitySnapshotEvent, Event, Message } from "@ag-ui/core";
 import type { AgentClientState } from "./types";
 
@@ -158,18 +158,44 @@ function applyCustom(state: AgentClientState, envelope: EventEnvelope, name: str
       [record.itemId]: record.phase as CodexMessagePhase | null,
     } };
   }
-  if (name === "brai.agent.output" || name === "brai.agent.diff") {
+  if (name === "brai.agent.output") {
     if (typeof record.itemId !== "string") return state;
-    const content = name.endsWith("output") ? record.text : record.diff;
-    if (typeof content !== "string") return state;
+    if (typeof record.text !== "string") return state;
+    const previousIndex = state.traceItems.findIndex(item => item.itemId === record.itemId);
+    const previous = previousIndex < 0 ? undefined : state.traceItems[previousIndex];
+    const output = record as unknown as CustomOutput;
+    const commandPresent = Object.prototype.hasOwnProperty.call(record, "command");
+    const isCommand = commandPresent || previous?.trace.type === "command" || typeof previous?.trace.command === "string";
+    const trace = {
+      ...(previous?.trace ?? {}),
+      type: isCommand ? "command" as const : "output" as const,
+      status: Object.prototype.hasOwnProperty.call(record, "status") ? output.status! : previous?.trace.status ?? "updated",
+      ...(commandPresent ? { command: output.command! } : {}),
+      ...(Object.prototype.hasOwnProperty.call(record, "exitCode") ? { exitCode: output.exitCode! } : {}),
+      output: record.text,
+    };
+    const item: ThreadSnapshot["traceItems"][number] = {
+      itemId: record.itemId, order: previous?.order ?? state.lastSeq ?? 0, kind: isCommand ? "command" : "output",
+      content: record.text, truncated: record.truncated === true, contentBytes: typeof record.contentBytes === "number" ? record.contentBytes : serializedBytes(record.text),
+      turnId: envelope.turnId ?? previous?.turnId ?? "", trace,
+    };
+    const items = state.traceItems.slice();
+    if (previousIndex < 0) items.push(item);
+    else items[previousIndex] = item;
+    const bounded = boundTrace(items);
+    return { ...state, traceItems: bounded.items, truncation: bounded.truncated ? { truncated: true, reason: "item-limit" } : state.truncation };
+  }
+  if (name === "brai.agent.diff") {
+    if (typeof record.itemId !== "string") return state;
+    if (typeof record.diff !== "string") return state;
     const previous = state.traceItems.filter(item => item.itemId !== record.itemId);
     const item: ThreadSnapshot["traceItems"][number] = {
-      itemId: record.itemId, order: state.lastSeq ?? 0, kind: name.endsWith("output") ? "output" : "file-change",
-      content, truncated: record.truncated === true, contentBytes: typeof record.contentBytes === "number" ? record.contentBytes : serializedBytes(content),
-      turnId: envelope.turnId ?? "", trace: { type: name.endsWith("output") ? "output" : "file-change", status: "updated", ...(name.endsWith("output") ? { output: content } : { diffSummary: content }) },
+      itemId: record.itemId, order: state.lastSeq ?? 0, kind: "file-change",
+      content: record.diff, truncated: record.truncated === true, contentBytes: typeof record.contentBytes === "number" ? record.contentBytes : serializedBytes(record.diff),
+      turnId: envelope.turnId ?? "", trace: { type: "file-change", status: "updated", diffSummary: record.diff },
     };
-    const trace = boundTrace([...previous, item]);
-    return { ...state, traceItems: trace.items, truncation: trace.truncated ? { truncated: true, reason: "item-limit" } : state.truncation };
+    const bounded = boundTrace([...previous, item]);
+    return { ...state, traceItems: bounded.items, truncation: bounded.truncated ? { truncated: true, reason: "item-limit" } : state.truncation };
   }
   if (name === "brai.agent.truncation" && typeof record.reason === "string") {
     return { ...state, truncation: { truncated: true, reason: record.reason as "byte-budget" | "item-limit" | "upstream-limit" } };

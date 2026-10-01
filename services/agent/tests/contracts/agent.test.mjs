@@ -133,3 +133,19 @@ test('phase metadata uses exact upstream values and only retained snapshot messa
   assert.ok(serializedBytes(oversized)>limits.snapshotBytes);
   assert.equal(validateDto('ThreadSnapshot',oversized),false);
 });
+
+
+test('command output metadata stays optional and follows the pinned native scalar contract',()=>{
+  const legacy={type:'CUSTOM',name:'brai.agent.output',value:{itemId:'i',text:'out',truncated:false,contentBytes:3}};
+  assert.equal(validateAguiEvent(legacy),true);
+  for(const value of [
+    {...legacy,value:{...legacy.value,command:'',status:'inProgress'}},
+    {...legacy,value:{...legacy.value,command:'run',status:'completed',exitCode:0}},
+    {...legacy,value:{...legacy.value,command:'run',status:'failed',exitCode:null}},
+    {...legacy,value:{...legacy.value,status:'completed'}},
+  ]) assert.equal(validateAguiEvent(value),true);
+  assert.equal(validateAguiEvent({...legacy,value:{...legacy.value,status:'exited'}}),false);
+  assert.equal(validateAguiEvent({...legacy,value:{...legacy.value,command:'run',status:'completed',exitCode:1.5}}),false);
+  assert.equal(validateAguiEvent({...legacy,value:{...legacy.value,command:'x'.repeat(16385)}}),false);
+  assert.equal(validateAguiEvent({...legacy,value:{...legacy.value,command:'run',status:'completed',extra:true}}),false);
+});
