@@ -8,7 +8,7 @@ import {
   serializedBytes,
 } from "../contracts/index.mjs";
 import type { CodexPort, CodexObservation } from "./ports.js";
-import { createState, type Session } from "./state.js";
+import { createState, type Session, type StateChange } from "./state.js";
 import { readHistory } from "./history.js";
 import type {
   HistoryRequest,
@@ -41,8 +41,9 @@ export type ApplicationOptions = {
     e: CodexObservation,
     s: Readonly<Session> | undefined,
     state: ReturnType<typeof createState>,
+    change: StateChange,
   ) => void;
-  onResync?: (s: Session) => void;
+  onResync?: (s: Session, state: ReturnType<typeof createState>) => void;
 };
 
 /** Преобразует ошибки порта и сценария в безопасный DTO и HTTP status. */
@@ -123,20 +124,17 @@ export function toErrorResponse(
 }
 /** Создаёт сценарии сервиса. Проекты должны иметь явный абсолютный cwd. */
 export function createApplication(options: ApplicationOptions) {
-  const state = createState(options.onResync);
+  const state = createState((session, owner) => options.onResync?.(session, owner));
   const projects = new Map(options.projects.map((p) => [p.projectId, p]));
   const openingThreads = new Set<string>();
   const openings = new Map<string, Promise<Session>>();
   const observed = options.codex.subscribe((e) => {
-    state.observe(e);
+    const change = state.observe(e);
     if (e.type === "connection") {
       state.syncGeneration(e.status.generation);
-      options.onObservation?.(e, undefined, state);
+      options.onObservation?.(e, undefined, state, change);
     } else {
-      const thread =
-        typeof e.params.threadId === "string" ? e.params.threadId : null;
-      const s = thread ? state.findThread(thread) : undefined;
-      options.onObservation?.(e, s, state);
+      options.onObservation?.(e, change.session, state, change);
     }
   });
   const fail = (
@@ -391,7 +389,7 @@ export function createApplication(options: ApplicationOptions) {
     async thread(r: ThreadReadRequest) {
       if (!validateDto("ThreadReadRequest", r)) fail("INVALID_ARGUMENT");
       const s = await openThread(r.projectId, r.threadId);
-      const value = state.view(s);
+      const value = structuredClone(state.view(s));
       if (!validateDto("ThreadSnapshot", value)) fail("UNSUPPORTED");
       return value;
     },

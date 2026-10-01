@@ -4,6 +4,27 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { CodexObservation, RawRequestId } from "./ports.js";
 
+/** Сокращает UTF-8 строку по кодовым точкам, сохраняя явный маркер. */
+function truncateUtf8(value: string, maxBytes: number): string {
+  const suffix = "\n[содержимое сокращено]";
+  let result = "";
+  let bytes = 0;
+  const budget = maxBytes - Buffer.byteLength(suffix, "utf8");
+  for (const point of value) {
+    const pointBytes = Buffer.byteLength(point, "utf8");
+    if (bytes + pointBytes > budget) break;
+    bytes += pointBytes;
+    result += point;
+  }
+  return result + suffix;
+}
+
+function boundedUtf8(value: string, maxBytes: number): { text: string; truncated: boolean } {
+  return Buffer.byteLength(value, "utf8") <= maxBytes
+    ? { text: value, truncated: false }
+    : { text: truncateUtf8(value, maxBytes), truncated: true };
+}
+
 type SessionData = {
   projectId: string;
   threadId: string;
@@ -12,13 +33,19 @@ type SessionData = {
   model: string | null;
   knownNew: boolean;
   messagePhases: Map<string, string>;
+  itemLifecycles: Map<string, "open" | "closed">;
+  messageSourceBytes: Map<string, number>;
+  messageTruncated: Set<string>;
   streamEpoch: string;
   seq: number;
   revision: number;
   activeTurnId: string | null;
   turnStatus: "completed" | "interrupted" | "failed" | "inProgress" | null;
+  truncated: boolean;
+  truncationReason: "byte-budget" | "item-limit" | "upstream-limit" | "none";
   opened: boolean;
   connectionLost: boolean;
+  requestStorageFailed: boolean;
   active: boolean;
   pending: Map<string, MutablePendingForm>;
   messages: unknown[];
@@ -28,7 +55,7 @@ type SessionData = {
 };
 /** Представление сеанса только для чтения в приложении и истории. */
 export type Session = Readonly<
-  Omit<SessionData, "pending" | "messages" | "trace" | "messagePhases"> & {
+  Omit<SessionData, "pending" | "messages" | "trace" | "messagePhases" | "itemLifecycles" | "messageSourceBytes" | "messageTruncated"> & {
     pending: ReadonlyMap<string, PendingForm>;
     messages: readonly unknown[];
     trace: readonly unknown[];
@@ -54,9 +81,17 @@ type LedgerEntry = {
   error?: unknown;
 };
 
+/** Изменения наблюдения, подтверждённые владельцем состояния. */
+export type StateChange = Readonly<{
+  session?: Session;
+  closedRequestIds: readonly string[];
+  openedRequestId?: string;
+  generationChanged?: boolean;
+}>;
+
 /** Создаёт bounded-владелец сеансов и immutable operation ledger. */
 export function createState(
-  onResync: (session: Session) => void = () => undefined,
+  onResync: (session: Session, owner?: any) => void = () => undefined,
 ) {
   const sessions = new Map<string, MutableSession>();
   const ledger = new Map<string, LedgerEntry>();
@@ -97,7 +132,7 @@ export function createState(
           code: "CAPACITY_EXHAUSTED",
           outcome: "not-sent",
         });
-      onResync(victim);
+      onResync(victim, owner);
       sessions.delete(key(victim.projectId, victim.threadId));
     }
     s = {
@@ -108,13 +143,19 @@ export function createState(
       model: null,
       knownNew: false,
       messagePhases: new Map(),
+      itemLifecycles: new Map(),
+      messageSourceBytes: new Map(),
+      messageTruncated: new Set(),
       streamEpoch: randomUUID(),
       seq: 0,
       revision: 0,
       activeTurnId: null,
       turnStatus: null,
+      truncated: false,
+      truncationReason: "none",
       opened: false,
       connectionLost: false,
+      requestStorageFailed: false,
       active: false,
       pending: new Map(),
       messages: [],
@@ -136,11 +177,16 @@ export function createState(
       sessions.set(id, {
         ...s,
         generation: next,
+        messagePhases: new Map(),
+        itemLifecycles: new Map(),
+        messageSourceBytes: new Map(),
+        messageTruncated: new Set(),
         active: false,
         activeTurnId: null,
         pending: new Map(),
         opened: false,
         connectionLost: true,
+        requestStorageFailed: false,
         streamEpoch: randomUUID(),
         seq: 0,
         revision: 0,
@@ -270,6 +316,7 @@ export function createState(
   }
   function claimPending(session: Session, id: string): PendingForm | undefined {
     const s = owned(session);
+    if (s.requestStorageFailed) return undefined;
     const form = s.pending.get(id);
     if (!form || form.decision) return undefined;
     const claimed = { ...form, decision: true };
@@ -301,9 +348,41 @@ export function createState(
       message && typeof message === "object"
         ? (message as { id?: unknown })
         : {};
-    s.messages.push(message);
+    const clone = message && typeof message === "object" ? structuredClone(message) as any : message;
+    const capStrings = (value: any): any => {
+      if (typeof value === "string") {
+        if (Buffer.byteLength(value, "utf8") <= 64 * 1024) return value;
+        s.truncated = true;
+        s.truncationReason = "byte-budget";
+        const suffix = "\n[содержимое сокращено]";
+        let text = "";
+        let usedBytes = 0;
+        const budget = 64 * 1024 - Buffer.byteLength(suffix, "utf8");
+        for (const point of value) {
+          const pointBytes = Buffer.byteLength(point, "utf8");
+          if (usedBytes + pointBytes > budget) break;
+          usedBytes += pointBytes;
+          text += point;
+        }
+        return text + suffix;
+      }
+      if (Array.isArray(value)) return value.map(capStrings);
+      if (value && typeof value === "object") for (const key of Object.keys(value)) value[key] = capStrings(value[key]);
+      return value;
+    };
+    const safe = capStrings(clone);
+    s.messages.push(safe);
+    if (typeof item.id === "string" && message && typeof message === "object") {
+      const sourceContent = (message as any).content;
+      const sourceBytes = typeof sourceContent === "string" ? Buffer.byteLength(sourceContent, "utf8") : Buffer.byteLength(JSON.stringify(sourceContent ?? ""), "utf8");
+      s.messageSourceBytes.set(item.id, sourceBytes);
+      if (typeof sourceContent === "string" && typeof safe?.content === "string" && sourceContent !== safe.content) s.messageTruncated.add(item.id);
+      else s.messageTruncated.delete(item.id);
+    }
     if (s.messages.length > 256) {
       const removed = s.messages.splice(0, s.messages.length - 256);
+      s.truncated = true;
+      s.truncationReason = "item-limit";
       for (const old of removed) {
         if (
           old &&
@@ -311,9 +390,22 @@ export function createState(
           typeof (old as { id?: unknown }).id === "string"
         )
           s.messagePhases.delete((old as { id: string }).id);
+        if (old && typeof old === "object" && typeof (old as { id?: unknown }).id === "string")
+          s.itemLifecycles.delete((old as { id: string }).id);
+        if (old && typeof old === "object" && typeof (old as { id?: unknown }).id === "string") {
+          s.messageSourceBytes.delete((old as { id: string }).id);
+          s.messageTruncated.delete((old as { id: string }).id);
+        }
       }
     }
-    if (typeof item.id === "string") s.messagePhases.delete(item.id);
+    while (s.messages.length > 1 && Buffer.byteLength(JSON.stringify(s.messages), "utf8") > 400 * 1024) {
+      const [old] = s.messages.splice(0, 1);
+      s.truncated = true;
+      s.truncationReason = "byte-budget";
+      if (typeof (old as any)?.id === "string") s.messagePhases.delete((old as any).id);
+      if (typeof (old as any)?.id === "string") s.itemLifecycles.delete((old as any).id);
+      if (typeof (old as any)?.id === "string") { s.messageSourceBytes.delete((old as any).id); s.messageTruncated.delete((old as any).id); }
+    }
   }
   /** Устанавливает только документированную фазу сохранённого сообщения. */
   function setMessagePhase(
@@ -322,18 +414,67 @@ export function createState(
     phase: "commentary" | "final_answer" | null,
   ): void {
     const s = owned(session);
-    if (phase === null) s.messagePhases.delete(itemId);
-    else s.messagePhases.set(itemId, phase);
+    const retained = s.messages.some((message: any) => message?.id === itemId);
+    if (phase === null || !retained) s.messagePhases.delete(itemId);
+    else {
+      s.messagePhases.delete(itemId);
+      s.messagePhases.set(itemId, phase);
+      while (s.messagePhases.size > 256) s.messagePhases.delete(s.messagePhases.keys().next().value!);
+    }
+  }
+  /** Возвращает lifecycle сообщения только для ID, удерживаемых владельцем. */
+  function messageLifecycle(session: Session, itemId: string): "unknown" | "open" | "closed" {
+    const s = owned(session);
+    if (!s.messages.some((message: any) => message?.id === itemId)) return "unknown";
+    return s.itemLifecycles.get(itemId) ?? "unknown";
+  }
+  /** Фиксирует начало или завершение native item lifecycle в bounded owner state. */
+  function setMessageLifecycle(session: Session, itemId: string, lifecycle: "open" | "closed"): void {
+    const s = owned(session);
+    if (!s.messages.some((message: any) => message?.id === itemId)) return;
+    s.itemLifecycles.delete(itemId);
+    s.itemLifecycles.set(itemId, lifecycle);
+    while (s.itemLifecycles.size > 256) s.itemLifecycles.delete(s.itemLifecycles.keys().next().value!);
+  }
+  /** Отмечает сокращение ограниченной проекции для последующего snapshot. */
+  function markTruncated(session: Session, reason: "byte-budget" | "item-limit" | "upstream-limit"): void {
+    const s = owned(session);
+    s.truncated = true;
+    s.truncationReason = reason;
   }
   /** Добавляет безопасную проекцию трассы в ограниченный хвост сеанса. */
   function appendTrace(session: Session, item: unknown): void {
     const s = owned(session);
-    s.trace.push(item);
-    if (s.trace.length > 200) s.trace.splice(0, s.trace.length - 200);
+    const safe = item && typeof item === "object" ? structuredClone(item) as any : item;
+    if (safe && Buffer.byteLength(JSON.stringify(safe), "utf8") > 4096 && typeof safe.content === "string") {
+      safe.content = truncateUtf8(safe.content, 4096);
+      safe.truncated = true;
+      s.truncated = true;
+      s.truncationReason = "byte-budget";
+    }
+    if (safe?.trace && typeof safe.trace.output === "string" && Buffer.byteLength(safe.trace.output, "utf8") > 64 * 1024) {
+      safe.trace.output = truncateUtf8(safe.trace.output, 64 * 1024);
+      safe.truncated = true;
+      s.truncated = true;
+      s.truncationReason = "byte-budget";
+    }
+    s.trace.push(safe);
+    if (s.trace.length > 200) {
+      s.trace.splice(0, s.trace.length - 200);
+      s.truncated = true;
+      s.truncationReason = "item-limit";
+    }
+    while (s.trace.length > 1 && Buffer.byteLength(JSON.stringify(s.trace), "utf8") > 128 * 1024) { s.trace.splice(0, 1); s.truncated = true; s.truncationReason = "byte-budget"; }
   }
   /** Увеличивает seq после атомарного применения проекционного изменения. */
   function nextSeq(session: Session): number {
     const s = owned(session);
+    if (s.seq >= Number.MAX_SAFE_INTEGER) {
+      s.streamEpoch = randomUUID();
+      s.seq = 0;
+      s.messagePhases.clear();
+      s.itemLifecycles.clear();
+    }
     s.seq++;
     return s.seq;
   }
@@ -381,10 +522,12 @@ export function createState(
       seq: s.seq,
       state: s.connectionLost
         ? "connection-lost"
-        : s.active
-          ? "working"
-          : s.pending.size > 0
-            ? "waiting"
+        : s.requestStorageFailed
+          ? "executor-unavailable"
+        : s.pending.size > 0
+          ? "waiting"
+          : s.active
+            ? "working"
           : s.turnStatus === "completed"
             ? "completed"
             : s.turnStatus === "interrupted"
@@ -395,7 +538,7 @@ export function createState(
       messages: s.messages,
       messagePhases,
       pendingRequests: pendingView(s),
-      truncation: { truncated: false, reason: "none" },
+      truncation: { truncated: s.truncated, reason: s.truncated ? s.truncationReason : "none" },
       activeTurnId: s.activeTurnId,
       turnStatus: s.turnStatus,
       traceItems: s.trace,
@@ -420,10 +563,13 @@ export function createState(
         : { requestId: f.requestId, kind: f.kind, params: f.params },
     );
   }
-  function observe(e: CodexObservation): void {
+  function observe(e: CodexObservation): StateChange {
+    const closedRequestIds: string[] = [];
     if (e.type === "connection") {
+      const previousGeneration = generation;
       syncGeneration(e.status.generation);
-      if (e.status.connection === "connected")
+      const generationChanged = Boolean(previousGeneration && e.status.generation && previousGeneration !== e.status.generation);
+      if (e.status.connection === "connected" && !generationChanged)
         for (const s of sessions.values()) s.connectionLost = false;
       if (e.status.connection === "disconnected") {
         activeCount = 0;
@@ -435,13 +581,13 @@ export function createState(
           s.opened = false;
         }
       }
-      return;
+      return { closedRequestIds, generationChanged };
     }
     const p = e.params;
     const thread = typeof p.threadId === "string" ? p.threadId : null;
-    if (!thread) return;
+    if (!thread) return { closedRequestIds };
     const s = [...sessions.values()].find((x) => x.threadId === thread);
-    if (!s) return;
+    if (!s) return { closedRequestIds };
     s.revision++;
     if (e.type === "notification") {
       const turn =
@@ -464,13 +610,20 @@ export function createState(
         finishTurn(s, result);
         s.turnStatus = result;
         s.activeTurnId = null;
+        for (const id of s.pending.keys()) {
+          closedRequestIds.push(id);
+          removePending(s, id);
+        }
       }
       if (
         e.method === "serverRequest/resolved" &&
         (typeof p.requestId === "string" || typeof p.requestId === "number")
       ) {
         const f = [...s.pending.values()].find((x) => x.rawId === p.requestId);
-        if (f) removePending(s, f.requestId);
+        if (f) {
+          closedRequestIds.push(f.requestId);
+          removePending(s, f.requestId);
+        }
       }
       if (
         (e.method === "item/started" || e.method === "item/completed") &&
@@ -478,14 +631,8 @@ export function createState(
         typeof p.item === "object"
       ) {
         const item = p.item as Record<string, unknown>;
-        if (
-          item.type === "agentMessage" &&
-          typeof item.id === "string" &&
-          typeof item.phase === "string"
-        )
-          s.messagePhases.set(item.id, item.phase);
       }
-      return;
+      return { session: s, closedRequestIds };
     }
     const kind =
       e.method === "item/commandExecution/requestApproval"
@@ -499,31 +646,110 @@ export function createState(
               : null;
     const bytes = Buffer.byteLength(JSON.stringify(e.params));
     const supported = e.supported && kind !== null && bytes <= 32768;
-    addPending(
-      s,
-      supported
-        ? {
-            requestId: randomUUID(),
-            rawId: e.id,
-            method: e.method,
-            kind,
-            params: e.params,
-            bytes,
-            decision: false,
-          }
-        : {
-            requestId: randomUUID(),
-            rawId: e.id,
-            method: e.method,
-            kind: "unsupported",
-            params: {},
-            bytes: Math.min(bytes, 128),
-            decision: false,
-            reason: bytes > 32768 ? "oversized" : "unknown-method",
-          },
-    );
+    const form: PendingForm = supported
+      ? {
+          requestId: randomUUID(),
+          rawId: e.id,
+          method: e.method,
+          kind,
+          params: e.params,
+          bytes,
+          decision: false,
+        }
+      : {
+          requestId: randomUUID(),
+          rawId: e.id,
+          method: e.method,
+          kind: "unsupported",
+          params: {},
+          bytes: Math.min(bytes, 128),
+          decision: false,
+          reason: bytes > 32768 ? "oversized" : "unknown-method",
+        };
+    const existing = [...s.pending.values()].find((item) => item.rawId === e.id);
+    if (addPending(s, form)) return { session: s, closedRequestIds, openedRequestId: existing?.requestId ?? form.requestId };
+    if (!existing) {
+      // Keep the request visible even when bounded storage cannot retain its payload.
+      s.requestStorageFailed = true;
+    }
+    return { session: s, closedRequestIds };
   }
-  return {
+
+  /** Проверяет immutable generation/epoch handle перед поздней записью. */
+  function isCurrent(session: Session, epoch = session.streamEpoch): boolean {
+    const current = sessions.get(key(session.projectId, session.threadId));
+    return current === session && current.generation === generation && current.streamEpoch === epoch;
+  }
+
+  /** Добавляет или заменяет сообщение с исходным upstream item ID. */
+  function upsertMessage(session: Session, message: unknown): void {
+    const s = owned(session);
+    const id = (message as { id?: unknown })?.id;
+    const index = typeof id === "string" ? s.messages.findIndex((item: any) => item?.id === id) : -1;
+    if (index < 0) appendMessage(session, message);
+    else {
+      const [old] = s.messages.splice(index, 1);
+      appendMessage(session, message);
+      const updated = s.messages.findIndex((item: any) => item?.id === id);
+      if (updated >= 0 && updated !== index) {
+        const [value] = s.messages.splice(updated, 1);
+        s.messages.splice(Math.min(index, s.messages.length), 0, value);
+      } else if (updated < 0 && typeof (old as any)?.id === "string") s.messagePhases.delete((old as any).id);
+    }
+  }
+
+  /** Добавляет native agent delta в bounded сообщение и сохраняет размер исходника. */
+  function appendMessageDelta(session: Session, itemId: string, delta: string): { message: unknown; delta: string; contentBytes: number; truncated: boolean; replacement: boolean } {
+    const s = owned(session);
+    const index = s.messages.findIndex((item: any) => item?.id === itemId);
+    const previous = index >= 0 && typeof (s.messages[index] as any)?.content === "string" ? (s.messages[index] as any).content as string : "";
+    const oldBytes = s.messageSourceBytes.get(itemId) ?? Buffer.byteLength(previous, "utf8");
+    const contentBytes = oldBytes + Buffer.byteLength(delta, "utf8");
+    let content = previous;
+    let accepted = "";
+    let replacement = false;
+    const wasTruncated = s.messageTruncated.has(itemId);
+    let truncated = wasTruncated;
+    if (!truncated) {
+      const bounded = boundedUtf8(previous + delta, 64 * 1024);
+      content = bounded.text;
+      truncated = bounded.truncated;
+      replacement = bounded.truncated && !content.startsWith(previous);
+      const marker = "\n[содержимое сокращено]";
+      const appendable = bounded.truncated ? content.slice(0, -marker.length) : content;
+      const room = Math.max(0, Buffer.byteLength(appendable, "utf8") - Buffer.byteLength(previous, "utf8"));
+      let acceptedBytes = 0;
+      for (const point of delta) {
+        const pointBytes = Buffer.byteLength(point, "utf8");
+        if (acceptedBytes + pointBytes > room) break;
+        acceptedBytes += pointBytes;
+        accepted += point;
+      }
+      if (bounded.truncated) accepted += marker;
+    }
+    upsertMessage(session, { id: itemId, role: "assistant", content });
+    s.messageSourceBytes.set(itemId, contentBytes);
+    if (truncated) { s.messageTruncated.add(itemId); s.truncated = true; s.truncationReason = "byte-budget"; }
+    return { message: s.messages.find((item: any) => item?.id === itemId), delta: accepted, contentBytes, truncated, replacement };
+  }
+
+  /** Заменяет проекционную запись трассы по item ID. */
+  function upsertTrace(session: Session, item: unknown): void {
+    const s = owned(session);
+    const id = (item as { itemId?: unknown })?.itemId;
+    const index = typeof id === "string" ? s.trace.findIndex((current: any) => current?.itemId === id) : -1;
+    if (index < 0) appendTrace(session, item);
+    else {
+      s.trace.splice(index, 1);
+      appendTrace(session, item);
+      const updated = s.trace.findIndex((entry: any) => entry?.itemId === id);
+      if (updated >= 0 && updated !== index) {
+        const [value] = s.trace.splice(updated, 1);
+        s.trace.splice(Math.min(index, s.trace.length), 0, value);
+      }
+    }
+  }
+  const owner = {
     get,
     put,
     runOperation,
@@ -543,6 +769,14 @@ export function createState(
     setOpening,
     view,
     pendingView,
+    values: () => [...sessions.values()] as readonly Session[],
+    isCurrent,
+    upsertMessage,
+    appendMessageDelta,
+    upsertTrace,
+    messageLifecycle,
+    setMessageLifecycle,
+    markTruncated,
     observe,
     syncGeneration,
     generation: effectiveGeneration,
@@ -554,4 +788,5 @@ export function createState(
     findThread: (threadId: string) =>
       [...sessions.values()].find((s) => s.threadId === threadId),
   };
+  return owner;
 }

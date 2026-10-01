@@ -194,6 +194,18 @@ test("same immutable operation id shares one Codex effect; changed body conflict
   );
 });
 
+test("thread snapshot returned by application stays immutable across native observations", async () => {
+  const codex = port();
+  const app = appPort(codex);
+  connected(codex);
+  const snapshot = await app.thread({ projectId: "p", threadId: "t" });
+  codex.emit({ type: "notification", method: "item/started", params: { threadId: "t", turnId: "turn-snapshot", item: { id: "message-snapshot", type: "agentMessage", text: "" } } });
+  codex.emit({ type: "notification", method: "item/agentMessage/delta", params: { threadId: "t", turnId: "turn-snapshot", itemId: "message-snapshot", delta: "later" } });
+  assert.deepEqual(snapshot.messages, []);
+  assert.equal(snapshot.seq, 0);
+  app.close();
+});
+
 test("a simultaneous distinct start cannot reserve the same thread twice", async () => {
   let release;
   const codex = port({
