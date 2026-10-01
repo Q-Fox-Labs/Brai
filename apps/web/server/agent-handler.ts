@@ -1,7 +1,8 @@
 // ABOUTME: Собирает реальное HTTP поведение шлюза agent на injected ports.
 // ABOUTME: Проверяет Origin и сессию до owner request; тестам не нужен NATS.
 import { limits } from "@brai/agent/contracts";
-import type { AgentOperation } from "./agent-gateway";
+import { AgentGatewayError, agentError, agentErrorResponse } from "./agent-gateway.ts";
+import type { AgentOperation } from "./agent-gateway.ts";
 
 export type HandlerSession = { session: { id: string }; user: { id: string } };
 export type HandlerDependencies = {
@@ -11,6 +12,24 @@ export type HandlerDependencies = {
   eventStream: (request: Request, session: HandlerSession, path: string[]) => Promise<Response>;
   failure: (error: unknown, mutation: boolean) => Response;
 };
+
+/** Создаёт общий mapper для auth отказов, owner errors и некорректного HTTP ввода. */
+export function createAgentFailureMapper(isAuthError: (error: unknown) => boolean) {
+  return (error: unknown, mutation: boolean): Response => {
+    if (isAuthError(error)) {
+      const status = error && typeof error === "object" && "status" in error ? Number(error.status) : 503;
+      const code = error && typeof error === "object" && "code" in error ? String(error.code) : "AUTH_UNAVAILABLE";
+      if (status === 401 || status === 403) return Response.json({ code }, { status, headers: { "Cache-Control": "no-store" } });
+      return agentErrorResponse(agentError(503, "UPSTREAM_UNAVAILABLE", mutation ? "not-sent" : "query"));
+    }
+    if (error instanceof AgentGatewayError) return agentErrorResponse(error);
+    const detail = error && typeof error === "object" ? error as { status?: number; code?: string } : {};
+    const knownCodes = ["INVALID_ARGUMENT", "STALE_GENERATION", "OPERATION_CONFLICT", "REQUEST_TOO_LARGE", "ITEM_TOO_LARGE", "CAPACITY_EXHAUSTED", "UPSTREAM_UNAVAILABLE", "TIMEOUT", "NOT_FOUND", "UNSUPPORTED", "STALE_REQUEST"];
+    const code = knownCodes.includes(detail.code ?? "") ? detail.code as "INVALID_ARGUMENT" : detail.status === 413 ? "REQUEST_TOO_LARGE" : detail.status === 404 ? "NOT_FOUND" : detail.status === 400 || detail.status === 415 ? "INVALID_ARGUMENT" : "UPSTREAM_UNAVAILABLE";
+    const status = detail.status === 415 ? 400 : detail.status ?? 503;
+    return agentErrorResponse(agentError(status, code, mutation ? "not-sent" : "query"));
+  };
+}
 
 /** Создаёт GET/POST обработчики, инъецируя auth и NATS порты для изолированных проверок. */
 export function createAgentHttpHandlers(deps: HandlerDependencies) {

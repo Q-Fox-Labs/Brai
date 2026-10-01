@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createAgentRequester, AgentGatewayError, AgentTransportError } from "../server/agent-gateway.ts";
-import { createAgentHttpHandlers } from "../server/agent-handler.ts";
+import { createAgentFailureMapper, createAgentHttpHandlers } from "../server/agent-handler.ts";
 
 const generation = "00000000-0000-4000-8000-000000000001";
 const start = { projectId: "brai", threadId: "thread", generation, operationId: "op-1", text: "hi" };
@@ -44,6 +44,27 @@ test("Origin 403 and session 401 both stop a mutation before its owner call", as
   const authHandler = createAgentHttpHandlers({ authorize: async () => { throw Object.assign(new Error("session"), { status: 401, code: "UNAUTHORIZED" }); }, checkOrigin: () => {}, request: async () => { sent = true; return accepted; }, eventStream: async () => new Response(), failure: rejected });
   assert.equal((await authHandler.post(new Request("https://example.test/api/agent/turns/start", options), ["turns", "start"])).status, 401);
   assert.equal(sent, false);
+});
+
+test("auth backend 503 maps to owner errors and never calls agent NATS", async () => {
+  let ownerCalls = 0;
+  const authUnavailable = () => Object.assign(new Error("auth unavailable"), { status: 503, code: "AUTH_UNAVAILABLE" });
+  const isAuthFailure = (error: unknown) => error instanceof Error && "code" in error && error.code === "AUTH_UNAVAILABLE";
+  const failure = createAgentFailureMapper(isAuthFailure);
+  const handlers = createAgentHttpHandlers({
+    authorize: async () => { throw authUnavailable(); }, checkOrigin: () => {}, request: async () => { ownerCalls++; return {}; },
+    eventStream: async () => new Response(), failure,
+  });
+  const post = await handlers.post(new Request("https://example.test/api/agent/turns/start", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(start),
+  }), ["turns", "start"]);
+  assert.equal(post.status, 503);
+  assert.deepEqual(await post.json(), { code: "UPSTREAM_UNAVAILABLE", outcome: "not-sent" });
+
+  const get = await handlers.get(new Request("https://example.test/api/agent/projects"), ["projects"]);
+  assert.equal(get.status, 503);
+  assert.deepEqual(await get.json(), { code: "UPSTREAM_UNAVAILABLE", outcome: "query" });
+  assert.equal(ownerCalls, 0);
 });
 
 test("validates exact DTO before one request and validates the owner response", async () => {

@@ -2,29 +2,14 @@
 // ABOUTME: Auth gate остаётся отдельным от owner ErrorResponse agent.
 import { checkOrigin, requireTimerSession } from "./auth";
 import { GatewayError } from "./gateway";
-import { AgentGatewayError, agentError, agentErrorResponse, agentRequest } from "./agent-gateway";
+import { agentError, agentErrorResponse, agentRequest } from "./agent-gateway";
 import { agentEventStream } from "./agent-hub";
 import { agentRuntime } from "./agent-runtime";
-import { createAgentHttpHandlers, type HandlerSession } from "./agent-handler";
+import { createAgentFailureMapper, createAgentHttpHandlers, type HandlerSession } from "./agent-handler";
 import { validateDto } from "@brai/agent/contracts";
 import type { ThreadSnapshot } from "@brai/agent/contracts";
 
-const noStore = { "Cache-Control": "no-store" };
-
-function failure(error: unknown, mutation: boolean): Response {
-  if (error instanceof GatewayError) {
-    if (error.status === 401 || error.status === 403) return Response.json({ code: error.code }, { status: error.status, headers: noStore });
-    if (error.status >= 500) return Response.json({ code: error.code }, { status: error.status, headers: noStore });
-    const status = error.status === 413 ? 413 : error.status === 415 ? 400 : 400;
-    return Response.json({ code: status === 413 ? "REQUEST_TOO_LARGE" : "INVALID_ARGUMENT", outcome: mutation ? "not-sent" : "query" }, { status, headers: noStore });
-  }
-  if (error instanceof AgentGatewayError) return agentErrorResponse(error);
-  const detail = error && typeof error === "object" ? error as { status?: number; code?: string } : {};
-  const knownCodes = ["INVALID_ARGUMENT", "STALE_GENERATION", "OPERATION_CONFLICT", "REQUEST_TOO_LARGE", "ITEM_TOO_LARGE", "CAPACITY_EXHAUSTED", "UPSTREAM_UNAVAILABLE", "TIMEOUT", "NOT_FOUND", "UNSUPPORTED", "STALE_REQUEST"];
-  const code = knownCodes.includes(detail.code ?? "") ? detail.code as "INVALID_ARGUMENT" : detail.status === 413 ? "REQUEST_TOO_LARGE" : detail.status === 404 ? "NOT_FOUND" : detail.status === 400 || detail.status === 415 ? "INVALID_ARGUMENT" : "UPSTREAM_UNAVAILABLE";
-  const status = detail.status === 415 ? 400 : detail.status ?? 503;
-  return agentErrorResponse(agentError(status, code, mutation ? "not-sent" : "query"));
-}
+const failure = createAgentFailureMapper(error => error instanceof GatewayError);
 
 const handlers = createAgentHttpHandlers({
   authorize: (request, eventStream = false) => requireTimerSession(request, eventStream),
