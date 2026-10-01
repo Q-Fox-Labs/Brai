@@ -71,6 +71,61 @@ async function selectedClient(fetcher = baseFetch().fetcher) {
 
 async function tick() { await new Promise(resolve => setImmediate(resolve)); }
 
+test("initial project selection loads the default when no manual selection has begun", async () => {
+  const client = makeClient();
+  await client.getProjects();
+  await client.selectInitialProject("brai");
+  assert.equal(client.getState().selectedProjectId, "brai");
+  assert.equal(client.getState().threads.length, 1);
+  await client.dispose();
+});
+
+test("late status bootstrap preserves the manually selected thread, live SSE and terminal", async () => {
+  let releaseStatus!: (response: Response) => void;
+  const status = new Promise<Response>(resolve => { releaseStatus = resolve; });
+  const wire = baseFetch({ mutation: () => Response.json({ generation, operationId: "operation-1", threadId: "thread", outcome: "accepted", turnId: "turn-1" }, { status: 202 }) });
+  const sources: FakeEventSource[] = [];
+  const client = makeClient((input, init) => String(input).endsWith("/status") ? status : wire.fetcher(input, init), sources);
+  const bootstrap = Promise.allSettled([client.getProjects(), client.getStatus()]).then(async results => {
+    if (results[0].status === "fulfilled") await client.selectInitialProject(results[0].value.projects[0].projectId);
+  });
+  await tick();
+  assert.equal(client.getState().projects.length, 1);
+  await client.selectProject("brai");
+  await client.selectThread("brai", "thread");
+  const source = sources[0];
+  source.emit("snapshot", snapshot());
+  await tick();
+  client.setDraft("work");
+  assert.equal((await client.submitDraft()).outcome, "accepted");
+  source.emit("agent", envelope(1, { type: "RUN_STARTED", threadId: "thread", runId: "turn-1" }, { turnId: "turn-1" }));
+  await tick();
+  releaseStatus(Response.json({ generation, ready: true, connection: "connected", authorization: "ready" }));
+  await bootstrap;
+  assert.equal(client.getState().selectedThreadId, "thread");
+  assert.equal(client.getState().threadStatus, "working");
+  assert.equal(client.getState().activeTurnId, "turn-1");
+  assert.equal(source.closed, false);
+  source.emit("agent", envelope(2, { type: "RUN_FINISHED", threadId: "thread", runId: "turn-1", outcome: { type: "success" } }, { turnId: "turn-1" }));
+  await tick();
+  assert.equal(client.getState().threadStatus, "completed");
+  assert.equal(client.getState().activeTurnId, null);
+  assert.equal(source.closed, false);
+  assert.equal(wire.calls(), 1);
+  await client.dispose();
+});
+
+test("initial selection cannot overtake manual selection awaiting detach before project dispatch", async () => {
+  const client = makeClient();
+  const manual = client.selectProject("brai");
+  assert.equal(client.getState().selectedProjectId, null);
+  assert.equal(await client.selectInitialProject("default"), null);
+  await manual;
+  assert.equal(client.getState().selectedProjectId, "brai");
+  assert.equal(client.getState().threads.length, 1);
+  await client.dispose();
+});
+
 test("reducer replaces authoritative snapshots, ignores duplicate seq, and reports gaps to its caller", () => {
   let state = reduceAgentState(initialAgentClientState(), { type: "thread", value: snapshot({ seq: 4, messages: [{ id: "m", role: "assistant", content: "snapshot" }] }) });
   state = reduceAgentState(state, { type: "event", value: envelope(5, { type: "RUN_STARTED", threadId: "thread", runId: "turn" }, { turnId: "turn" }) });

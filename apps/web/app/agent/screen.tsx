@@ -43,7 +43,7 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
       if (!mounted) return;
       if (results[0].status === "fulfilled") {
         const first = results[0].value.projects.find(project => project.available);
-        if (first) await instance.selectProject(first.projectId).catch(error => { if (mounted) setReadMessage(errorText(error)); });
+        if (first) await instance.selectInitialProject(first.projectId).catch(error => { if (mounted) setReadMessage(errorText(error)); });
       } else setReadMessage(errorText(results[0].reason));
       if (mounted && results[1].status === "rejected") setReadMessage(errorText(results[1].reason));
     });

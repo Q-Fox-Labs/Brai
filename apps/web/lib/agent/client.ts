@@ -419,6 +419,15 @@ export function createAgentClient(options: AgentClientOptions) {
     return state.selectedProjectId === target.projectId && state.selectedThreadId === target.threadId && state.generation === target.generation;
   }
 
+  async function selectProject(projectId: string) {
+    const token = ++selectionToken;
+    stopStream();
+    await detachFeed();
+    if (token !== selectionToken || disposed) return null;
+    dispatch({ type: "project", value: projectId });
+    return loadThreads(projectId, undefined, token);
+  }
+
   return {
     /** Возвращает неизменяемое состояние для чтения; обновления доступны через подписку. */
     getState: () => state,
@@ -445,14 +454,12 @@ export function createAgentClient(options: AgentClientOptions) {
       return value;
     },
     /** Выбирает проект и загружает первую страницу его чатов. */
-    async selectProject(projectId: string) {
-      selectionToken += 1;
-      const token = selectionToken;
-      stopStream();
-      await detachFeed();
-      if (token !== selectionToken || disposed) return null;
-      dispatch({ type: "project", value: projectId });
-      return loadThreads(projectId, undefined, token);
+    selectProject,
+    /** Выбирает стартовый проект только до первого явного выбора пользователя. */
+    async selectInitialProject(projectId: string) {
+      // AIDEV-NOTE: Ручной выбор меняет token до await detach, когда state ещё может быть пустым.
+      if (selectionToken !== 0 || disposed) return null;
+      return selectProject(projectId);
     },
     /** Загружает следующую страницу чатов выбранного проекта. */
     async loadMoreThreads() {
