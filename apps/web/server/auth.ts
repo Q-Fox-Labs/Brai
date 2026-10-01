@@ -42,8 +42,12 @@ export async function authRequest(request: Request, operation: "send-code" | "ve
 /** Возвращает проверенную текущую сессию; отсутствие или сбой запрещают доступ. */
 export async function requireSession(request: Request): Promise<Session> {
  const reply = await authRequest(request, "session");
+ if (reply.status !== 200) {
+  if (reply.status === 401 || reply.status === 403) throw new GatewayError(401, "UNAUTHORIZED", "not-published");
+  throw new GatewayError(503, "AUTH_UNAVAILABLE", "not-published");
+ }
  const value = reply.body as Session | null;
- if (reply.status !== 200 || !value?.user?.id || !value.session?.id || value.session.userId !== value.user.id || !(Date.parse(value.session.expiresAt) > Date.now())) throw new GatewayError(401, "UNAUTHORIZED", "not-published");
+ if (!value?.user?.id || !value.session?.id || value.session.userId !== value.user.id || !(Date.parse(value.session.expiresAt) > Date.now())) throw new GatewayError(401, "UNAUTHORIZED", "not-published");
  return value;
 }
 /** Проксирует JSON auth с отдельной обработкой всех Set-Cookie; не возвращает сессионный token. */
