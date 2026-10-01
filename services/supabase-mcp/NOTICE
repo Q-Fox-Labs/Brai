@@ -1,0 +1,17 @@
+Brai Supabase MCP
+
+Selected PostgreSQL metadata SQL is adapted from Supabase MCP
+https://github.com/supabase/mcp
+Commit: 641ed1ef09dbd0597dd53e763ab80c7a1209e0c3
+License: Apache License 2.0 (see LICENSE.supabase)
+
+Sources:
+packages/mcp-server-supabase/src/pg-meta/tables.sql
+packages/mcp-server-supabase/src/pg-meta/columns.sql
+packages/mcp-server-supabase/src/pg-meta/extensions.sql
+
+Changes in src/metadata.ts: explicit parameterized schema filtering; cumulative
+verbosity; selected column fields; primary-key ordering and INCLUDE exclusion;
+correlated metadata aggregates; bounded output handled by the local driver.
+The extension query preserves upstream fields and joins, adding stable ordering.
+Cloud adapters and Management API wrappers are not included.

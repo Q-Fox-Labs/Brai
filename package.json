@@ -13,8 +13,8 @@
     "typecheck:web": "npm run typecheck --workspace=@brai/web",
     "typecheck:timer": "npm run typecheck --workspace=@brai/timer",
     "typecheck:agent": "npm run typecheck --workspace=@brai/agent",
-    "build": "npm run build:web && npm run build:timer && npm run build:auth && npm run build:agent",
-    "typecheck": "npm run typecheck:web && npm run typecheck:timer && npm run typecheck:auth && npm run typecheck:agent",
+    "build": "npm run build:web && npm run build:timer && npm run build:auth && npm run build:agent && npm run build:supabase-mcp",
+    "typecheck": "npm run typecheck:web && npm run typecheck:timer && npm run typecheck:auth && npm run typecheck:agent && npm run typecheck:supabase-mcp",
     "lint": "npm run lint --workspaces --if-present",
     "test:web": "npm test --workspace=@brai/web",
     "build:auth": "npm run build --workspace=@brai/auth",
@@ -28,7 +28,11 @@
     "typecheck:contracts": "npm run typecheck:contracts --workspace=@brai/agent",
     "check:contracts": "npm run check:contracts --workspace=@brai/agent",
     "generate:codex-contract": "npm run generate:codex-contract --workspace=@brai/agent --",
-    "test": "npm test --workspaces --if-present"
+    "test": "npm test --workspaces --if-present",
+    "build:supabase-mcp": "npm run build --workspace=@brai/supabase-mcp",
+    "typecheck:supabase-mcp": "npm run typecheck --workspace=@brai/supabase-mcp",
+    "test:supabase-mcp": "npm test --workspace=@brai/supabase-mcp",
+    "test:integration:supabase-mcp": "npm run test:integration --workspace=@brai/supabase-mcp"
   },
   "engines": {
     "node": "24.21.0",

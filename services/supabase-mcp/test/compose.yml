@@ -1,0 +1,28 @@
+# ABOUTME: Предоставляет переносимый PostgreSQL-стенд интеграционных тестов MCP.
+# ABOUTME: Синтетические данные хранятся в tmpfs; порты доступны только на loopback.
+name: brai-supabase-mcp-test
+services:
+  postgres-a:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    command: [postgres, -c, max_connections=16]
+    ports: ["127.0.0.1:25431:5432"]
+    tmpfs: ["/var/lib/postgresql/data:rw,size=6g"]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+  postgres-b:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    command: [postgres, -c, max_connections=16]
+    ports: ["127.0.0.1:25432:5432"]
+    tmpfs: ["/var/lib/postgresql/data:rw,size=1g"]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
