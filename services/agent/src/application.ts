@@ -221,7 +221,7 @@ export function createApplication(options: ApplicationOptions) {
           fail("INVALID_ARGUMENT");
         s = await state.admit(projectId, threadId, p.cwd);
       }
-      const bootstrapRevision = s.revision;
+      const bootstrapTurnLifecycleRevision = s.turnLifecycleRevision;
       const epoch = s.streamEpoch;
       state.setOpening(s, true);
       try {
@@ -252,7 +252,7 @@ export function createApplication(options: ApplicationOptions) {
           typeof resumed.model === "string" ? resumed.model : null,
           confirmedActive ? turn!.id : null,
           turn?.status ?? null,
-          bootstrapRevision,
+          bootstrapTurnLifecycleRevision,
           canAccept,
           confirmedActive,
         );

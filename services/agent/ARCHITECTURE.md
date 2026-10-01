@@ -1,10 +1,13 @@
+<!-- ABOUTME: Описывает внутренние модули программы agent и их владельцев. -->
+<!-- ABOUTME: Не заменяет DTO, RPC или NATS контракты. -->
+
 # Модули программы agent
 
 Публичная граница закреплена в [README](README.md), DTO и AsyncAPI. Здесь описаны обычные вызовы внутри одной программы, без внутреннего RPC.
 
 ## Владельцы и порты
 
-`state.ts` единолично владеет загруженными сеансами, active turn, pending requests, журналом неизменяемых операций и границей generation/streamEpoch/seq. История принадлежит Codex; состояние не содержит второго постоянного журнала. `projection.ts` преобразует наблюдения и меняет проекцию только через функции владельца состояния.
+`state.ts` единолично владеет загруженными сеансами, active turn, pending requests, журналом неизменяемых операций и границей generation/streamEpoch/seq. История принадлежит Codex; состояние не содержит второго постоянного журнала. `turnLifecycleRevision` меняется только при записи владельцем active turn, его ID или terminal status. Bootstrap применяет native lifecycle только при неизменном счётчике; вопросы, разрешения и содержимое элементов сохраняются независимо. Подтверждение active требует одновременно native `thread.status=active` и последнего `turn.status=inProgress`. `projection.ts` преобразует наблюдения и меняет проекцию только через функции владельца состояния.
 
 `ports.ts` задаёт `CodexPort`: `connect()`, `call(method, params, {mutation, timeoutMs})`, `respond(rawRequestId, answer)`, `subscribe(listener)`, `status()` и `close()`. Вызовы возвращают Promise; подписка возвращает функцию отключения. Наблюдение различает notification, request и connection. RPC ID остаётся строкой или числом upstream. Ошибка содержит безопасные code/outcome и факт отправки; транспорт никогда не повторяет мутацию. `status()` возвращает только generation, connection и authorization, без upstream account.
 

@@ -38,7 +38,8 @@ type SessionData = {
   messageTruncated: Set<string>;
   streamEpoch: string;
   seq: number;
-  revision: number;
+  // AIDEV-NOTE: Меняется только при записи lifecycle; текст и формы не блокируют bootstrap.
+  turnLifecycleRevision: number;
   activeTurnId: string | null;
   turnStatus: "completed" | "interrupted" | "failed" | "inProgress" | null;
   canAcceptDirectInput: boolean | null;
@@ -131,7 +132,7 @@ export function createState(
     return {
       projectId, threadId, cwd, generation: effectiveGeneration(), model: null, knownNew: false,
       messagePhases: new Map(), itemLifecycles: new Map(), messageSourceBytes: new Map(), messageTruncated: new Set(),
-      streamEpoch: randomUUID(), seq: 0, revision: 0, activeTurnId: null, turnStatus: null, canAcceptDirectInput: null, truncated: false,
+      streamEpoch: randomUUID(), seq: 0, turnLifecycleRevision: 0, activeTurnId: null, turnStatus: null, canAcceptDirectInput: null, truncated: false,
       truncationReason: "none", opened: false, connectionLost: false, requestStorageFailed: false, active: false,
       pending: new Map(), messages: [], trace: [], lastUsed: Date.now(), opening: null,
     };
@@ -286,7 +287,7 @@ export function createState(
         requestStorageFailed: false,
         streamEpoch: randomUUID(),
         seq: 0,
-        revision: 0,
+        turnLifecycleRevision: 0,
         opening: null,
       });
     }
@@ -308,6 +309,7 @@ export function createState(
         outcome: "not-sent",
       });
     s.active = true;
+    s.turnLifecycleRevision++;
     activeCount++;
   }
   function finishTurn(
@@ -317,6 +319,7 @@ export function createState(
     const s = owned(session);
     if (!s.active) return;
     s.active = false;
+    s.turnLifecycleRevision++;
     activeCount = Math.max(0, activeCount - 1);
     if (state !== "completed") s.activeTurnId = null;
   }
@@ -442,6 +445,7 @@ export function createState(
   function setTurnId(session: Session, turnId: string | null): void {
     const s = owned(session);
     s.activeTurnId = turnId;
+    s.turnLifecycleRevision++;
   }
   /** Добавляет проекционное сообщение и удаляет метаданные вытесненного ID. */
   function appendMessage(session: Session, message: unknown): void {
@@ -580,17 +584,18 @@ export function createState(
     s.seq++;
     return s.seq;
   }
+  /** Применяет lifecycle снимка только если во время bootstrap не было более новой записи владельца. */
   function setOpened(
     session: Session,
     model: string | null,
     activeTurnId: string | null,
     status: Session["turnStatus"],
-    revision: number,
+    turnLifecycleRevision: number,
     canAcceptDirectInput: boolean | null,
     confirmedActive: boolean,
   ): void {
     const s = owned(session);
-    const liveChanged = s.revision !== revision;
+    const liveChanged = s.turnLifecycleRevision !== turnLifecycleRevision;
     const wasActive = s.active;
     s.model = model;
     s.canAcceptDirectInput = canAcceptDirectInput;
@@ -598,6 +603,7 @@ export function createState(
       s.activeTurnId = activeTurnId;
       s.turnStatus = status;
       s.active = confirmedActive;
+      s.turnLifecycleRevision++;
     }
     s.opened = true;
     s.connectionLost = false;
@@ -688,6 +694,7 @@ export function createState(
           for (const id of s.pending.keys()) removePending(s, id);
           s.active = false;
           s.activeTurnId = null;
+          s.turnLifecycleRevision++;
           s.connectionLost = true;
           s.opened = false;
         }
@@ -699,19 +706,20 @@ export function createState(
     if (!thread) return { closedRequestIds };
     const s = [...sessions.values()].find((x) => x.threadId === thread);
     if (!s) return { closedRequestIds };
-    s.revision++;
     if (e.type === "notification") {
       const turn =
         p.turn && typeof p.turn === "object"
           ? (p.turn as Record<string, unknown>)
           : {};
       if (e.method === "turn/started" && typeof turn.id === "string") {
+        s.turnLifecycleRevision++;
         if (!s.active && activeCount < 4) activeCount++;
         s.activeTurnId = turn.id;
         s.active = true;
         s.turnStatus = "inProgress";
       }
       if (e.method === "turn/completed") {
+        if (!s.active) s.turnLifecycleRevision++;
         const result =
           turn.status === "interrupted"
             ? "interrupted"

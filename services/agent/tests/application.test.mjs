@@ -440,6 +440,158 @@ test("live turn event during open bootstrap is not overwritten by stale turn met
   assert.equal(snapshot.activeTurnId, "turn-live");
 });
 
+test("a blocking question during bootstrap keeps the native active turn and one pending request", async () => {
+  let release;
+  const codex = port({
+    "thread/resume": async () => valid("ThreadResumeResponse", {
+      ...startFixture(),
+      thread: { ...threadFixture(), status: { type: "active", activeFlags: [] }, canAcceptDirectInput: true },
+    }),
+    "thread/turns/list": async () => {
+      await new Promise((resolve) => (release = resolve));
+      return valid("ThreadTurnsListResponse", {
+        data: [{ id: "turn-live", status: "inProgress", items: [] }],
+        nextCursor: null,
+      });
+    },
+  });
+  let owner;
+  const app = appPort(codex, { onObservation: (_event, _session, state) => (owner = state) });
+  connected(codex);
+  const opening = app.thread({ projectId: "p", threadId: "t" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const params = valid("ToolRequestUserInputParams", {
+    threadId: "t", turnId: "turn-live", itemId: "item-question", isBlocking: true,
+    questions: [{ id: "q", header: "Plan", question: "Continue?" }],
+  });
+  let responses = 0;
+  codex.respond = async (rawRequestId, answer) => {
+    responses++;
+    assert.equal(rawRequestId, 17);
+    assert.deepEqual(answer, { answers: { q: { answers: ["Continue"] } } });
+  };
+  codex.emit({ type: "request", method: "item/tool/requestUserInput", params, id: 17, supported: true });
+  codex.emit({ type: "request", method: "item/tool/requestUserInput", params, id: 17, supported: true });
+  release();
+  const snapshot = await opening;
+  assert.ok(validateDto("ThreadSnapshot", snapshot));
+  assert.ok(validateDto("PendingRequest", snapshot.pendingRequests[0]));
+  assert.equal(snapshot.pendingRequests[0].kind, "question");
+  assert.deepEqual(snapshot.pendingRequests[0].params, params);
+  assert.equal(snapshot.state, "waiting");
+  assert.equal(snapshot.pendingRequests.length, 1);
+  assert.equal(snapshot.activeTurnId, "turn-live");
+  assert.equal(snapshot.turnStatus, "inProgress");
+  assert.equal(owner.pendingCount(), 1);
+  assert.equal(owner.activeCount(), 1);
+  await app.requestRespond({
+    projectId: "p", threadId: "t", generation, operationId: "answer-question",
+    requestId: snapshot.pendingRequests[0].requestId, kind: "question", answer: { answers: { q: { answers: ["Continue"] } } },
+  });
+  assert.equal(responses, 1);
+  assert.equal(owner.pendingCount(), 1);
+  codex.emit({ type: "notification", method: "serverRequest/resolved", params: { threadId: "t", requestId: 17 } });
+  assert.equal(owner.pendingCount(), 0);
+  assert.equal(owner.activeCount(), 1);
+  assert.equal(codex.calls.some((call) => call.method === "turn/start"), false);
+});
+
+test("approval and item text events during bootstrap do not hide the confirmed active turn", async () => {
+  let release;
+  const codex = port({
+    "thread/resume": async () => valid("ThreadResumeResponse", {
+      ...startFixture(),
+      thread: { ...threadFixture(), status: { type: "active", activeFlags: [] }, canAcceptDirectInput: true },
+    }),
+    "thread/turns/list": async () => {
+      await new Promise((resolve) => (release = resolve));
+      return valid("ThreadTurnsListResponse", {
+        data: [{ id: "turn-live", status: "inProgress", items: [] }],
+        nextCursor: null,
+      });
+    },
+  });
+  connected(codex);
+  const opening = appPort(codex).thread({ projectId: "p", threadId: "t" });
+  await new Promise((resolve) => setImmediate(resolve));
+  codex.emit({ type: "request", method: "item/commandExecution/requestApproval", params: valid("CommandExecutionRequestApprovalParams", {
+    threadId: "t", turnId: "turn-live", itemId: "item-approval", startedAtMs: 1, command: "echo ok",
+  }), id: 18, supported: true });
+  codex.emit({ type: "notification", method: "item/started", params: { threadId: "t", turnId: "turn-live", item: { id: "message-live", type: "agentMessage", text: "" } } });
+  codex.emit({ type: "notification", method: "item/agentMessage/delta", params: { threadId: "t", turnId: "turn-live", itemId: "message-live", delta: "working" } });
+  release();
+  const snapshot = await opening;
+  assert.equal(snapshot.state, "waiting");
+  assert.equal(snapshot.pendingRequests.length, 1);
+  assert.equal(snapshot.activeTurnId, "turn-live");
+  assert.equal(snapshot.turnStatus, "inProgress");
+});
+
+test("request resolution during bootstrap does not suppress confirmed lifecycle hydration", async () => {
+  let release;
+  const codex = port({
+    "thread/resume": async () => valid("ThreadResumeResponse", {
+      ...startFixture(),
+      thread: { ...threadFixture(), status: { type: "active", activeFlags: [] }, canAcceptDirectInput: true },
+    }),
+    "thread/turns/list": async () => {
+      await new Promise((resolve) => (release = resolve));
+      return valid("ThreadTurnsListResponse", {
+        data: [{ id: "turn-live", status: "inProgress", items: [] }],
+        nextCursor: null,
+      });
+    },
+  });
+  connected(codex);
+  const opening = appPort(codex).thread({ projectId: "p", threadId: "t" });
+  await new Promise((resolve) => setImmediate(resolve));
+  codex.emit({ type: "request", method: "item/tool/requestUserInput", params: valid("ToolRequestUserInputParams", {
+    threadId: "t", turnId: "turn-live", itemId: "item-question", isBlocking: true, questions: [],
+  }), id: 19, supported: true });
+  codex.emit({ type: "notification", method: "serverRequest/resolved", params: { threadId: "t", requestId: 19 } });
+  release();
+  const snapshot = await opening;
+  assert.equal(snapshot.state, "working");
+  assert.equal(snapshot.pendingRequests.length, 0);
+  assert.equal(snapshot.activeTurnId, "turn-live");
+  assert.equal(snapshot.turnStatus, "inProgress");
+});
+
+test("a resolved question and live terminal event cannot resurrect bootstrap metadata", async (t) => {
+  for (const status of ["completed", "interrupted", "failed"]) {
+    await t.test(status, async () => {
+      let release;
+      const codex = port({
+        "thread/resume": async () => valid("ThreadResumeResponse", {
+          ...startFixture(),
+          thread: { ...threadFixture(), status: { type: "active", activeFlags: [] }, canAcceptDirectInput: true },
+        }),
+        "thread/turns/list": async () => {
+          await new Promise((resolve) => (release = resolve));
+          return valid("ThreadTurnsListResponse", {
+            data: [{ id: "turn-old", status: "inProgress", items: [] }],
+            nextCursor: null,
+          });
+        },
+      });
+      connected(codex);
+      const opening = appPort(codex).thread({ projectId: "p", threadId: "t" });
+      await new Promise((resolve) => setImmediate(resolve));
+      codex.emit({ type: "request", method: "item/tool/requestUserInput", params: valid("ToolRequestUserInputParams", {
+        threadId: "t", turnId: "turn-old", itemId: "item-question", isBlocking: true, questions: [],
+      }), id: 20, supported: true });
+      codex.emit({ type: "notification", method: "serverRequest/resolved", params: { threadId: "t", requestId: 20 } });
+      codex.emit({ type: "notification", method: "turn/completed", params: { threadId: "t", turn: { id: "turn-old", status } } });
+      release();
+      const snapshot = await opening;
+      assert.equal(snapshot.state, status === "failed" ? "error" : status);
+      assert.equal(snapshot.pendingRequests.length, 0);
+      assert.equal(snapshot.activeTurnId, null);
+      assert.equal(snapshot.turnStatus, status);
+    });
+  }
+});
+
 test("a disallowed model releases the active slot before any turn is sent", async () => {
   const codex = port({
     "thread/read": async () => valid("ThreadReadResponse", readFixture()),
