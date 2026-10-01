@@ -1,670 +1,17 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://brai.dev/schemas/agent-messages-1.json",
-  "title": "Brai agent DTOs",
-  "description": "Собственные DTO сервиса agent. Внешние Codex и AG-UI структуры проверяются их upstream-схемами.",
   "definitions": {
-    "ProjectId": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 64,
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
-    },
-    "OpaqueId": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128
-    },
-    "Generation": {
-      "type": "string",
-      "format": "uuid"
-    },
-    "OperationId": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128
-    },
-    "Cursor": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 2048
-    },
-    "Empty": {
-      "type": "object",
-      "additionalProperties": false
-    },
-    "Project": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "projectId",
-        "name",
-        "available"
-      ],
-      "properties": {
-        "projectId": {
-          "$ref": "#/definitions/ProjectId"
-        },
-        "name": {
-          "type": "string",
-          "maxLength": 256
-        },
-        "available": {
-          "type": "boolean"
-        }
-      }
-    },
-    "ThreadMetadata": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "threadId",
-        "title",
-        "updatedAt"
-      ],
-      "properties": {
-        "threadId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "title": {
-          "type": "string",
-          "maxLength": 1024
-        },
-        "updatedAt": {
-          "type": "string",
-          "maxLength": 64
-        },
-        "active": {
-          "type": "boolean"
-        }
-      }
-    },
-    "ProjectsRequest": {
-      "$ref": "#/definitions/Empty"
-    },
-    "ProjectsResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "generation",
-        "projects"
-      ],
-      "properties": {
-        "generation": {
-          "$ref": "#/definitions/Generation"
-        },
-        "projects": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/Project"
-          }
-        }
-      }
-    },
-    "StatusRequest": {
-      "$ref": "#/definitions/Empty"
-    },
-    "StatusResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "generation",
-        "ready",
-        "connection",
-        "authorization"
-      ],
-      "properties": {
-        "generation": {
-          "$ref": "#/definitions/Generation"
-        },
-        "ready": {
-          "type": "boolean"
-        },
-        "connection": {
-          "enum": [
-            "connected",
-            "connecting",
-            "disconnected"
-          ]
-        },
-        "authorization": {
-          "enum": [
-            "ready",
-            "required",
-            "failed",
-            "unknown"
-          ]
-        },
-        "limits": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "loadedThreads": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "activeTurns": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "pendingRpc": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "pendingForms": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "clients": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "queuePerClient": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "ledgerEntries": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "upstreamFrameBytes": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "natsSseFrameBytes": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "snapshotBytes": {
-              "type": "integer",
-              "minimum": 0
-            },
-            "historyResponseBytes": {
-              "type": "integer",
-              "minimum": 0
-            }
-          }
-        }
-      }
-    },
-    "ThreadsRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "projectId"
-      ],
-      "properties": {
-        "projectId": {
-          "$ref": "#/definitions/ProjectId"
-        },
-        "cursor": {
-          "$ref": "#/definitions/Cursor"
-        },
-        "limit": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 100
-        }
-      }
-    },
-    "ThreadsResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "generation",
-        "threads",
-        "nextCursor"
-      ],
-      "properties": {
-        "generation": {
-          "$ref": "#/definitions/Generation"
-        },
-        "threads": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/ThreadMetadata"
-          },
-          "maxItems": 100
-        },
-        "nextCursor": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Cursor"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      }
-    },
-    "ThreadCreateRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "projectId",
-        "generation",
-        "operationId"
-      ],
-      "properties": {
-        "projectId": {
-          "$ref": "#/definitions/ProjectId"
-        },
-        "generation": {
-          "$ref": "#/definitions/Generation"
-        },
-        "operationId": {
-          "$ref": "#/definitions/OperationId"
-        }
-      }
-    },
-    "ThreadCreateResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "generation",
-        "operationId",
-        "outcome",
-        "threadId"
-      ],
-      "properties": {
-        "generation": {
-          "$ref": "#/definitions/Generation"
-        },
-        "operationId": {
-          "$ref": "#/definitions/OperationId"
-        },
-        "outcome": {
-          "const": "accepted"
-        },
-        "threadId": {
-          "$ref": "#/definitions/OpaqueId"
-        }
-      }
-    },
-    "ThreadReadRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "projectId",
-        "threadId"
-      ],
-      "properties": {
-        "projectId": {
-          "$ref": "#/definitions/ProjectId"
-        },
-        "threadId": {
-          "$ref": "#/definitions/OpaqueId"
-        }
-      }
-    },
-    "Truncation": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "truncated",
-        "reason"
-      ],
-      "properties": {
-        "truncated": {
-          "type": "boolean"
-        },
-        "reason": {
-          "enum": [
-            "none",
-            "byte-budget",
-            "item-limit",
-            "upstream-limit"
-          ]
-        }
-      }
-    },
-    "ThreadSnapshot": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "projectId",
-        "threadId",
-        "generation",
-        "streamEpoch",
-        "seq",
-        "state",
-        "messages",
-        "pendingRequests",
-        "truncation",
-        "activeTurnId",
-        "turnStatus",
-        "traceItems"
-      ],
-      "properties": {
-        "projectId": {
-          "$ref": "#/definitions/ProjectId"
-        },
-        "threadId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "generation": {
-          "$ref": "#/definitions/Generation"
-        },
-        "streamEpoch": {
-          "$ref": "#/definitions/Generation"
-        },
-        "seq": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
-        },
-        "state": {
-          "enum": [
-            "ready",
-            "working",
-            "waiting",
-            "completed",
-            "interrupted",
-            "error",
-            "connection-lost",
-            "executor-unavailable"
-          ]
-        },
-        "messages": {
-          "type": "array",
-          "maxItems": 256,
-          "items": {
-            "type": "object"
-          }
-        },
-        "pendingRequests": {
-          "type": "array",
-          "maxItems": 64,
-          "items": {
-            "$ref": "#/definitions/PendingRequest"
-          }
-        },
-        "truncation": {
-          "$ref": "#/definitions/Truncation"
-        },
-        "activeTurnId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/OpaqueId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "turnStatus": {
-          "anyOf": [
-            {
-              "enum": [
-                "completed",
-                "interrupted",
-                "failed",
-                "inProgress"
-              ]
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "traceItems": {
-          "type": "array",
-          "maxItems": 200,
-          "items": {
-            "$ref": "#/definitions/HistoryItem"
-          }
-        },
-        "messagePhases": {
-          "type": "object",
-          "maxProperties": 256,
-          "propertyNames": {
-            "$ref": "#/definitions/OpaqueId"
-          },
-          "additionalProperties": {
-            "anyOf": [
-              {
-                "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/MessagePhase"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          }
-        }
-      }
-    },
-    "HistoryRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "projectId",
-        "threadId"
-      ],
-      "properties": {
-        "projectId": {
-          "$ref": "#/definitions/ProjectId"
-        },
-        "threadId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "cursor": {
-          "$ref": "#/definitions/Cursor"
-        },
-        "limit": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 100
-        },
-        "turnId": {
-          "$ref": "#/definitions/OpaqueId"
-        }
-      }
-    },
-    "HistoryItem": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "itemId",
-        "order",
-        "kind",
-        "content",
-        "turnId",
-        "trace",
-        "truncated",
-        "contentBytes"
-      ],
-      "properties": {
-        "itemId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "order": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "kind": {
-          "type": "string",
-          "maxLength": 64
-        },
-        "content": {
-          "type": "string",
-          "maxLength": 786432
-        },
-        "truncated": {
-          "type": "boolean"
-        },
-        "contentBytes": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "turnId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "trace": {
-          "$ref": "#/definitions/Trace"
-        }
-      }
-    },
-    "HistoryResponse": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "generation",
-        "items",
-        "truncation",
-        "nextCursor"
-      ],
-      "properties": {
-        "generation": {
-          "$ref": "#/definitions/Generation"
-        },
-        "items": {
-          "type": "array",
-          "maxItems": 100,
-          "items": {
-            "$ref": "#/definitions/HistoryItem"
-          }
-        },
-        "nextCursor": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Cursor"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "truncation": {
-          "$ref": "#/definitions/Truncation"
-        }
-      }
-    },
-    "TurnStartRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "projectId",
-        "threadId",
-        "generation",
-        "operationId",
-        "text"
-      ],
-      "properties": {
-        "projectId": {
-          "$ref": "#/definitions/ProjectId"
-        },
-        "threadId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "generation": {
-          "$ref": "#/definitions/Generation"
-        },
-        "operationId": {
-          "$ref": "#/definitions/OperationId"
-        },
-        "text": {
-          "type": "string",
-          "maxLength": 65536
-        }
-      }
-    },
-    "TurnSteerRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "projectId",
-        "threadId",
-        "generation",
-        "operationId",
-        "expectedTurnId",
-        "text"
-      ],
-      "properties": {
-        "projectId": {
-          "$ref": "#/definitions/ProjectId"
-        },
-        "threadId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "generation": {
-          "$ref": "#/definitions/Generation"
-        },
-        "operationId": {
-          "$ref": "#/definitions/OperationId"
-        },
-        "expectedTurnId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "text": {
-          "type": "string",
-          "maxLength": 65536
-        }
-      }
-    },
-    "TurnInterruptRequest": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "projectId",
-        "threadId",
-        "generation",
-        "operationId",
-        "turnId"
-      ],
-      "properties": {
-        "projectId": {
-          "$ref": "#/definitions/ProjectId"
-        },
-        "threadId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "generation": {
-          "$ref": "#/definitions/Generation"
-        },
-        "operationId": {
-          "$ref": "#/definitions/OperationId"
-        },
-        "turnId": {
-          "$ref": "#/definitions/OpaqueId"
-        }
-      }
-    },
-    "RequestRespondRequest": {
+    "Command": {
       "oneOf": [
         {
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "projectId",
-            "threadId",
-            "generation",
-            "operationId",
-            "requestId",
-            "kind",
-            "answer"
+            "action"
           ],
           "properties": {
-            "projectId": {
-              "$ref": "#/definitions/ProjectId"
-            },
-            "threadId": {
-              "$ref": "#/definitions/OpaqueId"
-            },
-            "generation": {
-              "$ref": "#/definitions/Generation"
-            },
-            "operationId": {
-              "$ref": "#/definitions/OperationId"
-            },
-            "requestId": {
-              "$ref": "#/definitions/OpaqueId"
-            },
-            "kind": {
-              "const": "command-approval"
-            },
-            "answer": {
-              "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/CommandExecutionRequestApprovalResponse"
+            "action": {
+              "const": "projects"
             }
           }
         },
@@ -672,35 +19,11 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "projectId",
-            "threadId",
-            "generation",
-            "operationId",
-            "requestId",
-            "kind",
-            "answer"
+            "action"
           ],
           "properties": {
-            "projectId": {
-              "$ref": "#/definitions/ProjectId"
-            },
-            "threadId": {
-              "$ref": "#/definitions/OpaqueId"
-            },
-            "generation": {
-              "$ref": "#/definitions/Generation"
-            },
-            "operationId": {
-              "$ref": "#/definitions/OperationId"
-            },
-            "requestId": {
-              "$ref": "#/definitions/OpaqueId"
-            },
-            "kind": {
-              "const": "file-change-approval"
-            },
-            "answer": {
-              "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/FileChangeRequestApprovalResponse"
+            "action": {
+              "const": "status"
             }
           }
         },
@@ -708,35 +31,22 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "projectId",
-            "threadId",
-            "generation",
-            "operationId",
-            "requestId",
-            "kind",
-            "answer"
+            "action",
+            "projectId"
           ],
           "properties": {
+            "action": {
+              "const": "threads"
+            },
             "projectId": {
-              "$ref": "#/definitions/ProjectId"
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
             },
-            "threadId": {
-              "$ref": "#/definitions/OpaqueId"
-            },
-            "generation": {
-              "$ref": "#/definitions/Generation"
-            },
-            "operationId": {
-              "$ref": "#/definitions/OperationId"
-            },
-            "requestId": {
-              "$ref": "#/definitions/OpaqueId"
-            },
-            "kind": {
-              "const": "permissions"
-            },
-            "answer": {
-              "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/PermissionsRequestApprovalResponse"
+            "cursor": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
             }
           }
         },
@@ -744,113 +54,730 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
+            "action",
+            "projectId",
+            "generation",
+            "operationId"
+          ],
+          "properties": {
+            "action": {
+              "const": "create"
+            },
+            "projectId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "generation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "projectId",
+            "threadId"
+          ],
+          "properties": {
+            "action": {
+              "const": "open"
+            },
+            "projectId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "projectId",
+            "threadId"
+          ],
+          "properties": {
+            "action": {
+              "const": "turns"
+            },
+            "projectId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "cursor": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "projectId",
+            "threadId"
+          ],
+          "properties": {
+            "action": {
+              "const": "items"
+            },
+            "projectId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "turnId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "cursor": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "projectId",
+            "threadId",
+            "generation",
+            "operationId",
+            "text"
+          ],
+          "properties": {
+            "action": {
+              "const": "start"
+            },
+            "projectId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "generation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "projectId",
+            "threadId",
+            "generation",
+            "operationId",
+            "expectedTurnId",
+            "text"
+          ],
+          "properties": {
+            "action": {
+              "const": "steer"
+            },
+            "projectId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "generation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "expectedTurnId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "projectId",
+            "threadId",
+            "generation",
+            "operationId",
+            "turnId"
+          ],
+          "properties": {
+            "action": {
+              "const": "interrupt"
+            },
+            "projectId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "generation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "turnId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
             "projectId",
             "threadId",
             "generation",
             "operationId",
             "requestId",
-            "kind",
             "answer"
           ],
           "properties": {
+            "action": {
+              "const": "answer"
+            },
             "projectId": {
-              "$ref": "#/definitions/ProjectId"
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
             },
             "threadId": {
-              "$ref": "#/definitions/OpaqueId"
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
             },
             "generation": {
-              "$ref": "#/definitions/Generation"
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
             },
             "operationId": {
-              "$ref": "#/definitions/OperationId"
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
             },
             "requestId": {
-              "$ref": "#/definitions/OpaqueId"
-            },
-            "kind": {
-              "const": "question"
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
             },
             "answer": {
-              "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/ToolRequestUserInputResponse"
+              "anyOf": [
+                {
+                  "$ref": "../contracts/codex/schema.json#/definitions/CommandExecutionRequestApprovalResponse"
+                },
+                {
+                  "$ref": "../contracts/codex/schema.json#/definitions/FileChangeRequestApprovalResponse"
+                },
+                {
+                  "$ref": "../contracts/codex/schema.json#/definitions/PermissionsRequestApprovalResponse"
+                },
+                {
+                  "$ref": "../contracts/codex/schema.json#/definitions/ToolRequestUserInputResponse"
+                }
+              ]
             }
           }
         }
       ]
     },
-    "TurnMutationResponse": {
+    "DisplayItem": {
       "type": "object",
       "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "type": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        },
+        "diff": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "exitCode": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "phase": {
+          "enum": [
+            "commentary",
+            "final_answer",
+            null
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
       "required": [
-        "generation",
-        "operationId",
-        "outcome",
+        "id",
+        "turnId",
+        "type",
+        "text"
+      ]
+    },
+    "ThreadMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "title": {
+          "type": "string"
+        },
+        "preview": {
+          "type": "string"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "canAcceptDirectInput": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "preview",
+        "model",
+        "canAcceptDirectInput",
+        "updatedAt"
+      ]
+    },
+    "PendingRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "kind": {
+          "enum": [
+            "command-approval",
+            "file-change-approval",
+            "permissions",
+            "question",
+            "unsupported"
+          ]
+        },
+        "method": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "params": {
+          "type": "object"
+        },
+        "answered": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestId",
+        "kind",
+        "method",
+        "turnId",
+        "params",
+        "answered"
+      ]
+    },
+    "Turn": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "status": {
+          "enum": [
+            "inProgress",
+            "completed",
+            "interrupted",
+            "failed"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ]
+    },
+    "NativeSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "projectId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "threadId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "generation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "epoch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "thread": {
+          "$ref": "#/definitions/ThreadMetadata"
+        },
+        "turn": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Turn"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "idle",
+            "inProgress",
+            "completed",
+            "interrupted",
+            "failed",
+            "waiting",
+            "connection-lost",
+            "executor-unavailable"
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DisplayItem"
+          },
+          "maxItems": 128
+        },
+        "requests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PendingRequest"
+          },
+          "maxItems": 64
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "projectId",
         "threadId",
-        "turnId"
-      ],
+        "generation",
+        "epoch",
+        "seq",
+        "thread",
+        "turn",
+        "state",
+        "items",
+        "requests",
+        "truncated"
+      ]
+    },
+    "Status": {
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "generation": {
-          "$ref": "#/definitions/Generation"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "connection": {
+          "enum": [
+            "connecting",
+            "connected",
+            "disconnected"
+          ]
+        },
+        "authorization": {
+          "enum": [
+            "unknown",
+            "ready",
+            "required"
+          ]
+        },
+        "ready": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "generation",
+        "connection",
+        "authorization",
+        "ready"
+      ]
+    },
+    "Projects": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "projectId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "name": {
+                "type": "string"
+              },
+              "available": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "projectId",
+              "name",
+              "available"
+            ]
+          }
+        }
+      },
+      "required": [
+        "generation",
+        "projects"
+      ]
+    },
+    "Accepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
         },
         "operationId": {
-          "$ref": "#/definitions/OperationId"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
         },
         "outcome": {
           "const": "accepted"
         },
         "threadId": {
-          "$ref": "#/definitions/OpaqueId"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
         },
         "turnId": {
-          "$ref": "#/definitions/OpaqueId"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
         }
-      }
-    },
-    "RequestRespondResponse": {
-      "type": "object",
-      "additionalProperties": false,
+      },
       "required": [
         "generation",
         "operationId",
         "outcome",
-        "requestId"
-      ],
-      "properties": {
-        "generation": {
-          "$ref": "#/definitions/Generation"
-        },
-        "operationId": {
-          "$ref": "#/definitions/OperationId"
-        },
-        "outcome": {
-          "const": "accepted"
-        },
-        "requestId": {
-          "$ref": "#/definitions/OpaqueId"
-        }
-      }
+        "threadId"
+      ]
     },
-    "ErrorResponse": {
+    "Page": {
       "type": "object",
       "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "data": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ThreadMetadata"
+              },
+              {
+                "$ref": "#/definitions/DisplayItem"
+              },
+              {
+                "$ref": "#/definitions/Turn"
+              }
+            ]
+          }
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "required": [
-        "code",
-        "outcome"
-      ],
+        "generation",
+        "data",
+        "nextCursor"
+      ]
+    },
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "code": {
           "enum": [
             "INVALID_ARGUMENT",
-            "STALE_GENERATION",
-            "OPERATION_CONFLICT",
             "REQUEST_TOO_LARGE",
             "ITEM_TOO_LARGE",
+            "STALE_GENERATION",
+            "STALE_REQUEST",
+            "OPERATION_CONFLICT",
             "CAPACITY_EXHAUSTED",
             "UPSTREAM_UNAVAILABLE",
             "TIMEOUT",
             "NOT_FOUND",
-            "UNSUPPORTED",
-            "STALE_REQUEST"
+            "UNSUPPORTED"
           ]
         },
         "outcome": {
@@ -860,448 +787,90 @@
             "query"
           ]
         },
-        "generation": {
-          "$ref": "#/definitions/Generation"
-        },
-        "operationId": {
-          "$ref": "#/definitions/OperationId"
-        },
-        "message": {
-          "type": "string",
-          "maxLength": 256
+        "upstreamCode": {
+          "type": "integer"
         }
-      }
+      },
+      "required": [
+        "code",
+        "outcome"
+      ]
     },
     "EventEnvelope": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "projectId",
-        "threadId",
-        "turnId",
-        "generation",
-        "streamEpoch",
-        "seq",
-        "event"
-      ],
       "properties": {
         "projectId": {
-          "$ref": "#/definitions/ProjectId"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
         },
         "threadId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "turnId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/OpaqueId"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
         },
         "generation": {
-          "$ref": "#/definitions/Generation"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
         },
-        "streamEpoch": {
-          "$ref": "#/definitions/Generation"
+        "epoch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
         },
         "seq": {
           "type": "integer",
-          "minimum": 0,
-          "maximum": 9007199254740991
+          "minimum": 0
         },
         "event": {
-          "type": "object"
-        }
-      }
-    },
-    "CustomRequestOpened": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "request"
-      ],
-      "properties": {
-        "request": {
-          "$ref": "#/definitions/PendingRequest"
-        }
-      }
-    },
-    "CustomRequestResolved": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "requestId",
-        "outcome"
-      ],
-      "properties": {
-        "requestId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "outcome": {
-          "enum": [
-            "accepted",
-            "rejected",
-            "stale",
-            "unknown"
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "STATE_SNAPSHOT"
+            },
+            "snapshot": {
+              "$ref": "#/definitions/NativeSnapshot"
+            }
+          },
+          "required": [
+            "type",
+            "snapshot"
           ]
         }
-      }
-    },
-    "CustomConnection": {
-      "type": "object",
-      "additionalProperties": false,
+      },
       "required": [
-        "state"
-      ],
-      "properties": {
-        "state": {
-          "enum": [
-            "connected",
-            "connecting",
-            "disconnected",
-            "executor-unavailable"
-          ]
-        }
-      }
-    },
-    "CustomTruncation": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
+        "projectId",
         "threadId",
-        "reason"
-      ],
-      "properties": {
-        "threadId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "reason": {
-          "enum": [
-            "byte-budget",
-            "item-limit",
-            "upstream-limit"
-          ]
-        }
-      }
-    },
-    "CustomResyncRequired": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "reason"
-      ],
-      "properties": {
-        "reason": {
-          "enum": [
-            "gap",
-            "overflow",
-            "generation-change",
-            "epoch-change",
-            "old-epoch"
-          ]
-        }
-      }
-    },
-    "CustomOutput": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "itemId",
-        "text"
-      ],
-      "properties": {
-        "itemId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "text": {
-          "type": "string",
-          "maxLength": 786432
-        },
-        "truncated": {
-          "type": "boolean"
-        },
-        "contentBytes": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "command": {
-          "type": "string",
-          "maxLength": 16384
-        },
-        "status": {
-          "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/CommandExecutionStatus"
-        },
-        "exitCode": {
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      }
-    },
-    "CustomDiff": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "itemId",
-        "diff"
-      ],
-      "properties": {
-        "itemId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "diff": {
-          "type": "string",
-          "maxLength": 786432
-        },
-        "truncated": {
-          "type": "boolean"
-        },
-        "contentBytes": {
-          "type": "integer",
-          "minimum": 0
-        }
-      }
-    },
-    "PendingRequest": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "requestId",
-            "kind",
-            "params"
-          ],
-          "properties": {
-            "requestId": {
-              "$ref": "#/definitions/OpaqueId"
-            },
-            "kind": {
-              "const": "command-approval"
-            },
-            "params": {
-              "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/CommandExecutionRequestApprovalParams"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "requestId",
-            "kind",
-            "params"
-          ],
-          "properties": {
-            "requestId": {
-              "$ref": "#/definitions/OpaqueId"
-            },
-            "kind": {
-              "const": "file-change-approval"
-            },
-            "params": {
-              "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/FileChangeRequestApprovalParams"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "requestId",
-            "kind",
-            "params"
-          ],
-          "properties": {
-            "requestId": {
-              "$ref": "#/definitions/OpaqueId"
-            },
-            "kind": {
-              "const": "permissions"
-            },
-            "params": {
-              "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/PermissionsRequestApprovalParams"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "requestId",
-            "kind",
-            "params"
-          ],
-          "properties": {
-            "requestId": {
-              "$ref": "#/definitions/OpaqueId"
-            },
-            "kind": {
-              "const": "question"
-            },
-            "params": {
-              "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/ToolRequestUserInputParams"
-            }
-          }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "requestId",
-            "kind",
-            "method",
-            "reason",
-            "code",
-            "threadId",
-            "turnId",
-            "itemId",
-            "interruptAvailable"
-          ],
-          "properties": {
-            "requestId": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/OpaqueId"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "kind": {
-              "const": "unsupported"
-            },
-            "method": {
-              "type": "string",
-              "maxLength": 128
-            },
-            "reason": {
-              "enum": [
-                "oversized",
-                "unknown-method"
-              ]
-            },
-            "code": {
-              "enum": [
-                "REQUEST_TOO_LARGE",
-                "UNSUPPORTED"
-              ]
-            },
-            "threadId": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/OpaqueId"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "turnId": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/OpaqueId"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "itemId": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/OpaqueId"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "interruptAvailable": {
-              "type": "boolean"
-            }
-          }
-        }
+        "generation",
+        "epoch",
+        "seq",
+        "event"
       ]
     },
-    "Trace": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "type",
-        "status"
-      ],
-      "properties": {
-        "type": {
-          "enum": [
-            "command",
-            "output",
-            "file-change",
-            "message",
-            "other"
-          ]
+    "Response": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/NativeSnapshot"
         },
-        "status": {
-          "type": "string",
-          "maxLength": 64
+        {
+          "$ref": "#/definitions/Status"
         },
-        "command": {
-          "type": "string",
-          "maxLength": 65536
+        {
+          "$ref": "#/definitions/Projects"
         },
-        "output": {
-          "type": "string",
-          "maxLength": 786432
+        {
+          "$ref": "#/definitions/Accepted"
         },
-        "exitCode": {
-          "type": [
-            "integer",
-            "null"
-          ]
+        {
+          "$ref": "#/definitions/Page"
         },
-        "diffSummary": {
-          "type": "string",
-          "maxLength": 65536
-        },
-        "phase": {
-          "anyOf": [
-            {
-              "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/MessagePhase"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        {
+          "$ref": "#/definitions/Error"
         }
-      }
-    },
-    "CustomMessagePhase": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "itemId",
-        "phase"
-      ],
-      "properties": {
-        "itemId": {
-          "$ref": "#/definitions/OpaqueId"
-        },
-        "phase": {
-          "anyOf": [
-            {
-              "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/MessagePhase"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      }
+      ]
     }
   }
 }

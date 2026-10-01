@@ -1,579 +1,109 @@
 {
   "asyncapi": "3.0.0",
   "info": {
-    "title": "Brai agent NATS API",
-    "version": "1.0.0",
-    "description": "Контракт request-reply и текущих событий. Сервис NATS: brai_agent версии 1.0.0, уникальный instance ID, queue group brai_agent; PING, INFO и STATS — встроенные endpoints NATS Services. Reply отправляется через нативный message.reply. Ошибка сервиса возвращает заголовки Nats-Service-Error и Nats-Service-Error-Code до разбора payload. Core NATS события best effort без истории.",
-    "x-nats-service": {
-      "name": "brai_agent",
-      "version": "1.0.0",
-      "instanceId": "unique-per-process",
-      "queueGroup": "brai_agent",
-      "builtInEndpoints": [
-        "PING",
-        "INFO",
-        "STATS"
-      ]
-    }
+    "title": "Brai agent native state service",
+    "version": "2.0.0"
   },
   "defaultContentType": "application/json",
-  "servers": {
-    "nats": {
-      "host": "localhost:4222",
-      "protocol": "nats",
-      "description": "Адрес экземпляра задаётся конфигурацией развёртывания."
-    }
-  },
   "channels": {
-    "projects": {
-      "address": "brai.agent.v1.query.projects",
+    "rpc": {
+      "address": "brai.agent.v2.rpc",
       "messages": {
-        "projectsRequest": {
-          "$ref": "#/components/messages/ProjectsRequest"
-        }
-      }
-    },
-    "status": {
-      "address": "brai.agent.v1.query.status",
-      "messages": {
-        "statusRequest": {
-          "$ref": "#/components/messages/StatusRequest"
-        }
-      }
-    },
-    "threads": {
-      "address": "brai.agent.v1.query.threads",
-      "messages": {
-        "threadsRequest": {
-          "$ref": "#/components/messages/ThreadsRequest"
-        }
-      }
-    },
-    "thread": {
-      "address": "brai.agent.v1.query.thread",
-      "messages": {
-        "threadReadRequest": {
-          "$ref": "#/components/messages/ThreadReadRequest"
-        }
-      }
-    },
-    "history": {
-      "address": "brai.agent.v1.query.history",
-      "messages": {
-        "historyRequest": {
-          "$ref": "#/components/messages/HistoryRequest"
-        }
-      }
-    },
-    "threadCreate": {
-      "address": "brai.agent.v1.command.thread.create",
-      "messages": {
-        "threadCreateRequest": {
-          "$ref": "#/components/messages/ThreadCreateRequest"
-        }
-      }
-    },
-    "turnStart": {
-      "address": "brai.agent.v1.command.turn.start",
-      "messages": {
-        "turnStartRequest": {
-          "$ref": "#/components/messages/TurnStartRequest"
-        }
-      }
-    },
-    "turnSteer": {
-      "address": "brai.agent.v1.command.turn.steer",
-      "messages": {
-        "turnSteerRequest": {
-          "$ref": "#/components/messages/TurnSteerRequest"
-        }
-      }
-    },
-    "turnInterrupt": {
-      "address": "brai.agent.v1.command.turn.interrupt",
-      "messages": {
-        "turnInterruptRequest": {
-          "$ref": "#/components/messages/TurnInterruptRequest"
-        }
-      }
-    },
-    "requestRespond": {
-      "address": "brai.agent.v1.command.request.respond",
-      "messages": {
-        "requestRespondRequest": {
-          "$ref": "#/components/messages/RequestRespondRequest"
-        }
-      }
-    },
-    "events": {
-      "address": "brai.agent.v1.event",
-      "messages": {
-        "agentEvent": {
-          "$ref": "#/components/messages/AgentEvent"
+        "command": {
+          "payload": {
+            "$ref": "./schemas/messages.schema.json#/definitions/Command"
+          }
         }
       }
     },
     "replies": {
       "address": null,
-      "description": "Ответ отправляется на нативный subject исходного NATS message.reply. Адрес определяется для каждого запроса.",
       "x-nats-reply-subject": "message.reply",
       "messages": {
-        "projectsResponse": {
-          "$ref": "#/components/messages/ProjectsResponse"
-        },
-        "statusResponse": {
-          "$ref": "#/components/messages/StatusResponse"
-        },
-        "threadsResponse": {
-          "$ref": "#/components/messages/ThreadsResponse"
-        },
-        "threadSnapshot": {
-          "$ref": "#/components/messages/ThreadSnapshot"
-        },
-        "historyResponse": {
-          "$ref": "#/components/messages/HistoryResponse"
-        },
-        "threadCreateResponse": {
-          "$ref": "#/components/messages/ThreadCreateResponse"
-        },
-        "turnMutationResponse": {
-          "$ref": "#/components/messages/TurnMutationResponse"
-        },
-        "requestRespondResponse": {
-          "$ref": "#/components/messages/RequestRespondResponse"
+        "response": {
+          "headers": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "Nats-Service-Error": {
+                "type": "string"
+              },
+              "Nats-Service-Error-Code": {
+                "type": "string"
+              }
+            },
+            "required": []
+          },
+          "payload": {
+            "$ref": "./schemas/messages.schema.json#/definitions/Response"
+          }
+        }
+      }
+    },
+    "event": {
+      "address": "brai.agent.v2.event",
+      "messages": {
+        "snapshot": {
+          "payload": {
+            "$ref": "./schemas/messages.schema.json#/definitions/EventEnvelope"
+          }
         }
       }
     }
   },
   "operations": {
-    "listProjects": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/projects"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/projects/messages/projectsRequest"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/replies"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/replies/messages/projectsResponse"
-          }
-        ]
-      },
-      "description": "Request/reply; 10 s deadline.",
-      "x-error-message": "#/components/messages/ServiceError",
-      "x-retry-policy": "Query may be retried after checking current state.",
-      "x-reply-timeout-ms": 10000
-    },
-    "getStatus": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/status"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/status/messages/statusRequest"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/replies"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/replies/messages/statusResponse"
-          }
-        ]
-      },
-      "x-error-message": "#/components/messages/ServiceError",
-      "x-retry-policy": "Query may be retried after checking current state.",
-      "x-reply-timeout-ms": 10000
-    },
-    "listThreads": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/threads"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/threads/messages/threadsRequest"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/replies"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/replies/messages/threadsResponse"
-          }
-        ]
-      },
-      "x-error-message": "#/components/messages/ServiceError",
-      "x-retry-policy": "Query may be retried after checking current state.",
-      "x-reply-timeout-ms": 10000
-    },
-    "readThread": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/thread"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/thread/messages/threadReadRequest"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/replies"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/replies/messages/threadSnapshot"
-          }
-        ]
-      },
-      "x-error-message": "#/components/messages/ServiceError",
-      "x-retry-policy": "Query may be retried after checking current state.",
-      "x-reply-timeout-ms": 10000
-    },
-    "readHistory": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/history"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/history/messages/historyRequest"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/replies"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/replies/messages/historyResponse"
-          }
-        ]
-      },
-      "x-error-message": "#/components/messages/ServiceError",
-      "x-retry-policy": "Query may be retried after checking current state.",
-      "x-reply-timeout-ms": 10000
-    },
-    "createThread": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/threadCreate"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/threadCreate/messages/threadCreateRequest"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/replies"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/replies/messages/threadCreateResponse"
-          }
-        ]
-      },
-      "description": "Mutation acceptance deadline 12 s; no automatic retry.",
-      "x-error-message": "#/components/messages/ServiceError",
-      "x-retry-policy": "Never automatically retry after timeout, disconnect, or upstream error.",
-      "x-acceptance-timeout-ms": 12000
-    },
-    "startTurn": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/turnStart"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/turnStart/messages/turnStartRequest"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/replies"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/replies/messages/turnMutationResponse"
-          }
-        ]
-      },
-      "x-error-message": "#/components/messages/ServiceError",
-      "x-retry-policy": "Never automatically retry after timeout, disconnect, or upstream error.",
-      "x-acceptance-timeout-ms": 12000
-    },
-    "steerTurn": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/turnSteer"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/turnSteer/messages/turnSteerRequest"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/replies"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/replies/messages/turnMutationResponse"
-          }
-        ]
-      },
-      "x-error-message": "#/components/messages/ServiceError",
-      "x-retry-policy": "Never automatically retry after timeout, disconnect, or upstream error.",
-      "x-acceptance-timeout-ms": 12000
-    },
-    "interruptTurn": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/turnInterrupt"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/turnInterrupt/messages/turnInterruptRequest"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/replies"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/replies/messages/turnMutationResponse"
-          }
-        ]
-      },
-      "x-error-message": "#/components/messages/ServiceError",
-      "x-retry-policy": "Never automatically retry after timeout, disconnect, or upstream error.",
-      "x-acceptance-timeout-ms": 12000
-    },
-    "respondToRequest": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/requestRespond"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/requestRespond/messages/requestRespondRequest"
-        }
-      ],
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/replies"
-        },
-        "messages": [
-          {
-            "$ref": "#/channels/replies/messages/requestRespondResponse"
-          }
-        ]
-      },
-      "x-error-message": "#/components/messages/ServiceError",
-      "x-retry-policy": "Never automatically retry after timeout, disconnect, or upstream error.",
-      "x-acceptance-timeout-ms": 12000
-    },
-    "publishAgentEvent": {
-      "action": "send",
-      "channel": {
-        "$ref": "#/channels/events"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/events/messages/agentEvent"
-        }
-      ],
-      "description": "Core NATS best-effort current event; no replay or business acknowledgement."
-    },
-    "consumeAgentEvent": {
+    "request": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/events"
+        "$ref": "#/channels/rpc"
       },
       "messages": [
         {
-          "$ref": "#/channels/events/messages/agentEvent"
+          "$ref": "#/channels/rpc/messages/command"
         }
       ],
-      "description": "Filter by exact projectId and threadId; snapshot resynchronizes after gaps."
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/replies"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/replies/messages/response"
+          }
+        ]
+      }
+    },
+    "publish": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/event"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/event/messages/snapshot"
+        }
+      ]
     }
   },
-  "components": {
-    "messages": {
-      "ProjectsRequest": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/ProjectsRequest"
-        }
-      },
-      "ProjectsResponse": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/ProjectsResponse"
-        }
-      },
-      "StatusRequest": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/StatusRequest"
-        }
-      },
-      "StatusResponse": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/StatusResponse"
-        }
-      },
-      "ThreadsRequest": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/ThreadsRequest"
-        }
-      },
-      "ThreadsResponse": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/ThreadsResponse"
-        }
-      },
-      "ThreadReadRequest": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/ThreadReadRequest"
-        }
-      },
-      "ThreadSnapshot": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/ThreadSnapshot"
-        }
-      },
-      "HistoryRequest": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/HistoryRequest"
-        }
-      },
-      "HistoryResponse": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/HistoryResponse"
-        }
-      },
-      "ThreadCreateRequest": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/ThreadCreateRequest"
-        }
-      },
-      "ThreadCreateResponse": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/ThreadCreateResponse"
-        }
-      },
-      "TurnStartRequest": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/TurnStartRequest"
-        }
-      },
-      "TurnSteerRequest": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/TurnSteerRequest"
-        }
-      },
-      "TurnInterruptRequest": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/TurnInterruptRequest"
-        }
-      },
-      "TurnMutationResponse": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/TurnMutationResponse"
-        }
-      },
-      "RequestRespondRequest": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/RequestRespondRequest"
-        }
-      },
-      "RequestRespondResponse": {
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/RequestRespondResponse"
-        }
-      },
-      "AgentEvent": {
-        "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "projectId",
-            "threadId",
-            "turnId",
-            "generation",
-            "streamEpoch",
-            "seq",
-            "event"
-          ],
-          "properties": {
-            "projectId": {
-              "$ref": "schemas/messages.schema.json#/definitions/ProjectId"
-            },
-            "threadId": {
-              "$ref": "schemas/messages.schema.json#/definitions/OpaqueId"
-            },
-            "turnId": {
-              "anyOf": [
-                {
-                  "$ref": "schemas/messages.schema.json#/definitions/OpaqueId"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "generation": {
-              "$ref": "schemas/messages.schema.json#/definitions/Generation"
-            },
-            "streamEpoch": {
-              "$ref": "schemas/messages.schema.json#/definitions/Generation"
-            },
-            "seq": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 9007199254740991
-            },
-            "event": {
-              "type": "object"
-            }
-          }
-        }
-      },
-      "ServiceError": {
-        "headers": {
-          "type": "object",
-          "additionalProperties": true,
-          "required": [
-            "Nats-Service-Error",
-            "Nats-Service-Error-Code"
-          ],
-          "properties": {
-            "Nats-Service-Error": {
-              "type": "string"
-            },
-            "Nats-Service-Error-Code": {
-              "type": "string"
-            }
-          }
-        },
-        "payload": {
-          "$ref": "schemas/messages.schema.json#/definitions/ErrorResponse"
-        },
-        "description": "Заголовки ошибки проверяются до payload."
-      }
-    }
-  }
+  "x-nats-service": {
+    "name": "brai_agent",
+    "version": "2.0.0",
+    "queueGroup": "brai_agent"
+  },
+  "x-limits": {
+    "frame": 1048576,
+    "input": 65536,
+    "state": 524288,
+    "clients": 128,
+    "queue": 64,
+    "threads": 16,
+    "pending": 64,
+    "operations": 4096,
+    "request": 32768
+  },
+  "x-timeouts-ms": {
+    "read": 10000,
+    "mutation": 12000
+  },
+  "x-retry-policy": "Never automatically retry mutations; operation IDs bind a request hash and its original result within a generation. Whole STATE_SNAPSHOT events may be coalesced; accept monotonically greater seq within the same generation/epoch. Read native history after generation/epoch change."
 }

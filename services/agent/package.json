@@ -1,46 +1,31 @@
 {
   "name": "@brai/agent",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "npm run build && node --test tests/*.test.mjs",
-    "test:integration": "npm run build && node --test --test-concurrency=1 tests/integration/*.test.mjs",
     "start": "node dist/main.js",
     "health": "node dist/health.js",
-    "test:contracts": "node --test tests/contracts/*.test.mjs",
-    "generate:contracts": "node scripts/generate-contract-types.mjs",
-    "typecheck:contracts": "tsc --noEmit --strict --module NodeNext --moduleResolution NodeNext --target ES2022 --resolveJsonModule tests/contracts/types.fixture.mts",
-    "check:contracts": "node scripts/generate-contract-types.mjs --check && npm run typecheck:contracts && node --test tests/contracts/*.test.mjs",
-    "generate:codex-contract": "node scripts/build-codex-contract.mjs"
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "check:contracts": "npm run build && node --test tests/*.test.mjs"
   },
   "exports": {
     "./contracts": {
       "types": "./contracts/index.d.mts",
       "default": "./contracts/index.mjs"
     },
-    "./schemas/messages.schema.json": "./schemas/messages.schema.json",
     "./contracts/codex/schema.json": "./contracts/codex/schema.json"
   },
   "dependencies": {
-    "@ag-ui/core": "1.0.1",
     "ajv": "8.17.1",
-    "ajv-formats": "3.0.1",
     "nats": "2.29.3",
-    "ws": "8.22.0",
-    "zod": "4.6.5"
+    "ws": "8.22.0"
   },
   "devDependencies": {
-    "@ag-ui/client": "1.0.1",
-    "@ag-ui/encoder": "1.0.1",
     "@types/node": "24.10.1",
     "@types/ws": "8.18.1",
-    "@open-rpc/meta-schema": "1.14.9",
-    "json-schema-to-typescript": "15.0.4",
-    "@asyncapi/specs": "6.11.1",
-    "@json-schema-tools/meta-schema": "1.8.0",
     "typescript": "5.9.3"
   }
 }

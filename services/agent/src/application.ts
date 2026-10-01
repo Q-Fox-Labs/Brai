@@ -1,620 +1,220 @@
-// ABOUTME: Реализует прикладные сценарии agent через CodexPort.
-// ABOUTME: Не импортирует транспорт, NATS, UI или файловую систему хоста.
-
-import {
-  limits,
-  validateDto,
-  validateUpstreamAnswer,
-  serializedBytes,
-} from "../contracts/index.mjs";
-import type { CodexPort, CodexObservation } from "./ports.js";
-import { createState, type Session, type StateChange } from "./state.js";
-import { readHistory } from "./history.js";
-import type {
-  HistoryRequest,
-  ErrorResponse,
-  RequestRespondResponse,
-  ThreadCreateResponse,
-  TurnMutationResponse,
-  RequestRespondRequest,
-  ThreadCreateRequest,
-  ThreadReadRequest,
-  ThreadsRequest,
-  TurnInterruptRequest,
-  TurnStartRequest,
-  TurnSteerRequest,
-} from "../contracts/index.mjs";
-
-/** Явная привязка безопасного project ID к абсолютному рабочему каталогу. */
-export type ProjectDefinition = {
-  projectId: string;
-  name: string;
-  cwd: string;
-  available?: boolean;
-};
-/** Требуемые адаптеры и конфигурация одного экземпляра сценариев agent. */
-export type ApplicationOptions = {
-  codex: CodexPort;
-  projects: ProjectDefinition[];
-  allowedModels?: string[];
-  newThread?: { approvalsReviewer?: "user" | "auto_review" | "guardian_subagent" | null };
-  onSubscription?: (session: Session, generation: string) => void;
-  onEvict?: (session: Session, generation: string) => Promise<"released" | "unresolved">;
-  onObservation?: (
-    e: CodexObservation,
-    s: Readonly<Session> | undefined,
-    state: ReturnType<typeof createState>,
-    change: StateChange,
-  ) => void;
-  onResync?: (s: Session, state: ReturnType<typeof createState>) => void;
-};
-
-/** Преобразует ошибки порта и сценария в безопасный DTO и HTTP status. */
-export function toErrorResponse(
-  error: unknown,
-  generation: string,
-  operationId?: string,
-): { body: ErrorResponse; httpStatus: number } {
-  const source =
-    error && typeof error === "object"
-      ? (error as { code?: unknown; outcome?: unknown })
-      : {};
-  const known = new Set<ErrorResponse["code"]>([
-    "INVALID_ARGUMENT",
-    "STALE_GENERATION",
-    "OPERATION_CONFLICT",
-    "REQUEST_TOO_LARGE",
-    "ITEM_TOO_LARGE",
-    "CAPACITY_EXHAUSTED",
-    "UPSTREAM_UNAVAILABLE",
-    "TIMEOUT",
-    "NOT_FOUND",
-    "UNSUPPORTED",
-    "STALE_REQUEST",
-  ]);
-  const code =
-    typeof source.code === "string" &&
-    known.has(source.code as ErrorResponse["code"])
-      ? (source.code as ErrorResponse["code"])
-      : source.code === "timeout"
-        ? "TIMEOUT"
-        : "UPSTREAM_UNAVAILABLE";
-  const outcome =
-    source.outcome === "not-sent" || source.outcome === "query"
-      ? source.outcome
-      : "unknown";
-  const messages: Record<ErrorResponse["code"], string> = {
-    INVALID_ARGUMENT: "Request is invalid.",
-    STALE_GENERATION: "Connection generation changed.",
-    OPERATION_CONFLICT: "Operation conflicts with current thread state.",
-    REQUEST_TOO_LARGE: "Request exceeds the allowed size.",
-    ITEM_TOO_LARGE: "History item exceeds the allowed size.",
-    CAPACITY_EXHAUSTED: "Service capacity is exhausted.",
-    UPSTREAM_UNAVAILABLE: "Codex is unavailable.",
-    TIMEOUT: "Codex request timed out.",
-    NOT_FOUND: "Project or thread was not found.",
-    UNSUPPORTED: "Operation is unsupported.",
-    STALE_REQUEST: "Request is no longer pending.",
-  };
-  const body: ErrorResponse = {
-    code,
-    outcome,
-    generation,
-    ...(operationId ? { operationId } : {}),
-    message: messages[code],
-  };
-  const httpStatus =
-    code === "INVALID_ARGUMENT" || code === "REQUEST_TOO_LARGE"
-      ? code === "INVALID_ARGUMENT"
-        ? 400
-        : 413
-      : code === "NOT_FOUND"
-        ? 404
-        : code === "OPERATION_CONFLICT" ||
-            code === "STALE_GENERATION" ||
-            code === "STALE_REQUEST"
-          ? 409
-          : code === "CAPACITY_EXHAUSTED"
-            ? 429
-            : code === "UNSUPPORTED"
-              ? 501
-              : code === "TIMEOUT"
-                ? 504
-                : code === "ITEM_TOO_LARGE"
-                  ? 413
-                  : 503;
-  return { body, httpStatus };
-}
-/** Создаёт сценарии сервиса. Проекты должны иметь явный абсолютный cwd. */
-export function createApplication(options: ApplicationOptions) {
-  const state = createState(
-    (session, owner) => options.onResync?.(session, owner),
-    (session, generation) => options.onEvict?.(session, generation) ?? Promise.resolve("released"),
-  );
-  const projects = new Map(options.projects.map((p) => [p.projectId, p]));
-  const openingThreads = new Set<string>();
+// ABOUTME: Управляет native чатами, ходами и формами через один CodexPort.
+// ABOUTME: Владеет только bounded live проекцией; историю читает у Codex.
+import { randomUUID, createHash } from 'node:crypto';
+import { bytes, limits, validateCommand } from '../contracts/index.mjs';
+import type { Command, EventEnvelope, NativeSnapshot, PendingRequest } from '../contracts/index.mjs';
+import type { CodexPort, Observation } from './codex.js';
+import { display, metadata, text } from './display.js';
+export type Config = { codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
+type Session = { view: NativeSnapshot; opened: boolean; fresh: boolean; closing?: boolean; model: string | null; raw: Map<string, string | number>; revisions: Map<string, number> };
+/** Собирает команды и единственного владельца live items/pending. */
+export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void) {
+  const sessions = new Map<string, Session>();
+  let creating = 0, admission = Promise.resolve();
+  const operations = new Map<string, { hash: string; result: Promise<any> }>();
   const openings = new Map<string, Promise<Session>>();
-  const observed = options.codex.subscribe((e) => {
-    const change = state.observe(e);
-    if (e.type === "connection") {
-      state.syncGeneration(e.status.generation);
-      options.onObservation?.(e, undefined, state, change);
-    } else {
-      options.onObservation?.(e, change.session, state, change);
+  function fail(code: string, outcome = 'not-sent'): never { throw Object.assign(new Error(code), { code, outcome }); }
+  const project = (id?: string) => config.projects.find(p => p.projectId === id && p.available !== false) ?? fail('NOT_FOUND');
+  const current = () => codex.status().generation;
+  function publish(s: Session) {
+    if (s.view.seq === Number.MAX_SAFE_INTEGER) { s.view.epoch = randomUUID(); s.view.seq = 0; }
+    s.view.seq++;
+    while (s.view.items.length > 128 || bytes(s.view) > limits.state) {
+      const dropped = s.view.items.shift();
+      if (!dropped) { s.view.requests = []; s.raw.clear(); s.view.state = 'executor-unavailable'; break; }
+      s.revisions.delete(dropped.id);
+      s.view.truncated = true;
     }
-  });
-  const fail = (
-    code: string,
-    outcome: "not-sent" | "unknown" | "query" = "not-sent",
-  ): never => {
-    throw Object.assign(new Error(code.replaceAll("_", " ").toLowerCase()), {
-      code,
-      outcome,
-    });
-  };
-  const project = (id: string): ProjectDefinition => {
-    const p = projects.get(id);
-    if (!p || p.available === false)
-      throw Object.assign(new Error("Project unavailable"), {
-        code: "NOT_FOUND",
-        outcome: "not-sent",
-      });
-    if (!p.cwd.startsWith("/"))
-      throw Object.assign(new Error("Project cwd must be absolute"), {
-        code: "INVALID_ARGUMENT",
-        outcome: "not-sent",
-      });
-    return p;
-  };
-  const session = (projectId: string, threadId: string): Session => {
-    project(projectId);
-    const s = state.get(projectId, threadId);
-    if (!s)
-      throw Object.assign(new Error("Thread not loaded"), {
-        code: "NOT_FOUND",
-        outcome: "not-sent",
-      });
+    emit({ projectId: s.view.projectId, threadId: s.view.threadId, generation: s.view.generation, epoch: s.view.epoch, seq: s.view.seq, event: { type: 'STATE_SNAPSHOT', snapshot: structuredClone(s.view) } });
+  }
+  function put(s: Session, item: any, turnId: string) {
+    const value = display(item, turnId), index = s.view.items.findIndex(old => old.id === value.id);
+    if (index < 0) s.view.items.push(value);
+    else s.view.items[index] = value;
+    s.revisions.set(value.id, s.view.seq + 1);
+  }
+  async function admit(projectId: string, thread: any, fresh = false): Promise<Session> {
+    const previous = admission;
+    let release!: () => void;
+    admission = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try {
+    if (sessions.size >= limits.threads) {
+      const victim = [...sessions.values()].find(s => s.view.turn?.status !== 'inProgress' && !s.view.requests.length);
+      if (!victim) fail('CAPACITY_EXHAUSTED');
+      victim.closing = true;
+      let response: any;
+      try { response = await codex.call('thread/unsubscribe', { threadId: victim.view.threadId }, { mutation: true }); }
+      catch (error: any) { if (error.outcome === 'not-sent') victim.closing = false; throw error; }
+      if (!['unsubscribed', 'notLoaded', 'notSubscribed'].includes(response.status)) fail('CAPACITY_EXHAUSTED');
+      victim.view.epoch = randomUUID();
+      publish(victim);
+      sessions.delete(victim.view.threadId);
+    }
+    const view: NativeSnapshot = { projectId, threadId: thread.id, generation: current(), epoch: randomUUID(), seq: 0, thread: metadata(thread), turn: null, state: 'idle', items: [], requests: [], truncated: false };
+    const s: Session = { view, opened: fresh, fresh, model: thread.model ?? null, raw: new Map(), revisions: new Map() };
+    sessions.set(thread.id, s);
     return s;
-  };
-  const call = (
-    method: string,
-    params: Record<string, unknown>,
-    mutation: boolean,
-  ) => options.codex.call(method, params, { mutation });
-  const operation = <T, R extends { generation: string; operationId: string }>(
-    r: R,
-    fn: () => Promise<T>,
-  ) => state.runOperation(r.generation, r.operationId, r, fn);
-  function assertCurrentGeneration(
-    generation: string,
-    s?: Session,
-    epoch?: string,
-    outcome: "not-sent" | "unknown" = "not-sent",
-  ): void {
-    if (
-      state.generation() !== generation ||
-      (s && s.generation !== generation) ||
-      (s && epoch !== undefined && s.streamEpoch !== epoch)
-    ) fail("STALE_GENERATION", outcome);
+    } finally { release(); }
   }
-  async function openThread(
-    projectId: string,
-    threadId: string,
-  ): Promise<Session> {
-    const p = project(projectId);
-    const openingGeneration = state.generation();
-    let s = state.get(projectId, threadId);
-    if (s) state.assertNotClosing(s);
-    if (s?.knownNew || s?.opened) return s;
-    const key = `${projectId}\0${threadId}`;
-    const pending = openings.get(key);
-    if (pending) return pending;
-    const opening = (async () => {
-      if (!s) {
-        const metadata: any = await call(
-          "thread/read",
-          { threadId, includeTurns: false },
-          false,
-        );
-        assertCurrentGeneration(openingGeneration);
-        if (metadata?.thread?.id !== threadId || metadata.thread.cwd !== p.cwd)
-          fail("INVALID_ARGUMENT");
-        s = await state.admit(projectId, threadId, p.cwd);
+  async function open(r: Command): Promise<Session> {
+    const p = project(r.projectId), id = r.threadId!;
+    let s = sessions.get(id);
+    if (s && s.view.projectId !== p.projectId) fail('INVALID_ARGUMENT');
+    if (s?.closing) fail('CAPACITY_EXHAUSTED');
+    if (s?.opened) return s;
+    if (openings.has(id)) return openings.get(id)!;
+    const work = (async () => {
+      const before = current();
+      const native = await codex.call('thread/read', { threadId: id, includeTurns: false });
+      if (native.thread.cwd !== p.cwd) fail('INVALID_ARGUMENT');
+      if (!s) s = await admit(p.projectId, native.thread);
+      const cut = s.view.seq;
+      const resumed = await codex.call('thread/resume', { threadId: id, cwd: p.cwd, excludeTurns: true }, { mutation: true });
+      const turns = await codex.call('thread/turns/list', { threadId: id, limit: 1, itemsView: 'notLoaded', sortDirection: 'desc' });
+      const items = await codex.call('thread/items/list', { threadId: id, limit: 100, sortDirection: 'desc' });
+      if (before !== current()) fail('STALE_GENERATION', 'query');
+      s.view.thread = metadata(resumed.thread);
+      s.model = resumed.model;
+      for (const entry of items.data.slice().reverse()) if ((s.revisions.get(entry.item.id) ?? 0) <= cut) put(s, entry.item, entry.turnId);
+      if (s.view.seq === cut) {
+        const turn = turns.data[0];
+        s.view.turn = turn ? { id: turn.id, status: turn.status } : null;
+        s.view.state = turn?.status === 'inProgress' && resumed.thread.status.type !== 'active' ? 'executor-unavailable' : turn?.status ?? 'idle';
       }
-      const bootstrapTurnLifecycleRevision = s.turnLifecycleRevision;
-      const epoch = s.streamEpoch;
-      state.setOpening(s, true);
-      try {
-        // Resume can apply its subscription before its reply is lost. Track
-        // possible ownership before sending so LRU cleanup can unsubscribe it.
-        options.onSubscription?.(s, openingGeneration);
-        const resumed: any = await call(
-          "thread/resume",
-          { threadId, cwd: p.cwd, excludeTurns: true },
-          true,
-        );
-        assertCurrentGeneration(openingGeneration, s, epoch, "unknown");
-        if (resumed?.thread?.id !== threadId || resumed.cwd !== p.cwd)
-          fail("INVALID_ARGUMENT");
-        const canAccept = typeof resumed.thread.canAcceptDirectInput === "boolean" ? resumed.thread.canAcceptDirectInput : null;
-        state.setCanAcceptDirectInput(s, canAccept);
-        const page: any = await call(
-          "thread/turns/list",
-          { threadId, limit: 1, sortDirection: "desc", itemsView: "notLoaded" },
-          false,
-        );
-        assertCurrentGeneration(openingGeneration, s, epoch);
-        const latest = Array.isArray(page?.data) ? page.data[0] : null;
-        const turn = latest && typeof latest.id === "string" ? latest : null;
-        const confirmedActive = resumed.thread.status?.type === "active" && turn?.status === "inProgress";
-        state.setOpened(
-          s,
-          typeof resumed.model === "string" ? resumed.model : null,
-          confirmedActive ? turn!.id : null,
-          turn?.status ?? null,
-          bootstrapTurnLifecycleRevision,
-          canAccept,
-          confirmedActive,
-        );
-        return s;
-      } finally {
-        state.setOpening(s, false);
-      }
-    })();
-    openings.set(key, opening);
-    try {
-      return await opening;
-    } finally {
-      openings.delete(key);
-    }
+      s.opened = true;
+      publish(s);
+      return s;
+    })().finally(() => openings.delete(id));
+    openings.set(id, work);
+    return work;
   }
-  async function start(
-    projectId: string,
-    text: string,
-    operationId: string,
-    generation: string,
-    s: Session,
-  ): Promise<TurnMutationResponse> {
-    const p = project(projectId);
-    state.assertNotClosing(s);
-    assertCurrentGeneration(generation, s);
-    if (s.cwd !== p.cwd) fail("INVALID_ARGUMENT");
-    if (s.canAcceptDirectInput === false) fail("OPERATION_CONFLICT");
-    if (s.turnStatus === "inProgress" && !s.active) fail("OPERATION_CONFLICT");
-    state.reserveTurn(s);
-    const epoch = s.streamEpoch;
-    const startedGeneration = generation;
-    if (!s.knownNew) {
-      try {
-        // A timed-out resume may still have subscribed upstream.
-        options.onSubscription?.(s, startedGeneration);
-        const resumed: any = await call(
-          "thread/resume",
-          { threadId: s.threadId, cwd: p.cwd, excludeTurns: true },
-          true,
-        );
-        assertCurrentGeneration(startedGeneration, s, epoch, "unknown");
-        if (resumed?.cwd !== p.cwd) {
-          state.finishTurn(s, "failed");
-          fail("INVALID_ARGUMENT");
-        }
-        const canAccept = typeof resumed.thread?.canAcceptDirectInput === "boolean" ? resumed.thread.canAcceptDirectInput : null;
-        state.setCanAcceptDirectInput(s, canAccept);
-        if (canAccept === false) {
-          state.finishTurn(s, "failed");
-          fail("OPERATION_CONFLICT");
-        }
-        state.setModel(
-          s,
-          typeof resumed.model === "string" ? resumed.model : null,
-        );
-      } catch (error) {
-        assertCurrentGeneration(startedGeneration, s, epoch, "unknown");
-        if ((error as any)?.outcome === "not-sent")
-          state.finishTurn(s, "failed");
-        throw error;
+  function observe(e: Observation) {
+    if (e.type === 'connection') {
+      operations.clear();
+      for (const s of sessions.values()) {
+        s.opened = s.fresh = s.closing = false;
+        s.raw.clear();
+        s.view.requests = [];
+        s.view.generation = current();
+        s.view.epoch = randomUUID();
+        s.view.state = 'connection-lost';
+        publish(s);
       }
+      return;
     }
-    assertCurrentGeneration(startedGeneration, s, epoch);
-    if (
-      options.allowedModels &&
-      (!s.model || !options.allowedModels.includes(s.model))
-    ) {
-      state.finishTurn(s, "failed");
-      fail("UNSUPPORTED");
+    const p = e.params, s = sessions.get(p?.threadId);
+    if (!s) return;
+    if (e.type === 'request') {
+      const requestId = `${typeof e.id}:${e.id}`, kinds: Record<string, PendingRequest['kind']> = { 'item/commandExecution/requestApproval': 'command-approval', 'item/fileChange/requestApproval': 'file-change-approval', 'item/permissions/requestApproval': 'permissions', 'item/tool/requestUserInput': 'question' };
+      if (s.view.requests.some(f => f.requestId === requestId)) return;
+      if (s.view.requests.length >= limits.pending) { s.view.state = 'executor-unavailable'; publish(s); return; }
+      const supported = e.supported && s.view.requests.length < limits.pending && bytes(s.view.requests) + bytes(p) < 131072;
+      s.view.requests.push({ requestId, turnId: p.turnId, method: e.method!, kind: supported ? kinds[e.method!] ?? 'unsupported' : 'unsupported', params: supported ? p : {}, answered: false, ...(supported ? {} : { reason: 'unsupported-or-too-large' }) });
+      s.raw.set(requestId, e.id!);
+    } else if (e.method === 'serverRequest/resolved') {
+      const id = `${typeof p.requestId}:${p.requestId}`;
+      s.view.requests = s.view.requests.filter(f => f.requestId !== id);
+      s.raw.delete(id);
+    } else if (e.method === 'turn/started' || e.method === 'turn/completed') {
+      s.view.turn = { id: p.turn.id, status: p.turn.status };
+      s.view.state = p.turn.status;
+      if (p.turn.status !== 'inProgress') { s.view.requests = []; s.raw.clear(); }
+    } else if (e.method === 'item/started' || e.method === 'item/completed') put(s, p.item, p.turnId);
+    else if (e.method?.endsWith('/delta') || e.method?.endsWith('/outputDelta')) {
+      const item = s.view.items.find(i => i.id === p.itemId);
+      if (!item) { s.opened = false; s.view.state = 'connection-lost'; }
+      else {
+        const field = e.method === 'item/agentMessage/delta' ? 'text' : 'output';
+        item[field] = text((item[field] ?? '') + p.delta, field === 'text' ? 8192 : 32768);
+        s.revisions.set(item.id, s.view.seq + 1);
+      }
+    } else if (e.method === 'turn/plan/updated') put(s, { id: `plan:${p.turnId}`, type: 'plan', text: p.plan.map((step: any) => `${step.status}: ${step.step}`).join('\n') }, p.turnId);
+    else return;
+    if (s.view.requests.some(f => !f.answered)) s.view.state = 'waiting';
+    publish(s);
+  }
+  const unsubscribe = codex.subscribe(observe);
+  async function execute(r: Command): Promise<any> {
+    if (r.action === 'status') return { ...codex.status(), ready: codex.status().connection === 'connected' && codex.status().authorization === 'ready' };
+    if (r.action === 'projects') return { generation: current(), projects: config.projects.map(p => ({ projectId: p.projectId, name: p.name, available: p.available !== false })) };
+    if (codex.status().connection !== 'connected' || codex.status().authorization !== 'ready') fail('UPSTREAM_UNAVAILABLE', r.operationId ? 'not-sent' : 'query');
+    const p = project(r.projectId);
+    if (r.operationId && r.generation !== current()) fail('STALE_GENERATION');
+    if (r.action === 'threads') {
+      const page = await codex.call('thread/list', { cwd: p.cwd, limit: 100, cursor: r.cursor });
+      return { generation: current(), data: page.data.filter((t: any) => t.cwd === p.cwd).map(metadata), nextCursor: page.nextCursor ?? null };
     }
-    state.setModel(s, s.model, false);
-    let response: any;
-    try {
-      response = await call(
-        "turn/start",
-        { threadId: s.threadId, input: [{ type: "text", text }] },
-        true,
-      );
-    } catch (error) {
-      assertCurrentGeneration(startedGeneration, s, epoch, "unknown");
-      if ((error as any)?.outcome === "not-sent") state.finishTurn(s, "failed");
-      throw error;
+    if (r.action === 'create') {
+      if (sessions.size + creating >= limits.threads) fail('CAPACITY_EXHAUSTED');
+      creating++;
+      try {
+      const native = await codex.call('thread/start', { cwd: p.cwd, allowProviderModelFallback: false, ...config.newThread }, { mutation: true });
+      if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
+      await admit(p.projectId, { ...native.thread, model: native.model }, true);
+      if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
+      return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: native.thread.id };
+      } finally { creating--; }
     }
-    assertCurrentGeneration(startedGeneration, s, epoch, "unknown");
-    state.setTurnId(s, response?.turn?.id ?? null);
-    const result: TurnMutationResponse = {
-      generation,
-      operationId,
-      outcome: "accepted",
-      threadId: s.threadId,
-      turnId: s.activeTurnId ?? "",
-    };
-    if (!validateDto("TurnMutationResponse", result))
-      fail("UNSUPPORTED", "unknown");
+    const s = await open(r);
+    if (r.action === 'open') return structuredClone(s.view);
+    if (r.action === 'items' || r.action === 'turns') {
+      if (s.fresh) return { generation: current(), data: [], nextCursor: null };
+      const page = await codex.call(r.action === 'items' ? 'thread/items/list' : 'thread/turns/list', { threadId: r.threadId, limit: 100, cursor: r.cursor, sortDirection: 'desc', ...(r.action === 'items' ? { turnId: r.turnId } : { itemsView: 'notLoaded' }) });
+      return { generation: current(), data: r.action === 'items' ? page.data.slice().reverse().map((e: any) => display(e.item, e.turnId, true)) : page.data.map((t: any) => ({ id: t.id, status: t.status })), nextCursor: page.nextCursor ?? null };
+    }
+    if (r.generation !== current()) fail('STALE_GENERATION');
+    if (s.closing) fail('CAPACITY_EXHAUSTED');
+    const active = s.view.turn?.status === 'inProgress';
+    if (r.action === 'start' && (active || s.view.thread.canAcceptDirectInput === false)) fail('OPERATION_CONFLICT');
+    if ((r.action === 'steer' || r.action === 'interrupt') && (!active || s.view.turn?.id !== (r.expectedTurnId ?? r.turnId))) fail('OPERATION_CONFLICT');
+    if (r.action === 'start' && [...sessions.values()].filter(s => s.view.turn?.status === 'inProgress').length >= 4) fail('CAPACITY_EXHAUSTED');
+    if (r.action === 'start' && config.allowedModels && !config.allowedModels.includes(s.model ?? '')) fail('UNSUPPORTED');
+    const previousTurn = s.view.turn, previousState = s.view.state;
+    if (r.action === 'start') { s.view.turn = { id: 'starting', status: 'inProgress' }; s.view.state = 'inProgress'; publish(s); }
+    let turnId = r.turnId;
+    if (r.action === 'answer') {
+      const f = s.view.requests.find(f => f.requestId === r.requestId);
+      if (!f || f.answered) fail('STALE_REQUEST');
+      if (f.kind === 'unsupported' || !codex.validateAnswer(s.raw.get(f.requestId)!, r.answer) || !validAnswer(f, r.answer)) fail('INVALID_ARGUMENT');
+      f.answered = true;
+      publish(s);
+      try { await codex.respond(s.raw.get(f.requestId)!, r.answer); }
+      catch (error: any) { if (error.outcome === 'not-sent' && r.generation === current() && s.view.requests.includes(f)) { f.answered = false; publish(s); } throw error; }
+    } else if (r.action === 'interrupt') await codex.call('turn/interrupt', { threadId: r.threadId, turnId: r.turnId }, { mutation: true });
+    else {
+      const params = { threadId: r.threadId, input: [{ type: 'text', text: r.text }], ...(r.action === 'steer' ? { expectedTurnId: r.expectedTurnId } : {}) };
+      let value: any;
+      try { value = await codex.call(r.action === 'steer' ? 'turn/steer' : 'turn/start', params, { mutation: true }); }
+      catch (error: any) { if (r.action === 'start' && error.outcome === 'not-sent' && r.generation === current() && s.view.turn?.id === 'starting') { s.view.turn = previousTurn; s.view.state = previousState; publish(s); } throw error; }
+      turnId = value.turn?.id ?? value.turnId;
+      if (r.action === 'start' && s.view.turn?.id === 'starting') { s.view.turn = { id: turnId!, status: value.turn.status }; publish(s); }
+      s.fresh = false;
+    }
+    if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
+    return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: r.threadId, turnId, ...(r.requestId ? { requestId: r.requestId } : {}) };
+  }
+  /** Повтор того же operation ID возвращает исходный результат без native вызова. */
+  async function request(r: Command): Promise<any> {
+    if (!validateCommand(r)) fail('INVALID_ARGUMENT');
+    if (!r.operationId) return execute(r);
+    if (r.generation !== current()) fail('STALE_GENERATION');
+    const canonical = JSON.stringify(r, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
+    const hash = createHash('sha256').update(canonical).digest('hex'), old = operations.get(r.operationId);
+    if (old) return old.hash === hash ? old.result : fail('OPERATION_CONFLICT');
+    if (operations.size >= limits.operations) fail('CAPACITY_EXHAUSTED');
+    const result = Promise.resolve().then(() => execute(r));
+    operations.set(r.operationId, { hash, result });
     return result;
   }
-  return {
-    /** Список только явно настроенных проектов. */
-    projects() {
-      const value = {
-        generation: state.generation(),
-        projects: [...projects.values()].map((p) => ({
-          projectId: p.projectId,
-          name: p.name,
-          available: p.available !== false,
-        })),
-      };
-      if (!validateDto("ProjectsResponse", value)) fail("UNSUPPORTED");
-      return value;
-    },
-    /** Безопасный статус порта и capacity. */
-    status() {
-      const s = options.codex.status();
-      const result = {
-        generation: state.generation(),
-        ready: s.connection === "connected" && s.authorization === "ready",
-        connection: s.connection,
-        authorization: s.authorization,
-        limits: {
-          loadedThreads: limits.loadedThreads,
-          activeTurns: limits.activeTurns,
-          pendingRpc: limits.pendingRpc,
-          pendingForms: limits.pendingForms,
-          ledgerEntries: limits.ledgerEntries,
-          upstreamFrameBytes: limits.upstreamFrameBytes,
-          natsSseFrameBytes: limits.natsSseFrameBytes,
-          historyResponseBytes: limits.historyResponseBytes,
-        },
-      };
-      if (!validateDto("StatusResponse", result)) fail("UNSUPPORTED", "query");
-      return result;
-    },
-    /** Перечисляет upstream threads в границах DTO. */
-    async threads(r: ThreadsRequest) {
-      if (!validateDto("ThreadsRequest", r)) fail("INVALID_ARGUMENT");
-      const p = project(r.projectId);
-      const x: any = await call(
-        "thread/list",
-        {
-          cwd: p.cwd,
-          limit: Math.min(100, r.limit ?? 50),
-          ...(r.cursor ? { cursor: r.cursor } : {}),
-        },
-        false,
-      );
-      const value = {
-        generation: state.generation(),
-        threads: (x.data ?? []).map((t: any) => ({
-          threadId: t.id,
-          title: String(t.name ?? t.preview ?? "").slice(0, 256),
-          updatedAt: new Date(Number(t.updatedAt) * 1000).toISOString(),
-          active: t.status?.type === "active",
-        })),
-        nextCursor: x.nextCursor ?? null,
-      };
-      if (!validateDto("ThreadsResponse", value)) fail("UNSUPPORTED");
-      return value;
-    },
-    /** Читает metadata без thread history hydration и связывает cwd с проектом. */
-    async thread(r: ThreadReadRequest) {
-      if (!validateDto("ThreadReadRequest", r)) fail("INVALID_ARGUMENT");
-      const s = await openThread(r.projectId, r.threadId);
-      const value = structuredClone(state.view(s));
-      if (!validateDto("ThreadSnapshot", value)) fail("UNSUPPORTED");
-      return value;
-    },
-    /** Читает только страничную историю. */
-    async history(r: HistoryRequest) {
-      const s = await openThread(r.projectId, r.threadId);
-      return readHistory(options.codex, s, r);
-    },
-    /** Создаёт новый пустой thread; не запускает ход. */
-    async threadCreate(r: ThreadCreateRequest) {
-      if (!validateDto("ThreadCreateRequest", r)) fail("INVALID_ARGUMENT");
-      return operation(r, async () => {
-        const p = project(r.projectId);
-        const ticket = await state.reserveThreadStart();
-        try {
-          const x: any = await call(
-            "thread/start",
-            {
-              cwd: p.cwd,
-              allowProviderModelFallback: false,
-              ...(options.newThread?.approvalsReviewer === undefined ? {} : { approvalsReviewer: options.newThread.approvalsReviewer }),
-            },
-            true,
-          );
-          assertCurrentGeneration(r.generation, undefined, undefined, "unknown");
-          const id = x?.thread?.id;
-          if (typeof id !== "string") fail("UNSUPPORTED", "unknown");
-          const s = await ticket.commit(r.projectId, id, p.cwd);
-          state.setCanAcceptDirectInput(s, typeof x.thread?.canAcceptDirectInput === "boolean" ? x.thread.canAcceptDirectInput : null);
-          state.setModel(s, typeof x.model === "string" ? x.model : null, true);
-          options.onSubscription?.(s, r.generation);
-          const result = {
-            generation: r.generation,
-            operationId: r.operationId,
-            outcome: "accepted",
-            threadId: id,
-          };
-          if (!validateDto("ThreadCreateResponse", result))
-            fail("UNSUPPORTED", "unknown");
-          return result;
-        } catch (error) {
-          await ticket.finish((error as { outcome?: unknown })?.outcome === "not-sent" ? "not-sent" : "unknown").catch(() => undefined);
-          throw error;
-        }
-      });
-    },
-    /** Запускает ход после подтверждения существующего или нового thread metadata. */
-    async turnStart(r: TurnStartRequest) {
-      if (serializedBytes(r) > 65536) fail("REQUEST_TOO_LARGE");
-      if (!validateDto("TurnStartRequest", r)) fail("INVALID_ARGUMENT");
-      return operation(r, async () => {
-        const lock = `${r.projectId}\0${r.threadId}`;
-        if (openingThreads.has(lock)) fail("OPERATION_CONFLICT");
-        openingThreads.add(lock);
-        try {
-          const p = project(r.projectId);
-          let s = state.get(r.projectId, r.threadId);
-          if (!s) {
-            const x: any = await call(
-              "thread/read",
-              { threadId: r.threadId, includeTurns: false },
-              false,
-            );
-            assertCurrentGeneration(r.generation);
-            if (x?.thread?.id !== r.threadId || x.thread.cwd !== p.cwd)
-              fail("INVALID_ARGUMENT");
-            s = await state.admit(r.projectId, r.threadId, p.cwd);
-            state.setOpening(s, false);
-          }
-          return await start(
-            r.projectId,
-            r.text,
-            r.operationId,
-            r.generation,
-            s,
-          );
-        } finally {
-          openingThreads.delete(lock);
-        }
-      });
-    },
-    /** Steer завершается конфликтом при несовпадении active turn. */
-    async turnSteer(r: TurnSteerRequest) {
-      if (serializedBytes(r) > 65536) fail("REQUEST_TOO_LARGE");
-      if (!validateDto("TurnSteerRequest", r)) fail("INVALID_ARGUMENT");
-      return operation(r, async () => {
-        const s = session(r.projectId, r.threadId);
-        if (!s.active || s.activeTurnId !== r.expectedTurnId)
-          fail("OPERATION_CONFLICT");
-        if (s.canAcceptDirectInput === false) fail("OPERATION_CONFLICT");
-        const epoch = s.streamEpoch;
-        assertCurrentGeneration(r.generation, s, epoch);
-        let x: any;
-        try {
-          x = await call(
-            "turn/steer",
-            {
-              threadId: s.threadId,
-              expectedTurnId: r.expectedTurnId,
-              input: [{ type: "text", text: r.text }],
-            },
-            true,
-          );
-        } catch (error) {
-          assertCurrentGeneration(r.generation, s, epoch, "unknown");
-          throw error;
-        }
-        assertCurrentGeneration(r.generation, s, epoch);
-        const result = {
-          generation: r.generation,
-          operationId: r.operationId,
-          outcome: "accepted",
-          threadId: s.threadId,
-          turnId: x?.turnId ?? s.activeTurnId,
-        };
-        if (!validateDto("TurnMutationResponse", result))
-          fail("UNSUPPORTED", "unknown");
-        return result;
-      });
-    },
-    /** Запрашивает interrupt; активность меняется только по upstream observation. */
-    async turnInterrupt(r: TurnInterruptRequest) {
-      if (!validateDto("TurnInterruptRequest", r)) fail("INVALID_ARGUMENT");
-      return operation(r, async () => {
-        const s = session(r.projectId, r.threadId);
-        if (s.activeTurnId !== r.turnId) fail("OPERATION_CONFLICT");
-        const epoch = s.streamEpoch;
-        assertCurrentGeneration(r.generation, s, epoch, "unknown");
-        let x: any;
-        try {
-          x = await call(
-            "turn/interrupt",
-            { threadId: s.threadId, turnId: r.turnId },
-            true,
-          );
-        } catch (error) {
-          assertCurrentGeneration(r.generation, s, epoch, "unknown");
-          throw error;
-        }
-        assertCurrentGeneration(r.generation, s, epoch, "unknown");
-        if (!x) fail("UNSUPPORTED", "unknown");
-        const result = {
-          generation: r.generation,
-          operationId: r.operationId,
-          outcome: "accepted",
-          threadId: s.threadId,
-          turnId: r.turnId,
-        };
-        if (!validateDto("TurnMutationResponse", result))
-          fail("UNSUPPORTED", "unknown");
-        return result;
-      });
-    },
-    /** Фиксирует локальное решение до RPC, сохраняя исходный тип ID. */
-    async requestRespond(r: RequestRespondRequest) {
-      if (!validateDto("RequestRespondRequest", r)) fail("INVALID_ARGUMENT");
-      return operation(r, async () => {
-        const s = session(r.projectId, r.threadId);
-        const f = s.pending.get(r.requestId);
-        if (!f || f.kind === "unsupported")
-          throw Object.assign(new Error("Stale request"), {
-            code: "STALE_REQUEST",
-            outcome: "not-sent",
-          });
-        if (
-          r.kind !== f.kind ||
-          !validateUpstreamAnswer(r.kind as any, r.answer, f.params as any)
-        )
-          fail("INVALID_ARGUMENT");
-        const claimed = state.claimPending(s, r.requestId);
-        if (!claimed)
-          throw Object.assign(new Error("Stale request"), {
-            code: "STALE_REQUEST",
-            outcome: "not-sent",
-          });
-        const epoch = s.streamEpoch;
-        try {
-          await options.codex.respond(claimed.rawId, r.answer);
-        } catch (error) {
-          assertCurrentGeneration(r.generation, s, epoch, "unknown");
-          if ((error as any)?.outcome === "not-sent")
-            state.releaseDecisionOnNotSent(s, r.requestId);
-          throw error;
-        }
-        assertCurrentGeneration(r.generation, s, epoch, "unknown");
-        const result = {
-          generation: r.generation,
-          operationId: r.operationId,
-          outcome: "accepted",
-          requestId: r.requestId,
-        };
-        if (!validateDto("RequestRespondResponse", result))
-          fail("UNSUPPORTED", "unknown");
-        return result;
-      });
-    },
-    /** Отменяет подписку приложения; транспорт закрывает владелец сборки. */
-    close() {
-      observed();
-    },
-  };
+  return { request, close: unsubscribe };
+}
+function validAnswer(f: PendingRequest, answer: any): boolean {
+  if (f.kind === 'command-approval' && f.params.availableDecisions) return f.params.availableDecisions.some((v: any) => JSON.stringify(v) === JSON.stringify(answer?.decision));
+  if (f.kind === 'question') {
+    if (Object.keys(answer?.answers ?? {}).sort().join() !== f.params.questions.map((q: any) => q.id).sort().join()) return false;
+    return f.params.questions.every((q: any) => answer.answers[q.id].answers.length > 0 && answer.answers[q.id].answers.every((value: string) => value.trim() && (!q.options?.length || q.isOther || q.options.some((option: any) => option.label === value))));
+  }
+  if (f.kind === 'permissions') return answer?.scope === 'turn' && answer?.strictAutoReview !== true && (JSON.stringify(answer?.permissions) === JSON.stringify(f.params.permissions) || JSON.stringify(answer?.permissions) === '{}');
+  return true;
 }

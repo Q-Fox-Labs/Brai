@@ -67,35 +67,8 @@ docker compose -f deploy/compose.production-test.yml down -v --remove-orphans
 
 ## Host agent
 
-### Сборка переносимого артефакта
+Agent работает вне контейнера, рядом с готовым Codex app server. Универсальный продукт не требует admin или конкретного домена/сервера.
 
-Выполняйте сборку из чистого checkout продукта. Нужны точная Git-ревизия, установленный Node.js `24.21.0` и npm `11.19.0`. Сборщик проверяет ревизию, закреплённые версии, очищает временные npm-конфиги, устанавливает workspace-зависимости, собирает agent, оставляет production-зависимости и проверяет ссылки внутри артефакта. Он не запускает собранный сервис.
+Для переносимого выпуска выполните `node deploy/scripts/build-agent-artifact.mjs --source /absolute/repository --revision <40-char-commit> --output /absolute/new-artifact`. Требуются закреплённые Node24.21.0/npm11.19.0. Builder использует только заданный Git commit и locked production dependencies. Артефакт содержит compiled agent, contracts, package и production node_modules; workspace исходники, тесты и admin не поставляются. Manifest v2 содержит точную sourceRevision и toolchain; npm lock остаётся владельцем dependency inventory.
 
-```sh
-node deploy/scripts/build-agent-artifact.mjs \
-  --source /absolute/path/to/brai-checkout \
-  --revision 0123456789abcdef0123456789abcdef01234567 \
-  --output /absolute/path/to/new-agent-artifact
-```
-
-`--source` должен быть корнем Git checkout, `--revision` — полный lowercase commit hash из 40 символов, а родительский каталог `--output` должен существовать. Путь результата должен быть новым и находиться вне source checkout. Сборщик не перезаписывает существующий результат.
-
-Артефакт содержит `services/agent/dist`, публичные контракты и схемы, manifest с source revision/toolchain/production dependency graph и production `node_modules`. Manifest перечисляет entrypoints `services/agent/dist/main.js` и `services/agent/dist/health.js`. Внутренние workspace-ссылки на исключённые пакеты удаляются; все оставшиеся symlink должны разрешаться внутри артефакта.
-
-### Запуск и остановка
-
-Подготовьте внешний JSON config с правами, ограниченными владельцем процесса. Контракт конфигурации описан в [`services/agent/README.md`](../services/agent/README.md). Укажите абсолютный путь через `BRAI_AGENT_CONFIG`; конфиг содержит явные Codex socket URL, NATS endpoint и учётные данные, а также список проектов. `allowedModels` можно опустить. Не храните конфиг и секреты в артефакте.
-
-Запустите entrypoint дочерним процессом оболочки, чтобы сохранить его PID:
-
-```sh
-BRAI_AGENT_CONFIG=/absolute/path/to/agent-config.json \
-  node /absolute/path/to/agent-artifact/services/agent/dist/main.js &
-agent_pid=$!
-BRAI_AGENT_CONFIG=/absolute/path/to/agent-config.json \
-  node /absolute/path/to/agent-artifact/services/agent/dist/health.js
-kill -TERM "$agent_pid"
-wait "$agent_pid"
-```
-
-Health требует успешного status endpoint с `ready: true`; ответ NATS PING сам по себе не подтверждает готовность. `kill` и `wait` относятся только к PID, запущенному этой оболочкой. Не используйте широкие команды остановки процессов.
+Запуск: `BRAI_AGENT_CONFIG=/absolute/config.json node /absolute/artifact/services/agent/dist/main.js`. Health запускается тем же способом с `dist/health.js`. SIGINT/SIGTERM освобождает собственные подключения. Сам Codex app server не запускается и не перезапускается. Его endpoint, NATS credentials, проекты и модели задаются внешней защищённой конфигурацией.

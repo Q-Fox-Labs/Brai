@@ -11,7 +11,7 @@
     "test": "node --experimental-strip-types --test --test-isolation=none tests/*.test.ts"
   },
   "dependencies": {
-    "@brai/agent": "1.0.0",
+    "@brai/agent": "2.0.0",
     "@ag-ui/client": "1.0.1",
     "@ag-ui/core": "1.0.1",
     "@radix-ui/react-separator": "1.1.15",

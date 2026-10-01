@@ -1,112 +1,23 @@
-# Контракт сервиса agent
+# Agent
 
-## Запуск процесса
+Отдельная программа соединяет web через NATS с существующим Codex app server. История и выполнение принадлежат Codex; своей БД и очереди заданий нет.
 
-Сервис читает настройки только из JSON-файла, указанного абсолютным путём в `BRAI_AGENT_CONFIG`. Сборка выполняется командой `npm run build`; обычный запуск — `npm start`, проверка готовности — `npm run health`. Health проверяет status endpoint и требует `ready: true`, поэтому одного ответа NATS PING недостаточно.
+## Запуск
 
-Минимальная форма конфигурации:
+Из корня: `npm ci`, `npm run build:agent`, затем `BRAI_AGENT_CONFIG=/absolute/config.json npm start --workspace=@brai/agent`. Конфигурация содержит `codex.socketUrl`, `nats.servers`, настроенные `projects` с `projectId/name/cwd`, необязательные `allowedModels` и `newThread.model/approvalsReviewer`. Credentials задаются явно в защищённой конфигурации. Сборка и запуск не читают admin. Health: `BRAI_AGENT_CONFIG=/absolute/config.json npm run health --workspace=@brai/agent`.
 
-```json
-{
-  "codex": { "socketUrl": "ws+unix:/absolute/path/to/app-server-control.sock:/" },
-  "nats": {
-    "servers": ["nats://127.0.0.1:4222"],
-    "user": "agent",
-    "password": "replace-me",
-    "inboxPrefix": "_INBOX.brai_agent"
-  },
-  "projects": [
-    { "projectId": "work", "name": "Work", "cwd": "/absolute/path/to/project" }
-  ],
-  "newThread": { "approvalsReviewer": "user" }
-}
-```
+## Контракт
 
-`allowedModels` необязателен и ограничивает модели, уже выбранные текущей конфигурацией Codex; сервис не подменяет модель и не включает fallback. `newThread.approvalsReviewer` задаёт маршрутизацию одобрений только при создании thread. Существующие threads не перенастраиваются. Секреты передавайте через файл с ограниченными правами доступа. Неизвестные ключи конфигурации отклоняются.
+NATS Services `brai_agent`, версия2.0.0, endpoint `brai.agent.v2.rpc`. Запросы описаны в [AsyncAPI](asyncapi.json) и [JSON Schema](schemas/messages.schema.json). Действия: `projects`, `status`, `threads`, `create`, `open`, `turns`, `items`, `start`, `steer`, `interrupt`, `answer`. Ответ успешной мутации содержит `outcome=accepted` и исходный `operationId`. Ошибки используют стандартные NATS Service Error headers; `outcome` различает `not-sent`, `unknown`, `query`. Неизвестный исход нельзя автоматически повторять.
 
-Каталог владеет публичной границей агента Brai. DTO описаны в `schemas/messages.schema.json` (JSON Schema Draft-07); `contracts/index.mjs` предоставляет браузерно-безопасный API. Импортируйте валидаторы, subjects и limits из `@brai/agent/contracts`. Объявления TypeScript генерируются из схемы. Единственный источник форм upstream-запросов и ответов Codex app-server — `contracts/codex/`.
+`generation` защищает мутации от старого исполнителя. Одинаковый operationId возвращает исходный результат; другое содержимое отклоняется. Ledger ограничен и живёт только в текущем поколении. Разрешены только настроенные проекты и модели; произвольного RPC proxy нет. Мутация не ждёт завершения хода.
 
-## Интерфейс NATS
+Core NATS `brai.agent.v2.event` передаёт только AG-UI `STATE_SNAPSHOT`: полное ограниченное представление native items и ожидающих запросов, с project/thread/generation/epoch/seq. Внутри того же generation/epoch любой больший seq заменяет состояние целиком: промежуточные снимки можно объединять. После нового поколения/epoch читают `open`; автоматического turn/start нет. Сохранённую историю читают native `turns/items`, передавая непрозрачный cursor.
 
-Имя сервиса — `brai_agent`, версия — `1.0.0`, instance ID уникален для процесса, queue group — `brai_agent`. Сервис предоставляет встроенные PING, INFO и STATS NATS Service API. PING подтверждает ответ экземпляра; готовность также требует инициализированного исполнителя и безопасного состояния авторизации.
+Четыре формы: команда, изменение файлов, дополнительные разрешения, вопрос. Ответ проверяется исходной native schema до first-wins claim; stale/неизвестные запросы не подтверждаются. Raw reasoning, binary/media и секреты профиля не передаются. Публичная краткая reasoning summary доступна как текст. `phase`, статус и код выхода сохраняются; сокращение обозначается явно.
 
-Subjects запросов: `brai.agent.v1.query.projects`, `.query.status`, `.query.threads`, `.query.thread`, `.query.history`; команды: `.command.thread.create`, `.command.turn.start`, `.command.turn.steer`, `.command.turn.interrupt`, `.command.request.respond`. Текущие события используют один Core NATS subject `brai.agent.v1.event`; потребитель фильтрует точные `projectId` и `threadId` в оболочке. Доставка событий не гарантирована. Core NATS не хранит историю; после восстановления связи нужен новый ограниченный снимок и чтение истории.
+Размеры и ёмкости экспортированы из `@brai/agent/contracts`. При переполнении интерфейс получает отказ либо восстановление снимка. Brai не выбирает замену модели; для созданных им чатов provider fallback отключён. Для прежних чатов настройкой fallback владеет Codex. Остановка agent закрывает его подключения; Codex daemon остаётся владельцем собственного выполнения.
 
-Срок ответа на чтение — 10 секунд. Срок подтверждения принятия команды — 12 секунд; ответ подтверждает местное принятие, а не завершение хода. Ответ на pending request принимается после фиксации местного решения и отправки upstream; окончательное разрешение запроса приходит отдельным событием. Ответы отправляются на нативный NATS `message.reply`. В AsyncAPI им соответствует отдельный канал `replies` с `address: null` и `x-nats-reply-subject: message.reply`; поле JSON `replyTo` не используется.
+## Проверки
 
-Ошибка сервиса содержит оба заголовка `Nats-Service-Error` и `Nats-Service-Error-Code`; клиент проверяет их до полезной нагрузки. Ошибки различают исходы `not-sent`, `unknown` и `query`. Тайм-аут, разрыв связи или upstream `-32600` не разрешают автоматический повтор команды. `NOT_FOUND` при чтении не доказывает отсутствие эффекта прежней команды. Классы ошибок потребителя: `INVALID_ARGUMENT` — 400; `STALE_GENERATION`, `STALE_REQUEST`, `OPERATION_CONFLICT` — 409; `REQUEST_TOO_LARGE`, `ITEM_TOO_LARGE` — 413; `CAPACITY_EXHAUSTED` — 429 при возможности освобождения ёмкости либо 503 с явной причиной; `UPSTREAM_UNAVAILABLE` — 503; `TIMEOUT` — 504; `NOT_FOUND` — 404; `UNSUPPORTED` — 501. NATS передаёт ошибку двумя стандартными заголовками сервиса без JSON-RPC-оболочки.
-
-## Идентификаторы, состояние и повторы
-
-`projectId` задаётся конфигурацией, непрозрачен, содержит не более 64 символов из разрешённого схемой набора. Идентификаторы Codex thread, turn и item — непрозрачные строки до 128 символов; UUID для них не требуется. Сервис создаёт новый UUID `generation` при каждом запуске и каждом восстановлении upstream-соединения с Codex. Каждый загруженный тред имеет UUID `streamEpoch` и целочисленный безопасный `seq`, который растёт только внутри этой эпохи. `seq` снимка — граница включённых событий. Перезагрузка браузера при подключении к той же живой проекции сохраняет эпоху и последовательность. Новая эпоха начинается с нуля при пересоздании проекции, например после вытеснения или смены поколения соединения Codex. Прежняя эпоха требует нового снимка; непрерывность последовательности между эпохами не гарантирована.
-
-Пределы: 16 загруженных тредов, 4 активных хода, 64 pending RPC, 64 формы, 128 клиентов, 64 события в очереди каждого клиента. LRU-вытеснение разрешено только для неактивных тредов без pending RPC. До вытеснения подписчики получают `brai.agent.resync-required` для прежней эпохи. Журнал операций содержит 4096 записей на поколение без вытеснения. При заполнении новые команды получают `CAPACITY_EXHAUSTED`; сервис сохраняет состояние, достаточное для объяснения отказа.
-
-Запись журнала связывает operation ID с неизменяемым хешем канонического запроса и исходным результатом: accepted, rejected, unknown или in-flight. Тот же ID, поколение и тело возвращают прежний результат без нового upstream-вызова. Другое тело даёт `OPERATION_CONFLICT`. После восстановления upstream-связи команды прежнего поколения устарели.
-
-## DTO и пределы размера
-
-`ProjectsRequest` и `StatusRequest` — пустые объекты. Размер страниц тредов и истории — от 1 до 100. Целая команда start/steer, включая оболочку и экранирование, занимает не более 64 KiB сериализованного JSON UTF-8. Upstream WebSocket-кадр ограничен 2 MiB; NATS/SSE-кадр — 1 MiB. Снимок и ответ истории — каждый до 768 KiB, включая оболочку и экранирование. Сумма сериализованных строк метаданных в ответе projects/threads ограничена 64 KiB. Все pending формы вместе занимают до 128 KiB, одна форма — до 32 KiB; этот предел проверяется и для формы в CUSTOM-событии открытия. Для исходящей JSON-нагрузки действует предел 1 MiB, если не задан более узкий. Экспорт `limits` задаёт требования контракта; эти проверки не доказывают соблюдение пределов реализацией сервиса.
-
-Слишком большой запрос Codex представляется компактным состоянием `unsupported` с кодом `REQUEST_TOO_LARGE`, идентификаторами и явной возможностью interrupt. Не храните и не показывайте неограниченную исходную нагрузку. Не обрезайте варианты одобрения или управляющие элементы запроса. Если минимальное состояние для сверки сохранить нельзя, сервис показывает состояние соединения/ошибки и прекращает принимать решения; автоматический ответ запрещён.
-
-Страница истории сохраняет каждый полученный item ID и порядок. Слишком большое содержимое заменяется стабильным явно сокращённым описанием с `contentBytes`; курсор продвигается только после представления всех элементов upstream-страницы. Один слишком большой элемент получает одно сокращённое описание либо `ITEM_TOO_LARGE`, без бесконечного цикла повторной синхронизации. Снимок может ограничить недавние сообщения и активное состояние с явной отметкой сокращения; более старое содержимое читается из истории.
-
-## Ответы на запросы
-
-Поддерживаемые формы: `command-approval`, `file-change-approval`, `permissions`, `question`. Сервис внутренне сопоставляет свой request ID с исходным upstream RPC ID. `RequestRespondRequest` различает формы по `kind`; `answer` ссылается на соответствующую upstream-схему. `validateDto` проверяет эту схему, а `validateUpstreamAnswer` дополнительно связывает ответ с `params` конкретного ожидающего запроса. `unsupported` не имеет параметров ответа и исключён из `SupportedPendingRequest`.
-
-Решения об одобрении команд и файлов должны соответствовать upstream-вариантам. Ответ на вопрос имеет форму `{ "answers": { "qid": { "answers": ["..."] } } }`; каждый qid совпадает с вопросом ожидающего запроса. Permissions используют upstream `permissions` и `scope: "turn"`: это профиль прав, а не решение allow/deny. Автоматическое одобрение запрещено. Первое принятое местное решение побеждает; следующий ответ получает `STALE_REQUEST`, в том числе с другим operation ID. Разрешение запроса другим клиентом делает местную форму устаревшей. Неизвестные методы явно не поддерживаются.
-
-## Отображение AG-UI
-
-События AG-UI 1.0.1 проверяются настоящим `EventSchema` из `@ag-ui/core/schemas`, без преобразования в Draft-07. Местная оболочка проверяется отдельно: точные project/thread, nullable turn ID, generation, stream epoch и sequence.
-
-| Наблюдение Codex | Событие AG-UI |
-| --- | --- |
-| Начало хода | `RUN_STARTED` |
-| Успешное завершение | `RUN_FINISHED`, `outcome: { "type": "success" }` |
-| Прерывание или отмена | `RUN_FINISHED`, `outcome: { "type": "cancelled" }`; снимок сохраняет фактический Codex `turnStatus` и состояние агента `interrupted` |
-| Ошибка завершения | `RUN_ERROR` |
-| Жизненный цикл сообщения | `TEXT_MESSAGE_START`, `TEXT_MESSAGE_CONTENT`, `TEXT_MESSAGE_END` |
-| Жизненный цикл инструмента | `TOOL_CALL_START`, `TOOL_CALL_ARGS`, `TOOL_CALL_END`; `TOOL_CALL_RESULT` приходит отдельно с результатом выполнения |
-| План | `ACTIVITY_SNAPSHOT` / `ACTIVITY_DELTA` в форме закреплённого SDK |
-| Завершённое сообщение/элемент заменяет накопленные дельты | `MESSAGES_SNAPSHOT` |
-
-CUSTOM-события используют `brai.agent.*` и явные DTO: output/diff, открытие/разрешение запроса, состояние соединения, сокращение и требование нового снимка. Не создавайте `AvailableCollabItems`: такого upstream-определения нет. Ожидание ответа сохраняет открытый AG-UI run без нового Codex turn. Отмена SSE или закрытие вкладки не прерывает ход Codex.
-
-Подпишитесь до получения границы снимка. Буфер вмещает до 64 событий; отбросьте события до границы снимка включительно, затем применяйте только непрерывные события того же поколения и эпохи. Пропуск, переполнение или смена поколения/эпохи требуют нового снимка. Core NATS не воспроизводит пропущенные события. Закреплённый `AbstractAgent` не имеет `events$`; `connectAgent` применяет состояние без накопления полной истории событий. Контрактные проверки SDK подтверждают поток дельты → конечный снимок → cancelled с одним сообщением и без вызова `run`, а также отключение живой подписки через `detachActiveRun` до завершения источника. Реализация продукта и поведение при перегрузке этими проверками не подтверждены.
-
-Потребитель SDK после snapshot активного run восстанавливает локальный message/tool lifecycle перед наблюдаемыми post-cut delta/end; это не новая команда Codex и не повтор текста/аргументов снимка. Точное [HTTP/SSE-отображение](../../apps/web/README.md#агент-httpsse) принадлежит web.
-
-## Фаза сообщения
-
-Фаза приходит только из upstream `MessagePhase` в `agentMessage`: `commentary` или `final_answer`. Отсутствие поля или null означает неизвестную фазу; завершение хода не определяет её. Схема владельца ссылается на native определение Codex, без второй копии enum.
-
-История передаёт optional nullable `HistoryItem.trace.phase`. Снимок передаёт optional `ThreadSnapshot.messagePhases`: карту itemId → phase|null, максимум 256 записей и только ID сообщений из `messages`. ID сообщения AG-UI совпадает с соответствующим itemId. Карта не зависит от `traceItems` и не требует дублировать текст сообщения в трассе. Старый снимок без карты означает неизвестные фазы; новый снимок заменяет карту целиком. Размер карты входит в прежний предел полного JSON снимка.
-
-Живое обновление передаётся в проверенном `EventEnvelope` как `CUSTOM` с именем `brai.agent.message.phase` и значением `CustomMessagePhase`: `{itemId,phase}`. Оно следует за созданием соответствующего сообщения, использует тот же generation/streamEpoch/seq и не создаёт отдельного run. Null явно сообщает неизвестную фазу. Новое значение заменяет фазу этого сообщения; события старой эпохи и поколения не применяются.
-
-Клиент хранит фазу отдельно от SDK messages, например в `messagePhasesByItemId`. Он применяет проверенные живые метаданные независимо от callback SDK; callback сообщений не заменяет карту фаз. Карта ограничена сохранёнными сообщениями, удаление сообщений удаляет их метаданные. SDK 1.0.1 удаляет extra `phase` из TEXT_MESSAGE_START и MESSAGES_SNAPSHOT при connectAgent, поэтому эти поля не служат каналом фазы. История показывает собственное trace.phase; reconnect восстанавливает карту из свежего снимка.
-
-Для `brai.agent.output` поле `text` и для `brai.agent.diff` поле `diff` содержат полную текущую проекцию одного исходного item ID. Каждый новый delta заменяет предыдущее значение в этом событии. Потребитель не дописывает эти значения повторно. Завершённый item заменяет накопленный текст целиком; `contentBytes` сохраняет размер исходного UTF-8 содержимого, а `truncated` отмечает сокращение.
-
-`brai.agent.output` может также содержать необязательные `command`, native `status` и `exitCode`. Поле `command` ограничено 16 KiB UTF-8; присутствующая пустая строка обозначает команду. Отсутствующий `command` означает, что метаданные не определяют команду. Статус берётся из native item или известной трассы команды. Отсутствующий `exitCode`, `null` и `0` сохраняют разные значения. Старт и дельта передают метаданные только для известной команды; завершение передаёт фактические поля native item даже без предыдущего снимка. Вывод файловых изменений не получает метаданные команды. Старые события без этих полей остаются допустимыми.
-
-MCP и dynamic tool results сохраняют native статус и доступные текстовые части в сообщении результата и истории. Dynamic result также сообщает `success`, MCP failure — текст ошибки. Изображения, аудио, binary data, metadata и structuredContent не сериализуются. Эти поля проходят обычные пределы проекции и истории; завершение item сохраняет его исходный порядок в трассе.
-
-Проекция хранит сообщения, trace, фазы, lifecycle item и pending формы только в владельце `state.ts`. Снимок клонирует состояние на границе `seq`; подписчики получают проверенные envelopes из очередей до 64 событий и 1 MiB. Переполнение ставит `brai.agent.resync-required`, затем закрывает подписку. `subscribe` также принимает неблокирующий `onClose` с причиной `overflow`, `slow-listener`, `listener-error` или `closed`, чтобы транспорт мог закрыть потребителя, когда зависший callback не прочитает resync. Владелец ограничивает сообщения 256/400 KiB, trace 200/128 KiB, pending формы 64/128 KiB, текст сообщения 64 KiB, trace content 4 KiB и trace output 64 KiB. Сокращение сохраняет UTF-8 границу, маркер и исходный размер в trace; snapshot содержит причину сокращения.
-
-## Генерация и проверка
-
-`npm test` проверяет модули, включая конечные буферы, медленных подписчиков, некорректные upstream-пакеты и неизвестные исходы мутаций через контролируемые порты. `npm run test:integration` по умолчанию пропускает обращения к реальным Codex/NATS. Успешная подставленная проверка не считается живой интеграцией.
-
-`tests/integration/acceptance.test.mjs` требует `BRAI_AGENT_TEST_ACCEPTANCE=1`, явный `BRAI_AGENT_TEST_SOCKET_URL`, `BRAI_AGENT_TEST_NATS_SERVERS` и четыре переменные `BRAI_AGENT_TEST_NATS_SERVICE_USER`, `BRAI_AGENT_TEST_NATS_SERVICE_PASSWORD`, `BRAI_AGENT_TEST_NATS_CALLER_USER`, `BRAI_AGENT_TEST_NATS_CALLER_PASSWORD`. Каждый сервер обязан быть loopback NATS; используйте отдельный тестовый broker с agent и caller ACL и без другого `brai_agent` consumer. Тест создаёт собственный временный cwd, проверяет native stdout delta/final, exit codes, apply_patch, AG-UI SDK, фазы и историю, steer/interrupt, журнал операций, смену поколения после закрытия собственного WebSocket и четыре native формы. Каждая форма обязательна: отсутствие native запроса завершает приёмку ошибкой. В конце тест подтверждает остановку, однократно архивирует собственные persisted threads, проверяет их через API с точным cwd, закрывает ресурсы и удаляет cwd. Неизвестный cleanup сохраняет cwd и сообщает ошибку.
-
-`tests/integration/native-seed.mjs` предоставляет `nativeSeedRecipe(kind, cwd, ephemeral=false)`, `createNativeSeed({socketUrl,cwd,projectId,kind,prompt?,ephemeral?,onThreadCreated?,signal?,timeoutMs?})` и `releaseNativeSeed(seed)`. Helper не запускает сервис, не подключается к NATS и не меняет переданный cwd. По умолчанию seed persisted; optional `ephemeral:true` подходит только проверкам без списка сохранённых чатов. Recipes используют gpt-6.1-sol, `allowProviderModelFallback:false`, user reviewer и read-only sandbox; вопрос использует native Plan mode. Только permissions recipe включает thread-scoped `features.request_permissions_tool=true`; глобальные настройки не меняются.
-
-`onThreadCreated` получает собственные project/cwd/thread metadata после проверки фактической модели, до первого turn. Возвращённый seed хранит исходные threadId/turnId, `rawRequestId` с native типом, params и фактически применённый recipe. Откройте свежий снимок сервиса, сверьте kind и native thread/turn/item params, используйте generation/requestId этого снимка для ответа. Public requestId не равен raw RPC ID. `seed.waitResolved()` подтверждает native `serverRequest/resolved` по исходному ID; `releaseNativeSeed` подтверждает matching terminal, unsubscribe и закрывает собственное соединение. Вызывающий код владеет архивацией persisted seed и удалением cwd. Abort прекращает новые действия и выполняет bounded cleanup; неизвестные мутации не повторяются.
-
-Живой socket-disconnect означает закрытие только клиентского соединения сервиса и штатный reconnect; это не проверка перезапуска daemon или брокера. Сохранённый `inProgress` без native active execution требует `executor-unavailable`, а не `working`. Ephemeral pending thread может не поддерживать `thread/turns/list` или `thread/resume`: `-32600` не доказывает отсутствие эффекта. Для его cleanup нужна проверка matching terminal на удерживаемом native соединении либо отдельная подтверждённая native остановка; закрытие WebSocket само по себе недостаточно.
-
-Из корня репозитория выполните `npm run generate:contracts` после изменения схемы DTO. `npm run check:contracts` проверяет актуальность объявления и контрактные сценарии; `npm run test:contracts` запускает сценарии отдельно. Прямая команда из корня: `node services/agent/scripts/generate-contract-types.mjs`. Сам генератор разрешает пути относительно своего файла и не зависит от текущего каталога.
+`npm run typecheck:agent`, `npm run test:agent`, `npm run build:agent`. Unit проверки не используют аккаунт, сервер Codex или модель. Upstream wire schemas закреплены в [contracts/codex](contracts/codex/README.md); обновление требует проверки фактического протокола, а не собственного форка.
