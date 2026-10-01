@@ -75,7 +75,7 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
     submitLock.current = true;
     setSubmitting(true);
     setReadMessage("");
-    try { await client.submitDraft(); }
+    try { await client.submitDraft(state.activeTurnId); }
     catch (error) { setReadMessage(errorText(error)); }
     finally { submitLock.current = false; setSubmitting(false); }
   };

@@ -483,9 +483,10 @@ export function createAgentClient(options: AgentClientOptions) {
     },
     /** Задаёт текст draft без отправки команды. */
     setDraft(value: string) { dispatch({ type: "draft", value }); },
-    /** Запускает один start или steer; conflict и unknown сохраняют draft, повтора нет. */
-    async submitDraft(): Promise<MutationResult> {
+    /** Отправляет start/steer для показанного экраном хода; null означает явный новый start. Изменение хода сохраняет draft и отклоняет отправку. */
+    async submitDraft(expectedTurnId: string | null): Promise<MutationResult> {
       const { draft, selectedProjectId: projectId, selectedThreadId: threadId, generation, activeTurnId } = state;
+      if (activeTurnId !== expectedTurnId) return mutationFailure(new AgentPreflightError("Состояние хода изменилось. Текст сохранён; отправьте его снова.", "OPERATION_CONFLICT"));
       if (!projectId || !threadId || !draft.trim()) return { outcome: "failed", code: "INVALID_ARGUMENT", error: "Выберите чат и введите текст" };
       const currentGeneration = generation ?? await ensureGeneration();
       if (!activeTurnId && state.threadStatus === "working") return { outcome: "failed", code: "STALE_GENERATION", error: "Неизвестен активный ход; текст сохранён" };

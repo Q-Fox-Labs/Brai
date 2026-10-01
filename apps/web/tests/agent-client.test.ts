@@ -98,7 +98,7 @@ test("late status bootstrap preserves the manually selected thread, live SSE and
   source.emit("snapshot", snapshot());
   await tick();
   client.setDraft("work");
-  assert.equal((await client.submitDraft()).outcome, "accepted");
+  assert.equal((await client.submitDraft(client.getState().activeTurnId)).outcome, "accepted");
   source.emit("agent", envelope(1, { type: "RUN_STARTED", threadId: "thread", runId: "turn-1" }, { turnId: "turn-1" }));
   await tick();
   releaseStatus(Response.json({ generation, ready: true, connection: "connected", authorization: "ready" }));
@@ -278,17 +278,35 @@ test("unknown mutation is not retried and steer conflict keeps the user's draft"
   sources[0].emit("snapshot", snapshot({ state: "working", activeTurnId: "turn-1", turnStatus: "inProgress" }));
   await tick();
   client.setDraft("поручи проверить");
-  const result = await client.submitDraft();
+  const result = await client.submitDraft(client.getState().activeTurnId);
   assert.equal(result.outcome, "unknown");
   assert.equal(wire.calls(), 1);
   assert.equal(client.getState().draft, "поручи проверить");
   assert.equal((sent[0] as { expectedTurnId: string }).expectedTurnId, "turn-1");
   client.setDraft("добавить условие");
-  const conflict = await client.submitDraft();
+  const conflict = await client.submitDraft(client.getState().activeTurnId);
   assert.equal(conflict.outcome, "failed");
   assert.equal(client.getState().draft, "добавить условие");
   assert.equal(wire.calls(), 2);
   await client.dispose();
+});
+
+
+test("a changed rendered turn never changes the submitted start or steer intent", async () => {
+  for (const [expectedTurnId, currentTurnId] of [["turn-1", null], [null, "turn-2"], ["turn-1", "turn-2"]]) {
+    const wire = baseFetch({ mutation: () => Response.json({ generation, operationId: "operation-1", threadId: "thread", outcome: "accepted", turnId: "turn-new" }, { status: 202 }) });
+    const { client, sources } = await selectedClient(wire.fetcher);
+    sources[0].emit("snapshot", snapshot({ seq: 1, state: currentTurnId ? "working" : "completed", activeTurnId: currentTurnId, turnStatus: currentTurnId ? "inProgress" : "completed" }));
+    await tick();
+    client.setDraft("сохранить поручение");
+    const result = await client.submitDraft(expectedTurnId);
+    assert.equal(result.outcome, "failed");
+    if (result.outcome === "failed") assert.equal(result.code, "OPERATION_CONFLICT");
+    assert.equal(wire.calls(), 0);
+    assert.equal(client.getState().draft, "сохранить поручение");
+    assert.equal(client.getState().mutation, "failed");
+    await client.dispose();
+  }
 });
 
 test("late accepted start response cannot restore a turn already finished on the live stream", async () => {
@@ -299,7 +317,7 @@ test("late accepted start response cannot restore a turn already finished on the
   source.emit("snapshot", snapshot({ seq: 0 }));
   await tick();
   client.setDraft("сделай задачу");
-  const pending = client.submitDraft();
+  const pending = client.submitDraft(client.getState().activeTurnId);
   source.emit("agent", envelope(1, { type: "RUN_STARTED", threadId: "thread", runId: "turn-late" }, { turnId: "turn-late" }));
   source.emit("agent", envelope(2, { type: "RUN_FINISHED", threadId: "thread", runId: "turn-late", outcome: { type: "success" } }, { turnId: "turn-late" }));
   await tick();
@@ -536,7 +554,7 @@ test("oversized form sets and local command validation never truncate or send", 
   const wire = baseFetch();
   const { client } = await selectedClient(wire.fetcher);
   client.setDraft("x".repeat(70_000));
-  const result = await client.submitDraft();
+  const result = await client.submitDraft(client.getState().activeTurnId);
   assert.equal(result.outcome, "failed");
   assert.equal(wire.calls(), 0);
   assert.equal(client.getState().draft.length, 70_000);
