@@ -3,9 +3,10 @@
 // ABOUTME: Смена сессии размонтирует клиент и прекращает его очередь, запросы и SSE.
 import { useCallback, useEffect, useRef, useState } from "react";
 import Timer from "./timer";
+import AgentScreen from "./agent/screen";
 type User = { id: string; email: string };
 /** Управляет подтверждённой сервером сессией без хранения токена в браузере. */
-export default function Account() {
+export default function Account({ view = "timer" }: { view?: "timer" | "agent" }) {
  const [user, setUser] = useState<User | null>(null), [ready, setReady] = useState(false), [exiting, setExiting] = useState(false);
  const [email, setEmail] = useState(""), [code, setCode] = useState(""), [sent, setSent] = useState(false), [busy, setBusy] = useState(false), [message, setMessage] = useState("");
  const locked = useRef(false), codeInput = useRef<HTMLInputElement>(null);
@@ -48,7 +49,9 @@ export default function Account() {
   finally { locked.current = false; setExiting(false); }
  };
  if (!ready) return <main className="p-8" role="status">Проверяем вход…</main>;
- if (user && !exiting) return <Timer key={user.id} userId={user.id} email={user.email} onLogout={() => { void logout(); }} onUnauthorized={unauthorized} accountMessage={message} />;
+ if (user && !exiting) return view === "agent"
+  ? <AgentScreen key={user.id} userId={user.id} email={user.email} onLogout={() => { void logout(); }} onUnauthorized={unauthorized} accountMessage={message} />
+  : <Timer key={user.id} userId={user.id} email={user.email} onLogout={() => { void logout(); }} onUnauthorized={unauthorized} accountMessage={message} />;
  if (exiting) return <main className="p-8" role="status">Выходим…</main>;
  return <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-6 py-12">
   <h1 className="mb-8 text-3xl font-semibold tracking-tight">Brai</h1>

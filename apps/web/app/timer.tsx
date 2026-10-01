@@ -2,6 +2,7 @@
 // ABOUTME: Показывает личные часы, одну командную кнопку и историю интервалов.
 // ABOUTME: Браузер использует только HTTP/SSE; бизнес-переходы подтверждает владелец таймера.
 import * as Separator from "@radix-ui/react-separator";
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { createClient } from "../lib/client";
 import { duration, ownerDuration, formatDuration, initialView } from "../lib/model";
@@ -34,7 +35,7 @@ export default function Timer({ userId, email, onLogout, onUnauthorized, account
  const date = (value: string) => new Date(value).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
  return <main className="mx-auto min-h-screen max-w-[1600px] px-5 py-8 sm:px-10 lg:px-16 lg:py-12">
   <header className="mb-10 flex items-center justify-between gap-4"><h1 className="text-2xl font-semibold tracking-tight">Brai <span className="font-normal text-slate-500">/ таймер</span></h1>
-   <div className="flex flex-wrap items-center justify-end gap-4"><span className="max-w-48 truncate text-sm text-slate-500">{email}</span><button className="rounded-lg border border-slate-300 px-4 py-2 text-sm" onClick={onLogout}>Выйти</button><p role="status" className="text-right text-sm text-slate-500"><span aria-hidden="true" className={`mr-2 inline-block h-2 w-2 rounded-full ${view.connected ? "bg-emerald-500" : "bg-amber-500"}`} />{view.connected ? "Соединение установлено" : "История: связь восстанавливается…"}</p></div></header>
+   <div className="flex flex-wrap items-center justify-end gap-4"><span className="max-w-48 truncate text-sm text-slate-500">{email}</span><Link href="/agent" className="text-sm font-medium text-blue-700 underline-offset-4 hover:underline">Агент</Link><button className="rounded-lg border border-slate-300 px-4 py-2 text-sm" onClick={onLogout}>Выйти</button><p role="status" className="text-right text-sm text-slate-500"><span aria-hidden="true" className={`mr-2 inline-block h-2 w-2 rounded-full ${view.connected ? "bg-emerald-500" : "bg-amber-500"}`} />{view.connected ? "Соединение установлено" : "История: связь восстанавливается…"}</p></div></header>
   {accountMessage && <p role="status" className="mb-6 text-sm text-red-700">{accountMessage}</p>}
   <div className="grid grid-cols-1 gap-12 lg:grid-cols-2 lg:gap-16">
    <section aria-label="Таймер" className="flex flex-col items-center justify-center gap-8 py-8 lg:sticky lg:top-12 lg:h-[65vh]">
