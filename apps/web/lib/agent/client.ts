@@ -107,7 +107,7 @@ export function createAgentClient(options: AgentClientOptions) {
     }
   }
 
-  async function request<T>(path: string, init?: RequestInit, cap = limits.natsSseFrameBytes, dto?: DtoName): Promise<T> {
+  async function request<T>(path: string, init?: RequestInit, cap = limits.natsSseFrameBytes, dto?: DtoName, isCurrent: () => boolean = () => true): Promise<T> {
     if (disposed) throw new Error("Клиент agent отключён");
     const controller = new AbortController();
     aborts.add(controller);
@@ -123,10 +123,10 @@ export function createAgentClient(options: AgentClientOptions) {
         throw new AgentHttpError(response.status, err);
       }
       if (!dto || !validateDto(dto, value)) throw new Error(`Некорректный ответ agent (${dto ?? "unknown"})`);
-      if (!init?.method) dispatch({ type: "read-error", value: null });
+      if (!init?.method && isCurrent()) dispatch({ type: "read-error", value: null });
       return value as T;
     } catch (error) {
-      if (!init?.method) dispatch({ type: "read-error", value: error instanceof Error ? error.message : "Ошибка чтения agent" });
+      if (!init?.method && isCurrent()) dispatch({ type: "read-error", value: error instanceof Error ? error.message : "Ошибка чтения agent" });
       throw error;
     } finally { aborts.delete(controller); }
   }
@@ -139,8 +139,8 @@ export function createAgentClient(options: AgentClientOptions) {
     return knownGeneration;
   }
 
-  async function get<T>(path: string, dto: DtoName, cap = limits.natsSseFrameBytes): Promise<T> {
-    return request<T>(path, undefined, cap, dto);
+  async function get<T>(path: string, dto: DtoName, cap = limits.natsSseFrameBytes, isCurrent?: () => boolean): Promise<T> {
+    return request<T>(path, undefined, cap, dto, isCurrent);
   }
 
   async function post<T>(path: string, body: unknown, requestDto: DtoName, responseDto: DtoName): Promise<T> {
@@ -199,16 +199,19 @@ export function createAgentClient(options: AgentClientOptions) {
     return value;
   }
 
-  async function applySnapshot(snapshot: ThreadSnapshot) {
+  async function applySnapshot(snapshot: ThreadSnapshot, isCurrent: () => boolean = () => true): Promise<boolean> {
+    if (!isCurrent()) return false;
     const previous = state;
     const newGeneration = knownGeneration !== null && knownGeneration !== snapshot.generation;
     await detachFeed();
+    if (!isCurrent()) return false;
     knownGeneration = snapshot.generation;
     dispatch({ type: "thread", value: snapshot });
     if (snapshot.activeTurnId) feed = newFeed(snapshot, true);
     if (newGeneration || (previous.streamEpoch && previous.streamEpoch !== snapshot.streamEpoch)) {
       dispatch({ type: "resyncing", value: false });
     }
+    return true;
   }
 
   function acceptEnvelope(envelope: EventEnvelope) {
@@ -270,6 +273,8 @@ export function createAgentClient(options: AgentClientOptions) {
     if (disposed || state.connection === "unauthorized") return;
     stopStream();
     const token = streamToken;
+    const selected = selectionToken;
+    let latestSnapshot = 0;
     bootstrapped = false;
     queue = [];
     dispatch({ type: "connection", value: "connecting" });
@@ -283,9 +288,11 @@ export function createAgentClient(options: AgentClientOptions) {
         if (!validateDto("ThreadSnapshot", value)) throw new Error("Некорректный snapshot agent");
         const snapshot = value as ThreadSnapshot;
         if (snapshot.projectId !== projectId || snapshot.threadId !== threadId) throw new Error("SSE snapshot адресован другому треду");
+        const applyToken = ++latestSnapshot;
+        const isCurrent = () => applyToken === latestSnapshot && selected === selectionToken && token === streamToken && source === nextSource && !disposed;
         bootstrapped = false;
-        void applySnapshot(snapshot).then(() => {
-          if (token !== streamToken || source !== nextSource) return;
+        void applySnapshot(snapshot, isCurrent).then(applied => {
+          if (!applied || !isCurrent()) return;
           const pending = queue;
           queue = [];
           queueBytes = 0;
@@ -300,7 +307,7 @@ export function createAgentClient(options: AgentClientOptions) {
             acceptEnvelope(envelope);
           }
           dispatch({ type: "resyncing", value: false });
-        }).catch(() => reconnect("gap", true));
+        }).catch(() => { if (isCurrent()) reconnect("gap", true); });
       } catch { reconnect("gap", true); }
     });
     nextSource.addEventListener("agent", raw => {
@@ -359,21 +366,23 @@ export function createAgentClient(options: AgentClientOptions) {
     const projectId = state.selectedProjectId;
     const threadId = state.selectedThreadId;
     const token = selectionToken;
+    const isCurrent = () => token === selectionToken && state.selectedProjectId === projectId && state.selectedThreadId === threadId;
     const query = new URLSearchParams({ projectId, limit: "100" });
     const pageCursor = cursor ?? state.historyCursor;
     if (pageCursor) query.set("cursor", pageCursor);
     try {
-      const value = await get<HistoryResponse>(`threads/${encodeURIComponent(threadId)}/history?${query}`, "HistoryResponse", limits.historyResponseBytes);
+      const value = await get<HistoryResponse>(`threads/${encodeURIComponent(threadId)}/history?${query}`, "HistoryResponse", limits.historyResponseBytes, isCurrent);
+      if (!isCurrent()) return value;
       if (knownGeneration && value.generation !== knownGeneration) {
         reconnect("generation-change", true);
         throw new Error("Поколение agent изменилось; история будет повторно согласована снимком");
       }
-      if (token === selectionToken && state.selectedProjectId === projectId && state.selectedThreadId === threadId) {
+      if (isCurrent()) {
         dispatch({ type: "history", value: value.items, cursor: value.nextCursor, append: Boolean(pageCursor) });
       }
       return value;
     } catch (error) {
-      if (token === selectionToken && state.selectedProjectId === projectId && state.selectedThreadId === threadId) {
+      if (isCurrent()) {
         dispatch({ type: "history-error", value: error instanceof Error ? error.message : "Не удалось загрузить историю agent" });
       }
       throw error;
@@ -384,6 +393,7 @@ export function createAgentClient(options: AgentClientOptions) {
     const token = ++selectionToken;
     stopStream();
     await detachFeed();
+    if (token !== selectionToken || disposed) return;
     dispatch({ type: "project", value: projectId });
     dispatch({ type: "thread", value: {
       projectId, threadId, generation: knownGeneration ?? "", streamEpoch: "", seq: 0, state: "ready",
@@ -396,7 +406,7 @@ export function createAgentClient(options: AgentClientOptions) {
       const snapshot = await get<ThreadSnapshot>(`threads/${encodeURIComponent(threadId)}?projectId=${encodeURIComponent(projectId)}`, "ThreadSnapshot", limits.snapshotBytes);
       if (token !== selectionToken || disposed) return;
       if (snapshot.projectId !== projectId || snapshot.threadId !== threadId) throw new Error("Ответ agent адресован другому треду");
-      await applySnapshot(snapshot);
+      if (!await applySnapshot(snapshot, () => token === selectionToken && !disposed && state.selectedProjectId === projectId && state.selectedThreadId === threadId)) return;
       try { await loadHistoryPage(); } catch { /* Ошибка истории видна в состоянии; SSE живого чата всё равно подключается. */ }
       if (token === selectionToken && !disposed) openStream(projectId, threadId);
     } catch (error) {
@@ -440,6 +450,7 @@ export function createAgentClient(options: AgentClientOptions) {
       const token = selectionToken;
       stopStream();
       await detachFeed();
+      if (token !== selectionToken || disposed) return null;
       dispatch({ type: "project", value: projectId });
       return loadThreads(projectId, undefined, token);
     },

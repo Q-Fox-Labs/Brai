@@ -180,6 +180,37 @@ test("a delayed old-feed SDK callback cannot overwrite a new generation snapshot
   await client.dispose();
 });
 
+test("an old SSE snapshot completing after selection change cannot replace the new thread or feed", async () => {
+  const sources: FakeEventSource[] = [];
+  const fetcher = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = String(input);
+    if (url.endsWith("/threads?projectId=other")) return Response.json({ generation, threads: [{ threadId: "thread-2", title: "Новый чат", updatedAt: "now" }], nextCursor: null });
+    if (url.includes("/threads/thread-2?projectId=other")) return Response.json(snapshot({ projectId: "other", threadId: "thread-2", messages: [{ id: "new", role: "assistant", content: "новый" }] }));
+    if (url.includes("/history?") && url.includes("projectId=other")) return Response.json({ generation, items: [], nextCursor: null, truncation: { truncated: false, reason: "none" } });
+    return baseFetch().fetcher(input, init);
+  };
+  const client = makeClient(fetcher, sources);
+  await client.selectThread("brai", "thread");
+  const oldSource = sources[0]!;
+  oldSource.emit("snapshot", snapshot({ state: "working", activeTurnId: "turn-old", turnStatus: "inProgress", messages: [{ id: "old", role: "assistant", content: "старый" }] }));
+  await tick();
+  oldSource.emit("snapshot", snapshot({ seq: 0, messages: [{ id: "stale", role: "assistant", content: "устаревший снимок" }] }));
+  const selectNew = client.selectThread("other", "thread-2");
+  await selectNew;
+  assert.equal(client.getState().selectedProjectId, "other");
+  assert.equal(client.getState().selectedThreadId, "thread-2");
+  assert.deepEqual(client.getState().messages.map(message => message.id), ["new"]);
+  const newSource = sources.at(-1)!;
+  assert.notEqual(newSource, oldSource);
+  newSource.emit("snapshot", snapshot({ projectId: "other", threadId: "thread-2", seq: 0, messages: [{ id: "live", role: "assistant", content: "живой" }] }));
+  await tick();
+  await tick();
+  assert.equal(client.getState().selectedThreadId, "thread-2");
+  assert.deepEqual(client.getState().messages.map(message => message.id), ["live"]);
+  assert.equal(newSource.closed, false);
+  await client.dispose();
+});
+
 test("unknown mutation is not retried and steer conflict keeps the user's draft", async () => {
   const sent: unknown[] = [];
   const responses: Response[] = [
