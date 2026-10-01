@@ -30,7 +30,17 @@ export const limits=Object.freeze({
 const ownAjv=new Ajv({allErrors:true,strict:true,coerceTypes:false,useDefaults:false,removeAdditional:false});
 addFormats(ownAjv);
 const runtimeSchema=structuredClone(messagesSchema);
-const replaceExternalRefs=value=>{if(!value||typeof value!=='object')return;for(const [key,child]of Object.entries(value)){if(key==='$ref'&&typeof child==='string'&&child.startsWith('https://brai.dev/contracts/codex/schema.json#/definitions/')){delete value.$ref;value.type='object';}else replaceExternalRefs(child);}};
+const replaceExternalRefs=value=>{
+  if(!value||typeof value!=='object')return;
+  for(const [key,child]of Object.entries(value)){
+    if(key==='$ref'&&typeof child==='string'&&child.startsWith('https://brai.dev/contracts/codex/schema.json#/definitions/')){
+      delete value.$ref;
+      // AIDEV-NOTE: Scalar phase берём из native схемы; формы запросов отдельно проверяет upstreamAjv.
+      if(child.endsWith('/MessagePhase'))Object.assign(value,structuredClone(codexSchema.definitions.MessagePhase));
+      else value.type='object';
+    }else replaceExternalRefs(child);
+  }
+};
 replaceExternalRefs(runtimeSchema.definitions);
 const upstreamAjv=new Ajv({allErrors:true,strict:false,validateFormats:false,coerceTypes:false,useDefaults:false,removeAdditional:false});
 upstreamAjv.addSchema(codexSchema,'https://brai.dev/contracts/codex/schema.json');
@@ -43,6 +53,7 @@ const customNames={
   'brai.agent.request.opened':'CustomRequestOpened','brai.agent.request.resolved':'CustomRequestResolved',
   'brai.agent.connection':'CustomConnection','brai.agent.truncation':'CustomTruncation',
   'brai.agent.resync-required':'CustomResyncRequired',
+  'brai.agent.message.phase':'CustomMessagePhase',
 };
 const customValidators=new Map(Object.entries(customNames).map(([name,def])=>[name,ownCheck({$schema:messagesSchema.$schema,definitions:runtimeSchema.definitions,$ref:`#/definitions/${def}`})]));
 const requestResponseNames={
@@ -74,6 +85,8 @@ export function validateDto(name,value){
     if(value.pendingRequests.some(item=>!validPendingRequest(item)))return false;
     if(value.pendingRequests.reduce((sum,item)=>sum+bytes(item),0)>limits.pendingFormsBytes)return false;
     if(!EventSchema.safeParse({type:'MESSAGES_SNAPSHOT',messages:value.messages}).success)return false;
+    const messageIds=new Set(value.messages.map(message=>message.id));
+    if(Object.keys(value.messagePhases??{}).some(id=>!messageIds.has(id)))return false;
   }
   if((name==='TurnStartRequest'||name==='TurnSteerRequest')&&bytes(value)>limits.inputTextBytes)return false;
   return true;

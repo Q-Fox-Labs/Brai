@@ -108,3 +108,28 @@ test('request opened custom event rejects a single form exceeding 32 KiB',()=>{
   assert.ok(serializedBytes(request)>limits.pendingFormBytes);
   assert.equal(validateAguiEvent({type:'CUSTOM',name:'brai.agent.request.opened',value:{request}}),false);
 });
+
+test('phase metadata uses exact upstream values and only retained snapshot message IDs',()=>{
+  const snapshot={projectId:'p',threadId:'t',generation:uuid,streamEpoch:uuid,seq:0,state:'ready',messages:[{id:'m',role:'assistant',content:'hello'}],pendingRequests:[],truncation:{truncated:false,reason:'none'},activeTurnId:null,turnStatus:null,traceItems:[]};
+  assert.equal(validateDto('ThreadSnapshot',snapshot),true);
+  for(const phase of ['commentary','final_answer',null]){
+    assert.equal(validateDto('ThreadSnapshot',{...snapshot,messagePhases:{m:phase}}),true);
+    assert.equal(validateAguiEvent({type:'CUSTOM',name:'brai.agent.message.phase',value:{itemId:'m',phase}}),true);
+    const history={generation:uuid,nextCursor:null,truncation:{truncated:false,reason:'none'},items:[{itemId:'m',order:0,kind:'agentMessage',content:'hello',turnId:'u',trace:{type:'message',status:'completed',phase},truncated:false,contentBytes:5}]};
+    assert.equal(validateDto('HistoryResponse',history),true);
+    assert.equal(validateDto('HistoryResponse',{...history,items:[{...history.items[0],trace:{type:'message',status:'completed',phase:'success'}}]}),false);
+  }
+  assert.equal(validateDto('ThreadSnapshot',{...snapshot,messagePhases:{m:'success'}}),false);
+  assert.equal(validateDto('ThreadSnapshot',{...snapshot,messagePhases:{other:'commentary'}}),false);
+  assert.equal(validateDto('ThreadSnapshot',{...snapshot,messagePhases:{m:{type:'commentary'}}}),false);
+  assert.equal(validateAguiEvent({type:'CUSTOM',name:'brai.agent.message.phase',value:{itemId:'m',phase:'success'}}),false);
+  assert.equal(validateAguiEvent({type:'CUSTOM',name:'brai.agent.message.phase',value:{itemId:'m'}}),false);
+  assert.equal(validateAguiEvent({type:'CUSTOM',name:'brai.agent.message.phase',value:{itemId:'m',phase:null,extra:true}}),false);
+  const messages=Array.from({length:256},(_,i)=>({id:`m${i}`,role:'assistant',content:'x'}));
+  const messagePhases=Object.fromEntries(messages.map(message=>[message.id,'commentary']));
+  assert.equal(validateDto('ThreadSnapshot',{...snapshot,messages,messagePhases}),true);
+  assert.equal(validateDto('ThreadSnapshot',{...snapshot,messages,messagePhases:{...messagePhases,overflow:null}}),false);
+  const oversized={...snapshot,messages:[{id:'m',role:'assistant',content:'😀'.repeat(limits.snapshotBytes/4)}],messagePhases:{m:'commentary'}};
+  assert.ok(serializedBytes(oversized)>limits.snapshotBytes);
+  assert.equal(validateDto('ThreadSnapshot',oversized),false);
+});

@@ -18,3 +18,12 @@ const badResponse:RequestRespondRequest={...response,kind:'question',answer:{dec
 // @ts-expect-error Неподдерживаемый запрос не имеет параметров ответа.
 validateUpstreamAnswer('unsupported',{},{});
 void badResponse;
+
+const phaseSnapshot:ThreadSnapshot={...snapshot,messagePhases:{m:'commentary',unknown:null}};
+import type { CustomMessagePhase, CodexMessagePhase, Trace } from '@brai/agent/contracts';
+const phase:CodexMessagePhase='final_answer';
+const phaseEvent:CustomMessagePhase={itemId:'m',phase};
+const trace:Trace={type:'message',status:'completed',phase};
+// @ts-expect-error Завершение хода не является фазой сообщения.
+const invalidPhase:CustomMessagePhase={itemId:'m',phase:'success'};
+void [phaseSnapshot,phaseEvent,trace,invalidPhase];

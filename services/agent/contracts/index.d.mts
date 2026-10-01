@@ -169,8 +169,12 @@ export interface ThreadSnapshot {
       output?: string;
       exitCode?: number | null;
       diffSummary?: string;
+      phase?: CodexMessagePhase | null;
     };
   }[];
+  messagePhases?: {
+    [k: string]: CodexMessagePhase | null;
+  };
 }
 
 export interface HistoryRequest {
@@ -196,6 +200,7 @@ export interface HistoryItem {
     output?: string;
     exitCode?: number | null;
     diffSummary?: string;
+    phase?: CodexMessagePhase | null;
   };
 }
 
@@ -219,6 +224,7 @@ export interface HistoryResponse {
       output?: string;
       exitCode?: number | null;
       diffSummary?: string;
+      phase?: CodexMessagePhase | null;
     };
   }[];
   nextCursor: string | null;
@@ -375,7 +381,15 @@ export interface Trace {
   output?: string;
   exitCode?: number | null;
   diffSummary?: string;
+  phase?: CodexMessagePhase | null;
 }
+
+export interface CustomMessagePhase {
+  itemId: string;
+  phase: CodexMessagePhase | null;
+}
+
+export type CodexMessagePhase = "commentary" | "final_answer";
 
 export interface CodexCommandExecutionRequestApprovalResponse {
   decision:

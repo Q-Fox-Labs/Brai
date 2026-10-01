@@ -414,6 +414,23 @@
           "items": {
             "$ref": "#/definitions/HistoryItem"
           }
+        },
+        "messagePhases": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": {
+            "$ref": "#/definitions/OpaqueId"
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/MessagePhase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
         }
       }
     },
@@ -1237,6 +1254,39 @@
         "diffSummary": {
           "type": "string",
           "maxLength": 65536
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/MessagePhase"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CustomMessagePhase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "itemId",
+        "phase"
+      ],
+      "properties": {
+        "itemId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "https://brai.dev/contracts/codex/schema.json#/definitions/MessagePhase"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     }

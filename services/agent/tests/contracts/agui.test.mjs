@@ -2,7 +2,7 @@
 // ABOUTME: Проверяет подключение и отключение SDK без живого сервиса и запуска хода.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateAguiEvent } from '../../contracts/index.mjs';
+import { validateAguiEvent, validateDto } from '../../contracts/index.mjs';
 
 test('message deltas, terminal outcomes, and snapshot replacement use actual SDK event schemas', () => {
   const messageEvents = [
@@ -97,4 +97,55 @@ test('detachActiveRun closes a live connect subscription before the source compl
   assert.equal(closed,true);
   assert.equal(agent.isRunning,false);
   assert.equal(agent.calls,0);
+});
+
+test('separate phase metadata survives real SDK enforcement and snapshot replacement',async()=>{
+  const {AbstractAgent}=await import('@ag-ui/client');
+  const {Observable}=await import('rxjs');
+  const generation='550e8400-e29b-41d4-a716-446655440000';
+  const snapshot={projectId:'p',threadId:'t',generation,streamEpoch:generation,seq:0,state:'ready',messages:[{id:'old',role:'assistant',content:'old'}],messagePhases:{old:'commentary'},pendingRequests:[],truncation:{truncated:false,reason:'none'},activeTurnId:null,turnStatus:null,traceItems:[]};
+  assert.equal(validateDto('ThreadSnapshot',snapshot),true);
+  // AIDEV-NOTE: Fixture моделирует независимую границу метаданных, а не SDK message reducer.
+  let messagePhases={...snapshot.messagePhases},messages=snapshot.messages;
+  const observed=[],phaseUpdates=[];
+  class FixtureAgent extends AbstractAgent{
+    connect(input){return new Observable(subscriber=>{
+      for(const event of [
+        {type:'RUN_STARTED',threadId:input.threadId,runId:input.runId},
+        {type:'TEXT_MESSAGE_START',messageId:'m',role:'assistant',phase:'commentary'},
+        {type:'CUSTOM',name:'brai.agent.message.phase',value:{itemId:'m',phase:'commentary'}},
+        {type:'TEXT_MESSAGE_CONTENT',messageId:'m',delta:'Hello'},
+        {type:'TEXT_MESSAGE_END',messageId:'m'},
+        {type:'CUSTOM',name:'brai.agent.message.phase',value:{itemId:'m',phase:'final_answer'}},
+        {type:'MESSAGES_SNAPSHOT',messages:[{id:'m',role:'assistant',content:'Hello',phase:'final_answer'},{id:'unknown',role:'assistant',content:'No phase'}]},
+        {type:'RUN_FINISHED',threadId:input.threadId,runId:input.runId,outcome:{type:'success'}},
+      ]){
+        assert.equal(validateAguiEvent(event),true);
+        if(event.type==='CUSTOM'){
+          messagePhases={...messagePhases,[event.value.itemId]:event.value.phase};
+          phaseUpdates.push(event.value.phase);
+        }
+        subscriber.next(event);
+      }
+      subscriber.complete();
+    });}
+    run(){throw new Error('Fixture не запускает ход');}
+  }
+  const agent=new FixtureAgent({threadId:'t',messages:snapshot.messages});
+  await agent.connectAgent({}, {onEvent:({messages:next})=>{messages=next;observed.push({...messagePhases});}});
+  assert.equal(agent.messages.find(message=>message.id==='m').phase,undefined);
+  assert.equal(messages.find(message=>message.id==='m').phase,undefined);
+  assert.deepEqual(phaseUpdates,['commentary','final_answer']);
+  assert.ok(observed.length>0);
+  assert.ok(observed.every(map=>map.m==='final_answer'));
+  assert.equal(messagePhases.m,'final_answer');
+  assert.equal(messagePhases.unknown,undefined);
+  const retainedIds=new Set(messages.map(message=>message.id));
+  messagePhases=Object.fromEntries(Object.entries(messagePhases).filter(([id])=>retainedIds.has(id)));
+  assert.deepEqual(messagePhases,{m:'final_answer'});
+  // Свежий снимок заменяет карту; terminal не восполняет отсутствующую фазу.
+  const restored={...snapshot,messages,messagePhases:{m:null}};
+  assert.equal(validateDto('ThreadSnapshot',restored),true);
+  messagePhases={...restored.messagePhases};
+  assert.deepEqual(messagePhases,{m:null});
 });
