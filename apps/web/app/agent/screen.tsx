@@ -10,12 +10,12 @@ import { mergeTimeline } from "./timeline";
 import Sidebar, { type Project, type ThreadPage } from "./sidebar";
 
 type CachedChat = { snapshot: NativeSnapshot | null; history: DisplayItem[]; generation: string; cursor: string | null; draft: string; model: string; effort: string; permissionMode: PermissionMode; ready: boolean };
-type Props = { userId: string; email: string; onLogout: () => void; onUnauthorized: () => void; accountMessage: string };
+type Props = { active: boolean; userId: string; email: string; onLogout: () => void; onUnauthorized: () => void; accountMessage: string };
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Ошибка связи";
 const stateLabels: Record<string, string> = { idle: "Готов", inProgress: "Работает", waiting: "Ждёт ответа", completed: "Завершён", interrupted: "Остановлен", failed: "Ошибка", "connection-lost": "Переподключение", "executor-unavailable": "Codex недоступен" };
 
-/** Сохраняет черновик при конфликте; выбор чата отменяет только его чтение, без остановки хода. */
-export default function AgentScreen({ userId, email, onLogout, onUnauthorized, accountMessage }: Props) {
+/** Сохраняет чат и черновик; active управляет только видимостью и восстановлением прокрутки. */
+export default function AgentScreen({ active: visible, userId, email, onLogout, onUnauthorized, accountMessage }: Props) {
   const client = useMemo(() => createAgentClient(userId, onUnauthorized), [userId, onUnauthorized]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [pages, setPages] = useState<Record<string, ThreadPage>>({});
@@ -89,9 +89,9 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
       if (changed || gap) void loadHistory();
       first = false;
       epoch = nextEpoch;
-      // AIDEV-NOTE: scroll может ещё не прийти; проверяем позицию до изменения высоты ленты.
+      // AIDEV-NOTE: Проверяем позицию до snapshot; скрытая вкладка не имеет геометрии и сохраняет режим чтения.
       const element = conversation.current;
-      if (element) followBottom.current = element.scrollHeight - element.clientHeight - element.scrollTop <= 1;
+      if (element?.getClientRects().length) followBottom.current = element.scrollHeight - element.clientHeight - element.scrollTop <= 1;
       setSnapshot(value);
       setPages(previous => {
         const page = previous[projectId];
@@ -177,10 +177,10 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
 
   useLayoutEffect(() => {
     const element = conversation.current, anchor = scrollAnchor.current;
-    if (!element) return;
+    if (!element || !visible) return;
     if (anchor) { element.scrollTop = anchor.top + element.scrollHeight - anchor.height; scrollAnchor.current = null; }
     else if (followBottom.current) element.scrollTop = element.scrollHeight;
-  }, [threadId, history, snapshot]);
+  }, [threadId, history, snapshot, visible]);
 
   return <main className="agent-shell">
     <Sidebar projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={sidebarOpen} email={email} busy={busy || uncertain.current}

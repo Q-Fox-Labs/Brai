@@ -19,7 +19,7 @@ type Props = {
 export default function Sidebar({ projects, pages, projectId, threadId, open, email, busy, select, create, more, refresh, close, logout }: Props) {
   const [visible, setVisible] = useState<Record<string, number>>({});
   return <aside id="agent-sidebar" className="agent-sidebar" data-open={open} aria-label="Проекты и чаты" onKeyDown={event => { if (event.key === "Escape") close(); }}>
-    <header className="agent-sidebar-header"><a className="agent-brand" href="/agent">Brai<span>Агент</span></a><button className="agent-sidebar-close" aria-label="Закрыть список чатов" onClick={close}>×</button></header>
+    <header className="agent-sidebar-header"><h2 className="agent-brand">Проекты</h2><button className="agent-sidebar-close" aria-label="Закрыть список чатов" onClick={close}>×</button></header>
     <Separator.Root className="agent-separator" />
     <nav className="agent-projects" aria-label="Проекты и чаты">
       {!projects.length && <p className="agent-sidebar-note">Загружаем проекты…</p>}
@@ -47,6 +47,6 @@ export default function Sidebar({ projects, pages, projectId, threadId, open, em
       })}
     </nav>
     <Separator.Root className="agent-separator" />
-    <footer className="agent-sidebar-footer"><span className="agent-account" title={email}>{email}</span><div><a href="/">Таймер</a><button onClick={logout}>Выйти</button></div></footer>
+    <footer className="agent-sidebar-footer"><span className="agent-account" title={email}>{email}</span><div><button onClick={logout}>Выйти</button></div></footer>
   </aside>;
 }
