@@ -85,6 +85,9 @@ button:focus-visible { outline: 3px solid #2563eb; outline-offset: 5px; }
 .agent-composer textarea::placeholder { color: #92969f; }
 .agent-composer textarea:focus-visible { outline: none; }
 .agent-composer:focus-within { border-color: #aa9cd1; }
+.agent-model-settings { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 10px; color: var(--agent-muted); font-size: 11px; }
+.agent-model-settings label { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.agent-model-settings select { max-width: 190px; padding: 5px 7px; border: 1px solid #45484f; border-radius: 7px; background: #25282d; color: #e5e5e8; font-size: 12px; }
 .agent-composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 10px; }
 .agent-composer-actions > span { color: var(--agent-muted); font-size: 11px; }
 .agent-composer-actions > div { display: flex; align-items: center; gap: 12px; }

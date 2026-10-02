@@ -5,11 +5,12 @@ import type { BaseEvent } from "@ag-ui/core";
 import { EventSchema } from "@ag-ui/core/schemas";
 import { Subject, type Observable } from "rxjs";
 import { bytes, limits, validateCommand, validateEnvelope } from "@brai/agent/contracts";
-import type { Command, NativeSnapshot, DisplayItem, ThreadMetadata } from "@brai/agent/contracts";
+import type { Command, NativeSnapshot, DisplayItem, ThreadMetadata, ModelCatalog } from "@brai/agent/contracts";
 type Page<T> = { generation: string; data: T[]; nextCursor: string | null };
 type MutationReply = { generation: string; operationId: string; threadId: string; turnId?: string; requestId?: string; outcome: "accepted" };
 type Replies = Record<"create" | "start" | "steer" | "interrupt" | "answer", MutationReply> & {
   projects: { generation: string; projects: { projectId: string; name: string; available: boolean }[] };
+  models: ModelCatalog;
   status: { generation: string; ready: boolean; connection: string; authorization: string };
   threads: Page<ThreadMetadata>;
   turns: Page<{ id: string; status: string }>;
@@ -29,7 +30,7 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
   let stop = () => {};
   async function request<A extends Command["action"]>(command: Command & { action: A }): Promise<Replies[A]> {
     if (!validateCommand(command)) throw new AgentError("INVALID_ARGUMENT", "not-sent");
-    const reading = ["projects", "status", "threads", "open", "turns", "items"].includes(command.action);
+    const reading = ["projects", "status", "models", "threads", "open", "turns", "items"].includes(command.action);
     const { action, ...body } = command;
     const query = new URLSearchParams(Object.entries(body).map(([key, value]) => [key, String(value)]));
     try {

@@ -77,6 +77,21 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 128
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "permissionMode": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "enum": [
+                "ask",
+                "auto",
+                "full"
+              ]
             }
           }
         },
@@ -206,6 +221,26 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 65536
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "effort": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "permissionMode": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "enum": [
+                "ask",
+                "auto",
+                "full"
+              ]
             }
           }
         },
@@ -357,6 +392,18 @@
               ]
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action"
+          ],
+          "properties": {
+            "action": {
+              "const": "models"
+            }
+          }
         }
       ]
     },
@@ -445,6 +492,12 @@
         },
         "updatedAt": {
           "type": "integer"
+        },
+        "reasoningEffort": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -869,7 +922,70 @@
         },
         {
           "$ref": "#/definitions/Error"
+        },
+        {
+          "$ref": "#/definitions/Models"
         }
+      ]
+    },
+    "ModelChoice": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "name": {
+          "type": "string"
+        },
+        "efforts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "defaultEffort": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "name",
+        "efforts",
+        "defaultEffort"
+      ]
+    },
+    "Models": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "data": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/definitions/ModelChoice"
+          }
+        },
+        "defaultModel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "data",
+        "defaultModel"
       ]
     }
   }

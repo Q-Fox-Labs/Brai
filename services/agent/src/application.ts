@@ -2,20 +2,34 @@
 // ABOUTME: Владеет только bounded live проекцией; историю читает у Codex.
 import { randomUUID, createHash } from 'node:crypto';
 import { bytes, limits, validateCommand } from '../contracts/index.mjs';
-import type { Command, EventEnvelope, NativeSnapshot, PendingRequest } from '../contracts/index.mjs';
+import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, ModelCatalog } from '../contracts/index.mjs';
 import type { CodexPort, Observation } from './codex.js';
 import { display, metadata, text } from './display.js';
 export type Config = { codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
-type Session = { view: NativeSnapshot; opened: boolean; fresh: boolean; closing?: boolean; model: string | null; raw: Map<string, string | number>; revisions: Map<string, number> };
+type Session = { view: NativeSnapshot; opened: boolean; fresh: boolean; closing?: boolean; raw: Map<string, string | number>; revisions: Map<string, number> };
 /** Собирает команды и единственного владельца live items/pending. */
 export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void) {
   const sessions = new Map<string, Session>();
   let creating = 0, admission = Promise.resolve();
+  let modelCatalog: { generation: string; result: Promise<ModelCatalog> } | undefined;
   const operations = new Map<string, { hash: string; result: Promise<any> }>();
   const openings = new Map<string, Promise<Session>>();
   function fail(code: string, outcome = 'not-sent'): never { throw Object.assign(new Error(code), { code, outcome }); }
   const project = (id?: string) => config.projects.find(p => p.projectId === id && p.available !== false) ?? fail('NOT_FOUND');
   const current = () => codex.status().generation;
+  async function catalog(): Promise<ModelCatalog> {
+    const generation = current();
+    if (!modelCatalog || modelCatalog.generation !== generation) {
+      const result = codex.call('model/list', { limit: 100, includeHidden: false }).then(page => {
+        if (generation !== current()) fail('STALE_GENERATION', 'query');
+        const data = page.data.filter((m: any) => !config.allowedModels || config.allowedModels.includes(m.model)).slice(0, 100).map((m: any) => ({ model: m.model, name: m.displayName, defaultEffort: m.defaultReasoningEffort, efforts: m.supportedReasoningEfforts.map((e: any) => e.reasoningEffort) }));
+        return { generation, data, defaultModel: data.find((m: any) => m.model === config.newThread?.model)?.model ?? data[0]?.model ?? null };
+      });
+      modelCatalog = { generation, result };
+      void result.catch(() => { if (modelCatalog?.result === result) modelCatalog = undefined; });
+    }
+    return modelCatalog.result;
+  }
   function publish(s: Session) {
     if (s.view.seq === Number.MAX_SAFE_INTEGER) { s.view.epoch = randomUUID(); s.view.seq = 0; }
     s.view.seq++;
@@ -52,7 +66,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       sessions.delete(victim.view.threadId);
     }
     const view: NativeSnapshot = { projectId, threadId: thread.id, generation: current(), epoch: randomUUID(), seq: 0, thread: metadata(thread), turn: null, state: 'idle', items: [], requests: [], truncated: false };
-    const s: Session = { view, opened: fresh, fresh, model: thread.model ?? null, raw: new Map(), revisions: new Map() };
+    const s: Session = { view, opened: fresh, fresh, raw: new Map(), revisions: new Map() };
     sessions.set(thread.id, s);
     return s;
     } finally { release(); }
@@ -74,8 +88,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       const turns = await codex.call('thread/turns/list', { threadId: id, limit: 1, itemsView: 'notLoaded', sortDirection: 'desc' });
       const items = await codex.call('thread/items/list', { threadId: id, limit: 100, sortDirection: 'desc' });
       if (before !== current()) fail('STALE_GENERATION', 'query');
-      s.view.thread = metadata(resumed.thread);
-      s.model = resumed.model;
+      s.view.thread = { ...metadata(resumed.thread), model: resumed.model, reasoningEffort: resumed.reasoningEffort ?? null };
       for (const entry of items.data.slice().reverse()) if ((s.revisions.get(entry.item.id) ?? 0) <= cut) put(s, entry.item, entry.turnId);
       if (s.view.seq === cut) {
         const turn = turns.data[0];
@@ -91,7 +104,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
   }
   function observe(e: Observation) {
     if (e.type === 'connection') {
-      operations.clear();
+      operations.clear(); modelCatalog = undefined;
       for (const s of sessions.values()) {
         s.opened = s.fresh = s.closing = false;
         s.raw.clear();
@@ -139,6 +152,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (r.action === 'status') return { ...codex.status(), ready: codex.status().connection === 'connected' && codex.status().authorization === 'ready' };
     if (r.action === 'projects') return { generation: current(), projects: config.projects.map(p => ({ projectId: p.projectId, name: p.name, available: p.available !== false })) };
     if (codex.status().connection !== 'connected' || codex.status().authorization !== 'ready') fail('UPSTREAM_UNAVAILABLE', r.operationId ? 'not-sent' : 'query');
+    if (r.action === 'models') return catalog();
     const p = project(r.projectId);
     if (r.operationId && r.generation !== current()) fail('STALE_GENERATION');
     if (r.action === 'threads') {
@@ -147,9 +161,12 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     }
     if (r.action === 'create') {
       if (sessions.size + creating >= limits.threads) fail('CAPACITY_EXHAUSTED');
+      if (r.model && !(await catalog()).data.some(m => m.model === r.model)) fail('UNSUPPORTED');
+      if (r.generation !== current()) fail('STALE_GENERATION');
+      if (sessions.size + creating >= limits.threads) fail('CAPACITY_EXHAUSTED');
       creating++;
       try {
-      const native = await codex.call('thread/start', { cwd: p.cwd, allowProviderModelFallback: false, ...config.newThread }, { mutation: true });
+      const native = await codex.call('thread/start', { cwd: p.cwd, allowProviderModelFallback: false, ...config.newThread, ...permissions(r.permissionMode), ...(r.model ? { model: r.model } : {}) }, { mutation: true });
       if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
       await admit(p.projectId, { ...native.thread, model: native.model }, true);
       if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
@@ -169,7 +186,13 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (r.action === 'start' && (active || s.view.thread.canAcceptDirectInput === false)) fail('OPERATION_CONFLICT');
     if ((r.action === 'steer' || r.action === 'interrupt') && (!active || s.view.turn?.id !== (r.expectedTurnId ?? r.turnId))) fail('OPERATION_CONFLICT');
     if (r.action === 'start' && [...sessions.values()].filter(s => s.view.turn?.status === 'inProgress').length >= 4) fail('CAPACITY_EXHAUSTED');
-    if (r.action === 'start' && config.allowedModels && !config.allowedModels.includes(s.model ?? '')) fail('UNSUPPORTED');
+    if (r.action === 'start') {
+      const model = r.model ?? s.view.thread.model;
+      if (config.allowedModels && !config.allowedModels.includes(model ?? '')) fail('UNSUPPORTED');
+      if (r.model || r.effort) { const choice = (await catalog()).data.find(m => m.model === model); if (!choice || (r.effort && !choice.efforts.includes(r.effort))) fail('UNSUPPORTED'); }
+    }
+    if (r.generation !== current()) fail('STALE_GENERATION');
+    if (r.action === 'start' && (s.closing || s.view.turn?.status === 'inProgress' || [...sessions.values()].filter(value => value.view.turn?.status === 'inProgress').length >= 4)) fail('OPERATION_CONFLICT');
     const previousTurn = s.view.turn, previousState = s.view.state;
     if (r.action === 'start') { s.view.turn = { id: 'starting', status: 'inProgress' }; s.view.state = 'inProgress'; publish(s); }
     let turnId = r.turnId;
@@ -183,12 +206,13 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       catch (error: any) { if (error.outcome === 'not-sent' && r.generation === current() && s.view.requests.includes(f)) { f.answered = false; publish(s); } throw error; }
     } else if (r.action === 'interrupt') await codex.call('turn/interrupt', { threadId: r.threadId, turnId: r.turnId }, { mutation: true });
     else {
-      const params = { threadId: r.threadId, input: [{ type: 'text', text: r.text }], ...(r.action === 'steer' ? { expectedTurnId: r.expectedTurnId } : {}) };
+      const params = { threadId: r.threadId, input: [{ type: 'text', text: r.text }], ...(r.action === 'steer' ? { expectedTurnId: r.expectedTurnId } : { ...permissions(r.permissionMode, p.cwd), ...(r.model ? { model: r.model } : {}), ...(r.effort ? { effort: r.effort } : {}) }) };
       let value: any;
       try { value = await codex.call(r.action === 'steer' ? 'turn/steer' : 'turn/start', params, { mutation: true }); }
       catch (error: any) { if (r.action === 'start' && error.outcome === 'not-sent' && r.generation === current() && s.view.turn?.id === 'starting') { s.view.turn = previousTurn; s.view.state = previousState; publish(s); } throw error; }
       turnId = value.turn?.id ?? value.turnId;
       if (r.action === 'start' && s.view.turn?.id === 'starting') { s.view.turn = { id: turnId!, status: value.turn.status }; publish(s); }
+      if (r.action === 'start') { s.view.thread.model = r.model ?? s.view.thread.model; s.view.thread.reasoningEffort = r.effort ?? s.view.thread.reasoningEffort ?? null; publish(s); }
       s.fresh = false;
     }
     if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
@@ -217,4 +241,10 @@ function validAnswer(f: PendingRequest, answer: any): boolean {
   }
   if (f.kind === 'permissions') return answer?.scope === 'turn' && answer?.strictAutoReview !== true && (JSON.stringify(answer?.permissions) === JSON.stringify(f.params.permissions) || JSON.stringify(answer?.permissions) === '{}');
   return true;
+}
+
+/** Три явных native режима; отсутствие выбора означает risk-based auto_review. */
+function permissions(mode = 'auto', cwd?: string) {
+  const full = mode === 'full';
+  return { approvalPolicy: full ? 'never' : 'on-request', approvalsReviewer: mode === 'auto' ? 'auto_review' : 'user', ...(cwd ? { sandboxPolicy: full ? { type: 'dangerFullAccess' } : { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false } } : { sandbox: full ? 'danger-full-access' : 'workspace-write' }) };
 }

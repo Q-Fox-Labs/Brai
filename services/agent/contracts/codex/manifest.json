@@ -54,7 +54,9 @@
     "v2/TurnStartParams.json": "07771223642e1b61bd9aac0069fc0f98143a1c047724ca02c7ceb13653442738",
     "v2/TurnStartResponse.json": "12c5151421bb061297c9790ff795a44aa4b9bdb91fbb68012dcf0a08cf4198b1",
     "v2/TurnSteerParams.json": "99f7fdff8b090065b68f36420b70870b5eafed048c024b308230aaa02f15d891",
-    "v2/TurnSteerResponse.json": "866ba9a77c12b5d570c837d58f73bf40b24e50fa93404bdf792dd984d313b1aa"
+    "v2/TurnSteerResponse.json": "866ba9a77c12b5d570c837d58f73bf40b24e50fa93404bdf792dd984d313b1aa",
+    "v2/ModelListParams.json": "de29a536c00a5b8f46f34dba417dabd93365305571a8ed200e33bea85db68b5a",
+    "v2/ModelListResponse.json": "bfbb3ee9f6e203e0b767587c17de94b9cb42f712d0d8168afbbbc3fcb4492f30"
   },
   "rootTypes": [
     "InitializeParams",
@@ -104,9 +106,11 @@
     "PermissionsRequestApprovalParams",
     "PermissionsRequestApprovalResponse",
     "FileChangeRequestApprovalParams",
-    "FileChangeRequestApprovalResponse"
+    "FileChangeRequestApprovalResponse",
+    "ModelListParams",
+    "ModelListResponse"
   ],
-  "definitionCount": 181,
+  "definitionCount": 191,
   "versionCompatibility": [
     {
       "version": "0.159.3",
@@ -116,5 +120,12 @@
       "initializeConfirmed": true,
       "liveScenariosRepeated": false
     }
-  ]
+  ],
+  "modelCatalogExtension": {
+    "sourceVersion": "0.159.2",
+    "compatibleVersion": "0.159.3",
+    "sourceFilesByteIdentical": true,
+    "liveMetadataConfirmed": true,
+    "inferenceTurns": 0
+  }
 }

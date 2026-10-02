@@ -4,7 +4,7 @@ import { checkOrigin, requireTimerSession, type Session } from "./auth";
 import { GatewayError, natsConnection } from "./gateway";
 import { limits, subjects, validateCommand, validateEnvelope } from "@brai/agent/contracts";
 import type { Command, ErrorResponse, EventEnvelope, NativeSnapshot } from "@brai/agent/contracts";
-const reads = new Set(["projects", "status", "threads", "open", "turns", "items"]);
+const reads = new Set(["projects", "status", "models", "threads", "open", "turns", "items"]);
 const key = Symbol.for("brai.web.agent-streams.v2");
 const globals = globalThis as typeof globalThis & { [key]?: Map<() => void, string> };
 const streams = globals[key] ??= new Map<() => void, string>();

@@ -21,3 +21,7 @@ Core NATS `brai.agent.v2.event` передаёт только AG-UI `STATE_SNAPS
 ## Проверки
 
 `npm run typecheck:agent`, `npm run test:agent`, `npm run build:agent`. Unit проверки не используют аккаунт, сервер Codex или модель. Upstream wire schemas закреплены в [contracts/codex](contracts/codex/README.md); обновление требует проверки фактического протокола, а не собственного форка.
+
+`models` возвращает до100 видимых native моделей, их `efforts/defaultEffort`, названия и configured `defaultModel`; configured `allowedModels` ограничивает каталог и исполнение. Результат кэшируется только в поколении Codex. `create` принимает optional `model`; `start` — optional `model/effort`. Явный выбор проверяется по каталогу до native мутации. Значения передаются напрямую в thread/start и turn/start и становятся штатными default для следующих ходов. Steer не меняет настройки. Snapshot thread metadata может содержать `reasoningEffort` и фактический model из resume/принятого start. Наличие в каталоге само по себе не подтверждает доступ к inference.
+
+`create/start.permissionMode` — `ask|auto|full`, default `auto`. Native mapping: ask = on-request/user/workspace-write; auto = on-request/auto_review/workspace-write; full = never/user/danger-full-access. Для turn/start workspaceWrite ограничен configured cwd, networkAccess=false. Профиль применяется только к новому заданию, без изменения global config.toml. Pending approvals проходят native reviewer; браузер не отвечает автоматически. Произвольные permission/sandbox поля не допускаются.

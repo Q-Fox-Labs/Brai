@@ -2,12 +2,14 @@
 // ABOUTME: Показывает выбранный native чат рядом с группами проектов и чатов.
 // ABOUTME: История и команды используют существующий клиент; раскладка не управляет исполнителем.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { DisplayItem, NativeSnapshot } from "@brai/agent/contracts";
+import type { DisplayItem, NativeSnapshot, ModelCatalog, PermissionMode } from "@brai/agent/contracts";
 import { createAgentClient, AgentError } from "../../lib/agent/client";
+import ModelSettings from "./settings";
 import NativeForm from "./request";
 import { mergeTimeline } from "./timeline";
 import Sidebar, { type Project, type ThreadPage } from "./sidebar";
 
+type CachedChat = { snapshot: NativeSnapshot | null; history: DisplayItem[]; generation: string; cursor: string | null; draft: string; model: string; effort: string; permissionMode: PermissionMode; ready: boolean };
 type Props = { userId: string; email: string; onLogout: () => void; onUnauthorized: () => void; accountMessage: string };
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Ошибка связи";
 const stateLabels: Record<string, string> = { idle: "Готов", inProgress: "Работает", waiting: "Ждёт ответа", completed: "Завершён", interrupted: "Остановлен", failed: "Ошибка", "connection-lost": "Переподключение", "executor-unavailable": "Codex недоступен" };
@@ -25,6 +27,11 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
   const [cursor, setCursor] = useState<string | null>(null), [sidebarOpen, setSidebarOpen] = useState(false);
   const [draft, setDraft] = useState(""), [message, setMessage] = useState(""), [busy, setBusy] = useState(false);
   const locked = useRef(false), selection = useRef(0), uncertain = useRef(false);
+  const cache = useRef(new Map<string, CachedChat>());
+  const historyReady = useRef(false);
+  const [models, setModels] = useState<ModelCatalog | null>(null);
+  const [model, setModel] = useState(""), [effort, setEffort] = useState("");
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>("auto");
   const pageRequests = useRef(new Map<string, symbol>());
 
   const loadThreads = useCallback(async (id: string, nextCursor?: string) => {
@@ -57,16 +64,18 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
 
   useEffect(() => {
     ++selection.current;
-    setBusy(locked.current); setSnapshot(null); setConnected(false); setHistory([]); setCursor(null); setDraft(""); uncertain.current = false;
+    setBusy(locked.current); setConnected(false); uncertain.current = false;
     followBottom.current = true; scrollAnchor.current = null;
     if (!threadId) return;
-    let active = true, epoch = "", historyRead = 0;
+    const saved = cache.current.get(`${projectId}:${threadId}`);
+    let active = true, epoch = saved?.snapshot ? `${saved.snapshot.generation}:${saved.snapshot.epoch}` : "", historyRead = 0, first = true;
     const loadHistory = async (preserve = false) => {
       const token = ++historyRead;
       try {
         const value = await client.request({ action: "items", projectId, threadId });
         if (!active || token !== historyRead) return;
         setHistory(previous => preserve ? mergeTimeline(previous, value.data).slice(-1000) : value.data);
+        historyReady.current = true;
         setHistoryGeneration(value.generation); setCursor(value.nextCursor);
       } catch (error) { if (active && token === historyRead) setMessage(errorText(error)); }
     };
@@ -75,11 +84,14 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
       setConnected(value !== null);
       if (!value) return;
       const nextEpoch = `${value.generation}:${value.epoch}`;
-      if (epoch && epoch !== nextEpoch) void loadHistory(true);
+      const changed = epoch && epoch !== nextEpoch;
+      const gap = first && saved?.snapshot?.items.length && value.items.length && !value.items.some(item => saved.snapshot!.items.some(old => old.id === item.id));
+      if (changed || gap) void loadHistory();
+      first = false;
       epoch = nextEpoch;
       // AIDEV-NOTE: scroll может ещё не прийти; проверяем позицию до изменения высоты ленты.
       const element = conversation.current;
-      if (element && element.scrollHeight - element.clientHeight - element.scrollTop > 1) followBottom.current = false;
+      if (element) followBottom.current = element.scrollHeight - element.clientHeight - element.scrollTop <= 1;
       setSnapshot(value);
       setPages(previous => {
         const page = previous[projectId];
@@ -87,12 +99,24 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
         return { ...previous, [projectId]: { data: [value.thread, ...(page?.data ?? [])].slice(0, 1000), nextCursor: page?.nextCursor ?? null, loading: page?.loading ?? false, error: page?.error ?? "" } };
       });
     });
-    void loadHistory();
+    if (!saved?.ready) void loadHistory();
     return () => { active = false; stop(); };
   }, [client, projectId, threadId]);
 
   function selectChat(id: string, chatId = "") {
+    if (id === projectId && chatId === threadId) { setSidebarOpen(false); return; }
     ++selection.current;
+    if (threadId) {
+      const key = `${projectId}:${threadId}`;
+      cache.current.delete(key);
+      cache.current.set(key, { snapshot, history, generation: historyGeneration, cursor, draft, model, effort, permissionMode, ready: historyReady.current });
+      if (cache.current.size > 8) cache.current.delete(cache.current.keys().next().value!);
+    }
+    const saved = cache.current.get(`${id}:${chatId}`);
+    historyReady.current = saved?.ready ?? false;
+    setSnapshot(saved?.snapshot ?? null); setHistory(saved?.history ?? []); setHistoryGeneration(saved?.generation ?? ""); setCursor(saved?.cursor ?? null);
+    setDraft(saved?.draft ?? ""); setModel(saved?.model ?? ""); setEffort(saved?.effort ?? ""); setPermissionMode(saved?.permissionMode ?? "auto"); setConnected(false);
+    followBottom.current = true; scrollAnchor.current = null;
     setProjectId(id); setThreadId(chatId); setMessage(""); setSidebarOpen(false);
   }
 
@@ -120,7 +144,10 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
       if (value.outcome !== "accepted" || value.generation !== generation || (action === "create" ? typeof value.threadId !== "string" : value.threadId !== selected!.threadId) || value.operationId !== operationId || (action === "answer" && value.requestId !== extra.requestId)) throw new AgentError("BAD_REPLY", "unknown");
       if (action === "create" || action === "start") void loadThreads(targetProject);
       if (token !== selection.current) return true;
-      if (action === "create") selectChat(targetProject, value.threadId);
+      if (action === "create") {
+        cache.current.set(`${targetProject}:${value.threadId}`, { snapshot: null, history: [], generation, cursor: null, draft: "", model, effort, permissionMode, ready: false });
+        selectChat(targetProject, value.threadId);
+      }
       if (action === "start" || action === "steer") setDraft(previous => previous === text ? "" : previous);
       setMessage("Действие принято."); return true;
     } catch (error) {
@@ -135,6 +162,16 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
   const active = view?.turn?.status === "inProgress", disabled = busy || !view || !connected || uncertain.current;
   const project = projects.find(value => value.projectId === projectId);
   const selectedThread = pages[projectId]?.data.find(thread => thread.id === threadId) ?? view?.thread;
+  const selectedModel = models?.data.find(value => value.model === (model || view?.thread.model)) ?? models?.data.find(value => value.model === models.defaultModel) ?? models?.data[0];
+  const requestedEffort = effort || (selectedModel?.model === view?.thread.model ? view?.thread.reasoningEffort : null);
+  const selectedEffort = selectedModel?.efforts.includes(requestedEffort ?? "") ? requestedEffort! : selectedModel?.defaultEffort ?? "";
+  const modelGeneration = snapshot?.generation;
+  useEffect(() => {
+    if (models && (!modelGeneration || models.generation === modelGeneration)) return;
+    let mounted = true;
+    void client.request({ action: "models" }).then(value => { if (mounted) setModels(value); }).catch(error => { if (mounted) setMessage(errorText(error)); });
+    return () => { mounted = false; };
+  }, [client, modelGeneration, models]);
   const title = selectedThread?.title || selectedThread?.preview || (threadId ? "Новый чат" : "Выберите чат");
   const items = mergeTimeline(history, view?.items ?? []);
 
@@ -147,7 +184,7 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
 
   return <main className="agent-shell">
     <Sidebar projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={sidebarOpen} email={email} busy={busy || uncertain.current}
-      select={selectChat} create={id => { void mutate("create", {}, id); }} more={id => { const next = pages[id]?.nextCursor; if (next) void loadThreads(id, next); }}
+      select={selectChat} create={id => { void mutate("create", selectedModel ? { model: selectedModel.model, permissionMode } : { permissionMode }, id); }} more={id => { const next = pages[id]?.nextCursor; if (next) void loadThreads(id, next); }}
       refresh={id => { void loadThreads(id); }} close={() => setSidebarOpen(false)} logout={onLogout} />
     <section className="agent-workspace" aria-labelledby="agent-chat-title">
       <header className="agent-toolbar">
@@ -159,7 +196,7 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
         const element = event.currentTarget;
         followBottom.current = element.scrollHeight - element.clientHeight - element.scrollTop <= 1;
       }}>
-        {!threadId && <div className="agent-empty"><span className="agent-empty-symbol" aria-hidden="true">✳</span><h2>С чего начнём?</h2><p>Выберите чат слева или создайте новый в нужном проекте.</p>{project && <button className="agent-primary" disabled={busy || uncertain.current} onClick={() => void mutate("create")}>Новый чат · {project.name}</button>}</div>}
+        {!threadId && <div className="agent-empty"><span className="agent-empty-symbol" aria-hidden="true">✳</span><h2>С чего начнём?</h2><p>Выберите чат слева или создайте новый в нужном проекте.</p>{project && <button className="agent-primary" disabled={busy || uncertain.current} onClick={() => void mutate("create", selectedModel ? { model: selectedModel.model, permissionMode } : { permissionMode })}>Новый чат · {project.name}</button>}</div>}
         <div className="agent-timeline">
           {cursor && <button className="agent-history-more" onClick={() => void moreHistory()}>Загрузить предыдущие сообщения</button>}
           {items.map(item => <Item key={item.id} item={item} />)}
@@ -167,10 +204,11 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
         </div>
       </div>
       <footer className="agent-composer-area">
-        <form className="agent-composer" onSubmit={event => { event.preventDefault(); if (draft.trim()) void mutate(active ? "steer" : "start", { text: draft, ...(active ? { expectedTurnId: view!.turn!.id } : {}) }); }}>
+        <form className="agent-composer" onSubmit={event => { event.preventDefault(); if (draft.trim()) void mutate(active ? "steer" : "start", { text: draft, ...(active ? { expectedTurnId: view!.turn!.id } : selectedModel ? { model: selectedModel.model, effort: selectedEffort, permissionMode } : {}) }); }}>
           <label className="sr-only" htmlFor="agent-draft">{active ? "Дополнить текущий ход" : "Сообщение"}</label>
           <textarea id="agent-draft" disabled={!threadId} placeholder={threadId ? active ? "Дополнить текущее задание…" : "Что нужно сделать?" : "Сначала выберите или создайте чат"} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-          <div className="agent-composer-actions"><span>{active ? "Агент работает · можно дополнить задание" : "Ctrl / ⌘ + Enter — отправить"}</span><div>{active && <button type="button" className="agent-stop" disabled={disabled} onClick={() => void mutate("interrupt", { turnId: view!.turn!.id })}>Остановить</button>}<button className="agent-send" disabled={disabled || !draft.trim() || view?.thread.canAcceptDirectInput === false}>{active ? "Дополнить" : "Отправить"}<span aria-hidden="true"> ↑</span></button></div></div>
+          <ModelSettings models={models?.data ?? []} model={selectedModel?.model ?? ""} effort={selectedEffort} permissionMode={permissionMode} choosePermissions={setPermissionMode} disabled={busy || active || (!!threadId && !connected)} chooseModel={value => { setModel(value); setEffort(""); }} chooseEffort={setEffort} />
+          <div className="agent-composer-actions"><span>{active ? "Агент работает · можно дополнить задание" : "Ctrl / ⌘ + Enter — отправить"}</span><div>{active && <button type="button" className="agent-stop" disabled={disabled} onClick={() => void mutate("interrupt", { turnId: view!.turn!.id })}>Остановить</button>}<button className="agent-send" disabled={disabled || (!active && !selectedModel) || !draft.trim() || view?.thread.canAcceptDirectInput === false}>{active ? "Дополнить" : "Отправить"}<span aria-hidden="true"> ↑</span></button></div></div>
         </form>
         <p className="agent-feedback" role="alert">{message || accountMessage}</p>
       </footer>
