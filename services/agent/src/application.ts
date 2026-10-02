@@ -6,7 +6,7 @@ import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, ModelCatal
 import type { CodexPort, Observation } from './codex.js';
 import { display, metadata, text, compact, summary } from './display.js';
 export type Config = { codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
-type Session = { view: NativeSnapshot; opened: boolean; fresh: boolean; closing?: boolean; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
+type Session = { view: NativeSnapshot; opened: boolean; fresh: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
 /** Собирает команды и единственного владельца live items/pending. */
 export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void) {
   const sessions = new Map<string, Session>();
@@ -23,7 +23,10 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (!modelCatalog || modelCatalog.generation !== generation) {
       const result = codex.call('model/list', { limit: 100, includeHidden: false }).then(page => {
         if (generation !== current()) fail('STALE_GENERATION', 'query');
-        const data = page.data.filter((m: any) => !config.allowedModels || config.allowedModels.includes(m.model)).slice(0, 100).map((m: any) => ({ model: m.model, name: m.displayName, defaultEffort: m.defaultReasoningEffort, efforts: m.supportedReasoningEfforts.map((e: any) => e.reasoningEffort) }));
+        const data = page.data.filter((m: any) => !config.allowedModels || config.allowedModels.includes(m.model)).slice(0, 100).map((m: any) => {
+          const inputModalities: string[] = m.inputModalities ?? ['text', 'image'];
+          return { model: m.model, name: m.displayName, defaultEffort: m.defaultReasoningEffort, efforts: m.supportedReasoningEfforts.map((e: any) => e.reasoningEffort), inputModalities, imageLimit: inputModalities.includes('image') ? limits.images : 0 };
+        });
         return { generation, data, defaultModel: data.find((m: any) => m.model === config.newThread?.model)?.model ?? data[0]?.model ?? null };
       });
       modelCatalog = { generation, result };
@@ -112,7 +115,8 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       const cut = s.view.seq;
       const resumed = await codex.call('thread/resume', { threadId: id, cwd: p.cwd, excludeTurns: true }, { mutation: true });
       const turns = await codex.call('thread/turns/list', { threadId: id, limit: 1, itemsView: 'notLoaded', sortDirection: 'desc' });
-      const items = await codex.call('thread/items/list', { threadId: id, limit: 100, sortDirection: 'desc' });
+      // AIDEV-NOTE: Маленькая native страница ограничивает raw media; наружу идёт только display.
+      const items = await codex.call('thread/items/list', { threadId: id, limit: 10, sortDirection: 'desc' });
       if (before !== current()) fail('STALE_GENERATION', 'query');
       s.view.thread = { ...metadata(resumed.thread), lastMessageAt: s.view.thread.lastMessageAt, model: resumed.model, reasoningEffort: resumed.reasoningEffort ?? null };
       const latestMessage = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
@@ -136,6 +140,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       for (const s of sessions.values()) {
         s.opened = s.fresh = s.closing = false;
         s.raw.clear();
+        s.activeModel = undefined;
         s.details.clear();
         s.view.requests = [];
         s.view.generation = current();
@@ -161,7 +166,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     } else if (e.method === 'turn/started' || e.method === 'turn/completed') {
       s.view.turn = { id: p.turn.id, status: p.turn.status };
       s.view.state = p.turn.status;
-      if (p.turn.status !== 'inProgress') { s.view.requests = []; s.raw.clear(); }
+      if (p.turn.status !== 'inProgress') { s.activeModel = undefined; s.view.requests = []; s.raw.clear(); }
     } else if (e.method === 'item/started' || e.method === 'item/completed') put(s, p.item, p.turnId);
     else if (e.method?.endsWith('/delta') || e.method?.endsWith('/outputDelta')) {
       const item = s.details.get(p.itemId);
@@ -199,7 +204,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
           let cursor: string | undefined;
           lastMessageAt = 0;
           for (let index = 0; index < 10; index++) {
-            const items = await codex.call('thread/items/list', { threadId: thread.id, limit: 100, sortDirection: 'desc', ...(cursor ? { cursor } : {}) });
+            const items = await codex.call('thread/items/list', { threadId: thread.id, limit: 10, sortDirection: 'desc', ...(cursor ? { cursor } : {}) });
             const message = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
             if (message) { lastMessageAt = message.startedAtMs ?? message.completedAtMs ?? thread.updatedAt * 1000; break; }
             if (!items.nextCursor) break;
@@ -241,7 +246,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (r.action === 'items' || r.action === 'turns') {
       if (s.fresh) return { generation: current(), data: [], nextCursor: null };
       const generation = current();
-      const page = await codex.call(r.action === 'items' ? 'thread/items/list' : 'thread/turns/list', { threadId: r.threadId, limit: 100, cursor: r.cursor, sortDirection: 'desc', ...(r.action === 'items' ? { turnId: r.turnId } : { itemsView: 'notLoaded' }) });
+      const page = await codex.call(r.action === 'items' ? 'thread/items/list' : 'thread/turns/list', { threadId: r.threadId, limit: r.action === 'items' ? 10 : 100, cursor: r.cursor, sortDirection: 'desc', ...(r.action === 'items' ? { turnId: r.turnId } : { itemsView: 'notLoaded' }) });
       if (generation !== current()) fail('STALE_GENERATION', 'query');
       return { generation, data: r.action === 'items' ? page.data.slice().reverse().map((e: any) => {
         const revision = s.view.items.find(i => i.id === e.item.id)?.revision ?? 0;
@@ -255,15 +260,19 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (r.action === 'start' && (active || s.view.thread.canAcceptDirectInput === false)) fail('OPERATION_CONFLICT');
     if ((r.action === 'steer' || r.action === 'interrupt') && (!active || s.view.turn?.id !== (r.expectedTurnId ?? r.turnId))) fail('OPERATION_CONFLICT');
     if (r.action === 'start' && [...sessions.values()].filter(s => s.view.turn?.status === 'inProgress').length >= 4) fail('CAPACITY_EXHAUSTED');
-    if (r.action === 'start') {
-      const model = r.model ?? s.view.thread.model;
+    if (r.action === 'start' || r.action === 'steer' && r.images?.length) {
+      const model = r.action === 'steer' ? s.activeModel ?? s.view.thread.model : r.model ?? s.view.thread.model;
       if (config.allowedModels && !config.allowedModels.includes(model ?? '')) fail('UNSUPPORTED');
-      if (r.model || r.effort) { const choice = (await catalog()).data.find(m => m.model === model); if (!choice || (r.effort && !choice.efforts.includes(r.effort))) fail('UNSUPPORTED'); }
+      if (r.model || r.effort || r.images?.length) {
+        const choice = (await catalog()).data.find(m => m.model === model);
+        if (!choice || (r.effort && !choice.efforts.includes(r.effort)) || (r.images?.length && choice.imageLimit === 0)) fail('UNSUPPORTED');
+      }
     }
     if (r.generation !== current()) fail('STALE_GENERATION');
     if (r.action === 'start' && (s.closing || s.view.turn?.status === 'inProgress' || [...sessions.values()].filter(value => value.view.turn?.status === 'inProgress').length >= 4)) fail('OPERATION_CONFLICT');
-    const previousTurn = s.view.turn, previousState = s.view.state;
-    if (r.action === 'start') { s.view.turn = { id: 'starting', status: 'inProgress' }; s.view.state = 'inProgress'; publish(s); }
+    if (r.action === 'steer' && (s.closing || s.view.turn?.status !== 'inProgress' || s.view.turn.id !== r.expectedTurnId)) fail('OPERATION_CONFLICT');
+    const previousTurn = s.view.turn, previousState = s.view.state, previousModel = s.activeModel;
+    if (r.action === 'start') { s.activeModel = r.model ?? s.view.thread.model; s.view.turn = { id: 'starting', status: 'inProgress' }; s.view.state = 'inProgress'; publish(s); }
     let turnId = r.turnId;
     if (r.action === 'answer') {
       const f = s.view.requests.find(f => f.requestId === r.requestId);
@@ -275,10 +284,11 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       catch (error: any) { if (error.outcome === 'not-sent' && r.generation === current() && s.view.requests.includes(f)) { f.answered = false; publish(s); } throw error; }
     } else if (r.action === 'interrupt') await codex.call('turn/interrupt', { threadId: r.threadId, turnId: r.turnId }, { mutation: true });
     else {
-      const params = { threadId: r.threadId, input: [{ type: 'text', text: r.text }], ...(r.action === 'steer' ? { expectedTurnId: r.expectedTurnId } : { ...permissions(r.permissionMode, p.cwd), ...(r.model ? { model: r.model } : {}), ...(r.effort ? { effort: r.effort } : {}) }) };
+      const input = [...(r.text?.trim() ? [{ type: 'text', text: r.text }] : []), ...(r.images ?? []).map(url => ({ type: 'image', url }))];
+      const params = { threadId: r.threadId, input, ...(r.action === 'steer' ? { expectedTurnId: r.expectedTurnId } : { ...permissions(r.permissionMode, p.cwd), ...(r.model ? { model: r.model } : {}), ...(r.effort ? { effort: r.effort } : {}) }) };
       let value: any;
       try { value = await codex.call(r.action === 'steer' ? 'turn/steer' : 'turn/start', params, { mutation: true }); }
-      catch (error: any) { if (r.action === 'start' && error.outcome === 'not-sent' && r.generation === current() && s.view.turn?.id === 'starting') { s.view.turn = previousTurn; s.view.state = previousState; publish(s); } throw error; }
+      catch (error: any) { if (r.action === 'start' && error.outcome === 'not-sent' && r.generation === current() && s.view.turn?.id === 'starting') { s.view.turn = previousTurn; s.view.state = previousState; s.activeModel = previousModel; publish(s); } throw error; }
       turnId = value.turn?.id ?? value.turnId;
       if (r.action === 'start' && s.view.turn?.id === 'starting') { s.view.turn = { id: turnId!, status: value.turn.status }; publish(s); }
       if (r.action === 'start') { s.view.thread.model = r.model ?? s.view.thread.model; s.view.thread.reasoningEffort = r.effort ?? s.view.thread.reasoningEffort ?? null; publish(s); }
@@ -290,10 +300,10 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
   /** Повтор того же operation ID возвращает исходный результат без native вызова. */
   async function request(r: Command): Promise<any> {
     if (!validateCommand(r)) fail('INVALID_ARGUMENT');
+    if (r.images?.length && !validImages(r.images)) fail('INVALID_ARGUMENT');
     if (!r.operationId) return execute(r);
     if (r.generation !== current()) fail('STALE_GENERATION');
-    const canonical = JSON.stringify(r, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
-    const hash = createHash('sha256').update(canonical).digest('hex'), old = operations.get(r.operationId);
+    const hash = commandHash(r), old = operations.get(r.operationId);
     if (old) return old.hash === hash ? old.result : fail('OPERATION_CONFLICT');
     if (operations.size >= limits.operations) fail('CAPACITY_EXHAUSTED');
     const result = Promise.resolve().then(() => execute(r));
@@ -301,6 +311,25 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     return result;
   }
   return { request, close: unsubscribe };
+}
+/** Хеширует полную команду; ledger сохраняет digest и результат, без raw media. */
+function commandHash(command: Command): string {
+  const canonical = JSON.stringify(command, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
+  return createHash('sha256').update(canonical).digest('hex');
+}
+/** Проверяет суммарные decoded bytes и сигнатуру MIME до открытия/изменения хода. */
+function validImages(images: string[]): boolean {
+  let total = 0;
+  return images.every(image => {
+    const comma = image.indexOf(','), mime = image.slice(5, image.indexOf(';'));
+    const encoded = image.slice(comma + 1);
+    total += encoded.length / 4 * 3 - (encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0);
+    if (total > limits.imageBytes) return false;
+    const data = Buffer.from(encoded, 'base64');
+    if (mime === 'image/png') return data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    if (mime === 'image/jpeg') return data.length >= 3 && data[0] === 255 && data[1] === 216 && data[2] === 255;
+    return mime === 'image/webp' && data.length >= 12 && data.subarray(0, 4).equals(Buffer.from('RIFF')) && data.subarray(8, 12).equals(Buffer.from('WEBP'));
+  });
 }
 function validAnswer(f: PendingRequest, answer: any): boolean {
   if (f.kind === 'command-approval' && f.params.availableDecisions) return f.params.availableDecisions.some((v: any) => JSON.stringify(v) === JSON.stringify(answer?.decision));

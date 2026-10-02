@@ -280,8 +280,24 @@
             "projectId",
             "threadId",
             "generation",
-            "operationId",
-            "text"
+            "operationId"
+          ],
+          "anyOf": [
+            {
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "pattern": "\\S"
+                }
+              }
+            },
+            {
+              "required": [
+                "images"
+              ]
+            }
           ],
           "properties": {
             "action": {
@@ -309,8 +325,17 @@
             },
             "text": {
               "type": "string",
-              "minLength": 1,
+              "minLength": 0,
               "maxLength": 65536
+            },
+            "images": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "type": "string",
+                "pattern": "^data:image/(?:png|jpeg|webp);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=|[A-Za-z0-9+/][AQgw]==)(?![\\s\\S])"
+              }
             },
             "model": {
               "type": "string",
@@ -343,8 +368,24 @@
             "threadId",
             "generation",
             "operationId",
-            "expectedTurnId",
-            "text"
+            "expectedTurnId"
+          ],
+          "anyOf": [
+            {
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "pattern": "\\S"
+                }
+              }
+            },
+            {
+              "required": [
+                "images"
+              ]
+            }
           ],
           "properties": {
             "action": {
@@ -377,8 +418,17 @@
             },
             "text": {
               "type": "string",
-              "minLength": 1,
+              "minLength": 0,
               "maxLength": 65536
+            },
+            "images": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 8,
+              "items": {
+                "type": "string",
+                "pattern": "^data:image/(?:png|jpeg|webp);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=|[A-Za-z0-9+/][AQgw]==)(?![\\s\\S])"
+              }
             }
           }
         },
@@ -465,22 +515,7 @@
               "minLength": 1,
               "maxLength": 128
             },
-            "answer": {
-              "anyOf": [
-                {
-                  "$ref": "../contracts/codex/schema.json#/definitions/CommandExecutionRequestApprovalResponse"
-                },
-                {
-                  "$ref": "../contracts/codex/schema.json#/definitions/FileChangeRequestApprovalResponse"
-                },
-                {
-                  "$ref": "../contracts/codex/schema.json#/definitions/PermissionsRequestApprovalResponse"
-                },
-                {
-                  "$ref": "../contracts/codex/schema.json#/definitions/ToolRequestUserInputResponse"
-                }
-              ]
-            }
+            "answer": {}
           }
         }
       ]
@@ -542,6 +577,10 @@
           "minimum": 0
         },
         "timestamp": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "imageCount": {
           "type": "integer",
           "minimum": 0
         }
@@ -1053,13 +1092,26 @@
         },
         "defaultEffort": {
           "type": "string"
+        },
+        "inputModalities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "imageLimit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
         }
       },
       "required": [
         "model",
         "name",
         "efforts",
-        "defaultEffort"
+        "defaultEffort",
+        "inputModalities",
+        "imageLimit"
       ]
     },
     "Models": {

@@ -40,6 +40,6 @@ export function groupTimeline(items: DisplayItem[]): TimelineEntry[] {
 }
 
 /** Одна кнопка и сочетание клавиш выполняют одну и ту же команду; пробелы не являются сообщением. */
-export function composerAction(active: boolean, draft: string): "start" | "steer" | "interrupt" {
-  return active ? draft.trim() ? "steer" : "interrupt" : "start";
+export function composerAction(active: boolean, draft: string, imageCount = 0): "start" | "steer" | "interrupt" {
+  return active ? draft.trim() || imageCount > 0 ? "steer" : "interrupt" : "start";
 }

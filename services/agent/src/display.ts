@@ -26,6 +26,7 @@ export function display(item: any, turnId: string, history = false): DisplayItem
   if (item.type === 'functionCallOutput') content = typeof item.output === 'string' ? item.output : textual(Array.isArray(item.output) ? item.output : item.output?.content);
   if (item.type === 'collabAgentToolCall') content = `${item.tool}\n${Object.entries(item.agentsStates ?? {}).map(([id, state]: any) => `${id}: ${state.status}`).join('\n')}`;
   const value: DisplayItem = { id: item.id, turnId, type: item.type, text: text(content), truncated: Buffer.byteLength(content) > 8192 };
+  if (item.type === 'userMessage') value.imageCount = (item.content ?? []).filter((part: any) => part.type === 'image' || part.type === 'localImage').length;
   if (typeof item.command === 'string') value.command = text(item.command, 16384);
   if (typeof item.aggregatedOutput === 'string') value.output = text(item.aggregatedOutput, 32768);
   if (item.type === 'fileChange') value.diff = text((item.changes ?? []).map((change: any) => `${change.path}\n${change.diff}`).join('\n'), 32768);

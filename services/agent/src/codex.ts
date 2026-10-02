@@ -95,7 +95,8 @@ export function createCodex(options: { socketUrl: string }) {
     connection = (async () => {
       if (!/^ws\+unix:\/.+:\/$/.test(options.socketUrl)) throw fail('INVALID_ARGUMENT');
       generation = randomUUID();
-      const socket = new WebSocket(options.socketUrl, { maxPayload: 2097152 });
+      // AIDEV-NOTE: История page10 может содержать десять image сообщений; исходящий предел остаётся 2 MiB.
+      const socket = new WebSocket(options.socketUrl, { maxPayload: 16777216 });
       ws = socket;
       socket.on('message', data => { if (ws === socket) receive(data); });
       socket.on('close', () => { if (ws === socket) disconnect(); });

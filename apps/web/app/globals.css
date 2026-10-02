@@ -99,6 +99,15 @@ button:focus-visible, a:focus-visible { outline: 2px solid #b3a2ff; outline-offs
 .agent-model-settings { display: flex; flex: 1; min-width: 0; gap: 8px; color: var(--agent-muted); font-size: 11px; }
 .agent-model-settings select { flex: 1; min-width: 0; max-width: 100%; width: 0; padding: 5px 7px; border: 1px solid #45484f; border-radius: 7px; background: #25282d; color: #e5e5e8; font-size: 12px; }
 .agent-composer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.agent-attach { flex: none; width: 34px; height: 34px; border: 1px solid #535761; border-radius: 9px; color: #dedee6; font-size: 23px; line-height: 1; }
+.agent-attachments { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 12px; padding: 0; list-style: none; }
+.agent-attachments li { position: relative; width: 112px; padding: 7px; border: 1px solid #535761; border-radius: 10px; background: #23262b; }
+.agent-attachments img { display: block; width: 96px; height: 72px; object-fit: contain; border-radius: 5px; }
+.agent-attachment-name { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-top: 5px; color: #cacbd2; font-size: 11px; }
+.agent-attachment-remove { position: absolute; right: -6px; top: -6px; width: 26px; height: 26px; border: 1px solid #676b75; border-radius: 50%; background: #363a43; color: #fff; font-size: 19px; line-height: 1; }
+.agent-image-reduced { display: block; margin-top: 3px; color: #d0bfdc; font-size: 10px; }
+.agent-image-preparing, .agent-message-images { color: #b9bbc4; font-size: 12px; }
+.agent-image-preparing { max-width: 808px; margin: 5px auto 0; }
 .agent-send { flex: none; max-width: 100%; padding: 8px 13px; border-radius: 9px; background: #e5e5eb; color: #27282b; font-size: 12px; font-weight: 600; }
 .agent-feedback { min-height: 18px; max-width: 808px; margin: 7px auto 0; color: #c4b6de; font-size: 12px; line-height: 1.5; }
 .agent-request { margin: 22px 0; padding: 22px; border: 1px solid #45464b; border-radius: 20px; background: #303136; font-size: 14px; }
