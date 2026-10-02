@@ -10,6 +10,7 @@ import NativeForm from "./request";
 import { createLazyReads } from "../../lib/agent/lazy";
 import Activities from "./activities";
 import Markdown from "./markdown";
+import { questionReplies } from "../../lib/agent/question-reply";
 import { composerAction, groupTimeline, mergeTimeline } from "./timeline";
 import Sidebar, { type Project, type ThreadPage } from "./sidebar";
 import { limits } from "@brai/agent/contracts";
@@ -318,9 +319,10 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
 
 /** Сообщения используют безопасный Markdown; тела действий принадлежат отдельному ленивому списку. */
 function Item({ item }: { item: DisplayItem }) {
+  const replies = item.type === "userMessage" ? questionReplies(item.text) : null;
   return <article data-item-id={item.id} className={`agent-item ${item.type === "userMessage" ? "agent-user-message" : "agent-assistant-message"}`}>
     <span className="agent-message-author">{item.type === "userMessage" ? "Вы" : "Brai"}{item.phase && <span className="agent-message-phase">{item.phase === "final_answer" ? "Итог" : item.phase === "commentary" ? "Промежуточное сообщение" : item.phase}</span>}</span>
-    <Markdown text={item.text} />
+    {replies ? <div className="agent-markdown">{replies.map((reply, index) => <div key={index}><p>{reply.question}</p><p><strong>Ответ: </strong>{reply.answer}</p></div>)}</div> : <Markdown text={item.text} />}
     {!!item.imageCount && <p className="agent-message-images">Изображений: {item.imageCount}</p>}
   </article>;
 }
