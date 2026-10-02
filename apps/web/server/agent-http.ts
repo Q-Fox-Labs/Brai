@@ -5,7 +5,7 @@ import { GatewayError, natsConnection } from "./gateway";
 import { bytes, limits, subjects, validateCommand, validateEnvelope } from "@brai/agent/contracts";
 import type { Command, ErrorResponse, EventEnvelope, NativeSnapshot } from "@brai/agent/contracts";
 import { encodeFrame } from "../lib/agent/stream";
-const reads = new Set(["projects", "status", "models", "threads", "open", "turns", "items"]);
+const reads = new Set(["projects", "status", "models", "threads", "open", "turns", "items", "activities", "item"]);
 const key = Symbol.for("brai.web.agent-streams.v2");
 const globals = globalThis as typeof globalThis & { [key]?: Map<() => void, string> };
 const streams = globals[key] ??= new Map<() => void, string>();
@@ -179,6 +179,7 @@ async function handle(request: Request, context: { params: Promise<{ path: strin
     value += decoder.decode();
     if (eventStream && !query.length) return await events(request, session);
     const command = { action: eventStream ? "open" : path[0], ...(value ? JSON.parse(value) : Object.fromEntries(query)) };
+    if (typeof command.itemIds === "string") command.itemIds = JSON.parse(command.itemIds);
     if (command.action !== (eventStream ? "open" : path[0])) throw fail(400, "INVALID_ARGUMENT", outcome);
     if (!validateCommand(command) || (!eventStream && reads.has(command.action) !== (request.method === "GET"))) throw fail(400, "INVALID_ARGUMENT", outcome);
     if (eventStream) return await events(request, session, command);

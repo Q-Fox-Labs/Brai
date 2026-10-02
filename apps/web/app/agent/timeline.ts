@@ -23,3 +23,23 @@ export function mergeTimeline(history: DisplayItem[], live: DisplayItem[]): Disp
   result.push(...history.slice(cursor).filter(item => !liveIds.has(item.id)));
   return result;
 }
+
+export type TimelineEntry = { kind: "message"; item: DisplayItem } | { kind: "activities"; id: string; items: DisplayItem[] };
+/** Скрытые действия группируются между сообщениями; даже пустой reasoning остаётся идентификатором. */
+export function groupTimeline(items: DisplayItem[]): TimelineEntry[] {
+  const entries: TimelineEntry[] = [];
+  for (const item of items) {
+    if (item.type === "userMessage" || item.type === "agentMessage") entries.push({ kind: "message", item });
+    else {
+      const previous = entries.at(-1);
+      if (previous?.kind === "activities") previous.items.push(item);
+      else entries.push({ kind: "activities", id: item.id, items: [item] });
+    }
+  }
+  return entries;
+}
+
+/** Одна кнопка и сочетание клавиш выполняют одну и ту же команду; пробелы не являются сообщением. */
+export function composerAction(active: boolean, draft: string): "start" | "steer" | "interrupt" {
+  return active ? draft.trim() ? "steer" : "interrupt" : "start";
+}

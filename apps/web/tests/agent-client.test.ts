@@ -120,3 +120,53 @@ test("an unopened chat keeps its wire base even when GETopen is ahead of the lat
     assert.equal(f.calls.length, 2); assert.equal(f.sources.length, 1);
   } finally { f.client.dispose(); }
 });
+
+test("metadata subscription sees unopened chats without another watch, open or stream", async () => {
+  const f = fixture();
+  try {
+    const changes: NativeSnapshot[] = [];
+    const stop = f.client.subscribeThreads(value => changes.push(value));
+    assert.equal(f.sources.length, 1);
+    f.sources[0].send("ready", { generation: "gen" }); await tick();
+    const working = { ...base("unopened", 1), thread: { ...base("unopened").thread, active: true, lastMessageAt: 1234 } };
+    f.sources[0].send("agent", envelope(working)); await tick();
+    f.sources[0].send("agent", envelope({ ...working, seq: 2, thread: { ...working.thread, active: false } })); await tick();
+    assert.deepEqual(changes.map(value => value.thread.active), [true, false]);
+    assert.equal(changes[1].thread.lastMessageAt, 1234);
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.applications, 0);
+    stop();
+  } finally { f.client.dispose(); }
+});
+
+test("authoritative reopen updates metadata even if the passive SDK previously held an active snapshot", async () => {
+  const f = fixture();
+  try {
+    const changes: NativeSnapshot[] = [];
+    f.client.subscribeThreads(value => changes.push(value));
+    const old = { ...base("A", 8), thread: { ...base("A").thread, active: true } };
+    f.snapshots.set("A", old);
+    f.client.watch("brai", "A", () => {});
+    f.sources[0].send("ready", { generation: "gen" }); await tick();
+    f.sources[0].onerror!();
+    f.snapshots.set("A", { ...old, seq: 10, thread: { ...old.thread, active: false } });
+    f.sources[0].send("ready", { generation: "gen" }); await tick();
+    assert.equal(changes.at(-1)?.seq, 10);
+    assert.equal(changes.at(-1)?.thread.active, false);
+  } finally { f.client.dispose(); }
+});
+
+test("lazy read actions encode itemIds as JSON rather than comma-separated query text", async () => {
+  const f = fixture();
+  try {
+    await f.client.request({ action: "activities", projectId: "brai", threadId: "A", turnId: "turn", itemIds: ["first", "second"] });
+    const url = new URL(f.calls[0], "https://example.test");
+    assert.equal(url.pathname, "/api/agent/activities");
+    assert.deepEqual(JSON.parse(url.searchParams.get("itemIds")!), ["first", "second"]);
+    assert.equal(f.sources.length, 0);
+    await f.client.request({ action: "item", projectId: "brai", threadId: "A", turnId: "turn", itemId: "first" });
+    assert.equal(new URL(f.calls[1], "https://example.test").pathname, "/api/agent/item");
+    await assert.rejects(f.client.request({ action: "activities", projectId: "brai", threadId: "A", turnId: "turn", itemIds: Array.from({ length: 101 }, (_, i) => String(i)) }), /INVALID_ARGUMENT/);
+    assert.equal(f.calls.length, 2);
+  } finally { f.client.dispose(); }
+});

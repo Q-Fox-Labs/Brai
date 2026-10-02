@@ -1,0 +1,33 @@
+/* ABOUTME: Оформляет семантические Markdown-элементы в сообщении агента.
+   ABOUTME: Ограничивает стили контейнером renderer и сохраняет переносы кода. */
+.agent-markdown { min-width: 0; overflow-wrap: anywhere; }
+.agent-markdown > :first-child { margin-top: 0; }
+.agent-markdown > :last-child { margin-bottom: 0; }
+.agent-markdown p { margin: 8px 0; white-space: pre-wrap; }
+.agent-markdown h1, .agent-markdown h2, .agent-markdown h3,
+.agent-markdown h4, .agent-markdown h5, .agent-markdown h6 { margin: 18px 0 8px; font-weight: 650; line-height: 1.35; }
+.agent-markdown h1 { font-size: 1.45em; }
+.agent-markdown h2 { font-size: 1.3em; }
+.agent-markdown h3 { font-size: 1.15em; }
+.agent-markdown ul, .agent-markdown ol { margin: 8px 0; padding-left: 1.6em; }
+.agent-markdown ul { list-style-type: disc; }
+.agent-markdown ol { list-style-type: decimal; }
+.agent-markdown li > ul { list-style-type: circle; }
+.agent-markdown li > ol { list-style-type: lower-alpha; }
+.agent-markdown li { padding-left: .15em; }
+.agent-markdown li > p { margin: 4px 0; }
+.agent-markdown blockquote { margin: 10px 0; padding: 2px 0 2px 14px; border-left: 3px solid rgb(148 163 184 / 45%); color: rgb(203 213 225 / 85%); }
+.agent-markdown blockquote > :first-child { margin-top: 0; }
+.agent-markdown blockquote > :last-child { margin-bottom: 0; }
+.agent-markdown code { border-radius: 4px; background: rgb(15 23 42 / 75%); padding: .12em .35em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+.agent-markdown .markdown-code-block { overflow-x: auto; margin: 10px 0; border: 1px solid rgb(148 163 184 / 20%); border-radius: 8px; background: rgb(15 23 42 / 70%); padding: 12px 14px; white-space: pre; }
+.agent-markdown .markdown-code-block code { padding: 0; background: transparent; font-size: .86em; }
+.agent-item .agent-markdown .markdown-code-block { overflow-wrap: normal; white-space: pre; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.agent-item .agent-markdown .markdown-code-block code { font-family: inherit; }
+.agent-markdown a { color: #93c5fd; text-decoration: underline; text-underline-offset: 2px; }
+.agent-markdown del { opacity: .8; }
+.agent-markdown hr { margin: 16px 0; border: 0; border-top: 1px solid rgb(148 163 184 / 30%); }
+.agent-markdown .markdown-table-wrap { max-width: 100%; overflow-x: auto; margin: 10px 0; }
+.agent-markdown table { width: 100%; border-collapse: collapse; font-size: .92em; }
+.agent-markdown th, .agent-markdown td { border: 1px solid rgb(148 163 184 / 25%); padding: 6px 9px; text-align: left; vertical-align: top; }
+.agent-markdown th { background: rgb(148 163 184 / 10%); font-weight: 600; }

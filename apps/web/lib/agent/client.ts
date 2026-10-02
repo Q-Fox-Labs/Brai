@@ -16,6 +16,8 @@ type Replies = Record<"create" | "start" | "steer" | "interrupt" | "answer", Mut
   threads: Page<ThreadMetadata>;
   turns: Page<{ id: string; status: string }>;
   items: Page<DisplayItem>;
+  activities: { generation: string; data: DisplayItem[] };
+  item: { generation: string; item: DisplayItem };
   open: NativeSnapshot;
 };
 class PassiveAgent extends AbstractAgent {
@@ -30,9 +32,9 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
   const abort = new AbortController();
   async function request<A extends Command["action"]>(command: Command & { action: A }): Promise<Replies[A]> {
     if (!validateCommand(command)) throw new AgentError("INVALID_ARGUMENT", "not-sent");
-    const reading = ["projects", "status", "models", "threads", "open", "turns", "items"].includes(command.action);
+    const reading = ["projects", "status", "models", "threads", "open", "turns", "items", "activities", "item"].includes(command.action);
     const { action, ...body } = command;
-    const query = new URLSearchParams(Object.entries(body).map(([key, value]) => [key, String(value)]));
+    const query = new URLSearchParams(Object.entries(body).map(([key, value]) => [key, Array.isArray(value) ? JSON.stringify(value) : String(value)]));
     try {
       const response = await fetch(`/api/agent/${action}${reading ? `?${query}` : ""}`, {
         method: reading ? "GET" : "POST", signal: abort.signal, cache: "no-store",
@@ -50,6 +52,8 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
   }
   type LiveChat = { projectId: string; threadId: string; snapshot: NativeSnapshot | null; confirmed: string; reading: boolean; accept: (snapshot: NativeSnapshot, authoritative?: boolean) => void; close: () => void };
   const chats = new Map<string, LiveChat>();
+  const threadListeners = new Set<(snapshot: NativeSnapshot) => void>();
+  const notifyThread = (snapshot: NativeSnapshot) => { for (const listener of threadListeners) listener(snapshot); };
   const bases = new Map<string, NativeSnapshot>();
   let source: EventSource | undefined, connected = false, generation = "", version = 0, disposed = false;
   let retry: ReturnType<typeof setTimeout> | undefined;
@@ -122,6 +126,7 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
       const envelope = { projectId: chat.projectId, threadId: chat.threadId, generation: snapshot.generation, epoch: snapshot.epoch, seq: snapshot.seq, event: { type: "STATE_SNAPSHOT", snapshot } };
       if (!validateEnvelope(envelope) || bytes(snapshot) > limits.state || snapshot.generation !== generation) throw new Error("BAD_REPLY");
       chat.accept(snapshot, true);
+      notifyThread(snapshot);
     } catch { if (!disposed && chats.get(key) === chat && selected?.key === key && before === version) reconnect(); }
     finally { chat.reading = false; if (chats.get(key) === chat && before !== version && selected?.key === key) void load(chat); }
   }
@@ -151,7 +156,10 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
         const snapshot = decodeFrame(frame, old);
         bases.delete(key); bases.set(key, snapshot);
         if (bases.size > limits.threads) bases.delete(bases.keys().next().value!);
-        chats.get(key)?.accept(snapshot);
+        const chat = chats.get(key);
+        chat?.accept(snapshot);
+        const shown = chat?.snapshot;
+        notifyThread(shown && identity(shown) === identity(snapshot) && shown.seq > snapshot.seq ? shown : snapshot);
       } catch { reconnect(); }
     });
     next.addEventListener("resync", () => { if (source === next && !disposed) reset(); });
@@ -167,5 +175,10 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
     notify(); connectStream(); void load(chat);
     return () => { if (selected === listener) selected = undefined; };
   }
-  return { request, watch, current, dispose() { disposed = true; selected = undefined; abort.abort(); source?.close(); clearTimeout(retry); for (const chat of chats.values()) chat.close(); chats.clear(); bases.clear(); } };
+  /** Получает metadata всех кадров через общий SSE, без создания passive view или HTTPopen. */
+  function subscribeThreads(update: (snapshot: NativeSnapshot) => void) {
+    threadListeners.add(update); connectStream();
+    return () => { threadListeners.delete(update); };
+  }
+  return { request, watch, current, subscribeThreads, dispose() { disposed = true; selected = undefined; abort.abort(); source?.close(); clearTimeout(retry); for (const chat of chats.values()) chat.close(); chats.clear(); bases.clear(); threadListeners.clear(); } };
 }

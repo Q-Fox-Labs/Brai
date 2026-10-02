@@ -34,9 +34,9 @@ export default function Sidebar({ projects, pages, projectId, threadId, open, em
             <button className="agent-icon-button" aria-label={`Новый чат в ${project.name}`} title="Новый чат" disabled={!project.available || busy} onClick={() => create(project.projectId)}>+</button>
           </div>
           <div className="agent-thread-list">
-            {page?.data.slice(0, count).map(thread => {
+            {sortThreads(page?.data ?? []).slice(0, count).map(thread => {
               const title = thread.title || thread.preview || "Новый чат", selected = projectId === project.projectId && threadId === thread.id;
-              return <button key={thread.id} data-thread-id={thread.id} className={`agent-thread ${selected ? "is-selected" : ""}`} title={title} aria-pressed={selected} onClick={() => select(project.projectId, thread.id)}>{title}</button>;
+              return <button key={thread.id} data-thread-id={thread.id} className={`agent-thread ${selected ? "is-selected" : ""}`} title={title} aria-pressed={selected} onClick={() => select(project.projectId, thread.id)}><span className="agent-thread-title">{title}</span>{thread.active && <span className="agent-thread-spinner" role="status" aria-label="Агент работает" />}</button>;
             })}
             {page?.error && <p className="agent-sidebar-note" role="alert">Не удалось загрузить чаты. <button onClick={() => refresh(project.projectId)}>Повторить</button></p>}
             {page?.loading && <p className="agent-sidebar-note" role="status">Загружаем чаты…</p>}
@@ -49,4 +49,9 @@ export default function Sidebar({ projects, pages, projectId, threadId, open, em
     <Separator.Root className="agent-separator" />
     <footer className="agent-sidebar-footer"><span className="agent-account" title={email}>{email}</span><div><button onClick={logout}>Выйти</button></div></footer>
   </aside>;
+}
+
+/** Служебный updatedAt не поднимает чат; равные метки сохраняют порядок native страницы. */
+export function sortThreads(threads: ThreadMetadata[]): ThreadMetadata[] {
+  return threads.map((thread, index) => ({ thread, index })).sort((a, b) => (b.thread.lastMessageAt ?? 0) - (a.thread.lastMessageAt ?? 0) || a.index - b.index).map(value => value.thread);
 }

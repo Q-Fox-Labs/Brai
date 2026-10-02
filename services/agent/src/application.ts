@@ -2,14 +2,15 @@
 // ABOUTME: Владеет только bounded live проекцией; историю читает у Codex.
 import { randomUUID, createHash } from 'node:crypto';
 import { bytes, limits, validateCommand } from '../contracts/index.mjs';
-import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, ModelCatalog } from '../contracts/index.mjs';
+import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, ModelCatalog, DisplayItem } from '../contracts/index.mjs';
 import type { CodexPort, Observation } from './codex.js';
-import { display, metadata, text } from './display.js';
+import { display, metadata, text, compact, summary } from './display.js';
 export type Config = { codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
-type Session = { view: NativeSnapshot; opened: boolean; fresh: boolean; closing?: boolean; raw: Map<string, string | number>; revisions: Map<string, number> };
+type Session = { view: NativeSnapshot; opened: boolean; fresh: boolean; closing?: boolean; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
 /** Собирает команды и единственного владельца live items/pending. */
 export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void) {
   const sessions = new Map<string, Session>();
+  const messageTimes = new Map<string, { updatedAt: number; lastMessageAt: number }>();
   let creating = 0, admission = Promise.resolve();
   let modelCatalog: { generation: string; result: Promise<ModelCatalog> } | undefined;
   const operations = new Map<string, { hash: string; result: Promise<any> }>();
@@ -32,20 +33,45 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
   }
   function publish(s: Session) {
     if (s.view.seq === Number.MAX_SAFE_INTEGER) { s.view.epoch = randomUUID(); s.view.seq = 0; }
+    s.view.thread.active = s.view.turn?.status === 'inProgress' && !['connection-lost', 'executor-unavailable'].includes(s.view.state);
     s.view.seq++;
     while (s.view.items.length > 128 || bytes(s.view) > limits.state) {
       const dropped = s.view.items.shift();
       if (!dropped) { s.view.requests = []; s.raw.clear(); s.view.state = 'executor-unavailable'; break; }
       s.revisions.delete(dropped.id);
+      s.details.delete(dropped.id);
       s.view.truncated = true;
     }
     emit({ projectId: s.view.projectId, threadId: s.view.threadId, generation: s.view.generation, epoch: s.view.epoch, seq: s.view.seq, event: { type: 'STATE_SNAPSHOT', snapshot: structuredClone(s.view) } });
   }
-  function put(s: Session, item: any, turnId: string) {
-    const value = display(item, turnId), index = s.view.items.findIndex(old => old.id === value.id);
-    if (index < 0) s.view.items.push(value);
-    else s.view.items[index] = value;
+  function put(s: Session, item: any, turnId: string, timestamp?: number, history = false) {
+    const value = display(item, turnId), old = s.view.items.find(i => i.id === value.id);
+    value.revision = history ? old?.revision ?? 0 : s.view.seq + 1;
+    if (value.type === 'userMessage' || value.type === 'agentMessage') {
+      value.timestamp = history ? timestamp ?? old?.timestamp ?? s.view.thread.updatedAt * 1000 : old?.timestamp ?? timestamp ?? Date.now();
+      if (!history) s.view.thread.lastMessageAt = Math.max(s.view.thread.lastMessageAt ?? 0, value.timestamp);
+    }
+    const index = s.view.items.findIndex(old => old.id === value.id);
+    if (index < 0) s.view.items.push(compact(value));
+    else s.view.items[index] = compact(value);
+    s.details.set(value.id, value);
+    while (s.details.size > 128) s.details.delete(s.details.keys().next().value!);
     s.revisions.set(value.id, s.view.seq + 1);
+  }
+  async function detail(s: Session, turnId: string, itemId: string): Promise<DisplayItem> {
+    const cached = s.details.get(itemId);
+    if (cached?.turnId === turnId) return structuredClone(cached);
+    const generation = current(), cut = s.view.seq;
+    // AIDEV-NOTE: native anchor исключает сам item; predecessor позволяет прочитать его без сканирования всей истории.
+    const previous = await codex.call('thread/items/list', { threadId: s.view.threadId, turnId, limit: 1, sortDirection: 'desc', cursor: { type: 'item', itemId } });
+    const predecessor = previous.data[0]?.item.id;
+    const page = await codex.call('thread/items/list', { threadId: s.view.threadId, turnId, limit: 1, sortDirection: 'asc', ...(predecessor ? { cursor: { type: 'item', itemId: predecessor } } : {}) });
+    if (generation !== current()) fail('STALE_GENERATION', 'query');
+    const entry = page.data.find((e: any) => e.item.id === itemId && e.turnId === turnId);
+    if (!entry) fail('NOT_FOUND', 'query');
+    const newer = s.details.get(itemId);
+    if (newer?.turnId === turnId && (s.revisions.get(itemId) ?? 0) > cut) return structuredClone(newer);
+    return { ...display(entry.item, turnId), revision: s.view.items.find(i => i.id === itemId)?.revision ?? 0 };
   }
   async function admit(projectId: string, thread: any, fresh = false): Promise<Session> {
     const previous = admission;
@@ -65,8 +91,8 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       publish(victim);
       sessions.delete(victim.view.threadId);
     }
-    const view: NativeSnapshot = { projectId, threadId: thread.id, generation: current(), epoch: randomUUID(), seq: 0, thread: metadata(thread), turn: null, state: 'idle', items: [], requests: [], truncated: false };
-    const s: Session = { view, opened: fresh, fresh, raw: new Map(), revisions: new Map() };
+    const view: NativeSnapshot = { projectId, threadId: thread.id, generation: current(), epoch: randomUUID(), seq: 0, thread: { ...metadata(thread), lastMessageAt: messageTimes.get(thread.id)?.lastMessageAt ?? 0 }, turn: null, state: 'idle', items: [], requests: [], truncated: false };
+    const s: Session = { view, opened: fresh, fresh, raw: new Map(), revisions: new Map(), details: new Map() };
     sessions.set(thread.id, s);
     return s;
     } finally { release(); }
@@ -88,8 +114,10 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       const turns = await codex.call('thread/turns/list', { threadId: id, limit: 1, itemsView: 'notLoaded', sortDirection: 'desc' });
       const items = await codex.call('thread/items/list', { threadId: id, limit: 100, sortDirection: 'desc' });
       if (before !== current()) fail('STALE_GENERATION', 'query');
-      s.view.thread = { ...metadata(resumed.thread), model: resumed.model, reasoningEffort: resumed.reasoningEffort ?? null };
-      for (const entry of items.data.slice().reverse()) if ((s.revisions.get(entry.item.id) ?? 0) <= cut) put(s, entry.item, entry.turnId);
+      s.view.thread = { ...metadata(resumed.thread), lastMessageAt: s.view.thread.lastMessageAt, model: resumed.model, reasoningEffort: resumed.reasoningEffort ?? null };
+      const latestMessage = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
+      if (latestMessage && s.view.seq === cut) s.view.thread.lastMessageAt = latestMessage.startedAtMs ?? latestMessage.completedAtMs ?? s.view.thread.updatedAt * 1000;
+      for (const entry of items.data.slice().reverse()) if ((s.revisions.get(entry.item.id) ?? 0) <= cut) put(s, entry.item, entry.turnId, entry.startedAtMs ?? entry.completedAtMs ?? s.view.thread.updatedAt * 1000, true);
       if (s.view.seq === cut) {
         const turn = turns.data[0];
         s.view.turn = turn ? { id: turn.id, status: turn.status } : null;
@@ -104,10 +132,11 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
   }
   function observe(e: Observation) {
     if (e.type === 'connection') {
-      operations.clear(); modelCatalog = undefined;
+      operations.clear(); modelCatalog = undefined; messageTimes.clear();
       for (const s of sessions.values()) {
         s.opened = s.fresh = s.closing = false;
         s.raw.clear();
+        s.details.clear();
         s.view.requests = [];
         s.view.generation = current();
         s.view.epoch = randomUUID();
@@ -135,11 +164,14 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       if (p.turn.status !== 'inProgress') { s.view.requests = []; s.raw.clear(); }
     } else if (e.method === 'item/started' || e.method === 'item/completed') put(s, p.item, p.turnId);
     else if (e.method?.endsWith('/delta') || e.method?.endsWith('/outputDelta')) {
-      const item = s.view.items.find(i => i.id === p.itemId);
+      const item = s.details.get(p.itemId);
       if (!item) { s.opened = false; s.view.state = 'connection-lost'; }
       else {
         const field = e.method === 'item/agentMessage/delta' ? 'text' : 'output';
         item[field] = text((item[field] ?? '') + p.delta, field === 'text' ? 8192 : 32768);
+        item.revision = s.view.seq + 1;
+        const index = s.view.items.findIndex(i => i.id === item.id);
+        if (index >= 0) s.view.items[index] = compact(item);
         s.revisions.set(item.id, s.view.seq + 1);
       }
     } else if (e.method === 'turn/plan/updated') put(s, { id: `plan:${p.turnId}`, type: 'plan', text: p.plan.map((step: any) => `${step.status}: ${step.step}`).join('\n') }, p.turnId);
@@ -156,8 +188,31 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     const p = project(r.projectId);
     if (r.operationId && r.generation !== current()) fail('STALE_GENERATION');
     if (r.action === 'threads') {
-      const page = await codex.call('thread/list', { cwd: p.cwd, limit: 100, cursor: r.cursor });
-      return { generation: current(), data: page.data.filter((t: any) => t.cwd === p.cwd).map(metadata), nextCursor: page.nextCursor ?? null };
+      const generation = current();
+      const page = await codex.call('thread/list', { cwd: p.cwd, limit: 100, cursor: r.cursor, sortKey: 'updated_at', sortDirection: 'desc' });
+      const threads = page.data.filter((t: any) => t.cwd === p.cwd), data = [];
+      for (let offset = 0; offset < threads.length; offset += 4) data.push(...await Promise.all(threads.slice(offset, offset + 4).map(async (thread: any) => {
+        const live = sessions.get(thread.id)?.view.thread;
+        const cached = messageTimes.get(thread.id);
+        let lastMessageAt = cached && cached.updatedAt === thread.updatedAt ? cached.lastMessageAt : undefined;
+        if (lastMessageAt === undefined) {
+          let cursor: string | undefined;
+          lastMessageAt = 0;
+          for (let index = 0; index < 10; index++) {
+            const items = await codex.call('thread/items/list', { threadId: thread.id, limit: 100, sortDirection: 'desc', ...(cursor ? { cursor } : {}) });
+            const message = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
+            if (message) { lastMessageAt = message.startedAtMs ?? message.completedAtMs ?? thread.updatedAt * 1000; break; }
+            if (!items.nextCursor) break;
+            cursor = items.nextCursor;
+          }
+          if (generation !== current()) fail('STALE_GENERATION', 'query');
+          messageTimes.set(thread.id, { updatedAt: thread.updatedAt, lastMessageAt: lastMessageAt! });
+          while (messageTimes.size > 1000) messageTimes.delete(messageTimes.keys().next().value!);
+        }
+        return { ...metadata(thread), lastMessageAt: Math.max(lastMessageAt!, live?.lastMessageAt ?? 0), active: live?.active ?? thread.status?.type === 'active' };
+      })));
+      if (generation !== current()) fail('STALE_GENERATION', 'query');
+      return { generation, data: data.sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0) || a.id.localeCompare(b.id)), nextCursor: page.nextCursor ?? null };
     }
     if (r.action === 'create') {
       if (sessions.size + creating >= limits.threads) fail('CAPACITY_EXHAUSTED');
@@ -175,10 +230,24 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     }
     const s = await open(r);
     if (r.action === 'open') return structuredClone(s.view);
+    if (r.action === 'activities' || r.action === 'item') {
+      const generation = current();
+      const data: DisplayItem[] = [];
+      const ids = r.action === 'item' ? [r.itemId!] : r.itemIds!;
+      for (let offset = 0; offset < ids.length; offset += 4) data.push(...await Promise.all(ids.slice(offset, offset + 4).map(id => detail(s, r.turnId!, id))));
+      if (generation !== current()) fail('STALE_GENERATION', 'query');
+      return r.action === 'item' ? { generation, item: data[0] } : { generation, data: data.map(summary) };
+    }
     if (r.action === 'items' || r.action === 'turns') {
       if (s.fresh) return { generation: current(), data: [], nextCursor: null };
+      const generation = current();
       const page = await codex.call(r.action === 'items' ? 'thread/items/list' : 'thread/turns/list', { threadId: r.threadId, limit: 100, cursor: r.cursor, sortDirection: 'desc', ...(r.action === 'items' ? { turnId: r.turnId } : { itemsView: 'notLoaded' }) });
-      return { generation: current(), data: r.action === 'items' ? page.data.slice().reverse().map((e: any) => display(e.item, e.turnId, true)) : page.data.map((t: any) => ({ id: t.id, status: t.status })), nextCursor: page.nextCursor ?? null };
+      if (generation !== current()) fail('STALE_GENERATION', 'query');
+      return { generation, data: r.action === 'items' ? page.data.slice().reverse().map((e: any) => {
+        const revision = s.view.items.find(i => i.id === e.item.id)?.revision ?? 0;
+        if (e.item.type !== 'userMessage' && e.item.type !== 'agentMessage') return { id: e.item.id, turnId: e.turnId, type: e.item.type, text: '', revision, ...(typeof e.item.status === 'string' ? { status: e.item.status } : {}), ...(Object.hasOwn(e.item, 'exitCode') ? { exitCode: e.item.exitCode } : {}) };
+        return { ...display(e.item, e.turnId, true), revision, timestamp: e.startedAtMs ?? e.completedAtMs ?? s.view.thread.updatedAt * 1000 };
+      }) : page.data.map((t: any) => ({ id: t.id, status: t.status })), nextCursor: page.nextCursor ?? null };
     }
     if (r.generation !== current()) fail('STALE_GENERATION');
     if (s.closing) fail('CAPACITY_EXHAUSTED');

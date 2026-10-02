@@ -13,7 +13,7 @@ export function text(value: unknown, cap = 8192): string {
 }
 /** Удаляет поля профиля, путей, media и контекста из metadata чата. */
 export function metadata(thread: any): ThreadMetadata {
-  return { id: thread.id, title: text(thread.name ?? thread.preview, 512), preview: text(thread.preview, 512), model: thread.model ?? null, canAcceptDirectInput: thread.canAcceptDirectInput ?? null, updatedAt: thread.updatedAt ?? 0 };
+  return { id: thread.id, title: text(thread.name ?? thread.preview, 512), preview: text(thread.preview, 512), model: thread.model ?? null, canAcceptDirectInput: thread.canAcceptDirectInput ?? null, updatedAt: thread.updatedAt ?? 0, active: thread.status?.type === 'active', lastMessageAt: (thread.updatedAt ?? 0) * 1000 };
 }
 /** Представляет item независимо от источника: native history или notification. */
 export function display(item: any, turnId: string, history = false): DisplayItem {
@@ -39,4 +39,14 @@ export function display(item: any, turnId: string, history = false): DisplayItem
     value.truncated = true;
   }
   return value;
+}
+
+/** Сообщения сохраняют текст; скрытые действия передают только состояние и идентификаторы. */
+export function compact(item: DisplayItem): DisplayItem {
+  if (item.type === 'userMessage' || item.type === 'agentMessage') return { ...item };
+  return { id: item.id, turnId: item.turnId, type: item.type, text: '', ...(item.status === undefined ? {} : { status: item.status }), ...(item.exitCode === undefined ? {} : { exitCode: item.exitCode }), ...(item.revision === undefined ? {} : { revision: item.revision }) };
+}
+/** Краткий заголовок без вывода, diff и полного тела команды. */
+export function summary(item: DisplayItem): DisplayItem {
+  return { id: item.id, turnId: item.turnId, type: item.type, text: '', status: item.status, exitCode: item.exitCode, revision: item.revision, summary: text((item.command ?? item.text.split('\n')[0]) || item.type, 256).replace(/\n\[содержимое сокращено\]$/, '') };
 }

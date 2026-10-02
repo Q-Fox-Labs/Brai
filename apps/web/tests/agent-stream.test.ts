@@ -26,6 +26,7 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = f
   let stopped = false, statusFailures = 0, ready = true, allowed = true;
   let releaseOpen: (value: NativeSnapshot) => void = () => {};
   const intervals = new Map<number, () => Promise<void>>();
+  const commands: { action: string; itemIds?: string[] }[] = [];
   const nc = {
     async *status() { await new Promise<void>(() => {}); yield { type: "unused" }; },
     subscribe(_subject: string, options: { callback: typeof callback }) {
@@ -33,7 +34,8 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = f
       return { unsubscribe() { stopped = true; } };
     },
     async request(_subject: string, payload: Uint8Array) {
-      const command = JSON.parse(Buffer.from(payload).toString()) as { action: string };
+      const command = JSON.parse(Buffer.from(payload).toString()) as { action: string; itemIds?: string[] };
+      commands.push(command);
       if (command.action === "status" && statusFailures > 0) { statusFailures--; throw new Error("temporary"); }
       const result = command.action === "projects" ? { generation: initial.generation, projects: [{ projectId: "brai", available: true }, { projectId: "admin", available: true }, { projectId: "hidden", available: false }] } : command.action === "status" ? { generation: initial.generation, ready } : holdOpen ? await new Promise<NativeSnapshot>(resolve => { releaseOpen = resolve; }) : initial;
       return { data: Buffer.from(JSON.stringify(result)), headers: { get: () => undefined } };
@@ -44,7 +46,7 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = f
   const module = { exports: {} as { agentGet: (request: Request, context: { params: Promise<{ path: string[] }> }) => Promise<Response> } };
   const overrides: Record<string, unknown> = {
     "../lib/agent/stream": { encodeFrame },
-    "./gateway": { natsConnection: async () => nc, GatewayError: Error },
+    "./gateway": { natsConnection: async () => nc, GatewayError: class extends Error {} },
     "./auth": { checkOrigin() {}, requireTimerSession: async () => { if (!allowed) throw new Error("revoked"); return session; } },
   };
   new Function("require", "module", "exports", "setInterval", "clearInterval", output)(
@@ -58,6 +60,8 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = f
   const response = module.exports.agentGet(new Request(multiplex ? "https://brai.example/api/agent/events?expectedUserId=user-fixture" : "https://brai.example/api/agent/events?projectId=brai&threadId=thread-fixture&expectedUserId=user-fixture", { signal: abort.signal }), { params: Promise.resolve({ path: ["events"] }) });
   return {
     response,
+    commands,
+    get(path: string, query: URLSearchParams) { return module.exports.agentGet(new Request(`https://brai.example/api/agent/${path}?${query}`), { params: Promise.resolve({ path: [path] }) }); },
     push(snapshot: NativeSnapshot) { callback(null, { data: Buffer.from(JSON.stringify({ projectId: snapshot.projectId, threadId: snapshot.threadId, generation: snapshot.generation, epoch: snapshot.epoch, seq: snapshot.seq, event: { type: "STATE_SNAPSHOT", snapshot } })) }); },
     releaseOpen(snapshot: NativeSnapshot) { releaseOpen(snapshot); },
     failStatus(times: number) { statusFailures = times; },
@@ -199,5 +203,22 @@ test("delta bases follow sent frames even when many source snapshots are coalesc
     snapshot = decodeFrame((await next(reader)).data, snapshot);
     assert.equal(snapshot.seq, 80);
     assert.equal(f.stopped, false);
+  } finally { f.close(); }
+});
+
+
+test("HTTP lazy reads parse bounded JSON itemIds and reject malformed or duplicated query fields before publishing", async () => {
+  const f = fixture();
+  try {
+    await f.response;
+    const query = new URLSearchParams({ projectId: "brai", threadId: "thread-fixture", turnId: "turn-fixture", itemIds: JSON.stringify(["first", "second"]) });
+    assert.equal((await f.get("activities", query)).status, 200);
+    assert.deepEqual(f.commands.at(-1), { action: "activities", projectId: "brai", threadId: "thread-fixture", turnId: "turn-fixture", itemIds: ["first", "second"] });
+    const published = f.commands.length;
+    query.set("itemIds", "first,second"); assert.equal((await f.get("activities", query)).status, 400);
+    query.set("itemIds", JSON.stringify(Array.from({ length: 101 }, (_, i) => String(i)))); assert.equal((await f.get("activities", query)).status, 400);
+    query.set("itemIds", JSON.stringify(["first", "first"])); assert.equal((await f.get("activities", query)).status, 400);
+    query.set("itemIds", JSON.stringify(["first"])); query.append("itemIds", JSON.stringify(["second"])); assert.equal((await f.get("activities", query)).status, 400);
+    assert.equal(f.commands.length, published);
   } finally { f.close(); }
 });

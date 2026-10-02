@@ -2,11 +2,14 @@
 // ABOUTME: Показывает выбранный native чат рядом с группами проектов и чатов.
 // ABOUTME: История и команды используют существующий клиент; раскладка не управляет исполнителем.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { DisplayItem, NativeSnapshot, ModelCatalog, PermissionMode } from "@brai/agent/contracts";
+import type { DisplayItem, NativeSnapshot, ModelCatalog, PermissionMode, ThreadMetadata } from "@brai/agent/contracts";
 import { createAgentClient, AgentError } from "../../lib/agent/client";
 import ModelSettings from "./settings";
 import NativeForm from "./request";
-import { mergeTimeline } from "./timeline";
+import { createLazyReads } from "../../lib/agent/lazy";
+import Activities from "./activities";
+import Markdown from "./markdown";
+import { composerAction, groupTimeline, mergeTimeline } from "./timeline";
 import Sidebar, { type Project, type ThreadPage } from "./sidebar";
 
 type CachedChat = { snapshot: NativeSnapshot | null; history: DisplayItem[]; generation: string; cursor: string | null; draft: string; model: string; effort: string; permissionMode: PermissionMode; ready: boolean };
@@ -17,6 +20,9 @@ const stateLabels: Record<string, string> = { idle: "Готов", inProgress: "�
 /** Сохраняет чат и черновик; active управляет только видимостью и восстановлением прокрутки. */
 export default function AgentScreen({ active: visible, userId, email, onLogout, onUnauthorized, accountMessage }: Props) {
   const client = useMemo(() => createAgentClient(userId, onUnauthorized), [userId, onUnauthorized]);
+  const lazyReads = useMemo(() => createLazyReads(client.request), [client]);
+  const liveMetadata = useRef(new Map<string, Pick<NativeSnapshot, "generation" | "epoch" | "seq" | "thread"> & { observed: number }>());
+  const metadataVersion = useRef(0);
   const [projects, setProjects] = useState<Project[]>([]);
   const [pages, setPages] = useState<Record<string, ThreadPage>>({});
   const [projectId, setProjectId] = useState(""), [threadId, setThreadId] = useState("");
@@ -35,14 +41,14 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const pageRequests = useRef(new Map<string, symbol>());
 
   const loadThreads = useCallback(async (id: string, nextCursor?: string) => {
-    const token = Symbol();
+    const token = Symbol(), observed = metadataVersion.current;
     pageRequests.current.set(id, token);
     setPages(previous => ({ ...previous, [id]: { data: previous[id]?.data ?? [], nextCursor: previous[id]?.nextCursor ?? null, loading: true, error: "" } }));
     try {
       const value = await client.request({ action: "threads", projectId: id, ...(nextCursor ? { cursor: nextCursor } : {}) });
       if (pageRequests.current.get(id) !== token) return;
       setPages(previous => {
-        const data = [...new Map([...(nextCursor ? previous[id]?.data ?? [] : []), ...value.data].map(thread => [thread.id, thread])).values()].slice(0, 1000);
+        const data = [...new Map([...(nextCursor ? previous[id]?.data ?? [] : []), ...value.data.map(thread => { const live = liveMetadata.current.get(`${id}:${thread.id}`); return live && live.generation === value.generation && live.observed > observed ? live.thread : thread; })].map(thread => [thread.id, thread])).values()].slice(0, 1000);
         return { ...previous, [id]: { data, nextCursor: data.length < 1000 ? value.nextCursor : null, loading: false, error: "" } };
       });
     } catch (error) {
@@ -53,13 +59,20 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   useEffect(() => {
     let active = true;
     const requests = pageRequests.current;
+    const stopMetadata = client.subscribeThreads(value => {
+      const key = `${value.projectId}:${value.threadId}`, previous = liveMetadata.current.get(key);
+      if (previous && previous.generation === value.generation && previous.epoch === value.epoch && previous.seq > value.seq) return;
+      liveMetadata.current.delete(key); liveMetadata.current.set(key, { generation: value.generation, epoch: value.epoch, seq: value.seq, thread: value.thread, observed: ++metadataVersion.current });
+      if (liveMetadata.current.size > 1000) liveMetadata.current.delete(liveMetadata.current.keys().next().value!);
+      setPages(pages => updateThreadPage(pages, value.projectId, value.thread));
+    });
     void client.request({ action: "projects" }).then(value => {
       if (!active) return;
       setProjects(value.projects);
       setProjectId(value.projects.find(project => project.available)?.projectId ?? "");
       for (const project of value.projects) if (project.available) void loadThreads(project.projectId);
     }).catch(error => { if (active) setMessage(errorText(error)); });
-    return () => { active = false; requests.clear(); client.dispose(); };
+    return () => { active = false; requests.clear(); stopMetadata(); liveMetadata.current.clear(); client.dispose(); };
   }, [client, loadThreads]);
 
   useEffect(() => {
@@ -93,11 +106,6 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       const element = conversation.current;
       if (element?.getClientRects().length) followBottom.current = element.scrollHeight - element.clientHeight - element.scrollTop <= 1;
       setSnapshot(value);
-      setPages(previous => {
-        const page = previous[projectId];
-        if (page?.data.some(thread => thread.id === value.thread.id)) return previous;
-        return { ...previous, [projectId]: { data: [value.thread, ...(page?.data ?? [])].slice(0, 1000), nextCursor: page?.nextCursor ?? null, loading: page?.loading ?? false, error: page?.error ?? "" } };
-      });
     });
     if (!saved?.ready) void loadHistory();
     return () => { active = false; stop(); };
@@ -175,6 +183,15 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   }, [client, modelGeneration, models]);
   const title = selectedThread?.title || selectedThread?.preview || (threadId ? "Новый чат" : "Выберите чат");
   const items = mergeTimeline(history, view?.items ?? []);
+  const timeline = groupTimeline(items);
+  const activityContext = useMemo(() => ({ generation: view?.generation ?? historyGeneration, epoch: view?.epoch ?? "", projectId, threadId }), [view?.generation, view?.epoch, historyGeneration, projectId, threadId]);
+  const action = composerAction(active, draft);
+  const sendDisabled = disabled || (action === "start" && (!draft.trim() || !selectedModel || view?.thread.canAcceptDirectInput === false));
+  const submit = () => {
+    if (sendDisabled) return;
+    if (action === "interrupt") void mutate("interrupt", { turnId: view!.turn!.id });
+    else void mutate(action, { text: draft, ...(action === "steer" ? { expectedTurnId: view!.turn!.id } : selectedModel ? { model: selectedModel.model, effort: selectedEffort, permissionMode } : {}) });
+  };
 
   useLayoutEffect(() => {
     const element = conversation.current, anchor = scrollAnchor.current;
@@ -200,16 +217,18 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         {!threadId && <div className="agent-empty"><span className="agent-empty-symbol" aria-hidden="true">✳</span><h2>С чего начнём?</h2><p>Выберите чат слева или создайте новый в нужном проекте.</p>{project && <button className="agent-primary" disabled={busy || uncertain.current} onClick={() => void mutate("create", selectedModel ? { model: selectedModel.model, permissionMode } : { permissionMode })}>Новый чат · {project.name}</button>}</div>}
         <div className="agent-timeline">
           {cursor && <button className="agent-history-more" onClick={() => void moreHistory()}>Загрузить предыдущие сообщения</button>}
-          {items.map(item => <Item key={item.id} item={item} />)}
+          {timeline.map(entry => entry.kind === "message" ? <Item key={entry.item.id} item={entry.item} /> : <Activities key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.id}`} items={entry.items} context={activityContext} reads={lazyReads} />)}
           {connected && view?.requests.map(request => <NativeForm key={`${view.generation}:${view.epoch}:${request.requestId}`} request={request} disabled={disabled} send={answer => mutate("answer", { requestId: request.requestId, answer })} />)}
         </div>
       </div>
       <footer className="agent-composer-area">
-        <form className="agent-composer" onSubmit={event => { event.preventDefault(); if (draft.trim()) void mutate(active ? "steer" : "start", { text: draft, ...(active ? { expectedTurnId: view!.turn!.id } : selectedModel ? { model: selectedModel.model, effort: selectedEffort, permissionMode } : {}) }); }}>
+        <form className="agent-composer" onSubmit={event => { event.preventDefault(); submit(); }}>
           <label className="sr-only" htmlFor="agent-draft">{active ? "Дополнить текущий ход" : "Сообщение"}</label>
           <textarea id="agent-draft" disabled={!threadId} placeholder={threadId ? active ? "Дополнить текущее задание…" : "Что нужно сделать?" : "Сначала выберите или создайте чат"} value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
+          <div className="agent-composer-actions">
           <ModelSettings models={models?.data ?? []} model={selectedModel?.model ?? ""} effort={selectedEffort} permissionMode={permissionMode} choosePermissions={setPermissionMode} disabled={busy || active || (!!threadId && !connected)} chooseModel={value => { setModel(value); setEffort(""); }} chooseEffort={setEffort} />
-          <div className="agent-composer-actions"><span>{active ? "Агент работает · можно дополнить задание" : "Ctrl / ⌘ + Enter — отправить"}</span><div>{active && <button type="button" className="agent-stop" disabled={disabled} onClick={() => void mutate("interrupt", { turnId: view!.turn!.id })}>Остановить</button>}<button className="agent-send" disabled={disabled || (!active && !selectedModel) || !draft.trim() || view?.thread.canAcceptDirectInput === false}>{active ? "Дополнить" : "Отправить"}<span aria-hidden="true"> ↑</span></button></div></div>
+          <button className="agent-send" disabled={sendDisabled}>{action === "interrupt" ? "Стоп" : action === "steer" ? "Скорректировать" : "Отправить"}</button>
+          </div>
         </form>
         <p className="agent-feedback" role="alert">{message || accountMessage}</p>
       </footer>
@@ -217,13 +236,16 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   </main>;
 }
 
-/** Сообщения остаются текстом; команда, вывод и diff раскрываются в той же ленте. */
+/** Сообщения используют безопасный Markdown; тела действий принадлежат отдельному ленивому списку. */
 function Item({ item }: { item: DisplayItem }) {
-  if (item.type === "reasoning" && !item.text.trim()) return null;
-  const message = item.type === "userMessage" || item.type === "agentMessage";
-  const label = ({ commandExecution: "Команда", fileChange: "Изменения файлов", reasoning: "Ход работы", plan: "План", mcpToolCall: "Инструмент", dynamicToolCall: "Инструмент", collabAgentToolCall: "Совместная работа" } as Record<string, string>)[item.type] ?? "Действие агента";
-  const content = <>{item.text && <pre>{item.text}</pre>}{item.command !== undefined && <pre className="agent-code">{item.command}</pre>}{item.output !== undefined && <pre className="agent-code">{item.output}</pre>}{item.diff !== undefined && <pre className="agent-code">{item.diff}</pre>}{item.truncated && <p className="agent-note">Элемент сокращён</p>}</>;
-  return <article data-item-id={item.id} className={`agent-item ${message ? item.type === "userMessage" ? "agent-user-message" : "agent-assistant-message" : "agent-tool-item"}`}>
-    {message ? <><span className="agent-message-author">{item.type === "userMessage" ? "Вы" : "Brai"}{item.phase && <span className="agent-message-phase">{item.phase === "final_answer" ? "Итог" : item.phase === "commentary" ? "Промежуточное сообщение" : item.phase}</span>}</span>{content}</> : <details><summary><span>{label}</span>{item.command && <code>{item.command}</code>}<span className="agent-note">{item.status === "inProgress" ? "Выполняется" : item.status === "failed" ? "Ошибка" : item.status === "completed" ? "Готово" : ""}{item.exitCode !== undefined && ` · код ${item.exitCode}`}</span></summary>{content}</details>}
+  return <article data-item-id={item.id} className={`agent-item ${item.type === "userMessage" ? "agent-user-message" : "agent-assistant-message"}`}>
+    <span className="agent-message-author">{item.type === "userMessage" ? "Вы" : "Brai"}{item.phase && <span className="agent-message-phase">{item.phase === "final_answer" ? "Итог" : item.phase === "commentary" ? "Промежуточное сообщение" : item.phase}</span>}</span>
+    <Markdown text={item.text} />
   </article>;
+}
+
+function updateThreadPage(pages: Record<string, ThreadPage>, projectId: string, thread: ThreadMetadata): Record<string, ThreadPage> {
+  const page = pages[projectId], found = page?.data.some(value => value.id === thread.id);
+  const data = found ? page.data.map(value => value.id === thread.id ? thread : value) : [thread, ...(page?.data ?? [])].slice(0, 1000);
+  return { ...pages, [projectId]: { data, nextCursor: page?.nextCursor ?? null, loading: page?.loading ?? false, error: page?.error ?? "" } };
 }

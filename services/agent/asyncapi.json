@@ -105,5 +105,5 @@
     "read": 10000,
     "mutation": 12000
   },
-  "x-retry-policy": "Never automatically retry mutations; operation IDs bind a request hash and its original result within a generation. Whole STATE_SNAPSHOT events may be coalesced; accept monotonically greater seq within the same generation/epoch. Read native history after generation/epoch change."
+  "x-retry-policy": "Never automatically retry mutations; operation IDs bind a request hash and its original result within a generation. Whole STATE_SNAPSHOT events may be coalesced; accept monotonically greater seq within the same generation/epoch. Read native history after generation/epoch change. activities/item are read-only scoped queries; generation rotation rejects a late result. Initial open/items/events omit non-message bodies. Summaries up to 100 IDs are fetched only on group expansion; full display on item expansion."
 }
