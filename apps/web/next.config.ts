@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: "standalone",
+  // AIDEV-NOTE: BRAI_WEB_STANDALONE_OUTPUT=0 отключает упаковку пакетов для локальных проверок.
+  output: process.env.BRAI_WEB_STANDALONE_OUTPUT === "0" ? undefined : "standalone",
   outputFileTracingRoot: path.join(path.dirname(fileURLToPath(import.meta.url)), "../.."),
 };
 
