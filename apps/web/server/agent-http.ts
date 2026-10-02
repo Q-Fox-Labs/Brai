@@ -2,8 +2,9 @@
 // ABOUTME: Авторизует web сессию; не повторяет мутации и не хранит историю агента.
 import { checkOrigin, requireTimerSession, type Session } from "./auth";
 import { GatewayError, natsConnection } from "./gateway";
-import { limits, subjects, validateCommand, validateEnvelope } from "@brai/agent/contracts";
+import { bytes, limits, subjects, validateCommand, validateEnvelope } from "@brai/agent/contracts";
 import type { Command, ErrorResponse, EventEnvelope, NativeSnapshot } from "@brai/agent/contracts";
+import { encodeFrame } from "../lib/agent/stream";
 const reads = new Set(["projects", "status", "models", "threads", "open", "turns", "items"]);
 const key = Symbol.for("brai.web.agent-streams.v2");
 const globals = globalThis as typeof globalThis & { [key]?: Map<() => void, string> };
@@ -38,7 +39,7 @@ async function rpc<T = unknown>(command: Command): Promise<T> {
 export function invalidateAgentSession(sessionId: string): void {
   for (const [close, id] of streams) if (id === sessionId) close();
 }
-async function events(request: Request, session: Session, command: Command): Promise<Response> {
+async function events(request: Request, session: Session, command?: Command): Promise<Response> {
   const nc = await natsConnection();
   if (streams.size >= limits.clients) throw fail(429, "CAPACITY_EXHAUSTED", "query");
   if (!watched.has(nc)) {
@@ -51,12 +52,14 @@ async function events(request: Request, session: Session, command: Command): Pro
   let cleanup = () => {}, pump = () => {};
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
-      let closed = false, boundary: NativeSnapshot | null = null, buffered: EventEnvelope | null = null, checking = false, missedStatus = 0;
-      let delivery: ReturnType<typeof setTimeout> | undefined;
+      let closed = false, generation = "", readyPending = false, checking = false, missedStatus = 0;
+      let allowed = new Set<string>(), delivery: ReturnType<typeof setTimeout> | undefined;
+      const buffered = new Map<string, EventEnvelope>(), sent = new Map<string, NativeSnapshot>();
       const encoder = new TextEncoder();
       const write = (type: string, value: unknown) => {
-        const frame = encoder.encode(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);
         if (closed || (controller.desiredSize ?? 0) <= 0) return false;
+        const frame = encoder.encode(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);
+        if (frame.byteLength > limits.frame) throw new Error("FRAME_LIMIT");
         controller.enqueue(frame);
         return true;
       };
@@ -64,71 +67,88 @@ async function events(request: Request, session: Session, command: Command): Pro
         if (closed) return;
         if (notify) write("resync", {});
         closed = true;
-        subscription.unsubscribe();
-        clearInterval(timer);
-        clearTimeout(delivery);
-        request.signal.removeEventListener("abort", abort);
-        streams.delete(close);
-        buffered = null;
+        subscription.unsubscribe(); clearInterval(timer); clearTimeout(delivery);
+        request.signal.removeEventListener("abort", abort); streams.delete(close);
+        buffered.clear(); sent.clear();
         try { controller.close(); } catch { /* Потребитель уже отменил поток. */ }
       };
-      // AIDEV-NOTE: Полные снимки заменяют друг друга: один в HTTP, один последний в ожидании.
+      // AIDEV-NOTE: Один кадр HTTP и максимум16 последних снимков; diff строится от отправленной базы.
       const schedule = () => {
-        if (closed || delivery || !buffered) return;
+        if (closed || !generation || delivery || (!readyPending && !buffered.size) || (controller.desiredSize ?? 0) <= 0) return;
         delivery = setTimeout(() => {
           delivery = undefined;
-          if (buffered && write("agent", buffered)) buffered = null;
+          try {
+            if (readyPending) { if (write("ready", { generation })) readyPending = false; }
+            else {
+              const entry = buffered.entries().next().value;
+              if (entry) {
+                const [key, value] = entry;
+                if (write("agent", command ? value : encodeFrame(value, sent.get(key)))) {
+                  buffered.delete(key); sent.delete(key); sent.set(key, value.event.snapshot);
+                  if (sent.size > limits.threads) sent.delete(sent.keys().next().value!);
+                }
+              }
+            }
+            schedule();
+          } catch { close(); }
         }, 50);
       };
       pump = schedule;
       const accept = (value: EventEnvelope) => {
-        if (!boundary) { buffered = value; return; }
-        if (value.generation !== boundary.generation || value.epoch !== boundary.epoch) return close();
-        if (value.seq <= boundary.seq) return;
-        boundary = value.event.snapshot;
-        buffered = value;
-        schedule();
+        if (command && (value.projectId !== command.projectId || value.threadId !== command.threadId)) return;
+        if (generation && !allowed.has(value.projectId)) return;
+        if (generation && value.generation !== generation) return close();
+        const key = `${value.projectId}:${value.threadId}`, previous = buffered.get(key)?.event.snapshot ?? sent.get(key);
+        if (previous && previous.generation === value.generation && previous.epoch === value.epoch && value.seq <= previous.seq) return;
+        if (command && previous && previous.epoch !== value.epoch) return close();
+        if (!buffered.has(key) && buffered.size >= limits.threads) return close();
+        buffered.set(key, value); schedule();
       };
       const subscription = nc.subscribe(subjects.event, { callback(error, message) {
         if (closed) return;
         try {
           if (error || message.data.byteLength > limits.frame) throw new Error("BAD_FRAME");
           const value = JSON.parse(Buffer.from(message.data).toString("utf8"));
-          if (!validateEnvelope(value)) throw new Error("BAD_EVENT");
-          if (value.projectId === command.projectId && value.threadId === command.threadId) accept(value);
+          if (!validateEnvelope(value) || bytes(value.event.snapshot) > limits.state) throw new Error("BAD_EVENT");
+          accept(value);
         } catch { close(); }
       } });
       const timer = setInterval(async () => {
         if (closed || checking) return;
-        write("heartbeat", null);
+        if (generation) write("heartbeat", null);
         checking = true;
         const current = await requireTimerSession(request, true).catch(() => null);
-        const status = !closed && current && permitted(current) && boundary ? await rpc<{ generation: string; ready: boolean }>({ action: "status" }).catch(() => null) : null;
+        const status = !closed && current && permitted(current) && generation ? await rpc<{ generation: string; ready: boolean }>({ action: "status" }).catch(() => null) : null;
         checking = false;
-        if (boundary) {
+        if (generation) {
           missedStatus = status ? 0 : missedStatus + 1;
-          if ((status && (!status.ready || status.generation !== boundary.generation)) || missedStatus >= 3) close();
+          if ((status && (!status.ready || status.generation !== generation)) || missedStatus >= 3) close();
         }
         if (!current || !permitted(current) || current.session.id !== session.session.id || current.user.id !== session.user.id) close();
       }, 5000);
       const abort = () => close(false);
-      cleanup = abort;
-      streams.set(close, session.session.id);
+      cleanup = abort; streams.set(close, session.session.id);
       request.signal.addEventListener("abort", abort, { once: true });
       if (request.signal.aborted) abort();
-      void rpc<NativeSnapshot>(command).then(snapshot => {
-        if (closed) return;
-        const value = { projectId: command.projectId, threadId: command.threadId, generation: snapshot.generation, epoch: snapshot.epoch, seq: snapshot.seq, event: { type: "STATE_SNAPSHOT", snapshot } };
-        if (!validateEnvelope(value)) return close();
-        const duringOpen = buffered;
-        boundary = snapshot;
-        buffered = value;
-        if (duringOpen) accept(duringOpen);
+      void (async () => {
+        if (command) {
+          const snapshot = await rpc<NativeSnapshot>(command);
+          if (closed) return;
+          const value = { projectId: command.projectId!, threadId: command.threadId!, generation: snapshot.generation, epoch: snapshot.epoch, seq: snapshot.seq, event: { type: "STATE_SNAPSHOT" as const, snapshot } };
+          if (!validateEnvelope(value)) return close();
+          generation = snapshot.generation; allowed = new Set([command.projectId!]); accept(value);
+        } else {
+          const projects = await rpc<{ generation: string; projects: { projectId: string; available: boolean }[] }>({ action: "projects" });
+          if (closed) return;
+          if (typeof projects.generation !== "string" || !projects.generation || !Array.isArray(projects.projects)) return close();
+          generation = projects.generation; allowed = new Set(projects.projects.filter(p => p.available).map(p => p.projectId));
+          for (const [key, value] of buffered) { if (!allowed.has(value.projectId)) buffered.delete(key); else if (value.generation !== generation) return close(); }
+          readyPending = true;
+        }
         schedule();
-      }).catch(() => close());
+      })().catch(() => close());
     },
-    pull() { pump(); },
-    cancel() { cleanup(); },
+    pull() { pump(); }, cancel() { cleanup(); },
   }, { highWaterMark: 1 });
   return new Response(body, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no" } });
 }
@@ -157,6 +177,7 @@ async function handle(request: Request, context: { params: Promise<{ path: strin
       value += decoder.decode(part.value, { stream: true });
     }
     value += decoder.decode();
+    if (eventStream && !query.length) return await events(request, session);
     const command = { action: eventStream ? "open" : path[0], ...(value ? JSON.parse(value) : Object.fromEntries(query)) };
     if (command.action !== (eventStream ? "open" : path[0])) throw fail(400, "INVALID_ARGUMENT", outcome);
     if (!validateCommand(command) || (!eventStream && reads.has(command.action) !== (request.method === "GET"))) throw fail(400, "INVALID_ARGUMENT", outcome);

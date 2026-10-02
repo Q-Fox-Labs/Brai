@@ -64,7 +64,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
 
   useEffect(() => {
     ++selection.current;
-    setBusy(locked.current); setConnected(false); uncertain.current = false;
+    setBusy(locked.current); setConnected(!!client.current(projectId, threadId)); uncertain.current = false;
     followBottom.current = true; scrollAnchor.current = null;
     if (!threadId) return;
     const saved = cache.current.get(`${projectId}:${threadId}`);
@@ -114,8 +114,9 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     }
     const saved = cache.current.get(`${id}:${chatId}`);
     historyReady.current = saved?.ready ?? false;
-    setSnapshot(saved?.snapshot ?? null); setHistory(saved?.history ?? []); setHistoryGeneration(saved?.generation ?? ""); setCursor(saved?.cursor ?? null);
-    setDraft(saved?.draft ?? ""); setModel(saved?.model ?? ""); setEffort(saved?.effort ?? ""); setPermissionMode(saved?.permissionMode ?? "auto"); setConnected(false);
+    const live = client.current(id, chatId);
+    setSnapshot(live ?? saved?.snapshot ?? null); setHistory(saved?.history ?? []); setHistoryGeneration(saved?.generation ?? ""); setCursor(saved?.cursor ?? null);
+    setDraft(saved?.draft ?? ""); setModel(saved?.model ?? ""); setEffort(saved?.effort ?? ""); setPermissionMode(saved?.permissionMode ?? "auto"); setConnected(!!live);
     followBottom.current = true; scrollAnchor.current = null;
     setProjectId(id); setThreadId(chatId); setMessage(""); setSidebarOpen(false);
   }

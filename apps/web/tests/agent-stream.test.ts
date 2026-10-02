@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { encodeFrame, decodeFrame } from "../lib/agent/stream.ts";
 import type { NativeSnapshot } from "@brai/agent/contracts";
 
 const root = process.env.BRAI_STREAM_TEST_ROOT ?? resolve(import.meta.dirname, "../../..");
@@ -20,7 +21,7 @@ const base: NativeSnapshot = {
 };
 const session = { user: { id: "user-fixture", email: "sse@example.test" }, session: { id: "session-fixture", userId: "user-fixture" } };
 
-function fixture(initial: NativeSnapshot = base, holdOpen = false) {
+function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = false) {
   let callback: (error: Error | null, message: { data: Uint8Array }) => void;
   let stopped = false, statusFailures = 0, ready = true, allowed = true;
   let releaseOpen: (value: NativeSnapshot) => void = () => {};
@@ -34,7 +35,7 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false) {
     async request(_subject: string, payload: Uint8Array) {
       const command = JSON.parse(Buffer.from(payload).toString()) as { action: string };
       if (command.action === "status" && statusFailures > 0) { statusFailures--; throw new Error("temporary"); }
-      const result = command.action === "status" ? { generation: initial.generation, ready } : holdOpen ? await new Promise<NativeSnapshot>(resolve => { releaseOpen = resolve; }) : initial;
+      const result = command.action === "projects" ? { generation: initial.generation, projects: [{ projectId: "brai", available: true }, { projectId: "admin", available: true }, { projectId: "hidden", available: false }] } : command.action === "status" ? { generation: initial.generation, ready } : holdOpen ? await new Promise<NativeSnapshot>(resolve => { releaseOpen = resolve; }) : initial;
       return { data: Buffer.from(JSON.stringify(result)), headers: { get: () => undefined } };
     },
   };
@@ -42,6 +43,7 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false) {
   const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
   const module = { exports: {} as { agentGet: (request: Request, context: { params: Promise<{ path: string[] }> }) => Promise<Response> } };
   const overrides: Record<string, unknown> = {
+    "../lib/agent/stream": { encodeFrame },
     "./gateway": { natsConnection: async () => nc, GatewayError: Error },
     "./auth": { checkOrigin() {}, requireTimerSession: async () => { if (!allowed) throw new Error("revoked"); return session; } },
   };
@@ -53,7 +55,7 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false) {
   const abort = new AbortController();
   const originalAllowlist = process.env.BRAI_AGENT_ALLOWED_EMAILS;
   process.env.BRAI_AGENT_ALLOWED_EMAILS = session.user.email;
-  const response = module.exports.agentGet(new Request("https://brai.example/api/agent/events?projectId=brai&threadId=thread-fixture&expectedUserId=user-fixture", { signal: abort.signal }), { params: Promise.resolve({ path: ["events"] }) });
+  const response = module.exports.agentGet(new Request(multiplex ? "https://brai.example/api/agent/events?expectedUserId=user-fixture" : "https://brai.example/api/agent/events?projectId=brai&threadId=thread-fixture&expectedUserId=user-fixture", { signal: abort.signal }), { params: Promise.resolve({ path: ["events"] }) });
   return {
     response,
     push(snapshot: NativeSnapshot) { callback(null, { data: Buffer.from(JSON.stringify({ projectId: snapshot.projectId, threadId: snapshot.threadId, generation: snapshot.generation, epoch: snapshot.epoch, seq: snapshot.seq, event: { type: "STATE_SNAPSHOT", snapshot } })) }); },
@@ -73,7 +75,7 @@ async function next(reader: ReadableStreamDefaultReader<Uint8Array>) {
     const value = await Promise.race([reader.read(), new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("SSE delivery timeout")), 1000); })]);
     assert.equal(value.done, false);
     const frame = new TextDecoder().decode(value.value);
-    return { type: frame.split("\n")[0], data: JSON.parse(frame.split("\ndata: ")[1]) as { seq?: number } };
+    return { type: frame.split("\n")[0], data: JSON.parse(frame.split("\ndata: ")[1]) as ReturnType<typeof encodeFrame> };
   } finally { clearTimeout(timer); }
 }
 
@@ -157,4 +159,45 @@ test("SSE immediately closes on revoked session or confirmed executor unavailabi
       assert.equal(f.stopped, true);
     } finally { f.close(); }
   }
+});
+
+
+test("one account stream filters unavailable projects and transmits compact standard deltas", async () => {
+  const f = fixture(large(0), false, true);
+  try {
+    const reader = (await f.response).body!.getReader();
+    assert.equal((await next(reader)).type, "event: ready");
+    f.push(large(0));
+    const initial = (await next(reader)).data;
+    assert.equal(initial.event.type, "STATE_SNAPSHOT");
+    const before = decodeFrame(initial);
+    f.push(large(1));
+    const update = (await next(reader)).data;
+    assert.equal(update.event.type, "STATE_DELTA");
+    assert.ok(JSON.stringify(update).length < 2000, "history must not be retransmitted on each text change");
+    assert.equal(decodeFrame(update, before).items.at(-1)!.text, "Latest 1");
+    f.push({ ...base, projectId: "hidden", seq: 1 });
+    f.push({ ...base, projectId: "admin", seq: 1 });
+    assert.equal((await next(reader)).data.projectId, "admin");
+    f.push({ ...base, generation: "generation-2", seq: 2 });
+    assert.equal(f.stopped, true);
+  } finally { f.close(); }
+});
+
+test("delta bases follow sent frames even when many source snapshots are coalesced", async () => {
+  const f = fixture(large(0), false, true);
+  try {
+    const reader = (await f.response).body!.getReader();
+    await next(reader); f.push(large(0));
+    let snapshot = decodeFrame((await next(reader)).data);
+    for (let seq = 1; seq <= 40; seq++) f.push(large(seq));
+    await wait(80);
+    for (let seq = 41; seq <= 80; seq++) f.push(large(seq));
+    await wait(80);
+    snapshot = decodeFrame((await next(reader)).data, snapshot);
+    assert.equal(snapshot.seq, 40);
+    snapshot = decodeFrame((await next(reader)).data, snapshot);
+    assert.equal(snapshot.seq, 80);
+    assert.equal(f.stopped, false);
+  } finally { f.close(); }
 });

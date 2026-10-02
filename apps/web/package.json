@@ -21,7 +21,8 @@
     "rxjs": "7.8.1",
     "nats": "2.29.3",
     "ajv": "8.17.1",
-    "ajv-formats": "3.0.1"
+    "ajv-formats": "3.0.1",
+    "fast-json-patch": "3.1.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.3.3",
