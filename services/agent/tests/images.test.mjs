@@ -173,12 +173,17 @@ test('real local WebSocket validates image commands and restores >2 MiB raw page
     const result = {
       initialize: { codexHome: '/tmp/mock', platformFamily: 'unix', platformOs: 'linux', userAgent: 'test' },
       'account/read': { account: { type: 'apiKey' }, requiresOpenaiAuth: false },
+      'account/rateLimits/read': { rateLimits: {} },
       'model/list': { data: models.map((m, i) => ({ ...m, id: m.model, description: '', hidden: false, isDefault: i === 0 })) },
       'thread/start': response, 'thread/read': { thread }, 'thread/resume': response,
       'turn/start': { turn }, 'turn/steer': { turnId: 'turn' },
       'thread/turns/list': { data: [turn] }, 'thread/items/list': { data: history, nextCursor: null },
     }[packet.method];
     assert.ok(result, packet.method);
+    if (packet.method === 'account/rateLimits/read') {
+      const validateResult = native('GetAccountRateLimitsResponse');
+      assert.equal(validateResult(result), true, JSON.stringify(validateResult.errors));
+    }
     socket.send(JSON.stringify({ id: packet.id, result }));
   }));
   try {
