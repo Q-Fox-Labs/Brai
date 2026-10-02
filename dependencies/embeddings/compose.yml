@@ -1,0 +1,64 @@
+# ABOUTME: Запускает отдельный CPU-сервис эмбеддингов llama.cpp.
+# ABOUTME: Модель и сеть готовятся извне; приложение и индексы не изменяются.
+name: brai-embeddings
+services:
+  embeddings:
+    image: ${LLAMA_CPP_IMAGE:?Set an immutable llama.cpp image reference}
+    platform: linux/amd64
+    user: "65532:65532"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: ${BRAI_EMBEDDINGS_CPUS:-4}
+    mem_limit: ${BRAI_EMBEDDINGS_MEMORY:-6g}
+    memswap_limit: ${BRAI_EMBEDDINGS_MEMORY:-6g}
+    pids_limit: 128
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    command:
+      - --model
+      - /models/giga-embeddings-0826-480m-q8_0.gguf
+      - --alias
+      - giga-embeddings-480m-q8
+      - --embedding
+      - --pooling
+      - mean
+      - --embd-normalize
+      - "2"
+      - --ctx-size
+      - "2048"
+      - --batch-size
+      - "2048"
+      - --ubatch-size
+      - "2048"
+      - --parallel
+      - "1"
+      - --threads
+      - ${BRAI_EMBEDDINGS_THREADS:-4}
+      - --threads-batch
+      - ${BRAI_EMBEDDINGS_THREADS:-4}
+      - --n-gpu-layers
+      - "0"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --no-webui
+    volumes:
+      - type: bind
+        source: ${BRAI_EMBEDDINGS_MODEL_DIR:?Set the prepared model directory}
+        target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+    ports:
+      - "127.0.0.1:${BRAI_EMBEDDINGS_HOST_PORT:-19330}:8080"
+    networks: [embeddings]
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+networks:
+  embeddings:
+    external: true
+    name: ${BRAI_EMBEDDINGS_NETWORK:?Set the existing private project bridge}
