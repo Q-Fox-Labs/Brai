@@ -1,7 +1,7 @@
 "use client";
 // ABOUTME: Показывает выбранный native чат рядом с группами проектов и чатов.
 // ABOUTME: История и команды используют существующий клиент; раскладка не управляет исполнителем.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DisplayItem, NativeSnapshot, PendingRequest } from "@brai/agent/contracts";
 import { createAgentClient, AgentError } from "../../lib/agent/client";
 import Sidebar, { type Project, type ThreadPage } from "./sidebar";
@@ -17,7 +17,9 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
   const [projects, setProjects] = useState<Project[]>([]);
   const [pages, setPages] = useState<Record<string, ThreadPage>>({});
   const [projectId, setProjectId] = useState(""), [threadId, setThreadId] = useState("");
-  const [snapshot, setSnapshot] = useState<NativeSnapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<NativeSnapshot | null>(null), [connected, setConnected] = useState(false);
+  const conversation = useRef<HTMLDivElement>(null), followBottom = useRef(true);
+  const scrollAnchor = useRef<{ height: number; top: number } | null>(null);
   const [historyGeneration, setHistoryGeneration] = useState(""), [history, setHistory] = useState<DisplayItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null), [sidebarOpen, setSidebarOpen] = useState(false);
   const [draft, setDraft] = useState(""), [message, setMessage] = useState(""), [busy, setBusy] = useState(false);
@@ -54,21 +56,34 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
 
   useEffect(() => {
     ++selection.current;
-    setBusy(locked.current); setSnapshot(null); setHistory([]); setCursor(null); setDraft(""); uncertain.current = false;
+    setBusy(locked.current); setSnapshot(null); setConnected(false); setHistory([]); setCursor(null); setDraft(""); uncertain.current = false;
+    followBottom.current = true; scrollAnchor.current = null;
     if (!threadId) return;
-    let active = true;
+    let active = true, epoch = "", historyRead = 0;
+    const loadHistory = async (preserve = false) => {
+      const token = ++historyRead;
+      try {
+        const value = await client.request({ action: "items", projectId, threadId });
+        if (!active || token !== historyRead) return;
+        setHistory(previous => preserve ? [...new Map([...previous, ...value.data].map(item => [item.id, item])).values()].slice(-1000) : value.data);
+        setHistoryGeneration(value.generation); setCursor(value.nextCursor);
+      } catch (error) { if (active && token === historyRead) setMessage(errorText(error)); }
+    };
     const stop = client.watch(projectId, threadId, value => {
       if (!active) return;
+      setConnected(value !== null);
+      if (!value) return;
+      const nextEpoch = `${value.generation}:${value.epoch}`;
+      if (epoch && epoch !== nextEpoch) void loadHistory(true);
+      epoch = nextEpoch;
       setSnapshot(value);
-      if (value) setPages(previous => {
+      setPages(previous => {
         const page = previous[projectId];
         if (page?.data.some(thread => thread.id === value.thread.id)) return previous;
         return { ...previous, [projectId]: { data: [value.thread, ...(page?.data ?? [])].slice(0, 1000), nextCursor: page?.nextCursor ?? null, loading: page?.loading ?? false, error: page?.error ?? "" } };
       });
     });
-    void client.request({ action: "items", projectId, threadId }).then(value => {
-      if (active) { setHistory(value.data); setHistoryGeneration(value.generation); setCursor(value.nextCursor); }
-    }).catch(error => { if (active) setMessage(errorText(error)); });
+    void loadHistory();
     return () => { active = false; stop(); };
   }, [client, projectId, threadId]);
 
@@ -84,12 +99,15 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
       const value = await client.request({ action: "items", projectId, threadId, cursor });
       if (token !== selection.current || value.generation !== historyGeneration) return;
       if (history.length + value.data.length > 1000) setMessage("Показаны 1000 элементов выбранного участка истории. Последние действия остаются в живом снимке.");
+      const element = conversation.current;
+      if (element) scrollAnchor.current = { height: element.scrollHeight, top: element.scrollTop };
+      followBottom.current = false;
       setHistory(previous => [...value.data, ...previous].slice(0, 1000)); setCursor(value.nextCursor);
     } catch (error) { if (token === selection.current) setMessage(errorText(error)); }
   }
 
   async function mutate(action: "create" | "start" | "steer" | "interrupt" | "answer", extra: Record<string, unknown> = {}, targetProject = projectId) {
-    if (!targetProject || locked.current || uncertain.current || (action !== "create" && (!snapshot || snapshot.projectId !== projectId || snapshot.threadId !== threadId))) return false;
+    if (!targetProject || locked.current || uncertain.current || (action !== "create" && (!connected || !snapshot || snapshot.projectId !== projectId || snapshot.threadId !== threadId))) return false;
     const selected = snapshot, text = draft, token = selection.current, operationId = crypto.randomUUID();
     locked.current = true; setBusy(true); setMessage("");
     try {
@@ -110,11 +128,18 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
   }
 
   const view = snapshot?.projectId === projectId && snapshot?.threadId === threadId ? snapshot : null;
-  const active = view?.turn?.status === "inProgress", disabled = busy || !view || uncertain.current;
+  const active = view?.turn?.status === "inProgress", disabled = busy || !view || !connected || uncertain.current;
   const project = projects.find(value => value.projectId === projectId);
   const selectedThread = pages[projectId]?.data.find(thread => thread.id === threadId) ?? view?.thread;
   const title = selectedThread?.title || selectedThread?.preview || (threadId ? "Новый чат" : "Выберите чат");
-  const items = [...new Map([...(view?.generation === historyGeneration ? history : []), ...(view?.items ?? [])].map(item => [item.id, item])).values()];
+  const items = [...new Map([...history, ...(view?.items ?? [])].map(item => [item.id, item])).values()];
+
+  useLayoutEffect(() => {
+    const element = conversation.current, anchor = scrollAnchor.current;
+    if (!element) return;
+    if (anchor) { element.scrollTop = anchor.top + element.scrollHeight - anchor.height; scrollAnchor.current = null; }
+    else if (followBottom.current) element.scrollTop = element.scrollHeight;
+  }, [threadId, history, snapshot]);
 
   return <main className="agent-shell">
     <Sidebar projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={sidebarOpen} email={email} busy={busy || uncertain.current}
@@ -124,15 +149,17 @@ export default function AgentScreen({ userId, email, onLogout, onUnauthorized, a
       <header className="agent-toolbar">
         <button className="agent-mobile-toggle" aria-controls="agent-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(value => !value)}>☰ <span>Чаты</span></button>
         <div className="agent-heading"><p>{project?.name ?? "Агент"}</p><h1 id="agent-chat-title" title={title}>{title}</h1></div>
-        <span className="agent-chat-status" role="status">{view ? stateLabels[view.state] ?? "Состояние обновляется" : threadId ? "Подключаемся…" : "Готов к выбору"}</span>
+        <span className="agent-chat-status" role="status">{view && connected ? stateLabels[view.state] ?? "Состояние обновляется" : view ? "Переподключение…" : threadId ? "Подключаемся…" : "Готов к выбору"}</span>
       </header>
-      <div className="agent-conversation" aria-label="История">
+      <div ref={conversation} className="agent-conversation" aria-label="История" onScroll={event => {
+        const element = event.currentTarget;
+        followBottom.current = element.scrollHeight - element.clientHeight - element.scrollTop < 80;
+      }}>
         {!threadId && <div className="agent-empty"><span className="agent-empty-symbol" aria-hidden="true">✳</span><h2>С чего начнём?</h2><p>Выберите чат слева или создайте новый в нужном проекте.</p>{project && <button className="agent-primary" disabled={busy || uncertain.current} onClick={() => void mutate("create")}>Новый чат · {project.name}</button>}</div>}
         <div className="agent-timeline">
           {cursor && <button className="agent-history-more" onClick={() => void moreHistory()}>Загрузить предыдущие сообщения</button>}
           {items.map(item => <Item key={item.id} item={item} />)}
-          {view?.truncated && <p className="agent-note">Живой снимок сокращён; сохранённая история доступна выше.</p>}
-          {view?.requests.map(request => <NativeForm key={`${view.generation}:${view.epoch}:${request.requestId}`} request={request} disabled={disabled} send={answer => mutate("answer", { requestId: request.requestId, answer })} />)}
+          {connected && view?.requests.map(request => <NativeForm key={`${view.generation}:${view.epoch}:${request.requestId}`} request={request} disabled={disabled} send={answer => mutate("answer", { requestId: request.requestId, answer })} />)}
         </div>
       </div>
       <footer className="agent-composer-area">

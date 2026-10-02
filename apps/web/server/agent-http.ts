@@ -48,15 +48,15 @@ async function events(request: Request, session: Session, command: Command): Pro
       for (const close of streams.keys()) close();
     })();
   }
-  let cleanup = () => {};
+  let cleanup = () => {}, pump = () => {};
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
-      let closed = false, boundary: NativeSnapshot | null = null, buffered: EventEnvelope | null = null, checking = false;
+      let closed = false, boundary: NativeSnapshot | null = null, buffered: EventEnvelope | null = null, checking = false, missedStatus = 0;
+      let delivery: ReturnType<typeof setTimeout> | undefined;
       const encoder = new TextEncoder();
       const write = (type: string, value: unknown) => {
         const frame = encoder.encode(`event: ${type}\ndata: ${JSON.stringify(value)}\n\n`);
-        // AIDEV-NOTE: Минимальный вес ограничивает число кадров; один слот оставляем для resync.
-        if (closed || Math.max(frame.byteLength, limits.frame / limits.queue) > (controller.desiredSize ?? 0) - (type === "resync" ? 0 : limits.frame / limits.queue)) return false;
+        if (closed || (controller.desiredSize ?? 0) <= 0) return false;
         controller.enqueue(frame);
         return true;
       };
@@ -66,17 +66,28 @@ async function events(request: Request, session: Session, command: Command): Pro
         closed = true;
         subscription.unsubscribe();
         clearInterval(timer);
+        clearTimeout(delivery);
         request.signal.removeEventListener("abort", abort);
         streams.delete(close);
         buffered = null;
         try { controller.close(); } catch { /* Потребитель уже отменил поток. */ }
       };
+      // AIDEV-NOTE: Полные снимки заменяют друг друга: один в HTTP, один последний в ожидании.
+      const schedule = () => {
+        if (closed || delivery || !buffered) return;
+        delivery = setTimeout(() => {
+          delivery = undefined;
+          if (buffered && write("agent", buffered)) buffered = null;
+        }, 50);
+      };
+      pump = schedule;
       const accept = (value: EventEnvelope) => {
         if (!boundary) { buffered = value; return; }
         if (value.generation !== boundary.generation || value.epoch !== boundary.epoch) return close();
         if (value.seq <= boundary.seq) return;
-        if (!write("agent", value)) return close();
         boundary = value.event.snapshot;
+        buffered = value;
+        schedule();
       };
       const subscription = nc.subscribe(subjects.event, { callback(error, message) {
         if (closed) return;
@@ -89,11 +100,15 @@ async function events(request: Request, session: Session, command: Command): Pro
       } });
       const timer = setInterval(async () => {
         if (closed || checking) return;
+        write("heartbeat", null);
         checking = true;
         const current = await requireTimerSession(request, true).catch(() => null);
         const status = !closed && current && permitted(current) && boundary ? await rpc<{ generation: string; ready: boolean }>({ action: "status" }).catch(() => null) : null;
         checking = false;
-        if (boundary && (!status?.ready || status.generation !== boundary.generation)) close();
+        if (boundary) {
+          missedStatus = status ? 0 : missedStatus + 1;
+          if ((status && (!status.ready || status.generation !== boundary.generation)) || missedStatus >= 3) close();
+        }
         if (!current || !permitted(current) || current.session.id !== session.session.id || current.user.id !== session.user.id) close();
       }, 5000);
       const abort = () => close(false);
@@ -104,14 +119,17 @@ async function events(request: Request, session: Session, command: Command): Pro
       void rpc<NativeSnapshot>(command).then(snapshot => {
         if (closed) return;
         const value = { projectId: command.projectId, threadId: command.threadId, generation: snapshot.generation, epoch: snapshot.epoch, seq: snapshot.seq, event: { type: "STATE_SNAPSHOT", snapshot } };
-        if (!validateEnvelope(value) || !write("agent", value)) return close();
+        if (!validateEnvelope(value)) return close();
+        const duringOpen = buffered;
         boundary = snapshot;
-        if (buffered) accept(buffered);
-        buffered = null;
+        buffered = value;
+        if (duringOpen) accept(duringOpen);
+        schedule();
       }).catch(() => close());
     },
+    pull() { pump(); },
     cancel() { cleanup(); },
-  }, { highWaterMark: limits.frame, size: frame => Math.max(frame.byteLength, limits.frame / limits.queue) });
+  }, { highWaterMark: 1 });
   return new Response(body, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no" } });
 }
 /** Проверяет аккаунт, Origin и закрытый action до передачи единственной команды владельцу. */

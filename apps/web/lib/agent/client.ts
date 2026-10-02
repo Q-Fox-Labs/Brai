@@ -66,8 +66,8 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
       applying = false;
       const value = mutation.state as NativeSnapshot | undefined;
       if (!active || !value || !latest) return;
-      if (value.generation === latest.generation && value.epoch === latest.epoch && value.seq === latest.seq) update(value);
-      else deliver();
+      if (value.generation === latest.generation && value.epoch === latest.epoch) update(value);
+      if (value.generation !== latest.generation || value.epoch !== latest.epoch || value.seq < latest.seq) deliver();
     }, error: reconnect });
     source.addEventListener("agent", raw => {
       if (!active) return;
