@@ -1,0 +1,52 @@
+"use client";
+// ABOUTME: Показывает группы проектов и названия чатов в левой панели.
+// ABOUTME: Только выбор и раскрытие списка; запросы и команды принадлежат экрану.
+import { useState } from "react";
+import * as Separator from "@radix-ui/react-separator";
+import type { ThreadMetadata } from "@brai/agent/contracts";
+
+export type Project = { projectId: string; name: string; available: boolean };
+export type ThreadPage = { data: ThreadMetadata[]; nextCursor: string | null; loading: boolean; error: string };
+type Props = {
+  projects: Project[]; pages: Record<string, ThreadPage>; projectId: string; threadId: string;
+  open: boolean; email: string; busy: boolean;
+  select: (projectId: string, threadId?: string) => void;
+  create: (projectId: string) => void; more: (projectId: string) => void; refresh: (projectId: string) => void;
+  close: () => void; logout: () => void;
+};
+
+/** Группирует уже прочитанные чаты; длинное название доступно полностью через title. */
+export default function Sidebar({ projects, pages, projectId, threadId, open, email, busy, select, create, more, refresh, close, logout }: Props) {
+  const [visible, setVisible] = useState<Record<string, number>>({});
+  return <aside id="agent-sidebar" className="agent-sidebar" data-open={open} aria-label="Проекты и чаты" onKeyDown={event => { if (event.key === "Escape") close(); }}>
+    <header className="agent-sidebar-header"><a className="agent-brand" href="/agent">Brai<span>Агент</span></a><button className="agent-sidebar-close" aria-label="Закрыть список чатов" onClick={close}>×</button></header>
+    <Separator.Root className="agent-separator" />
+    <nav className="agent-projects" aria-label="Проекты и чаты">
+      {!projects.length && <p className="agent-sidebar-note">Загружаем проекты…</p>}
+      {projects.map((project, index) => {
+        const page = pages[project.projectId], count = visible[project.projectId] ?? 5;
+        return <section className="agent-project" key={project.projectId} aria-label={project.name}>
+          <div className="agent-project-heading">
+            <button className="agent-project-select" aria-label={`Проект ${project.name}`} aria-pressed={projectId === project.projectId} disabled={!project.available} onClick={() => select(project.projectId)}>
+              <svg className={`agent-project-icon agent-project-color-${index % 3}`} width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /><path d="m8 12 3 2-3 2m6 0h3" /></svg>
+              <span>{project.name}</span><span className={`agent-project-dot ${project.available ? "is-available" : ""}`} title={project.available ? "Проект доступен" : "Проект недоступен"} />
+            </button>
+            <button className="agent-icon-button" aria-label={`Новый чат в ${project.name}`} title="Новый чат" disabled={!project.available || busy} onClick={() => create(project.projectId)}>+</button>
+          </div>
+          <div className="agent-thread-list">
+            {page?.data.slice(0, count).map(thread => {
+              const title = thread.title || thread.preview || "Новый чат", selected = projectId === project.projectId && threadId === thread.id;
+              return <button key={thread.id} data-thread-id={thread.id} className={`agent-thread ${selected ? "is-selected" : ""}`} title={title} aria-pressed={selected} onClick={() => select(project.projectId, thread.id)}>{title}</button>;
+            })}
+            {page?.error && <p className="agent-sidebar-note" role="alert">Не удалось загрузить чаты. <button onClick={() => refresh(project.projectId)}>Повторить</button></p>}
+            {page?.loading && <p className="agent-sidebar-note" role="status">Загружаем чаты…</p>}
+            {page && !page.loading && !page.error && !page.data.length && <p className="agent-sidebar-note">Пока нет чатов</p>}
+            {page && (page.data.length > count || page.nextCursor) && <button className="agent-more" disabled={page.loading} onClick={() => { if (count >= page.data.length) more(project.projectId); setVisible(previous => ({ ...previous, [project.projectId]: count + 5 })); }}>Показать больше</button>}
+          </div>
+        </section>;
+      })}
+    </nav>
+    <Separator.Root className="agent-separator" />
+    <footer className="agent-sidebar-footer"><span className="agent-account" title={email}>{email}</span><div><a href="/">Таймер</a><button onClick={logout}>Выйти</button></div></footer>
+  </aside>;
+}
