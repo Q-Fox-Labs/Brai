@@ -19,7 +19,7 @@
 
 `account/read` вызывается с `refreshToken: false`: он читает состояние, но не инициирует обновление токена. `initialize` подтверждает только инициализацию протокола и не доказывает, что аккаунт авторизован. Используемое подмножество не включает login, token refresh, logout или чтение токена.
 
-Upstream-ответ `GetAccountResponse` сохраняется без изменений в контрактной схеме. Операция `status` [публичной границы agent](../../README.md#контракт) возвращает `generation`, `ready`, `connection` и `authorization`. Текущий адаптер использует значения `authorization`: `ready`, `required` или `unknown`. Типы границы находятся в [contracts/index.d.mts](../index.d.mts). Не передавайте наружу и не записывайте в журналы upstream account/email, plan или `workspaceRouting`. `account/updated` и `error` включены для точной трассировки типов; их live-поведение не заявляется.
+Upstream-ответ `GetAccountResponse` сохраняется без изменений в контрактной схеме. Операция `status` [публичной границы agent](../../README.md#контракт) возвращает `generation`, `ready`, `connection`, `authorization` и ограниченную проекцию `limits`. `account/rateLimits/read` вызывается с `excludeResetCreditDetails: true`; `supportsLunaReserve` не включается. Agent выбирает только bucket `codex` и поля первичного/вторичного окна; account ID, email, тариф, кредиты и upsell остаются внутри native-ответа. `account/rateLimits/updated` содержит частичное состояние и вызывает полное чтение. Schemas новых roots созданы из daemon 0.160.0; прежние roots остаются из 0.159.2. При сверке с 0.160.0 все 50 ранее сохранённых source files совпали побайтно, их исходные хеши в manifest сохранены.
 
 ## Совместимость обновлённого daemon
 

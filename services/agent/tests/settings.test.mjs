@@ -10,6 +10,7 @@ const choices = ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-luna'].map(model => ({ mod
 function fixture() {
   const calls = []; let generation = 'g1', observer, index = 0, operation = 0;
   const port = { status: () => ({ generation, connection: 'connected', authorization: 'ready' }), subscribe: fn => { observer = fn; return () => {}; }, call: async (method, params) => {
+    if (method === 'account/rateLimits/read') return { rateLimits: null };
     calls.push({ method, params });
     if (method === 'model/list') return { data: [...choices, { ...choices[0], model: 'unconfigured' }] };
     if (method === 'thread/start') return { thread: { id: `t${++index}`, model: params.model ?? choices[0].model, status: { type: 'idle' }, updatedAt: 1 }, model: params.model ?? choices[0].model };

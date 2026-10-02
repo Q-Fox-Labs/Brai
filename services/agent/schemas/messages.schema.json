@@ -823,13 +823,142 @@
         },
         "ready": {
           "type": "boolean"
+        },
+        "limits": {
+          "$ref": "#/definitions/AgentLimits"
         }
       },
       "required": [
         "generation",
         "connection",
         "authorization",
-        "ready"
+        "ready",
+        "limits"
+      ]
+    },
+    "AgentLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "loading",
+            "ready",
+            "stale",
+            "unavailable"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "observedAt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "windows": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "slot": {
+                "enum": [
+                  "primary",
+                  "secondary"
+                ]
+              },
+              "remainingPercent": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "windowDurationMins": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "resetsAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "slot",
+              "remainingPercent",
+              "windowDurationMins",
+              "resetsAt"
+            ]
+          },
+          "allOf": [
+            {
+              "anyOf": [
+                {
+                  "maxItems": 1
+                },
+                {
+                  "minItems": 2,
+                  "items": [
+                    {
+                      "properties": {
+                        "slot": {
+                          "const": "primary"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "slot": {
+                          "const": "secondary"
+                        }
+                      }
+                    }
+                  ],
+                  "additionalItems": false
+                },
+                {
+                  "minItems": 2,
+                  "items": [
+                    {
+                      "properties": {
+                        "slot": {
+                          "const": "secondary"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "slot": {
+                          "const": "primary"
+                        }
+                      }
+                    }
+                  ],
+                  "additionalItems": false
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "revision",
+        "observedAt",
+        "windows"
       ]
     },
     "Projects": {

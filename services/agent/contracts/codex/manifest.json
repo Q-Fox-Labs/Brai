@@ -56,7 +56,10 @@
     "v2/TurnSteerParams.json": "99f7fdff8b090065b68f36420b70870b5eafed048c024b308230aaa02f15d891",
     "v2/TurnSteerResponse.json": "866ba9a77c12b5d570c837d58f73bf40b24e50fa93404bdf792dd984d313b1aa",
     "v2/ModelListParams.json": "de29a536c00a5b8f46f34dba417dabd93365305571a8ed200e33bea85db68b5a",
-    "v2/ModelListResponse.json": "bfbb3ee9f6e203e0b767587c17de94b9cb42f712d0d8168afbbbc3fcb4492f30"
+    "v2/ModelListResponse.json": "bfbb3ee9f6e203e0b767587c17de94b9cb42f712d0d8168afbbbc3fcb4492f30",
+    "v2/NullableGetAccountRateLimitsParams.json": "072f813ca1c696831a7f2fbd934feaa8cad228a6b3d44a4be8877547c796341b",
+    "v2/GetAccountRateLimitsResponse.json": "cb9655e68130116f634ed9353e45b336492e6069a6628f424d1cd52e54eda0e0",
+    "v2/AccountRateLimitsUpdatedNotification.json": "37326ef0364007be0c8f92bf5cd228941b513f87266edd566d694409b5aa5b8b"
   },
   "rootTypes": [
     "InitializeParams",
@@ -108,15 +111,27 @@
     "FileChangeRequestApprovalParams",
     "FileChangeRequestApprovalResponse",
     "ModelListParams",
-    "ModelListResponse"
+    "ModelListResponse",
+    "GetAccountRateLimitsParams",
+    "NullableGetAccountRateLimitsParams",
+    "GetAccountRateLimitsResponse",
+    "AccountRateLimitsUpdatedNotification"
   ],
-  "definitionCount": 191,
+  "definitionCount": 204,
   "versionCompatibility": [
     {
       "version": "0.159.3",
       "sourceFilesCompared": 48,
       "sourceFilesByteIdentical": true,
       "sourceFilesSha256": "a6268cdfb7ba6310a8c021cca11258009bdd004f39bc035d38d7a4eafc9f43a9",
+      "initializeConfirmed": true,
+      "liveScenariosRepeated": false
+    },
+    {
+      "version": "0.160.0",
+      "sourceFilesCompared": 50,
+      "sourceFilesByteIdentical": true,
+      "sourceFilesSha256": "996a4e380d8ddc47738f3796c3bf6362ae6af41d4cecdaba842b2af22e39566a",
       "initializeConfirmed": true,
       "liveScenariosRepeated": false
     }
@@ -127,5 +142,26 @@
     "sourceFilesByteIdentical": true,
     "liveMetadataConfirmed": true,
     "inferenceTurns": 0
+  },
+  "codexLimitsExtension": {
+    "sourceVersion": "0.160.0",
+    "schemaCommand": "codex app-server generate-json-schema --experimental --out <output-directory>",
+    "sourceFiles": {
+      "v2/NullableGetAccountRateLimitsParams.json": "072f813ca1c696831a7f2fbd934feaa8cad228a6b3d44a4be8877547c796341b",
+      "v2/GetAccountRateLimitsResponse.json": "cb9655e68130116f634ed9353e45b336492e6069a6628f424d1cd52e54eda0e0",
+      "v2/AccountRateLimitsUpdatedNotification.json": "37326ef0364007be0c8f92bf5cd228941b513f87266edd566d694409b5aa5b8b"
+    },
+    "rootTypes": [
+      "GetAccountRateLimitsParams",
+      "NullableGetAccountRateLimitsParams",
+      "GetAccountRateLimitsResponse",
+      "AccountRateLimitsUpdatedNotification"
+    ],
+    "usedBoundaryCompatibility": {
+      "priorSourceFilesCompared": 50,
+      "sourceFilesByteIdentical": true,
+      "sourceFilesSha256": "996a4e380d8ddc47738f3796c3bf6362ae6af41d4cecdaba842b2af22e39566a",
+      "note": "Compared each previously recorded v0.159.2 source-file SHA-256 against the daemon v0.160.0 generated bundle; the existing contract roots remain unchanged."
+    }
   }
 }

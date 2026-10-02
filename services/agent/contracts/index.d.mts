@@ -6,6 +6,7 @@ export type ThreadMetadata = { id: string; title: string; preview: string; model
 export type PermissionMode = "ask" | "auto" | "full";
 export type ModelChoice = { model: string; name: string; efforts: string[]; defaultEffort: string; inputModalities: string[]; imageLimit: number };
 export type ModelCatalog = { generation: string; data: ModelChoice[]; defaultModel: string | null };
+export type AgentLimits = { state: "loading" | "ready" | "stale" | "unavailable"; revision: number; observedAt: number | null; windows: { slot: "primary" | "secondary"; remainingPercent: number; windowDurationMins: number | null; resetsAt: number | null }[] };
 export type NativeSnapshot = { projectId: string; threadId: string; generation: string; epoch: string; seq: number; thread: ThreadMetadata; turn: { id: string; status: string } | null; state: string; items: DisplayItem[]; requests: PendingRequest[]; truncated: boolean };
 export type EventEnvelope = { projectId: string; threadId: string; generation: string; epoch: string; seq: number; event: { type: "STATE_SNAPSHOT"; snapshot: NativeSnapshot } };
 export type Action = "projects" | "status" | "models" | "threads" | "create" | "open" | "turns" | "items" | "activities" | "item" | "start" | "steer" | "interrupt" | "answer";
@@ -16,4 +17,5 @@ export declare const limits: { frame: number; input: number; images: number; ima
 export declare const commandSchema: object;
 export declare function bytes(value: unknown): number;
 export declare function validateCommand(value: unknown): value is Command;
+export declare function validateLimits(value: unknown): value is AgentLimits;
 export declare function validateEnvelope(value: unknown): value is EventEnvelope;

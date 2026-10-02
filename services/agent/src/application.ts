@@ -4,6 +4,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { bytes, limits, validateCommand } from '../contracts/index.mjs';
 import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, ModelCatalog, DisplayItem } from '../contracts/index.mjs';
 import type { CodexPort, Observation } from './codex.js';
+import { createLimitsMonitor } from './limits.js';
 import { display, metadata, text, compact, summary } from './display.js';
 export type Config = { codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
 type Session = { view: NativeSnapshot; opened: boolean; fresh: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
@@ -135,6 +136,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     return work;
   }
   function observe(e: Observation) {
+    limitMonitor.observe(e);
     if (e.type === 'connection') {
       operations.clear(); modelCatalog = undefined; messageTimes.clear();
       for (const s of sessions.values()) {
@@ -184,9 +186,10 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (s.view.requests.some(f => !f.answered)) s.view.state = 'waiting';
     publish(s);
   }
+  const limitMonitor = createLimitsMonitor(codex);
   const unsubscribe = codex.subscribe(observe);
   async function execute(r: Command): Promise<any> {
-    if (r.action === 'status') return { ...codex.status(), ready: codex.status().connection === 'connected' && codex.status().authorization === 'ready' };
+    if (r.action === 'status') return { ...codex.status(), ready: codex.status().connection === 'connected' && codex.status().authorization === 'ready', limits: limitMonitor.snapshot() };
     if (r.action === 'projects') return { generation: current(), projects: config.projects.map(p => ({ projectId: p.projectId, name: p.name, available: p.available !== false })) };
     if (codex.status().connection !== 'connected' || codex.status().authorization !== 'ready') fail('UPSTREAM_UNAVAILABLE', r.operationId ? 'not-sent' : 'query');
     if (r.action === 'models') return catalog();
@@ -310,7 +313,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     operations.set(r.operationId, { hash, result });
     return result;
   }
-  return { request, close: unsubscribe };
+  return { request, close() { unsubscribe(); limitMonitor.close(); } };
 }
 /** Хеширует полную команду; ledger сохраняет digest и результат, без raw media. */
 function commandHash(command: Command): string {

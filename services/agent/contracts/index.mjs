@@ -30,6 +30,21 @@ export function validateCommand(value) {
   if (['start', 'steer'].includes(value.action) && !value.text?.trim() && !value.images?.length) return false;
   return bytes(value) <= limits.input;
 }
+/** Проверяет закрытую проекцию лимита для Status и клиентов границы agent. */
+export function validateLimits(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['state', 'revision', 'observedAt', 'windows'].includes(key))) return false;
+  if (!['loading', 'ready', 'stale', 'unavailable'].includes(value.state) || !Number.isSafeInteger(value.revision) || value.revision < 0) return false;
+  if (!(value.observedAt === null || Number.isSafeInteger(value.observedAt) && value.observedAt >= 0) || !Array.isArray(value.windows) || value.windows.length > 2) return false;
+  const slots = new Set();
+  return value.windows.every(window => {
+    if (!window || typeof window !== 'object' || Array.isArray(window) || Object.keys(window).some(key => !['slot', 'remainingPercent', 'windowDurationMins', 'resetsAt'].includes(key))) return false;
+    if (!['primary', 'secondary'].includes(window.slot) || slots.has(window.slot)) return false;
+    slots.add(window.slot);
+    return Number.isInteger(window.remainingPercent) && window.remainingPercent >= 0 && window.remainingPercent <= 100
+      && (window.windowDurationMins === null || Number.isSafeInteger(window.windowDurationMins) && window.windowDurationMins >= 0)
+      && (window.resetsAt === null || Number.isSafeInteger(window.resetsAt) && window.resetsAt >= 0);
+  });
+}
 /** Проверяет внешнюю оболочку; EventSchema проверяется на AG-UI границе отдельно. */
 export function validateEnvelope(value) {
   const snapshot = value?.event?.snapshot;

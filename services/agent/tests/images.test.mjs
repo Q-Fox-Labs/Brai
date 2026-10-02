@@ -29,6 +29,7 @@ function fixture() {
     status: () => ({ generation: 'g', connection: 'connected', authorization: 'ready' }),
     subscribe: fn => { observer = fn; return () => {}; },
     call: async (method, params) => {
+      if (method === 'account/rateLimits/read') return { rateLimits: null };
       calls.push({ method, params });
       await hook?.(method, params);
       if (method === 'model/list') return { data: models };

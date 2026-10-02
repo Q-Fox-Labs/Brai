@@ -79,6 +79,36 @@
       "x-wire": "read-only request/response; use refreshToken=false; does not perform login, refresh, logout, or token read"
     },
     {
+      "name": "account/rateLimits/read",
+      "params": [
+        {
+          "name": "excludeResetCreditDetails",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/GetAccountRateLimitsParams/properties/excludeResetCreditDetails"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/GetAccountRateLimitsResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32600,
+          "message": "Invalid Request or upstream-specific rejected request"
+        }
+      ],
+      "description": "Read usage windows. The agent sends excludeResetCreditDetails=true and never opts into supportsLunaReserve. The response may contain account, credit, and plan fields; the public agent exposes only the codex primary/secondary remaining percentages, duration, and reset timestamp.",
+      "paramStructure": "by-name",
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/NullableGetAccountRateLimitsParams"
+      },
+      "x-wire": "read-only request/response; no account, plan, credit, or upsell data is exposed by the agent"
+    },
+    {
       "name": "thread/start",
       "params": [
         {
@@ -1102,7 +1132,7 @@
           "schema": {
             "description": "Optional page size; defaults to a reasonable server-side value.",
             "format": "uint32",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": [
               "integer",
               "null"
@@ -1340,6 +1370,14 @@
       "schema": {
         "$ref": "schema.json#/definitions/AccountUpdatedNotification"
       },
+      "evidence": "schema-only"
+    },
+    {
+      "name": "account/rateLimits/updated",
+      "schema": {
+        "$ref": "schema.json#/definitions/AccountRateLimitsUpdatedNotification"
+      },
+      "description": "Sparse update; the agent discards the partial payload and requests a complete rate-limit snapshot.",
       "evidence": "schema-only"
     },
     {
