@@ -91,7 +91,16 @@ button:focus-visible { outline: 3px solid #2563eb; outline-offset: 5px; }
 .agent-send { padding: 8px 13px; border-radius: 9px; background: #e5e5eb; color: #27282b; font-size: 12px; font-weight: 600; }
 .agent-stop { padding: 8px 10px; border: 1px solid #706169; border-radius: 8px; color: #edc3c3; font-size: 12px; }
 .agent-feedback { min-height: 18px; max-width: 808px; margin: 7px auto 0; color: #c4b6de; font-size: 12px; line-height: 1.5; }
-.agent-request { margin: 22px 0; background: #2c2e34; border-color: #575062; font-size: 14px; }
+.agent-request { margin: 22px 0; padding: 22px; border: 1px solid #45464b; border-radius: 20px; background: #303136; font-size: 14px; }
+.agent-request fieldset { min-width: 0; }
+.agent-request legend { color: var(--agent-muted); font-size: 13px; }
+.agent-request-question { margin: 16px 0 20px; font-size: 16px; line-height: 1.6; }
+.agent-request-details, .agent-request-options { margin: 14px 0; color: var(--agent-muted); }
+.agent-request summary { cursor: pointer; }
+.agent-request-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
+.agent-request .agent-request-actions button { margin-top: 0; padding: 9px 16px; border: 1px solid #515258; border-radius: 999px; font-size: 14px; text-align: left; }
+.agent-request-actions .agent-approval-accept { order: 1; background: #f4f4f6; color: #27282b; border-color: #f4f4f6; }
+.agent-request-options .agent-request-actions { margin-top: 12px; justify-content: flex-start; }
 .agent-request pre { margin: 12px 0; color: var(--agent-muted); font-size: 12px; }
 .agent-request select, .agent-request input { max-width: 100%; margin: 10px 0; padding: 8px; border: 1px solid #575b64; border-radius: 7px; background: #22252a; }
 .agent-request button { margin-top: 12px; }
