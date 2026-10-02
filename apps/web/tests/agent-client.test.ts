@@ -45,6 +45,7 @@ test("A→B→A keeps one stream, immediate SDK state and background text withou
     assert.equal(f.calls.length, 0);
     f.sources[0].send("ready", { generation: "gen" }); await tick();
     assert.equal(f.client.current("brai", "A")!.seq, 0);
+    f.sources[0].send("agent", envelope(base("A")));
     stop(); stop = f.client.watch("brai", "B", value => { shown = value; }); await tick();
     const next = { ...base("A", 1), items: [{ ...base("A").items[0], text: "Фоновое сообщение" }] };
     f.sources[0].send("agent", encodeFrame(envelope(next), base("A"))); await tick();
@@ -66,6 +67,7 @@ test("480 KB history does not delay a burst of intermediate text or replay obsol
     const updates: number[] = [];
     f.client.watch("brai", "A", value => { if (value) updates.push(value.seq); });
     f.sources[0].send("ready", { generation: "gen" }); await tick();
+    f.sources[0].send("agent", envelope(initial));
     const started = performance.now(); let previous = initial;
     for (let seq = 1; seq <= 80; seq++) {
       const current = { ...initial, seq, items: initial.items.map((item, i) => i === 119 ? { ...item, text: "Проверяю передачу событий. ".repeat(seq) } : item) };
@@ -81,7 +83,7 @@ test("480 KB history does not delay a burst of intermediate text or replay obsol
   } finally { f.client.dispose(); }
 });
 
-test("real gaps block stale state; ready refreshes once, seq rollback is ignored, missing patch base reloads", async () => {
+test("real gaps block stale state; ready refreshes once, seq rollback is ignored", async () => {
   const f = fixture();
   try {
     f.client.watch("brai", "A", () => {}); f.sources[0].send("ready", { generation: "gen" }); await tick();
@@ -91,10 +93,7 @@ test("real gaps block stale state; ready refreshes once, seq rollback is ignored
     assert.equal(f.client.current("brai", "A")!.seq, 10);
     f.sources[0].send("agent", envelope(base("A", 3))); await tick();
     assert.equal(f.client.current("brai", "A")!.seq, 10);
-    f.snapshots.set("A", base("A", 12));
-    f.sources[0].send("agent", encodeFrame(envelope(base("A", 12)), base("A", 11))); await tick();
-    assert.equal(f.client.current("brai", "A")!.seq, 12);
-    assert.equal(f.calls.length, 3); assert.equal(f.sources.length, 1);
+    assert.equal(f.calls.length, 2); assert.equal(f.sources.length, 1);
   } finally { f.client.dispose(); }
 });
 
@@ -105,4 +104,19 @@ test("delta validation refuses missing base and prototype changes; reconstructio
   assert.throws(() => decodeFrame(frame), /STREAM_BASE_MISMATCH/);
   assert.throws(() => decodeFrame({ ...frame, event: { type: "STATE_DELTA", delta: [{ op: "add", path: "/__proto__/polluted", value: true }] }, baseSeq: 0 }, previous));
   assert.equal(({} as { polluted?: boolean }).polluted, undefined);
+});
+
+
+test("an unopened chat keeps its wire base even when GETopen is ahead of the latest sent frame", async () => {
+  const f = fixture();
+  try {
+    const stop = f.client.watch("brai", "A", () => {});
+    f.sources[0].send("ready", { generation: "gen" }); await tick();
+    f.sources[0].send("agent", envelope(base("B", 10)));
+    f.snapshots.set("B", base("B", 15));
+    stop(); f.client.watch("brai", "B", () => {}); await tick();
+    f.sources[0].send("agent", encodeFrame(envelope(base("B", 20)), base("B", 10))); await tick();
+    assert.equal(f.client.current("brai", "B")!.seq, 20);
+    assert.equal(f.calls.length, 2); assert.equal(f.sources.length, 1);
+  } finally { f.client.dispose(); }
 });

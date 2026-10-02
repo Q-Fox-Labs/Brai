@@ -48,8 +48,9 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
       throw new AgentError("UNAVAILABLE", reading ? "query" : "unknown");
     }
   }
-  type LiveChat = { projectId: string; threadId: string; snapshot: NativeSnapshot | null; raw: NativeSnapshot | null; confirmed: string; reading: boolean; accept: (snapshot: NativeSnapshot, authoritative?: boolean) => void; close: () => void };
+  type LiveChat = { projectId: string; threadId: string; snapshot: NativeSnapshot | null; confirmed: string; reading: boolean; accept: (snapshot: NativeSnapshot, authoritative?: boolean) => void; close: () => void };
   const chats = new Map<string, LiveChat>();
+  const bases = new Map<string, NativeSnapshot>();
   let source: EventSource | undefined, connected = false, generation = "", version = 0, disposed = false;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let selected: { key: string; update: (snapshot: NativeSnapshot | null) => void } | undefined;
@@ -74,7 +75,7 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
     let latest: NativeSnapshot | null = null, closed = false;
     let stopPipe = () => {}, push = () => {};
     let pipeRetry: ReturnType<typeof setTimeout> | undefined;
-    const chat: LiveChat = { projectId, threadId, snapshot: null, raw: null, confirmed: "", reading: false,
+    const chat: LiveChat = { projectId, threadId, snapshot: null, confirmed: "", reading: false,
       accept(value, authoritative = false) {
         if (closed) return;
         if (authoritative) {
@@ -84,7 +85,7 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
           if (identity(latest) === identity(value) && value.seq <= latest.seq) return;
           if (identity(latest) !== identity(value)) chat.confirmed = "";
         }
-        latest = chat.raw = value; push();
+        latest = value; push();
         if (selected?.key === key && !chat.confirmed) { notify(); void load(chat); }
       },
       close() { closed = true; clearTimeout(pipeRetry); stopPipe(); },
@@ -133,7 +134,7 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
       try {
         const value = JSON.parse((raw as MessageEvent).data);
         if (typeof value.generation !== "string" || !value.generation || value.generation.length > 128) throw new Error("BAD_READY");
-        generation = value.generation; connected = true; version++;
+        generation = value.generation; connected = true; version++; bases.clear();
         for (const entry of chats.values()) entry.confirmed = "";
         const chat = selected && chats.get(selected.key);
         if (chat) void load(chat);
@@ -144,14 +145,13 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
       try {
         const frame = JSON.parse((raw as MessageEvent).data) as StreamFrame;
         if (frame.generation !== generation) throw new Error("BAD_EVENT");
-        const chat = chats.get(`${frame.projectId}:${frame.threadId}`), old = chat?.raw;
-        if (!chat || (old && old.generation === frame.generation && old.epoch === frame.epoch && frame.seq <= old.seq)) return;
-        try { chat.accept(decodeFrame(frame, old)); }
-        catch (error) {
-          if (!(error instanceof Error) || error.message !== "STREAM_BASE_MISMATCH") throw error;
-          chat.confirmed = "";
-          if (selected?.key === `${chat.projectId}:${chat.threadId}`) { notify(); void load(chat); }
-        }
+        const key = `${frame.projectId}:${frame.threadId}`, old = bases.get(key);
+        if (old && old.generation === frame.generation && old.epoch === frame.epoch && frame.seq <= old.seq) return;
+        // AIDEV-NOTE: База wire живёт и до выбора чата; GETopen может быть новее отправленного SSE.
+        const snapshot = decodeFrame(frame, old);
+        bases.delete(key); bases.set(key, snapshot);
+        if (bases.size > limits.threads) bases.delete(bases.keys().next().value!);
+        chats.get(key)?.accept(snapshot);
       } catch { reconnect(); }
     });
     next.addEventListener("resync", () => { if (source === next && !disposed) reset(); });
@@ -167,5 +167,5 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
     notify(); connectStream(); void load(chat);
     return () => { if (selected === listener) selected = undefined; };
   }
-  return { request, watch, current, dispose() { disposed = true; selected = undefined; abort.abort(); source?.close(); clearTimeout(retry); for (const chat of chats.values()) chat.close(); chats.clear(); } };
+  return { request, watch, current, dispose() { disposed = true; selected = undefined; abort.abort(); source?.close(); clearTimeout(retry); for (const chat of chats.values()) chat.close(); chats.clear(); bases.clear(); } };
 }
