@@ -59,7 +59,10 @@
     "v2/ModelListResponse.json": "bfbb3ee9f6e203e0b767587c17de94b9cb42f712d0d8168afbbbc3fcb4492f30",
     "v2/NullableGetAccountRateLimitsParams.json": "072f813ca1c696831a7f2fbd934feaa8cad228a6b3d44a4be8877547c796341b",
     "v2/GetAccountRateLimitsResponse.json": "cb9655e68130116f634ed9353e45b336492e6069a6628f424d1cd52e54eda0e0",
-    "v2/AccountRateLimitsUpdatedNotification.json": "37326ef0364007be0c8f92bf5cd228941b513f87266edd566d694409b5aa5b8b"
+    "v2/AccountRateLimitsUpdatedNotification.json": "37326ef0364007be0c8f92bf5cd228941b513f87266edd566d694409b5aa5b8b",
+    "v2/ThreadSetNameParams.json": "8e334c816bbaeb80f807aca61bf659246f3f60c245c21b5cb7e3ca4ee3ce4820",
+    "v2/ThreadSetNameResponse.json": "f8763716433feea94f7c1ebd59b6cea4c261432e83240c13a8d49ba8185aa567",
+    "v2/ThreadNameUpdatedNotification.json": "06d5e6b0e1eaf03eb88891af58eff14368a76e300a40a9bed71bacce2093b960"
   },
   "rootTypes": [
     "InitializeParams",
@@ -115,9 +118,12 @@
     "GetAccountRateLimitsParams",
     "NullableGetAccountRateLimitsParams",
     "GetAccountRateLimitsResponse",
-    "AccountRateLimitsUpdatedNotification"
+    "AccountRateLimitsUpdatedNotification",
+    "ThreadSetNameParams",
+    "ThreadSetNameResponse",
+    "ThreadNameUpdatedNotification"
   ],
-  "definitionCount": 204,
+  "definitionCount": 207,
   "versionCompatibility": [
     {
       "version": "0.159.3",
@@ -163,5 +169,19 @@
       "sourceFilesSha256": "996a4e380d8ddc47738f3796c3bf6362ae6af41d4cecdaba842b2af22e39566a",
       "note": "Compared each previously recorded v0.159.2 source-file SHA-256 against the daemon v0.160.0 generated bundle; the existing contract roots remain unchanged."
     }
+  },
+  "semanticTitleExtension": {
+    "sourceVersion": "0.157.1",
+    "sourceFiles": {
+      "v2/ThreadSetNameParams.json": "8e334c816bbaeb80f807aca61bf659246f3f60c245c21b5cb7e3ca4ee3ce4820",
+      "v2/ThreadSetNameResponse.json": "f8763716433feea94f7c1ebd59b6cea4c261432e83240c13a8d49ba8185aa567",
+      "v2/ThreadNameUpdatedNotification.json": "06d5e6b0e1eaf03eb88891af58eff14368a76e300a40a9bed71bacce2093b960"
+    },
+    "rootTypes": [
+      "ThreadSetNameParams",
+      "ThreadSetNameResponse",
+      "ThreadNameUpdatedNotification"
+    ],
+    "liveConfirmed": true
   }
 }

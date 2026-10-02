@@ -8351,6 +8351,44 @@
         }
       },
       "type": "object"
+    },
+    "ThreadSetNameParams": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "threadId"
+      ],
+      "title": "ThreadSetNameParams",
+      "type": "object"
+    },
+    "ThreadSetNameResponse": {
+      "title": "ThreadSetNameResponse",
+      "type": "object"
+    },
+    "ThreadNameUpdatedNotification": {
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "threadName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "ThreadNameUpdatedNotification",
+      "type": "object"
     }
   }
 }

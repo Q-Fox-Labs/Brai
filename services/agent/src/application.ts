@@ -5,9 +5,10 @@ import { bytes, limits, validateCommand } from '../contracts/index.mjs';
 import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, ModelCatalog, DisplayItem } from '../contracts/index.mjs';
 import type { CodexPort, Observation } from './codex.js';
 import { createLimitsMonitor } from './limits.js';
+import { nameThread } from './title.js';
 import { display, metadata, text, compact, summary } from './display.js';
 export type Config = { codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
-type Session = { view: NativeSnapshot; opened: boolean; fresh: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
+type Session = { view: NativeSnapshot; opened: boolean; fresh: boolean; titleNeeded: boolean; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
 /** Собирает команды и единственного владельца live items/pending. */
 export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void) {
   const sessions = new Map<string, Session>();
@@ -84,7 +85,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     await previous;
     try {
     if (sessions.size >= limits.threads) {
-      const victim = [...sessions.values()].find(s => s.view.turn?.status !== 'inProgress' && !s.view.requests.length);
+      const victim = [...sessions.values()].find(s => s.view.turn?.status !== 'inProgress' && !s.view.requests.length && !s.naming);
       if (!victim) fail('CAPACITY_EXHAUSTED');
       victim.closing = true;
       let response: any;
@@ -96,7 +97,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       sessions.delete(victim.view.threadId);
     }
     const view: NativeSnapshot = { projectId, threadId: thread.id, generation: current(), epoch: randomUUID(), seq: 0, thread: { ...metadata(thread), lastMessageAt: messageTimes.get(thread.id)?.lastMessageAt ?? 0 }, turn: null, state: 'idle', items: [], requests: [], truncated: false };
-    const s: Session = { view, opened: fresh, fresh, raw: new Map(), revisions: new Map(), details: new Map() };
+    const s: Session = { view, opened: fresh, fresh, titleNeeded: fresh && !thread.name, raw: new Map(), revisions: new Map(), details: new Map() };
     sessions.set(thread.id, s);
     return s;
     } finally { release(); }
@@ -165,6 +166,9 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       const id = `${typeof p.requestId}:${p.requestId}`;
       s.view.requests = s.view.requests.filter(f => f.requestId !== id);
       s.raw.delete(id);
+    } else if (e.method === 'thread/name/updated') {
+      s.view.thread.title = text(p.threadName ?? '', 512);
+      s.titleNeeded = false;
     } else if (e.method === 'turn/started' || e.method === 'turn/completed') {
       s.view.turn = { id: p.turn.id, status: p.turn.status };
       s.view.state = p.turn.status;
@@ -298,6 +302,12 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       s.fresh = false;
     }
     if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
+    if (r.action === 'start' && !previousTurn && s.titleNeeded && (!config.allowedModels || config.allowedModels.includes('gpt-6-luna'))) {
+      s.titleNeeded = false; s.naming = true;
+      void nameThread(codex, r.threadId!, r.text?.trim() || 'Проанализировать присланные изображения').catch(() => {
+        console.error('agent: TITLE_GENERATION_FAILED');
+      }).finally(() => { s.naming = false; });
+    }
     return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: r.threadId, turnId, ...(r.requestId ? { requestId: r.requestId } : {}) };
   }
   /** Повтор того же operation ID возвращает исходный результат без native вызова. */

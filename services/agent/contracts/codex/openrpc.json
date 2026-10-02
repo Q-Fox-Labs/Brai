@@ -1149,6 +1149,37 @@
           "$ref": "schema.json#/definitions/ModelListResponse"
         }
       }
+    },
+    {
+      "name": "thread/name/set",
+      "summary": "Сохраняет смысловое название в штатной metadata Codex.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSetNameParams/properties/name"
+          }
+        },
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSetNameParams/properties/threadId"
+          }
+        }
+      ],
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ThreadSetNameParams"
+      },
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ThreadSetNameResponse"
+        }
+      },
+      "x-wire": "mutation; updates the native name and emits thread/name/updated; timeout/disconnection leaves outcome unknown; no automatic retry"
     }
   ],
   "components": {
@@ -1386,6 +1417,12 @@
         "$ref": "schema.json#/definitions/ErrorNotification"
       },
       "evidence": "schema-only"
+    },
+    {
+      "name": "thread/name/updated",
+      "schema": {
+        "$ref": "schema.json#/definitions/ThreadNameUpdatedNotification"
+      }
     }
   ],
   "x-serverRequests": [
