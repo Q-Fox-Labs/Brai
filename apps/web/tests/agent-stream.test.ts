@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { encodeFrame, decodeFrame } from "../lib/agent/stream.ts";
 import type { NativeSnapshot } from "@brai/agent/contracts";
+import type { AgentLimits } from "@brai/agent/contracts";
 
 const root = process.env.BRAI_STREAM_TEST_ROOT ?? resolve(import.meta.dirname, "../../..");
 const filename = process.env.BRAI_STREAM_TEST_SOURCE ?? resolve(root, "apps/web/server/agent-http.ts");
@@ -24,6 +25,7 @@ const session = { user: { id: "user-fixture", email: "sse@example.test" }, sessi
 function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = false) {
   let callback: (error: Error | null, message: { data: Uint8Array }) => void;
   let stopped = false, statusFailures = 0, ready = true, allowed = true;
+  let accountLimits: AgentLimits = { state: "ready", revision: 1, observedAt: 1, windows: [{ slot: "primary", remainingPercent: 70, windowDurationMins: 10080, resetsAt: null }] };
   let releaseOpen: (value: NativeSnapshot) => void = () => {};
   const intervals = new Map<number, () => Promise<void>>();
   const commands: { action: string; itemIds?: string[] }[] = [];
@@ -37,7 +39,7 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = f
       const command = JSON.parse(Buffer.from(payload).toString()) as { action: string; itemIds?: string[] };
       commands.push(command);
       if (command.action === "status" && statusFailures > 0) { statusFailures--; throw new Error("temporary"); }
-      const result = command.action === "projects" ? { generation: initial.generation, projects: [{ projectId: "brai", available: true }, { projectId: "admin", available: true }, { projectId: "hidden", available: false }] } : command.action === "status" ? { generation: initial.generation, ready } : holdOpen ? await new Promise<NativeSnapshot>(resolve => { releaseOpen = resolve; }) : initial;
+      const result = command.action === "projects" ? { generation: initial.generation, projects: [{ projectId: "brai", available: true }, { projectId: "admin", available: true }, { projectId: "hidden", available: false }] } : command.action === "status" ? { generation: initial.generation, ready, limits: accountLimits } : holdOpen ? await new Promise<NativeSnapshot>(resolve => { releaseOpen = resolve; }) : initial;
       return { data: Buffer.from(JSON.stringify(result)), headers: { get: () => undefined } };
     },
   };
@@ -67,20 +69,33 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = f
     failStatus(times: number) { statusFailures = times; },
     unavailable() { ready = false; },
     revoke() { allowed = false; },
+    setLimits(value: AgentLimits) { accountLimits = value; },
     async tick() { for (const fn of intervals.values()) await fn(); },
     get stopped() { return stopped; },
     close() { abort.abort(); if (originalAllowlist === undefined) delete process.env.BRAI_AGENT_ALLOWED_EMAILS; else process.env.BRAI_AGENT_ALLOWED_EMAILS = originalAllowlist; },
   };
 }
 
-async function next(reader: ReadableStreamDefaultReader<Uint8Array>) {
+async function next(reader: ReadableStreamDefaultReader<Uint8Array>, skipLimits = true) {
+  for (;;) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const value = await Promise.race([reader.read(), new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("SSE delivery timeout")), 1000); })]);
     assert.equal(value.done, false);
     const frame = new TextDecoder().decode(value.value);
-    return { type: frame.split("\n")[0], data: JSON.parse(frame.split("\ndata: ")[1]) as ReturnType<typeof encodeFrame> };
+    const result = { type: frame.split("\n")[0], data: JSON.parse(frame.split("\ndata: ")[1]) as ReturnType<typeof encodeFrame> };
+    if (skipLimits && result.type === "event: limits") continue;
+    return result;
   } finally { clearTimeout(timer); }
+  }
+}
+
+async function nextLimits(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  for (let count = 0; count < 8; count++) {
+    const frame = await next(reader, false);
+    if (frame.type === "event: limits") return frame.data as unknown as { generation: string; limits: AgentLimits };
+  }
+  throw new Error("limits SSE frame missing");
 }
 
 function large(seq: number): NativeSnapshot {
@@ -185,6 +200,48 @@ test("one account stream filters unavailable projects and transmits compact stan
     assert.equal((await next(reader)).data.projectId, "admin");
     f.push({ ...base, generation: "generation-2", seq: 2 });
     assert.equal(f.stopped, true);
+  } finally { f.close(); }
+});
+
+test("account stream sends initial and changed limits and coalesces a slow consumer to the latest frame", async () => {
+  const f = fixture(large(0), false, true);
+  try {
+    const reader = (await f.response).body!.getReader();
+    assert.equal((await next(reader)).type, "event: ready");
+    const initial = await nextLimits(reader);
+    assert.equal(initial.generation, "generation-1");
+    assert.equal(initial.limits.windows[0].remainingPercent, 70);
+    for (const revision of [2, 3, 4]) {
+      f.setLimits({ state: "ready", revision, observedAt: revision, windows: [{ slot: "primary", remainingPercent: 100 - revision, windowDurationMins: 10080, resetsAt: null }] });
+      await f.tick();
+      await wait(60);
+    }
+    const latest = await nextLimits(reader);
+    assert.equal(latest.limits.revision, 4);
+    assert.equal(latest.limits.windows[0].remainingPercent, 96);
+    assert.equal(f.stopped, false);
+  } finally { f.close(); }
+});
+
+test("invalid or unavailable limit status becomes local unavailable/stale state without closing chat SSE", async () => {
+  const f = fixture(large(0), false, true);
+  try {
+    const reader = (await f.response).body!.getReader();
+    await next(reader);
+    await nextLimits(reader);
+    f.setLimits({ state: "ready", revision: 9, observedAt: 9, windows: [{ slot: "primary", remainingPercent: 101, windowDurationMins: null, resetsAt: null }] } as unknown as AgentLimits);
+    await f.tick();
+    const invalid = await nextLimits(reader);
+    assert.equal(invalid.limits.state, "unavailable");
+    f.setLimits({ state: "ready", revision: 10, observedAt: 10, windows: [{ slot: "primary", remainingPercent: 50, windowDurationMins: null, resetsAt: null }] });
+    await f.tick();
+    assert.equal((await nextLimits(reader)).limits.state, "ready");
+    f.failStatus(1);
+    await f.tick();
+    const failed = await nextLimits(reader);
+    assert.equal(failed.limits.state, "stale");
+    assert.equal(failed.limits.windows[0].remainingPercent, 50);
+    assert.equal(f.stopped, false);
   } finally { f.close(); }
 });
 

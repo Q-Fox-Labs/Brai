@@ -156,6 +156,36 @@ test("authoritative reopen updates metadata even if the passive SDK previously h
   } finally { f.client.dispose(); }
 });
 
+test("account limits stay separate, ignore older frames, accept equal revision after reconnect, and clear on generation change", async () => {
+  const f = fixture();
+  const changes: { state: string; revision: number; windows: { remainingPercent: number }[] }[] = [];
+  try {
+    f.client.subscribeLimits(value => changes.push(value));
+    assert.equal(changes.at(-1)?.state, "loading");
+    f.sources[0].send("ready", { generation: "gen" }); await tick();
+    const value = (revision: number, remainingPercent: number) => ({ state: "ready", revision, observedAt: 1, windows: [{ slot: "primary", remainingPercent, windowDurationMins: 10080, resetsAt: null }] });
+    f.sources[0].send("limits", { generation: "gen", limits: value(5, 40) });
+    assert.equal(changes.at(-1)?.windows[0].remainingPercent, 40);
+    f.sources[0].onerror!();
+    assert.equal(changes.at(-1)?.state, "stale");
+    f.sources[0].send("ready", { generation: "gen" }); await tick();
+    f.sources[0].send("limits", { generation: "gen", limits: value(4, 90) });
+    assert.equal(changes.at(-1)?.windows[0].remainingPercent, 40);
+    f.sources[0].send("limits", { generation: "gen", limits: value(5, 35) });
+    assert.equal(changes.at(-1)?.windows[0].remainingPercent, 35);
+    f.sources[0].send("ready", { generation: "next-gen" }); await tick();
+    assert.equal(changes.at(-1)?.state, "loading");
+    f.sources[0].send("limits", { generation: "gen", limits: value(99, 10) });
+    assert.equal(changes.at(-1)?.state, "loading");
+    f.sources[0].send("limits", { generation: "next-gen", limits: value(0, 100) });
+    assert.equal(changes.at(-1)?.windows[0].remainingPercent, 100);
+    const beforeDispose = changes.length;
+    f.client.dispose();
+    f.sources[0].send("limits", { generation: "next-gen", limits: value(1, 0) });
+    assert.equal(changes.length, beforeDispose);
+  } finally { f.client.dispose(); }
+});
+
 test("lazy read actions encode itemIds as JSON rather than comma-separated query text", async () => {
   const f = fixture();
   try {

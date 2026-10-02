@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createLazyReads } from "../lib/agent/lazy.ts";
+import { formatLimitReset } from "../lib/agent/limits.ts";
 import { composerAction, groupTimeline } from "../app/agent/timeline.ts";
 import type { Command, DisplayItem } from "@brai/agent/contracts";
 const context = { generation: "gen", epoch: "epoch", projectId: "project", threadId: "chat" };
@@ -81,7 +82,7 @@ function component(name: string) {
   const source = readFileSync(new URL(`../app/agent/${name}.tsx`, import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const module = { exports: {} as { default: ComponentType<Record<string, unknown>> } };
-  new Function("require", "module", "exports", compiled)(require, module, module.exports);
+  new Function("require", "module", "exports", compiled)((name: string) => name === "../../lib/agent/limits" ? { formatLimitReset } : require(name), module, module.exports);
   return module.exports.default;
 }
 
@@ -100,12 +101,46 @@ test("sidebar keeps selection, sorts by messages with stable ties and shows an a
   const html = renderToStaticMarkup(createElement(component("sidebar"), {
     projects: [{ projectId: "project", name: "Project", available: true }],
     pages: { project: { data: [{ ...thread, id: "tool-latest", lastMessageAt: 1 }, { ...thread, id: "selected", lastMessageAt: 20, active: true }, { ...thread, id: "tie", lastMessageAt: 20 }], nextCursor: null, loading: false, error: "" } },
-    projectId: "project", threadId: "selected", email: "user@example.test", open: true, busy: false, select: noop, create: noop, more: noop, refresh: noop, close: noop, logout: noop,
+    projectId: "project", threadId: "selected", email: "user@example.test", open: true, busy: false, accountLimits: { state: "unavailable", revision: 0, observedAt: null, windows: [] }, select: noop, create: noop, more: noop, refresh: noop, close: noop, logout: noop,
   }));
   assert.ok(html.indexOf('data-thread-id="selected"') < html.indexOf('data-thread-id="tie"'));
   assert.ok(html.indexOf('data-thread-id="tie"') < html.indexOf('data-thread-id="tool-latest"'));
   assert.match(html, /data-thread-id="selected" class="agent-thread is-selected"/);
   assert.match(html, /role="status" aria-label="Агент работает"/);
+});
+
+test("sidebar renders both account limit windows with accessible remaining values and unknown reset", () => {
+  const noop = () => {};
+  const html = renderToStaticMarkup(createElement(component("sidebar"), {
+    projects: [], pages: {}, projectId: "", threadId: "", email: "user@example.test", open: true, busy: false,
+    accountLimits: { state: "ready", revision: 4, observedAt: 1, windows: [
+      { slot: "primary", remainingPercent: 0, windowDurationMins: 10080, resetsAt: null },
+      { slot: "secondary", remainingPercent: 100, windowDurationMins: 300, resetsAt: null },
+    ] },
+    select: noop, create: noop, more: noop, refresh: noop, close: noop, logout: noop,
+  }));
+  assert.match(html, /Основное · 1 нед\./);
+  assert.match(html, /Дополнительное · 5 ч/);
+  assert.match(html, /aria-valuenow="0"/);
+  assert.match(html, /aria-valuenow="100"/);
+  assert.equal((html.match(/сброс неизвестен/g) ?? []).length, 2);
+});
+
+test("reset formatting uses the local timezone and safely handles missing or invalid timestamps", () => {
+  const timezone = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  try {
+    const reset = formatLimitReset(Date.UTC(2026, 0, 1, 1, 30) / 1000);
+    assert.ok(reset);
+    assert.match(reset.label, /31/);
+    assert.match(reset.label, /17:30/);
+    assert.match(reset.title, /17:30/);
+    assert.equal(formatLimitReset(null), null);
+    assert.equal(formatLimitReset(Number.MAX_SAFE_INTEGER), null);
+  } finally {
+    if (timezone === undefined) delete process.env.TZ;
+    else process.env.TZ = timezone;
+  }
 });
 
 test("three selectors retain accessible names without visible labels", () => {

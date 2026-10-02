@@ -5,14 +5,14 @@ import type { BaseEvent } from "@ag-ui/core";
 import { EventSchema } from "@ag-ui/core/schemas";
 import { Subject, type Observable } from "rxjs";
 import { decodeFrame, type StreamFrame } from "./stream";
-import { bytes, limits, validateCommand, validateEnvelope } from "@brai/agent/contracts";
-import type { Command, NativeSnapshot, DisplayItem, ThreadMetadata, ModelCatalog } from "@brai/agent/contracts";
+import { bytes, limits, validateCommand, validateEnvelope, validateLimits } from "@brai/agent/contracts";
+import type { AgentLimits, Command, NativeSnapshot, DisplayItem, ThreadMetadata, ModelCatalog } from "@brai/agent/contracts";
 type Page<T> = { generation: string; data: T[]; nextCursor: string | null };
 type MutationReply = { generation: string; operationId: string; threadId: string; turnId?: string; requestId?: string; outcome: "accepted" };
 type Replies = Record<"create" | "start" | "steer" | "interrupt" | "answer", MutationReply> & {
   projects: { generation: string; projects: { projectId: string; name: string; available: boolean }[] };
   models: ModelCatalog;
-  status: { generation: string; ready: boolean; connection: string; authorization: string };
+  status: { generation: string; ready: boolean; connection: string; authorization: string; limits?: AgentLimits };
   threads: Page<ThreadMetadata>;
   turns: Page<{ id: string; status: string }>;
   items: Page<DisplayItem>;
@@ -53,6 +53,10 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
   type LiveChat = { projectId: string; threadId: string; snapshot: NativeSnapshot | null; confirmed: string; reading: boolean; accept: (snapshot: NativeSnapshot, authoritative?: boolean) => void; close: () => void };
   const chats = new Map<string, LiveChat>();
   const threadListeners = new Set<(snapshot: NativeSnapshot) => void>();
+  const limitsListeners = new Set<(value: AgentLimits) => void>();
+  const emptyLimits = (): AgentLimits => ({ state: "loading", revision: 0, observedAt: null, windows: [] });
+  let limitsValue = emptyLimits(), limitsGeneration = "", limitsNeedsFresh = true;
+  const notifyLimits = () => { for (const listener of limitsListeners) listener(limitsValue); };
   const notifyThread = (snapshot: NativeSnapshot) => { for (const listener of threadListeners) listener(snapshot); };
   const bases = new Map<string, NativeSnapshot>();
   let source: EventSource | undefined, connected = false, generation = "", version = 0, disposed = false;
@@ -66,6 +70,8 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
   const notify = () => { const chat = selected && chats.get(selected.key); selected?.update(chat ? current(chat.projectId, chat.threadId) : null); };
   function reset() {
     connected = false; version++;
+    limitsValue = limitsValue.windows.length ? { ...limitsValue, state: "stale" } : { ...limitsValue, state: "unavailable" };
+    limitsNeedsFresh = true; notifyLimits();
     for (const chat of chats.values()) chat.confirmed = "";
     notify();
   }
@@ -139,11 +145,35 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
       try {
         const value = JSON.parse((raw as MessageEvent).data);
         if (typeof value.generation !== "string" || !value.generation || value.generation.length > 128) throw new Error("BAD_READY");
+        if (generation && generation !== value.generation) {
+          limitsValue = emptyLimits(); limitsGeneration = value.generation; notifyLimits();
+        }
         generation = value.generation; connected = true; version++; bases.clear();
+        limitsGeneration = generation; limitsNeedsFresh = true;
         for (const entry of chats.values()) entry.confirmed = "";
         const chat = selected && chats.get(selected.key);
         if (chat) void load(chat);
       } catch { reconnect(); }
+    });
+    next.addEventListener("limits", raw => {
+      if (source !== next || disposed || !connected) return;
+      try {
+        const value = JSON.parse((raw as MessageEvent).data);
+        if (value?.generation !== generation) return;
+        if (!validateLimits(value?.limits)) {
+          limitsValue = limitsValue.windows.length ? { ...limitsValue, state: "stale" } : { ...limitsValue, state: "unavailable" };
+          limitsNeedsFresh = true; notifyLimits(); return;
+        }
+        const incoming = value.limits as AgentLimits;
+        if (limitsGeneration !== generation) { limitsValue = emptyLimits(); limitsGeneration = generation; limitsNeedsFresh = true; }
+        if (incoming.revision < limitsValue.revision) return;
+        const reconnectSnapshot = limitsNeedsFresh;
+        if (!reconnectSnapshot && incoming.revision === limitsValue.revision && incoming.state === limitsValue.state) return;
+        limitsValue = incoming; limitsNeedsFresh = false; notifyLimits();
+      } catch {
+        limitsValue = limitsValue.windows.length ? { ...limitsValue, state: "stale" } : { ...limitsValue, state: "unavailable" };
+        limitsNeedsFresh = true; notifyLimits();
+      }
     });
     next.addEventListener("agent", raw => {
       if (source !== next || disposed || !connected) return;
@@ -180,5 +210,10 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
     threadListeners.add(update); connectStream();
     return () => { threadListeners.delete(update); };
   }
-  return { request, watch, current, subscribeThreads, dispose() { disposed = true; selected = undefined; abort.abort(); source?.close(); clearTimeout(retry); for (const chat of chats.values()) chat.close(); chats.clear(); bases.clear(); threadListeners.clear(); } };
+  /** Подписывает интерфейс на проекцию аккаунта через общее SSE, даже без выбранного чата. */
+  function subscribeLimits(update: (value: AgentLimits) => void) {
+    limitsListeners.add(update); update(limitsValue); connectStream();
+    return () => { limitsListeners.delete(update); };
+  }
+  return { request, watch, current, subscribeThreads, subscribeLimits, dispose() { disposed = true; selected = undefined; limitsValue = emptyLimits(); limitsGeneration = ""; limitsNeedsFresh = true; abort.abort(); source?.close(); clearTimeout(retry); for (const chat of chats.values()) chat.close(); chats.clear(); bases.clear(); threadListeners.clear(); limitsListeners.clear(); } };
 }

@@ -2,8 +2,8 @@
 // ABOUTME: Авторизует web сессию; не повторяет мутации и не хранит историю агента.
 import { checkOrigin, requireTimerSession, type Session } from "./auth";
 import { GatewayError, natsConnection } from "./gateway";
-import { bytes, limits, subjects, validateCommand, validateEnvelope } from "@brai/agent/contracts";
-import type { Command, ErrorResponse, EventEnvelope, NativeSnapshot } from "@brai/agent/contracts";
+import { bytes, limits, subjects, validateCommand, validateEnvelope, validateLimits } from "@brai/agent/contracts";
+import type { AgentLimits, Command, ErrorResponse, EventEnvelope, NativeSnapshot } from "@brai/agent/contracts";
 import { encodeFrame } from "../lib/agent/stream";
 const reads = new Set(["projects", "status", "models", "threads", "open", "turns", "items", "activities", "item"]);
 const key = Symbol.for("brai.web.agent-streams.v2");
@@ -55,6 +55,15 @@ async function events(request: Request, session: Session, command?: Command): Pr
       let closed = false, generation = "", readyPending = false, checking = false, missedStatus = 0;
       let allowed = new Set<string>(), delivery: ReturnType<typeof setTimeout> | undefined;
       const buffered = new Map<string, EventEnvelope>(), sent = new Map<string, NativeSnapshot>();
+      let bufferedLimits: { generation: string; limits: AgentLimits } | undefined;
+      let lastLimits: AgentLimits | undefined;
+      const unavailableLimits = (): AgentLimits => ({ state: "unavailable", revision: lastLimits?.revision ?? 0, observedAt: null, windows: [] });
+      const publishLimits = (value: AgentLimits) => {
+        if (closed || !generation || (lastLimits && lastLimits.revision === value.revision && lastLimits.state === value.state)) return;
+        lastLimits = value;
+        bufferedLimits = { generation, limits: value };
+        schedule();
+      };
       const encoder = new TextEncoder();
       const write = (type: string, value: unknown) => {
         if (closed || (controller.desiredSize ?? 0) <= 0) return false;
@@ -69,17 +78,21 @@ async function events(request: Request, session: Session, command?: Command): Pr
         closed = true;
         subscription.unsubscribe(); clearInterval(timer); clearTimeout(delivery);
         request.signal.removeEventListener("abort", abort); streams.delete(close);
-        buffered.clear(); sent.clear();
+        buffered.clear(); bufferedLimits = undefined; sent.clear();
         try { controller.close(); } catch { /* Потребитель уже отменил поток. */ }
       };
       // AIDEV-NOTE: Один кадр HTTP и максимум16 последних снимков; diff строится от отправленной базы.
       const schedule = () => {
-        if (closed || !generation || delivery || (!readyPending && !buffered.size) || (controller.desiredSize ?? 0) <= 0) return;
+        if (closed || !generation || delivery || (!readyPending && !bufferedLimits && !buffered.size) || (controller.desiredSize ?? 0) <= 0) return;
         delivery = setTimeout(() => {
           delivery = undefined;
           try {
             if (readyPending) { if (write("ready", { generation })) readyPending = false; }
-            else {
+            else if (bufferedLimits) {
+              const value = bufferedLimits;
+              if (value.generation === generation && write("limits", value)) bufferedLimits = undefined;
+              else if (value.generation !== generation) bufferedLimits = undefined;
+            } else {
               const entry = buffered.entries().next().value;
               if (entry) {
                 const [key, value] = entry;
@@ -113,19 +126,27 @@ async function events(request: Request, session: Session, command?: Command): Pr
           accept(value);
         } catch { close(); }
       } });
-      const timer = setInterval(async () => {
+      let checkStatus: (heartbeat?: boolean) => Promise<void> = async () => {};
+      const timer = setInterval(() => checkStatus(), 5000);
+      checkStatus = async (heartbeat = true) => {
         if (closed || checking) return;
-        if (generation) write("heartbeat", null);
+        if (heartbeat && generation) write("heartbeat", null);
         checking = true;
+        const checkedGeneration = generation;
         const current = await requireTimerSession(request, true).catch(() => null);
-        const status = !closed && current && permitted(current) && generation ? await rpc<{ generation: string; ready: boolean }>({ action: "status" }).catch(() => null) : null;
+        const status = !closed && current && permitted(current) && checkedGeneration ? await rpc<{ generation: string; ready: boolean; limits?: unknown }>({ action: "status" }).catch(() => null) : null;
         checking = false;
+        if (closed || generation !== checkedGeneration) return;
         if (generation) {
           missedStatus = status ? 0 : missedStatus + 1;
           if ((status && (!status.ready || status.generation !== generation)) || missedStatus >= 3) close();
         }
         if (!current || !permitted(current) || current.session.id !== session.session.id || current.user.id !== session.user.id) close();
-      }, 5000);
+        if (!command && status && status.generation === checkedGeneration && status.ready) {
+          const next = validateLimits(status.limits) ? status.limits : unavailableLimits();
+          publishLimits(next);
+        } else if (!command) publishLimits(lastLimits?.windows.length ? { ...lastLimits, state: "stale" } : unavailableLimits());
+      };
       const abort = () => close(false);
       cleanup = abort; streams.set(close, session.session.id);
       request.signal.addEventListener("abort", abort, { once: true });
@@ -144,6 +165,7 @@ async function events(request: Request, session: Session, command?: Command): Pr
           generation = projects.generation; allowed = new Set(projects.projects.filter(p => p.available).map(p => p.projectId));
           for (const [key, value] of buffered) { if (!allowed.has(value.projectId)) buffered.delete(key); else if (value.generation !== generation) return close(); }
           readyPending = true;
+          void checkStatus(false);
         }
         schedule();
       })().catch(() => close());

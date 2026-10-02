@@ -3,6 +3,7 @@
 // ABOUTME: История и команды используют существующий клиент; раскладка не управляет исполнителем.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DisplayItem, NativeSnapshot, ModelCatalog, PermissionMode, ThreadMetadata } from "@brai/agent/contracts";
+import type { AgentLimits } from "@brai/agent/contracts";
 import { createAgentClient, AgentError } from "../../lib/agent/client";
 import { mergeThreadMetadata } from "../../lib/agent/thread";
 import ModelSettings from "./settings";
@@ -29,6 +30,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const liveMetadata = useRef(new Map<string, Pick<NativeSnapshot, "generation" | "epoch" | "seq" | "thread"> & { observed: number }>());
   const metadataVersion = useRef(0);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [accountLimits, setAccountLimits] = useState<AgentLimits>({ state: "loading", revision: 0, observedAt: null, windows: [] });
   const [pages, setPages] = useState<Record<string, ThreadPage>>({});
   const [projectId, setProjectId] = useState(""), [threadId, setThreadId] = useState("");
   const [snapshot, setSnapshot] = useState<NativeSnapshot | null>(null), [connected, setConnected] = useState(false);
@@ -80,6 +82,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       if (liveMetadata.current.size > 1000) liveMetadata.current.delete(liveMetadata.current.keys().next().value!);
       setPages(pages => updateThreadPage(pages, value.projectId, value.thread));
     });
+    const stopLimits = client.subscribeLimits(setAccountLimits);
     void client.request({ action: "projects" }).then(value => {
       if (!active) return;
       setProjects(value.projects);
@@ -87,7 +90,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       for (const project of value.projects) if (project.available) void loadThreads(project.projectId);
     }).catch(error => { if (active) setMessage(errorText(error)); });
     alive.current = true;
-    return () => { active = false; alive.current = false; ++preparationVersion.current; queue.current = []; cache.current.clear(); composerRef.current = emptyDraft(); requests.clear(); stopMetadata(); liveMetadata.current.clear(); client.dispose(); };
+    return () => { active = false; alive.current = false; ++preparationVersion.current; queue.current = []; cache.current.clear(); composerRef.current = emptyDraft(); requests.clear(); stopMetadata(); stopLimits(); liveMetadata.current.clear(); client.dispose(); };
   }, [client, loadThreads]);
 
   useEffect(() => {
@@ -274,7 +277,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   }, [threadId, history, snapshot, visible]);
 
   return <main className="agent-shell">
-    <Sidebar projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={sidebarOpen} email={email} busy={busy || uncertain.current}
+    <Sidebar projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={sidebarOpen} email={email} busy={busy || uncertain.current} accountLimits={accountLimits}
       select={selectChat} create={id => { void mutate("create", selectedModel ? { model: selectedModel.model, permissionMode } : { permissionMode }, id); }} more={id => { const next = pages[id]?.nextCursor; if (next) void loadThreads(id, next); }}
       refresh={id => { void loadThreads(id); }} close={() => setSidebarOpen(false)} logout={onLogout} />
     <section className="agent-workspace" aria-labelledby="agent-chat-title">
