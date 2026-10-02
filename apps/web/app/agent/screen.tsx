@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DisplayItem, NativeSnapshot, ModelCatalog, PermissionMode, ThreadMetadata } from "@brai/agent/contracts";
 import { createAgentClient, AgentError } from "../../lib/agent/client";
+import { mergeThreadMetadata } from "../../lib/agent/thread";
 import ModelSettings from "./settings";
 import NativeForm from "./request";
 import { createLazyReads } from "../../lib/agent/lazy";
@@ -60,7 +61,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       const value = await client.request({ action: "threads", projectId: id, ...(nextCursor ? { cursor: nextCursor } : {}) });
       if (pageRequests.current.get(id) !== token) return;
       setPages(previous => {
-        const data = [...new Map([...(nextCursor ? previous[id]?.data ?? [] : []), ...value.data.map(thread => { const live = liveMetadata.current.get(`${id}:${thread.id}`); return live && live.generation === value.generation && live.observed > observed ? live.thread : thread; })].map(thread => [thread.id, thread])).values()].slice(0, 1000);
+        const data = [...new Map([...(nextCursor ? previous[id]?.data ?? [] : []), ...value.data.map(thread => { const live = liveMetadata.current.get(`${id}:${thread.id}`); return live && live.generation === value.generation && live.observed > observed ? mergeThreadMetadata(thread, live.thread) : thread; })].map(thread => [thread.id, thread])).values()].slice(0, 1000);
         return { ...previous, [id]: { data, nextCursor: data.length < 1000 ? value.nextCursor : null, loading: false, error: "" } };
       });
     } catch (error) {
@@ -326,6 +327,6 @@ function Item({ item }: { item: DisplayItem }) {
 
 function updateThreadPage(pages: Record<string, ThreadPage>, projectId: string, thread: ThreadMetadata): Record<string, ThreadPage> {
   const page = pages[projectId], found = page?.data.some(value => value.id === thread.id);
-  const data = found ? page.data.map(value => value.id === thread.id ? thread : value) : [thread, ...(page?.data ?? [])].slice(0, 1000);
+  const data = found ? page.data.map(value => value.id === thread.id ? mergeThreadMetadata(value, thread) : value) : [thread, ...(page?.data ?? [])].slice(0, 1000);
   return { ...pages, [projectId]: { data, nextCursor: page?.nextCursor ?? null, loading: page?.loading ?? false, error: page?.error ?? "" } };
 }
