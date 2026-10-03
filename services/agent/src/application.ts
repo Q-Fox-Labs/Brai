@@ -114,20 +114,21 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       const native = await codex.call('thread/read', { threadId: id, includeTurns: false });
       if (native.thread.cwd !== p.cwd) fail('INVALID_ARGUMENT');
       if (!s) s = await admit(p.projectId, native.thread);
-      const cut = s.view.seq;
+      const cut = s.view.seq, previousTurn = s.view.turn;
       const resumed = await codex.call('thread/resume', { threadId: id, cwd: p.cwd, excludeTurns: true }, { mutation: true });
       const turns = await codex.call('thread/turns/list', { threadId: id, limit: 1, itemsView: 'notLoaded', sortDirection: 'desc' });
-      // AIDEV-NOTE: Маленькая native страница ограничивает raw media; наружу идёт только display.
       const items = await codex.call('thread/items/list', { threadId: id, limit: 10, sortDirection: 'desc' });
       if (before !== current()) fail('STALE_GENERATION', 'query');
       s.view.thread = { ...metadata(resumed.thread), lastMessageAt: s.view.thread.lastMessageAt, model: resumed.model, reasoningEffort: resumed.reasoningEffort ?? null };
       const latestMessage = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
       if (latestMessage && s.view.seq === cut) s.view.thread.lastMessageAt = latestMessage.startedAtMs ?? latestMessage.completedAtMs ?? s.view.thread.updatedAt * 1000;
       for (const entry of items.data.slice().reverse()) if ((s.revisions.get(entry.item.id) ?? 0) <= cut) put(s, entry.item, entry.turnId, entry.startedAtMs ?? entry.completedAtMs ?? s.view.thread.updatedAt * 1000, true);
-      if (s.view.seq === cut) {
+      const pageIds = new Set(items.data.map((entry: any) => entry.item.id));
+      s.view.items = [...items.data.slice().reverse().map((entry: any) => s!.view.items.find(item => item.id === entry.item.id)!), ...s.view.items.filter(item => !pageIds.has(item.id) && (s!.revisions.get(item.id) ?? 0) > cut)];
+      if (s.view.turn === previousTurn) {
         const turn = turns.data[0];
         s.view.turn = turn ? { id: turn.id, status: turn.status } : null;
-        s.view.state = turn?.status === 'inProgress' && resumed.thread.status.type !== 'active' ? 'executor-unavailable' : turn?.status ?? 'idle';
+        s.view.state = s.view.requests.some(form => !form.answered) ? 'waiting' : turn?.status === 'inProgress' && resumed.thread.status.type !== 'active' ? 'executor-unavailable' : turn?.status ?? 'idle';
       }
       s.opened = true;
       publish(s);
