@@ -1180,6 +1180,36 @@
         }
       },
       "x-wire": "mutation; updates the native name and emits thread/name/updated; timeout/disconnection leaves outcome unknown; no automatic retry"
+    },
+    {
+      "name": "config/read",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "cwd",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ConfigReadParams/properties/cwd"
+          }
+        },
+        {
+          "name": "includeLayers",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ConfigReadParams/properties/includeLayers"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ConfigReadResponse"
+        }
+      },
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ConfigReadParams"
+      },
+      "x-wire": "read-only; metadata remains private and is used only to disable inherited MCP servers for semantic titles"
     }
   ],
   "components": {

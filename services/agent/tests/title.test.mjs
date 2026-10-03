@@ -18,6 +18,7 @@ function fixture(options = {}) {
     call: async (method, params, flags) => {
       calls.push({ method, params, flags });
       if (method === 'thread/read') return { thread: { name } };
+      if (method === 'config/read') return { config: { mcp_servers: { index: { command: 'private' }, data: { http_headers: { token: 'private' } } } } };
       if (method === 'account/rateLimits/read') return { rateLimits: null };
       if (method === 'thread/start') return { thread: { id: params.ephemeral ? 'temporary' : 'main', name, preview: '', cwd: '/tmp/demo', updatedAt: 1 }, model: 'gpt-6-luna' };
       if (method === 'turn/start') {
@@ -46,6 +47,14 @@ test('one Luna request saves a semantic title and cleans its ephemeral conversat
   assert.equal(f.name(), 'Настроить уведомления');
   const start = f.calls.find(c => c.method === 'thread/start');
   assert.equal(start.params.ephemeral, true); assert.equal(start.params.model, 'gpt-6-luna'); assert.equal(start.params.allowProviderModelFallback, false);
+  assert.equal(start.params.config.model_reasoning_effort, 'low'); assert.equal(start.params.developerInstructions, ''); assert.ok(start.params.baseInstructions.length < 150);
+  assert.deepEqual(start.params.config.mcp_servers, { index: { enabled: false }, data: { enabled: false } });
+  for (const key of ['skills.include_instructions', 'skills.bundled.enabled', 'include_permissions_instructions', 'include_apps_instructions', 'include_collaboration_mode_instructions', 'include_environment_context', 'agents.enabled', 'tools.update_plan.enabled', 'tools.experimental_request_user_input.enabled']) assert.equal(start.params.config[key], false);
+  for (const key of ['apps', 'plugins', 'remote_plugin', 'multi_agent', 'multi_agent_v2', 'shell_tool', 'unified_exec', 'hooks', 'code_mode', 'code_mode_host']) assert.equal(start.params.config[`features.${key}`], false);
+  for (const key of ['dynamicTools', 'selectedCapabilityRoots', 'environments']) assert.deepEqual(start.params[key], []);
+  const turn = f.calls.find(c => c.method === 'turn/start'); assert.equal(turn.params.effort, 'low'); assert.equal(turn.params.model, 'gpt-6-luna');
+  assert.deepEqual(JSON.parse(turn.params.input[0].text), { request: 'Пожалуйста, посмотри проект и настрой уведомления' });
+  const long = fixture(); await nameThread(long.port, 'main', 'x'.repeat(8192)); assert.equal(JSON.parse(long.calls.find(c => c.method === 'turn/start').params.input[0].text).request.length, 2048);
   assert.equal(f.calls.filter(c => c.method === 'turn/start').length, 1);
   assert.equal(f.calls.filter(c => c.method === 'thread/name/set').length, 1);
   assert.equal(f.calls.at(-1).method, 'thread/unsubscribe'); assert.equal(f.listeners.size, 0);

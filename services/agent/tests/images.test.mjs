@@ -194,7 +194,7 @@ test('real local WebSocket validates image commands and restores >2 MiB raw page
     throw error;
   }
   const codex = createCodex({ socketUrl: `ws+unix:${socketPath}:/` });
-  const app = createApplication(codex, { projects: [{ projectId: 'p', name: 'P', cwd: '/tmp/p' }], newThread: { model: 'vision' } }, () => {});
+  const app = createApplication(codex, { projects: [{ projectId: 'p', name: 'P', cwd: '/tmp/p' }], allowedModels: models.map(m => m.model), newThread: { model: 'vision' } }, () => {});
   try {
     await codex.connect();
     const generation = codex.status().generation;
@@ -204,7 +204,7 @@ test('real local WebSocket validates image commands and restores >2 MiB raw page
     const sentStarts = calls.filter(c => c.method === 'turn/start').length;
     await assert.rejects(codex.call('turn/start', { threadId: 't', input: [{ type: 'image', url: bigImage.repeat(3) }] }, { mutation: true }), e => e.code === 'CAPACITY_EXHAUSTED' && e.outcome === 'not-sent');
     assert.equal(calls.filter(c => c.method === 'turn/start').length, sentStarts);
-    const restoring = createApplication(codex, { projects: [{ projectId: 'p', name: 'P', cwd: '/tmp/p' }] }, () => {});
+    const restoring = createApplication(codex, { projects: [{ projectId: 'p', name: 'P', cwd: '/tmp/p' }], allowedModels: models.map(m => m.model) }, () => {});
     try {
       const snapshot = await restoring.request({ action: 'open', projectId: 'p', threadId: 't' });
       const page = await restoring.request({ action: 'items', projectId: 'p', threadId: 't' });

@@ -183,5 +183,17 @@
       "ThreadNameUpdatedNotification"
     ],
     "liveConfirmed": true
+  },
+  "titleContextExtension": {
+    "sourceVersion": "0.160.0",
+    "sourceFiles": {
+      "v2/ConfigReadParams.json": "257c54a423b47c1d209ff1076765a1564d82322fd5161670fd489a2874de1bac",
+      "v2/ConfigReadResponse.json": "4ec77e1a3eed746037149799c3b6bb8fe7b4b593e5930fc9f410e6282de9df50"
+    },
+    "rootTypes": [
+      "ConfigReadParams",
+      "ConfigReadResponse"
+    ],
+    "liveConfirmed": true
   }
 }
