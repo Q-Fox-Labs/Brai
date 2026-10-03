@@ -11,13 +11,8 @@ type Runtime = { now?: () => number; setTimeout?: typeof setTimeout; clearTimeou
 
 /** Управляет одним bounded read-потоком, не влияя на готовность чата. */
 export function createLimitsMonitor(codex: CodexPort, runtime: Runtime = globalThis) {
-  const now = runtime.now ?? Date.now;
-  const schedule = runtime.setTimeout ?? setTimeout;
-  const cancel = runtime.clearTimeout ?? clearTimeout;
-  const repeat = runtime.setInterval ?? setInterval;
-  const stopRepeat = runtime.clearInterval ?? clearInterval;
-  const initial: AgentLimits = { state: 'unavailable', revision: 0, observedAt: null, windows: [] };
-  let value = initial, closed = false, generation = codex.status().generation, accountEpoch = 0;
+  const { now = Date.now, setTimeout: schedule = setTimeout, clearTimeout: cancel = clearTimeout, setInterval: repeat = setInterval, clearInterval: stopRepeat = clearInterval } = runtime;
+  let value: AgentLimits = { state: 'unavailable', revision: 0, observedAt: null, windows: [] }, closed = false, generation = codex.status().generation, accountEpoch = 0;
   let inFlight = false, queued = false, lastStartedAt = Number.NEGATIVE_INFINITY;
   let retryTimer: Timer | undefined, pollTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -57,8 +52,7 @@ export function createLimitsMonitor(codex: CodexPort, runtime: Runtime = globalT
     const requestGeneration = generation, requestAccountEpoch = accountEpoch;
     void codex.call('account/rateLimits/read', { excludeResetCreditDetails: true }).then(result => {
       if (!matches(requestGeneration, requestAccountEpoch)) return;
-      const bucket = codexBucket(result);
-      const windows = projectWindows(bucket);
+      const windows = projectWindows(result);
       update(windows.length ? 'ready' : 'unavailable', now(), windows, true);
     }).catch(() => {
       if (!matches(requestGeneration, requestAccountEpoch)) return;
@@ -91,14 +85,9 @@ export function createLimitsMonitor(codex: CodexPort, runtime: Runtime = globalT
 
   function observe(event: Observation) {
     if (closed) return;
-    if (event.type === 'connection') {
-      if (event.status) resetConnection(event.status);
-      return;
-    }
-    if (event.type !== 'notification') return;
-    if (event.method === 'account/updated') {
-      resetConnection(codex.status());
-    } else if (event.method === 'account/rateLimits/updated') queueRead();
+    if (event.type === 'connection' && event.status) resetConnection(event.status);
+    else if (event.type === 'notification' && event.method === 'account/updated') resetConnection(codex.status());
+    else if (event.type === 'notification' && event.method === 'account/rateLimits/updated') queueRead();
   }
 
   const status = codex.status();
@@ -120,14 +109,9 @@ export function createLimitsMonitor(codex: CodexPort, runtime: Runtime = globalT
   };
 }
 
-function codexBucket(value: any): any | undefined {
-  const buckets = value?.rateLimitsByLimitId;
-  if (buckets !== undefined && buckets !== null) return buckets.codex;
-  const fallback = value?.rateLimits;
-  return fallback && (fallback.limitId == null || fallback.limitId === 'codex') ? fallback : undefined;
-}
-
-function projectWindows(bucket: any): AgentLimits['windows'] {
+function projectWindows(value: any): AgentLimits['windows'] {
+  const buckets = value?.rateLimitsByLimitId, fallback = value?.rateLimits;
+  const bucket = buckets == null ? fallback && (fallback.limitId == null || fallback.limitId === 'codex') ? fallback : undefined : buckets.codex;
   if (!bucket) return [];
   const windows: AgentLimits['windows'] = [];
   for (const slot of ['primary', 'secondary'] as const) {
