@@ -71,6 +71,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid #b3a2ff; outline-offs
 .agent-limit-label { margin-bottom: 3px; }
 .agent-limit-track { height: 4px; overflow: hidden; border-radius: 3px; background: #44474d; }
 .agent-limit-track > span { display: block; height: 100%; border-radius: inherit; background: #8d78ed; }
+.agent-limit-time-track { margin-top: 3px; }
+.agent-limit-time-track > span { background: #23734b; }
 .agent-limit-reset { margin-top: 2px; font-size: 10px; }
 .agent-workspace { min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; }
 .agent-toolbar { min-height: 76px; display: flex; align-items: center; gap: 18px; padding: 14px 28px; border-bottom: 1px solid #303338; }

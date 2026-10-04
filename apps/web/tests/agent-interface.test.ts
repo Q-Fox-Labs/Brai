@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createLazyReads } from "../lib/agent/lazy.ts";
-import { formatLimitReset } from "../lib/agent/limits.ts";
+import { formatLimitReset, limitCountdown } from "../lib/agent/limits.ts";
 import { composerAction, groupTimeline } from "../app/agent/timeline.ts";
 import type { Command, DisplayItem } from "@brai/agent/contracts";
 const context = { generation: "gen", epoch: "epoch", projectId: "project", threadId: "chat" };
@@ -82,7 +82,7 @@ function component(name: string) {
   const source = readFileSync(new URL(`../app/agent/${name}.tsx`, import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const module = { exports: {} as { default: ComponentType<Record<string, unknown>> } };
-  new Function("require", "module", "exports", compiled)((name: string) => name === "../../lib/agent/limits" ? { formatLimitReset } : require(name), module, module.exports);
+  new Function("require", "module", "exports", compiled)((name: string) => name === "../../lib/agent/limits" ? { formatLimitReset, limitCountdown } : require(name), module, module.exports);
   return module.exports.default;
 }
 
@@ -119,11 +119,28 @@ test("sidebar renders both account limit windows with accessible remaining value
     ] },
     select: noop, create: noop, more: noop, refresh: noop, close: noop, logout: noop,
   }));
-  assert.match(html, /Основное · 1 нед\./);
-  assert.match(html, /Дополнительное · 5 ч/);
+  assert.match(html, /Основное/);
+  assert.match(html, /Дополнительное/);
+  assert.doesNotMatch(html, /нед\.|agent-limit-time-track/);
   assert.match(html, /aria-valuenow="0"/);
   assert.match(html, /aria-valuenow="100"/);
   assert.equal((html.match(/сброс неизвестен/g) ?? []).length, 2);
+});
+
+test("countdown shows remaining days and hours and the fraction of the reset window", () => {
+  const now = Date.UTC(2026, 9, 4), hour = 3_600_000;
+  const reset = (remaining: number) => (now + remaining * hour) / 1000;
+  assert.deepEqual(limitCountdown(reset(84), 10080, now), { label: "3 дн. 12 ч", percent: 50 });
+  assert.equal(limitCountdown(reset(26.9), 10080, now)?.label, "1 дн. 2 ч");
+  assert.equal(limitCountdown(reset(23.9), 10080, now)?.label, "23 ч");
+  assert.equal(limitCountdown(reset(0.5), 10080, now)?.label, "0 ч");
+  assert.deepEqual(limitCountdown(reset(-1), 10080, now), { label: "0 ч", percent: 0 });
+  assert.equal(limitCountdown(reset(200), 10080, now)?.percent, 100);
+  assert.equal(limitCountdown(reset(2.5), 300, now)?.percent, 50);
+  assert.deepEqual(limitCountdown(reset(1), null, now), { label: "1 ч", percent: null });
+  assert.equal(limitCountdown(reset(1), 0, now)?.percent, null);
+  assert.equal(limitCountdown(null, 10080, now), null);
+  assert.equal(limitCountdown(Number.MAX_SAFE_INTEGER, 10080, now), null);
 });
 
 test("reset formatting uses the local timezone and safely handles missing or invalid timestamps", () => {

@@ -4,7 +4,7 @@
 import { useEffect, useState } from "react";
 import * as Separator from "@radix-ui/react-separator";
 import type { AgentLimits, ThreadMetadata } from "@brai/agent/contracts";
-import { formatLimitReset } from "../../lib/agent/limits";
+import { formatLimitReset, limitCountdown } from "../../lib/agent/limits";
 
 export type Project = { projectId: string; name: string; available: boolean };
 export type ThreadPage = { data: ThreadMetadata[]; nextCursor: string | null; loading: boolean; error: string };
@@ -52,15 +52,6 @@ export default function Sidebar({ projects, pages, projectId, threadId, open, em
   </aside>;
 }
 
-function durationLabel(minutes: number | null) {
-  if (minutes === null) return "";
-  if (minutes < 60) return `${minutes} мин`;
-  if (minutes < 1440) return minutes % 60 ? `${Math.floor(minutes / 60)} ч ${minutes % 60} мин` : `${minutes / 60} ч`;
-  const days = Math.floor(minutes / 1440), remainder = minutes % 1440;
-  const wholeDays = days % 7 ? `${days} дн.` : `${days / 7} нед.`;
-  return remainder ? `${wholeDays} ${Math.floor(remainder / 60)} ч${remainder % 60 ? ` ${remainder % 60} мин` : ""}` : wholeDays;
-}
-
 function AccountLimits({ value }: { value: AgentLimits }) {
   const stateLabel = value.state === "loading" ? "Загрузка лимитов" : value.state === "unavailable" ? "Лимиты недоступны" : value.state === "stale" ? "Данные устарели" : value.windows.length ? "" : "Нет доступных окон";
   return <section className="agent-limits" aria-label="Лимиты Codex">
@@ -71,14 +62,23 @@ function AccountLimits({ value }: { value: AgentLimits }) {
 
 function LimitWindow({ window, stale }: { window: AgentLimits["windows"][number]; stale: boolean }) {
   const [reset, setReset] = useState<{ label: string; title: string; iso: string; value: number | null } | null>(null);
+  const [now, setNow] = useState<number | null>(null);
+  useEffect(() => {
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
   useEffect(() => { const formatted = formatLimitReset(window.resetsAt); setReset(formatted ? { ...formatted, value: window.resetsAt } : null); }, [window.resetsAt]);
   const slot = window.slot === "primary" ? "Основное" : "Дополнительное";
-  const duration = durationLabel(window.windowDurationMins);
+  const countdown = now === null ? null : limitCountdown(window.resetsAt, window.windowDurationMins, now);
   return <div className="agent-limit-window">
-    <div className="agent-limit-label"><span>{slot}{duration && ` · ${duration}`}</span><span>Осталось {window.remainingPercent}%</span></div>
+    <div className="agent-limit-label"><span>{slot}{countdown && ` · ${countdown.label}`}</span><span>Осталось {window.remainingPercent}%</span></div>
     <div className="agent-limit-track" role="progressbar" aria-label={`${slot} окно Codex, осталось ${window.remainingPercent}%`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={window.remainingPercent}>
       <span style={{ width: `${window.remainingPercent}%` }} />
     </div>
+    {countdown?.percent != null && <div className="agent-limit-track agent-limit-time-track" role="progressbar" aria-label={`${slot} окно Codex, время до сброса`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={countdown.percent} aria-valuetext={countdown.label}>
+      <span style={{ width: `${countdown.percent}%` }} />
+    </div>}
     <div className="agent-limit-reset">{stale && <span>Устарело · </span>}{reset?.value === window.resetsAt ? <time dateTime={reset.iso} title={reset.title}>{reset.label}</time> : <span>сброс неизвестен</span>}</div>
   </div>;
 }
