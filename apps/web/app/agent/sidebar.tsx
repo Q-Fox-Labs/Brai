@@ -72,14 +72,15 @@ function ThreadActions({ title, disabled, archive }: { title: string; disabled: 
 }
 
 function AccountLimits({ value }: { value: AgentLimits }) {
-  const stateLabel = value.state === "loading" ? "Загрузка лимитов" : value.state === "unavailable" ? "Лимиты недоступны" : value.state === "stale" ? "Данные устарели" : value.windows.length ? "" : "Нет доступных окон";
-  return <section className="agent-limits" aria-label="Лимиты Codex">
+  const stateLabel = value.state === "loading" ? "Загрузка лимитов" : value.state === "unavailable" ? "Лимиты недоступны" : value.windows.length ? "" : "Нет доступных окон";
+  // AIDEV-NOTE: Единичный сбой опроса не должен мигать надписями рядом с сохранённой квотой.
+  return <section className="agent-limits" aria-label="Лимиты Codex" title={value.state === "stale" ? "Обновление лимита задерживается. Показаны последние полученные данные." : undefined}>
     <div className="agent-limits-heading"><span>Codex</span>{stateLabel && <span role="status">{stateLabel}</span>}</div>
-    {value.windows.map(window => <LimitWindow key={window.slot} window={window} stale={value.state === "stale"} />)}
+    {value.windows.map(window => <LimitWindow key={window.slot} window={window} />)}
   </section>;
 }
 
-function LimitWindow({ window, stale }: { window: AgentLimits["windows"][number]; stale: boolean }) {
+function LimitWindow({ window }: { window: AgentLimits["windows"][number] }) {
   const [reset, setReset] = useState<{ label: string; title: string; iso: string; value: number | null } | null>(null);
   const [now, setNow] = useState<number | null>(null);
   useEffect(() => {
@@ -98,7 +99,7 @@ function LimitWindow({ window, stale }: { window: AgentLimits["windows"][number]
     {countdown?.percent != null && <div className="agent-limit-track agent-limit-time-track" role="progressbar" aria-label={`${slot} окно Codex, время до сброса`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={countdown.percent} aria-valuetext={countdown.label}>
       <span style={{ width: `${countdown.percent}%` }} />
     </div>}
-    <div className="agent-limit-reset">{stale && <span>Устарело · </span>}{reset?.value === window.resetsAt ? <time dateTime={reset.iso} title={reset.title}>{reset.label}</time> : <span>сброс неизвестен</span>}</div>
+    <div className="agent-limit-reset">{reset?.value === window.resetsAt ? <time dateTime={reset.iso} title={reset.title}>{reset.label}</time> : <span>сброс неизвестен</span>}</div>
   </div>;
 }
 
