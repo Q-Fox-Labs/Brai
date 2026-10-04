@@ -62,7 +62,19 @@
     "v2/AccountRateLimitsUpdatedNotification.json": "37326ef0364007be0c8f92bf5cd228941b513f87266edd566d694409b5aa5b8b",
     "v2/ThreadSetNameParams.json": "8e334c816bbaeb80f807aca61bf659246f3f60c245c21b5cb7e3ca4ee3ce4820",
     "v2/ThreadSetNameResponse.json": "f8763716433feea94f7c1ebd59b6cea4c261432e83240c13a8d49ba8185aa567",
-    "v2/ThreadNameUpdatedNotification.json": "06d5e6b0e1eaf03eb88891af58eff14368a76e300a40a9bed71bacce2093b960"
+    "v2/ThreadNameUpdatedNotification.json": "06d5e6b0e1eaf03eb88891af58eff14368a76e300a40a9bed71bacce2093b960",
+    "v2/ThreadGoalGetParams.json": "1a5de89b3c5c49528af404a65411a73ef05dc7c9c49c3f00c90d9926dfe34137",
+    "v2/ThreadGoalGetResponse.json": "f610000963194731c96ce2b45e46722ca700f1b6ccc1fc55a2fd95e526018fd9",
+    "v2/ThreadGoalSetParams.json": "93162f095e9b3b5a051ceb24318b8922c663edefc1f8c67bd378085c0d6c01d2",
+    "v2/ThreadGoalSetResponse.json": "b1c61b6068b3b73dd3d97b38f8a269593f8f7added4643bfdb2016315b71ad8e",
+    "v2/ThreadGoalClearParams.json": "896c8b1997edf913382393f7d0f20ced4344714b9f0e8ce1f6564a11403e1675",
+    "v2/ThreadGoalClearResponse.json": "2652c2d0072be8ccb71c8dcaaa054aa74f974e68156a73451baf72c8597669c2",
+    "v2/ThreadGoalUpdatedNotification.json": "52010479c7efcc6dc749e2d9bf1e27c134453d92a1f0b367193d8125eec1fedc",
+    "v2/ThreadGoalClearedNotification.json": "ad6c2cf53970e45cae55d36dbddd84ecc7b34837846616493efa7b132a35a051",
+    "v2/PlanDeltaNotification.json": "a5cf42ccfc6cf905ede0fa9041e9c951ea7870aba4e3a7c7f68d85f01416d3af",
+    "v2/ThreadSettingsUpdateParams.json": "749419634bb7ed66216d72bf9d8734ecf0e6efaa8cd46fe51a117d1b42ed9657",
+    "v2/ThreadSettingsUpdateResponse.json": "adb6c5232ff2474b61ac1811c9fe0faf8beae7f629c9bb2182190679d82bf0b1",
+    "v2/ThreadSettingsUpdatedNotification.json": "5e0f512bcca5fbf3cfea9f13574928ad26e790d5bc765ea92cd024a7ac96f86e"
   },
   "rootTypes": [
     "InitializeParams",
@@ -121,9 +133,21 @@
     "AccountRateLimitsUpdatedNotification",
     "ThreadSetNameParams",
     "ThreadSetNameResponse",
-    "ThreadNameUpdatedNotification"
+    "ThreadNameUpdatedNotification",
+    "ThreadGoalGetParams",
+    "ThreadGoalGetResponse",
+    "ThreadGoalSetParams",
+    "ThreadGoalSetResponse",
+    "ThreadGoalClearParams",
+    "ThreadGoalClearResponse",
+    "ThreadGoalUpdatedNotification",
+    "ThreadGoalClearedNotification",
+    "PlanDeltaNotification",
+    "ThreadSettingsUpdateParams",
+    "ThreadSettingsUpdateResponse",
+    "ThreadSettingsUpdatedNotification"
   ],
-  "definitionCount": 207,
+  "definitionCount": 255,
   "versionCompatibility": [
     {
       "version": "0.159.3",
@@ -195,5 +219,49 @@
       "ConfigReadResponse"
     ],
     "liveConfirmed": true
+  },
+  "agentModesExtension": {
+    "sourceVersion": "0.160.0",
+    "sourceFiles": {
+      "v2/ThreadGoalGetParams.json": "1a5de89b3c5c49528af404a65411a73ef05dc7c9c49c3f00c90d9926dfe34137",
+      "v2/ThreadGoalGetResponse.json": "f610000963194731c96ce2b45e46722ca700f1b6ccc1fc55a2fd95e526018fd9",
+      "v2/ThreadGoalSetParams.json": "93162f095e9b3b5a051ceb24318b8922c663edefc1f8c67bd378085c0d6c01d2",
+      "v2/ThreadGoalSetResponse.json": "b1c61b6068b3b73dd3d97b38f8a269593f8f7added4643bfdb2016315b71ad8e",
+      "v2/ThreadGoalClearParams.json": "896c8b1997edf913382393f7d0f20ced4344714b9f0e8ce1f6564a11403e1675",
+      "v2/ThreadGoalClearResponse.json": "2652c2d0072be8ccb71c8dcaaa054aa74f974e68156a73451baf72c8597669c2",
+      "v2/ThreadGoalUpdatedNotification.json": "52010479c7efcc6dc749e2d9bf1e27c134453d92a1f0b367193d8125eec1fedc",
+      "v2/ThreadGoalClearedNotification.json": "ad6c2cf53970e45cae55d36dbddd84ecc7b34837846616493efa7b132a35a051",
+      "v2/PlanDeltaNotification.json": "a5cf42ccfc6cf905ede0fa9041e9c951ea7870aba4e3a7c7f68d85f01416d3af",
+      "v2/ThreadSettingsUpdateParams.json": "749419634bb7ed66216d72bf9d8734ecf0e6efaa8cd46fe51a117d1b42ed9657",
+      "v2/ThreadSettingsUpdateResponse.json": "adb6c5232ff2474b61ac1811c9fe0faf8beae7f629c9bb2182190679d82bf0b1",
+      "v2/ThreadSettingsUpdatedNotification.json": "5e0f512bcca5fbf3cfea9f13574928ad26e790d5bc765ea92cd024a7ac96f86e"
+    },
+    "rootTypes": [
+      "ThreadGoalGetParams",
+      "ThreadGoalGetResponse",
+      "ThreadGoalSetParams",
+      "ThreadGoalSetResponse",
+      "ThreadGoalClearParams",
+      "ThreadGoalClearResponse",
+      "ThreadGoalUpdatedNotification",
+      "ThreadGoalClearedNotification",
+      "PlanDeltaNotification",
+      "ThreadSettingsUpdateParams",
+      "ThreadSettingsUpdateResponse",
+      "ThreadSettingsUpdatedNotification"
+    ],
+    "liveGoalConfirmed": true,
+    "liveSettingsConfirmed": true,
+    "notes": "Goals require materialized non-ephemeral threads. Active set starts native continuation; pause/clear do not interrupt an existing turn.",
+    "livePlanConfirmed": true,
+    "livePlanHistoryConfirmed": true,
+    "liveProbeDate": "2026-10-04",
+    "budgetSemantics": "Changing objective preserves tokenBudget; explicit null clears it; clear then set starts with null budget and zero usage.",
+    "liveProbeEvidence": {
+      "goals": "materialized synthetic thread: paused/get/active auto-start, pause and clear leave turn running; explicit interrupt then archive",
+      "settings": "thread/settings/update effective plan then default, model gpt-6-luna, effort low, readOnly",
+      "plans": "materialized synthetic proposed_plan: native plan started, deltas, completed, then persisted type plan with completedAtMs; initial brief safety prompt returned agentMessage",
+      "ephemeral": "goal mutations rejected -32600; plan history rejected -32601; live plan streaming worked"
+    }
   }
 }

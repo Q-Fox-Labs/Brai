@@ -300,6 +300,46 @@
               ]
             }
           ],
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "agentMode"
+                ],
+                "properties": {
+                  "agentMode": {
+                    "const": "goal"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "text": {
+                    "pattern": "\\S"
+                  },
+                  "tokenBudget": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "not": {
+                  "required": [
+                    "images"
+                  ]
+                }
+              },
+              "else": {
+                "not": {
+                  "required": [
+                    "tokenBudget"
+                  ]
+                }
+              }
+            }
+          ],
           "properties": {
             "action": {
               "const": "start"
@@ -357,6 +397,21 @@
                 "auto",
                 "full"
               ]
+            },
+            "agentMode": {
+              "enum": [
+                "default",
+                "plan",
+                "goal"
+              ]
+            },
+            "tokenBudget": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 9007199254740991
             }
           }
         },
@@ -553,6 +608,139 @@
               "maxLength": 128
             },
             "answer": {}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "projectId",
+            "threadId"
+          ],
+          "properties": {
+            "action": {
+              "const": "goalGet"
+            },
+            "projectId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "projectId",
+            "threadId",
+            "generation",
+            "operationId"
+          ],
+          "anyOf": [
+            {
+              "required": [
+                "objective"
+              ]
+            },
+            {
+              "required": [
+                "status"
+              ]
+            },
+            {
+              "required": [
+                "tokenBudget"
+              ]
+            }
+          ],
+          "properties": {
+            "action": {
+              "const": "goalSet"
+            },
+            "projectId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "generation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "objective": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536,
+              "pattern": "\\S"
+            },
+            "status": {
+              "enum": [
+                "active",
+                "paused"
+              ]
+            },
+            "tokenBudget": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "projectId",
+            "threadId",
+            "generation",
+            "operationId"
+          ],
+          "properties": {
+            "action": {
+              "const": "goalClear"
+            },
+            "projectId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "generation": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
           }
         }
       ]
@@ -840,6 +1028,12 @@
         },
         "truncated": {
           "type": "boolean"
+        },
+        "goal": {
+          "$ref": "#/definitions/GoalProjection"
+        },
+        "planProgress": {
+          "$ref": "#/definitions/PlanProgress"
         }
       },
       "required": [
@@ -1090,6 +1284,9 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 128
+        },
+        "goal": {
+          "$ref": "#/definitions/GoalProjection"
         }
       },
       "required": [
@@ -1254,6 +1451,9 @@
         },
         {
           "$ref": "#/definitions/Item"
+        },
+        {
+          "$ref": "#/definitions/Goal"
         }
       ]
     },
@@ -1368,6 +1568,173 @@
       "required": [
         "generation",
         "item"
+      ]
+    },
+    "AgentGoal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "threadId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "objective": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "paused",
+            "blocked",
+            "usageLimited",
+            "budgetLimited",
+            "complete"
+          ]
+        },
+        "timeUsedSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "tokensUsed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "tokenBudget": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "createdAt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "updatedAt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "threadId",
+        "objective",
+        "status",
+        "timeUsedSeconds",
+        "tokensUsed",
+        "tokenBudget",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "GoalProjection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "ready",
+            "stale",
+            "unavailable"
+          ]
+        },
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentGoal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "value"
+      ]
+    },
+    "PlanProgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "live",
+            "stale",
+            "unavailable"
+          ]
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "explanation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "steps": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "step": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "pending",
+                  "inProgress",
+                  "completed"
+                ]
+              }
+            },
+            "required": [
+              "step",
+              "status"
+            ]
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "state",
+        "turnId",
+        "explanation",
+        "steps",
+        "truncated"
+      ]
+    },
+    "Goal": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "type": "string"
+        },
+        "goal": {
+          "$ref": "#/definitions/GoalProjection"
+        }
+      },
+      "required": [
+        "generation",
+        "goal"
       ]
     }
   }

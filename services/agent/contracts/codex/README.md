@@ -29,3 +29,14 @@ Upstream-ответ `GetAccountResponse` сохраняется без изме�
 Смысловые названия используют thread/name/set и thread/name/updated. Три root types получены из установленного CLI0.157.1; их происхождение отдельно записано в semanticTitleExtension. Живая проверка2026-10-02 подтвердила один ход Luna во временном ephemeral чате, сохранение native имени, событие переименования и повторное чтение имени. Метаданные читаются с includeTurns=false; проверочный целевой чат должен быть активным и загруженным, как новый чат после принятого задания.
 
 Минимизация контекста названия добавляет read-only config/read из выгрузки установленного daemon0.160.0. ConfigReadParams/ConfigReadResponse и зависимые определения закреплены в titleContextExtension; конфликтующие имена definitions из новой выгрузки изолированы префиксом TitleConfigRead. Значения профиля остаются внутри исполнителя, в модель передаются только request-local отключения MCP. Общая конфигурация не изменяется.
+
+
+## Native режимы и цели 0.160.0
+
+`agentModesExtension` в manifest закрепляет SHA-256 root-файлов goal get/set/clear, goal updated/cleared, settings update/updated и PlanDeltaNotification из действующего daemon 0.160.0. Schema сохраняет upstream формы; конфликтующие определения новых settings изолированы префиксом Modes без изменения их структуры. OpenRPC перечисляет только используемые native операции и уведомления.
+
+Живые проверки 2026-10-04 использовали собственные синтетические чаты, request-local выключенные MCP и инструменты, затем clear/interrupt/archive либо unsubscribe. Goal/set active самостоятельно послал turn/started; pause и clear не завершили текущий ход. Settings/update подтвердил effective plan→default, модель, effort и readOnly. Замена objective сохранила старый tokenBudget; явный null его очистил; clear→set без бюджета дал null и нулевые счётчики. Эти эффекты отражены в публичном многоэтапном сценарии agent, а не заменены промптом или отдельным исполнителем.
+
+Первый краткий запрос плана с safety baseInstructions вернул обычный agentMessage. Focused запрос завершённого proposed_plan подтвердил native item/started type plan, item/plan/delta, item/completed type plan и сохранённый план в thread/items/list с startedAtMs/completedAtMs. Native текст не содержит внешнюю proposed_plan обёртку. Product использует встроенные collaboration instructions без их замены; пояснения и вопросы остаются agentMessage. Native ThreadItem plan является authority для предложенного документа. Живой turn/plan/updated в этих прогонах не проверялся; восстановление его списка шагов API не предоставляет.
+
+Ephemeral thread отвергает goal mutations с -32600; его plan stream работает, но thread/items/list ответил -32601. Goals и durable history проверены в materialized временных чатах, которые затем архивированы. Глобальная конфигурация и daemon не изменялись.

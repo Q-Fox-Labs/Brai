@@ -5,7 +5,7 @@ import { GatewayError, natsConnection } from "./gateway";
 import { bytes, limits, subjects, validateCommand, validateEnvelope, validateLimits } from "@brai/agent/contracts";
 import type { AgentLimits, Command, ErrorResponse, EventEnvelope, NativeSnapshot } from "@brai/agent/contracts";
 import { encodeFrame } from "../lib/agent/stream";
-const reads = new Set(["projects", "status", "models", "threads", "open", "turns", "items", "activities", "item"]);
+const reads = new Set(["projects", "status", "models", "threads", "open", "turns", "items", "activities", "item", "goalGet"]);
 const key = Symbol.for("brai.web.agent-streams.v2");
 const globals = globalThis as typeof globalThis & { [key]?: Map<() => void, string> };
 const streams = globals[key] ??= new Map<() => void, string>();

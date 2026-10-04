@@ -177,7 +177,7 @@ test('real local WebSocket validates image commands and restores >2 MiB raw page
       'model/list': { data: models.map((m, i) => ({ ...m, id: m.model, description: '', hidden: false, isDefault: i === 0 })) },
       'thread/start': response, 'thread/read': { thread }, 'thread/resume': response,
       'turn/start': { turn }, 'turn/steer': { turnId: 'turn' },
-      'thread/turns/list': { data: [turn] }, 'thread/items/list': { data: history, nextCursor: null },
+      'thread/goal/get': { goal: null }, 'thread/turns/list': { data: [turn] }, 'thread/items/list': { data: history, nextCursor: null },
     }[packet.method];
     assert.ok(result, packet.method);
     if (packet.method === 'account/rateLimits/read') {

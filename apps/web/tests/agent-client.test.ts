@@ -16,6 +16,7 @@ const base = (id: string, seq = 0): NativeSnapshot => ({ projectId: "brai", thre
 const envelope = (s: NativeSnapshot) => ({ projectId: s.projectId, threadId: s.threadId, generation: s.generation, epoch: s.epoch, seq: s.seq, event: { type: "STATE_SNAPSHOT" as const, snapshot: s } });
 function fixture() {
   const sources: FakeSource[] = [], calls: string[] = [], snapshots = new Map<string, NativeSnapshot>();
+  const requests: { path: string; method: string; body: BodyInit | null | undefined }[] = [];
   let applications = 0;
   class FakeSource extends EventTarget {
     onerror: (() => void) | null = null;
@@ -31,11 +32,21 @@ function fixture() {
   const ports: Record<string, unknown> = { "@ag-ui/client": { AbstractAgent, defaultApplyEvents: (...args: Parameters<typeof defaultApplyEvents>) => { applications++; return defaultApplyEvents(...args); } }, "@ag-ui/core/schemas": { EventSchema }, rxjs, "@brai/agent/contracts": contracts, "./stream": { decodeFrame } };
   new Function("require", "module", "exports", "EventSource", "fetch", compiled)(
     (name: string) => ports[name] ?? require(name), module, module.exports, FakeSource,
-    async (path: string) => { const url = new URL(path, "https://example.test"); calls.push(path); const id = url.searchParams.get("threadId")!; return Response.json(snapshots.get(id) ?? base(id)); },
+    async (path: string, options: RequestInit) => { const url = new URL(path, "https://example.test"); calls.push(path); requests.push({ path, method: options.method!, body: options.body }); const id = url.searchParams.get("threadId")!; return Response.json(url.pathname.endsWith("/goalGet") ? { generation: "gen", goal: { state: "ready", value: null } } : snapshots.get(id) ?? base(id)); },
   );
   const client = module.exports.createAgentClient("account", () => assert.fail("unexpected auth failure"));
-  return { client, sources, calls, snapshots, get applications() { return applications; } };
+  return { client, sources, calls, snapshots, requests, get applications() { return applications; } };
 }
+
+test("goalGet uses query-only GET without mutation body or automatic turn", async () => {
+  const f = fixture();
+  try {
+    const value = await f.client.request({ action: "goalGet", projectId: "brai", threadId: "A" });
+    assert.deepEqual(value.goal, { state: "ready", value: null });
+    assert.deepEqual(f.requests, [{ path: "/api/agent/goalGet?projectId=brai&threadId=A", method: "GET", body: undefined }]);
+    assert.equal(f.sources.length, 0);
+  } finally { f.client.dispose(); }
+});
 
 test("A→B→A keeps one stream, immediate SDK state and background text without repeated open", async () => {
   const f = fixture();

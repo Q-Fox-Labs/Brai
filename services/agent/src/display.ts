@@ -1,7 +1,7 @@
 // ABOUTME: Преобразует native item в единственное безопасное представление.
 // ABOUTME: Передаёт только текст и явные поля; raw reasoning исключены; изображения доступны только в отдельном чтении.
 import { bytes, limits, validateCommand } from '../contracts/index.mjs';
-import type { DisplayItem, ThreadMetadata } from '../contracts/index.mjs';
+import type { DisplayItem, ThreadMetadata, AgentGoal, PlanProgress } from '../contracts/index.mjs';
 /** Сохраняет UTF-8 границу и явный маркер сокращения. */
 export function text(value: unknown, cap = 8192): string {
   const source = typeof value === 'string' ? value : '';
@@ -25,7 +25,8 @@ export function display(item: any, turnId: string, history = false, media = fals
   if (item.type === 'dynamicToolCall') content = `${item.tool}\n${textual(item.contentItems)}${item.success === false ? '\nОшибка инструмента' : ''}`;
   if (item.type === 'functionCallOutput') content = typeof item.output === 'string' ? item.output : textual(Array.isArray(item.output) ? item.output : item.output?.content);
   if (item.type === 'collabAgentToolCall') content = `${item.tool}\n${Object.entries(item.agentsStates ?? {}).map(([id, state]: any) => `${id}: ${state.status}`).join('\n')}`;
-  const value: DisplayItem = { id: item.id, turnId, type: item.type, text: text(content), truncated: Buffer.byteLength(content) > 8192 };
+  const cap = item.type === 'plan' ? 32768 : 8192;
+  const value: DisplayItem = { id: item.id, turnId, type: item.type, text: text(content, cap), truncated: Buffer.byteLength(content) > cap };
   if (item.type === 'userMessage') value.imageCount = (item.content ?? []).filter((part: any) => part.type === 'image' || part.type === 'localImage').length;
   if (media && item.type === 'userMessage') {
     const images = (item.content ?? []).filter((part: any) => part.type === 'image').map((part: any) => part.url);
@@ -37,7 +38,7 @@ export function display(item: any, turnId: string, history = false, media = fals
   if (typeof item.status === 'string') value.status = item.status;
   if (Object.hasOwn(item, 'exitCode')) value.exitCode = item.exitCode;
   if (Object.hasOwn(item, 'phase')) value.phase = item.phase;
-  while (history && bytes(value) > 4096) {
+  while (item.type === 'plan' ? bytes(value) > 49152 : history && bytes(value) > 4096) {
     const key = (['text', 'command', 'output', 'diff'] as ('text' | 'command' | 'output' | 'diff')[]).sort((a, b) => (value[b]?.length ?? 0) - (value[a]?.length ?? 0))[0];
     if (!value[key] || value[key]!.length < 64) throw Object.assign(new Error('ITEM_TOO_LARGE'), { code: 'ITEM_TOO_LARGE', outcome: 'query' });
     value[key] = text(value[key], Math.max(16, Math.floor(Buffer.byteLength(value[key]!) / 2)));
@@ -48,11 +49,22 @@ export function display(item: any, turnId: string, history = false, media = fals
 
 /** Скрытые действия передают идентификаторы; reasoning также сообщает наличие публичного текста. */
 export function compact(item: DisplayItem): DisplayItem {
-  if (item.type === 'userMessage' || item.type === 'agentMessage') {
+  if (item.type === 'userMessage' || item.type === 'agentMessage' || item.type === 'plan') {
     const { images, ...message } = item;
     return message;
   }
   return { id: item.id, turnId: item.turnId, type: item.type, text: '', ...(item.type === 'reasoning' ? { hasContent: Boolean(item.text.trim()) } : {}), ...(item.status === undefined ? {} : { status: item.status }), ...(item.exitCode === undefined ? {} : { exitCode: item.exitCode }), ...(item.revision === undefined ? {} : { revision: item.revision }) };
+}
+
+/** Ограничивает цель для снимка; native состояние и счётчики сохраняет без переименования. */
+export function goal(value: any): AgentGoal | null {
+  if (!value) return null;
+  return { threadId: value.threadId, objective: text(value.objective, 16384), status: value.status, timeUsedSeconds: value.timeUsedSeconds, tokensUsed: value.tokensUsed, tokenBudget: value.tokenBudget ?? null, createdAt: value.createdAt, updatedAt: value.updatedAt, ...(Buffer.byteLength(value.objective) > 16384 ? { truncated: true } : {}) };
+}
+
+/** Шаги принадлежат только живому turn/plan/updated; история не восстанавливает этот список. */
+export function progress(value: any): PlanProgress {
+  return { state: 'live', turnId: value.turnId, explanation: value.explanation == null ? null : text(value.explanation, 4096), steps: value.plan.slice(0, 100).map((entry: any) => ({ step: text(entry.step, 512), status: entry.status })), truncated: value.plan.length > 100 || value.plan.some((entry: any) => Buffer.byteLength(entry.step) > 512) || Buffer.byteLength(value.explanation ?? '') > 4096 };
 }
 /** Краткий заголовок без вывода и diff; пустое рассуждение сохраняет пустой заголовок. */
 export function summary(item: DisplayItem): DisplayItem {

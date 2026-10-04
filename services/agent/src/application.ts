@@ -2,13 +2,13 @@
 // ABOUTME: Владеет только bounded live проекцией; историю читает у Codex.
 import { randomUUID, createHash } from 'node:crypto';
 import { bytes, limits, validateCommand } from '../contracts/index.mjs';
-import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, ModelCatalog, DisplayItem } from '../contracts/index.mjs';
+import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, ModelCatalog, DisplayItem, GoalProjection, PlanProgress } from '../contracts/index.mjs';
 import type { CodexPort, Observation } from './codex.js';
 import { createLimitsMonitor } from './limits.js';
 import { nameThread } from './title.js';
-import { display, metadata, text, compact, summary, messageAttention } from './display.js';
+import { display, metadata, text, compact, summary, messageAttention, goal, progress } from './display.js';
 export type Config = { codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
-type Session = { attention: ReturnType<typeof messageAttention>; view: NativeSnapshot; opened: boolean; fresh: boolean; titleNeeded: boolean; titleRequest: string; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
+type Session = { attention: ReturnType<typeof messageAttention>; view: NativeSnapshot & { goal: GoalProjection; planProgress: PlanProgress }; mutating?: boolean; goalRevision: number; opened: boolean; fresh: boolean; titleNeeded: boolean; titleRequest: string; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
 /** Собирает команды и единственного владельца live items/pending. */
 export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void) {
   const sessions = new Map<string, Session>();
@@ -38,7 +38,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
   }
   function publish(s: Session) {
     if (s.view.seq === Number.MAX_SAFE_INTEGER) { s.view.epoch = randomUUID(); s.view.seq = 0; }
-    s.view.thread.active = s.view.turn?.status === 'inProgress' && !['connection-lost', 'executor-unavailable'].includes(s.view.state);
+    s.view.thread.active = (s.view.turn?.status === 'inProgress' || s.view.goal.state === 'ready' && s.view.goal.value?.status === 'active') && !['connection-lost', 'executor-unavailable'].includes(s.view.state);
     const latestMessage = [...s.view.items].reverse().find(item => item.type === 'userMessage' || item.type === 'agentMessage');
     if (latestMessage) s.attention = messageAttention(latestMessage);
     Object.assign(s.view.thread, s.attention);
@@ -82,7 +82,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (!entry) fail('NOT_FOUND', 'query');
     const newer = s.details.get(itemId);
     if (newer?.turnId === turnId && !newer.imageCount && (s.revisions.get(itemId) ?? 0) > cut) return structuredClone(newer);
-    return { ...display(entry.item, turnId, false, true), revision: s.view.items.find(i => i.id === itemId)?.revision ?? 0 };
+    return { ...display(historyItem(entry, s.view.turn), turnId, false, true), revision: s.view.items.find(i => i.id === itemId)?.revision ?? 0 };
   }
   async function admit(projectId: string, thread: any, fresh = false): Promise<Session> {
     const previous = admission;
@@ -91,7 +91,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     await previous;
     try {
     if (sessions.size >= limits.threads) {
-      const victim = [...sessions.values()].find(s => s.view.turn?.status !== 'inProgress' && !s.view.requests.length && !s.naming);
+      const victim = [...sessions.values()].find(s => s.view.turn?.status !== 'inProgress' && !s.view.requests.length && !s.naming && !s.mutating && s.view.goal.value?.status !== 'active');
       if (!victim) fail('CAPACITY_EXHAUSTED');
       victim.closing = true;
       let response: any;
@@ -102,8 +102,8 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       publish(victim);
       sessions.delete(victim.view.threadId);
     }
-    const view: NativeSnapshot = { projectId, threadId: thread.id, generation: current(), epoch: randomUUID(), seq: 0, thread: { ...metadata(thread), lastMessageAt: messageTimes.get(thread.id)?.lastMessageAt ?? 0 }, turn: null, state: 'idle', items: [], requests: [], truncated: false };
-    const s: Session = { attention: { finalMessageId: null, awaitingReply: false }, view, opened: fresh, fresh, titleNeeded: !thread.name, titleRequest: thread.preview ?? '', raw: new Map(), revisions: new Map(), details: new Map() };
+    const view: Session['view'] = { projectId, threadId: thread.id, generation: current(), epoch: randomUUID(), seq: 0, thread: { ...metadata(thread), lastMessageAt: messageTimes.get(thread.id)?.lastMessageAt ?? 0 }, turn: null, state: 'idle', items: [], requests: [], truncated: false, goal: { state: fresh ? 'ready' : 'unavailable', value: null }, planProgress: { state: 'unavailable', turnId: null, explanation: null, steps: [], truncated: false } };
+    const s: Session = { attention: { finalMessageId: null, awaitingReply: false }, goalRevision: 0, view, opened: fresh, fresh, titleNeeded: !thread.name, titleRequest: thread.preview ?? '', raw: new Map(), revisions: new Map(), details: new Map() };
     sessions.set(thread.id, s);
     return s;
     } finally { release(); }
@@ -122,13 +122,14 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       if (!s) s = await admit(p.projectId, native.thread);
       const cut = s.view.seq, previousTurn = s.view.turn;
       const resumed = await codex.call('thread/resume', { threadId: id, cwd: p.cwd, excludeTurns: true }, { mutation: true });
+      await readGoal(s);
       const turns = await codex.call('thread/turns/list', { threadId: id, limit: 1, itemsView: 'notLoaded', sortDirection: 'desc' });
       const items = await codex.call('thread/items/list', { threadId: id, limit: 10, sortDirection: 'desc' });
       if (before !== current()) fail('STALE_GENERATION', 'query');
       s.view.thread = { ...metadata(resumed.thread), lastMessageAt: s.view.thread.lastMessageAt, model: resumed.model, reasoningEffort: resumed.reasoningEffort ?? null };
       const latestMessage = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
-      if (latestMessage && s.view.seq === cut) s.view.thread.lastMessageAt = latestMessage.startedAtMs ?? latestMessage.completedAtMs ?? s.view.thread.updatedAt * 1000;
-      for (const entry of items.data.slice().reverse()) if ((s.revisions.get(entry.item.id) ?? 0) <= cut) put(s, entry.item, entry.turnId, entry.startedAtMs ?? entry.completedAtMs ?? s.view.thread.updatedAt * 1000, true);
+      if (latestMessage) s.view.thread.lastMessageAt = Math.max(s.view.thread.lastMessageAt ?? 0, latestMessage.startedAtMs ?? latestMessage.completedAtMs ?? s.view.thread.updatedAt * 1000);
+      for (const entry of items.data.slice().reverse()) if ((s.revisions.get(entry.item.id) ?? 0) <= cut) put(s, historyItem(entry, turns.data[0]), entry.turnId, entry.startedAtMs ?? entry.completedAtMs ?? s.view.thread.updatedAt * 1000, true);
       const pageIds = new Set(items.data.map((entry: any) => entry.item.id));
       s.view.items = [...items.data.slice().reverse().map((entry: any) => s!.view.items.find(item => item.id === entry.item.id)!), ...s.view.items.filter(item => !pageIds.has(item.id) && (s!.revisions.get(item.id) ?? 0) > cut)];
       if (s.view.turn === previousTurn) {
@@ -143,6 +144,63 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     openings.set(id, work);
     return work;
   }
+  async function readGoal(s: Session): Promise<void> {
+    const generation = current(), revision = s.goalRevision;
+    try {
+      const result = await codex.call('thread/goal/get', { threadId: s.view.threadId });
+      if (generation !== current()) fail('STALE_GENERATION', 'query');
+      if (revision === s.goalRevision) s.view.goal = { state: 'ready', value: goal(result.goal) };
+    } catch (error: any) {
+      if (generation !== current()) fail('STALE_GENERATION', 'query');
+      if (revision === s.goalRevision) s.view.goal.state = s.view.goal.value ? 'stale' : 'unavailable';
+    }
+  }
+  async function mutation<T>(s: Session, r: Command, work: (call: (method: string, params: any) => Promise<any>) => Promise<T>): Promise<T> {
+    if (s.mutating) fail('OPERATION_CONFLICT');
+    s.mutating = true;
+    let affected = false;
+    try {
+      return await work(async (method, params) => {
+        if (r.generation !== current()) fail('STALE_GENERATION', affected ? 'unknown' : 'not-sent');
+        const result = await codex.call(method, params, { mutation: true });
+        affected = true;
+        if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
+        return result;
+      });
+    } catch (error: any) {
+      // AIDEV-NOTE: Принятый первый этап нельзя повторять, даже если второй этап точно не отправлен.
+      if (affected && error.outcome !== 'unknown') error.outcome = 'unknown';
+      if (error.outcome === 'unknown') { s.opened = s.fresh = false; s.view.goal.state = s.view.goal.value ? 'stale' : 'unavailable'; publish(s); }
+      throw error;
+    } finally { s.mutating = false; }
+  }
+  async function changeGoal(s: Session, params: any, call: (method: string, params: any) => Promise<any>) {
+    const revision = s.goalRevision;
+    const result = await call('thread/goal/set', params);
+    if (s.goalRevision === revision) s.view.goal = { state: 'ready', value: goal(result.goal) };
+    s.fresh = false;
+    publish(s);
+  }
+  async function stopGoalTurn(s: Session, call: (method: string, params: any) => Promise<any>) {
+    const turn = s.view.turn;
+    if (turn?.status === 'inProgress' && turn.id !== 'starting') await call('turn/interrupt', { threadId: s.view.threadId, turnId: turn.id });
+  }
+  async function validateGoalModel(s: Session) {
+    const model = s.view.thread.model, effort = s.view.thread.reasoningEffort;
+    if (!model || config.allowedModels && !config.allowedModels.includes(model)) fail('UNSUPPORTED');
+    const choice = (await catalog()).data.find(m => m.model === model);
+    if (!choice || effort && !choice.efforts.includes(effort)) fail('UNSUPPORTED');
+  }
+  function title(s: Session, r: Command) {
+    if (!s.titleNeeded || s.naming || config.allowedModels && !config.allowedModels.includes('gpt-6-luna')) return;
+    s.titleNeeded = false; s.naming = true;
+    // AIDEV-NOTE: Preview принадлежит первому заданию, включая задание новой цели.
+    s.titleRequest = s.titleRequest.trim() || r.text?.trim() || 'Проанализировать присланные изображения';
+    void nameThread(codex, r.threadId!, s.titleRequest).catch((error: any) => {
+      s.titleNeeded = true;
+      console.error('agent: TITLE_GENERATION_FAILED', { stage: error.titleStage, code: error.code, upstreamCode: error.upstreamCode, nativeCode: error.nativeCode });
+    }).finally(() => { s.naming = false; });
+  }
   function observe(e: Observation) {
     limitMonitor.observe(e);
     if (e.type === 'connection') {
@@ -156,6 +214,8 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
         s.view.generation = current();
         s.view.epoch = randomUUID();
         s.view.state = 'connection-lost';
+        s.view.goal.state = s.view.goal.value ? 'stale' : 'unavailable';
+        if (s.view.planProgress.state === 'live') s.view.planProgress.state = 'stale';
         publish(s);
       }
       return;
@@ -176,23 +236,35 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     } else if (e.method === 'thread/name/updated') {
       s.view.thread.title = text(p.threadName ?? '', 512);
       s.titleNeeded = false;
+    } else if (e.method === 'thread/goal/updated' || e.method === 'thread/goal/cleared') {
+      s.goalRevision++;
+      s.view.goal = { state: 'ready', value: e.method === 'thread/goal/cleared' ? null : goal(p.goal) };
+    } else if (e.method === 'thread/settings/updated') {
+      s.view.thread.model = p.threadSettings.model;
+      s.view.thread.reasoningEffort = p.threadSettings.effort ?? null;
     } else if (e.method === 'turn/started' || e.method === 'turn/completed') {
       s.view.turn = { id: p.turn.id, status: p.turn.status };
       s.view.state = p.turn.status;
+      if (e.method === 'turn/started') s.fresh = false;
+      if (e.method === 'turn/started' && s.view.planProgress.turnId !== p.turn.id) s.view.planProgress = { state: 'unavailable', turnId: p.turn.id, explanation: null, steps: [], truncated: false };
       if (p.turn.status !== 'inProgress') { s.activeModel = undefined; s.view.requests = []; s.raw.clear(); }
-    } else if (e.method === 'item/started' || e.method === 'item/completed') put(s, p.item, p.turnId);
+    } else if (e.method === 'item/started' || e.method === 'item/completed') put(s, p.item.type === 'plan' ? { ...p.item, status: e.method === 'item/completed' ? 'completed' : 'inProgress' } : p.item, p.turnId);
     else if (e.method?.endsWith('/delta') || e.method?.endsWith('/outputDelta')) {
       const item = s.details.get(p.itemId);
       if (!item) { s.opened = false; s.view.state = 'connection-lost'; }
       else {
-        const field = e.method === 'item/agentMessage/delta' ? 'text' : 'output';
-        item[field] = text((item[field] ?? '') + p.delta, field === 'text' ? 8192 : 32768);
+        const field = e.method === 'item/agentMessage/delta' || e.method === 'item/plan/delta' ? 'text' : 'output';
+        const cap = item.type === 'plan' || field === 'output' ? 32768 : 8192;
+        const combined = (item[field] ?? '') + p.delta;
+        item[field] = text(combined, cap);
+        item.truncated = item.truncated || Buffer.byteLength(combined) > cap;
+        if (item.type === 'plan') item.status = 'inProgress';
         item.revision = s.view.seq + 1;
         const index = s.view.items.findIndex(i => i.id === item.id);
         if (index >= 0) s.view.items[index] = compact(item);
         s.revisions.set(item.id, s.view.seq + 1);
       }
-    } else if (e.method === 'turn/plan/updated') put(s, { id: `plan:${p.turnId}`, type: 'plan', text: p.plan.map((step: any) => `${step.status}: ${step.step}`).join('\n') }, p.turnId);
+    } else if (e.method === 'turn/plan/updated') s.view.planProgress = progress(p);
     else return;
     if (s.view.requests.some(f => !f.answered)) s.view.state = 'waiting';
     publish(s);
@@ -264,6 +336,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     }
     const s = await open(r);
     if (r.action === 'open') return structuredClone(s.view);
+    if (r.action === 'goalGet') { await readGoal(s); publish(s); return { generation: current(), goal: structuredClone(s.view.goal) }; }
     if (r.action === 'activities' || r.action === 'item') {
       const generation = current();
       const data: DisplayItem[] = [];
@@ -279,21 +352,46 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       let messages = 0;
       do {
         // AIDEV-NOTE: Действия не расходуют десять сообщений; малые native страницы сохраняют предел media-кадра.
-        const part = await codex.call(r.action === 'items' ? 'thread/items/list' : 'thread/turns/list', { threadId: r.threadId, limit: r.action === 'items' ? Math.min(10 - messages, 1000 - page.data.length) : 100, cursor: page.nextCursor, sortDirection: 'desc', ...(r.action === 'items' ? { turnId: r.turnId } : { itemsView: 'notLoaded' }) });
+        const part = await codex.call(r.action === 'items' ? 'thread/items/list' : 'thread/turns/list', { threadId: r.threadId, limit: r.action === 'items' ? Math.min(10 - messages, 1000 - page.data.length, Math.max(1, Math.floor((limits.state - bytes(page) - 2048) / 49152))) : 100, cursor: page.nextCursor, sortDirection: 'desc', ...(r.action === 'items' ? { turnId: r.turnId } : { itemsView: 'notLoaded' }) });
         if (generation !== current()) fail('STALE_GENERATION', 'query');
         if (part.nextCursor && (!part.data.length || part.nextCursor === page.nextCursor)) fail('UPSTREAM_UNAVAILABLE', 'query');
         messages += part.data.filter((e: any) => e.item?.type === 'userMessage' || e.item?.type === 'agentMessage').length;
         page.data.push(...(r.action === 'items' ? part.data.map((e: any) => {
           const revision = s.view.items.find(i => i.id === e.item.id)?.revision ?? 0;
-          if (e.item.type !== 'userMessage' && e.item.type !== 'agentMessage') return { id: e.item.id, turnId: e.turnId, type: e.item.type, text: '', revision, ...(e.item.type === 'reasoning' ? { hasContent: (e.item.summary ?? []).some((part: string) => Boolean(part.trim())) } : {}), ...(typeof e.item.status === 'string' ? { status: e.item.status } : {}), ...(Object.hasOwn(e.item, 'exitCode') ? { exitCode: e.item.exitCode } : {}) };
-          return { ...display(e.item, e.turnId, true), revision, timestamp: e.startedAtMs ?? e.completedAtMs ?? s.view.thread.updatedAt * 1000 };
+          if (e.item.type !== 'userMessage' && e.item.type !== 'agentMessage' && e.item.type !== 'plan') return { id: e.item.id, turnId: e.turnId, type: e.item.type, text: '', revision, ...(e.item.type === 'reasoning' ? { hasContent: (e.item.summary ?? []).some((part: string) => Boolean(part.trim())) } : {}), ...(typeof e.item.status === 'string' ? { status: e.item.status } : {}), ...(Object.hasOwn(e.item, 'exitCode') ? { exitCode: e.item.exitCode } : {}) };
+          return { ...display(historyItem(e, s.view.turn), e.turnId, true), revision, timestamp: e.startedAtMs ?? e.completedAtMs ?? s.view.thread.updatedAt * 1000 };
         }) : part.data.map((t: any) => ({ id: t.id, status: t.status }))));
         page.nextCursor = part.nextCursor ?? null;
-      } while (r.action === 'items' && page.nextCursor && messages < 10 && page.data.length < 1000);
+      } while (r.action === 'items' && page.nextCursor && messages < 10 && page.data.length < 1000 && bytes(page) < limits.state - 51200);
       return { generation, data: r.action === 'items' ? page.data.reverse() : page.data, nextCursor: page.nextCursor };
     }
     if (r.generation !== current()) fail('STALE_GENERATION');
     if (s.closing) fail('CAPACITY_EXHAUSTED');
+    if (s.mutating && ['start', 'goalSet', 'goalClear'].includes(r.action)) fail('OPERATION_CONFLICT');
+    if (r.action === 'goalSet' || r.action === 'goalClear') {
+      if (s.view.thread.canAcceptDirectInput === false) fail('OPERATION_CONFLICT');
+      if (r.action === 'goalSet' && !r.objective && !s.view.goal.value) fail('INVALID_ARGUMENT');
+      const activation = r.action === 'goalSet' && (r.status === 'active' || r.status === undefined && (s.view.goal.value?.status ?? 'active') === 'active');
+      if (activation) await validateGoalModel(s);
+      if (r.generation !== current()) fail('STALE_GENERATION');
+      await mutation(s, r, async call => {
+        if (r.action === 'goalClear') {
+          const revision = s.goalRevision;
+          await call('thread/goal/clear', { threadId: r.threadId });
+          if (revision === s.goalRevision) s.view.goal = { state: 'ready', value: null };
+          publish(s);
+          await stopGoalTurn(s, call);
+        } else {
+          if (activation) {
+            if (!s.view.thread.model) fail('UNSUPPORTED');
+            await call('thread/settings/update', { threadId: r.threadId, collaborationMode: collaboration('default', s.view.thread.model, s.view.thread.reasoningEffort) });
+          }
+          await changeGoal(s, { threadId: r.threadId, ...(r.objective !== undefined ? { objective: r.objective } : {}), ...(r.status ? { status: r.status } : {}), ...(r.tokenBudget !== undefined ? { tokenBudget: r.tokenBudget } : {}) }, call);
+          if (r.status === 'paused') await stopGoalTurn(s, call);
+        }
+      });
+      return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: r.threadId, goal: structuredClone(s.view.goal) };
+    }
     const active = s.view.turn?.status === 'inProgress';
     if (r.action === 'start' && (active || s.view.thread.canAcceptDirectInput === false)) fail('OPERATION_CONFLICT');
     if ((r.action === 'steer' || r.action === 'interrupt') && (!active || s.view.turn?.id !== (r.expectedTurnId ?? r.turnId))) fail('OPERATION_CONFLICT');
@@ -309,6 +407,25 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (r.action === 'start' && (s.closing || s.view.turn?.status === 'inProgress')) fail('OPERATION_CONFLICT');
     if (r.action === 'steer' && (s.closing || s.view.turn?.status !== 'inProgress' || s.view.turn.id !== r.expectedTurnId)) fail('OPERATION_CONFLICT');
     const previousTurn = s.view.turn, previousState = s.view.state, previousModel = s.activeModel;
+    if (r.action === 'start' && r.agentMode === 'goal') {
+      const model = r.model ?? s.view.thread.model;
+      if (!model) fail('UNSUPPORTED');
+      await mutation(s, r, async call => {
+        if (s.view.goal.value || s.view.goal.state !== 'ready') {
+          const revision = s.goalRevision;
+          await call('thread/goal/clear', { threadId: r.threadId });
+          if (revision === s.goalRevision) s.view.goal = { state: 'ready', value: null };
+          publish(s);
+        }
+        await call('thread/settings/update', { threadId: r.threadId, ...permissions(r.permissionMode, p.cwd), collaborationMode: collaboration('default', model, r.effort ?? s.view.thread.reasoningEffort) });
+        if (s.view.turn?.status === 'inProgress') fail('OPERATION_CONFLICT');
+        s.view.thread.model = model;
+        s.view.thread.reasoningEffort = r.effort ?? s.view.thread.reasoningEffort ?? null;
+        await changeGoal(s, { threadId: r.threadId, objective: r.text!.trim(), status: 'active', ...(r.tokenBudget !== undefined ? { tokenBudget: r.tokenBudget } : {}) }, call);
+      });
+      title(s, r);
+      return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: r.threadId, goal: structuredClone(s.view.goal) };
+    }
     if (r.action === 'start') { s.activeModel = r.model ?? s.view.thread.model; s.view.turn = { id: 'starting', status: 'inProgress' }; s.view.state = 'inProgress'; publish(s); }
     let turnId = r.turnId;
     if (r.action === 'answer') {
@@ -322,9 +439,13 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     } else if (r.action === 'interrupt') await codex.call('turn/interrupt', { threadId: r.threadId, turnId: r.turnId }, { mutation: true });
     else {
       const input = [...(r.text?.trim() ? [{ type: 'text', text: r.text }] : []), ...(r.images ?? []).map(url => ({ type: 'image', url }))];
-      const params = { threadId: r.threadId, input, ...(r.action === 'steer' ? { expectedTurnId: r.expectedTurnId } : { ...permissions(r.permissionMode, p.cwd), ...(r.model ? { model: r.model } : {}), ...(r.effort ? { effort: r.effort } : {}) }) };
+      const params = { threadId: r.threadId, input, ...(r.action === 'steer' ? { expectedTurnId: r.expectedTurnId } : { ...permissions(r.permissionMode, p.cwd), ...(r.model ? { model: r.model } : {}), ...(r.effort ? { effort: r.effort } : {}), collaborationMode: collaboration(r.agentMode === 'plan' ? 'plan' : 'default', r.model ?? s.view.thread.model ?? config.newThread?.model ?? '', r.effort ?? s.view.thread.reasoningEffort) }) };
       let value: any;
-      try { value = await codex.call(r.action === 'steer' ? 'turn/steer' : 'turn/start', params, { mutation: true }); }
+      try { value = r.action === 'steer' ? await codex.call('turn/steer', params, { mutation: true }) : await mutation(s, r, async call => {
+        if (s.view.goal.value?.status === 'active') await changeGoal(s, { threadId: r.threadId, status: 'paused' }, call);
+        if (s.view.turn?.status === 'inProgress' && s.view.turn.id !== 'starting') fail('OPERATION_CONFLICT');
+        return call('turn/start', params);
+      }); }
       catch (error: any) { if (r.action === 'start' && error.outcome === 'not-sent' && r.generation === current() && s.view.turn?.id === 'starting') { s.view.turn = previousTurn; s.view.state = previousState; s.activeModel = previousModel; publish(s); } throw error; }
       turnId = value.turn?.id ?? value.turnId;
       if (r.action === 'start' && s.view.turn?.id === 'starting') { s.view.turn = { id: turnId!, status: value.turn.status }; publish(s); }
@@ -332,15 +453,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       s.fresh = false;
     }
     if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
-    if (r.action === 'start' && s.titleNeeded && !s.naming && (!config.allowedModels || config.allowedModels.includes('gpt-6-luna'))) {
-      s.titleNeeded = false; s.naming = true;
-      // AIDEV-NOTE: Preview принадлежит первому заданию; восстановленный чат называем по нему, а не по продолжению.
-      s.titleRequest = s.titleRequest.trim() || r.text?.trim() || 'Проанализировать присланные изображения';
-      void nameThread(codex, r.threadId!, s.titleRequest).catch((error: any) => {
-        s.titleNeeded = true;
-        console.error('agent: TITLE_GENERATION_FAILED', { stage: error.titleStage, code: error.code, upstreamCode: error.upstreamCode, nativeCode: error.nativeCode });
-      }).finally(() => { s.naming = false; });
-    }
+    if (r.action === 'start') title(s, r);
     return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: r.threadId, turnId, ...(r.requestId ? { requestId: r.requestId } : {}) };
   }
   /** Повтор того же operation ID возвращает исходный результат без native вызова. */
@@ -391,4 +504,14 @@ function validAnswer(f: PendingRequest, answer: any): boolean {
 function permissions(mode = 'auto', cwd?: string) {
   const full = mode === 'full';
   return { approvalPolicy: full ? 'never' : 'on-request', approvalsReviewer: mode === 'auto' ? 'auto_review' : 'user', ...(cwd ? { sandboxPolicy: full ? { type: 'dangerFullAccess' } : { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false } } : { sandbox: full ? 'danger-full-access' : 'workspace-write' }) };
+}
+
+/** Встроенные инструкции выбирает native Codex; явный default снимает прежний plan. */
+function collaboration(mode: 'default' | 'plan', model: string, effort?: string | null) {
+  return { mode, settings: { model, reasoning_effort: effort ?? null, developer_instructions: null } };
+}
+
+/** Только native отметка завершения подтверждает окончательный предложенный документ. */
+function historyItem(entry: any, turn?: { id: string; status: string } | null) {
+  return entry.item.type === 'plan' ? { ...entry.item, status: entry.completedAtMs != null || turn?.id === entry.turnId && turn?.status === 'completed' ? 'completed' : 'inProgress' } : entry.item;
 }

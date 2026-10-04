@@ -1101,7 +1101,7 @@
     },
     {
       "name": "model/list",
-      "summary": "Читает native каталог моделей и поддерживаемое рассуждение без выполнения хода.",
+      "summary": "\u0427\u0438\u0442\u0430\u0435\u0442 native \u043a\u0430\u0442\u0430\u043b\u043e\u0433 \u043c\u043e\u0434\u0435\u043b\u0435\u0439 \u0438 \u043f\u043e\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u043c\u043e\u0435 \u0440\u0430\u0441\u0441\u0443\u0436\u0434\u0435\u043d\u0438\u0435 \u0431\u0435\u0437 \u0432\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u044f \u0445\u043e\u0434\u0430.",
       "paramStructure": "by-name",
       "params": [
         {
@@ -1152,7 +1152,7 @@
     },
     {
       "name": "thread/name/set",
-      "summary": "Сохраняет смысловое название в штатной metadata Codex.",
+      "summary": "\u0421\u043e\u0445\u0440\u0430\u043d\u044f\u0435\u0442 \u0441\u043c\u044b\u0441\u043b\u043e\u0432\u043e\u0435 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u0432 \u0448\u0442\u0430\u0442\u043d\u043e\u0439 metadata Codex.",
       "paramStructure": "by-name",
       "params": [
         {
@@ -1210,6 +1210,214 @@
         "$ref": "schema.json#/definitions/ConfigReadParams"
       },
       "x-wire": "read-only; metadata remains private and is used only to disable inherited MCP servers for semantic titles"
+    },
+    {
+      "name": "thread/goal/get",
+      "params": [
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadGoalGetParams/properties/threadId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ThreadGoalGetResponse"
+        }
+      },
+      "paramStructure": "by-name",
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ThreadGoalGetParams"
+      },
+      "x-wire": "request/response",
+      "x-evidence": "upstream-0.160.0 schema; live synthetic disposable thread"
+    },
+    {
+      "name": "thread/goal/set",
+      "params": [
+        {
+          "name": "objective",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadGoalSetParams/properties/objective"
+          }
+        },
+        {
+          "name": "status",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadGoalSetParams/properties/status"
+          }
+        },
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadGoalSetParams/properties/threadId"
+          }
+        },
+        {
+          "name": "tokenBudget",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadGoalSetParams/properties/tokenBudget"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ThreadGoalSetResponse"
+        }
+      },
+      "paramStructure": "by-name",
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ThreadGoalSetParams"
+      },
+      "x-wire": "request/response",
+      "x-evidence": "upstream-0.160.0 schema; live synthetic disposable thread"
+    },
+    {
+      "name": "thread/goal/clear",
+      "params": [
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadGoalClearParams/properties/threadId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ThreadGoalClearResponse"
+        }
+      },
+      "paramStructure": "by-name",
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ThreadGoalClearParams"
+      },
+      "x-wire": "request/response",
+      "x-evidence": "upstream-0.160.0 schema; live synthetic disposable thread"
+    },
+    {
+      "name": "thread/settings/update",
+      "params": [
+        {
+          "name": "approvalPolicy",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/approvalPolicy"
+          }
+        },
+        {
+          "name": "approvalsReviewer",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/approvalsReviewer"
+          }
+        },
+        {
+          "name": "collaborationMode",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/collaborationMode"
+          }
+        },
+        {
+          "name": "cwd",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/cwd"
+          }
+        },
+        {
+          "name": "disabledPluginIds",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/disabledPluginIds"
+          }
+        },
+        {
+          "name": "effort",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/effort"
+          }
+        },
+        {
+          "name": "model",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/model"
+          }
+        },
+        {
+          "name": "multiAgentMode",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/multiAgentMode"
+          }
+        },
+        {
+          "name": "permissions",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/permissions"
+          }
+        },
+        {
+          "name": "personality",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/personality"
+          }
+        },
+        {
+          "name": "sandboxPolicy",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/sandboxPolicy"
+          }
+        },
+        {
+          "name": "serviceTier",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/serviceTier"
+          }
+        },
+        {
+          "name": "summary",
+          "required": false,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/summary"
+          }
+        },
+        {
+          "name": "threadId",
+          "required": true,
+          "schema": {
+            "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams/properties/threadId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "schema.json#/definitions/ThreadSettingsUpdateResponse"
+        }
+      },
+      "paramStructure": "by-name",
+      "x-paramsSchema": {
+        "$ref": "schema.json#/definitions/ThreadSettingsUpdateParams"
+      },
+      "x-wire": "request/response",
+      "x-evidence": "upstream-0.160.0 schema; live synthetic disposable thread"
     }
   ],
   "components": {
@@ -1453,6 +1661,34 @@
       "schema": {
         "$ref": "schema.json#/definitions/ThreadNameUpdatedNotification"
       }
+    },
+    {
+      "name": "thread/goal/updated",
+      "schema": {
+        "$ref": "schema.json#/definitions/ThreadGoalUpdatedNotification"
+      },
+      "evidence": "live-synthetic"
+    },
+    {
+      "name": "thread/goal/cleared",
+      "schema": {
+        "$ref": "schema.json#/definitions/ThreadGoalClearedNotification"
+      },
+      "evidence": "live-synthetic"
+    },
+    {
+      "name": "item/plan/delta",
+      "schema": {
+        "$ref": "schema.json#/definitions/PlanDeltaNotification"
+      },
+      "evidence": "live-synthetic"
+    },
+    {
+      "name": "thread/settings/updated",
+      "schema": {
+        "$ref": "schema.json#/definitions/ThreadSettingsUpdatedNotification"
+      },
+      "evidence": "live-synthetic"
     }
   ],
   "x-serverRequests": [

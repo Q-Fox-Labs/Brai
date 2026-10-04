@@ -6,11 +6,27 @@ export const bytes = value => new TextEncoder().encode(JSON.stringify(value)).by
 const string = { type: 'string', minLength: 1, maxLength: 128 };
 // AIDEV-NOTE: Последние символы проверяют нулевые pad bits; конец исключает даже завершающий перевод строки.
 const imagePattern = '^data:image/(?:png|jpeg|webp);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=|[A-Za-z0-9+/][AQgw]==)(?![\\s\\S])';
-const properties = { permissionMode: { type: 'string', minLength: 1, maxLength: 128, enum: ['ask', 'auto', 'full'] }, model: string, effort: string, action: string, projectId: string, threadId: string, generation: string, operationId: string, turnId: string, expectedTurnId: string, requestId: string, itemId: string, itemIds: { type: 'array', minItems: 1, maxItems: 100, uniqueItems: true, items: string }, text: { type: 'string', minLength: 0, maxLength: 65536 }, images: { type: 'array', minItems: 1, maxItems: limits.images, items: { type: 'string', pattern: imagePattern } }, answer: {}, cursor: { type: 'string', minLength: 1, maxLength: 2048 } };
+const properties = { agentMode: { enum: ['default', 'plan', 'goal'] }, objective: { type: 'string', minLength: 1, maxLength: 65536, pattern: '\\S' }, status: { enum: ['active', 'paused'] }, tokenBudget: { type: ['integer', 'null'], minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, permissionMode: { type: 'string', minLength: 1, maxLength: 128, enum: ['ask', 'auto', 'full'] }, model: string, effort: string, action: string, projectId: string, threadId: string, generation: string, operationId: string, turnId: string, expectedTurnId: string, requestId: string, itemId: string, itemIds: { type: 'array', minItems: 1, maxItems: 100, uniqueItems: true, items: string }, text: { type: 'string', minLength: 0, maxLength: 65536 }, images: { type: 'array', minItems: 1, maxItems: limits.images, items: { type: 'string', pattern: imagePattern } }, answer: {}, cursor: { type: 'string', minLength: 1, maxLength: 2048 } };
 const read = ['projectId', 'threadId'];
 const write = [...read, 'generation', 'operationId'];
-const fields = { projects: [], status: [], models: [], threads: ['projectId', '?cursor'], create: ['projectId', 'generation', 'operationId', '?model', '?permissionMode'], open: read, turns: [...read, '?cursor'], items: [...read, '?turnId', '?cursor'], activities: [...read, 'turnId', 'itemIds'], item: [...read, 'turnId', 'itemId'], start: [...write, '?text', '?images', '?model', '?effort', '?permissionMode'], steer: [...write, 'expectedTurnId', '?text', '?images'], archive: write, interrupt: [...write, 'turnId'], answer: [...write, 'requestId', 'answer'] };
-export const commandSchema = { $schema: 'http://json-schema.org/draft-07/schema#', oneOf: Object.entries(fields).map(([action, names]) => ({ type: 'object', additionalProperties: false, required: ['action', ...names.filter(name => !name.startsWith('?'))], ...(['start', 'steer'].includes(action) ? { anyOf: [{ required: ['text'], properties: { text: { pattern: '\\S' } } }, { required: ['images'] }] } : {}), properties: Object.fromEntries([['action', { const: action }], ...names.map(name => [name.replace('?', ''), properties[name.replace('?', '')]])]) })) };
+const fields = { projects: [], status: [], models: [], threads: ['projectId', '?cursor'], create: ['projectId', 'generation', 'operationId', '?model', '?permissionMode'], open: read, turns: [...read, '?cursor'], items: [...read, '?turnId', '?cursor'], activities: [...read, 'turnId', 'itemIds'], item: [...read, 'turnId', 'itemId'], start: [...write, '?text', '?images', '?model', '?effort', '?permissionMode', '?agentMode', '?tokenBudget'], steer: [...write, 'expectedTurnId', '?text', '?images'], archive: write, interrupt: [...write, 'turnId'], answer: [...write, 'requestId', 'answer'], goalGet: read, goalSet: [...write, '?objective', '?status', '?tokenBudget'], goalClear: write };
+const nonEmptyInput = { anyOf: [{ required: ['text'], properties: { text: { pattern: '\\S' } } }, { required: ['images'] }] };
+const goalStart = {
+  if: { required: ['agentMode'], properties: { agentMode: { const: 'goal' } } },
+  then: { required: ['text'], properties: { text: { pattern: '\\S' }, tokenBudget: { type: 'integer', minimum: 1 } }, not: { required: ['images'] } },
+  else: { not: { required: ['tokenBudget'] } },
+};
+export const commandSchema = {
+  $schema: 'http://json-schema.org/draft-07/schema#',
+  oneOf: Object.entries(fields).map(([action, names]) => ({
+    type: 'object', additionalProperties: false,
+    required: ['action', ...names.filter(name => !name.startsWith('?'))],
+    ...(['start', 'steer'].includes(action) ? nonEmptyInput : {}),
+    ...(action === 'start' ? { allOf: [goalStart] } : {}),
+    ...(action === 'goalSet' ? { anyOf: [{ required: ['objective'] }, { required: ['status'] }, { required: ['tokenBudget'] }] } : {}),
+    properties: Object.fromEntries([['action', { const: action }], ...names.map(name => [name.replace('?', ''), properties[name.replace('?', '')]])]),
+  })),
+};
 /** Проверяет структуру и JSON bytes; decoded budget и MIME signature проверяет сервер. */
 export function validateCommand(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || !Object.hasOwn(fields, value.action)) return false;
@@ -25,9 +41,13 @@ export function validateCommand(value) {
       else if (new Set(field).size !== field.length || field.some(id => typeof id !== 'string' || Array.from(id).length < 1 || Array.from(id).length > 128)) return false;
     }
     if (rule.enum && !rule.enum.includes(field)) return false;
+    if (key === 'tokenBudget' && field !== null && (!Number.isSafeInteger(field) || field < 1)) return false;
+    if (key === 'objective' && (typeof field !== 'string' || !field.trim())) return false;
     if (field === undefined || (rule.type === 'string' && (typeof field !== 'string' || Array.from(field).length < rule.minLength || Array.from(field).length > rule.maxLength))) return false;
   }
   if (['start', 'steer'].includes(value.action) && !value.text?.trim() && !value.images?.length) return false;
+  if (value.action === 'start' && (value.agentMode === 'goal' ? !value.text?.trim() || value.images || value.tokenBudget === null : value.tokenBudget !== undefined)) return false;
+  if (value.action === 'goalSet' && value.objective === undefined && value.status === undefined && value.tokenBudget === undefined) return false;
   return bytes(value) <= limits.input;
 }
 /** Проверяет закрытую проекцию лимита для Status и клиентов границы agent. */

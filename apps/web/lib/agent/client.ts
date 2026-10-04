@@ -6,10 +6,10 @@ import { EventSchema } from "@ag-ui/core/schemas";
 import { Subject, type Observable } from "rxjs";
 import { decodeFrame, type StreamFrame } from "./stream";
 import { bytes, limits, validateCommand, validateEnvelope, validateLimits } from "@brai/agent/contracts";
-import type { AgentLimits, Command, NativeSnapshot, DisplayItem, ThreadMetadata, ModelCatalog } from "@brai/agent/contracts";
+import type { AgentLimits, Command, NativeSnapshot, DisplayItem, ThreadMetadata, ModelCatalog, GoalProjection } from "@brai/agent/contracts";
 type Page<T> = { generation: string; data: T[]; nextCursor: string | null };
 type MutationReply = { generation: string; operationId: string; threadId: string; turnId?: string; requestId?: string; outcome: "accepted" };
-type Replies = Record<"create" | "start" | "steer" | "interrupt" | "answer" | "archive", MutationReply> & {
+type Replies = Record<"create" | "start" | "steer" | "interrupt" | "answer" | "archive" | "goalSet" | "goalClear", MutationReply> & {
   projects: { generation: string; projects: { projectId: string; name: string; available: boolean }[] };
   models: ModelCatalog;
   status: { generation: string; ready: boolean; connection: string; authorization: string; limits?: AgentLimits };
@@ -19,6 +19,7 @@ type Replies = Record<"create" | "start" | "steer" | "interrupt" | "answer" | "a
   activities: { generation: string; data: DisplayItem[] };
   item: { generation: string; item: DisplayItem };
   open: NativeSnapshot;
+  goalGet: { generation: string; goal: GoalProjection };
 };
 class PassiveAgent extends AbstractAgent {
   run(): Observable<BaseEvent> { throw new Error("PASSIVE_ONLY"); }
@@ -32,7 +33,7 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
   const abort = new AbortController();
   async function request<A extends Command["action"]>(command: Command & { action: A }): Promise<Replies[A]> {
     if (!validateCommand(command)) throw new AgentError("INVALID_ARGUMENT", "not-sent");
-    const reading = ["projects", "status", "models", "threads", "open", "turns", "items", "activities", "item"].includes(command.action);
+    const reading = ["projects", "status", "models", "threads", "open", "turns", "items", "activities", "item", "goalGet"].includes(command.action);
     const { action, ...body } = command;
     const query = new URLSearchParams(Object.entries(body).map(([key, value]) => [key, Array.isArray(value) ? JSON.stringify(value) : String(value)]));
     try {
