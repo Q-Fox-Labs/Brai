@@ -64,6 +64,19 @@ test('open/history/SSE hide bodies; summaries and detail require explicit reads'
   assert.equal(updated.item.output, 'large output MORE');
   assert.ok(updated.item.revision > headings.data[0].revision);
 });
+test('reasoning headings distinguish empty summaries and detail preserves public content', async () => {
+  const f = fixture();
+  for (const [id, content] of [['empty', []], ['spaces', ['  ', '\n\t']], ['public', ['\n  First line', 'Second line']]]) {
+    f.entries.push({ turnId: 'turn', item: { id, type: 'reasoning', summary: content, content: ['private reasoning'] } });
+  }
+  const headers = await f.read('activities', { turnId: 'turn', itemIds: ['empty', 'spaces', 'public'] });
+  assert.deepEqual(headers.data.map(item => item.summary), ['', '', 'First line']);
+  assert.ok(headers.data.every(item => item.text === ''));
+  const detail = await f.read('item', { turnId: 'turn', itemId: 'public' });
+  assert.equal(detail.item.text, '\n  First line\nSecond line');
+  assert.ok(!JSON.stringify(detail).includes('private reasoning'));
+  f.app.close();
+});
 test('targeted native lookup handles the first item, scope and generation', async () => {
   const f = fixture();
   await f.read('open');

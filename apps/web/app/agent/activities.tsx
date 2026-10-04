@@ -31,7 +31,7 @@ function ActivityList({ items, context, reads }: Props) {
   return <div className="agent-activity-list">
     {loading && <p className="agent-note" role="status">{data ? "Обновляем действия…" : "Загружаем действия…"}</p>}
     {error && <p className="agent-note" role="alert">{error} <button onClick={() => setRetry(value => value + 1)}>Повторить</button></p>}
-    {data?.map(item => <Activity key={item.id} item={item} context={context} reads={reads} />)}
+    {data?.filter(item => item.type !== "reasoning" || item.summary?.trim()).map(item => <Activity key={item.id} item={item} context={context} reads={reads} />)}
   </div>;
 }
 function Activity({ item, context, reads }: { item: DisplayItem; context: Context; reads: LazyReads }) {
