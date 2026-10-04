@@ -219,3 +219,18 @@ test('real local WebSocket validates image commands and restores >2 MiB raw page
     await new Promise(resolve => wss.close(resolve)); await new Promise(resolve => server.close(resolve)); rmSync(dir, { recursive: true });
   }
 });
+
+
+test('image detail rejects remote URLs, local paths and oversized media', () => {
+  const native = content => ({ id: 'u', type: 'userMessage', content });
+  const valid = display(native([{ type: 'image', url: image }]), 'turn', false, true);
+  assert.deepEqual(valid.images, [image]);
+  assert.equal(compact(valid).images, undefined);
+  for (const content of [
+    [{ type: 'image', url: 'https://example.com/x.png' }],
+    [{ type: 'localImage', path: '/private/image.png' }],
+    [{ type: 'image', url: 'data:image/svg+xml;base64,AAAA' }],
+    [{ type: 'image', url: png(limits.imageBytes + 1) }],
+  ]) assert.equal(display(native(content), 'turn', false, true).images, undefined);
+  assert.ok(bytes(display(native([{ type: 'image', url: png(limits.imageBytes) }]), 'turn', false, true)) < limits.frame);
+});

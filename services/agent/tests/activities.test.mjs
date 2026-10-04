@@ -161,3 +161,23 @@ test('history bounds action-only pages and rejects a generation change mid-page'
   f.settings.beforeCall = method => { if (method === 'thread/items/list' && ++calls === 2) f.rotate(); };
   await assert.rejects(f.read('items'), e => e.code === 'STALE_GENERATION' && e.outcome === 'query');
 });
+
+
+test('message images survive reopening and live snapshots stay compact', async () => {
+  const f = fixture();
+  const url = 'data:image/png;base64,iVBORw0KGgo=';
+  f.entries[0].item.content.push({ type: 'image', url });
+  const opened = await f.read('open');
+  assert.equal(opened.items.find(item => item.id === 'user').imageCount, 1);
+  assert.equal(JSON.stringify(opened).includes(url), false);
+  const history = await f.read('items');
+  assert.equal(JSON.stringify(history).includes(url), false);
+  const detail = await f.read('item', { turnId: 'turn', itemId: 'user' });
+  assert.deepEqual(detail.item.images, [url]);
+  assert.equal(new Ajv({ strict: false }).compile(schema.definitions.DisplayItem)(detail.item), true);
+  f.observe({ method: 'item/completed', params: { threadId: 't', turnId: 'turn', item: f.entries[0].item } });
+  assert.equal(JSON.stringify(f.events).includes(url), false);
+  assert.deepEqual((await f.read('item', { turnId: 'turn', itemId: 'user' })).item.images, [url]);
+  await assert.rejects(f.read('item', { turnId: 'other', itemId: 'user' }), error => error.code === 'NOT_FOUND');
+  f.app.close();
+});

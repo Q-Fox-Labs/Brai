@@ -65,7 +65,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
   }
   async function detail(s: Session, turnId: string, itemId: string): Promise<DisplayItem> {
     const cached = s.details.get(itemId);
-    if (cached?.turnId === turnId) return structuredClone(cached);
+    if (cached?.turnId === turnId && !cached.imageCount) return structuredClone(cached);
     const generation = current(), cut = s.view.seq;
     // AIDEV-NOTE: native anchor исключает сам item; predecessor позволяет прочитать его без сканирования всей истории.
     const previous = await codex.call('thread/items/list', { threadId: s.view.threadId, turnId, limit: 1, sortDirection: 'desc', cursor: { type: 'item', itemId } });
@@ -75,8 +75,8 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     const entry = page.data.find((e: any) => e.item.id === itemId && e.turnId === turnId);
     if (!entry) fail('NOT_FOUND', 'query');
     const newer = s.details.get(itemId);
-    if (newer?.turnId === turnId && (s.revisions.get(itemId) ?? 0) > cut) return structuredClone(newer);
-    return { ...display(entry.item, turnId), revision: s.view.items.find(i => i.id === itemId)?.revision ?? 0 };
+    if (newer?.turnId === turnId && !newer.imageCount && (s.revisions.get(itemId) ?? 0) > cut) return structuredClone(newer);
+    return { ...display(entry.item, turnId, false, true), revision: s.view.items.find(i => i.id === itemId)?.revision ?? 0 };
   }
   async function admit(projectId: string, thread: any, fresh = false): Promise<Session> {
     const previous = admission;

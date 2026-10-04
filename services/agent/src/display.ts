@@ -1,6 +1,6 @@
 // ABOUTME: Преобразует native item в единственное безопасное представление.
-// ABOUTME: Передаёт только текст и явные поля; raw reasoning и binary исключены.
-import { bytes } from '../contracts/index.mjs';
+// ABOUTME: Передаёт только текст и явные поля; raw reasoning исключены; изображения доступны только в отдельном чтении.
+import { bytes, limits, validateCommand } from '../contracts/index.mjs';
 import type { DisplayItem, ThreadMetadata } from '../contracts/index.mjs';
 /** Сохраняет UTF-8 границу и явный маркер сокращения. */
 export function text(value: unknown, cap = 8192): string {
@@ -15,8 +15,8 @@ export function text(value: unknown, cap = 8192): string {
 export function metadata(thread: any): ThreadMetadata {
   return { id: thread.id, title: text(thread.name ?? thread.preview, 512), preview: text(thread.preview, 512), model: thread.model ?? null, canAcceptDirectInput: thread.canAcceptDirectInput ?? null, updatedAt: thread.updatedAt ?? 0, active: thread.status?.type === 'active', lastMessageAt: (thread.updatedAt ?? 0) * 1000 };
 }
-/** Представляет item независимо от источника: native history или notification. */
-export function display(item: any, turnId: string, history = false): DisplayItem {
+/** Представляет native item; media включают только для отдельного чтения, вне history/snapshot. */
+export function display(item: any, turnId: string, history = false, media = false): DisplayItem {
   const textual = (parts: any[]) => (parts ?? []).filter(part => (part.type === 'text' || part.type === 'inputText') && typeof part.text === 'string').map(part => part.text).join('\n');
   let content = item.text ?? '';
   if (item.type === 'userMessage') content = textual(item.content);
@@ -27,6 +27,10 @@ export function display(item: any, turnId: string, history = false): DisplayItem
   if (item.type === 'collabAgentToolCall') content = `${item.tool}\n${Object.entries(item.agentsStates ?? {}).map(([id, state]: any) => `${id}: ${state.status}`).join('\n')}`;
   const value: DisplayItem = { id: item.id, turnId, type: item.type, text: text(content), truncated: Buffer.byteLength(content) > 8192 };
   if (item.type === 'userMessage') value.imageCount = (item.content ?? []).filter((part: any) => part.type === 'image' || part.type === 'localImage').length;
+  if (media && item.type === 'userMessage') {
+    const images = (item.content ?? []).filter((part: any) => part.type === 'image').map((part: any) => part.url);
+    if (images.length && validateCommand({ action: 'start', projectId: 'p', threadId: 't', generation: 'g', operationId: 'o', images }) && images.reduce((sum: number, url: string) => sum + Buffer.byteLength(url.slice(url.indexOf(',') + 1), 'base64'), 0) <= limits.imageBytes) value.images = images;
+  }
   if (typeof item.command === 'string') value.command = text(item.command, 16384);
   if (typeof item.aggregatedOutput === 'string') value.output = text(item.aggregatedOutput, 32768);
   if (item.type === 'fileChange') value.diff = text((item.changes ?? []).map((change: any) => `${change.path}\n${change.diff}`).join('\n'), 32768);
@@ -42,9 +46,12 @@ export function display(item: any, turnId: string, history = false): DisplayItem
   return value;
 }
 
-/** Сообщения сохраняют текст; скрытые действия передают только состояние и идентификаторы. */
+/** Сообщения сохраняют текст без изображений; скрытые действия передают состояние и идентификаторы. */
 export function compact(item: DisplayItem): DisplayItem {
-  if (item.type === 'userMessage' || item.type === 'agentMessage') return { ...item };
+  if (item.type === 'userMessage' || item.type === 'agentMessage') {
+    const { images, ...message } = item;
+    return message;
+  }
   return { id: item.id, turnId: item.turnId, type: item.type, text: '', ...(item.status === undefined ? {} : { status: item.status }), ...(item.exitCode === undefined ? {} : { exitCode: item.exitCode }), ...(item.revision === undefined ? {} : { revision: item.revision }) };
 }
 /** Краткий заголовок без вывода, diff и полного тела команды. */

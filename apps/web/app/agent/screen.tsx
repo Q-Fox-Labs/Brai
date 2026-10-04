@@ -15,6 +15,7 @@ import { questionReplies } from "../../lib/agent/question-reply";
 import { composerAction, groupTimeline, mergeTimeline } from "./timeline";
 import Sidebar, { type Project, type ThreadPage } from "./sidebar";
 import { limits } from "@brai/agent/contracts";
+import MessageImages from "./message-images";
 import { acceptedDraft, imageModel, prepareImage, type ComposerDraft } from "../../lib/agent/images";
 
 type CachedChat = { snapshot: NativeSnapshot | null; history: DisplayItem[]; generation: string; cursor: string | null; draft: ComposerDraft; model: string; effort: string; permissionMode: PermissionMode; ready: boolean; uncertain: boolean };
@@ -293,7 +294,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         {!threadId && <div className="agent-empty"><span className="agent-empty-symbol" aria-hidden="true">✳</span><h2>С чего начнём?</h2><p>Выберите чат слева или создайте новый в нужном проекте.</p>{project && <button className="agent-primary" disabled={busy || uncertain.current} onClick={() => void mutate("create", selectedModel ? { model: selectedModel.model, permissionMode } : { permissionMode })}>Новый чат · {project.name}</button>}</div>}
         <div className="agent-timeline">
           {cursor && <button className="agent-history-more" onClick={() => void moreHistory()}>Загрузить предыдущие сообщения</button>}
-          {timeline.map(entry => entry.kind === "message" ? <Item key={entry.item.id} item={entry.item} /> : <Activities key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.id}`} items={entry.items} context={activityContext} reads={lazyReads} />)}
+          {timeline.map(entry => entry.kind === "message" ? <Item key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.item.id}`} item={entry.item} context={activityContext} reads={lazyReads} /> : <Activities key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.id}`} items={entry.items} context={activityContext} reads={lazyReads} />)}
           {connected && view?.requests.map(request => <NativeForm key={`${view.generation}:${view.epoch}:${request.requestId}`} request={request} disabled={disabled} send={answer => mutate("answer", { requestId: request.requestId, answer })} />)}
         </div>
       </div>
@@ -321,12 +322,12 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
 }
 
 /** Сообщения используют безопасный Markdown; тела действий принадлежат отдельному ленивому списку. */
-function Item({ item }: { item: DisplayItem }) {
+function Item({ item, context, reads }: { item: DisplayItem; context: Parameters<typeof MessageImages>[0]["context"]; reads: Parameters<typeof MessageImages>[0]["reads"] }) {
   const replies = item.type === "userMessage" ? questionReplies(item.text) : null;
   return <article data-item-id={item.id} className={`agent-item ${item.type === "userMessage" ? "agent-user-message" : "agent-assistant-message"}`}>
     <span className="agent-message-author">{item.type === "userMessage" ? "Вы" : "Brai"}{item.phase && <span className="agent-message-phase">{item.phase === "final_answer" ? "Итог" : item.phase === "commentary" ? "Промежуточное сообщение" : item.phase}</span>}</span>
     {replies ? <div className="agent-markdown">{replies.map((reply, index) => <div key={index}><p>{reply.question}</p><p><strong>Ответ: </strong>{reply.answer}</p></div>)}</div> : <Markdown text={item.text} />}
-    {!!item.imageCount && <p className="agent-message-images">Изображений: {item.imageCount}</p>}
+    {!!item.imageCount && <MessageImages item={item} context={context} reads={reads} />}
   </article>;
 }
 

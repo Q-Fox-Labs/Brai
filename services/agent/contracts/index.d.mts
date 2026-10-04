@@ -1,6 +1,6 @@
 // ABOUTME: Описывает единственную native-display границу agent v2.
 // ABOUTME: История остаётся у Codex; AG-UI переносит состояние, а не второй lifecycle.
-export type DisplayItem = { id: string; turnId: string; type: string; text: string; command?: string; output?: string; diff?: string; status?: string; exitCode?: number | null; phase?: string | null; truncated?: boolean; summary?: string; revision?: number; timestamp?: number; imageCount?: number };
+export type DisplayItem = { id: string; turnId: string; type: string; text: string; command?: string; output?: string; diff?: string; status?: string; exitCode?: number | null; phase?: string | null; truncated?: boolean; summary?: string; revision?: number; timestamp?: number; images?: string[]; imageCount?: number };
 export type PendingRequest = { requestId: string; kind: "command-approval" | "file-change-approval" | "permissions" | "question" | "unsupported"; method: string; turnId: string; params: Record<string, any>; answered: boolean; reason?: string };
 export type ThreadMetadata = { id: string; title: string; preview: string; model: string | null; reasoningEffort?: string | null; canAcceptDirectInput: boolean | null; updatedAt: number; active?: boolean; lastMessageAt?: number };
 export type PermissionMode = "ask" | "auto" | "full";

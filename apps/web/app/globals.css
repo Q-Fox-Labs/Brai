@@ -170,3 +170,6 @@ button:focus-visible, a:focus-visible { outline: 2px solid #b3a2ff; outline-offs
   .agent-composer-actions .agent-send { margin-left: auto; }
   .agent-model-settings select { font-size: 11px; padding: 5px 3px; }
 }
+
+.agent-message-thumbnails { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 0; padding: 0; list-style: none; }
+.agent-message-thumbnails img { display: block; width: 144px; height: 108px; max-width: 100%; object-fit: contain; border: 1px solid #535761; border-radius: 8px; background: #23262b; }
