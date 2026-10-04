@@ -4,6 +4,16 @@ import type { CodexPort } from './codex.js';
 /** Сохраняет краткое имя неназванного чата; сохраняет ручное имя, не повторяет мутации. */
 export async function nameThread(codex: CodexPort, threadId: string, request: string, timeoutMs = 60_000): Promise<string | null> {
   const generation = codex.status().generation, valid = () => codex.status().generation === generation && codex.status().connection === 'connected';
+  // AIDEV-NOTE: Отказ native чтения -32603 не должен терять готовое название; повторяем только чтение, не inference.
+  async function readName(): Promise<string | null> {
+    for (let attempt = 0; ; attempt++) {
+      try { return (await codex.call('thread/read', { threadId, includeTurns: false })).thread.name; }
+      catch (error: any) {
+        if (error.upstreamCode !== -32603 || attempt >= 9 || !valid()) throw error;
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+    }
+  }
   let temporary: string | undefined, turnId: string | undefined, answer = '', finished = false, stage = 'thread/read';
   let resolve!: () => void, reject!: (error: Error) => void;
   const done = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
@@ -23,7 +33,7 @@ export async function nameThread(codex: CodexPort, threadId: string, request: st
   });
   const timer = setTimeout(() => reject(new Error('TITLE_TIMEOUT')), timeoutMs);
   try {
-    if ((await codex.call('thread/read', { threadId, includeTurns: false })).thread.name || !valid()) return null;
+    if (await readName() || !valid()) return null;
     stage = 'config/read'; const { config } = await codex.call('config/read', { cwd: '/tmp', includeLayers: false });
     if (!valid()) return null;
     stage = 'thread/start'; temporary = (await codex.call('thread/start', {
@@ -51,7 +61,7 @@ export async function nameThread(codex: CodexPort, threadId: string, request: st
     if (typeof title !== 'string' || !title.trim() || /[\r\n]/.test(title)) throw new Error('TITLE_INVALID_RESULT');
     // AIDEV-NOTE: Слишком длинный ответ не теряем и не повторяем платный запрос; обрезаем по границе слова.
     const name = title.trim().length > 60 ? title.trim().slice(0, 61).replace(/\s+\S*$/, '').slice(0, 60).trim() : title.trim();
-    stage = 'thread/read'; if (!valid() || (await codex.call('thread/read', { threadId, includeTurns: false })).thread.name || !valid()) return null;
+    stage = 'thread/read/current'; if (!valid() || await readName() || !valid()) return null;
     stage = 'thread/name/set'; await codex.call('thread/name/set', { threadId, name }, { mutation: true });
     return valid() ? name : null;
   } catch (error: any) {

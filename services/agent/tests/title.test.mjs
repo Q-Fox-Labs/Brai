@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { nameThread } from '../dist/title.js';
 import { createApplication } from '../dist/application.js';
 function fixture(options = {}) {
-  const calls = [], listeners = new Set(); let generation = 'g1', name = options.name ?? null;
+  const calls = [], listeners = new Set(); let generation = 'g1', name = options.name ?? null, reads = 0;
   const send = (method, params) => { for (const observer of listeners) observer({ type: 'notification', method, params }); };
   const finish = () => {
     if (options.rename) name = options.rename;
@@ -17,7 +17,12 @@ function fixture(options = {}) {
     subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); },
     call: async (method, params, flags) => {
       calls.push({ method, params, flags });
-      if (method === 'thread/read') return { thread: { id: 'main', name, preview: options.preview ?? '', cwd: '/tmp/demo', updatedAt: 1, model: 'gpt-6-luna' } };
+      if (method === 'thread/read') {
+        reads++;
+        if (options.failReads?.includes(reads)) throw Object.assign(new Error('private upstream details'), { code: 'UPSTREAM_UNAVAILABLE', upstreamCode: -32603 });
+        if (reads === options.renameAtRead) name = 'Ручное название';
+        return { thread: { id: 'main', name, preview: options.preview ?? '', cwd: '/tmp/demo', updatedAt: 1, model: 'gpt-6-luna' } };
+      }
       if (method === 'thread/resume') return { ...(await port.call('thread/read', params)), model: 'gpt-6-luna' };
       if (method === 'thread/turns/list') return { data: options.turn ? [options.turn] : [] };
       if (method === 'thread/items/list') return { data: [] };
@@ -84,6 +89,27 @@ test('a long semantic title is bounded without another inference', async () => {
   assert.equal(f.calls.filter(c => c.method === 'turn/start').length, 1);
   const schema = f.calls.find(c => c.method === 'turn/start').params.outputSchema;
   assert.equal(schema.properties.title.maxLength, 60);
+});
+
+test('transient native reads preserve the generated title without repeating inference', async () => {
+  for (const failReads of [[1, 2], [2, 3]]) {
+    const f = fixture({ failReads });
+    assert.equal(await nameThread(f.port, 'main', 'Настроить уведомления'), 'Настроить уведомления');
+    assert.equal(f.calls.filter(c => c.method === 'turn/start').length, 1);
+    assert.equal(f.calls.filter(c => c.method === 'thread/name/set').length, 1);
+  }
+  const manual = fixture({ failReads: [2], renameAtRead: 3 });
+  assert.equal(await nameThread(manual.port, 'main', 'task'), null);
+  assert.equal(manual.name(), 'Ручное название');
+  assert.equal(manual.calls.some(c => c.method === 'thread/name/set'), false);
+});
+
+test('persistent native read failure is bounded before any inference', async () => {
+  const f = fixture({ failReads: Array.from({ length: 10 }, (_, i) => i + 1) });
+  await assert.rejects(nameThread(f.port, 'main', 'task'), e => e.upstreamCode === -32603 && e.titleStage === 'thread/read');
+  assert.equal(f.calls.filter(c => c.method === 'thread/read').length, 10);
+  assert.equal(f.calls.some(c => c.method === 'turn/start'), false);
+  assert.equal(f.listeners.size, 0);
 });
 test('RPC and generation failures identify their stage without losing native codes', async () => {
   for (const stage of ['thread/read', 'config/read', 'thread/start', 'turn/start', 'thread/name/set']) {
