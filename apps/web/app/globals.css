@@ -114,6 +114,11 @@ button:focus-visible, a:focus-visible { outline: 2px solid #b3a2ff; outline-offs
 .agent-note { color: var(--agent-muted); font-size: 12px; }
 .agent-history-more { display: block; margin: 0 auto 28px; padding: 9px 14px; border: 1px solid var(--agent-border); border-radius: 8px; color: var(--agent-muted); font-size: 12px; }
 .agent-composer-area { flex: none; padding: 0 30px 14px; }
+.agent-message-queue { max-width: 808px; max-height: 140px; overflow: auto; margin: 0 auto 8px; padding: 0; list-style: none; }
+.agent-message-queue li { display: flex; align-items: center; gap: 10px; padding: 6px 10px; font-size: 13px; }
+.agent-message-queue li span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-message-queue button { flex: none; padding: 4px 8px; }
+.agent-composer-hint { display: block; margin-top: 8px; color: var(--workspace-muted); font-size: 11px; }
 .agent-composer { max-width: 808px; margin: 0 auto; padding: 14px 16px 12px; border: 1px solid #484b52; border-radius: 18px; background: #2a2d32; }
 .agent-composer textarea { width: 100%; min-height: 65px; max-height: 180px; resize: vertical; border: 0; background: transparent; color: inherit; font-size: 15px; line-height: 1.6; }
 .agent-composer textarea::placeholder { color: #92969f; }
