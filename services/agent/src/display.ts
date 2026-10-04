@@ -46,13 +46,13 @@ export function display(item: any, turnId: string, history = false, media = fals
   return value;
 }
 
-/** Сообщения сохраняют текст без изображений; скрытые действия передают состояние и идентификаторы. */
+/** Скрытые действия передают идентификаторы; reasoning также сообщает наличие публичного текста. */
 export function compact(item: DisplayItem): DisplayItem {
   if (item.type === 'userMessage' || item.type === 'agentMessage') {
     const { images, ...message } = item;
     return message;
   }
-  return { id: item.id, turnId: item.turnId, type: item.type, text: '', ...(item.status === undefined ? {} : { status: item.status }), ...(item.exitCode === undefined ? {} : { exitCode: item.exitCode }), ...(item.revision === undefined ? {} : { revision: item.revision }) };
+  return { id: item.id, turnId: item.turnId, type: item.type, text: '', ...(item.type === 'reasoning' ? { hasContent: Boolean(item.text.trim()) } : {}), ...(item.status === undefined ? {} : { status: item.status }), ...(item.exitCode === undefined ? {} : { exitCode: item.exitCode }), ...(item.revision === undefined ? {} : { revision: item.revision }) };
 }
 /** Краткий заголовок без вывода и diff; пустое рассуждение сохраняет пустой заголовок. */
 export function summary(item: DisplayItem): DisplayItem {

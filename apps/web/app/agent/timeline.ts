@@ -25,10 +25,11 @@ export function mergeTimeline(history: DisplayItem[], live: DisplayItem[]): Disp
 }
 
 export type TimelineEntry = { kind: "message"; item: DisplayItem } | { kind: "activities"; id: string; items: DisplayItem[] };
-/** Скрытые действия группируются между сообщениями; даже пустой reasoning остаётся идентификатором. */
+/** Группирует скрытые действия между сообщениями, пропуская заведомо пустые рассуждения. */
 export function groupTimeline(items: DisplayItem[]): TimelineEntry[] {
   const entries: TimelineEntry[] = [];
   for (const item of items) {
+    if (item.type === "reasoning" && item.hasContent === false) continue;
     if (item.type === "userMessage" || item.type === "agentMessage") entries.push({ kind: "message", item });
     else {
       const previous = entries.at(-1);

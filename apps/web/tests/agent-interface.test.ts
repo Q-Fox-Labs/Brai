@@ -82,7 +82,7 @@ function component(name: string) {
   const source = readFileSync(new URL(`../app/agent/${name}.tsx`, import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const module = { exports: {} as { default: ComponentType<Record<string, unknown>> } };
-  new Function("require", "module", "exports", compiled)((name: string) => name === "../../lib/agent/limits" ? { formatLimitReset, limitCountdown } : require(name), module, module.exports);
+  new Function("require", "module", "exports", compiled)((name: string) => name.endsWith(".css") ? {} : name === "./markdown" ? { default: component("markdown") } : name === "../../lib/agent/limits" ? { formatLimitReset, limitCountdown } : require(name), module, module.exports);
   return module.exports.default;
 }
 
@@ -166,4 +166,13 @@ test("three selectors retain accessible names without visible labels", () => {
   assert.equal((html.match(/<select/g) ?? []).length, 3);
   for (const name of ["Модель", "Рассуждение", "Разрешения"]) assert.ok(html.includes(`aria-label="${name}"`));
   assert.doesNotMatch(html, /<label/);
+});
+
+test("empty reasoning cannot create a group; a live nonempty revision reappears", () => {
+  const empty = { ...item("empty"), type: "reasoning", hasContent: false };
+  assert.deepEqual(groupTimeline([empty]), []);
+  assert.deepEqual(groupTimeline([empty, { ...empty, id: "spaces" }]), []);
+  assert.equal(groupTimeline([{ ...empty, hasContent: true, revision: 1 }]).length, 1);
+  const reads = createLazyReads(async () => { throw new Error("empty group must not read"); });
+  assert.equal(renderToStaticMarkup(createElement(component("activities"), { context, reads, items: [empty] })), "");
 });

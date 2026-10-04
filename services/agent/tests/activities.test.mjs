@@ -72,6 +72,15 @@ test('reasoning headings distinguish empty summaries and detail preserves public
   const headers = await f.read('activities', { turnId: 'turn', itemIds: ['empty', 'spaces', 'public'] });
   assert.deepEqual(headers.data.map(item => item.summary), ['', '', 'First line']);
   assert.ok(headers.data.every(item => item.text === ''));
+  for (const action of ['open', 'items']) {
+    const result = await f.read(action);
+    const items = result.items ?? result.data;
+    assert.deepEqual(items.filter(item => item.type === 'reasoning').map(item => item.hasContent), [false, false, true]);
+    assert.ok(items.filter(item => item.type === 'reasoning').every(item => item.text === ''));
+    assert.ok(items.every(item => new Ajv({ strict: false }).compile(schema.definitions.DisplayItem)(item)));
+  }
+  f.observe({ method: 'item/completed', params: { threadId: 't', turnId: 'turn', item: { id: 'empty', type: 'reasoning', summary: ['Now visible'] } } });
+  assert.equal(f.events.at(-1).event.snapshot.items.find(item => item.id === 'empty').hasContent, true);
   const detail = await f.read('item', { turnId: 'turn', itemId: 'public' });
   assert.equal(detail.item.text, '\n  First line\nSecond line');
   assert.ok(!JSON.stringify(detail).includes('private reasoning'));

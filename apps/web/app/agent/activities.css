@@ -1,0 +1,4 @@
+/* ABOUTME: Оформляет Markdown-заголовки рассуждений в списке действий.
+   ABOUTME: Обычный текст переносится; оформление вывода инструментов не меняется. */
+.agent-reasoning-title { white-space: normal; overflow-wrap: anywhere; }
+.agent-reasoning-title .agent-markdown p { margin: 0; }

@@ -278,7 +278,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
         messages += part.data.filter((e: any) => e.item?.type === 'userMessage' || e.item?.type === 'agentMessage').length;
         page.data.push(...(r.action === 'items' ? part.data.map((e: any) => {
           const revision = s.view.items.find(i => i.id === e.item.id)?.revision ?? 0;
-          if (e.item.type !== 'userMessage' && e.item.type !== 'agentMessage') return { id: e.item.id, turnId: e.turnId, type: e.item.type, text: '', revision, ...(typeof e.item.status === 'string' ? { status: e.item.status } : {}), ...(Object.hasOwn(e.item, 'exitCode') ? { exitCode: e.item.exitCode } : {}) };
+          if (e.item.type !== 'userMessage' && e.item.type !== 'agentMessage') return { id: e.item.id, turnId: e.turnId, type: e.item.type, text: '', revision, ...(e.item.type === 'reasoning' ? { hasContent: (e.item.summary ?? []).some((part: string) => Boolean(part.trim())) } : {}), ...(typeof e.item.status === 'string' ? { status: e.item.status } : {}), ...(Object.hasOwn(e.item, 'exitCode') ? { exitCode: e.item.exitCode } : {}) };
           return { ...display(e.item, e.turnId, true), revision, timestamp: e.startedAtMs ?? e.completedAtMs ?? s.view.thread.updatedAt * 1000 };
         }) : part.data.map((t: any) => ({ id: t.id, status: t.status }))));
         page.nextCursor = part.nextCursor ?? null;
