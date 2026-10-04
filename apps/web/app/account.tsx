@@ -5,10 +5,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import Timer from "./timer";
 import AgentScreen from "./agent/screen";
+import DoScreen from "./do/screen";
 type User = { id: string; email: string };
 /** Управляет подтверждённой сервером сессией без хранения токена в браузере. */
 export default function Account() {
- const view = usePathname() === "/agent" ? "agent" : "timer";
+ const pathname = usePathname();
+ const view = pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : "timer";
  const [user, setUser] = useState<User | null>(null), [ready, setReady] = useState(false), [exiting, setExiting] = useState(false);
  const [email, setEmail] = useState(""), [code, setCode] = useState(""), [sent, setSent] = useState(false), [busy, setBusy] = useState(false), [message, setMessage] = useState("");
  const locked = useRef(false), codeInput = useRef<HTMLInputElement>(null);
@@ -67,14 +69,15 @@ export default function Account() {
  </main>;
 }
 
-/** Сохраняет состояние посещённых экранов; выход или смена пользователя удаляют оба. */
-function AccountScreens({ view, user, onLogout, onUnauthorized, accountMessage }: { view: "agent" | "timer"; user: User; onLogout: () => void; onUnauthorized: () => void; accountMessage: string }) {
- const [visited, setVisited] = useState({ agent: view === "agent", timer: view === "timer" });
+/** Сохраняет состояние посещённых экранов; выход или смена пользователя удаляют их. */
+function AccountScreens({ view, user, onLogout, onUnauthorized, accountMessage }: { view: "agent" | "timer" | "do"; user: User; onLogout: () => void; onUnauthorized: () => void; accountMessage: string }) {
+ const [visited, setVisited] = useState({ agent: view === "agent", timer: view === "timer", do: view === "do" });
  useEffect(() => { setVisited(previous => previous[view] ? previous : { ...previous, [view]: true }); }, [view]);
  const props = { userId: user.id, email: user.email, onLogout, onUnauthorized, accountMessage };
- // AIDEV-NOTE: hidden сохраняет черновик, очередь и SSE; второй клиент создаётся только после посещения вкладки.
+ // AIDEV-NOTE: hidden сохраняет состояние; каждый экран создаётся только после первого посещения вкладки.
  return <>
   <div className="workspace-screen" hidden={view !== "agent"}>{(visited.agent || view === "agent") && <AgentScreen {...props} active={view === "agent"} />}</div>
   <div className="workspace-screen workspace-timer" hidden={view !== "timer"}>{(visited.timer || view === "timer") && <Timer {...props} />}</div>
+  <div className="workspace-screen" hidden={view !== "do"}>{(visited.do || view === "do") && <DoScreen {...props} active={view === "do"} />}</div>
  </>;
 }

@@ -1,5 +1,5 @@
 "use client";
-// ABOUTME: Показывает общие вкладки «Агент» и «Таймер» над рабочими экранами.
+// ABOUTME: Показывает общие вкладки «Агент», «Таймер» и «Дела» над рабочими экранами.
 // ABOUTME: Использует клиентские переходы Next.js и отмечает текущий маршрут.
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -12,6 +12,7 @@ export default function Navigation() {
     <nav className="workspace-tabs" aria-label="Разделы Brai">
       <Link href="/agent" aria-current={pathname === "/agent" ? "page" : undefined}>Агент</Link>
       <Link href="/" aria-current={pathname === "/" ? "page" : undefined}>Таймер</Link>
+      <Link href="/do" aria-current={pathname === "/do" ? "page" : undefined}>Дела</Link>
     </nav>
   </header>;
 }
