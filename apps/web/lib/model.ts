@@ -1,15 +1,19 @@
 // ABOUTME: Применяет подтверждённые snapshots/events и рассчитывает монотонные часы.
 // ABOUTME: Не выполняет I/O и не создаёт commandId; история сохраняет ранее загруженные страницы.
 import type { Active, Interval, Pending, Snapshot, TimerEvent } from "./types";
-export type View = { active: Active | null; version: number; items: Interval[]; cursor: string | null; paged: boolean;
+export type View = { active: Active | null; version: number; items: Interval[]; cursor: string | null; paged: boolean; totalCompletedMs: number | null; totalFromHistory: boolean;
  anchorServer: number; anchorMono: number; connected: boolean; local: Active | null; localElapsed: number; localMono: number; queued: number; message: string; loading: boolean };
 /** Возвращает исходное состояние до первого свежего snapshot. */
-export function initialView(): View { return { active: null, version: 0, items: [], cursor: null, paged: false,
+export function initialView(): View { return { active: null, version: 0, items: [], cursor: null, paged: false, totalCompletedMs: null, totalFromHistory: false,
  anchorServer: 0, anchorMono: 0, connected: false, local: null, localElapsed: 0, localMono: 0, queued: 0, message: "", loading: false }; }
 /** Объединяет страницы/live запись без повторов по timerId. */
 export function mergeIntervals(a: Interval[], b: Interval[]): Interval[] {
  return [...new Map([...a, ...b].map(item => [item.timerId, item])).values()].sort((x, y) =>
  y.startedAt.localeCompare(x.startedAt) || y.timerId.localeCompare(x.timerId));
+}
+/** Суммирует миллисекунды завершённых уникальных интервалов до форматирования. */
+export function sumCompleted(items: Interval[]): number {
+ return [...new Map(items.map(item => [item.timerId, item])).values()].reduce((sum, item) => sum + item.durationMs, 0);
 }
 /** Снимок заменяет state и clock anchor, сохраняя историю и курсор загруженных старых страниц. */
 export function applySnapshot(view: View, data: Snapshot, mono: number): View {
@@ -17,8 +21,10 @@ export function applySnapshot(view: View, data: Snapshot, mono: number): View {
  if (data.version < view.version) return { ...view, anchorServer: Date.parse(data.serverTime), anchorMono: mono, connected: true };
  const overlap = data.recentCompleted.some(item => view.items.some(old => old.timerId === item.timerId));
  const paged = view.paged && overlap;
+ const items = mergeIntervals(view.items, data.recentCompleted), cursor = paged ? view.cursor : data.nextCursor;
  return { ...view, active: data.active, version: data.version,
-  items: mergeIntervals(view.items, data.recentCompleted), cursor: paged ? view.cursor : data.nextCursor, paged,
+  items, cursor, paged, totalFromHistory: data.totalCompletedMs === undefined,
+  totalCompletedMs: data.totalCompletedMs ?? (cursor === null ? sumCompleted(items) : null),
   anchorServer: Date.parse(data.serverTime), anchorMono: mono, connected: true };
 }
 /** Применяет только подтверждённую историю; локальные намерения здесь не меняются. */
@@ -26,7 +32,12 @@ export function applyEvent(view: View, event: TimerEvent): View {
  if (!("version" in event) || event.version <= view.version) return view;
  if (event.version !== view.version + 1) return { ...view, connected: false };
  const next = { ...view, version: event.version };
- if ("interval" in event) return { ...next, active: null, items: mergeIntervals(next.items, [event.interval]) };
+ if ("interval" in event) {
+  const items = mergeIntervals(next.items, [event.interval]);
+  // AIDEV-NOTE: Старый DTO считает по уникальным строкам: history может опередить доставку SSE.
+  return { ...next, active: null, items, totalCompletedMs: next.totalCompletedMs === null ? null :
+   next.totalFromHistory ? sumCompleted(items) : next.totalCompletedMs + event.interval.durationMs };
+ }
  return { ...next, active: { timerId: event.timerId, startedAt: event.startedAt } };
 }
 /** Локальный STOP всегда даёт ноль; тики не накапливаются и не читают Date.now. */

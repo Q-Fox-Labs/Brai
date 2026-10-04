@@ -1,7 +1,7 @@
 // ABOUTME: Держит локальный секундомер отдельно от подтверждённой личной истории.
 // ABOUTME: Ограниченный FIFO сохраняет неизменные намерения до окончательного owner-результата.
 import type { Active, History, Pending, Snapshot, TimerEvent } from "./types";
-import { applyEvent, applySnapshot, duration, initialView, isPending, mergeIntervals, rejectionMessage, type View } from "./model.ts";
+import { applyEvent, applySnapshot, duration, initialView, isPending, mergeIntervals, rejectionMessage, sumCompleted, type View } from "./model.ts";
 export const OUTBOX_KEY = "brai.timer.outbox.v2";
 export const OUTBOX_LIMIT = 512;
 type Entry = { command: Pending; accepted: boolean; uncertain: boolean };
@@ -20,7 +20,7 @@ export function createClient(ports: ClientPorts, userId: string) {
  };
  const storageKey = `${OUTBOX_KEY}:${encodeURIComponent(userId)}`;
  let view = initialView(), entries: Entry[] = [], disposed = false, close = () => {}, publishing = false, lookingUp = false;
- let hold = false, barrier = 0, pollIndex = 0, generation = 0, localCommandId: string | null = null, storageBlocked = false;
+ let hold = false, barrier = 0, pollIndex = 0, generation = 0, localCommandId: string | null = null, storageBlocked = false, fillingHistory = false;
  let polling: ReturnType<typeof setInterval> | undefined, reconnectTimer: ReturnType<typeof setTimeout> | undefined;
  const lifetime = new AbortController();
  const wall = ports.wall ?? Date.now;
@@ -61,7 +61,7 @@ export function createClient(ports: ClientPorts, userId: string) {
   const current = ++generation;
   close = ports.stream(data => {
    if (disposed || generation !== current) return;
-   update(applySnapshot(view, data, ports.now())); followOwner(); void recover();
+   update(applySnapshot(view, data, ports.now())); followOwner(); void recover(); void completeLegacyHistory();
   }, event => { if (!disposed && generation === current) onEvent(event); }, () => { if (!disposed && generation === current) reconnect(); });
  };
  const lookup = async (entry: Entry) => {
@@ -107,6 +107,32 @@ export function createClient(ports: ClientPorts, userId: string) {
    finally { lookingUp = false; }
   }
  };
+ const loadHistory = async () => {
+  if (!view.cursor || view.loading || !view.connected) return false;
+  const cursor = view.cursor; update({ ...view, loading: true });
+  try {
+   const response = await accountFetch(`/api/timer/history?cursor=${encodeURIComponent(cursor)}`, { cache: "no-store", signal: signal() });
+   if (!response.ok) throw new Error("HISTORY");
+   const data = await response.json() as History;
+   if (disposed) return false;
+   const items = mergeIntervals(view.items, data.items);
+   // AIDEV-NOTE: Новый snapshot может переставить границу страниц, пока запрос ещё в пути.
+   const sameCursor = view.cursor === cursor;
+   const nextCursor = sameCursor ? data.nextCursor : view.cursor;
+   update({ ...view, items, cursor: nextCursor, paged: sameCursor || view.paged, loading: false,
+    totalCompletedMs: view.totalFromHistory && nextCursor === null ? sumCompleted(items) : view.totalCompletedMs });
+   return true;
+  } catch { update({ ...view, loading: false, message: "Не удалось загрузить историю. Повторите загрузку." }); return false; }
+ };
+ const completeLegacyHistory = async () => {
+  if (fillingHistory) return;
+  fillingHistory = true;
+  try {
+   while (!disposed && view.totalFromHistory && view.totalCompletedMs === null && view.cursor && view.connected) {
+    if (!await loadHistory()) break;
+   }
+  } finally { fillingHistory = false; }
+ };
  return {
   /** Возвращает локальный отсчёт и подтверждённую проекцию. */
   getView: () => view,
@@ -141,16 +167,7 @@ export function createClient(ports: ClientPorts, userId: string) {
    update(view); if (persist()) void flush();
   },
   /** Загружает устойчивую следующую страницу без замены live истории. */
-  async loadHistory() {
-   if (!view.cursor || view.loading || !view.connected) return;
-   const cursor = view.cursor; update({ ...view, loading: true });
-   try {
-    const response = await accountFetch(`/api/timer/history?cursor=${encodeURIComponent(cursor)}`, { cache: "no-store", signal: signal() });
-    if (!response.ok) throw new Error("HISTORY");
-    const data = await response.json() as History;
-    update({ ...view, items: mergeIntervals(view.items, data.items), cursor: data.nextCursor, paged: true, loading: false });
-   } catch { update({ ...view, loading: false, message: "Не удалось загрузить историю. Повторите загрузку." }); }
-  },
+  async loadHistory() { await loadHistory(); await completeLegacyHistory(); },
   /** Возвращение страницы обновляет только историю и anchor владельца. */
   resync: reconnect,
   /** Отменяет I/O; неизменная очередь остаётся для следующего документа. */

@@ -2,7 +2,7 @@
 // ABOUTME: Не зеркалит разметку и не использует внешние сервисы.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { initialView, applySnapshot, applyEvent, duration, formatDuration, mergeIntervals } from "../lib/model.ts";
+import { initialView, applySnapshot, applyEvent, duration, formatDuration, mergeIntervals, sumCompleted } from "../lib/model.ts";
 const stamp = "2026-09-29T00:00:00.000Z";
 const interval = { timerId: "old", startedAt: stamp, stoppedAt: stamp, durationMs: 1000 };
 test("local clock is monotonic >24h; STOP is zero and late owner data is separate", () => {
@@ -31,4 +31,29 @@ test("resnapshot without overlap restarts paging at owner boundary and retains l
  const next = applySnapshot(view,{active:null,version:120,serverTime:stamp,recentCompleted,nextCursor:"fresh-boundary"},10);
  assert.equal(next.items.length,51);assert.equal(next.cursor,"fresh-boundary");assert.equal(next.paged,false);
  assert.ok(next.items.some(item=>item.timerId==='old'));
+});
+
+test("owner total includes unloaded history; fractional seconds and duplicate deliveries accumulate once", () => {
+ const rows = Array.from({length:50}, (_,n) => ({...interval,timerId:`recent-${n}`,durationMs:600}));
+ let view = applySnapshot(initialView(), {active:{timerId:"active",startedAt:stamp},version:111,serverTime:stamp,totalCompletedMs:33000,recentCompleted:rows,nextCursor:"tail"}, 10);
+ assert.equal(view.items.length,50); assert.equal(view.totalCompletedMs,33000);
+ const event = {userId:"account-a",eventId:"stop",commandId:"command",version:112,interval:{...interval,timerId:"active",durationMs:600}};
+ view = applyEvent(view,event); assert.equal(view.totalCompletedMs,33600);
+ view = applyEvent(view,event); assert.equal(view.totalCompletedMs,33600);
+ view = applySnapshot(view,{active:null,version:110,serverTime:stamp,totalCompletedMs:1,recentCompleted:[],nextCursor:null},20);
+ assert.equal(view.totalCompletedMs,33600);
+ view = applySnapshot(view,{active:null,version:112,serverTime:stamp,totalCompletedMs:33600,recentCompleted:[event.interval],nextCursor:"tail"},30);
+ assert.equal(view.totalCompletedMs,33600); assert.equal(formatDuration(view.totalCompletedMs!),"00:00:33");
+ assert.equal(formatDuration(sumCompleted([{...interval,durationMs:600},{...interval,timerId:"second",durationMs:600}])) ,"00:00:01");
+});
+
+test("legacy sum waits for complete history and deduplicates a STOP already read on a page", () => {
+ const incomplete = applySnapshot(initialView(), {active:null,version:1,serverTime:stamp,recentCompleted:[interval],nextCursor:"tail"},0);
+ assert.equal(incomplete.totalCompletedMs,null);
+ const complete = applySnapshot({...incomplete,items:[interval,{...interval,timerId:"second",durationMs:200}],cursor:null,paged:true},
+  {active:null,version:1,serverTime:stamp,recentCompleted:[interval],nextCursor:"tail"},0);
+ assert.equal(complete.totalCompletedMs,1200);
+ const next = applyEvent(complete,{userId:"account-a",eventId:"stop",commandId:"command",version:2,interval:{...interval,timerId:"second",durationMs:200}});
+ assert.equal(next.totalCompletedMs,1200);
+ assert.equal(sumCompleted([interval,interval]),1000);
 });

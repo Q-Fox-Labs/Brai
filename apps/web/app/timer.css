@@ -1,0 +1,40 @@
+/* ABOUTME: Сохраняет геометрию двух карточек таймера September в тёмной палитре Brai. */
+/* ABOUTME: Стили ограничены таймером и его отсчётом в общей навигации. */
+.timer-shell { height: 100%; min-height: 0; padding: 20px 24px; font-family: "Brai Do Manrope", Arial, sans-serif; }
+.timer-grid { display: grid; height: 100%; min-height: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: 16px; }
+.timer-card { height: 100%; min-height: 0; border: 1px solid var(--workspace-border); border-radius: 16px; background: #25272b; }
+.timer-control { overflow-y: auto; padding: 44px 32px 32px; text-align: center; transition: border-color .18s; }
+.timer-control.is-running { border-color: #b3a2ff80; }
+.timer-clock { display: block; margin-bottom: 30px; font-size: clamp(52px, 12vw, 76px); line-height: 1; letter-spacing: -.06em; font-variant-numeric: tabular-nums; }
+.timer-command { height: 48px; min-width: 148px; border: 0; border-radius: 10px; padding: 0 24px; background: #b3a2ff; color: #212326; font-size: 14px; font-weight: 700; transition: background-color .15s, transform .15s; }
+.timer-command:hover { background: #c6b9ff; transform: translateY(-1px); }
+.timer-command.is-running { background: #e7e9e3; color: #1c1e1a; }
+.timer-command.is-running:hover { background: #fff; }
+.timer-message { max-width: 360px; margin: 18px auto 0; color: var(--workspace-muted); font-size: 13px; line-height: 1.6; }
+.timer-history { display: flex; flex-direction: column; overflow: hidden; }
+.timer-history-header { display: flex; flex: none; height: 60px; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--workspace-border); padding: 0 20px; }
+.timer-history-header h1 { margin: 0; font-size: 14px; font-weight: 700; }
+.timer-history-header strong { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.timer-history-scroll { min-height: 0; flex: 1; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #4e5157 transparent; }
+.timer-history-scroll ol { margin: 0; padding: 0; list-style: none; }
+.timer-history-empty { margin: 0; padding: 22px 20px; text-align: center; color: var(--workspace-muted); font-size: 13px; }
+.timer-history-row { display: flex; min-height: 54px; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--workspace-border); padding: 0 20px; }
+.timer-history-row:last-child { border-bottom: 0; }
+.timer-history-row time { flex: none; color: var(--workspace-muted); font-size: 13px; }
+.timer-history-row strong { flex: none; margin-left: auto; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.timer-history-more { display: block; margin: 16px auto; border: 1px solid var(--workspace-border); border-radius: 8px; padding: 8px 16px; font-size: 13px; }
+.workspace-tabs .workspace-timer-tab { flex-direction: column; gap: 2px; }
+.workspace-timer-countdown { font-size: 11px; line-height: 1; font-variant-numeric: tabular-nums; color: #c6b9ff; }
+@media (max-width: 800px) {
+ .timer-shell { height: auto; min-height: 100%; padding: 16px; }
+ .timer-grid { height: auto; grid-template-columns: minmax(0, 1fr); align-items: start; }
+ .timer-card { height: auto; }
+ .timer-history-scroll { max-height: 320px; }
+}
+@media (max-width: 480px) {
+ .timer-shell { padding: 12px; }
+ .timer-card { border-radius: 14px; }
+ .timer-control { padding: 36px 16px 24px; }
+ .timer-clock { margin-bottom: 24px; font-size: clamp(48px, 16vw, 66px); }
+}
+@media (prefers-reduced-motion: reduce) { .timer-control, .timer-command { transition: none; } }

@@ -73,7 +73,7 @@ export function createStore(pool: Pool) {
       } catch (error) { await client.query("ROLLBACK").catch(()=>{}); throw error; }
       finally {client.release();}
     },
-    /** Читает согласованные state/history/serverTime из repeatable-read транзакции. */
+    /** Читает state, всю завершённую сумму в миллисекундах, history и часы из одной транзакции. */
     async snapshot(userId: string) {
       const client=await pool.connect();
       try {
@@ -81,9 +81,11 @@ export function createStore(pool: Pool) {
         const row=(await client.query(stateSQL,[userId])).rows[0];
         const current=row ? state(row) : {version:0,active:null};
         const history=await page(client,userId,50);
+        const totalCompletedMs=Number((await client.query("SELECT COALESCE(SUM(duration_ms),0) AS total FROM timer.intervals WHERE user_id=$1 AND stopped_at IS NOT NULL",[userId])).rows[0].total);
+        if (!Number.isSafeInteger(totalCompletedMs)) throw new Error("DURATION_EXHAUSTED");
         const serverTime=asISO((await client.query("SELECT transaction_timestamp() AS now")).rows[0].now);
         await client.query("COMMIT");
-        return {userId,...current,serverTime,recentCompleted:history.items,nextCursor:history.nextCursor};
+        return {userId,...current,serverTime,totalCompletedMs,recentCompleted:history.items,nextCursor:history.nextCursor};
       } catch(error) {await client.query("ROLLBACK").catch(()=>{});throw error;} finally {client.release();}
     },
     /** Читает страницу завершённых интервалов по устойчивому курсору. */

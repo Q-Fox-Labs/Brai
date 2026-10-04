@@ -1,13 +1,24 @@
 "use client";
 // ABOUTME: Показывает личные часы, одну командную кнопку и историю интервалов.
 // ABOUTME: Браузер использует только HTTP/SSE; бизнес-переходы подтверждает владелец таймера.
-import * as Separator from "@radix-ui/react-separator";
 import { useEffect, useRef, useState } from "react";
 import { createClient } from "../lib/client";
-import { duration, ownerDuration, formatDuration, initialView } from "../lib/model";
+import { duration, formatDuration, initialView } from "../lib/model";
 import type { TimerEvent, Snapshot } from "../lib/types";
-/** Отображает адаптивный таймер; даты используют локальный часовой пояс браузера. */
-export default function Timer({ userId, email, onLogout, onUnauthorized, accountMessage }: { userId: string; email: string; onLogout: () => void; onUnauthorized: () => void; accountMessage: string }) {
+import "./timer.css";
+
+const shortMonthFormatter = new Intl.DateTimeFormat("ru-RU", { month: "short" });
+function formatShortDateTime(value: string) {
+ const date = new Date(value);
+ const day = String(date.getDate()).padStart(2, "0");
+ const month = shortMonthFormatter.format(date).replace(/\.$/, "");
+ const year = date.getFullYear() === new Date().getFullYear() ? "" : ` ${date.getFullYear()}`;
+ const hours = String(date.getHours()).padStart(2, "0");
+ const minutes = String(date.getMinutes()).padStart(2, "0");
+ return `${day} ${month}${year} ${hours}:${minutes}`;
+}
+/** Показывает интервалы владельца и передаёт локальный отсчёт в шапку, включая скрытый экран. */
+export default function Timer({ userId, onUnauthorized, accountMessage, onElapsed }: { userId: string; onUnauthorized: () => void; accountMessage: string; onElapsed: (elapsed: string | null) => void }) {
  const [view, setView] = useState(initialView);
  const [mono, setMono] = useState(0);
  const client = useRef<ReturnType<typeof createClient> | null>(null);
@@ -31,32 +42,32 @@ export default function Timer({ userId, email, onLogout, onUnauthorized, account
   return () => { unsubscribe(); instance.stop(); clearInterval(tick); document.removeEventListener("visibilitychange", resume); window.removeEventListener("pageshow", restored); };
  }, [userId, onUnauthorized]);
  const elapsed = duration(view, Math.max(mono, view.anchorMono));
- const date = (value: string) => new Date(value).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
- return <main className="mx-auto min-h-full max-w-[1600px] px-5 py-8 sm:px-10 lg:px-16 lg:py-12">
-  <header className="mb-10 flex items-center justify-between gap-4"><h1 className="text-2xl font-semibold tracking-tight">Таймер</h1>
-   <div className="flex flex-wrap items-center justify-end gap-4"><span className="max-w-48 truncate text-sm text-slate-400">{email}</span><button className="rounded-lg border border-slate-600 px-4 py-2 text-sm" onClick={onLogout}>Выйти</button><p role="status" className="text-right text-sm text-slate-400"><span aria-hidden="true" className={`mr-2 inline-block h-2 w-2 rounded-full ${view.connected ? "bg-emerald-500" : "bg-amber-500"}`} />{view.connected ? "Соединение установлено" : "История: связь восстанавливается…"}</p></div></header>
-  {accountMessage && <p role="status" className="mb-6 text-sm text-red-300">{accountMessage}</p>}
-  <div className="grid grid-cols-1 gap-12 lg:grid-cols-2 lg:gap-16">
-   <section aria-label="Таймер" className="flex flex-col items-center justify-center gap-8 py-8 lg:sticky lg:top-12 lg:h-[65vh]">
-    <p className="text-sm uppercase tracking-[0.2em] text-slate-400">{view.local ? "Идёт отсчёт" : "Готов к старту"}</p>
-    <output aria-label="Длительность таймера" className="timer-digits font-light tabular-nums tracking-tight">{formatDuration(elapsed)}</output>
-    <button className={`command-button ${view.local ? "bg-slate-600" : "bg-blue-600"}`} onClick={() => client.current?.command()}>
-     {view.local ? "СТОП" : "СТАРТ"}</button>
-    <p role="status" aria-live="polite" className="min-h-12 max-w-sm text-center text-sm leading-6 text-slate-400">{view.message || (view.queued ? `История: ожидают сохранения ${view.queued} действий.` : view.local ? "Отсчёт работает независимо от соединения." : "Начните новый интервал, когда будете готовы.")}</p>
+ const elapsedText = formatDuration(elapsed);
+ const runningElapsed = view.local ? elapsedText : null;
+ useEffect(() => { onElapsed(runningElapsed); }, [runningElapsed, onElapsed]);
+ useEffect(() => () => onElapsed(null), [onElapsed]);
+ const message = accountMessage || view.message || (view.queued ? `История: ожидают сохранения ${view.queued} действий.` : "");
+ return <main className="timer-shell">
+  <div className="timer-grid">
+   <section aria-label="Таймер" className={`timer-card timer-control${view.local ? " is-running" : ""}`}>
+    <output aria-label="Длительность таймера" className="timer-clock">{elapsedText}</output>
+    <button type="button" className={`timer-command${view.local ? " is-running" : ""}`} onClick={() => client.current?.command()} aria-label={view.local ? "Остановить таймер" : "Запустить таймер"}>
+     {view.local ? "Остановить" : "Начать"}
+    </button>
+    {message && <p role="status" aria-live="polite" className="timer-message">{message}</p>}
    </section>
-   <section aria-labelledby="history-heading" className="min-w-0">
-    <div className="mb-5 flex items-baseline justify-between gap-4"><h2 id="history-heading" className="text-xl font-semibold">История</h2><span className="text-xs text-slate-400">Время этого устройства</span></div>
-    <Separator.Root className="h-px bg-slate-700" decorative />
-    {!view.active && view.items.length === 0 && <p className="py-12 text-center text-slate-400">Ваши интервалы появятся здесь.</p>}
-    <ol aria-label="Интервалы" className="divide-y divide-slate-700">
-     {view.active && <li data-timer-id={view.active.timerId} className="py-5">
-      <div className="mb-3 flex items-center justify-between gap-3"><span className="rounded-full bg-blue-500/15 px-3 py-1 text-xs font-medium text-blue-300">Активный интервал</span><span className="font-medium tabular-nums">{formatDuration(ownerDuration(view, Math.max(mono, view.anchorMono)))}</span></div>
-      <dl className="interval-details"><dt>Начало</dt><dd>{date(view.active.startedAt)}</dd><dt>Конец</dt><dd>Идёт отсчёт</dd></dl></li>}
-     {view.items.filter(item => item.timerId !== view.active?.timerId).map(item => <li key={item.timerId} data-timer-id={item.timerId} className="py-5">
-      <div className="mb-3 flex justify-between gap-3"><span className="text-sm text-slate-400">Завершён</span><span className="font-medium tabular-nums">{formatDuration(item.durationMs)}</span></div>
-      <dl className="interval-details"><dt>Начало</dt><dd>{date(item.startedAt)}</dd><dt>Конец</dt><dd>{date(item.stoppedAt)}</dd></dl></li>)}
-    </ol>
-    {view.cursor && <button className="history-button" disabled={view.loading || !view.connected} onClick={() => { void client.current?.loadHistory(); }}>{view.loading ? "Загрузка…" : "Загрузить ещё"}</button>}
+   <section aria-labelledby="history-heading" className="timer-card timer-history">
+    <header className="timer-history-header"><h1 id="history-heading">История</h1><strong aria-label="Общее сохранённое время">{view.totalCompletedMs === null ? "…" : formatDuration(view.totalCompletedMs)}</strong></header>
+    <div className="timer-history-scroll">
+     {view.items.length === 0 && <p className="timer-history-empty">{view.totalCompletedMs === null ? "Загружаем историю…" : "Пока нет записей"}</p>}
+     <ol aria-label="Интервалы">
+      {view.items.map(item => <li key={item.timerId} data-timer-id={item.timerId} className="timer-history-row">
+       <time dateTime={item.startedAt} title={`Начало: ${formatShortDateTime(item.startedAt)}; конец: ${formatShortDateTime(item.stoppedAt)}`}>{formatShortDateTime(item.startedAt)}</time>
+       <strong>{formatDuration(item.durationMs)}</strong>
+      </li>)}
+     </ol>
+     {view.cursor && <button type="button" className="timer-history-more" disabled={view.loading || !view.connected} onClick={() => { void client.current?.loadHistory(); }}>{view.loading ? "Загрузка…" : "Загрузить ещё"}</button>}
+    </div>
    </section>
   </div>
  </main>;

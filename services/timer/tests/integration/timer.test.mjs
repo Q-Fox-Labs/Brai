@@ -116,6 +116,25 @@ test('настоящий PostgreSQL и NATS выполняют контракт'
    for(let i=0;i<8;i++){const command=start(version++);const pending=store.process(delivery('start',command));checks.push(store.snapshot('user-a').then(s=>{assert.equal(s.recentCompleted.length,50);assert.equal(Boolean(s.active),s.version%2===1);}));const begun=await pending;const ending=store.process(delivery('stop',stop(version++,begun.event.timerId)));checks.push(store.snapshot('user-a').then(s=>assert.equal(Boolean(s.active),s.version%2===1)));await ending;}
    await Promise.all(checks);
   });
+  await t.test('сумма всей истории сохраняет миллисекунды, исключает активный и не растёт при повторе STOP',async()=>{
+   await reset();
+   for(let i=0;i<55;i++){
+    const timerId=randomUUID(),startedAt=new Date(Date.UTC(2026,0,1,0,0,i)).toISOString(),stoppedAt=new Date(Date.parse(startedAt)+600).toISOString();
+    await store.process(delivery('start',{userId:'user-a',commandId:randomUUID(),timerId,startedAt}));
+    const command=delivery('stop',{userId:'user-a',commandId:randomUUID(),timerId,stoppedAt});
+    const stopped=await store.process(command);assert.equal(stopped.event.interval.durationMs,600);
+    assert.deepEqual((await store.process(command)).event,stopped.event);
+   }
+   const snapshot=await store.snapshot('user-a');assert.equal(snapshot.totalCompletedMs,33000);assert.equal(snapshot.recentCompleted.length,50);
+   assert.equal((await store.snapshot('user-b')).totalCompletedMs,0);
+   const timerId=randomUUID();await store.process(delivery('start',{userId:'user-a',commandId:randomUUID(),timerId,startedAt:'2026-01-01T00:01:00.000Z'}));
+   assert.equal((await store.snapshot('user-a')).totalCompletedMs,33000);
+   const pending=store.process(delivery('stop',{userId:'user-a',commandId:randomUUID(),timerId,stoppedAt:'2026-01-01T00:01:00.600Z'}));
+   const concurrent=await store.snapshot('user-a');
+   assert.equal(concurrent.totalCompletedMs,concurrent.version===111?33000:33600);
+   assert.equal(Boolean(concurrent.active),concurrent.version===111);
+   await pending;assert.equal((await store.snapshot('user-a')).totalCompletedMs,33600);
+  });
   await reset();
   let timer=await connectNats(cfg);const web=await connectWeb();
   try{

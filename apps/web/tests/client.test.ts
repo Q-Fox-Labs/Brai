@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createClient, OUTBOX_KEY, OUTBOX_LIMIT } from "../lib/client.ts";
-import { duration } from "../lib/model.ts";
+import { duration, formatDuration } from "../lib/model.ts";
 import type { Snapshot, TimerEvent } from "../lib/types.ts";
 const snapshot: Snapshot = { active:null,version:0,serverTime:"2026-09-29T00:00:00.000Z",recentCompleted:[],nextCursor:null };
 const PENDING_KEY = "brai.timer.pending.v1";
@@ -123,4 +123,42 @@ test("account queues and local state are isolated, disposed account cannot publi
  const first=fixture(async()=>new Promise(()=>{}),storage);first.client.command();first.client.stop();
  const second=createClient({now:()=>100,id:()=>crypto.randomUUID(),storage:{getItem:key=>storage.get(key)??null,setItem:(key,value)=>{storage.set(key,value);},removeItem:key=>{storage.delete(key);}},fetch:async()=>{posts++;return Response.json({},{status:202});},stream:()=>()=>{}},"account-b");
  second.start();await turn();assert.equal(second.getView().queued,0);assert.equal(second.getView().local,null);first.client.command();assert.equal(posts,0);second.stop();assert.equal(JSON.parse(storage.get(KEY)!).entries.length,1);
+});
+
+test("owner total survives pagination, repeated STOP and restoration without double counting",async()=>{
+ const row={timerId:"closed",startedAt:snapshot.serverTime,stoppedAt:snapshot.serverTime,durationMs:600};
+ const rows=Array.from({length:50},(_,n)=>({...row,timerId:`row-${n}`}));
+ const f=fixture(async()=>Response.json({items:[{...row,timerId:"running"},{...row,timerId:"running"}],nextCursor:null}));
+ f.streams[0].snapshot({...snapshot,version:111,active:{timerId:"running",startedAt:snapshot.serverTime},recentCompleted:rows,nextCursor:"tail",totalCompletedMs:33000});
+ assert.equal(f.client.getView().totalCompletedMs,33000);await f.client.loadHistory();assert.equal(f.client.getView().totalCompletedMs,33000);
+ const event:TimerEvent={userId:USER,eventId:"stop",commandId:null,version:112,interval:{...row,timerId:"running",durationMs:600}};
+ f.streams[0].event(event);f.streams[0].event(event);assert.equal(f.client.getView().totalCompletedMs,33600);
+ f.client.stop();
+ const reloaded=fixture(async()=>Response.json({items:[],nextCursor:null}),f.storage);
+ assert.equal(reloaded.client.getView().totalCompletedMs,0);
+ reloaded.streams[0].snapshot({...snapshot,version:112,totalCompletedMs:33600,recentCompleted:rows,nextCursor:"tail"});
+ reloaded.streams[0].event(event);assert.equal(reloaded.client.getView().totalCompletedMs,33600);reloaded.client.stop();
+});
+
+test("legacy DTO reads every page, sums milliseconds once and handles history arriving before SSE",async()=>{
+ const row={timerId:"base",startedAt:snapshot.serverTime,stoppedAt:snapshot.serverTime,durationMs:600};
+ const rows=Array.from({length:50},(_,n)=>({...row,timerId:`row-${n}`}));
+ let requests=0;
+ const f=fixture(async()=>{requests++;return Response.json({items:requests===1?[{...row,timerId:"future"},{...row,timerId:"future"}]:[row],nextCursor:requests===1?"last":null});});
+ f.streams[0].snapshot({...snapshot,version:1,recentCompleted:rows,nextCursor:"tail"});
+ assert.equal(f.client.getView().totalCompletedMs,null);await turn();await turn();
+ assert.equal(requests,2);assert.equal(f.client.getView().items.length,52);assert.equal(f.client.getView().totalCompletedMs,31200);
+ f.streams[0].event({userId:USER,eventId:"stop",commandId:null,version:2,interval:{...row,timerId:"future"}});
+ assert.equal(f.client.getView().totalCompletedMs,31200);assert.equal(formatDuration(f.client.getView().totalCompletedMs!),"00:00:31");f.client.stop();
+});
+
+test("snapshot resets a pagination boundary while an older page is in flight",async()=>{
+ const row={timerId:"base",startedAt:snapshot.serverTime,stoppedAt:snapshot.serverTime,durationMs:600};
+ let finish:(response:Response)=>void=()=>{};
+ const f=fixture(async()=>new Promise(resolve=>{finish=resolve;}));
+ f.streams[0].snapshot({...snapshot,version:2,totalCompletedMs:600,recentCompleted:[row],nextCursor:"old"});
+ const loading=f.client.loadHistory();
+ f.streams[0].snapshot({...snapshot,version:4,totalCompletedMs:1200,recentCompleted:[{...row,timerId:"new"}],nextCursor:"new"});
+ finish(Response.json({items:[row],nextCursor:null}));await loading;
+ assert.equal(f.client.getView().cursor,"new");assert.equal(f.client.getView().totalCompletedMs,1200);f.client.stop();
 });
