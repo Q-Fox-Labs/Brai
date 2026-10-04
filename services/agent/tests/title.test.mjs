@@ -10,14 +10,17 @@ function fixture(options = {}) {
   const finish = () => {
     if (options.rename) name = options.rename;
     send('item/completed', { threadId: 'temporary', turnId: 'title-turn', item: { id: 'title', type: 'agentMessage', text: options.output ?? '{"title":"Настроить уведомления"}' } });
-    send('turn/completed', { threadId: 'temporary', turn: { id: 'title-turn', status: 'completed' } });
+    send('turn/completed', { threadId: 'temporary', turn: { id: 'title-turn', status: options.failure ? 'failed' : 'completed', ...(options.failure ? { error: { message: 'private upstream details', codexErrorInfo: options.failure } } : {}) } });
   };
   const port = {
     status: () => ({ generation, connection: 'connected', authorization: 'ready' }),
     subscribe: fn => { listeners.add(fn); return () => listeners.delete(fn); },
     call: async (method, params, flags) => {
       calls.push({ method, params, flags });
-      if (method === 'thread/read') return { thread: { name } };
+      if (method === 'thread/read') return { thread: { id: 'main', name, preview: options.preview ?? '', cwd: '/tmp/demo', updatedAt: 1, model: 'gpt-6-luna' } };
+      if (method === 'thread/resume') return { ...(await port.call('thread/read', params)), model: 'gpt-6-luna' };
+      if (method === 'thread/turns/list') return { data: options.turn ? [options.turn] : [] };
+      if (method === 'thread/items/list') return { data: [] };
       if (method === 'config/read') return { config: { mcp_servers: { index: { command: 'private' }, data: { http_headers: { token: 'private' } } } } };
       if (method === 'account/rateLimits/read') return { rateLimits: null };
       if (method === 'thread/start') return { thread: { id: params.ephemeral ? 'temporary' : 'main', name, preview: '', cwd: '/tmp/demo', updatedAt: 1 }, model: 'gpt-6-luna' };
@@ -68,12 +71,65 @@ test('existing and concurrently changed native names are preserved', async () =>
   assert.equal(changed.name(), 'Выбранное вручную'); assert.equal(changed.calls.some(c => c.method === 'thread/name/set'), false); assert.equal(changed.listeners.size, 0);
 });
 test('invalid output has no rename; timeout interrupts only the temporary turn and releases observers', async () => {
-  for (const output of ['invalid', '{"title":""}', JSON.stringify({ title: 'x'.repeat(61) })]) {
+  for (const output of ['invalid', '{"title":""}', '{"title":"Две\\nстроки"}']) {
     const f = fixture({ output }); await assert.rejects(nameThread(f.port, 'main', 'task')); assert.equal(f.calls.some(c => c.method === 'thread/name/set'), false); assert.equal(f.listeners.size, 0);
   }
   const f = fixture({ hold: true }); await assert.rejects(nameThread(f.port, 'main', 'task', 5), /TITLE_TIMEOUT/);
   assert.deepEqual(f.calls.find(c => c.method === 'turn/interrupt').params, { threadId: 'temporary', turnId: 'title-turn' });
   assert.equal(f.calls.at(-1).method, 'thread/unsubscribe'); assert.equal(f.listeners.size, 0);
+});
+test('a long semantic title is bounded without another inference', async () => {
+  const f = fixture({ output: JSON.stringify({ title: 'Настроить ежедневные уведомления об ошибках приложения и отправлять сводку по почте' }) });
+  assert.equal(await nameThread(f.port, 'main', 'task'), 'Настроить ежедневные уведомления об ошибках приложения и');
+  assert.equal(f.calls.filter(c => c.method === 'turn/start').length, 1);
+  const schema = f.calls.find(c => c.method === 'turn/start').params.outputSchema;
+  assert.equal(schema.properties.title.maxLength, 60);
+});
+test('RPC and generation failures identify their stage without losing native codes', async () => {
+  const f = fixture();
+  const call = f.port.call;
+  f.port.call = async (...args) => {
+    if (args[0] === 'thread/start') throw Object.assign(new Error('private upstream details'), { code: 'UPSTREAM_UNAVAILABLE', upstreamCode: -32600 });
+    return call(...args);
+  };
+  await assert.rejects(nameThread(f.port, 'main', 'task'), e => e.titleStage === 'thread/start' && e.code === 'UPSTREAM_UNAVAILABLE' && e.upstreamCode === -32600);
+  const invalid = fixture({ output: 'invalid' });
+  await assert.rejects(nameThread(invalid.port, 'main', 'task'), e => e.titleStage === 'result' && e.code === 'TITLE_INVALID_RESULT');
+  const failed = fixture({ failure: 'usageLimitExceeded' });
+  await assert.rejects(nameThread(failed.port, 'main', 'task'), e => e.titleStage === 'generation' && e.code === 'TITLE_TURN_FAILED' && e.nativeCode === 'usageLimitExceeded');
+});
+test('reopened unnamed chats are named once after an accepted start using the original request', async t => {
+  for (const turn of [undefined, { id: 'old-turn', status: 'completed' }]) {
+    const f = fixture({ turn, preview: turn ? 'Настроить уведомления' : '' });
+    const app = createApplication(f.port, { projects: [{ projectId: 'demo', name: 'Demo', cwd: '/tmp/demo' }], allowedModels: ['gpt-6-luna'] }, () => {});
+    t.after(() => app.close());
+    await app.request({ action: 'open', projectId: 'demo', threadId: 'main' });
+    const command = { action: 'start', projectId: 'demo', threadId: 'main', generation: 'g1', operationId: 'first', text: 'Продолжить работу' };
+    await app.request(command); await tick(); await tick();
+    const titleTurns = f.calls.filter(c => c.method === 'turn/start' && c.params.threadId === 'temporary');
+    assert.equal(titleTurns.length, 1);
+    assert.equal(JSON.parse(titleTurns[0].params.input[0].text).request, turn ? 'Настроить уведомления' : command.text);
+    f.send('turn/completed', { threadId: 'main', turn: { id: 'main-turn', status: 'completed' } });
+    await app.request({ ...command, operationId: 'second' }); await tick();
+    assert.equal(f.calls.filter(c => c.method === 'turn/start' && c.params.threadId === 'temporary').length, 1);
+  }
+});
+test('a failed name waits for another accepted user task and keeps the first request', async t => {
+  const options = { failure: 'serverOverloaded' }, f = fixture(options);
+  const app = createApplication(f.port, { projects: [{ projectId: 'demo', name: 'Demo', cwd: '/tmp/demo' }], allowedModels: ['gpt-6-luna'] }, () => {});
+  t.after(() => app.close());
+  await app.request({ action: 'create', projectId: 'demo', generation: 'g1', operationId: 'create' });
+  const command = { action: 'start', projectId: 'demo', threadId: 'main', generation: 'g1', operationId: 'first', text: 'Настроить уведомления' };
+  await app.request(command); await tick(); await tick();
+  await app.request(command); await tick();
+  assert.equal(f.calls.filter(c => c.method === 'turn/start' && c.params.threadId === 'temporary').length, 1);
+  options.failure = undefined;
+  f.send('turn/completed', { threadId: 'main', turn: { id: 'main-turn', status: 'completed' } });
+  await app.request({ ...command, operationId: 'second', text: 'Продолжить работу' }); await tick(); await tick();
+  const attempts = f.calls.filter(c => c.method === 'turn/start' && c.params.threadId === 'temporary');
+  assert.equal(attempts.length, 2);
+  assert.equal(JSON.parse(attempts[1].params.input[0].text).request, command.text);
+  assert.equal(f.name(), 'Настроить уведомления');
 });
 test('disconnect rejects old generation without sending cleanup or rename to a new generation', async () => {
   const f = fixture({ disconnect: true }); await assert.rejects(nameThread(f.port, 'main', 'task'), /TITLE_CONNECTION_LOST/);

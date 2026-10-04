@@ -8,7 +8,7 @@ import { createLimitsMonitor } from './limits.js';
 import { nameThread } from './title.js';
 import { display, metadata, text, compact, summary } from './display.js';
 export type Config = { codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
-type Session = { view: NativeSnapshot; opened: boolean; fresh: boolean; titleNeeded: boolean; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
+type Session = { view: NativeSnapshot; opened: boolean; fresh: boolean; titleNeeded: boolean; titleRequest: string; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
 /** Собирает команды и единственного владельца live items/pending. */
 export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void) {
   const sessions = new Map<string, Session>();
@@ -97,7 +97,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       sessions.delete(victim.view.threadId);
     }
     const view: NativeSnapshot = { projectId, threadId: thread.id, generation: current(), epoch: randomUUID(), seq: 0, thread: { ...metadata(thread), lastMessageAt: messageTimes.get(thread.id)?.lastMessageAt ?? 0 }, turn: null, state: 'idle', items: [], requests: [], truncated: false };
-    const s: Session = { view, opened: fresh, fresh, titleNeeded: fresh && !thread.name, raw: new Map(), revisions: new Map(), details: new Map() };
+    const s: Session = { view, opened: fresh, fresh, titleNeeded: !thread.name, titleRequest: thread.preview ?? '', raw: new Map(), revisions: new Map(), details: new Map() };
     sessions.set(thread.id, s);
     return s;
     } finally { release(); }
@@ -303,10 +303,13 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       s.fresh = false;
     }
     if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
-    if (r.action === 'start' && !previousTurn && s.titleNeeded && (!config.allowedModels || config.allowedModels.includes('gpt-6-luna'))) {
+    if (r.action === 'start' && s.titleNeeded && !s.naming && (!config.allowedModels || config.allowedModels.includes('gpt-6-luna'))) {
       s.titleNeeded = false; s.naming = true;
-      void nameThread(codex, r.threadId!, r.text?.trim() || 'Проанализировать присланные изображения').catch(() => {
-        console.error('agent: TITLE_GENERATION_FAILED');
+      // AIDEV-NOTE: Preview принадлежит первому заданию; восстановленный чат называем по нему, а не по продолжению.
+      s.titleRequest = s.titleRequest.trim() || r.text?.trim() || 'Проанализировать присланные изображения';
+      void nameThread(codex, r.threadId!, s.titleRequest).catch((error: any) => {
+        s.titleNeeded = true;
+        console.error('agent: TITLE_GENERATION_FAILED', { stage: error.titleStage, code: error.code, upstreamCode: error.upstreamCode, nativeCode: error.nativeCode });
       }).finally(() => { s.naming = false; });
     }
     return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: r.threadId, turnId, ...(r.requestId ? { requestId: r.requestId } : {}) };
