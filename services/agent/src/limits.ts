@@ -6,7 +6,6 @@ import type { CodexPort, Observation } from './codex.js';
 const POLL_MS = 60_000;
 const MIN_READ_INTERVAL_MS = 5_000;
 const FRESH_MS = 90_000;
-type Timer = ReturnType<typeof setTimeout>;
 type Runtime = { now?: () => number; setTimeout?: typeof setTimeout; clearTimeout?: typeof clearTimeout; setInterval?: typeof setInterval; clearInterval?: typeof clearInterval };
 
 /** Управляет одним bounded read-потоком, не влияя на готовность чата. */
@@ -14,7 +13,7 @@ export function createLimitsMonitor(codex: CodexPort, runtime: Runtime = globalT
   const { now = Date.now, setTimeout: schedule = setTimeout, clearTimeout: cancel = clearTimeout, setInterval: repeat = setInterval, clearInterval: stopRepeat = clearInterval } = runtime;
   let value: AgentLimits = { state: 'unavailable', revision: 0, observedAt: null, windows: [] }, closed = false, generation = codex.status().generation, accountEpoch = 0;
   let inFlight = false, queued = false, lastStartedAt = Number.NEGATIVE_INFINITY;
-  let retryTimer: Timer | undefined, pollTimer: ReturnType<typeof setInterval> | undefined;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined, pollTimer: ReturnType<typeof setInterval> | undefined;
 
   function update(state: AgentLimits['state'], observedAt = value.observedAt, windows = value.windows, force = false) {
     if (!force && state === value.state && observedAt === value.observedAt && windows === value.windows) return;
@@ -100,10 +99,8 @@ export function createLimitsMonitor(codex: CodexPort, runtime: Runtime = globalT
     close() {
       if (closed) return;
       closed = true;
-      queued = false;
       clearRetry();
       if (pollTimer !== undefined) stopRepeat(pollTimer);
-      pollTimer = undefined;
       update('unavailable', null, [], true);
     },
   };
@@ -113,16 +110,14 @@ function projectWindows(value: any): AgentLimits['windows'] {
   const buckets = value?.rateLimitsByLimitId, fallback = value?.rateLimits;
   const bucket = buckets == null ? fallback && (fallback.limitId == null || fallback.limitId === 'codex') ? fallback : undefined : buckets.codex;
   if (!bucket) return [];
-  const windows: AgentLimits['windows'] = [];
-  for (const slot of ['primary', 'secondary'] as const) {
+  return (['primary', 'secondary'] as const).flatMap(slot => {
     const window = bucket[slot];
-    if (window === undefined || window === null) continue;
-    windows.push({
+    if (window === undefined || window === null) return [];
+    return [{
       slot,
       remainingPercent: Math.max(0, Math.min(100, 100 - window.usedPercent)),
       windowDurationMins: Number.isSafeInteger(window.windowDurationMins) && window.windowDurationMins >= 0 ? window.windowDurationMins : null,
       resetsAt: Number.isSafeInteger(window.resetsAt) && window.resetsAt >= 0 ? window.resetsAt : null,
-    });
-  }
-  return windows;
+    }];
+  });
 }

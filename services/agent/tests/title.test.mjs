@@ -86,13 +86,15 @@ test('a long semantic title is bounded without another inference', async () => {
   assert.equal(schema.properties.title.maxLength, 60);
 });
 test('RPC and generation failures identify their stage without losing native codes', async () => {
-  const f = fixture();
-  const call = f.port.call;
-  f.port.call = async (...args) => {
-    if (args[0] === 'thread/start') throw Object.assign(new Error('private upstream details'), { code: 'UPSTREAM_UNAVAILABLE', upstreamCode: -32600 });
-    return call(...args);
-  };
-  await assert.rejects(nameThread(f.port, 'main', 'task'), e => e.titleStage === 'thread/start' && e.code === 'UPSTREAM_UNAVAILABLE' && e.upstreamCode === -32600);
+  for (const stage of ['thread/read', 'config/read', 'thread/start', 'turn/start', 'thread/name/set']) {
+    const f = fixture(), call = f.port.call;
+    f.port.call = async (...args) => {
+      if (args[0] === stage) throw Object.assign(new Error('private upstream details'), { code: 'UPSTREAM_UNAVAILABLE', upstreamCode: -32600 });
+      return call(...args);
+    };
+    await assert.rejects(nameThread(f.port, 'main', 'task'), e => e.titleStage === stage && e.code === 'UPSTREAM_UNAVAILABLE' && e.upstreamCode === -32600);
+    assert.equal(f.listeners.size, 0);
+  }
   const invalid = fixture({ output: 'invalid' });
   await assert.rejects(nameThread(invalid.port, 'main', 'task'), e => e.titleStage === 'result' && e.code === 'TITLE_INVALID_RESULT');
   const failed = fixture({ failure: 'usageLimitExceeded' });
