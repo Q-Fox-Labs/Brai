@@ -99,6 +99,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid #b3a2ff; outline-offs
 .agent-item pre { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; }
 .agent-message-author { display: block; color: var(--agent-muted); font-size: 12px; font-weight: 600; }
 .agent-message-phase { margin-left: 12px; font-weight: 400; }
+.agent-correction-status { display: flex; align-items: center; gap: 6px; margin-top: 6px; color: var(--agent-muted); font-size: 12px; }
+.agent-correction-status button { margin-left: auto; text-decoration: underline; }
 .agent-user-message { max-width: 85%; margin-left: auto; padding: 13px 18px; border-radius: 16px; background: #303339; }
 .agent-assistant-message { padding: 2px 4px; }
 .agent-tool-item { border: 1px solid var(--agent-border); border-radius: 10px; background: #27292d; }

@@ -12,7 +12,7 @@ import { createLazyReads } from "../../lib/agent/lazy";
 import Activities from "./activities";
 import Markdown from "./markdown";
 import { questionReplies } from "../../lib/agent/question-reply";
-import { composerAction, groupTimeline, mergeTimeline } from "./timeline";
+import { composerAction, groupTimeline, mergeTimeline, reconcileCorrections, type PendingCorrection } from "./timeline";
 import Sidebar, { type Project, type ThreadPage } from "./sidebar";
 import { limits } from "@brai/agent/contracts";
 import MessageImages from "./message-images";
@@ -40,6 +40,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const [historyGeneration, setHistoryGeneration] = useState(""), [history, setHistory] = useState<DisplayItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null), [sidebarOpen, setSidebarOpen] = useState(false);
   const [composer, setComposer] = useState<ComposerDraft>(emptyDraft), [message, setMessage] = useState(""), [busy, setBusy] = useState(false);
+  const [corrections, setCorrections] = useState<PendingCorrection[]>([]);
   const draft = composer.text, attachments = composer.images;
   const composerRef = useRef(composer), currentChat = useRef(`${projectId}:${threadId}`);
   const fileInput = useRef<HTMLInputElement>(null), preparationVersion = useRef(0), alive = useRef(true);
@@ -167,6 +168,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       if (reply.outcome !== "accepted" || reply.generation !== generation || reply.operationId !== operationId || reply.threadId !== chatId) throw new AgentError("BAD_REPLY", "unknown");
       if (!alive.current) return;
       archived.current.add(key);
+      setCorrections(previous => previous.filter(value => value.chat !== key));
       liveMetadata.current.delete(key);
       setPages(previous => {
         const page = previous[id];
@@ -197,11 +199,18 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     if (!targetProject || locked.current || uncertain.current || (action !== "create" && (!connected || !snapshot || snapshot.projectId !== projectId || snapshot.threadId !== threadId))) return false;
     const selected = snapshot, sent = composerRef.current, sentChat = `${projectId}:${threadId}`, token = selection.current, operationId = crypto.randomUUID();
     locked.current = true; setBusy(true); setMessage("");
+    if (action === "steer") {
+      followBottom.current = true;
+      setCorrections(previous => [...previous, { chat: sentChat, generation: selected!.generation,
+        knownIds: mergeTimeline(history, selected!.items).map(item => item.id), state: "sending",
+        item: { id: operationId, turnId: selected!.turn!.id, type: "userMessage", text: sent.text, imageCount: sent.images.length, images: sent.images.map(image => image.dataUrl) } }]);
+    }
     try {
       const generation = action === "create" ? (await client.request({ action: "status" })).generation : selected!.generation;
       const value = await client.request({ action, projectId: targetProject, ...(action === "create" ? {} : { threadId }), generation, operationId, ...extra });
       if (value.outcome !== "accepted" || value.generation !== generation || (action === "create" ? typeof value.threadId !== "string" : value.threadId !== selected!.threadId) || value.operationId !== operationId || (action === "answer" && value.requestId !== extra.requestId)) throw new AgentError("BAD_REPLY", "unknown");
       if (!alive.current) return true;
+      if (action === "steer") setCorrections(previous => previous.map(value => value.item.id === operationId ? { ...value, state: "waiting" } : value));
       if (action === "start" || action === "steer") {
         // AIDEV-NOTE: Ответ относится к отправленному чату, даже после ухода и возврата selection.
         if (currentChat.current === sentChat) changeDraft(acceptedDraft(composerRef.current, sent));
@@ -217,6 +226,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       setMessage("Действие принято."); return true;
     } catch (error) {
       if (!alive.current) return false;
+      if (action === "steer") setCorrections(previous => previous.map(value => value.item.id === operationId ? { ...value, state: error instanceof AgentError && error.outcome === "unknown" ? "unknown" : "failed" } : value));
       if (error instanceof AgentError && error.outcome === "unknown") {
         const saved = cache.current.get(sentChat);
         if (saved) saved.uncertain = true;
@@ -249,12 +259,19 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   }, [client, modelGeneration, models]);
   const title = selectedThread?.title || selectedThread?.preview || (threadId ? "Новый чат" : "Выберите чат");
   const items = mergeTimeline(history, view?.items ?? []);
+  const pendingCorrections = reconcileCorrections(corrections, currentChat.current, view?.generation ?? historyGeneration, items).filter(value => value.chat === currentChat.current);
+  useEffect(() => {
+    setCorrections(previous => {
+      const next = reconcileCorrections(previous, `${projectId}:${threadId}`, view?.generation ?? historyGeneration, mergeTimeline(history, view?.items ?? []));
+      return next.length === previous.length ? previous : next;
+    });
+  }, [projectId, threadId, view, history, historyGeneration]);
   const timeline = groupTimeline(items);
   const activityContext = useMemo(() => ({ generation: view?.generation ?? historyGeneration, epoch: view?.epoch ?? "", projectId, threadId }), [view?.generation, view?.epoch, historyGeneration, projectId, threadId]);
   const action = composerAction(active, draft, attachments.length);
   const catalogFresh = !!view && models?.generation === view.generation;
   const imageError = attachments.length && !imagesAllowed ? !catalogFresh ? "Дождитесь свежего каталога моделей и соединения с чатом." : "Эта модель не принимает изображения. Выберите другую модель или удалите вложения." : attachments.length > imageLimit ? `В этом чате можно прикрепить не более ${imageLimit} изображений. Удалите лишние вложения.` : "";
-  const sendDisabled = disabled || preparationCount > 0 || !!imageError || (action !== "interrupt" && !catalogFresh) || (action === "start" && ((!draft.trim() && !attachments.length) || !selectedModel || view?.thread.canAcceptDirectInput === false));
+  const sendDisabled = disabled || preparationCount > 0 || !!imageError || (action === "steer" && corrections.length >= 64) || (action !== "interrupt" && !catalogFresh) || (action === "start" && ((!draft.trim() && !attachments.length) || !selectedModel || view?.thread.canAcceptDirectInput === false));
   const submit = () => {
     if (sendDisabled) return;
     if (action === "interrupt") void mutate("interrupt", { turnId: view!.turn!.id });
@@ -303,7 +320,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     if (!element || !visible) return;
     if (anchor) { element.scrollTop = anchor.top + element.scrollHeight - anchor.height; scrollAnchor.current = null; }
     else if (followBottom.current) element.scrollTop = element.scrollHeight;
-  }, [threadId, history, snapshot, visible]);
+  }, [threadId, history, snapshot, visible, corrections]);
 
   return <main className="agent-shell">
     <Sidebar projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={sidebarOpen} email={email} busy={busy || uncertain.current} accountLimits={accountLimits}
@@ -323,6 +340,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         <div className="agent-timeline">
           {cursor && <button className="agent-history-more" onClick={() => void moreHistory()}>Загрузить предыдущие сообщения</button>}
           {timeline.map(entry => entry.kind === "message" ? <Item key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.item.id}`} item={entry.item} context={activityContext} reads={lazyReads} /> : <Activities key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.id}`} items={entry.items} context={activityContext} reads={lazyReads} />)}
+          {pendingCorrections.map(value => <Item key={value.item.id} item={value.item} context={activityContext} reads={lazyReads} pending={value.state} dismiss={() => setCorrections(previous => previous.filter(item => item.item.id !== value.item.id))} />)}
           {connected && view?.requests.map(request => <NativeForm key={`${view.generation}:${view.epoch}:${request.requestId}`} request={request} disabled={disabled} send={answer => mutate("answer", { requestId: request.requestId, answer })} />)}
         </div>
       </div>
@@ -343,6 +361,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           </div>
         </form>}
         <p className="agent-feedback" role="alert">{uncertain.current ? "Результат неизвестен. Обновите страницу и проверьте чат перед новой отправкой." : imageError || message || accountMessage}</p>
+        {corrections.length >= 64 && <p role="status">Дождитесь применения корректировок или уберите сообщения с ошибкой перед новой корректировкой.</p>}
         {preparationCount > 0 && <p className="agent-image-preparing" role="status">Подготовка изображений: {preparationCount}…</p>}
       </footer>}
     </section>
@@ -350,12 +369,13 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
 }
 
 /** Сообщения используют безопасный Markdown; тела действий принадлежат отдельному ленивому списку. */
-function Item({ item, context, reads }: { item: DisplayItem; context: Parameters<typeof MessageImages>[0]["context"]; reads: Parameters<typeof MessageImages>[0]["reads"] }) {
+function Item({ item, context, reads, pending, dismiss }: { item: DisplayItem; context: Parameters<typeof MessageImages>[0]["context"]; reads: Parameters<typeof MessageImages>[0]["reads"]; pending?: PendingCorrection["state"]; dismiss?: () => void }) {
   const replies = item.type === "userMessage" ? questionReplies(item.text) : null;
   return <article data-item-id={item.id} className={`agent-item ${item.type === "userMessage" ? "agent-user-message" : "agent-assistant-message"}`}>
     <span className="agent-message-author">{item.type === "userMessage" ? "Вы" : "Brai"}{item.phase && <span className="agent-message-phase">{item.phase === "final_answer" ? "Итог" : item.phase === "commentary" ? "Промежуточное сообщение" : item.phase}</span>}</span>
+    {pending && <span className="agent-correction-status" role="status"><span aria-hidden="true">{pending === "failed" || pending === "unknown" ? "⚠" : "◷"}</span> {pending === "sending" ? "Отправляется…" : pending === "waiting" ? "Ожидает применения" : pending === "unknown" ? "Отправка не подтверждена. Проверьте чат." : "Не отправлено. Повторите из поля ввода."}{pending === "failed" && <button type="button" onClick={dismiss}>Убрать</button>}</span>}
     {replies ? <div className="agent-markdown">{replies.map((reply, index) => <div key={index}><p>{reply.question}</p><p><strong>Ответ: </strong>{reply.answer}</p></div>)}</div> : <Markdown text={item.text} />}
-    {!!item.imageCount && <MessageImages item={item} context={context} reads={reads} />}
+    {!!item.imageCount && (pending ? <ul className="agent-message-thumbnails" aria-label="Изображения сообщения">{item.images?.map((src, index) => <li key={index}><img src={src} alt={`Прикреплённое изображение ${index + 1}`} /></li>)}</ul> : <MessageImages item={item} context={context} reads={reads} />)}
   </article>;
 }
 

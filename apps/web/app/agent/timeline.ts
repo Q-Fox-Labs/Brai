@@ -43,3 +43,26 @@ export function groupTimeline(items: DisplayItem[]): TimelineEntry[] {
 export function composerAction(active: boolean, draft: string, imageCount = 0): "start" | "steer" | "interrupt" {
   return active ? draft.trim() || imageCount > 0 ? "steer" : "interrupt" : "start";
 }
+
+export type PendingCorrection = {
+  chat: string; generation: string; knownIds: string[]; item: DisplayItem;
+  state: "sending" | "waiting" | "failed" | "unknown";
+};
+
+/** Native сообщения заменяют локальные корректировки по одному, только в исходном чате и ходе. */
+export function reconcileCorrections(pending: PendingCorrection[], chat: string, generation: string, items: DisplayItem[]): PendingCorrection[] {
+  const used = new Set<string>();
+  const remaining = pending.filter(value => {
+    if (value.chat !== chat || value.generation !== generation || value.state === "failed") return true;
+    const match = items.find(item => {
+      if (item.type !== "userMessage" || item.turnId !== value.item.turnId || used.has(item.id) || value.knownIds.includes(item.id) || (item.imageCount ?? 0) !== (value.item.imageCount ?? 0)) return false;
+      // История может сокращать длинный текст сильнее, чем живой снимок.
+      const prefix = item.text.split("\n[содержимое сокращено]")[0];
+      return item.text === value.item.text || !!item.truncated && !!prefix && value.item.text.startsWith(prefix);
+    });
+    if (!match) return true;
+    used.add(match.id);
+    return false;
+  });
+  return used.size ? remaining.map(value => value.chat === chat && value.generation === generation ? { ...value, knownIds: [...value.knownIds, ...used] } : value) : remaining;
+}

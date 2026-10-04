@@ -2,7 +2,7 @@
 // ABOUTME: Воспроизводит исчезнувший из конца ленты итог без сервера и модельных вызовов.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mergeTimeline } from "../app/agent/timeline.ts";
+import { mergeTimeline, reconcileCorrections, type PendingCorrection } from "../app/agent/timeline.ts";
 import type { DisplayItem } from "@brai/agent/contracts";
 const item = (id: string, text = id): DisplayItem => ({ id, text, turnId: "turn", type: "agentMessage" });
 const ids = (items: DisplayItem[]) => items.map(value => value.id);
@@ -29,4 +29,39 @@ test("пропущенный живым окном элемент остаётс
 test("пустое и непересекающееся новое окно", () => {
   assert.deepEqual(ids(mergeTimeline([item("a")], [])), ["a"]);
   assert.deepEqual(ids(mergeTimeline([item("a")], [item("b")])), ["a", "b"]);
+});
+
+const correction = (id = "local", state: PendingCorrection["state"] = "waiting"): PendingCorrection => ({
+  chat: "p:t", generation: "g", knownIds: ["old"], state,
+  item: { id, turnId: "turn", type: "userMessage", text: "Исправь", imageCount: 0 },
+});
+const user = (id: string, text = "Исправь"): DisplayItem => ({ id, turnId: "turn", type: "userMessage", text });
+
+test("корректировка остаётся видна при задержке native истории и после accepted", () => {
+  for (const state of ["sending", "waiting", "unknown"] as const) {
+    const pending = correction("local", state);
+    assert.deepEqual(reconcileCorrections([pending], "p:t", "g", [user("old"), item("activity")]), [pending]);
+    assert.deepEqual(reconcileCorrections([pending], "p:t", "g", [user("new")]), []);
+  }
+});
+test("подтверждение не относится к другому чату, поколению, ходу или ошибке отправки", () => {
+  const pending = correction();
+  assert.equal(reconcileCorrections([pending], "p:other", "g", [user("new")]).length, 1);
+  assert.equal(reconcileCorrections([pending], "p:t", "next", [user("new")]).length, 1);
+  assert.equal(reconcileCorrections([pending], "p:t", "g", [{ ...user("new"), turnId: "other" }]).length, 1);
+  assert.equal(reconcileCorrections([correction("failed", "failed")], "p:t", "g", [user("new")]).length, 1);
+});
+test("один native item не подтверждает две одинаковые корректировки на повторных снимках", () => {
+  const remaining = reconcileCorrections([correction("one"), correction("two")], "p:t", "g", [user("native-one")]);
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].item.id, "two");
+  assert.equal(reconcileCorrections(remaining, "p:t", "g", [user("native-one")]).length, 1);
+  assert.equal(reconcileCorrections(remaining, "p:t", "g", [user("native-one"), user("native-two")]).length, 0);
+});
+test("сокращённая история подтверждает длинный текст, число изображений должно совпадать", () => {
+  const pending = correction();
+  pending.item.text = "Длинный текст".repeat(1000);
+  assert.equal(reconcileCorrections([pending], "p:t", "g", [user("new", "Длинный текст")]).length, 1);
+  assert.equal(reconcileCorrections([pending], "p:t", "g", [{ ...user("new", "Длинный текст\n[содержимое сокращено]"), truncated: true }]).length, 0);
+  assert.equal(reconcileCorrections([correction()], "p:t", "g", [{ ...user("new"), imageCount: 1 }]).length, 1);
 });
