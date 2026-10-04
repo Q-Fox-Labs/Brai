@@ -81,7 +81,9 @@ test('question without Other rejects unoffered values', async () => {
   const answer = f.command('answer', { requestId: 'number:2', answer: { answers: { q: { answers: ['Injected'] } } } });
   await assert.rejects(f.app.request(answer), error => error.code === 'INVALID_ARGUMENT');
   assert.equal((await f.open()).requests[0].answered, false);
+  assert.equal((await f.open()).thread.awaitingReply, true);
   await f.app.request({ ...answer, operationId: 'answer2', answer: { answers: { q: { answers: ['Yes'] } } } });
+  assert.equal((await f.open()).thread.awaitingReply, false);
 });
 test('sixteen concurrent admissions fit; seventeenth has no native effect', async () => {
   const f = fixture();

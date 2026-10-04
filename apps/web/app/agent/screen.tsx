@@ -34,6 +34,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const metadataVersion = useRef(0);
   const [projects, setProjects] = useState<Project[]>([]);
   const [accountLimits, setAccountLimits] = useState<AgentLimits>({ state: "loading", revision: 0, observedAt: null, windows: [] });
+  const [readMessages, setReadMessages] = useState<Record<string, string>>({});
   const [pages, setPages] = useState<Record<string, ThreadPage>>({});
   const [projectId, setProjectId] = useState(""), [threadId, setThreadId] = useState("");
   const [snapshot, setSnapshot] = useState<NativeSnapshot | null>(null), [connected, setConnected] = useState(false);
@@ -274,6 +275,33 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       return next.length === previous.length ? previous : next;
     });
   }, [projectId, threadId, view, history, historyGeneration]);
+  useEffect(() => {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem(`brai.agent.read:${userId}`) ?? "{}");
+      setReadMessages(saved && typeof saved === "object" && !Array.isArray(saved) ? Object.fromEntries(Object.entries(saved).filter(([key, value]) => key.length <= 300 && typeof value === "string" && value.length <= 128).slice(-1000)) : {});
+    } catch { setReadMessages({}); }
+  }, [userId]);
+  useEffect(() => {
+    const messageId = view?.thread.finalMessageId;
+    if (!visible || !view || view.thread.active || !messageId) return;
+    const marker = Array.from(conversation.current?.querySelectorAll<HTMLElement>("[data-read-message]") ?? []).find(element => element.dataset.readMessage === messageId);
+    if (!marker) return;
+    const key = `${projectId}:${threadId}`;
+    const markRead = () => {
+      const rect = marker.getBoundingClientRect(), area = conversation.current?.getBoundingClientRect();
+      if (document.visibilityState !== "visible" || !marker.getClientRects().length || !area || rect.top < area.top || rect.bottom > area.bottom) return;
+      setReadMessages(previous => {
+        if (previous[key] === messageId) return previous;
+        const next = Object.fromEntries([...Object.entries(previous).filter(([id]) => id !== key), [key, messageId]].slice(-1000));
+        try { localStorage.setItem(`brai.agent.read:${userId}`, JSON.stringify(next)); } catch { /* Чтение сохраняется в памяти при недоступном хранилище. */ }
+        return next;
+      });
+    };
+    const observer = new IntersectionObserver(markRead, { root: conversation.current, threshold: 1 });
+    observer.observe(marker);
+    document.addEventListener("visibilitychange", markRead);
+    return () => { observer.disconnect(); document.removeEventListener("visibilitychange", markRead); };
+  }, [visible, userId, projectId, threadId, view, history]);
   const timeline = groupTimeline(items);
   const activityContext = useMemo(() => ({ generation: view?.generation ?? historyGeneration, epoch: view?.epoch ?? "", projectId, threadId }), [view?.generation, view?.epoch, historyGeneration, projectId, threadId]);
   const action = composerAction(active, draft, attachments.length);
@@ -363,7 +391,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   }, [threadId, history, snapshot, visible, corrections]);
 
   return <main className="agent-shell">
-    <Sidebar projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={sidebarOpen} email={email} busy={busy || uncertain.current} accountLimits={accountLimits}
+    <Sidebar readMessages={readMessages} projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={sidebarOpen} email={email} busy={busy || uncertain.current} accountLimits={accountLimits}
       select={selectChat} create={id => { void mutate("create", selectedModel ? { model: selectedModel.model, permissionMode } : { permissionMode }, id); }} more={id => { const next = pages[id]?.nextCursor; if (next) void loadThreads(id, next); }}
       archive={(id, chatId) => { void archiveChat(id, chatId); }} refresh={id => { void loadThreads(id); }} close={() => setSidebarOpen(false)} logout={onLogout} />
     <section className="agent-workspace" aria-labelledby="agent-chat-title">
@@ -426,6 +454,7 @@ function Item({ item, context, reads, pending, dismiss }: { item: DisplayItem; c
     <span className="agent-message-author">{item.type === "userMessage" ? "Вы" : "Brai"}{item.phase && <span className="agent-message-phase">{item.phase === "final_answer" ? "Итог" : item.phase === "commentary" ? "Промежуточное сообщение" : item.phase}</span>}</span>
     {pending && <span className="agent-correction-status" role="status"><span aria-hidden="true">{pending === "failed" || pending === "unknown" ? "⚠" : "◷"}</span> {pending === "sending" ? "Отправляется…" : pending === "waiting" ? "Ожидает применения" : pending === "unknown" ? "Отправка не подтверждена. Проверьте чат." : "Не отправлено. Повторите из поля ввода."}{pending === "failed" && <button type="button" onClick={dismiss}>Убрать</button>}</span>}
     {replies ? <div className="agent-markdown">{replies.map((reply, index) => <div key={index}><p>{reply.question}</p><p><strong>Ответ: </strong>{reply.answer}</p></div>)}</div> : <Markdown text={item.type === "userMessage" ? desktopMessage(item.text) : item.text} />}
+    {item.type === "agentMessage" && item.phase === "final_answer" && <span className="agent-message-read-marker" data-read-message={item.id} aria-hidden="true" />}
     {!!item.imageCount && (pending ? <ul className="agent-message-thumbnails" aria-label="Изображения сообщения">{item.images?.map((src, index) => <li key={index}><img src={src} alt={`Прикреплённое изображение ${index + 1}`} /></li>)}</ul> : <MessageImages item={item} context={context} reads={reads} />)}
   </article>;
 }

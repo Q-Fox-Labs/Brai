@@ -6,13 +6,13 @@ import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, ModelCatal
 import type { CodexPort, Observation } from './codex.js';
 import { createLimitsMonitor } from './limits.js';
 import { nameThread } from './title.js';
-import { display, metadata, text, compact, summary } from './display.js';
+import { display, metadata, text, compact, summary, messageAttention } from './display.js';
 export type Config = { codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
-type Session = { view: NativeSnapshot; opened: boolean; fresh: boolean; titleNeeded: boolean; titleRequest: string; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
+type Session = { attention: ReturnType<typeof messageAttention>; view: NativeSnapshot; opened: boolean; fresh: boolean; titleNeeded: boolean; titleRequest: string; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
 /** Собирает команды и единственного владельца live items/pending. */
 export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void) {
   const sessions = new Map<string, Session>();
-  const messageTimes = new Map<string, { updatedAt: number; lastMessageAt: number }>();
+  const messageTimes = new Map<string, { updatedAt: number; lastMessageAt: number; finalMessageId: string | null; awaitingReply: boolean }>();
   let creating = 0, admission = Promise.resolve();
   let modelCatalog: { generation: string; result: Promise<ModelCatalog> } | undefined;
   const operations = new Map<string, { hash: string; result: Promise<any> }>();
@@ -39,6 +39,10 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
   function publish(s: Session) {
     if (s.view.seq === Number.MAX_SAFE_INTEGER) { s.view.epoch = randomUUID(); s.view.seq = 0; }
     s.view.thread.active = s.view.turn?.status === 'inProgress' && !['connection-lost', 'executor-unavailable'].includes(s.view.state);
+    const latestMessage = [...s.view.items].reverse().find(item => item.type === 'userMessage' || item.type === 'agentMessage');
+    if (latestMessage) s.attention = messageAttention(latestMessage);
+    Object.assign(s.view.thread, s.attention);
+    s.view.thread.awaitingReply = s.view.requests.some(request => !request.answered) || (!s.view.thread.active && s.attention.awaitingReply);
     s.view.seq++;
     while (s.view.items.length > 128 || bytes(s.view) > limits.state) {
       const dropped = s.view.items.shift();
@@ -54,6 +58,8 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     value.revision = history ? old?.revision ?? 0 : s.view.seq + 1;
     if (value.type === 'userMessage' || value.type === 'agentMessage') {
       value.timestamp = history ? timestamp ?? old?.timestamp ?? s.view.thread.updatedAt * 1000 : old?.timestamp ?? timestamp ?? Date.now();
+      s.attention = messageAttention(value);
+      Object.assign(s.view.thread, s.attention);
       if (!history) s.view.thread.lastMessageAt = Math.max(s.view.thread.lastMessageAt ?? 0, value.timestamp);
     }
     const index = s.view.items.findIndex(old => old.id === value.id);
@@ -97,7 +103,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       sessions.delete(victim.view.threadId);
     }
     const view: NativeSnapshot = { projectId, threadId: thread.id, generation: current(), epoch: randomUUID(), seq: 0, thread: { ...metadata(thread), lastMessageAt: messageTimes.get(thread.id)?.lastMessageAt ?? 0 }, turn: null, state: 'idle', items: [], requests: [], truncated: false };
-    const s: Session = { view, opened: fresh, fresh, titleNeeded: !thread.name, titleRequest: thread.preview ?? '', raw: new Map(), revisions: new Map(), details: new Map() };
+    const s: Session = { attention: { finalMessageId: null, awaitingReply: false }, view, opened: fresh, fresh, titleNeeded: !thread.name, titleRequest: thread.preview ?? '', raw: new Map(), revisions: new Map(), details: new Map() };
     sessions.set(thread.id, s);
     return s;
     } finally { release(); }
@@ -208,21 +214,22 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
         const live = sessions.get(thread.id)?.view.thread;
         const cached = messageTimes.get(thread.id);
         let lastMessageAt = cached && cached.updatedAt === thread.updatedAt ? cached.lastMessageAt : undefined;
+        let attention = cached && cached.updatedAt === thread.updatedAt ? { finalMessageId: cached.finalMessageId, awaitingReply: cached.awaitingReply } : { finalMessageId: null as string | null, awaitingReply: false };
         if (lastMessageAt === undefined) {
           let cursor: string | undefined;
           lastMessageAt = 0;
           for (let index = 0; index < 10; index++) {
             const items = await codex.call('thread/items/list', { threadId: thread.id, limit: 10, sortDirection: 'desc', ...(cursor ? { cursor } : {}) });
             const message = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
-            if (message) { lastMessageAt = message.startedAtMs ?? message.completedAtMs ?? thread.updatedAt * 1000; break; }
+            if (message) { attention = messageAttention(display(message.item, message.turnId)); lastMessageAt = message.startedAtMs ?? message.completedAtMs ?? thread.updatedAt * 1000; break; }
             if (!items.nextCursor) break;
             cursor = items.nextCursor;
           }
           if (generation !== current()) fail('STALE_GENERATION', 'query');
-          messageTimes.set(thread.id, { updatedAt: thread.updatedAt, lastMessageAt: lastMessageAt! });
+          messageTimes.set(thread.id, { updatedAt: thread.updatedAt, lastMessageAt: lastMessageAt!, ...attention });
           while (messageTimes.size > 1000) messageTimes.delete(messageTimes.keys().next().value!);
         }
-        return { ...metadata(thread), lastMessageAt: Math.max(lastMessageAt!, live?.lastMessageAt ?? 0), active: live?.active ?? thread.status?.type === 'active' };
+        return { ...metadata(thread), ...attention, awaitingReply: thread.status?.activeFlags?.some((flag: string) => ['waitingOnApproval', 'waitingOnUserInput'].includes(flag)) || (thread.status?.type !== 'active' && attention.awaitingReply), ...(live ? { finalMessageId: live.finalMessageId, awaitingReply: live.awaitingReply } : {}), lastMessageAt: Math.max(lastMessageAt!, live?.lastMessageAt ?? 0), active: live?.active ?? thread.status?.type === 'active' };
       })));
       if (generation !== current()) fail('STALE_GENERATION', 'query');
       return { generation, data: data.sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0) || a.id.localeCompare(b.id)), nextCursor: page.nextCursor ?? null };

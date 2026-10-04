@@ -176,3 +176,17 @@ test("empty reasoning cannot create a group; a live nonempty revision reappears"
   const reads = createLazyReads(async () => { throw new Error("empty group must not read"); });
   assert.equal(renderToStaticMarkup(createElement(component("activities"), { context, reads, items: [empty] })), "");
 });
+
+test("sidebar prioritizes questions over work and hides a read final check", () => {
+  const noop = () => {}, thread = { title: "Chat", preview: "", model: null, canAcceptDirectInput: true, updatedAt: 1 };
+  const props = { projects: [{ projectId: "p", name: "P", available: true }], pages: { p: { data: [
+    { ...thread, id: "question", active: true, awaitingReply: true },
+    { ...thread, id: "unread", finalMessageId: "final" },
+    { ...thread, id: "read", finalMessageId: "seen" },
+  ], nextCursor: null, loading: false, error: "" } }, projectId: "p", threadId: "question", email: "test@example.test", open: true, busy: false,
+    accountLimits: { state: "unavailable", revision: 0, observedAt: null, windows: [] }, readMessages: { "p:read": "seen" }, select: noop, create: noop, more: noop, refresh: noop, archive: noop, close: noop, logout: noop };
+  const html = renderToStaticMarkup(createElement(component("sidebar"), props));
+  assert.equal((html.match(/aria-label="Агент ждёт ответа"/g) ?? []).length, 1);
+  assert.equal((html.match(/aria-label="Непрочитанный итог"/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /Агент работает/);
+});

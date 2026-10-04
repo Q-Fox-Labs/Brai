@@ -203,3 +203,19 @@ test('message images survive reopening and live snapshots stay compact', async (
   await assert.rejects(f.read('item', { turnId: 'other', itemId: 'user' }), error => error.code === 'NOT_FOUND');
   f.app.close();
 });
+
+test('final attention survives reading and tool updates, clears on reply, and returns in native list', async t => {
+  const f = fixture(); t.after(() => f.app.close());
+  f.entries.at(-1).item = { id: 'final', type: 'agentMessage', phase: 'final_answer', text: 'Какой вариант выбрать?' };
+  const listed = (await f.app.request({ action: 'threads', projectId: 'p' })).data.find(thread => thread.id === 't');
+  assert.equal(listed.finalMessageId, 'final'); assert.equal(listed.awaitingReply, true);
+  assert.equal((await f.read('open')).thread.awaitingReply, true);
+  f.observe({ method: 'item/completed', params: { threadId: 't', turnId: 'turn', item: { id: 'tool', type: 'commandExecution' } } });
+  assert.equal(f.events.at(-1).event.snapshot.thread.awaitingReply, true);
+  f.observe({ method: 'item/completed', params: { threadId: 't', turnId: 'next', item: { id: 'reply', type: 'userMessage', content: [{ type: 'text', text: 'Первый' }] } } });
+  assert.equal(f.events.at(-1).event.snapshot.thread.awaitingReply, false);
+  assert.equal(f.events.at(-1).event.snapshot.thread.finalMessageId, null);
+  f.observe({ method: 'item/completed', params: { threadId: 't', turnId: 'next', item: { id: 'done', type: 'agentMessage', phase: 'final_answer', text: 'Готово. Код: `value ? a : b`' } } });
+  assert.equal(f.events.at(-1).event.snapshot.thread.finalMessageId, 'done');
+  assert.equal(f.events.at(-1).event.snapshot.thread.awaitingReply, false);
+});

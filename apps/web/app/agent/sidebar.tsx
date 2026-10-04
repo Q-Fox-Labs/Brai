@@ -10,7 +10,7 @@ export type Project = { projectId: string; name: string; available: boolean };
 export type ThreadPage = { data: ThreadMetadata[]; nextCursor: string | null; loading: boolean; error: string };
 type Props = {
   projects: Project[]; pages: Record<string, ThreadPage>; projectId: string; threadId: string;
-  open: boolean; email: string; busy: boolean; accountLimits: AgentLimits;
+  open: boolean; email: string; busy: boolean; accountLimits: AgentLimits; readMessages?: Record<string, string>;
   select: (projectId: string, threadId?: string) => void;
   create: (projectId: string) => void; more: (projectId: string) => void; refresh: (projectId: string) => void;
   archive: (projectId: string, threadId: string) => void;
@@ -18,7 +18,7 @@ type Props = {
 };
 
 /** Группирует уже прочитанные чаты; длинное название доступно полностью через title. */
-export default function Sidebar({ projects, pages, projectId, threadId, open, email, busy, accountLimits, select, create, more, refresh, archive, close, logout }: Props) {
+export default function Sidebar({ projects, pages, projectId, threadId, open, email, busy, accountLimits, readMessages = {}, select, create, more, refresh, archive, close, logout }: Props) {
   const [visible, setVisible] = useState<Record<string, number>>({});
   return <aside id="agent-sidebar" className="agent-sidebar" data-open={open} aria-label="Проекты и чаты" onKeyDown={event => { if (event.key === "Escape") close(); }}>
     <header className="agent-sidebar-header"><h2 className="agent-brand">Проекты</h2><button className="agent-sidebar-close" aria-label="Закрыть список чатов" onClick={close}>×</button></header>
@@ -39,7 +39,7 @@ export default function Sidebar({ projects, pages, projectId, threadId, open, em
             {sortThreads(page?.data ?? []).slice(0, count).map(thread => {
               const title = thread.title || thread.preview || "Новый чат", selected = projectId === project.projectId && threadId === thread.id;
               return <div key={thread.id} data-thread-id={thread.id} className={`agent-thread ${selected ? "is-selected" : ""}`}>
-                <button className="agent-thread-select" title={title} aria-pressed={selected} onClick={() => select(project.projectId, thread.id)}><span className="agent-thread-title">{title}</span>{thread.active && <span className="agent-thread-spinner" role="status" aria-label="Агент работает" />}</button>
+                <button className="agent-thread-select" title={title} aria-pressed={selected} onClick={() => select(project.projectId, thread.id)}><span className="agent-thread-title">{title}</span>{thread.awaitingReply ? <span className="agent-thread-indicator is-question" role="status" aria-label="Агент ждёт ответа" title="Агент ждёт ответа">?</span> : thread.active ? <span className="agent-thread-spinner" role="status" aria-label="Агент работает" /> : thread.finalMessageId && readMessages[`${project.projectId}:${thread.id}`] !== thread.finalMessageId ? <span className="agent-thread-indicator is-completed" role="status" aria-label="Непрочитанный итог" title="Непрочитанный итог"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg></span> : null}</button>
                 <ThreadActions title={title} disabled={busy || !project.available} archive={() => archive(project.projectId, thread.id)} />
               </div>;
             })}

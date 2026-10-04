@@ -59,3 +59,10 @@ export function summary(item: DisplayItem): DisplayItem {
   const title = item.type === 'reasoning' ? item.text.trim().split('\n')[0] : (item.command ?? item.text.split('\n')[0]) || item.type;
   return { id: item.id, turnId: item.turnId, type: item.type, text: '', status: item.status, exitCode: item.exitCode, revision: item.revision, summary: text(title, 256).replace(/\n\[содержимое сокращено\]$/, '') };
 }
+
+/** Последнее сообщение определяет итог; вопрос в тексте — явный знак вопроса вне блоков кода. */
+export function messageAttention(item: DisplayItem): { finalMessageId: string | null; awaitingReply: boolean } {
+  const final = item.type === 'agentMessage' && item.phase === 'final_answer';
+  const prose = item.text.replace(/```[\s\S]*?```|`[^`]*`/g, '');
+  return { finalMessageId: final ? item.id : null, awaitingReply: final && /[?？]/u.test(prose) };
+}

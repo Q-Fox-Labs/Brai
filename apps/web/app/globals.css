@@ -58,13 +58,12 @@ button:focus-visible, a:focus-visible { outline: 2px solid #b3a2ff; outline-offs
 .agent-thread:hover, .agent-thread:focus-within { background: #2e3136; }
 .agent-thread.is-selected { background: #35383e; color: #fff; }
 .agent-thread-select { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 9px 12px 9px 42px; text-align: left; }
-.agent-thread-actions { display: none; flex: none; width: 30px; height: 30px; margin-right: 6px; border-radius: 7px; font-size: 22px; line-height: 1; }
-.agent-thread:hover .agent-thread-actions, .agent-thread:focus-within .agent-thread-actions, .agent-thread:has(.agent-thread-menu:popover-open) .agent-thread-actions { display: block; }
+.agent-thread-actions { display: block; opacity: 0; pointer-events: none; flex: none; width: 30px; height: 30px; margin-right: 6px; border-radius: 7px; font-size: 22px; line-height: 1; }
+.agent-thread:hover .agent-thread-actions, .agent-thread-actions:focus-visible, .agent-thread:has(.agent-thread-menu:popover-open) .agent-thread-actions { opacity: 1; pointer-events: auto; }
 .agent-thread-actions:hover { background: #45484e; }
 .agent-thread-menu { position: fixed; inset: auto; margin: 0; width: 176px; padding: 4px; border: 1px solid var(--agent-border); border-radius: 9px; background: #282a2e; color: #e5e5e8; box-shadow: 0 8px 24px #0005; }
 .agent-thread-menu button { width: 100%; padding: 8px 12px; border-radius: 5px; text-align: left; font-size: 14px; }
 .agent-thread-menu button:hover { background: #393c41; }
-@media (hover: none) { .agent-thread-actions { display: block; } }
 .agent-more { margin: 5px 0 0 42px; padding: 7px 0; text-align: left; color: var(--agent-muted); font-size: 13px; }
 .agent-more:hover, .agent-sidebar-footer button:hover { color: #fff; }
 .agent-sidebar-note { margin: 6px 8px 6px 42px; color: var(--agent-muted); font-size: 13px; line-height: 1.6; }
@@ -172,6 +171,11 @@ button:focus-visible, a:focus-visible { outline: 2px solid #b3a2ff; outline-offs
 }
 
 .agent-thread-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-thread-indicator { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; font-size: 13px; font-weight: 700; }
+.agent-thread-indicator.is-question { color: #eac478; border: 1.5px solid currentColor; border-radius: 50%; }
+.agent-thread-indicator.is-completed { color: #8ed8a6; }
+.agent-thread-indicator svg { width: 16px; height: 16px; }
+.agent-message-read-marker { display: block; height: 1px; }
 .agent-thread-spinner { flex: none; width: 14px; height: 14px; border: 2px solid #727781; border-top-color: #ded5ff; border-radius: 50%; animation: agent-spin .8s linear infinite; }
 @keyframes agent-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .agent-thread-spinner { animation: none; } }

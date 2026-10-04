@@ -683,6 +683,15 @@
         "lastMessageAt": {
           "type": "integer",
           "minimum": 0
+        },
+        "finalMessageId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "awaitingReply": {
+          "type": "boolean"
         }
       },
       "required": [
