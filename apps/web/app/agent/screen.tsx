@@ -281,15 +281,19 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       setReadMessages(saved && typeof saved === "object" && !Array.isArray(saved) ? Object.fromEntries(Object.entries(saved).filter(([key, value]) => key.length <= 300 && typeof value === "string" && value.length <= 128).slice(-1000)) : {});
     } catch { setReadMessages({}); }
   }, [userId]);
+  // AIDEV-NOTE: Чтение относится к показанной истории; metadata live окна может не содержать старый итог.
+  const lastShownMessage = items.findLast(item => item.type === "userMessage" || item.type === "agentMessage");
+  const readMessageId = lastShownMessage?.type === "agentMessage" && lastShownMessage.phase === "final_answer" ? lastShownMessage.id : null;
+  const readEpoch = view?.epoch;
   useEffect(() => {
-    const messageId = view?.thread.finalMessageId;
-    if (!visible || !view || view.thread.active || !messageId) return;
+    const messageId = readMessageId;
+    if (!visible || active || !messageId) return;
     const marker = Array.from(conversation.current?.querySelectorAll<HTMLElement>("[data-read-message]") ?? []).find(element => element.dataset.readMessage === messageId);
     if (!marker) return;
     const key = `${projectId}:${threadId}`;
     const markRead = () => {
       const rect = marker.getBoundingClientRect(), area = conversation.current?.getBoundingClientRect();
-      if (document.visibilityState !== "visible" || !marker.getClientRects().length || !area || rect.top < area.top || rect.bottom > area.bottom) return;
+      if (document.visibilityState !== "visible" || !marker.getClientRects().length || !area || rect.bottom < area.top || rect.top > area.bottom + 1) return;
       setReadMessages(previous => {
         if (previous[key] === messageId) return previous;
         const next = Object.fromEntries([...Object.entries(previous).filter(([id]) => id !== key), [key, messageId]].slice(-1000));
@@ -297,11 +301,15 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         return next;
       });
     };
-    const observer = new IntersectionObserver(markRead, { root: conversation.current, threshold: 1 });
+    // AIDEV-NOTE: Частые snapshot не пересоздают observer; scroll и первый кадр снимают зависимость от задержки его callback.
+    const element = conversation.current;
+    const frame = requestAnimationFrame(markRead);
+    const observer = new IntersectionObserver(markRead, { root: element, threshold: 0 });
     observer.observe(marker);
+    element?.addEventListener("scroll", markRead, { passive: true });
     document.addEventListener("visibilitychange", markRead);
-    return () => { observer.disconnect(); document.removeEventListener("visibilitychange", markRead); };
-  }, [visible, userId, projectId, threadId, view, history]);
+    return () => { cancelAnimationFrame(frame); observer.disconnect(); element?.removeEventListener("scroll", markRead); document.removeEventListener("visibilitychange", markRead); };
+  }, [visible, userId, projectId, threadId, readMessageId, readEpoch, active, history]);
   const timeline = groupTimeline(items);
   const activityContext = useMemo(() => ({ generation: view?.generation ?? historyGeneration, epoch: view?.epoch ?? "", projectId, threadId }), [view?.generation, view?.epoch, historyGeneration, projectId, threadId]);
   const action = composerAction(active, draft, attachments.length);
