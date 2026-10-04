@@ -1,0 +1,27 @@
+/* ABOUTME: Регистрирует имена цветов исходных компонентов September в Tailwind. */
+/* ABOUTME: Значения ограничены .do-shell и соответствуют общей тёмной теме Brai. */
+@custom-variant dark (&:where([data-do-theme="dark"], [data-do-theme="dark"] *));
+@theme inline {
+  --color-brai-background: var(--background);
+  --color-brai-card: var(--card);
+  --color-brai-ink: var(--ink);
+  --color-brai-muted: var(--muted);
+  --color-brai-line: var(--line);
+  --color-brai-accent: var(--accent);
+  --color-brai-accent-hover: var(--accent-hover);
+  --color-brai-danger: var(--danger);
+  --color-brai-goal: var(--goal-accent);
+  --color-brai-goal-fill: var(--goal-accent-fill);
+  --color-brai-quest: var(--quest-accent);
+  --color-brai-quest-fill: var(--quest-accent-fill);
+  --color-brai-mission: var(--mission-accent);
+  --color-brai-mission-fill: var(--mission-accent-fill);
+  --color-brai-surface-subtle: var(--surface-subtle);
+  --color-brai-surface-soft: var(--surface-soft);
+  --color-brai-surface-hover: var(--surface-hover);
+  --color-brai-surface-raised: var(--surface-raised);
+  --color-brai-surface-focus: var(--surface-focus);
+  --color-brai-text-secondary: var(--text-secondary);
+  --color-brai-text-strong: var(--text-strong);
+  --color-brai-field: var(--field);
+}

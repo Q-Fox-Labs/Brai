@@ -20,6 +20,7 @@ ENV HOSTNAME=0.0.0.0
 WORKDIR /app
 COPY --from=build /app/apps/web/.next/standalone ./
 COPY --from=build /app/apps/web/.next/static ./apps/web/.next/static
+COPY --from=build /app/apps/web/public ./apps/web/public
 COPY --from=build /app/services/timer/schemas ./services/timer/schemas
 COPY --from=build /app/services/auth/schemas ./services/auth/schemas
 COPY --from=build /app/services/agent/package.json ./services/agent/package.json

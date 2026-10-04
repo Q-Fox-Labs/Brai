@@ -6,6 +6,10 @@ export type TaskStatus = "active" | "completed" | "not_completed";
 export type Task = {
   id: string;
   publicId: string;
+  relativeNumber: string | null;
+  blockers: Task[];
+  isDraft?: boolean;
+  draftAfterId?: string;
   title: string;
   description: string | null;
   result: string | null;
@@ -21,7 +25,7 @@ export type Task = {
 };
 export type Project = { id: string; title: string; color: string };
 export type OrderedTask = Task & { nestingDepth: number };
-export type TaskUpdate = Partial<Pick<Task, "title" | "description" | "result" | "status" | "projectId" | "parentId">> & { siblingOrder?: string[]; kind?: TaskKind };
+export type TaskUpdate = Partial<Pick<Task, "title" | "description" | "result" | "status" | "projectId" | "parentId">> & { siblingOrder?: string[]; kind?: TaskKind; blockerId?: string; removeBlockerId?: string };
 
 type TaskKindSource = Pick<Task, "isGoal" | "isQuest" | "isMission">;
 
@@ -201,14 +205,18 @@ export function updateLocalTask(tasks: readonly Task[], id: string, update: Task
   if ("parentId" in update && !canMoveTask(tasks, id, update.parentId ?? null)) return [...tasks];
   if (update.kind && children.has(id)) return [...tasks];
   if (update.status && (isContainer(task) || task.blockerIds.some(blockerId => tasks.some(candidate => candidate.id === blockerId && !isCountedStatus(candidate.status))))) return [...tasks];
-  const { siblingOrder, kind, ...fields } = update;
+  const { siblingOrder, kind, blockerId, removeBlockerId, ...fields } = update;
   if (fields.title !== undefined) {
     fields.title = fields.title.trim().slice(0, 200);
     if (!fields.title) return [...tasks];
   }
   let updated = { ...task, ...fields };
+  if (blockerId && blockerId !== id && tasks.some(item => item.id === blockerId)) updated = { ...updated, blockerIds: [...new Set([...task.blockerIds, blockerId])] };
+  if (removeBlockerId) updated = { ...updated, blockerIds: task.blockerIds.filter(value => value !== removeBlockerId) };
+  if ("parentId" in update && !updated.parentId) updated = { ...updated, sortOrder: -updated.createdAt };
   if (kind) updated = { ...updated, isGoal: kind === "goal", isQuest: kind === "quest", isMission: kind === "mission", parentId: null, status: "active" };
-  const treeIds = collectTaskAndDescendantIds(id, children);
+  const root = "projectId" in update ? taskTreeRoot(task, new Map(tasks.map(item => [item.id, item]))) : task;
+  const treeIds = collectTaskAndDescendantIds(root.id, children);
   const projectId = "parentId" in update && updated.parentId
     ? taskTreeProjectId(tasks.find(candidate => candidate.id === updated.parentId)!, new Map(tasks.map(candidate => [candidate.id, candidate])))
     : updated.projectId;

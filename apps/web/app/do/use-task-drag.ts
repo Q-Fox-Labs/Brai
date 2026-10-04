@@ -1,5 +1,5 @@
-// ABOUTME: Переносит записи дерева и прокручивает панель у краёв во время переноса.
-// ABOUTME: Адаптировано из Brai_september/app/tasks/use-task-drag.ts; команды меняют только память.
+// ABOUTME: Восстанавливает перенос и автопрокрутку из September.
+// ABOUTME: Команды меняют только память; скрытая вкладка прекращает перенос.
 import {
   type Dispatch,
   type DragEvent,
@@ -8,9 +8,9 @@ import {
   useRef,
   useState,
 } from "react";
-import { sortTasksByOrder, type TaskUpdate, type Task } from "./model";
+import { isContainer, sortTasksByOrder, type TaskUpdate } from "./model";
+import type { Task } from "./types";
 
-// AIDEV-NOTE: Скорости исходного задачника заданы в пикселях в секунду, независимо от частоты кадров.
 const DRAG_SCROLL_SLOW_SPEED = 72;
 const DRAG_SCROLL_FAST_MULTIPLIER = 3;
 
@@ -20,15 +20,23 @@ type DragOptions = {
   tasks: Task[];
   childTasksByParent: Map<string, Task[]>;
   active: boolean;
+  editingId?: string | null;
+  editingDetailTaskId?: string | null;
+  setOpenMenuId?: Dispatch<SetStateAction<string | null>>;
+  setRightOpenMenuId?: Dispatch<SetStateAction<string | null>>;
   setCollapsedContainerIds: Dispatch<SetStateAction<Set<string>>>;
-  updateTask: (id: string, update: TaskUpdate) => void;
+  updateTask: (id: string, update: TaskUpdate, fallbackError?: string) => void | Promise<boolean>;
 };
 
-/** Управляет переносом внутри одной панели и прокруткой её краёв; скрытие экрана отменяет перенос. */
+/** Воспроизводит исходные зоны переноса и скорость автопрокрутки; скрытие отменяет перенос. */
 export function useTaskDrag({
   tasks,
   childTasksByParent,
   active,
+  editingId = null,
+  editingDetailTaskId = null,
+  setOpenMenuId = () => {},
+  setRightOpenMenuId = () => {},
   setCollapsedContainerIds,
   updateTask,
 }: DragOptions) {
@@ -43,17 +51,16 @@ export function useTaskDrag({
 
   const draggedTask = tasks.find((task) => task.id === draggedId) ?? null;
   const isDraggingChild = Boolean(draggedTask?.parentId);
+  const isDraggingGoal = Boolean(draggedTask?.isGoal);
+  const isDraggingTask = Boolean(draggedTask && !isContainer(draggedTask));
+  const isDraggingQuest = Boolean(draggedTask?.isQuest);
+  const isDraggingTopLevelContainer = Boolean(
+    draggedTask && isContainer(draggedTask) && !draggedTask.parentId,
+  );
 
+  // AIDEV-NOTE: Общая оболочка скрывает посещённые экраны без размонтирования.
   useEffect(() => {
-    if (!active) {
-      if (dragScrollFrameRef.current !== null) window.cancelAnimationFrame(dragScrollFrameRef.current);
-      dragScrollFrameRef.current = null;
-      dragScrollDirectionRef.current = 0;
-      dragScrollLastTimestampRef.current = null;
-      setDraggedId(null);
-      setDragArea(null);
-      setDropTarget(null);
-    }
+    if (!active) finishDragging();
     return () => {
       if (dragScrollFrameRef.current !== null) window.cancelAnimationFrame(dragScrollFrameRef.current);
     };
@@ -62,7 +69,9 @@ export function useTaskDrag({
   function startDragging(event: DragEvent<HTMLElement>, task: Task, area: TaskDragArea) {
     const target = event.target as HTMLElement;
     if (
-      target.closest("input, textarea, select, button, a, [data-task-detail]")
+      editingId === task.id
+      || editingDetailTaskId === task.id
+      || target.closest("[data-task-title-row], [data-task-detail]")
     ) {
       event.preventDefault();
       return;
@@ -75,6 +84,8 @@ export function useTaskDrag({
     setDropTarget(null);
     setDragArea(area);
     setDraggedId(task.id);
+    setOpenMenuId(null);
+    setRightOpenMenuId(null);
   }
 
   function stopDragScrolling() {
@@ -141,7 +152,7 @@ export function useTaskDrag({
     });
   }
 
-  function moveTask(
+  async function moveTask(
     taskId: string,
     parentId: string,
     targetId?: string,
@@ -157,21 +168,22 @@ export function useTaskDrag({
       : siblings.length;
     if (targetId && insertionIndex < 0) return;
     siblings.splice(edge === "after" ? insertionIndex + 1 : insertionIndex, 0, movingTask);
-    updateTask(
+    await updateTask(
       taskId,
       { parentId, siblingOrder: siblings.map((task) => task.id) },
+      "Не удалось изменить порядок задач",
     );
   }
 
-  function moveRootTask(
+  async function moveTopLevelContainer(
     containerId: string,
     targetId: string,
     edge: "before" | "after",
   ) {
     const movingContainer = tasks.find((task) => task.id === containerId);
-    if (!movingContainer || movingContainer.parentId) return;
+    if (!movingContainer || !isContainer(movingContainer) || movingContainer.parentId) return;
     const siblings = sortTasksByOrder(
-      tasks.filter((task) => !task.parentId && task.id !== containerId),
+      tasks.filter((task) => !task.parentId && isContainer(task) && task.id !== containerId),
     );
     const insertionIndex = siblings.findIndex((container) => container.id === targetId);
     if (insertionIndex < 0) return;
@@ -180,9 +192,10 @@ export function useTaskDrag({
       0,
       movingContainer,
     );
-    updateTask(
+    await updateTask(
       containerId,
       { siblingOrder: siblings.map((container) => container.id) },
+      "Не удалось изменить порядок корневых элементов",
     );
   }
 
@@ -191,7 +204,7 @@ export function useTaskDrag({
     return event.clientY < bounds.top + bounds.height / 2 ? "before" as const : "after" as const;
   }
 
-  function dropIntoContainer(event: DragEvent<HTMLElement>, container: Task) {
+  async function dropIntoContainer(event: DragEvent<HTMLElement>, container: Task) {
     event.preventDefault();
     event.stopPropagation();
     const taskId = draggedId ?? event.dataTransfer.getData("text/plain");
@@ -200,36 +213,36 @@ export function useTaskDrag({
     const firstChild = sortTasksByOrder(
       (childTasksByParent.get(container.id) ?? []).filter((task) => task.id !== taskId),
     )[0];
-    moveTask(taskId, container.id, firstChild?.id, "before");
+    await moveTask(taskId, container.id, firstChild?.id, "before");
   }
 
-  function dropBesideNestedTask(event: DragEvent<HTMLElement>, target: Task) {
+  async function dropBesideNestedTask(event: DragEvent<HTMLElement>, target: Task) {
     event.preventDefault();
     event.stopPropagation();
     const taskId = draggedId ?? event.dataTransfer.getData("text/plain");
     const edge = insertionEdge(event);
     finishDragging();
     if (!taskId || !target.parentId || taskId === target.id) return;
-    moveTask(taskId, target.parentId, target.id, edge);
+    await moveTask(taskId, target.parentId, target.id, edge);
   }
 
-  function dropBesideRootTask(event: DragEvent<HTMLElement>, target: Task) {
+  async function dropBesideTopLevelContainer(event: DragEvent<HTMLElement>, target: Task) {
     event.preventDefault();
     event.stopPropagation();
     const containerId = draggedId ?? event.dataTransfer.getData("text/plain");
     const edge = insertionEdge(event);
     finishDragging();
     if (!containerId || containerId === target.id) return;
-    moveRootTask(containerId, target.id, edge);
+    await moveTopLevelContainer(containerId, target.id, edge);
   }
 
-  function dropOutsideParent(event: DragEvent<HTMLElement>) {
+  async function dropOutsideGoal(event: DragEvent<HTMLElement>) {
     event.preventDefault();
     event.stopPropagation();
     const taskId = draggedId ?? event.dataTransfer.getData("text/plain");
     finishDragging();
     if (taskId && isDraggingChild) {
-      updateTask(taskId, { parentId: null, siblingOrder: [...sortTasksByOrder(tasks.filter(task => !task.parentId)).map(task => task.id), taskId] });
+      await updateTask(taskId, { parentId: null }, "Не удалось вынести задачу из цели");
     }
   }
 
@@ -237,13 +250,17 @@ export function useTaskDrag({
     dragArea,
     draggedId,
     dropBesideNestedTask,
-    dropBesideRootTask,
+    dropBesideTopLevelContainer,
     dropIntoContainer,
-    dropOutsideParent,
+    dropOutsideGoal,
     dropTarget,
     finishDragging,
     insertionEdge,
     isDraggingChild,
+    isDraggingGoal,
+    isDraggingQuest,
+    isDraggingTask,
+    isDraggingTopLevelContainer,
     setDropTarget,
     startDragging,
     stopDragScrolling,

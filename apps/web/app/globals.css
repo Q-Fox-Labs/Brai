@@ -1,6 +1,7 @@
 /* ABOUTME: Подключает Tailwind и адаптивные стили общей оболочки, входа, таймера и агента. */
 /* ABOUTME: Общая тёмная оболочка сохраняет высоту экранов и верхнюю навигацию. */
 @import "tailwindcss";
+@import "./do/theme.css";
 :root { color-scheme: dark; font-family: Arial, Helvetica, sans-serif; --workspace-bg: #212326; --workspace-border: #393c41; --workspace-muted: #a0a3aa; }
 body { margin: 0; background: var(--workspace-bg); color: #e5e5e8; }
 button { cursor: pointer; }

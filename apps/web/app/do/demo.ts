@@ -13,7 +13,7 @@ export function createDemoTasks(): Task[] {
   const tasks: Task[] = [];
   const add = (id: string, title: string, kind: TaskKind, parentId: string | null, projectId: string | null, description: string | null = null, status: TaskStatus = "active", blockerIds: string[] = []) => {
     const index = tasks.length;
-    tasks.push({ id, title, publicId: String(101 + index), parentId, projectId, description, result: status === "completed" ? "Готово: результат проверен и принят." : null, status, isMission: kind === "mission", isQuest: kind === "quest", isGoal: kind === "goal", blockerIds, sortOrder: tasks.filter(task => task.parentId === parentId).length, createdAt: Date.UTC(2026, 9, 1, 10, index * 7) });
+    tasks.push({ id, title, blockers: [], relativeNumber: null, publicId: String(101 + index), parentId, projectId, description, result: status === "completed" ? "Готово: результат проверен и принят." : null, status, isMission: kind === "mission", isQuest: kind === "quest", isGoal: kind === "goal", blockerIds, sortOrder: tasks.filter(task => task.parentId === parentId).length, createdAt: Date.UTC(2026, 9, 1, 10, index * 7) });
   };
   add("m-brai", "Сделать Brai удобным каждый день", "mission", null, "brai", "Собрать спокойное рабочее пространство для дел, фокуса и идей.");
   add("q-workspace", "Рабочее пространство", "quest", "m-brai", "brai", "Все повседневные инструменты — в одном месте.");

@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
-import { sortTasksByOrder } from "../app/do/model.ts";
+import { isContainer, sortTasksByOrder } from "../app/do/model.ts";
 import type { useTaskDrag } from "../app/do/use-task-drag.ts";
 
 function createDragHarness(active = true) {
@@ -16,14 +16,14 @@ function createDragHarness(active = true) {
   const js = ts.transpileModule(readFileSync(new URL("../app/do/use-task-drag.ts", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   vm.runInNewContext(js, { module, exports: module.exports, require: (name: string) => name === "react"
     ? { useRef: (current: unknown) => ({ current }), useState: (value: unknown) => [value, () => {}], useEffect: (effect: () => () => void) => effects.push(effect) }
-    : { sortTasksByOrder }, window: {
+    : { isContainer, sortTasksByOrder }, window: {
       requestAnimationFrame: (callback: (timestamp: number) => void) => { frames.set(++nextFrame, callback); return nextFrame; },
       cancelAnimationFrame: (id: number) => frames.delete(id),
     } });
   const drag = module.exports.useTaskDrag({ tasks: [], childTasksByParent: new Map(), active, setCollapsedContainerIds: () => {}, updateTask: () => {} });
   const cleanups = effects.map(effect => effect());
   const dataTransfer = { effectAllowed: "", dropEffect: "", setData() {} };
-  drag.startDragging({ target: { closest: (query: string) => query.includes("input") ? null : scrollElement }, dataTransfer } as never, { id: "demo" } as never, "left");
+  drag.startDragging({ target: { closest: (query: string) => query.includes("scroll-container") ? scrollElement : null }, dataTransfer } as never, { id: "demo" } as never, "left");
   const over = (y: number) => ({ preventDefault() {}, stopPropagation() {}, currentTarget: { getBoundingClientRect: () => ({ top: 100, bottom: 500 }) }, dataTransfer, clientY: y });
   const tick = (timestamp: number) => { const callbacks = [...frames.values()]; frames.clear(); callbacks.forEach(callback => callback(timestamp)); };
   return { drag, over, tick, cleanups, frames, get scrollTop() { return scrollTop; } };
