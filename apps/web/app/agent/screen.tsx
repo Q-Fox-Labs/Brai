@@ -297,11 +297,11 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           {connected && view?.requests.map(request => <NativeForm key={`${view.generation}:${view.epoch}:${request.requestId}`} request={request} disabled={disabled} send={answer => mutate("answer", { requestId: request.requestId, answer })} />)}
         </div>
       </div>
-      <footer className="agent-composer-area">
-        <form className="agent-composer" onSubmit={event => { event.preventDefault(); submit(); }}>
+      {(threadId || message || accountMessage) && <footer className="agent-composer-area">
+        {threadId && <form className="agent-composer" onSubmit={event => { event.preventDefault(); submit(); }}>
           <label className="sr-only" htmlFor="agent-draft">{active ? "Дополнить текущий ход" : "Сообщение"}</label>
           {!!attachments.length && <ul className="agent-attachments" aria-label="Прикреплённые изображения">{attachments.map(image => <li key={image.id}><img src={image.dataUrl} alt={image.name} /><span className="agent-attachment-name" title={image.name}>{image.name}</span>{image.reduced && <span className="agent-image-reduced">Уменьшено</span>}<button type="button" className="agent-attachment-remove" aria-label={`Удалить ${image.name}`} onClick={() => changeDraft({ ...composerRef.current, images: composerRef.current.images.filter(value => value.id !== image.id) })}>×</button></li>)}</ul>}
-          <textarea id="agent-draft" disabled={!threadId} placeholder={threadId ? active ? "Дополнить текущее задание…" : "Что нужно сделать?" : "Сначала выберите или создайте чат"} value={draft} onChange={event => changeDraft({ ...composerRef.current, text: event.target.value, revision: composerRef.current.revision + 1 })} onPaste={event => {
+          <textarea id="agent-draft" placeholder={active ? "Дополнить текущее задание…" : "Что нужно сделать?"} value={draft} onChange={event => changeDraft({ ...composerRef.current, text: event.target.value, revision: composerRef.current.revision + 1 })} onPaste={event => {
             const files = Array.from(event.clipboardData.files);
             if (!files.length) for (const item of Array.from(event.clipboardData.items)) { if (item.kind === "file") { const file = item.getAsFile(); if (file) files.push(file); } }
             if (files.length) { if (!event.clipboardData.getData("text/plain")) event.preventDefault(); addFiles(files); }
@@ -312,10 +312,10 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           <ModelSettings models={models?.data ?? []} model={selectedModel?.model ?? ""} effort={selectedEffort} permissionMode={permissionMode} choosePermissions={setPermissionMode} disabled={busy || active || (!!threadId && !connected)} chooseModel={value => { cancelPreparation(); setModel(value); setEffort(""); }} chooseEffort={setEffort} />
           <button className="agent-send" disabled={sendDisabled}>{action === "interrupt" ? "Стоп" : action === "steer" ? "Скорректировать" : "Отправить"}</button>
           </div>
-        </form>
+        </form>}
         <p className="agent-feedback" role="alert">{uncertain.current ? "Результат неизвестен. Обновите страницу и проверьте чат перед новой отправкой." : imageError || message || accountMessage}</p>
         {preparationCount > 0 && <p className="agent-image-preparing" role="status">Подготовка изображений: {preparationCount}…</p>}
-      </footer>
+      </footer>}
     </section>
   </main>;
 }
