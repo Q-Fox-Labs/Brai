@@ -254,13 +254,22 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (r.action === 'items' || r.action === 'turns') {
       if (s.fresh) return { generation: current(), data: [], nextCursor: null };
       const generation = current();
-      const page = await codex.call(r.action === 'items' ? 'thread/items/list' : 'thread/turns/list', { threadId: r.threadId, limit: r.action === 'items' ? 10 : 100, cursor: r.cursor, sortDirection: 'desc', ...(r.action === 'items' ? { turnId: r.turnId } : { itemsView: 'notLoaded' }) });
-      if (generation !== current()) fail('STALE_GENERATION', 'query');
-      return { generation, data: r.action === 'items' ? page.data.slice().reverse().map((e: any) => {
-        const revision = s.view.items.find(i => i.id === e.item.id)?.revision ?? 0;
-        if (e.item.type !== 'userMessage' && e.item.type !== 'agentMessage') return { id: e.item.id, turnId: e.turnId, type: e.item.type, text: '', revision, ...(typeof e.item.status === 'string' ? { status: e.item.status } : {}), ...(Object.hasOwn(e.item, 'exitCode') ? { exitCode: e.item.exitCode } : {}) };
-        return { ...display(e.item, e.turnId, true), revision, timestamp: e.startedAtMs ?? e.completedAtMs ?? s.view.thread.updatedAt * 1000 };
-      }) : page.data.map((t: any) => ({ id: t.id, status: t.status })), nextCursor: page.nextCursor ?? null };
+      const page: { data: any[]; nextCursor?: string | null } = { data: [], nextCursor: r.cursor };
+      let messages = 0;
+      do {
+        // AIDEV-NOTE: Действия не расходуют десять сообщений; малые native страницы сохраняют предел media-кадра.
+        const part = await codex.call(r.action === 'items' ? 'thread/items/list' : 'thread/turns/list', { threadId: r.threadId, limit: r.action === 'items' ? Math.min(10 - messages, 1000 - page.data.length) : 100, cursor: page.nextCursor, sortDirection: 'desc', ...(r.action === 'items' ? { turnId: r.turnId } : { itemsView: 'notLoaded' }) });
+        if (generation !== current()) fail('STALE_GENERATION', 'query');
+        if (part.nextCursor && (!part.data.length || part.nextCursor === page.nextCursor)) fail('UPSTREAM_UNAVAILABLE', 'query');
+        messages += part.data.filter((e: any) => e.item?.type === 'userMessage' || e.item?.type === 'agentMessage').length;
+        page.data.push(...(r.action === 'items' ? part.data.map((e: any) => {
+          const revision = s.view.items.find(i => i.id === e.item.id)?.revision ?? 0;
+          if (e.item.type !== 'userMessage' && e.item.type !== 'agentMessage') return { id: e.item.id, turnId: e.turnId, type: e.item.type, text: '', revision, ...(typeof e.item.status === 'string' ? { status: e.item.status } : {}), ...(Object.hasOwn(e.item, 'exitCode') ? { exitCode: e.item.exitCode } : {}) };
+          return { ...display(e.item, e.turnId, true), revision, timestamp: e.startedAtMs ?? e.completedAtMs ?? s.view.thread.updatedAt * 1000 };
+        }) : part.data.map((t: any) => ({ id: t.id, status: t.status }))));
+        page.nextCursor = part.nextCursor ?? null;
+      } while (r.action === 'items' && page.nextCursor && messages < 10 && page.data.length < 1000);
+      return { generation, data: r.action === 'items' ? page.data.reverse() : page.data, nextCursor: page.nextCursor };
     }
     if (r.generation !== current()) fail('STALE_GENERATION');
     if (s.closing) fail('CAPACITY_EXHAUSTED');

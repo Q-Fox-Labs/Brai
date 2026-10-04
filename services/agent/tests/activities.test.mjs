@@ -34,7 +34,8 @@ function fixture() {
           data = params.sortDirection === 'desc' ? data.slice(0, index) : data.slice(index + 1);
         }
         if (params.sortDirection === 'desc') data = data.slice().reverse();
-        return { data: data.slice(0, params.limit), nextCursor: null };
+        const offset = typeof params.cursor === 'string' ? Number(params.cursor) : 0;
+        return { data: data.slice(offset, offset + params.limit), nextCursor: offset + params.limit < data.length ? String(offset + params.limit) : null };
       }
       throw new Error(method);
     },
@@ -126,4 +127,37 @@ test('history projects hidden actions without reading their large bodies', async
   for (const key of ['command', 'aggregatedOutput', 'changes', 'text']) Object.defineProperty(command, key, { get() { throw new Error('hidden body accessed: ' + key); }, configurable: true });
   const page = await f.read('items');
   assert.deepEqual(page.data.find(i => i.id === 'cmd'), { id: 'cmd', turnId: 'turn', type: 'commandExecution', text: '', revision: 0, status: 'completed', exitCode: 0 });
+});
+
+test('history counts ten messages across native pages without gaps or duplicates', async () => {
+  const f = fixture();
+  await f.read('open');
+  f.entries.splice(0);
+  for (let i = 0; i < 23; i++) {
+    f.entries.push({ turnId: 'turn', item: { id: `message-${i}`, type: i % 2 ? 'agentMessage' : 'userMessage', text: `answer-${i}`, content: [{ type: 'text', text: `request-${i}` }] } });
+    for (let j = 0; j < 12; j++) f.entries.push({ turnId: 'turn', item: { id: `action-${i}-${j}`, type: 'commandExecution', get aggregatedOutput() { throw new Error('hidden body accessed'); } } });
+  }
+  const pages = [], all = [];
+  let cursor;
+  do {
+    const page = await f.read('items', cursor ? { cursor } : {});
+    pages.push(page.data.filter(item => ['userMessage', 'agentMessage'].includes(item.type)).length);
+    all.unshift(...page.data);
+    cursor = page.nextCursor;
+  } while (cursor);
+  assert.deepEqual(pages, [10, 10, 3]);
+  assert.deepEqual(all.map(item => item.id), f.entries.map(entry => entry.item.id));
+  assert.ok(f.calls.filter(call => call.method === 'thread/items/list').every(call => call.params.limit <= 10));
+});
+
+test('history bounds action-only pages and rejects a generation change mid-page', async () => {
+  const f = fixture();
+  f.entries.splice(0, f.entries.length, ...Array.from({ length: 1011 }, (_, i) => ({ turnId: 'turn', item: { id: `action-${i}`, type: 'sleep' } })));
+  const page = await f.read('items');
+  assert.equal(page.data.length, 1000);
+  assert.ok(page.nextCursor);
+  assert.equal((await f.read('items', { cursor: page.nextCursor })).data.length, 11);
+  let calls = 0;
+  f.settings.beforeCall = method => { if (method === 'thread/items/list' && ++calls === 2) f.rotate(); };
+  await assert.rejects(f.read('items'), e => e.code === 'STALE_GENERATION' && e.outcome === 'query');
 });
