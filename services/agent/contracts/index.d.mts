@@ -9,7 +9,7 @@ export type ModelCatalog = { generation: string; data: ModelChoice[]; defaultMod
 export type AgentLimits = { state: "loading" | "ready" | "stale" | "unavailable"; revision: number; observedAt: number | null; windows: { slot: "primary" | "secondary"; remainingPercent: number; windowDurationMins: number | null; resetsAt: number | null }[] };
 export type NativeSnapshot = { projectId: string; threadId: string; generation: string; epoch: string; seq: number; thread: ThreadMetadata; turn: { id: string; status: string } | null; state: string; items: DisplayItem[]; requests: PendingRequest[]; truncated: boolean };
 export type EventEnvelope = { projectId: string; threadId: string; generation: string; epoch: string; seq: number; event: { type: "STATE_SNAPSHOT"; snapshot: NativeSnapshot } };
-export type Action = "projects" | "status" | "models" | "threads" | "create" | "open" | "turns" | "items" | "activities" | "item" | "start" | "steer" | "interrupt" | "answer";
+export type Action = "projects" | "status" | "models" | "threads" | "create" | "open" | "turns" | "items" | "activities" | "item" | "start" | "steer" | "interrupt" | "answer" | "archive";
 export type Command = { action: Action; permissionMode?: PermissionMode; model?: string; effort?: string; projectId?: string; threadId?: string; generation?: string; operationId?: string; turnId?: string; expectedTurnId?: string; requestId?: string; text?: string; images?: string[]; answer?: unknown; cursor?: string; itemId?: string; itemIds?: string[] };
 export type ErrorResponse = { code: string; outcome: "not-sent" | "unknown" | "query" };
 export declare const subjects: { rpc: string; event: string };

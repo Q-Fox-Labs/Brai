@@ -1,10 +1,10 @@
 "use client";
 // ABOUTME: Показывает группы проектов и названия чатов в левой панели.
 // ABOUTME: Только выбор и раскрытие списка; запросы и команды принадлежат экрану.
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import * as Separator from "@radix-ui/react-separator";
 import type { AgentLimits, ThreadMetadata } from "@brai/agent/contracts";
-import { formatLimitReset, limitCountdown } from "../../lib/agent/limits";
+import { formatLimitReset } from "../../lib/agent/limits";
 
 export type Project = { projectId: string; name: string; available: boolean };
 export type ThreadPage = { data: ThreadMetadata[]; nextCursor: string | null; loading: boolean; error: string };
@@ -13,11 +13,12 @@ type Props = {
   open: boolean; email: string; busy: boolean; accountLimits: AgentLimits;
   select: (projectId: string, threadId?: string) => void;
   create: (projectId: string) => void; more: (projectId: string) => void; refresh: (projectId: string) => void;
+  archive: (projectId: string, threadId: string) => void;
   close: () => void; logout: () => void;
 };
 
 /** Группирует уже прочитанные чаты; длинное название доступно полностью через title. */
-export default function Sidebar({ projects, pages, projectId, threadId, open, email, busy, accountLimits, select, create, more, refresh, close, logout }: Props) {
+export default function Sidebar({ projects, pages, projectId, threadId, open, email, busy, accountLimits, select, create, more, refresh, archive, close, logout }: Props) {
   const [visible, setVisible] = useState<Record<string, number>>({});
   return <aside id="agent-sidebar" className="agent-sidebar" data-open={open} aria-label="Проекты и чаты" onKeyDown={event => { if (event.key === "Escape") close(); }}>
     <header className="agent-sidebar-header"><h2 className="agent-brand">Проекты</h2><button className="agent-sidebar-close" aria-label="Закрыть список чатов" onClick={close}>×</button></header>
@@ -37,7 +38,10 @@ export default function Sidebar({ projects, pages, projectId, threadId, open, em
           <div className="agent-thread-list">
             {sortThreads(page?.data ?? []).slice(0, count).map(thread => {
               const title = thread.title || thread.preview || "Новый чат", selected = projectId === project.projectId && threadId === thread.id;
-              return <button key={thread.id} data-thread-id={thread.id} className={`agent-thread ${selected ? "is-selected" : ""}`} title={title} aria-pressed={selected} onClick={() => select(project.projectId, thread.id)}><span className="agent-thread-title">{title}</span>{thread.active && <span className="agent-thread-spinner" role="status" aria-label="Агент работает" />}</button>;
+              return <div key={thread.id} data-thread-id={thread.id} className={`agent-thread ${selected ? "is-selected" : ""}`}>
+                <button className="agent-thread-select" title={title} aria-pressed={selected} onClick={() => select(project.projectId, thread.id)}><span className="agent-thread-title">{title}</span>{thread.active && <span className="agent-thread-spinner" role="status" aria-label="Агент работает" />}</button>
+                <ThreadActions title={title} disabled={busy || !project.available} archive={() => archive(project.projectId, thread.id)} />
+              </div>;
             })}
             {page?.error && <p className="agent-sidebar-note" role="alert">Не удалось загрузить чаты. <button onClick={() => refresh(project.projectId)}>Повторить</button></p>}
             {page?.loading && <p className="agent-sidebar-note" role="status">Загружаем чаты…</p>}
@@ -52,6 +56,30 @@ export default function Sidebar({ projects, pages, projectId, threadId, open, em
   </aside>;
 }
 
+/** Native popover закрывается снаружи и по Escape, не обрезаясь прокруткой списка. */
+function ThreadActions({ title, disabled, archive }: { title: string; disabled: boolean; archive: () => void }) {
+  const id = useId(), trigger = useRef<HTMLButtonElement>(null), menu = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ left: 0, top: 0 });
+  return <>
+    <button ref={trigger} type="button" className="agent-thread-actions" aria-label={`Меню чата: ${title}`} title="Меню чата" popoverTarget={id} disabled={disabled} onClick={() => {
+      const rect = trigger.current!.getBoundingClientRect();
+      setPosition({ left: Math.max(8, rect.right - 176), top: Math.min(rect.bottom + 4, window.innerHeight - 56) });
+    }}>⋯</button>
+    <div ref={menu} id={id} popover="auto" className="agent-thread-menu" style={position} onKeyDown={event => { if (event.key === "Escape") event.stopPropagation(); }}>
+      <button type="button" disabled={disabled} onClick={() => { menu.current?.hidePopover(); archive(); }}>Архивировать</button>
+    </div>
+  </>;
+}
+
+function durationLabel(minutes: number | null) {
+  if (minutes === null) return "";
+  if (minutes < 60) return `${minutes} мин`;
+  if (minutes < 1440) return minutes % 60 ? `${Math.floor(minutes / 60)} ч ${minutes % 60} мин` : `${minutes / 60} ч`;
+  const days = Math.floor(minutes / 1440), remainder = minutes % 1440;
+  const wholeDays = days % 7 ? `${days} дн.` : `${days / 7} нед.`;
+  return remainder ? `${wholeDays} ${Math.floor(remainder / 60)} ч${remainder % 60 ? ` ${remainder % 60} мин` : ""}` : wholeDays;
+}
+
 function AccountLimits({ value }: { value: AgentLimits }) {
   const stateLabel = value.state === "loading" ? "Загрузка лимитов" : value.state === "unavailable" ? "Лимиты недоступны" : value.state === "stale" ? "Данные устарели" : value.windows.length ? "" : "Нет доступных окон";
   return <section className="agent-limits" aria-label="Лимиты Codex">
@@ -62,23 +90,14 @@ function AccountLimits({ value }: { value: AgentLimits }) {
 
 function LimitWindow({ window, stale }: { window: AgentLimits["windows"][number]; stale: boolean }) {
   const [reset, setReset] = useState<{ label: string; title: string; iso: string; value: number | null } | null>(null);
-  const [now, setNow] = useState<number | null>(null);
-  useEffect(() => {
-    setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(timer);
-  }, []);
   useEffect(() => { const formatted = formatLimitReset(window.resetsAt); setReset(formatted ? { ...formatted, value: window.resetsAt } : null); }, [window.resetsAt]);
   const slot = window.slot === "primary" ? "Основное" : "Дополнительное";
-  const countdown = now === null ? null : limitCountdown(window.resetsAt, window.windowDurationMins, now);
+  const duration = durationLabel(window.windowDurationMins);
   return <div className="agent-limit-window">
-    <div className="agent-limit-label"><span>{slot}{countdown && ` · ${countdown.label}`}</span><span>Осталось {window.remainingPercent}%</span></div>
+    <div className="agent-limit-label"><span>{slot}{duration && ` · ${duration}`}</span><span>Осталось {window.remainingPercent}%</span></div>
     <div className="agent-limit-track" role="progressbar" aria-label={`${slot} окно Codex, осталось ${window.remainingPercent}%`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={window.remainingPercent}>
       <span style={{ width: `${window.remainingPercent}%` }} />
     </div>
-    {countdown?.percent != null && <div className="agent-limit-track agent-limit-time-track" role="progressbar" aria-label={`${slot} окно Codex, время до сброса`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={countdown.percent} aria-valuetext={countdown.label}>
-      <span style={{ width: `${countdown.percent}%` }} />
-    </div>}
     <div className="agent-limit-reset">{stale && <span>Устарело · </span>}{reset?.value === window.resetsAt ? <time dateTime={reset.iso} title={reset.title}>{reset.label}</time> : <span>сброс неизвестен</span>}</div>
   </div>;
 }

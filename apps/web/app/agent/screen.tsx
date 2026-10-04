@@ -55,6 +55,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const [models, setModels] = useState<ModelCatalog | null>(null);
   const [model, setModel] = useState(""), [effort, setEffort] = useState("");
   const [permissionMode, setPermissionMode] = useState<PermissionMode>("auto");
+  const archived = useRef(new Set<string>());
   const pageRequests = useRef(new Map<string, symbol>());
 
   const loadThreads = useCallback(async (id: string, nextCursor?: string) => {
@@ -65,7 +66,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       const value = await client.request({ action: "threads", projectId: id, ...(nextCursor ? { cursor: nextCursor } : {}) });
       if (pageRequests.current.get(id) !== token) return;
       setPages(previous => {
-        const data = [...new Map([...(nextCursor ? previous[id]?.data ?? [] : []), ...value.data.map(thread => { const live = liveMetadata.current.get(`${id}:${thread.id}`); return live && live.generation === value.generation && live.observed > observed ? mergeThreadMetadata(thread, live.thread) : thread; })].map(thread => [thread.id, thread])).values()].slice(0, 1000);
+        const data = [...new Map([...(nextCursor ? previous[id]?.data ?? [] : []), ...value.data.filter(thread => !archived.current.has(`${id}:${thread.id}`)).map(thread => { const live = liveMetadata.current.get(`${id}:${thread.id}`); return live && live.generation === value.generation && live.observed > observed ? mergeThreadMetadata(thread, live.thread) : thread; })].map(thread => [thread.id, thread])).values()].slice(0, 1000);
         return { ...previous, [id]: { data, nextCursor: data.length < 1000 ? value.nextCursor : null, loading: false, error: "" } };
       });
     } catch (error) {
@@ -77,7 +78,9 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     let active = true;
     const requests = pageRequests.current;
     const stopMetadata = client.subscribeThreads(value => {
-      const key = `${value.projectId}:${value.threadId}`, previous = liveMetadata.current.get(key);
+      const key = `${value.projectId}:${value.threadId}`;
+      if (archived.current.has(key)) return;
+      const previous = liveMetadata.current.get(key);
       if (previous && previous.generation === value.generation && previous.epoch === value.epoch && previous.seq > value.seq) return;
       liveMetadata.current.delete(key); liveMetadata.current.set(key, { generation: value.generation, epoch: value.epoch, seq: value.seq, thread: value.thread, observed: ++metadataVersion.current });
       if (liveMetadata.current.size > 1000) liveMetadata.current.delete(liveMetadata.current.keys().next().value!);
@@ -149,6 +152,31 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     changeDraft(saved?.draft ?? emptyDraft()); setModel(saved?.model ?? ""); setEffort(saved?.effort ?? ""); setPermissionMode(saved?.permissionMode ?? "auto"); setConnected(!!live);
     followBottom.current = true; scrollAnchor.current = null;
     setProjectId(id); setThreadId(chatId); setMessage(""); setSidebarOpen(false);
+  }
+
+  const selectChatRef = useRef(selectChat);
+  selectChatRef.current = selectChat;
+
+  async function archiveChat(id: string, chatId: string) {
+    if (locked.current || uncertain.current) return;
+    locked.current = true; setBusy(true); setMessage("");
+    const key = `${id}:${chatId}`, operationId = crypto.randomUUID();
+    try {
+      const { generation } = await client.request({ action: "status" });
+      const reply = await client.request({ action: "archive", projectId: id, threadId: chatId, generation, operationId });
+      if (reply.outcome !== "accepted" || reply.generation !== generation || reply.operationId !== operationId || reply.threadId !== chatId) throw new AgentError("BAD_REPLY", "unknown");
+      if (!alive.current) return;
+      archived.current.add(key);
+      liveMetadata.current.delete(key);
+      setPages(previous => {
+        const page = previous[id];
+        return page ? { ...previous, [id]: { ...page, data: page.data.filter(thread => thread.id !== chatId) } } : previous;
+      });
+      if (currentChat.current === key) selectChatRef.current(id);
+      cache.current.delete(key);
+    } catch (error) {
+      if (alive.current) setMessage(errorText(error));
+    } finally { locked.current = false; if (alive.current) setBusy(false); }
   }
 
   async function moreHistory() {
@@ -280,7 +308,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   return <main className="agent-shell">
     <Sidebar projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={sidebarOpen} email={email} busy={busy || uncertain.current} accountLimits={accountLimits}
       select={selectChat} create={id => { void mutate("create", selectedModel ? { model: selectedModel.model, permissionMode } : { permissionMode }, id); }} more={id => { const next = pages[id]?.nextCursor; if (next) void loadThreads(id, next); }}
-      refresh={id => { void loadThreads(id); }} close={() => setSidebarOpen(false)} logout={onLogout} />
+      archive={(id, chatId) => { void archiveChat(id, chatId); }} refresh={id => { void loadThreads(id); }} close={() => setSidebarOpen(false)} logout={onLogout} />
     <section className="agent-workspace" aria-labelledby="agent-chat-title">
       <header className="agent-toolbar">
         <button className="agent-mobile-toggle" aria-controls="agent-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(value => !value)}>☰ <span>Чаты</span></button>

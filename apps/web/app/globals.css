@@ -53,9 +53,17 @@ button:focus-visible, a:focus-visible { outline: 2px solid #b3a2ff; outline-offs
 .agent-icon-button { width: 30px; height: 30px; border-radius: 7px; color: var(--agent-muted); font-size: 24px; line-height: 1; }
 .agent-icon-button:hover, .agent-sidebar-close:hover { background: #34373d; color: white; }
 .agent-thread-list { display: flex; flex-direction: column; gap: 3px; }
-.agent-thread { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 9px 12px 9px 42px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; border-radius: 10px; font-size: 14px; line-height: 22px; }
-.agent-thread:hover { background: #2e3136; }
+.agent-thread { position: relative; display: flex; align-items: center; min-height: 40px; border-radius: 10px; font-size: 14px; line-height: 22px; }
+.agent-thread:hover, .agent-thread:focus-within { background: #2e3136; }
 .agent-thread.is-selected { background: #35383e; color: #fff; }
+.agent-thread-select { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; padding: 9px 12px 9px 42px; text-align: left; }
+.agent-thread-actions { display: none; flex: none; width: 30px; height: 30px; margin-right: 6px; border-radius: 7px; font-size: 22px; line-height: 1; }
+.agent-thread:hover .agent-thread-actions, .agent-thread:focus-within .agent-thread-actions, .agent-thread:has(.agent-thread-menu:popover-open) .agent-thread-actions { display: block; }
+.agent-thread-actions:hover { background: #45484e; }
+.agent-thread-menu { position: fixed; inset: auto; margin: 0; width: 176px; padding: 4px; border: 1px solid var(--agent-border); border-radius: 9px; background: #282a2e; color: #e5e5e8; box-shadow: 0 8px 24px #0005; }
+.agent-thread-menu button { width: 100%; padding: 8px 12px; border-radius: 5px; text-align: left; font-size: 14px; }
+.agent-thread-menu button:hover { background: #393c41; }
+@media (hover: none) { .agent-thread-actions { display: block; } }
 .agent-more { margin: 5px 0 0 42px; padding: 7px 0; text-align: left; color: var(--agent-muted); font-size: 13px; }
 .agent-more:hover, .agent-sidebar-footer button:hover { color: #fff; }
 .agent-sidebar-note { margin: 6px 8px 6px 42px; color: var(--agent-muted); font-size: 13px; line-height: 1.6; }
@@ -71,8 +79,6 @@ button:focus-visible, a:focus-visible { outline: 2px solid #b3a2ff; outline-offs
 .agent-limit-label { margin-bottom: 3px; }
 .agent-limit-track { height: 4px; overflow: hidden; border-radius: 3px; background: #44474d; }
 .agent-limit-track > span { display: block; height: 100%; border-radius: inherit; background: #8d78ed; }
-.agent-limit-time-track { margin-top: 3px; }
-.agent-limit-time-track > span { background: #23734b; }
 .agent-limit-reset { margin-top: 2px; font-size: 10px; }
 .agent-workspace { min-width: 0; min-height: 0; flex: 1; display: flex; flex-direction: column; }
 .agent-toolbar { min-height: 76px; display: flex; align-items: center; gap: 18px; padding: 14px 28px; border-bottom: 1px solid #303338; }

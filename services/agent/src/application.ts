@@ -241,6 +241,20 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: native.thread.id };
       } finally { creating--; }
     }
+    if (r.action === 'archive') {
+      // AIDEV-NOTE: До первого хода native read может отказать; свежий чат уже проверен при admit.
+      const known = sessions.get(r.threadId!);
+      if (known) { if (known.view.projectId !== p.projectId) fail('INVALID_ARGUMENT'); }
+      else {
+        const native = await codex.call('thread/read', { threadId: r.threadId, includeTurns: false });
+        if (native.thread.cwd !== p.cwd) fail('INVALID_ARGUMENT');
+      }
+      if (r.generation !== current()) fail('STALE_GENERATION');
+      await codex.call('thread/archive', { threadId: r.threadId }, { mutation: true });
+      if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
+      sessions.delete(r.threadId!); messageTimes.delete(r.threadId!);
+      return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: r.threadId };
+    }
     const s = await open(r);
     if (r.action === 'open') return structuredClone(s.view);
     if (r.action === 'activities' || r.action === 'item') {

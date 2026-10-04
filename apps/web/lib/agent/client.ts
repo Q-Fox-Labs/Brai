@@ -9,7 +9,7 @@ import { bytes, limits, validateCommand, validateEnvelope, validateLimits } from
 import type { AgentLimits, Command, NativeSnapshot, DisplayItem, ThreadMetadata, ModelCatalog } from "@brai/agent/contracts";
 type Page<T> = { generation: string; data: T[]; nextCursor: string | null };
 type MutationReply = { generation: string; operationId: string; threadId: string; turnId?: string; requestId?: string; outcome: "accepted" };
-type Replies = Record<"create" | "start" | "steer" | "interrupt" | "answer", MutationReply> & {
+type Replies = Record<"create" | "start" | "steer" | "interrupt" | "answer" | "archive", MutationReply> & {
   projects: { generation: string; projects: { projectId: string; name: string; available: boolean }[] };
   models: ModelCatalog;
   status: { generation: string; ready: boolean; connection: string; authorization: string; limits?: AgentLimits };
