@@ -25,7 +25,7 @@ class PassiveAgent extends AbstractAgent {
 }
 /** Ошибка HTTP сохраняет неопределённый исход для запрета автоматического повтора. */
 export class AgentError extends Error {
-  constructor(public code: string, public outcome: string) { super(outcome === "unknown" ? "Результат неизвестен. Проверьте чат перед новым действием." : code === "STALE_REQUEST" ? "Форма устарела: решение уже получено или запрос закрыт." : code); }
+  constructor(public code: string, public outcome: string) { super(outcome === "unknown" ? "Результат неизвестен. Проверьте чат перед новым действием." : code === "CAPACITY_EXHAUSTED" ? "Сервис временно занят. Сообщение не отправлено, текст сохранён. Попробуйте ещё раз через несколько секунд." : code === "STALE_REQUEST" ? "Форма устарела: решение уже получено или запрос закрыт." : code); }
 }
 /** Создаёт клиент текущего аккаунта; dispose отменяет HTTP и освобождает SSE/SDK. */
 export function createAgentClient(userId: string, unauthorized: () => void) {

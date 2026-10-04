@@ -290,7 +290,6 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     const active = s.view.turn?.status === 'inProgress';
     if (r.action === 'start' && (active || s.view.thread.canAcceptDirectInput === false)) fail('OPERATION_CONFLICT');
     if ((r.action === 'steer' || r.action === 'interrupt') && (!active || s.view.turn?.id !== (r.expectedTurnId ?? r.turnId))) fail('OPERATION_CONFLICT');
-    if (r.action === 'start' && [...sessions.values()].filter(s => s.view.turn?.status === 'inProgress').length >= 4) fail('CAPACITY_EXHAUSTED');
     if (r.action === 'start' || r.action === 'steer' && r.images?.length) {
       const model = r.action === 'steer' ? s.activeModel ?? s.view.thread.model : r.model ?? s.view.thread.model;
       if (config.allowedModels && !config.allowedModels.includes(model ?? '')) fail('UNSUPPORTED');
@@ -300,7 +299,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       }
     }
     if (r.generation !== current()) fail('STALE_GENERATION');
-    if (r.action === 'start' && (s.closing || s.view.turn?.status === 'inProgress' || [...sessions.values()].filter(value => value.view.turn?.status === 'inProgress').length >= 4)) fail('OPERATION_CONFLICT');
+    if (r.action === 'start' && (s.closing || s.view.turn?.status === 'inProgress')) fail('OPERATION_CONFLICT');
     if (r.action === 'steer' && (s.closing || s.view.turn?.status !== 'inProgress' || s.view.turn.id !== r.expectedTurnId)) fail('OPERATION_CONFLICT');
     const previousTurn = s.view.turn, previousState = s.view.state, previousModel = s.activeModel;
     if (r.action === 'start') { s.activeModel = r.model ?? s.view.thread.model; s.view.turn = { id: 'starting', status: 'inProgress' }; s.view.state = 'inProgress'; publish(s); }

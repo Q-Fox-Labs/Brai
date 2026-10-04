@@ -100,3 +100,13 @@ test('connection loss rotates generation; module imports have no side effects', 
   await import('../dist/main.js');
   await import('../dist/health.js');
 });
+
+test('four other active threads do not block starting an idle native chat', async t => {
+  const f = fixture(); t.after(() => f.app.close());
+  for (let i = 1; i <= 5; i++) {
+    await f.create('parallel-create-' + i);
+    const reply = await f.app.request(f.command('start', { threadId: 't' + i, operationId: 'parallel-start-' + i, text: 'task' }));
+    assert.equal(reply.outcome, 'accepted');
+  }
+  assert.equal(f.counts().starts, 5);
+});

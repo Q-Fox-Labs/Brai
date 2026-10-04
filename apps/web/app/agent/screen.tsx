@@ -11,6 +11,7 @@ import NativeForm from "./request";
 import { createLazyReads } from "../../lib/agent/lazy";
 import Activities from "./activities";
 import Markdown from "./markdown";
+import { desktopMessage } from "../../lib/agent/desktop-message";
 import { questionReplies } from "../../lib/agent/question-reply";
 import { composerAction, groupTimeline, mergeTimeline, reconcileCorrections, type PendingCorrection } from "./timeline";
 import Sidebar, { type Project, type ThreadPage } from "./sidebar";
@@ -374,7 +375,7 @@ function Item({ item, context, reads, pending, dismiss }: { item: DisplayItem; c
   return <article data-item-id={item.id} className={`agent-item ${item.type === "userMessage" ? "agent-user-message" : "agent-assistant-message"}`}>
     <span className="agent-message-author">{item.type === "userMessage" ? "Вы" : "Brai"}{item.phase && <span className="agent-message-phase">{item.phase === "final_answer" ? "Итог" : item.phase === "commentary" ? "Промежуточное сообщение" : item.phase}</span>}</span>
     {pending && <span className="agent-correction-status" role="status"><span aria-hidden="true">{pending === "failed" || pending === "unknown" ? "⚠" : "◷"}</span> {pending === "sending" ? "Отправляется…" : pending === "waiting" ? "Ожидает применения" : pending === "unknown" ? "Отправка не подтверждена. Проверьте чат." : "Не отправлено. Повторите из поля ввода."}{pending === "failed" && <button type="button" onClick={dismiss}>Убрать</button>}</span>}
-    {replies ? <div className="agent-markdown">{replies.map((reply, index) => <div key={index}><p>{reply.question}</p><p><strong>Ответ: </strong>{reply.answer}</p></div>)}</div> : <Markdown text={item.text} />}
+    {replies ? <div className="agent-markdown">{replies.map((reply, index) => <div key={index}><p>{reply.question}</p><p><strong>Ответ: </strong>{reply.answer}</p></div>)}</div> : <Markdown text={item.type === "userMessage" ? desktopMessage(item.text) : item.text} />}
     {!!item.imageCount && (pending ? <ul className="agent-message-thumbnails" aria-label="Изображения сообщения">{item.images?.map((src, index) => <li key={index}><img src={src} alt={`Прикреплённое изображение ${index + 1}`} /></li>)}</ul> : <MessageImages item={item} context={context} reads={reads} />)}
   </article>;
 }
