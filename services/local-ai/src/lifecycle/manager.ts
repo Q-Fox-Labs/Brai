@@ -139,9 +139,17 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
   let allocationTail: Promise<void> = Promise.resolve();
   const admittingOperations = new Set<string>();
   const pendingAdmissions = new Map<string, number>();
+  const pendingLifecycleTasks = new Set<Promise<void>>();
   let active = 0;
   let queued = 0;
   let closePromise: Promise<void> | undefined;
+
+  function beginPendingTask(): () => void {
+    let resolve!: () => void;
+    const task = new Promise<void>(done => { resolve = done; });
+    pendingLifecycleTasks.add(task);
+    return () => { pendingLifecycleTasks.delete(task); resolve(); };
+  }
 
   function stateOf(slot: Slot): RuntimeState {
     if (slot.state === 'error') return 'error';
@@ -457,6 +465,8 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
     }
   }
   async function accept(input: Invocation, context: OperationContext, prepared: Prepared, inputBytes: number, audioPath?: string): Promise<Job> {
+    const donePendingTask = beginPendingTask();
+    try {
     validateContext(input, context);
     if (!accepting) fail('BUSY');
     if (lockedModels.has(input.model.modelId)) fail('MODEL_IN_USE');
@@ -477,6 +487,17 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       if (count) pendingAdmissions.set(input.model.modelId, count); else pendingAdmissions.delete(input.model.modelId);
       throw errorFrom(error);
     }
+    if (!accepting) {
+      const stopped = new LocalAiError('CANCELLED', 'CANCELLED');
+      const terminal = event(input, 'cancelled', { id: terminalEventId, now: new Date(now()).toISOString(), inputBytes, errorCode: stopped.code });
+      try { await store.transaction(tx => tx.outbox.appendCompletion(input.operationId, terminal)); }
+      finally {
+        outstanding--; admittingOperations.delete(input.operationId);
+        const count = (pendingAdmissions.get(input.model.modelId) ?? 1) - 1;
+        if (count) pendingAdmissions.set(input.model.modelId, count); else pendingAdmissions.delete(input.model.modelId);
+      }
+      throw stopped;
+    }
     const job = createJob(input, context, acceptedEvent, inputBytes, prepared.record, audioPath);
     job.terminalEventId = terminalEventId;
     admittingOperations.delete(input.operationId);
@@ -487,6 +508,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
     queued++;
     drain(slot);
     return job;
+    } finally { donePendingTask(); }
   }
   function resultForCaller(job: Job, slot: Slot): Promise<InvocationResult> {
     const timerController = new AbortController();
@@ -562,7 +584,10 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       return 'cancellation_requested';
     },
     async load(selector, context) {
+      const donePendingTask = beginPendingTask();
+      try {
       validateSelector(selector);
+      if (!accepting) fail('BUSY');
       if (context.signal.aborted) fail('CANCELLED');
       if (Date.parse(context.deadlineAt) <= now()) fail('DEADLINE_EXCEEDED');
       const prepared = await prepare(selector);
@@ -573,6 +598,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       let reservation: Awaited<ReturnType<typeof reserveManagement>> | undefined;
       try {
         reservation = await reserveManagement(selector, 'load', context.ownerId);
+        if (!accepting) fail('CANCELLED');
         const runtime = await Promise.race([ensureRuntime(slot), waitContext(context)]);
         if (slot.runtime !== runtime) fail('MODEL_LOAD_FAILED');
         slot.idleSince ??= now();
@@ -586,9 +612,13 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
         slot.managementWaiters--;
         if (slot.opening && !slotHasWaiter(slot)) slot.loadController?.abort();
       }
+      } finally { donePendingTask(); }
     },
     async unload(selector, context) {
+      const donePendingTask = beginPendingTask();
+      try {
       validateSelector(selector);
+      if (!accepting) fail('BUSY');
       if (context.signal.aborted) fail('CANCELLED');
       if (Date.parse(context.deadlineAt) <= now()) fail('DEADLINE_EXCEEDED');
       const prepared = await prepare(selector);
@@ -597,17 +627,20 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       slot.settings = prepared.settings;
       if (slot && selectorKey(slot.selector) !== selectorKey(selector)) fail('REVISION_CONFLICT');
       if ((pendingAdmissions.get(selector.modelId) ?? 0) > 0 || slot.activeJob || slot.queue.length || slot.opening || slot.closing || slot.managementWaiters) fail('MODEL_IN_USE');
+      lockedModels.add(selector.modelId);
       slot.managementWaiters++;
       let reservation: Awaited<ReturnType<typeof reserveManagement>> | undefined;
       try {
         reservation = await reserveManagement(selector, 'unload', context.ownerId);
+        if (!accepting) fail('CANCELLED');
         if (slot.runtime) await closeSlot(slot);
         await finishManagement(reservation, 'succeeded');
       } catch (error) {
         const local = errorFrom(error);
         if (reservation) await finishManagement(reservation, local.code === 'CANCELLED' ? 'cancelled' : 'failed', local.code).catch(() => undefined);
         throw local;
-      } finally { slot.managementWaiters--; }
+      } finally { slot.managementWaiters--; lockedModels.delete(selector.modelId); }
+      } finally { donePendingTask(); }
     },
     readRuntimeState(modelId, revision) {
       const slot = slots.get(modelId);
@@ -652,6 +685,17 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
             slot.activeJob.controller.abort();
             if (slot.runtime) void stopForCancellation(slot, slot.activeJob);
             else if (slot.opening) slot.loadController?.abort();
+          }
+        }
+        await Promise.all([...pendingLifecycleTasks]);
+        // Admissions that committed just before shutdown are now visible in operations/queues.
+        for (const slot of slots.values()) {
+          failQueue(slot);
+          if (slot.opening) slot.loadController?.abort();
+          if (slot.activeJob) {
+            slot.activeJob.failure = new LocalAiError('CANCELLED', 'CANCELLED');
+            slot.activeJob.controller.abort();
+            if (slot.runtime) void stopForCancellation(slot, slot.activeJob);
           }
         }
         const activeJobs = [...operations.values()].map(job => job.done.then(() => undefined, () => undefined));
