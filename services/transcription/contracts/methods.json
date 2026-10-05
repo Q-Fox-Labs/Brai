@@ -1,0 +1,130 @@
+{
+  "helper": {
+    "health": [
+      "HelperHealthParams",
+      "HealthResult"
+    ],
+    "settings.get": [
+      "HelperSettingsGetParams",
+      "SettingsResult"
+    ],
+    "settings.set": [
+      "HelperSettingsSetParams",
+      "SettingsResult"
+    ],
+    "request.accept": [
+      "HelperRequestAcceptParams",
+      "RequestAcceptResult"
+    ],
+    "request.get": [
+      "HelperRequestGetParams",
+      "RevisionResult"
+    ],
+    "request.lookup": [
+      "HelperRequestLookupParams",
+      "RequestLookupResult"
+    ],
+    "request.cancel": [
+      "HelperRequestCancelParams",
+      "CancelResult"
+    ],
+    "request.claim": [
+      "HelperRequestClaimParams",
+      "ClaimResult"
+    ],
+    "request.renew": [
+      "HelperRequestRenewParams",
+      "RequestClaim"
+    ],
+    "attempt.start": [
+      "HelperAttemptStartParams",
+      "AttemptStartResult"
+    ],
+    "attempt.markRunning": [
+      "HelperAttemptMarkRunningParams",
+      "AttemptResult"
+    ],
+    "attempt.finish": [
+      "HelperAttemptFinishParams",
+      "AttemptResult"
+    ],
+    "result.setState": [
+      "HelperResultSetStateParams",
+      "RevisionResult"
+    ],
+    "recovery.run": [
+      "HelperRecoveryRunParams",
+      "RecoveryResult"
+    ],
+    "history.claim": [
+      "HelperHistoryClaimParams",
+      "HistoryClaimResult"
+    ],
+    "history.ack": [
+      "HelperHistoryAckParams",
+      "HistoryAckResult"
+    ],
+    "history.fail": [
+      "HelperHistoryFailParams",
+      "HistoryFailResult"
+    ]
+  },
+  "public": {
+    "request.submit": [
+      "PublicSubmitParams",
+      "PublicSubmitResult"
+    ],
+    "request.get": [
+      "PublicGetParams",
+      "PublicSubmitResult"
+    ],
+    "request.cancel": [
+      "PublicCancelParams",
+      "PublicCancelResult"
+    ],
+    "models.list": [
+      "PublicSettingsGetParams",
+      "ModelsListResult"
+    ],
+    "settings.get": [
+      "PublicSettingsGetParams",
+      "SettingsResult"
+    ],
+    "settings.set": [
+      "PublicSettingsSetParams",
+      "SettingsResult"
+    ],
+    "result.get": [
+      "ResultGetParams",
+      "ResultGetResult"
+    ]
+  },
+  "local": {
+    "execute": [
+      "LocalExecuteParams",
+      "LocalExecuteResult"
+    ],
+    "health": [
+      "ExecutorHealthParams",
+      "LocalHealthResult"
+    ],
+    "cancel": [
+      "LocalCancelParams",
+      "ExecutorCancelResult"
+    ]
+  },
+  "external": {
+    "execute": [
+      "ExternalExecuteParams",
+      "ExternalExecuteResult"
+    ],
+    "health": [
+      "ExecutorHealthParams",
+      "ExternalHealthResult"
+    ],
+    "cancel": [
+      "LocalCancelParams",
+      "ExternalCancelResult"
+    ]
+  }
+}

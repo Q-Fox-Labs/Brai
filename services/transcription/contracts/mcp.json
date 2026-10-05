@@ -1,0 +1,84 @@
+{
+  "service": "transcription",
+  "version": "1.0.0",
+  "description": "MCP tools share public DTO and trusted session. Descriptor schema references resolve before tools/list; tool errors carry generic safe message and ErrorResponse only.",
+  "tools": [
+    {
+      "name": "transcription_request_submit",
+      "description": "Requires transcription:use. Returns transcription metadata.",
+      "inputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/PublicSubmitParams"
+      },
+      "outputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/PublicSubmitResult"
+      },
+      "x-method": "request.submit"
+    },
+    {
+      "name": "transcription_request_get",
+      "description": "Requires transcription:use. Returns transcription metadata.",
+      "inputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/PublicGetParams"
+      },
+      "outputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/PublicSubmitResult"
+      },
+      "x-method": "request.get"
+    },
+    {
+      "name": "transcription_request_cancel",
+      "description": "Requires transcription:use. Returns transcription metadata.",
+      "inputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/PublicCancelParams"
+      },
+      "outputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/PublicCancelResult"
+      },
+      "x-method": "request.cancel"
+    },
+    {
+      "name": "transcription_models_list",
+      "description": "Requires transcription:use. Returns transcription metadata.",
+      "inputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/PublicSettingsGetParams"
+      },
+      "outputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/ModelsListResult"
+      },
+      "x-method": "models.list"
+    },
+    {
+      "name": "transcription_settings_get",
+      "description": "Requires transcription:use. Returns transcription metadata.",
+      "inputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/PublicSettingsGetParams"
+      },
+      "outputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/SettingsResult"
+      },
+      "x-method": "settings.get"
+    },
+    {
+      "name": "transcription_settings_set",
+      "description": "Requires transcription:settings:write. Returns transcription metadata.",
+      "inputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/PublicSettingsSetParams"
+      },
+      "outputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/SettingsResult"
+      },
+      "x-method": "settings.set"
+    },
+    {
+      "name": "transcription_result_get",
+      "description": "Requires transcription:use. Reads live volatile result; no compute.",
+      "inputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/ResultGetParams"
+      },
+      "outputSchema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/ResultGetResult"
+      },
+      "x-method": "result.get"
+    }
+  ]
+}

@@ -1,0 +1,2287 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.invalid/services/transcription/schemas/messages.schema.json",
+  "title": "Brai transcription DTOs",
+  "description": "Closed owner schemas for metadata control DTOs and volatile public results. Runtime support is not implied.",
+  "definitions": {
+    "Uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "SelectorId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9:/._@+-]*$"
+    },
+    "OwnerId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@+-]*$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})$",
+      "format": "date-time"
+    },
+    "BoundedId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "ErrorCode": {
+      "type": "string",
+      "enum": [
+        "INVALID_ARGUMENT",
+        "UNAUTHENTICATED",
+        "FORBIDDEN",
+        "NOT_FOUND",
+        "ARTIFACT_NOT_READY",
+        "ARTIFACT_OWNER_MISMATCH",
+        "UNSUPPORTED_FORMAT",
+        "IDEMPOTENCY_CONFLICT",
+        "MODEL_UNAVAILABLE",
+        "MODEL_MISMATCH",
+        "EXTERNAL_ROUTE_UNAVAILABLE",
+        "OVERLOADED",
+        "REQUEST_OUTCOME_UNKNOWN",
+        "RESULT_UNAVAILABLE",
+        "CANCEL_NOT_CONFIRMED",
+        "STORAGE_UNAVAILABLE",
+        "INTERNAL",
+        "MODEL_CATALOG_UNAVAILABLE",
+        "STALE_REVISION",
+        "STATE_CONFLICT",
+        "INPUT_TOO_LARGE",
+        "RESULT_TOO_LARGE",
+        "DEADLINE_EXCEEDED",
+        "DEPENDENCY_UNAVAILABLE",
+        "STALE_CLAIM",
+        "HISTORY_REJECTED",
+        "HISTORY_DELIVERY_FAILED"
+      ]
+    },
+    "TrustedPrincipal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scopeType",
+        "scopeId",
+        "ownerId",
+        "permissions"
+      ],
+      "properties": {
+        "scopeType": {
+          "type": "string",
+          "enum": [
+            "user",
+            "system"
+          ]
+        },
+        "scopeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@+-]*$"
+        },
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "transcription:use",
+              "transcription:settings:write"
+            ]
+          }
+        }
+      }
+    },
+    "OwnerScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scopeType",
+        "scopeId"
+      ],
+      "properties": {
+        "scopeType": {
+          "type": "string",
+          "enum": [
+            "user",
+            "system"
+          ]
+        },
+        "scopeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@+-]*$"
+        }
+      }
+    },
+    "ModelSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "modelId",
+        "revision",
+        "profileId"
+      ],
+      "properties": {
+        "modelId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9:/._@+-]*$"
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9:/._@+-]*$"
+        },
+        "profileId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9:/._@+-]*$"
+        }
+      }
+    },
+    "RequestedModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "route",
+        "selection"
+      ],
+      "properties": {
+        "route": {
+          "type": "string",
+          "enum": [
+            "local",
+            "external"
+          ]
+        },
+        "modelId": {
+          "$ref": "#/definitions/SelectorId"
+        },
+        "selection": {
+          "type": "string",
+          "enum": [
+            "required",
+            "preferred"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "route": {
+                "const": "local"
+              }
+            },
+            "required": [
+              "route"
+            ]
+          },
+          "then": {
+            "required": [
+              "modelId"
+            ],
+            "properties": {
+              "modelId": {
+                "$ref": "#/definitions/SelectorId"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "PublicSubmitParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "clientIdempotencyKey",
+        "audioArtifactId",
+        "requestedModel",
+        "deadlineAt"
+      ],
+      "properties": {
+        "clientIdempotencyKey": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "audioArtifactId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "requestedModel": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/RequestedModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deadlineAt": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "PolicySnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "sha256",
+        "defaultLocalModel",
+        "externalEnabled",
+        "allowReplacement"
+      ],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "defaultLocalModel": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ModelSelector"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "externalEnabled": {
+          "const": false
+        },
+        "allowReplacement": {
+          "const": false
+        }
+      }
+    },
+    "ArtifactMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "ownerId",
+        "state",
+        "mimeType",
+        "sizeBytes"
+      ],
+      "properties": {
+        "artifactId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        },
+        "state": {
+          "const": "ready"
+        },
+        "mimeType": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 127,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Usage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "inputUnits",
+            "outputUnits",
+            "unit"
+          ],
+          "properties": {
+            "inputUnits": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "outputUnits": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "unit": {
+              "type": "string",
+              "enum": [
+                "token",
+                "second",
+                "byte",
+                "unknown"
+              ]
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "Cost": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "amount",
+            "currency"
+          ],
+          "properties": {
+            "amount": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32,
+              "pattern": "^(0|[1-9][0-9]*)([.][0-9]+)?$"
+            },
+            "currency": {
+              "type": "string",
+              "pattern": "^[A-Z]{3}$"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "TaskState": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "dispatching",
+        "running",
+        "succeeded",
+        "failed",
+        "outcome_unknown",
+        "cancelled"
+      ]
+    },
+    "ResultState": {
+      "type": "string",
+      "enum": [
+        "not_ready",
+        "available",
+        "delivery_unknown",
+        "lost",
+        "expired"
+      ]
+    },
+    "HistoryAppendRequest": {
+      "allOf": [
+        {
+          "$ref": "https://brai.invalid/contracts/history/v1/messages.schema.json#/definitions/appendRequest"
+        },
+        {
+          "type": "object",
+          "required": [
+            "data"
+          ],
+          "properties": {
+            "data": {
+              "$ref": "#/definitions/HistoryFact"
+            },
+            "type_id": {
+              "enum": [
+                1201,
+                1202,
+                1301
+              ]
+            },
+            "scope_type": {
+              "enum": [
+                "user",
+                "system"
+              ]
+            },
+            "scope_id": {
+              "$ref": "#/definitions/OwnerId"
+            },
+            "actor_id": {
+              "oneOf": [
+                {
+                  "$ref": "#/definitions/OwnerId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "object_type": {
+              "enum": [
+                "transcription_request",
+                "transcription_settings",
+                null
+              ]
+            },
+            "object_id": {
+              "oneOf": [
+                {
+                  "$ref": "#/definitions/BoundedId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "RequestRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "scope",
+        "ownerId",
+        "audioArtifactId",
+        "clientIdempotencyKey",
+        "normalizedInputSha256",
+        "requestedModel",
+        "selectedModel",
+        "policySnapshot",
+        "taskState",
+        "resultState",
+        "revision",
+        "currentAttemptId",
+        "fenceGeneration",
+        "deadlineAt",
+        "resultExpiresAt",
+        "bufferOwnerInstanceId",
+        "actualModel",
+        "usage",
+        "cost",
+        "errorCode",
+        "createdAt",
+        "updatedAt",
+        "inputMetadata"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "scope": {
+          "$ref": "#/definitions/OwnerScope"
+        },
+        "audioArtifactId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "clientIdempotencyKey": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "requestedModel": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/RequestedModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "selectedModel": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ModelSelector"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policySnapshot": {
+          "$ref": "#/definitions/PolicySnapshot"
+        },
+        "taskState": {
+          "$ref": "#/definitions/TaskState"
+        },
+        "resultState": {
+          "$ref": "#/definitions/ResultState"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "currentAttemptId": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fenceGeneration": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deadlineAt": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resultExpiresAt": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bufferOwnerInstanceId": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/BoundedId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actualModel": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ModelSelector"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usage": {
+          "$ref": "#/definitions/Usage"
+        },
+        "cost": {
+          "$ref": "#/definitions/Cost"
+        },
+        "errorCode": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "createdAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "updatedAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "normalizedInputSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        },
+        "inputMetadata": {
+          "$ref": "#/definitions/InputMetadata"
+        }
+      }
+    },
+    "PublicRequestView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "requestedModel",
+        "actualModel",
+        "taskState",
+        "resultState",
+        "revision",
+        "errorCode",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "requestedModel": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/RequestedModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actualModel": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ModelSelector"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "taskState": {
+          "$ref": "#/definitions/TaskState"
+        },
+        "resultState": {
+          "$ref": "#/definitions/ResultState"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "errorCode": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "createdAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "updatedAt": {
+          "$ref": "#/definitions/Timestamp"
+        }
+      }
+    },
+    "AttemptRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "attemptId",
+        "fenceGeneration",
+        "state",
+        "selectedModel",
+        "actualModel",
+        "usage",
+        "cost",
+        "errorCode",
+        "startedAt",
+        "finishedAt",
+        "durationMs"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "attemptId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "fenceGeneration": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "dispatching",
+            "running",
+            "succeeded",
+            "failed",
+            "outcome_unknown",
+            "cancelled"
+          ]
+        },
+        "selectedModel": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ModelSelector"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actualModel": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ModelSelector"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usage": {
+          "$ref": "#/definitions/Usage"
+        },
+        "cost": {
+          "$ref": "#/definitions/Cost"
+        },
+        "errorCode": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "startedAt": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "finishedAt": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "durationMs": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "HealthResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "available",
+        "storageAvailable"
+      ],
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "storageAvailable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "Settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "defaultLocalModel",
+        "allowReplacement",
+        "policyVersion"
+      ],
+      "properties": {
+        "defaultLocalModel": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ModelSelector"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "allowReplacement": {
+          "const": false
+        },
+        "policyVersion": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "SettingsResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "settings",
+        "revision"
+      ],
+      "properties": {
+        "settings": {
+          "$ref": "#/definitions/Settings"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "RequestClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claimToken",
+        "fenceGeneration",
+        "revision",
+        "leaseExpiresAt",
+        "request"
+      ],
+      "properties": {
+        "claimToken": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "fenceGeneration": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "leaseExpiresAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "request": {
+          "$ref": "#/definitions/RequestRecord"
+        }
+      }
+    },
+    "HistoryClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "claimToken",
+        "leaseExpiresAt",
+        "requestId",
+        "source",
+        "event"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "claimToken": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "leaseExpiresAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "requestId": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "type": "string",
+          "const": "transcription"
+        },
+        "event": {
+          "$ref": "#/definitions/HistoryAppendRequest"
+        }
+      }
+    },
+    "PublicResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "text",
+        "segments",
+        "actualModel"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "text": {
+          "type": "string"
+        },
+        "segments": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "startSeconds",
+                  "endSeconds",
+                  "text"
+                ],
+                "properties": {
+                  "startSeconds": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "endSeconds": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actualModel": {
+          "$ref": "#/definitions/ModelSelector"
+        }
+      }
+    },
+    "ResultGetResult": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "result"
+          ],
+          "properties": {
+            "state": {
+              "const": "available"
+            },
+            "result": {
+              "$ref": "#/definitions/PublicResult"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "errorCode"
+          ],
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "not_ready",
+                "delivery_unknown",
+                "lost",
+                "expired"
+              ]
+            },
+            "errorCode": {
+              "$ref": "#/definitions/ErrorCode"
+            }
+          }
+        }
+      ]
+    },
+    "ModelSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selector",
+        "supported",
+        "installed",
+        "ready"
+      ],
+      "properties": {
+        "selector": {
+          "$ref": "#/definitions/ModelSelector"
+        },
+        "supported": {
+          "type": "boolean"
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "ready": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ModelsListResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "localCatalogState",
+        "localItems",
+        "externalAvailable",
+        "externalItems",
+        "catalogErrorCode"
+      ],
+      "properties": {
+        "localCatalogState": {
+          "type": "string",
+          "enum": [
+            "available",
+            "unavailable",
+            "unverified"
+          ]
+        },
+        "localItems": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModelSummary"
+          }
+        },
+        "externalAvailable": {
+          "const": false
+        },
+        "externalItems": {
+          "type": "array",
+          "maxItems": 0
+        },
+        "catalogErrorCode": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "MODEL_CATALOG_UNAVAILABLE",
+                "DEPENDENCY_UNAVAILABLE"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "HelperHealthParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {}
+    },
+    "HelperSettingsGetParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "principal"
+      ],
+      "properties": {
+        "principal": {
+          "$ref": "#/definitions/TrustedPrincipal"
+        }
+      }
+    },
+    "HelperSettingsSetParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "principal",
+        "expectedRevision",
+        "settings"
+      ],
+      "properties": {
+        "principal": {
+          "$ref": "#/definitions/TrustedPrincipal"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "settings": {
+          "$ref": "#/definitions/Settings"
+        }
+      }
+    },
+    "HelperRequestAcceptParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "principal",
+        "input",
+        "artifact",
+        "selectedModel",
+        "policySnapshot"
+      ],
+      "properties": {
+        "principal": {
+          "$ref": "#/definitions/TrustedPrincipal"
+        },
+        "input": {
+          "$ref": "#/definitions/PublicSubmitParams"
+        },
+        "artifact": {
+          "$ref": "#/definitions/ArtifactMetadata"
+        },
+        "selectedModel": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ModelSelector"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policySnapshot": {
+          "$ref": "#/definitions/PolicySnapshot"
+        }
+      }
+    },
+    "HelperRequestGetParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "principal",
+        "requestId"
+      ],
+      "properties": {
+        "principal": {
+          "$ref": "#/definitions/TrustedPrincipal"
+        },
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        }
+      }
+    },
+    "HelperRequestCancelParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "principal",
+        "requestId",
+        "expectedRevision"
+      ],
+      "properties": {
+        "principal": {
+          "$ref": "#/definitions/TrustedPrincipal"
+        },
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "HelperRequestClaimParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workerId"
+      ],
+      "properties": {
+        "workerId": {
+          "$ref": "#/definitions/BoundedId"
+        }
+      }
+    },
+    "HelperAttemptStartParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "attemptId",
+        "claimToken",
+        "fenceGeneration",
+        "expectedRevision"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "attemptId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "claimToken": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "fenceGeneration": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "HelperAttemptMarkRunningParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "attemptId",
+        "claimToken",
+        "fenceGeneration",
+        "expectedRevision"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "attemptId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "claimToken": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "fenceGeneration": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "HelperAttemptFinishParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "attemptId",
+        "claimToken",
+        "fenceGeneration",
+        "expectedRevision",
+        "outcome",
+        "actualModel",
+        "usage",
+        "cost",
+        "errorCode",
+        "durationMs",
+        "resultState",
+        "resultExpiresAt",
+        "bufferOwnerInstanceId"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "attemptId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "claimToken": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "fenceGeneration": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "succeeded",
+            "failed",
+            "outcome_unknown",
+            "cancelled"
+          ]
+        },
+        "actualModel": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ModelSelector"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usage": {
+          "$ref": "#/definitions/Usage"
+        },
+        "cost": {
+          "$ref": "#/definitions/Cost"
+        },
+        "errorCode": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "durationMs": {
+          "oneOf": [
+            {
+              "type": "number",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resultState": {
+          "$ref": "#/definitions/ResultState"
+        },
+        "resultExpiresAt": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bufferOwnerInstanceId": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/BoundedId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "HelperResultSetStateParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "expectedRevision",
+        "state",
+        "resultExpiresAt",
+        "bufferOwnerInstanceId"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "$ref": "#/definitions/ResultState"
+        },
+        "resultExpiresAt": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bufferOwnerInstanceId": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/BoundedId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "HelperRecoveryRunParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "coordinatorInstanceId"
+      ],
+      "properties": {
+        "coordinatorInstanceId": {
+          "$ref": "#/definitions/BoundedId"
+        }
+      }
+    },
+    "HelperHistoryClaimParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workerId"
+      ],
+      "properties": {
+        "workerId": {
+          "$ref": "#/definitions/BoundedId"
+        }
+      }
+    },
+    "HelperHistoryAckParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "claimToken"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "claimToken": {
+          "$ref": "#/definitions/Uuid"
+        }
+      }
+    },
+    "HelperHistoryFailParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deliveryId",
+        "claimToken",
+        "errorCode"
+      ],
+      "properties": {
+        "deliveryId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "claimToken": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "errorCode": {
+          "$ref": "#/definitions/ErrorCode"
+        }
+      }
+    },
+    "RevisionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request"
+      ],
+      "properties": {
+        "request": {
+          "$ref": "#/definitions/RequestRecord"
+        }
+      }
+    },
+    "RequestAcceptResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created",
+        "request"
+      ],
+      "properties": {
+        "created": {
+          "type": "boolean"
+        },
+        "request": {
+          "$ref": "#/definitions/RequestRecord"
+        }
+      }
+    },
+    "CancelResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted",
+        "stopConfirmed",
+        "request"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "stopConfirmed": {
+          "type": "boolean"
+        },
+        "request": {
+          "$ref": "#/definitions/RequestRecord"
+        }
+      }
+    },
+    "ClaimResult": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/RequestClaim"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "AttemptResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request",
+        "attempt"
+      ],
+      "properties": {
+        "request": {
+          "$ref": "#/definitions/RequestRecord"
+        },
+        "attempt": {
+          "$ref": "#/definitions/AttemptRecord"
+        }
+      }
+    },
+    "RecoveryResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dispatchingExpired",
+        "runningExpired",
+        "succeededBufferLost",
+        "resultsExpired"
+      ],
+      "properties": {
+        "dispatchingExpired": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "runningExpired": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "succeededBufferLost": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resultsExpired": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "HistoryClaimResult": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/HistoryClaim"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "HistoryAckResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "acknowledged"
+      ],
+      "properties": {
+        "acknowledged": {
+          "type": "boolean"
+        }
+      }
+    },
+    "HistoryFailResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "failed"
+      ],
+      "properties": {
+        "failed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "PublicSubmitResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request"
+      ],
+      "properties": {
+        "request": {
+          "$ref": "#/definitions/PublicRequestView"
+        }
+      }
+    },
+    "PublicGetParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        }
+      }
+    },
+    "PublicCancelParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        }
+      }
+    },
+    "ResultGetParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        }
+      }
+    },
+    "PublicSettingsGetParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {}
+    },
+    "PublicSettingsSetParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "settings",
+        "expectedRevision"
+      ],
+      "properties": {
+        "settings": {
+          "$ref": "#/definitions/Settings"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "PublicCancelResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted",
+        "stopConfirmed",
+        "request"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "stopConfirmed": {
+          "type": "boolean"
+        },
+        "request": {
+          "$ref": "#/definitions/PublicRequestView"
+        }
+      }
+    },
+    "LocalExecuteParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "audioArtifactId",
+        "operationId",
+        "ownerId",
+        "model",
+        "deadlineAt"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "audioArtifactId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        },
+        "model": {
+          "$ref": "#/definitions/ModelSelector"
+        },
+        "deadlineAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "operationId": {
+          "$ref": "#/definitions/Uuid"
+        }
+      }
+    },
+    "LocalExecuteResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "operationId",
+        "actualModel",
+        "text",
+        "segments",
+        "durationMs",
+        "usage",
+        "cost"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "operationId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "actualModel": {
+          "$ref": "#/definitions/ModelSelector"
+        },
+        "text": {
+          "type": "string"
+        },
+        "segments": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "startSeconds",
+                  "endSeconds",
+                  "text"
+                ],
+                "properties": {
+                  "startSeconds": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "endSeconds": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "durationMs": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usage": {
+          "type": "null"
+        },
+        "cost": {
+          "type": "null"
+        }
+      }
+    },
+    "ExecutorHealthParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {}
+    },
+    "LocalHealthResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "configured",
+        "verified",
+        "available"
+      ],
+      "properties": {
+        "configured": {
+          "type": "boolean"
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "available": {
+          "type": "boolean"
+        }
+      }
+    },
+    "LocalCancelParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "operationId"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "operationId": {
+          "$ref": "#/definitions/Uuid"
+        }
+      }
+    },
+    "ExecutorCancelResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted",
+        "stopConfirmed"
+      ],
+      "properties": {
+        "accepted": {
+          "const": false
+        },
+        "stopConfirmed": {
+          "const": false
+        }
+      }
+    },
+    "ExternalExecuteParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "audioArtifactId",
+        "operationId",
+        "ownerId",
+        "model",
+        "deadlineAt"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "audioArtifactId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        },
+        "model": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ModelSelector"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deadlineAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "operationId": {
+          "$ref": "#/definitions/Uuid"
+        }
+      }
+    },
+    "ExternalExecuteResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "errorCode"
+      ],
+      "properties": {
+        "errorCode": {
+          "const": "EXTERNAL_ROUTE_UNAVAILABLE"
+        }
+      }
+    },
+    "ExternalHealthResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "available"
+      ],
+      "properties": {
+        "available": {
+          "const": false
+        }
+      }
+    },
+    "HistoryFact": {
+      "oneOf": [
+        {
+          "$ref": "#/definitions/RequestHistoryFact"
+        },
+        {
+          "$ref": "#/definitions/SettingsHistoryFact"
+        }
+      ]
+    },
+    "AttemptStartResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created",
+        "request",
+        "attempt"
+      ],
+      "properties": {
+        "created": {
+          "const": true
+        },
+        "request": {
+          "$ref": "#/definitions/RequestRecord"
+        },
+        "attempt": {
+          "$ref": "#/definitions/AttemptRecord"
+        }
+      }
+    },
+    "RequestHistoryFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "phase",
+        "outcome"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "attemptId": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "dispatching",
+            "running",
+            "terminal",
+            "cancel"
+          ]
+        },
+        "outcome": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "succeeded",
+                "failed",
+                "outcome_unknown",
+                "cancelled",
+                "rejected"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "route": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "local",
+                "external"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requestedModelId": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/SelectorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actualModelId": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/SelectorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "errorCode": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/ErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "enum": [
+                  "accepted",
+                  "dispatching",
+                  "running"
+                ]
+              }
+            },
+            "required": [
+              "phase"
+            ]
+          },
+          "then": {
+            "properties": {
+              "outcome": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "enum": [
+                  "terminal",
+                  "cancel"
+                ]
+              }
+            },
+            "required": [
+              "phase"
+            ]
+          },
+          "then": {
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "succeeded",
+                  "failed",
+                  "outcome_unknown",
+                  "cancelled",
+                  "rejected"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "SettingsHistoryFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "phase",
+        "policyVersion",
+        "policySha256"
+      ],
+      "properties": {
+        "phase": {
+          "const": "settings"
+        },
+        "policyVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "policySha256": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "requestId": {
+          "type": "null"
+        }
+      }
+    },
+    "ExternalCancelResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted",
+        "stopConfirmed"
+      ],
+      "properties": {
+        "accepted": {
+          "const": false
+        },
+        "stopConfirmed": {
+          "const": false
+        }
+      }
+    },
+    "HelperRequestRenewParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "claimToken",
+        "fenceGeneration",
+        "expectedRevision"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "claimToken": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "fenceGeneration": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "InputMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mimeType",
+        "sizeBytes",
+        "audioDurationSeconds"
+      ],
+      "properties": {
+        "mimeType": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 127,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "audioDurationSeconds": {
+          "type": "null"
+        }
+      }
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "errorCode"
+      ],
+      "properties": {
+        "errorCode": {
+          "$ref": "#/definitions/ErrorCode"
+        }
+      }
+    },
+    "Sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "HelperRequestLookupParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "principal",
+        "clientIdempotencyKey",
+        "normalizedInputSha256"
+      ],
+      "properties": {
+        "principal": {
+          "$ref": "#/definitions/TrustedPrincipal"
+        },
+        "clientIdempotencyKey": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "normalizedInputSha256": {
+          "$ref": "#/definitions/Sha256"
+        }
+      }
+    },
+    "RequestLookupResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request"
+      ],
+      "properties": {
+        "request": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/RequestRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
