@@ -1,7 +1,7 @@
 // ABOUTME: Авторизует загрузку браузерных вложений и выдачу закрытых миниатюр.
 // ABOUTME: Контроль идёт через NATS, а байты передаются только между браузером и artifacts/Caddy.
 import { validateRequest, validateResponse, subjects as artifactSubjects } from "../../../services/artifacts/contracts/index.mjs";
-import type { Artifact } from "../../../services/artifacts/contracts/index.mjs";
+import type { Artifact, ArtifactReference } from "../../../services/artifacts/contracts/index.mjs";
 type Metadata = Pick<Artifact, "title" | "filename" | "extension" | "mimeType" | "source" | "details">;
 import { checkOrigin, requireSession, type Session } from "./auth";
 import { GatewayError, natsConnection } from "./gateway";
@@ -179,7 +179,7 @@ function exactQuery(url: URL): Map<string, string> {
 }
 
 async function confirmedReference(ownerId: string, projectId: string, threadId: string, itemId: string, turnId: string, artifactId: string): Promise<boolean> {
-  const result = await artifactCall<{ items: any[] }>(artifactSubjects.referenceList, {
+  const result = await artifactCall<{ items: ArtifactReference[] }>(artifactSubjects.referenceList, {
     scope: { ownerId, projectId, threadId }, nativeItemIds: [itemId],
   });
   return result.items.some(reference => reference.state === "confirmed" && reference.scope?.ownerId === ownerId

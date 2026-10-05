@@ -32,6 +32,8 @@
 
 `native-fixture.mjs` требует явный абсолютный `BRAI_NATIVE_SCHEMA_DIR` с proof схемы установленного Codex 0.160.0 и проверяет agent по его OpenRPC/schema. Initialize schemas берутся из самостоятельных native v1 файлов; остальные использованные native schemas — из self-contained файлов `v2/`, а не из aggregate v2 definitions. Это schema-checked Unix WebSocket fake для Codex 0.160.0. Он сохраняет test threads/items в выделенном durable каталоге и поддерживает startup account/config/model/thread calls, создание и возобновление thread, history read/list, goal/settings, `turn/start`, `turn/steer` и события хода. Он явно не исполняет модель и не заменяет живой inference.
 
+При длинном пути worktree задайте `BRAI_NATIVE_FIXTURE_SOCKET=/tmp/brai-native-<runId>/codex-v160.sock`. Родительский каталог заранее создаёт операция стенда с владельцем fixture и режимом `0700`; fixture проверяет владельца, режим и предел Unix socket менее 108 байтов. Durable threads остаются в каталоге run ID. Fixture сохраняет nullable goals, использует целые Unix seconds и возобновляет оставшееся время активного хода без повторного добавления input.
+
 До запуска `harness.mjs` должны быть переданы `BRAI_ACCEPTANCE_GATE=accepted`, точный `BRAI_ACCEPTANCE_SOURCE_REVISION`, уникальный `BRAI_ACCEPTANCE_RUN_ID` и явные адреса test database/NATS с ACL операции 2. Auth fixture требует выданные operation 2 имя отдельной тестовой базы, runtime URL/app role, свой NATS URL/principal и явный список test email. Никакие credentials не печатаются или записываются в отчёты.
 
 Все временные файлы должны быть внутри worktree `tmp/artifacts-acceptance/` либо явно переданного каталога того же run. Никогда не используйте `HOME`/`CODEX_HOME`, `.env` файлы или git-tracked reports для состояния теста.

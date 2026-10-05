@@ -3,8 +3,8 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { schemaDirectory, validateEvent, validateParams, validateResult } from './native-contract.mjs';
 
@@ -14,7 +14,10 @@ const runId = process.env.BRAI_ACCEPTANCE_RUN_ID ?? '';
 if (process.env.BRAI_ACCEPTANCE_GATE !== 'accepted' || !/^[0-9a-f]{40}$/.test(process.env.BRAI_ACCEPTANCE_SOURCE_REVISION ?? '')) throw new Error('Acceptance gate or exact source revision is missing');
 assert.match(runId, /^[a-z0-9][a-z0-9-]{2,40}$/);
 const root = resolve('tmp/artifacts-acceptance', runId, 'native-fixture');
-const socketPath = resolve(root, 'codex-v160.sock');
+const explicitSocket = process.env.BRAI_NATIVE_FIXTURE_SOCKET;
+const socketPath = explicitSocket ? resolve(explicitSocket) : resolve(root, 'codex-v160.sock');
+if (explicitSocket) assert.equal(socketPath, `/tmp/brai-native-${runId}/codex-v160.sock`);
+assert.ok(Buffer.byteLength(socketPath) < 108, 'Use scoped BRAI_NATIVE_FIXTURE_SOCKET with a pre-created private directory');
 const statePath = resolve(root, 'threads.json');
 const schemaPath = schemaDirectory;
 const holdMs = Number(process.env.BRAI_NATIVE_FIXTURE_HOLD_MS ?? 60000);
@@ -23,8 +26,12 @@ const cwd = resolve(process.env.BRAI_NATIVE_FIXTURE_CWD ?? process.cwd());
 let state = { threads: {} };
 let sequence = 0;
 const sockets = new Set();
+const scheduledTurns = new Set();
 
 await mkdir(root, { recursive: true, mode: 0o700 });
+const socketDirectory = await lstat(dirname(socketPath));
+assert.ok(socketDirectory.isDirectory() && !socketDirectory.isSymbolicLink() && socketDirectory.uid === process.getuid() && (socketDirectory.mode & 0o777) === 0o700);
+try { const value = await lstat(socketPath); assert.ok(value.isSocket() && !value.isSymbolicLink() && value.uid === process.getuid()); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 await rm(socketPath, { force: true });
 try { state = JSON.parse(await readFile(statePath, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 assert.ok(state && typeof state.threads === 'object' && !Array.isArray(state.threads));
@@ -103,7 +110,7 @@ async function handle(socket, raw) {
         preview: '', projectId: null, sessionId: randomUUID(), source: 'appServer',
         status: { type: 'idle' }, turns: [], updatedAt: now,
       };
-      state.threads[id] = { thread, items: [], activeTurn: null };
+      state.threads[id] = { thread, items: [], activeTurn: null, goal: null };
       await persist();
       reply(socket, message.id, message.method, {
         approvalPolicy: message.params.approvalPolicy ?? 'never', approvalsReviewer: message.params.approvalsReviewer ?? 'user',
@@ -117,6 +124,11 @@ async function handle(socket, raw) {
         cwd: record.thread.cwd, model: record.thread.model ?? 'fixture-model', modelProvider: record.thread.modelProvider,
         sandbox: { type: 'readOnly', networkAccess: false }, thread: { ...record.thread, turns: message.params.excludeTurns ? [] : record.thread.turns },
       });
+      if (record.activeTurn) {
+        const active = record.thread.turns.find(turn => turn.id === record.activeTurn);
+        assert.ok(active && active.status === 'inProgress');
+        scheduleFinish(record, active);
+      }
     } else if (message.method === 'thread/read') {
       const record = threadRecord(message.params.threadId);
       const thread = { ...record.thread, turns: message.params.includeTurns ? record.thread.turns : [] };
@@ -140,11 +152,20 @@ async function handle(socket, raw) {
       await persist();
       reply(socket, message.id, message.method, {});
     } else if (message.method === 'thread/goal/get') {
-      reply(socket, message.id, message.method, { goal: fixtureGoal(message.params.threadId) });
+      reply(socket, message.id, message.method, { goal: threadRecord(message.params.threadId).goal ?? null });
     } else if (message.method === 'thread/goal/set') {
-      reply(socket, message.id, message.method, { goal: fixtureGoal(message.params.threadId, message.params.objective) });
+      const record = threadRecord(message.params.threadId);
+      const goal = fixtureGoal(record, message.params);
+      validateResult('thread/goal/set', { goal });
+      record.goal = goal;
+      await persist();
+      reply(socket, message.id, message.method, { goal });
     } else if (message.method === 'thread/goal/clear') {
-      reply(socket, message.id, message.method, { cleared: true });
+      const record = threadRecord(message.params.threadId);
+      const cleared = (record.goal ?? null) !== null;
+      record.goal = null;
+      await persist();
+      reply(socket, message.id, message.method, { cleared });
     } else if (message.method === 'thread/settings/update') {
       reply(socket, message.id, message.method, {});
     } else if (message.method === 'thread/unsubscribe') {
@@ -152,7 +173,7 @@ async function handle(socket, raw) {
     } else if (message.method === 'turn/start') {
       const turnId = randomUUID();
       const record = threadRecord(message.params.threadId);
-      const turn = { id: turnId, items: [], status: 'inProgress', startedAt: Date.now() / 1000 };
+      const turn = { id: turnId, items: [], status: 'inProgress', startedAt: Math.floor(Date.now() / 1000) };
       record.activeTurn = turnId;
       record.thread.status = { type: 'active', activeFlags: [] };
       record.thread.updatedAt = Math.floor(Date.now() / 1000);
@@ -188,9 +209,17 @@ function threadRecord(threadId) {
   return record;
 }
 
-function fixtureGoal(threadId, objective = 'Fixture goal; no inference is performed.') {
+function fixtureGoal(record, params) {
+  const previous = record.goal ?? null;
   const now = Math.floor(Date.now() / 1000);
-  return { createdAt: now, objective, status: 'active', threadId, timeUsedSeconds: 0, tokensUsed: 0, updatedAt: now };
+  const objective = params.objective ?? previous?.objective;
+  assert.equal(typeof objective, 'string', 'An explicit objective is required for a new goal');
+  return {
+    ...(previous ?? { createdAt: now, timeUsedSeconds: 0, tokensUsed: 0 }),
+    objective, status: params.status ?? previous?.status ?? 'active',
+    threadId: record.thread.id, updatedAt: now,
+    ...(Object.hasOwn(params, 'tokenBudget') ? { tokenBudget: params.tokenBudget } : {}),
+  };
 }
 
 async function appendInput(record, turnId, params) {
@@ -205,10 +234,14 @@ async function appendInput(record, turnId, params) {
 
 function scheduleFinish(record, turn) {
   const turnId = turn.id;
+  if (scheduledTurns.has(turnId)) return;
+  scheduledTurns.add(turnId);
+  const remainingHold = Math.max(0, holdMs - (Date.now() - turn.startedAt * 1000));
   setTimeout(async () => {
+    scheduledTurns.delete(turnId);
     if (!record.activeTurn || record.activeTurn !== turnId) return;
     turn.status = 'completed';
-    turn.completedAt = Date.now() / 1000;
+    turn.completedAt = Math.floor(Date.now() / 1000);
     record.activeTurn = null;
     record.thread.status = { type: 'idle' };
     record.thread.updatedAt = Math.floor(Date.now() / 1000);
@@ -217,5 +250,5 @@ function scheduleFinish(record, turn) {
       event('item/completed', { threadId: record.thread.id, turnId, item: entry.item, completedAtMs: Date.now() });
     }
     event('turn/completed', { threadId: record.thread.id, turn: { ...turn, status: 'completed' } });
-  }, holdMs).unref();
+  }, remainingHold).unref();
 }

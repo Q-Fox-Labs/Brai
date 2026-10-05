@@ -36,7 +36,7 @@ export function createAgentClient(userId: string, unauthorized: () => void) {
     const checked = command.threadId ? { ...command, ownerId: userId } : command;
     if (!validateCommand(checked)) throw new AgentError("INVALID_ARGUMENT", "not-sent");
     const reading = ["projects", "status", "models", "threads", "open", "turns", "items", "activities", "item", "goalGet"].includes(command.action);
-    const { action, ownerId: _trustedOwnerId, ...body } = checked;
+    const { action, ...body } = command;
     const query = new URLSearchParams(Object.entries(body).map(([key, value]) => [key, Array.isArray(value) ? JSON.stringify(value) : String(value)]));
     try {
       const response = await fetch(`/api/agent/${action}${reading ? `?${query}` : ""}`, {

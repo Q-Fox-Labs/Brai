@@ -249,6 +249,7 @@ services:
       HOSTNAME: 0.0.0.0
       PORT: "3000"
       WEB_ORIGIN: http://127.0.0.1:13000
+      ARTIFACTS_UPLOAD_BASE_URL: http://127.0.0.1:13000
       NATS_URL: nats://nats:4222
       NATS_USER: fixture
       NATS_PASSWORD: fixture-nats

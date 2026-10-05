@@ -13,7 +13,7 @@ const makeAttachment = (reduced = false): Attachment => {
   return { id: crypto.randomUUID(), name: original.name, original, model, bytes: model.size, reduced, previewUrl: "blob:fixture", previewObjectUrl: false,
     originalRequestId: "stable-original-id", modelRequestId: reduced ? "stable-copy-id" : null, relationRequestId: "stable-relation-id" };
 };
-function fixture(fetcher: typeof fetch) {
+function fixture() {
   const old = Object.getOwnPropertyDescriptor(globalThis, "location");
   Object.defineProperty(globalThis, "location", { configurable: true, value: { href: "https://app.test/", origin: "https://app.test" } });
   return () => { if (old) Object.defineProperty(globalThis, "location", old); else Reflect.deleteProperty(globalThis, "location"); };
@@ -22,7 +22,7 @@ function json(value: unknown, status = 200) { return new Response(JSON.stringify
 function uploaded(id: string, size: number) { return new Response(null, { status: 201, headers: { "X-Artifact-Id": id, "X-Artifact-State": "ready", "X-Artifact-Size": String(size), "X-Artifact-SHA256": "a".repeat(64), Location: "https://artifacts.internal/files/abc" } }); }
 
 test("small original reuses its ID and a valid 201 avoids an extra prepare round trip", async () => {
-  const calls: { url: string; init?: RequestInit }[] = [], restore = fixture(fetch);
+  const calls: { url: string; init?: RequestInit }[] = [], restore = fixture();
   const fetcher: typeof fetch = async (input, init) => {
     const url = String(input); calls.push({ url, init });
     if (url === "/api/agent/attachments/prepare") return json({ artifact: { artifactId: "original-id", status: "pending" }, uploadUrl: "https://app.test/upload/abcdefghijklmnop" });
@@ -45,7 +45,7 @@ test("small original reuses its ID and a valid 201 avoids an extra prepare round
 
 test("reduced copy uploads separately and finalization binds its ID to the original", async () => {
   const calls: { url: string; init?: RequestInit }[] = [], states = new Map([["stable-original-id", "original-id"], ["stable-copy-id", "copy-id"]]);
-  const restore = fixture(fetch);
+  const restore = fixture();
   const fetcher: typeof fetch = async (input, init) => {
     const url = String(input); calls.push({ url, init });
     if (url === "/api/agent/attachments/prepare") {
@@ -68,7 +68,7 @@ test("reduced copy uploads separately and finalization binds its ID to the origi
 });
 
 test("lost PUT response reconciles with the same prepare ID; aborted old scope never reconciles", async () => {
-  const restore = fixture(fetch); let prepareCalls = 0, putCalls = 0;
+  const restore = fixture(); let prepareCalls = 0, putCalls = 0;
   const fetcher: typeof fetch = async (input) => {
     const url = String(input);
     if (url === "/api/agent/attachments/prepare") {
@@ -94,7 +94,7 @@ test("lost PUT response reconciles with the same prepare ID; aborted old scope n
 });
 
 test("prepare preserves explicit authorization errors for a clear user retry", async () => {
-  const restore = fixture(fetch);
+  const restore = fixture();
   try {
     await assert.rejects(uploadAttachment(makeAttachment(false), scope, new AbortController().signal, async () => json({ code: "ACCOUNT_CHANGED" }, 401)), /Сеанс или аккаунт изменился/);
   } finally { restore(); }
