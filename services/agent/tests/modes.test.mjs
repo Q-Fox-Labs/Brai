@@ -201,3 +201,24 @@ test('goal snapshot notification during open does not discard the native message
   f.setHook(method => { if (method === 'thread/resume') f.observe('thread/goal/cleared', {}); });
   assert.equal((await f.open()).thread.lastMessageAt, 1234);
 });
+
+
+test('context usage projects the last request, follows compaction and clears on reconnect', async t => {
+  const f = fixture(); t.after(() => f.app.close());
+  assert.equal((await f.open()).contextUsage, undefined);
+  const usage = (usedTokens, contextWindow = 258000) => f.observe('thread/tokenUsage/updated', { tokenUsage: { last: { totalTokens: usedTokens }, total: { totalTokens: 900000 }, modelContextWindow: contextWindow } });
+  usage(25000);
+  assert.deepEqual(f.snapshots.at(-1).contextUsage, { usedTokens: 25000, contextWindow: 258000 });
+  assert.deepEqual((await f.open()).contextUsage, { usedTokens: 25000, contextWindow: 258000 });
+  usage(5000);
+  assert.equal(f.snapshots.at(-1).contextUsage.usedTokens, 5000);
+  usage(0, null);
+  assert.deepEqual(f.snapshots.at(-1).contextUsage, { usedTokens: 0, contextWindow: null });
+  usage(300000);
+  assert.equal(f.snapshots.at(-1).contextUsage.usedTokens, 300000);
+  usage(-1);
+  assert.equal(f.snapshots.at(-1).contextUsage, null);
+  usage(25000); f.rotate();
+  assert.equal(f.snapshots.at(-1).contextUsage, null);
+  assert.equal((await f.open()).contextUsage, null);
+});

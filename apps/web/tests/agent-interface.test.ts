@@ -223,3 +223,17 @@ test("sidebar prioritizes questions over work and hides a read final check", () 
   assert.equal((html.match(/aria-label="Непрочитанный итог"/g) ?? []).length, 1);
   assert.doesNotMatch(html, /Агент работает/);
 });
+
+
+test("context ring uses the native window, caps its percent and distinguishes unknown data", () => {
+  const props = { models: [], model: "", effort: "", permissionMode: "auto", disabled: false, chooseModel: () => {}, chooseEffort: () => {}, choosePermissions: () => {} };
+  const render = (contextUsage?: { usedTokens: number; contextWindow: number | null } | null) => renderToStaticMarkup(createElement(component("settings"), { ...props, contextUsage }));
+  assert.match(render({ usedTokens: 25000, contextWindow: 258000 }), /aria-label="Контекстное окно: 10% использовано"/);
+  assert.match(render({ usedTokens: 300000, contextWindow: 258000 }), /stroke-dasharray="100 100"/);
+  assert.match(render({ usedTokens: 0, contextWindow: 258000 }), /Контекстное окно: 0% использовано/);
+  for (const usage of [undefined, null, { usedTokens: 25000, contextWindow: null }]) {
+    const html = render(usage);
+    assert.match(html, /Контекстное окно: данные недоступны/);
+    assert.doesNotMatch(html, /stroke-dasharray/);
+  }
+});

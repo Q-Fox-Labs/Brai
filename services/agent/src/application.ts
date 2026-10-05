@@ -221,6 +221,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
         s.view.generation = current();
         s.view.epoch = randomUUID();
         s.view.state = 'connection-lost';
+        s.view.contextUsage = null;
         s.view.goal.state = s.view.goal.value ? 'stale' : 'unavailable';
         if (s.view.planProgress.state === 'live') s.view.planProgress.state = 'stale';
         publish(s);
@@ -259,6 +260,11 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     } else if (e.method === 'thread/goal/updated' || e.method === 'thread/goal/cleared') {
       s.goalRevision++;
       s.view.goal = { state: 'ready', value: e.method === 'thread/goal/cleared' ? null : goal(p.goal) };
+    } else if (e.method === 'thread/tokenUsage/updated') {
+      const usedTokens = p.tokenUsage?.last?.totalTokens, contextWindow = p.tokenUsage?.modelContextWindow;
+      // AIDEV-NOTE: total — стоимость всей истории; last — размер последнего контекста с ответом.
+      s.view.contextUsage = Number.isSafeInteger(usedTokens) && usedTokens >= 0
+        ? { usedTokens, contextWindow: Number.isSafeInteger(contextWindow) && contextWindow > 0 ? contextWindow : null } : null;
     } else if (e.method === 'thread/settings/updated') {
       s.view.thread.model = p.threadSettings.model;
       s.view.thread.reasoningEffort = p.threadSettings.effort ?? null;

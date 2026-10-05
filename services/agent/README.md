@@ -76,3 +76,6 @@ Snapshot содержит `goal:GoalProjection` и `planProgress:PlanProgress`; 
 `turn/plan/updated` обновляет отдельный `planProgress`: turnId, nullable explanation, до 100 шагов step/status (pending/inProgress/completed), state live/stale/unavailable и флаг truncated. Native история не предоставляет восстановление этих шагов. После reconnect прежний список остаётся stale; при холодном открытии он unavailable. Новый ход сбрасывает старый прогресс. Прогресс не создаёт синтетический plan item и не выдаётся за сохранённый документ.
 
 Изменение расширяет существующую закрытую границу без новых subjects. Web и agent обновляются согласованно; после обновления клиент перечитывает снимок. Старый потребитель закрытой JSON Schema может отвергнуть новые поля.
+
+
+Snapshot содержит optional `contextUsage:{usedTokens,contextWindow}|null`: `usedTokens` — `last.totalTokens` из `thread/tokenUsage/updated`, включая вход и ответ последнего запроса, а не накопленный `total`. `contextWindow` — положительный native `modelContextWindow` или null при неизвестном лимите. До первого события поле отсутствует; после потери соединения сбрасывается в null и ждёт нового события. Счётчик может уменьшаться после компактизации. Данные принадлежат выбранному thread и не оцениваются по тексту истории.
