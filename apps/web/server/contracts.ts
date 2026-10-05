@@ -1,4 +1,4 @@
-// ABOUTME: Проверяет wire-данные по JSON Schema сервиса таймера.
+// ABOUTME: Проверяет wire-данные по JSON Schema сервисов-владельцев.
 // ABOUTME: Загружает публичный контракт владельца, не импортирует внутренний код сервиса.
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
@@ -6,8 +6,12 @@ import common from "../../../services/timer/schemas/common.schema.json";
 import commands from "../../../services/timer/schemas/commands.schema.json";
 import messages from "../../../services/timer/schemas/messages.schema.json";
 import auth from "../../../services/auth/schemas/messages.schema.json";
+import historyCommon from "../../../services/history/schemas/common.schema.json";
+import historyMessages from "../../../services/history/schemas/messages.schema.json";
 const ajv = new Ajv({ allErrors: false });
 addFormats(ajv);
+ajv.addSchema(historyCommon);
+ajv.addSchema(historyMessages);
 ajv.addSchema(auth, "auth-messages.schema.json");
 ajv.addSchema(common, "common.schema.json");
 ajv.addSchema(commands, "commands.schema.json");

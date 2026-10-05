@@ -1,0 +1,211 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.invalid/contracts/history/v1/messages.schema.json",
+  "title": "Brai history NATS messages",
+  "definitions": {
+    "appendRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type_id",
+        "occurred_at",
+        "scope_type",
+        "scope_id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "type_id": {
+          "$ref": "common.schema.json#/definitions/id"
+        },
+        "occurred_at": {
+          "$ref": "common.schema.json#/definitions/timestamp"
+        },
+        "actor_id": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/definitions/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope_type": {
+          "$ref": "common.schema.json#/definitions/scopeType"
+        },
+        "scope_id": {
+          "$ref": "common.schema.json#/definitions/identifier"
+        },
+        "object_type": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "object_id": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/definitions/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "common.schema.json#/definitions/data"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "object_type"
+            ],
+            "properties": {
+              "object_type": {
+                "type": "string"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "object_id"
+            ],
+            "properties": {
+              "object_id": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "object_id"
+            ],
+            "properties": {
+              "object_id": {
+                "type": "string"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "object_type"
+            ],
+            "properties": {
+              "object_type": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "appendResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event"
+      ],
+      "properties": {
+        "event": {
+          "$ref": "common.schema.json#/definitions/event"
+        }
+      }
+    },
+    "listRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user_id"
+      ],
+      "properties": {
+        "user_id": {
+          "$ref": "common.schema.json#/definitions/identifier"
+        },
+        "filters": {
+          "$ref": "common.schema.json#/definitions/webFilters"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    },
+    "listResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/definitions/event"
+          }
+        },
+        "next_cursor": {
+          "$ref": "common.schema.json#/definitions/nextCursor"
+        }
+      }
+    },
+    "getRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user_id",
+        "source",
+        "id"
+      ],
+      "properties": {
+        "user_id": {
+          "$ref": "common.schema.json#/definitions/identifier"
+        },
+        "source": {
+          "$ref": "common.schema.json#/definitions/source"
+        },
+        "id": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        }
+      }
+    },
+    "getResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event"
+      ],
+      "properties": {
+        "event": {
+          "$ref": "common.schema.json#/definitions/event"
+        }
+      }
+    },
+    "serviceError": {
+      "$ref": "common.schema.json#/definitions/error"
+    }
+  }
+}

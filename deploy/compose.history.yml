@@ -1,0 +1,57 @@
+# ABOUTME: Запускает service_history отдельно от основного Brai Compose-проекта.
+# ABOUTME: Runtime image собирается из локального артефакта; БД, NATS и секреты задаёт оператор.
+name: brai-history
+services:
+  history:
+    image: ${BRAI_HISTORY_IMAGE:-brai-history:production}
+    build:
+      context: ../tmp/history-runtime
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "1000:1000"
+    env_file:
+      - ${HISTORY_ENV_FILE:?Set HISTORY_ENV_FILE to the protected history runtime environment file}
+    environment:
+      NODE_ENV: production
+      HISTORY_MCP_HOST: 0.0.0.0
+      HISTORY_MCP_PORT: "3006"
+      HISTORY_CURSOR_HMAC_KEY_FILE: /run/secrets/history_cursor_hmac_key
+    ports:
+      - "127.0.0.1:${BRAI_HISTORY_MCP_HOST_PORT:-3006}:3006"
+    volumes:
+      - type: bind
+        source: ${BRAI_HISTORY_CURSOR_KEY_FILE:?Set BRAI_HISTORY_CURSOR_KEY_FILE to the protected cursor key file}
+        target: /run/secrets/history_cursor_hmac_key
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - messaging
+      - database
+
+  history-migrate:
+    image: ${BRAI_HISTORY_IMAGE:-brai-history:production}
+    profiles: [migration]
+    restart: "no"
+    init: true
+    user: "1000:1000"
+    working_dir: /app
+    command: ["node", "dist/migrate.js"]
+    healthcheck:
+      disable: true
+    env_file:
+      - ${HISTORY_MIGRATION_ENV_FILE:?Set HISTORY_MIGRATION_ENV_FILE to the protected history migration environment file}
+    environment:
+      NODE_ENV: production
+    networks:
+      - database
+
+networks:
+  messaging:
+    name: ${BRAI_NATS_NETWORK:?Set BRAI_NATS_NETWORK to the NATS bridge network}
+    external: true
+  database:
+    name: ${BRAI_DATABASE_NETWORK:?Set BRAI_DATABASE_NETWORK to the private database network}
+    external: true
