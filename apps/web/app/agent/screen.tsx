@@ -394,7 +394,8 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     document.addEventListener("visibilitychange", markRead);
     return () => { cancelAnimationFrame(frame); observer.disconnect(); changes.disconnect(); element?.removeEventListener("scroll", markRead); document.removeEventListener("visibilitychange", markRead); };
   }, [visible, userId, projectId, threadId, readMessageId, readEpoch, active, history]);
-  const timeline = groupTimeline(items);
+  const pendingAsyncQuestions = view?.requests.filter(request => request.method === "agentMessage/questions" && !request.answered) ?? [];
+  const timeline = groupTimeline(items).filter(entry => entry.kind !== "message" || !pendingAsyncQuestions.some(request => request.params.itemId === entry.item.id || entry.item.type === "agentMessage" && !entry.item.text.trim() && request.turnId === entry.item.turnId));
   const activityContext = useMemo(() => ({ generation: view?.generation ?? historyGeneration, epoch: view?.epoch ?? "", projectId, threadId }), [view?.generation, view?.epoch, historyGeneration, projectId, threadId]);
   const action = !draft.trim() && !attachments.length && goalUnfinished ? "goalClear" : composerAction(active, draft, attachments.length);
   const catalogFresh = !!view && models?.generation === view.generation;

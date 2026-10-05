@@ -89,3 +89,13 @@ test("own answers honor isOther, secrets, whitespace, IME and deliberate Enter",
   assert.equal(calls.length, 0); key({}); await Promise.resolve();
   assert.deepEqual(calls, [{ answers: { secret: { answers: ["private-answer"] } } }]);
 });
+
+test("partial async reply from another client retains the remaining question and draft", () => {
+  const value = request(); value.method = "agentMessage/questions";
+  const f = fixture(value);
+  f.button("Следующий вопрос").props.onClick!(); f.change("Мой черновик");
+  value.params.questions = value.params.questions.slice(1);
+  assert.match(f.html(), /Вопрос b\?/);
+  assert.equal(f.input().props.value, "Мой черновик");
+  assert.match(f.html(), /1 из 1/);
+});

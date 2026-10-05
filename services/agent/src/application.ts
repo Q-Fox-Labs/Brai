@@ -9,8 +9,9 @@ import { createAttachments, type ArtifactsConfig, type ArtifactsPort } from './a
 import { createLimitsMonitor } from './limits.js';
 import { nameThread } from './title.js';
 import { display, messagePage, metadata, text, compact, summary, messageAttention, goal, progress } from './display.js';
+import { asyncQuestionMethod, asyncQuestionRequest, asyncQuestionReply, asyncReplyIds } from './async-questions.js';
 export type Config = { artifacts?: ArtifactsConfig; codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
-type Session = { attention: ReturnType<typeof messageAttention>; view: NativeSnapshot & { goal: GoalProjection; planProgress: PlanProgress }; mutating?: boolean; goalRevision: number; opened: boolean; fresh: boolean; titleNeeded: boolean; titleRequest: string; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
+type Session = { answering: Set<string>; attention: ReturnType<typeof messageAttention>; view: NativeSnapshot & { goal: GoalProjection; planProgress: PlanProgress }; mutating?: boolean; goalRevision: number; opened: boolean; fresh: boolean; titleNeeded: boolean; titleRequest: string; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
 function pendingRequest(request: PendingRequest) { return request.kind !== 'unsupported' && !request.answered; }
 function projectTurn(turn: any): NativeTurn {
   const info = turn.error?.codexErrorInfo;
@@ -64,6 +65,20 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     emit({ projectId: s.view.projectId, threadId: s.view.threadId, generation: s.view.generation, epoch: s.view.epoch, seq: s.view.seq, event: { type: 'STATE_SNAPSHOT', snapshot: structuredClone(s.view) } });
   }
   function put(s: Session, item: any, turnId: string, timestamp?: number, history = false) {
+    const question = asyncQuestionRequest(item, turnId);
+    if (question && !s.view.requests.some(request => request.requestId === question.requestId)) {
+      if (s.view.requests.length >= limits.pending) {
+        const resolved = s.view.requests.findIndex(request => request.answered || request.kind === 'unsupported');
+        if (resolved >= 0) s.view.requests.splice(resolved, 1);
+      }
+      if (s.view.requests.length < limits.pending) s.view.requests.push(question);
+    }
+    // AIDEV-NOTE: Reply может прийти live раньше чтения исторического исходного вопроса.
+    const replied = new Set([...asyncReplyIds(item), ...s.view.items.flatMap(asyncReplyIds)]);
+    for (const request of s.view.requests) if (request.kind === 'question' && request.method === asyncQuestionMethod && !request.answered && replied.size) {
+      request.params.questions = request.params.questions.filter((question: any) => !replied.has(question.id));
+      if (!request.params.questions.length) request.answered = true;
+    }
     const value = display(item, turnId), old = s.view.items.find(i => i.id === value.id);
     value.revision = history ? old?.revision ?? 0 : s.view.seq + 1;
     if (value.type === 'userMessage' || value.type === 'agentMessage') {
@@ -121,7 +136,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       sessions.delete(victim.view.threadId);
     }
     const view: Session['view'] = { projectId, threadId: thread.id, generation: current(), epoch: randomUUID(), seq: 0, thread: { ...metadata(thread), lastMessageAt: messageTimes.get(thread.id)?.lastMessageAt ?? 0 }, turn: null, state: 'idle', items: [], requests: [], truncated: false, goal: { state: fresh ? 'ready' : 'unavailable', value: null }, planProgress: { state: 'unavailable', turnId: null, explanation: null, steps: [], truncated: false } };
-    const s: Session = { attention: { finalMessageId: null, awaitingReply: false }, goalRevision: 0, view, opened: fresh, fresh, titleNeeded: !thread.name, titleRequest: thread.preview ?? '', raw: new Map(), revisions: new Map(), details: new Map() };
+    const s: Session = { answering: new Set(), attention: { finalMessageId: null, awaitingReply: false }, goalRevision: 0, view, opened: fresh, fresh, titleNeeded: !thread.name, titleRequest: thread.preview ?? '', raw: new Map(), revisions: new Map(), details: new Map() };
     sessions.set(thread.id, s);
     return s;
     } finally { release(); }
@@ -142,7 +157,15 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       const resumed = await codex.call('thread/resume', { threadId: id, cwd: p.cwd, excludeTurns: true }, { mutation: true });
       await readGoal(s);
       const turns = await codex.call('thread/turns/list', { threadId: id, limit: 1, itemsView: 'notLoaded', sortDirection: 'desc' });
-      const items = await codex.call('thread/items/list', { threadId: id, limit: 10, sortDirection: 'desc' });
+      const items: { data: any[]; nextCursor?: string | null } = { data: [] };
+      let messages = 0;
+      do {
+        const part = await codex.call('thread/items/list', { threadId: id, limit: Math.min(10, 1000 - items.data.length), sortDirection: 'desc', ...(items.nextCursor ? { cursor: items.nextCursor } : {}) });
+        if (part.nextCursor && (!part.data.length || part.nextCursor === items.nextCursor)) break;
+        items.data.push(...part.data); items.nextCursor = part.nextCursor;
+        messages += part.data.filter((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type)).length;
+        // AIDEV-NOTE: Десять действий после async вопроса не должны скрыть карточку при восстановлении.
+      } while (items.nextCursor && messages < 10 && items.data.length < 1000 && bytes(items) < limits.state);
       if (before !== current()) fail('STALE_GENERATION', 'query');
       s.view.thread = { ...metadata(resumed.thread), lastMessageAt: s.view.thread.lastMessageAt, model: resumed.model, reasoningEffort: resumed.reasoningEffort ?? null };
       const latestMessage = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
@@ -227,6 +250,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       for (const s of sessions.values()) {
         s.opened = s.fresh = s.closing = false;
         s.raw.clear();
+        s.answering = new Set();
         s.activeModel = undefined;
         s.details.clear();
         s.view.requests = s.view.requests.filter(request => request.kind === 'unsupported');
@@ -289,7 +313,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       s.view.state = p.turn.status;
       if (e.method === 'turn/started') s.fresh = false;
       if (e.method === 'turn/started' && s.view.planProgress.turnId !== p.turn.id) s.view.planProgress = { state: 'unavailable', turnId: p.turn.id, explanation: null, steps: [], truncated: false };
-      if (p.turn.status !== 'inProgress') { s.activeModel = undefined; s.view.requests = s.view.requests.filter(request => request.kind === 'unsupported'); s.raw.clear(); }
+      if (p.turn.status !== 'inProgress') { s.activeModel = undefined; s.view.requests = s.view.requests.filter(request => request.kind === 'unsupported' || request.method === asyncQuestionMethod); s.raw.clear(); }
     } else if (e.method === 'item/started' || e.method === 'item/completed') put(s, p.item.type === 'plan' ? { ...p.item, status: e.method === 'item/completed' ? 'completed' : 'inProgress' } : p.item, p.turnId);
     else if (e.method?.endsWith('/delta') || e.method?.endsWith('/outputDelta')) {
       const item = s.details.get(p.itemId);
@@ -309,6 +333,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     } else if (e.method === 'turn/plan/updated') s.view.planProgress = progress(p);
     else return;
     if (s.view.requests.some(pendingRequest)) s.view.state = 'waiting';
+    else if (s.view.state === 'waiting') s.view.state = s.view.turn?.status ?? 'idle';
     publish(s);
   }
   const limitMonitor = createLimitsMonitor(codex);
@@ -490,12 +515,34 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     let turnId = r.turnId;
     if (r.action === 'answer') {
       const f = s.view.requests.find(f => f.requestId === r.requestId);
-      if (!f || f.answered) fail('STALE_REQUEST');
-      if (f.kind === 'unsupported' || !codex.validateAnswer(s.raw.get(f.requestId)!, r.answer) || !validAnswer(f, r.answer)) fail('INVALID_ARGUMENT');
-      f.answered = true;
-      publish(s);
-      try { await codex.respond(s.raw.get(f.requestId)!, r.answer); }
-      catch (error: any) { if (error.outcome === 'not-sent' && r.generation === current() && s.view.requests.includes(f)) { f.answered = false; publish(s); } throw error; }
+      if (!f || f.answered || s.answering.has(f.requestId)) fail('STALE_REQUEST');
+      const asynchronous = f.kind === 'question' && f.method === asyncQuestionMethod;
+      const asyncReply = asynchronous ? asyncQuestionReply(f, r.answer) : null;
+      if (asynchronous ? !asyncReply || s.view.thread.canAcceptDirectInput === false || s.mutating : f.kind === 'unsupported' || !codex.validateAnswer(s.raw.get(f.requestId)!, r.answer) || !validAnswer(f, r.answer)) fail('INVALID_ARGUMENT');
+      const claims = s.answering;
+      claims.add(f.requestId);
+      // AIDEV-NOTE: Локальный claim блокирует дубль, не скрывая карточку до результата отправки.
+      try {
+        // AIDEV-NOTE: Async вопрос не держит server request: Desktop отвечает обычным user input.
+        if (asyncReply) {
+          const params = { threadId: r.threadId, input: [{ type: 'text', text: asyncReply }] };
+          const value = active
+            ? await codex.call('turn/steer', { ...params, expectedTurnId: s.view.turn!.id }, { mutation: true })
+            : await mutation(s, r, call => call('turn/start', params));
+          turnId = value.turn?.id ?? value.turnId;
+          if (!active && s.view.turn === previousTurn) { s.view.turn = projectTurn(value.turn); s.view.state = value.turn.status; publish(s); }
+          s.fresh = false;
+        } else await codex.respond(s.raw.get(f.requestId)!, r.answer);
+        if (r.generation === current() && s.view.requests.includes(f)) {
+          f.answered = true;
+          if (!s.view.requests.some(pendingRequest) && s.view.state === 'waiting') s.view.state = s.view.turn?.status ?? 'idle';
+          publish(s);
+        }
+      }
+      catch (error: any) {
+        if (error.outcome !== 'not-sent' && r.generation === current() && s.view.requests.includes(f)) { f.answered = true; publish(s); }
+        throw error;
+      } finally { claims.delete(f.requestId); }
     } else if (r.action === 'interrupt') await codex.call('turn/interrupt', { threadId: r.threadId, turnId: r.turnId }, { mutation: true });
     else {
       const params = nativeParams ?? buildInput([]);
