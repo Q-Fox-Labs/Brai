@@ -56,3 +56,26 @@ test("rejects executable, entity-obfuscated, whitespace-obfuscated and network-p
   assert.match(html, /<span>b<\/span>/);
   assert.match(html, /<span>f<\/span>/);
 });
+
+test("waits for a closed Mermaid fence throughout streaming", () => {
+  const source = '```mermaid\nflowchart TB\nA["Начало"] --> B["Конец"]\n';
+  for (let length = 10; length <= source.length; length++) {
+    const html = render(source.slice(0, length));
+    assert.match(html, /Диаграмма появится после получения кода/);
+    assert.doesNotMatch(html, /markdown-mermaid-canvas|markdown-mermaid-error/);
+  }
+  assert.match(render(source + "```"), /markdown-mermaid-canvas/);
+  assert.match(render("~~~~mermaid\nflowchart TB\nA --> B\n~~~"), /Диаграмма появится/);
+  assert.match(render("~~~~mermaid\nflowchart TB\nA --> B\n~~~~"), /markdown-mermaid-canvas/);
+});
+
+test("keeps Mermaid identity when source lines or following text change", () => {
+  const diagram = (text: string) => {
+    const tree = Markdown({ text }) as { props: { children: { key: string; type: unknown }[] } };
+    return tree.props.children[0];
+  };
+  const first = diagram("```mermaid\nflowchart TB\nA --> B\n```");
+  const updated = diagram("```mermaid\nflowchart TB\nA --> B\nB --> C\n```\n\nПродолжение ответа");
+  assert.equal(first.key, updated.key);
+  assert.equal(first.type, updated.type);
+});

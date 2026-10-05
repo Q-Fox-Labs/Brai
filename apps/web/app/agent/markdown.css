@@ -24,7 +24,23 @@
 .agent-markdown .markdown-code-block code { padding: 0; background: transparent; font-size: .86em; }
 .agent-item .agent-markdown .markdown-code-block { overflow-wrap: normal; white-space: pre; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .agent-item .agent-markdown .markdown-code-block code { font-family: inherit; }
-.agent-markdown .markdown-mermaid { max-width: 100%; overflow: hidden; margin: 12px 0; border: 1px solid rgb(148 163 184 / 22%); border-radius: 12px; background: #111827; }
+.agent-markdown .markdown-mermaid { max-width: 100%; overflow: hidden; margin: 12px 0; border: 1px solid rgb(148 163 184 / 22%); border-radius: 12px; background: #202124; }
+.markdown-mermaid-toolbar { display: flex; justify-content: flex-end; padding: 8px 8px 0; }
+.markdown-mermaid-toolbar button, .markdown-mermaid-viewer-toolbar button { display: inline-flex; align-items: center; justify-content: center; min-width: 40px; min-height: 40px; padding: 6px 12px; border: 1px solid #45474e; border-radius: 8px; background: #2e3036; color: #e5e7eb; font: inherit; cursor: pointer; }
+.markdown-mermaid-toolbar button:hover, .markdown-mermaid-viewer-toolbar button:hover { background: #3a3d44; }
+.markdown-mermaid-toolbar button:focus-visible, .markdown-mermaid-viewer-toolbar button:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
+.markdown-mermaid-toolbar button { font-size: 24px; }
+.markdown-mermaid-dialog { box-sizing: border-box; width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: #202124; color: #e5e7eb; }
+.markdown-mermaid-dialog[open] { display: flex; flex-direction: column; }
+.markdown-mermaid-dialog::backdrop { background: #202124; }
+.markdown-mermaid-viewer-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; border-bottom: 1px solid #45474e; }
+.markdown-mermaid-viewer-toolbar > span { margin-right: auto; }
+.markdown-mermaid-viewer-toolbar output { min-width: 48px; text-align: center; font-variant-numeric: tabular-nums; }
+.markdown-mermaid-viewport { display: flex; flex: 1; min-height: 0; overflow: auto; padding: 24px; cursor: grab; touch-action: none; }
+.markdown-mermaid-viewport:active { cursor: grabbing; }
+.markdown-mermaid-drawing { margin: auto; flex-shrink: 0; }
+.markdown-mermaid-drawing svg { display: block; width: 100%; height: 100%; max-width: none !important; }
+.markdown-mermaid .node rect { rx: 8px; ry: 8px; }
 .agent-markdown .markdown-mermaid-canvas { max-width: 100%; overflow-x: auto; padding: 18px; }
 .agent-markdown .markdown-mermaid-canvas svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
 .agent-markdown .markdown-mermaid-status, .agent-markdown .markdown-mermaid-error { display: block; padding: 10px 14px; color: rgb(203 213 225 / 78%); font-size: 12px; }
