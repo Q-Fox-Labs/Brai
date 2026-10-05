@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.invalid/contracts/local-ai/v1/facts.schema.json",
+  "title": "Разрешённые метаданные событий local-ai",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "type_id", "occurred_at", "actor_id", "scope_type", "scope_id", "object_type", "object_id", "data"],
+  "properties": {
+    "id": { "$ref": "messages.schema.json#/definitions/Uuid" },
+    "type_id": { "type": "integer", "enum": [103, 203, 204, 301, 902, 1201, 1202, 1301] },
+    "occurred_at": { "$ref": "messages.schema.json#/definitions/Timestamp" },
+    "actor_id": { "anyOf": [{ "$ref": "#/definitions/HistoryId" }, { "type": "null" }] },
+    "scope_type": { "type": "string", "enum": ["user", "system"] },
+    "scope_id": { "$ref": "#/definitions/HistoryId" },
+    "object_type": { "type": "string", "enum": ["model", "installation", "operation"] },
+    "object_id": { "$ref": "#/definitions/HistoryId" },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "modelId", "outcome"],
+      "properties": {
+        "operation": { "type": "string", "enum": ["invoke", "install", "configure", "load", "unload", "remove"] },
+        "modelId": { "$ref": "#/definitions/HistoryId" },
+        "revision": { "anyOf": [{ "$ref": "#/definitions/HistoryId" }, { "type": "null" }] },
+        "profileId": { "anyOf": [{ "$ref": "#/definitions/HistoryId" }, { "type": "null" }] },
+        "operationId": { "$ref": "messages.schema.json#/definitions/Uuid" },
+        "requestId": { "$ref": "messages.schema.json#/definitions/Uuid" },
+        "outcome": { "type": "string", "enum": ["accepted", "started", "succeeded", "failed", "cancelled", "interrupted", "unknown"] },
+        "phase": { "type": "string", "enum": ["accepted", "download", "verify", "publish", "load", "execute", "unload", "remove", "configure"] },
+        "durationMs": { "type": "integer", "minimum": 0 },
+        "inputBytes": { "type": "integer", "minimum": 0 },
+        "resultBytes": { "type": "integer", "minimum": 0 },
+        "vectorDimensions": { "type": "integer", "minimum": 1 },
+        "errorCode": { "type": "string", "enum": ["INVALID_ARGUMENT", "MODEL_NOT_FOUND", "MODEL_NOT_INSTALLED", "UNSUPPORTED_OPERATION", "MODEL_IN_USE", "INPUT_TOO_LARGE", "RESULT_TOO_LARGE", "BUSY", "MODEL_LOAD_FAILED", "ENGINE_UNAVAILABLE", "DEADLINE_EXCEEDED", "CANCELLED", "ARTIFACT_NOT_AVAILABLE", "DEPENDENCY_UNAVAILABLE", "INSTALLATION_FAILED", "REVISION_CONFLICT", "NOT_SUPPORTED", "INTERNAL"] }
+      }
+    }
+  },
+  "definitions": {
+    "HistoryId": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^\\u0000]+$" }
+  },
+  "if": { "properties": { "data": { "properties": { "operation": { "const": "invoke" } }, "required": ["operation"] } } },
+  "then": { "properties": { "scope_type": { "const": "user" } } },
+  "else": { "properties": { "scope_type": { "const": "system" }, "scope_id": { "const": "local_ai" } } }
+}

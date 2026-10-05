@@ -1,0 +1,73 @@
+{
+  "openrpc": "1.2.6",
+  "info": {
+    "title": "Brai private GigaAM v3 e2e CTC runner",
+    "version": "1.0.0",
+    "description": "Private UTF-8 JSON-RPC 2.0 over stdin/stdout, one JSON document per line. stdout contains RPC responses only; stderr contains diagnostics. GigaAM, VAD model, and audio paths are local to the service container."
+  },
+  "servers": [],
+  "methods": [
+    {
+      "name": "health",
+      "summary": "Return the loaded model readiness and immutable revision.",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": { "$ref": "schemas.json#/definitions/HealthResult" }
+      },
+      "x-paramsSchema": { "$ref": "schemas.json#/definitions/HealthParams" },
+      "paramStructure": "by-name",
+      "errors": [
+        { "code": -32600, "message": "Invalid Request" },
+        { "code": -32602, "message": "Invalid params" },
+        { "code": -32603, "message": "Internal error" }
+      ]
+    },
+    {
+      "name": "transcribe",
+      "summary": "Transcribe local audio with GigaAM-v3 e2e CTC, switching to VAD longform above 25 seconds.",
+      "params": [
+        {
+          "name": "audio_path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^/",
+            "description": "Absolute local path to an FFmpeg-decodable audio file readable by the runner."
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": { "$ref": "schemas.json#/definitions/TranscribeResult" }
+      },
+      "x-paramsSchema": { "$ref": "schemas.json#/definitions/TranscribeParams" },
+      "paramStructure": "by-name",
+      "errors": [
+        { "code": -32600, "message": "Invalid Request" },
+        { "code": -32602, "message": "Invalid params" },
+        { "code": -32001, "message": "Audio file is unavailable, invalid, or exceeds the configured longform duration limit" },
+        { "code": -32603, "message": "Inference failed" }
+      ]
+    }
+  ],
+  "x-transport": {
+    "type": "UTF-8 JSON text lines over child-process stdin/stdout",
+    "request": "JSON-RPC 2.0 request object, or batch array, on one line",
+    "response": "JSON-RPC 2.0 result or error object on one line",
+    "notification": "No response line",
+    "batch": "One response array line in request order; notifications are omitted; all-notification batch emits no line",
+    "diagnostics": "stderr only",
+    "offline": "GigaAM and pyannote VAD are loaded from checksum-verified local snapshots; runtime network access is disabled."
+  },
+  "x-jsonrpc-errors": {
+    "-32700": "Parse error; id is null",
+    "-32600": "Invalid request; id is null when the request id cannot be determined",
+    "-32601": "Method not found; recognized request id is echoed",
+    "-32602": "Invalid params; recognized request id is echoed",
+    "-32001": "Audio input unavailable, undecodable, or beyond configured longform duration limit",
+    "-32603": "Internal or inference error; sensitive implementation details are omitted"
+  },
+  "x-resource-lifecycle": "The runner owns one CPU model for its process lifetime. Exiting the child process releases its model memory; there is no unload RPC."
+}
