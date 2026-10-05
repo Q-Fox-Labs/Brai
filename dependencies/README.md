@@ -1,5 +1,7 @@
 # Зависимости Brai
 
+[Temporal](temporal/README.md) `1.31.0` — сервер workflow с отдельным PostgreSQL и постоянной историей. Микросервисы подключаются к `temporal:7233` через существующую сеть `BRAI_NATS_NETWORK`; namespace — `brai`.
+
 [Instaloader](instaloader/README.md) `4.15.3` установлен как отдельная контейнерная CLI-зависимость для получения медиа и метаданных Instagram. Его образ и Docker Compose находятся в `instaloader/`; инструмент запускается по запросу с явным каталогом данных.
 
 Brai использует NATS `2.15.0` с JetStream и полный Supabase `self-hosted/v0.8.2`. Эти определения запускаются через Docker Compose без репозитория `admin`. Секреты, параметры экземпляра и подготовленный корень Supabase передаются явно.

@@ -1,0 +1,70 @@
+# ABOUTME: Запускает Temporal Server с отдельным постоянным PostgreSQL.
+# ABOUTME: Первоначальная схема запускается явно; восстановление использует готовые данные.
+name: ${TEMPORAL_COMPOSE_PROJECT:?Set TEMPORAL_COMPOSE_PROJECT}
+services:
+  postgresql:
+    image: postgres:16.15
+    restart: unless-stopped
+    env_file: ${TEMPORAL_DATABASE_ENV_FILE:?Set protected database environment file}
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/temporal.sql:ro
+    networks: [database]
+    healthcheck:
+      test: [CMD, pg_isready, -U, temporal, -d, temporal]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  temporal:
+    image: temporalio/server:1.31.0
+    restart: unless-stopped
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    env_file: ${TEMPORAL_DATABASE_ENV_FILE:?Set protected database environment file}
+    environment:
+      DB: postgres12
+      DB_PORT: '5432'
+      POSTGRES_USER: temporal
+      POSTGRES_SEEDS: postgresql
+      BIND_ON_IP: 0.0.0.0
+      LOG_LEVEL: warn
+    volumes:
+      - ./dynamicconfig.yml:/etc/temporal/config/dynamicconfig/docker.yaml:ro
+    ports:
+      - '127.0.0.1:${TEMPORAL_HOST_PORT:-7233}:7233'
+    networks:
+      database: {}
+      messaging:
+        aliases: [temporal]
+    healthcheck:
+      test: [CMD, nc, -z, localhost, '7233']
+      interval: 5s
+      timeout: 3s
+      start_period: 30s
+      retries: 60
+  schema:
+    image: temporalio/admin-tools:1.31.0
+    profiles: [setup]
+    env_file: ${TEMPORAL_DATABASE_ENV_FILE:?Set protected database environment file}
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_SEEDS: postgresql
+    entrypoint: [/bin/sh, /setup-schema.sh]
+    volumes:
+      - ./setup-schema.sh:/setup-schema.sh:ro
+    networks: [database]
+networks:
+  messaging:
+    name: ${BRAI_NATS_NETWORK:?Set existing microservice network}
+    external: true
+  database:
+    name: ${TEMPORAL_DATABASE_NETWORK:?Set private database network}
+    external: true
+volumes:
+  postgres_data:
+    name: ${TEMPORAL_DATABASE_VOLUME:?Set existing PostgreSQL volume}
+    external: true
