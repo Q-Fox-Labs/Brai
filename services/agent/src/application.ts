@@ -532,7 +532,8 @@ function validAnswer(f: PendingRequest, answer: any): boolean {
   if (f.kind === 'command-approval' && f.params.availableDecisions) return f.params.availableDecisions.some((v: any) => JSON.stringify(v) === JSON.stringify(answer?.decision));
   if (f.kind === 'question') {
     if (Object.keys(answer?.answers ?? {}).sort().join() !== f.params.questions.map((q: any) => q.id).sort().join()) return false;
-    return f.params.questions.every((q: any) => answer.answers[q.id].answers.length > 0 && answer.answers[q.id].answers.every((value: string) => value.trim() && (!q.options?.length || q.isOther || q.options.some((option: any) => option.label === value))));
+    // AIDEV-NOTE: Native schema допускает пустой answers — это явный пропуск, а не отсутствующий вопрос.
+    return f.params.questions.every((q: any) => answer.answers[q.id].answers.every((value: string) => value.trim() && (!q.options?.length || q.isOther || q.options.some((option: any) => option.label === value))));
   }
   if (f.kind === 'permissions') return answer?.scope === 'turn' && answer?.strictAutoReview !== true && (JSON.stringify(answer?.permissions) === JSON.stringify(f.params.permissions) || JSON.stringify(answer?.permissions) === '{}');
   return true;

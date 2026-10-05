@@ -95,6 +95,21 @@ test('question without Other rejects unoffered values', async () => {
   await f.app.request({ ...answer, operationId: 'answer2', answer: { answers: { q: { answers: ['Yes'] } } } });
   assert.equal((await f.open()).thread.awaitingReply, false);
 });
+test('question skips keep every original ID and accept mixed or entirely empty answers', async t => {
+  for (const skipAll of [false, true]) {
+    const f = fixture(); t.after(() => f.app.close());
+    await f.create('create1');
+    f.observe({ type: 'request', method: 'item/tool/requestUserInput', id: 3, supported: true, params: { threadId: 't1', turnId: 'turn1', questions: [{ id: 'first', options: [{ label: 'Yes' }] }, { id: 'second', isOther: true }] } });
+    const command = f.command('answer', { requestId: 'number:3' });
+    for (const answers of [{ first: { answers: [] } }, { first: { answers: [] }, second: { answers: ['   '] } }, { first: { answers: [] }, second: { answers: [] }, extra: { answers: [] } }]) {
+      await assert.rejects(f.app.request({ ...command, operationId: 'invalid-' + JSON.stringify(answers), answer: { answers } }), error => error.code === 'INVALID_ARGUMENT');
+    }
+    await f.app.request({ ...command, answer: { answers: { first: { answers: [] }, second: { answers: skipAll ? [] : ['Custom response'] } } } });
+    assert.equal(f.counts().answers, 1);
+    assert.equal((await f.open()).thread.awaitingReply, false);
+    assert.equal((await f.open()).requests[0].answered, true);
+  }
+});
 test('sixteen concurrent admissions fit; seventeenth has no native effect', async () => {
   const f = fixture();
   await Promise.all(Array.from({ length: 16 }, (_, i) => f.create('create' + i)));
