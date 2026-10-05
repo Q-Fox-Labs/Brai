@@ -7,7 +7,7 @@ import { validateCommand } from '../contracts/index.mjs';
 import Ajv from 'ajv';
 import schema from '../schemas/messages.schema.json' with { type: 'json' };
 import nativeSchema from '../contracts/codex/schema.json' with { type: 'json' };
-import { summary } from '../dist/display.js';
+import { summary, messageAttention } from '../dist/display.js';
 function fixture() {
   let observer, generation = 'g1';
   const settings = { beforeCall: null };
@@ -232,6 +232,20 @@ test('message images survive reopening and live snapshots stay compact', async (
   assert.deepEqual((await f.read('item', { turnId: 'turn', itemId: 'user' })).item.images, [url]);
   await assert.rejects(f.read('item', { turnId: 'other', itemId: 'user' }), error => error.code === 'NOT_FOUND');
   f.app.close();
+});
+
+test('link query parameters do not ask for a reply, but visible questions still do', async t => {
+  const f = fixture(); t.after(() => f.app.close());
+  f.entries.at(-1).item = { id: 'final', type: 'agentMessage', phase: 'final_answer', text: 'Проверено. [Каталог](https://openrouter.ai/api/v1/models?output_modalities=all)' };
+  const listed = (await f.app.request({ action: 'threads', projectId: 'p' })).data.find(thread => thread.id === 't');
+  assert.equal(listed.awaitingReply, false);
+  assert.equal((await f.read('open')).thread.awaitingReply, false);
+  for (const text of ['https://example.com/?q=1', '<https://example.com/?q=1>', '[Каталог](/models?all=1)', '[Каталог][models]\n\n[models]: /models?all=1']) {
+    assert.equal(messageAttention({ ...f.entries.at(-1).item, text }).awaitingReply, false, text);
+  }
+  for (const text of ['Какой вариант выбрать? [Каталог](https://example.com/?q=1)', '[Какой вариант?](https://example.com/?q=1)', 'Продолжить？']) {
+    assert.equal(messageAttention({ ...f.entries.at(-1).item, text }).awaitingReply, true, text);
+  }
 });
 
 test('final attention survives reading and tool updates, clears on reply, and returns in native list', async t => {

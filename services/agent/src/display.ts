@@ -72,9 +72,13 @@ export function summary(item: DisplayItem): DisplayItem {
   return { id: item.id, turnId: item.turnId, type: item.type, text: '', status: item.status, exitCode: item.exitCode, revision: item.revision, summary: text(title, 256).replace(/\n\[содержимое сокращено\]$/, '') };
 }
 
-/** Последнее сообщение определяет итог; вопрос в тексте — явный знак вопроса вне блоков кода. */
+/** Последнее сообщение определяет итог; вопрос ищется в видимом тексте, вне кода и адресов ссылок. */
 export function messageAttention(item: DisplayItem): { finalMessageId: string | null; awaitingReply: boolean } {
   const final = item.type === 'agentMessage' && item.phase === 'final_answer';
-  const prose = item.text.replace(/```[\s\S]*?```|`[^`]*`/g, '');
+  // AIDEV-NOTE: Query-параметры URL не являются вопросом; текст подписи ссылки остаётся видимым.
+  const prose = item.text.replace(/```[\s\S]*?```|`[^`]*`/g, '')
+    .replace(/\]\((?:\\.|[^\\)])*\)/g, ']')
+    .replace(/^\s{0,3}\[[^\]]+\]:[^\n]*$/gm, '')
+    .replace(/(?:https?:\/\/|mailto:)[^\s<>]+/gi, '');
   return { finalMessageId: final ? item.id : null, awaitingReply: final && /[?？]/u.test(prose) };
 }
