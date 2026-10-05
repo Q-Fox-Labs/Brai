@@ -12,12 +12,9 @@
 .agent-materials-actions button { border: 1px solid var(--agent-border); border-radius: 9px; padding: 9px 12px; font-size: 13px; }
 .agent-materials-actions button:disabled { opacity: .45; }
 .agent-materials-actions .agent-primary { margin-top: 0; }
-.agent-shell:has(.agent-materials) .agent-composer-actions .agent-model-settings { flex-basis: 100%; order: 1; }
-.agent-shell:has(.agent-materials) .agent-composer-actions .agent-send { margin-left: auto; }
 .agent-material-card { display: block; width: 100%; text-align: left; padding: 16px 18px; margin: 12px 0; border: 1px solid var(--agent-border); border-radius: 12px; background: #2a2d32; font-size: 14px; }
 .agent-material-card span { float: right; font-size: 12px; color: #c4b5fd; }
 .agent-materials-toggle { border: 1px solid var(--agent-border); padding: 8px 10px; border-radius: 8px; font-size: 12px; }
-.agent-mode-select { max-width: 150px; min-width: 0; background: var(--agent-bg); border: 1px solid var(--agent-border); border-radius: 8px; padding: 7px 9px; font-size: 12px; }
 .agent-plan-steps { padding-left: 22px; }
 .agent-plan-steps li { padding: 8px 0; }
 .agent-plan-step-status { color: var(--agent-muted); font-size: 12px; }

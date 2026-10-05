@@ -160,12 +160,28 @@ test("reset formatting uses the local timezone and safely handles missing or inv
   }
 });
 
-test("three selectors retain accessible names without visible labels", () => {
+test("compact settings keep catalogue choices, labelled thumbs and icon-only permissions", () => {
   const noop = () => {};
-  const html = renderToStaticMarkup(createElement(component("settings"), { models: [{ model: "model", name: "Model", efforts: ["high"], defaultEffort: "high" }], model: "model", effort: "high", permissionMode: "auto", disabled: false, chooseModel: noop, chooseEffort: noop, choosePermissions: noop }));
-  assert.equal((html.match(/<select/g) ?? []).length, 3);
-  for (const name of ["Модель", "Рассуждение", "Разрешения"]) assert.ok(html.includes(`aria-label="${name}"`));
-  assert.doesNotMatch(html, /<label/);
+  const models = ["gpt-6-astra", "gpt-6-luna", "gpt-6.1-sol"].map(model => ({ model, name: model, efforts: model === "gpt-6-luna" ? ["low", "medium", "high", "xhigh", "max"] : ["low", "medium", "high", "xhigh", "max", "ultra"], defaultEffort: "low" }));
+  const props = { models, model: "gpt-6.1-sol", effort: "medium", permissionMode: "auto", disabled: false, chooseModel: noop, chooseEffort: noop, choosePermissions: noop };
+  const html = renderToStaticMarkup(createElement(component("settings"), props));
+  assert.equal((html.match(/type="range"/g) ?? []).length, 2);
+  for (const name of ["Модель", "Рассуждение"]) assert.ok(html.includes(`aria-label="${name}"`));
+  assert.match(html, /title="Разрешения: Подтверждать за меня"/);
+  assert.match(html, />Sol<\/span>/);
+  assert.match(html, />Med<\/span>/);
+  assert.match(html, /aria-valuetext="Medium"/);
+  assert.match(html, /aria-label="Рассуждение"[^>]*max="5"/);
+  const luna = renderToStaticMarkup(createElement(component("settings"), { ...props, model: "gpt-6-luna", effort: "max" }));
+  assert.match(luna, /aria-label="Рассуждение"[^>]*max="4"/);
+  assert.match(luna, />Max<\/span>/);
+  assert.equal((html.match(/tabindex="-1"/g) ?? []).length, 2);
+  assert.doesNotMatch(html, /<select|<label|>Подтверждать за меня</);
+  const locked = renderToStaticMarkup(createElement(component("settings"), { ...props, disabled: true }));
+  assert.equal((locked.match(/disabled=""/g) ?? []).length, 3);
+  const loading = renderToStaticMarkup(createElement(component("settings"), { ...props, models: [], model: "", effort: "" }));
+  assert.equal((loading.match(/disabled=""/g) ?? []).length, 2);
+  assert.match(loading, /Загрузка…/);
 });
 
 test("empty reasoning cannot create a group; a live nonempty revision reappears", () => {

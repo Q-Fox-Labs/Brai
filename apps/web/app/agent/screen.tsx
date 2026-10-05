@@ -6,7 +6,7 @@ import type { DisplayItem, NativeSnapshot, ModelCatalog, PermissionMode, ThreadM
 import type { AgentLimits } from "@brai/agent/contracts";
 import { createAgentClient, AgentError } from "../../lib/agent/client";
 import { mergeThreadMetadata } from "../../lib/agent/thread";
-import ModelSettings from "./settings";
+import ModelSettings, { AgentModeButton, ComposerIcon } from "./settings";
 import NativeForm from "./request";
 import { createLazyReads } from "../../lib/agent/lazy";
 import Activities from "./activities";
@@ -24,6 +24,7 @@ import { acceptedDraft, imageModel, prepareImage, type ComposerDraft } from "../
 type CachedChat = { snapshot: NativeSnapshot | null; history: DisplayItem[]; generation: string; cursor: string | null; draft: ComposerDraft; model: string; effort: string; permissionMode: PermissionMode; agentMode: AgentMode; materials: MaterialView; ready: boolean; uncertain: boolean };
 type QueuedMessage = { id: string; chat: string; generation: string; draft: ComposerDraft; model: string; effort: string; permissionMode: PermissionMode; agentMode: AgentMode; state: "waiting" | "sending" | "failed" | "unknown" };
 const emptyDraft = (): ComposerDraft => ({ text: "", revision: 0, images: [] });
+const defaultModelId = "gpt-6.1-sol", defaultEffort = "medium";
 type Props = { active: boolean; userId: string; email: string; onLogout: () => void; onUnauthorized: () => void; accountMessage: string };
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Ошибка связи";
 const stateLabels: Record<string, string> = { idle: "Готов", inProgress: "Работает", waiting: "Ждёт ответа", completed: "Завершён", interrupted: "Остановлен", failed: "Ошибка", "connection-lost": "Переподключение", "executor-unavailable": "Codex недоступен" };
@@ -66,6 +67,8 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const [agentMode, setAgentMode] = useState<AgentMode>("default");
   const [materialView, setMaterialView] = useState<MaterialView>(emptyMaterialView);
   const composerInput = useRef<HTMLTextAreaElement>(null);
+  const [inputHeight, setInputHeight] = useState(65);
+  const resizing = useRef<{ pointer: number; y: number; height: number } | null>(null);
   const archived = useRef(new Set<string>());
   const pageRequests = useRef(new Map<string, symbol>());
 
@@ -233,10 +236,11 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       if (action === "create" || action === "start") void loadThreads(targetProject);
       if (token !== selection.current) return true;
       if (action === "create") {
-        cache.current.set(`${targetProject}:${value.threadId}`, { snapshot: null, history: [], generation, cursor: null, draft: emptyDraft(), model, effort, permissionMode, agentMode, materials: emptyMaterialView(), ready: false, uncertain: false });
+        const createdModel = typeof extra.model === "string" ? extra.model : "";
+        cache.current.set(`${targetProject}:${value.threadId}`, { snapshot: null, history: [], generation, cursor: null, draft: emptyDraft(), model: createdModel, effort: createdModel === defaultModelId ? defaultEffort : "", permissionMode, agentMode, materials: emptyMaterialView(), ready: false, uncertain: false });
         selectChat(targetProject, value.threadId);
       }
-      setMessage("Действие принято."); return true;
+      setMessage(""); return true;
     } catch (error) {
       if (!alive.current) return false;
       if (queuedDraft && error instanceof AgentError && error.outcome === "unknown") setQueuedMessages(previous => previous.map(value => value.draft === queuedDraft ? { ...value, state: "unknown" } : value));
@@ -258,9 +262,10 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const active = view?.turn?.status === "inProgress", disabled = busy || !view || !connected || uncertain.current;
   const project = projects.find(value => value.projectId === projectId);
   const selectedThread = pages[projectId]?.data.find(thread => thread.id === threadId) ?? view?.thread;
-  const selectedModel = models?.data.find(value => value.model === (model || view?.thread.model)) ?? models?.data.find(value => value.model === models.defaultModel) ?? models?.data[0];
+  const defaultModel = models?.data.find(value => value.model === defaultModelId) ?? models?.data.find(value => value.model === models.defaultModel) ?? models?.data[0];
+  const selectedModel = models?.data.find(value => value.model === (model || view?.thread.model)) ?? defaultModel;
   const requestedEffort = effort || (selectedModel?.model === view?.thread.model ? view?.thread.reasoningEffort : null);
-  const selectedEffort = selectedModel?.efforts.includes(requestedEffort ?? "") ? requestedEffort! : selectedModel?.defaultEffort ?? "";
+  const selectedEffort = selectedModel?.efforts.includes(requestedEffort ?? "") ? requestedEffort! : selectedModel?.model === defaultModelId && selectedModel.efforts.includes(defaultEffort) ? defaultEffort : selectedModel?.defaultEffort ?? "";
   const currentImageModel = imageModel(models, view, selectedModel, active);
   const imagesAllowed = (active || agentMode !== "goal") && !!currentImageModel?.inputModalities.includes("image") && currentImageModel.imageLimit > 0;
   const imageLimit = Math.min(limits.images, currentImageModel?.imageLimit ?? 0);
@@ -435,7 +440,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
 
   return <main className="agent-shell">
     <Sidebar readMessages={readMessages} projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={sidebarOpen} email={email} busy={busy || uncertain.current} accountLimits={accountLimits}
-      select={selectChat} create={id => { void mutate("create", selectedModel ? { model: selectedModel.model, permissionMode } : { permissionMode }, id); }} more={id => { const next = pages[id]?.nextCursor; if (next) void loadThreads(id, next); }}
+      select={selectChat} create={id => { void mutate("create", defaultModel ? { model: defaultModel.model, permissionMode } : { permissionMode }, id); }} more={id => { const next = pages[id]?.nextCursor; if (next) void loadThreads(id, next); }}
       archive={(id, chatId) => { void archiveChat(id, chatId); }} refresh={id => { void loadThreads(id); }} close={() => setSidebarOpen(false)} logout={onLogout} />
     <section className="agent-workspace" aria-labelledby="agent-chat-title">
       <header className="agent-toolbar">
@@ -448,7 +453,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         const element = event.currentTarget;
         followBottom.current = element.scrollHeight - element.clientHeight - element.scrollTop <= 1;
       }}>
-        {!threadId && <div className="agent-empty"><span className="agent-empty-symbol" aria-hidden="true">✳</span><h2>С чего начнём?</h2><p>Выберите чат слева или создайте новый в нужном проекте.</p>{project && <button className="agent-primary" disabled={busy || uncertain.current} onClick={() => void mutate("create", selectedModel ? { model: selectedModel.model, permissionMode } : { permissionMode })}>Новый чат · {project.name}</button>}</div>}
+        {!threadId && <div className="agent-empty"><span className="agent-empty-symbol" aria-hidden="true">✳</span><h2>С чего начнём?</h2><p>Выберите чат слева или создайте новый в нужном проекте.</p>{project && <button className="agent-primary" disabled={busy || uncertain.current} onClick={() => void mutate("create", defaultModel ? { model: defaultModel.model, permissionMode } : { permissionMode })}>Новый чат · {project.name}</button>}</div>}
         <div className="agent-timeline">
           {cursor && <button className="agent-history-more" onClick={() => void moreHistory()}>Загрузить предыдущие сообщения</button>}
           {timeline.map(entry => entry.kind === "message" ? entry.item.type === "plan" ? <button key={entry.item.id} type="button" className="agent-material-card" onClick={() => chooseMaterial(`plan:${entry.item.id}`)}>Предложенный план <span>{materialView.updated.includes(`plan:${entry.item.id}`) ? "Обновлено · " : ""}Открыть →</span></button> : <Item key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.item.id}`} item={entry.item} context={activityContext} reads={lazyReads} /> : <Activities key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.id}`} items={entry.items} context={activityContext} reads={lazyReads} />)}
@@ -465,7 +470,8 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         {threadId && <form className="agent-composer" onSubmit={event => { event.preventDefault(); submit(); }}>
           <label className="sr-only" htmlFor="agent-draft">{active ? "Дополнить текущий ход" : "Сообщение"}</label>
           {!!attachments.length && <ul className="agent-attachments" aria-label="Прикреплённые изображения">{attachments.map(image => <li key={image.id}><img src={image.dataUrl} alt={image.name} /><span className="agent-attachment-name" title={image.name}>{image.name}</span>{image.reduced && <span className="agent-image-reduced">Уменьшено</span>}<button type="button" className="agent-attachment-remove" aria-label={`Удалить ${image.name}`} onClick={() => changeDraft({ ...composerRef.current, images: composerRef.current.images.filter(value => value.id !== image.id) })}>×</button></li>)}</ul>}
-          <textarea ref={composerInput} id="agent-draft" placeholder={active ? "Дополнить текущее задание…" : agentMode === "goal" ? "Какой цели нужно достичь?" : agentMode === "plan" ? "Что нужно спланировать?" : "Что нужно сделать?"} value={draft} onChange={event => changeDraft({ ...composerRef.current, text: event.target.value, revision: composerRef.current.revision + 1 })} onPaste={event => {
+          <div className="agent-composer-input">
+          <textarea ref={composerInput} id="agent-draft" style={{ height: inputHeight }} placeholder={active ? "Дополнить текущее задание…" : agentMode === "goal" ? "Какой цели нужно достичь?" : agentMode === "plan" ? "Что нужно спланировать?" : "Что нужно сделать?"} value={draft} onChange={event => changeDraft({ ...composerRef.current, text: event.target.value, revision: composerRef.current.revision + 1 })} onPaste={event => {
             const files = Array.from(event.clipboardData.files);
             if (!files.length) for (const item of Array.from(event.clipboardData.items)) { if (item.kind === "file") { const file = item.getAsFile(); if (file) files.push(file); } }
             if (files.length) { if (!event.clipboardData.getData("text/plain")) event.preventDefault(); addFiles(files); }
@@ -476,15 +482,34 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
             if (event.ctrlKey || event.metaKey) enqueueMessage();
             else if (draft.trim() || attachments.length) event.currentTarget.form?.requestSubmit();
           }} />
+          <button type="button" className="agent-input-resize" aria-label="Изменить высоту поля ввода" title="Потяните вверх, чтобы увеличить поле" tabIndex={-1}
+            onPointerDown={event => {
+              if (!event.isPrimary || event.button !== 0) return;
+              event.preventDefault();
+              resizing.current = { pointer: event.pointerId, y: event.clientY, height: composerInput.current?.getBoundingClientRect().height ?? inputHeight };
+              event.currentTarget.setPointerCapture(event.pointerId);
+            }}
+            onPointerMove={event => {
+              const start = resizing.current;
+              if (start?.pointer === event.pointerId) setInputHeight(Math.max(65, Math.min(180, start.height - (event.clientY - start.y))));
+            }}
+            onPointerUp={event => {
+              if (resizing.current?.pointer !== event.pointerId) return;
+              resizing.current = null;
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }}
+            onPointerCancel={() => { resizing.current = null; }} onLostPointerCapture={() => { resizing.current = null; }}><ComposerIcon kind="resize" /></button>
+          </div>
           <div className="agent-composer-actions">
+          <div className="agent-composer-tools">
           <input ref={fileInput} type="file" hidden multiple accept="image/png,image/jpeg,image/webp" onChange={event => { addFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
-          <button type="button" className="agent-attach" aria-label="Прикрепить изображения" title={imagesAllowed ? "Прикрепить PNG, JPEG или WebP" : !active && agentMode === "goal" ? "В режиме «Цель» изображения недоступны" : "Текущая модель не принимает изображения"} disabled={disabled || !imagesAllowed || attachments.length + preparationCount >= imageLimit} onClick={() => fileInput.current?.click()}>+</button>
-          <select className="agent-mode-select" aria-label="Режим агента" value={agentMode} disabled={disabled || active || goalUnfinished} onChange={event => { cancelPreparation(); setAgentMode(event.target.value as AgentMode); }}><option value="default">Обычный</option><option value="plan">Планирование</option><option value="goal">Цель</option></select>
-          <ModelSettings models={models?.data ?? []} model={selectedModel?.model ?? ""} effort={selectedEffort} permissionMode={permissionMode} choosePermissions={setPermissionMode} disabled={busy || active || goalUnfinished || (!!threadId && !connected)} chooseModel={value => { cancelPreparation(); setModel(value); setEffort(""); }} chooseEffort={setEffort} />
-          <button className="agent-send" disabled={sendDisabled}>{action === "interrupt" || action === "goalClear" ? "Стоп" : action === "steer" ? "Скорректировать" : "Отправить"}</button>
+          <button type="button" className="agent-composer-icon" aria-label="Прикрепить изображения" title={imagesAllowed ? "Прикрепить PNG, JPEG или WebP" : !active && agentMode === "goal" ? "В режиме «Цель» изображения недоступны" : "Текущая модель не принимает изображения"} disabled={disabled || !imagesAllowed || attachments.length + preparationCount >= imageLimit} onClick={() => fileInput.current?.click()}><ComposerIcon kind="plus" /></button>
+          <AgentModeButton mode={agentMode} disabled={disabled || active || goalUnfinished} choose={value => { cancelPreparation(); setAgentMode(value); }} />
+          <ModelSettings models={models?.data ?? []} model={selectedModel?.model ?? ""} effort={selectedEffort} permissionMode={permissionMode} choosePermissions={setPermissionMode} disabled={busy || active || goalUnfinished || (!!threadId && !connected)} chooseModel={value => { cancelPreparation(); setModel(value); setEffort(value === defaultModelId ? defaultEffort : ""); }} chooseEffort={setEffort} />
+          </div>
+          <button className="agent-send" disabled={sendDisabled} aria-label={action === "interrupt" || action === "goalClear" ? "Стоп" : action === "steer" ? "Скорректировать" : "Отправить"} title={action === "interrupt" || action === "goalClear" ? "Стоп" : action === "steer" ? "Скорректировать" : "Отправить"}><ComposerIcon kind={action === "interrupt" || action === "goalClear" ? "stop" : "send"} /></button>
           </div>
           {agentMode === "goal" && !active && <small className="agent-composer-hint">В режиме «Цель» отправьте описание задачи без изображений.</small>}
-          <small className="agent-composer-hint">Enter — отправить · Shift+Enter — новая строка · Ctrl/⌘+Enter — в очередь</small>
         </form>}
         <p className="agent-feedback" role="alert">{uncertain.current ? "Результат неизвестен. Обновите страницу и проверьте чат перед новой отправкой." : imageError || message || accountMessage}</p>
         {corrections.length >= 64 && <p role="status">Дождитесь применения корректировок или уберите сообщения с ошибкой перед новой корректировкой.</p>}
