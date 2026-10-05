@@ -36,7 +36,12 @@
     "test:history": "npm run test --workspace=@brai/history",
     "migrate:history": "npm run migrate --workspace=@brai/history",
     "health:history": "npm run health --workspace=@brai/history",
-    "test:integration:history": "npm run test:integration --workspace=@brai/history"
+    "test:integration:history": "npm run test:integration --workspace=@brai/history",
+    "build:local-ai": "npm run build --workspace=@brai/local-ai",
+    "typecheck:local-ai": "npm run typecheck --workspace=@brai/local-ai",
+    "test:local-ai": "npm test --workspace=@brai/local-ai",
+    "test:integration:local-ai": "npm run test:integration --workspace=@brai/local-ai",
+    "migrate:local-ai": "npm run migrate --workspace=@brai/local-ai"
   },
   "engines": {
     "node": "24.21.0",
