@@ -1,0 +1,159 @@
+# ABOUTME: Описывает NATS Services запросы и owner JSON Schema сервиса истории.
+# ABOUTME: Документирует NATS ACL source binding и нативный адрес request/reply.
+asyncapi: 3.1.0
+info:
+  title: Brai history service
+  version: 1.0.0
+  description: >
+    NATS Service service_history, version 1.0.0, unique instance ID, queue service_history,
+    with PING, INFO and STATS. Service errors use Nats-Service-Error (symbolic code) and
+    Nats-Service-Error-Code (numeric HTTP-like status). Replies use the native NATS message
+    reply subject; request bodies do not contain replyTo.
+servers:
+  brai:
+    host: '{host}:{port}'
+    protocol: nats
+    description: Private NATS endpoint supplied by runtime configuration.
+    variables:
+      host:
+        default: localhost
+      port:
+        default: '4222'
+defaultContentType: application/json
+channels:
+  appendEvent:
+    address: brai.history.v1.append.{source}
+    parameters:
+      source:
+        description: Source code bound to the sender by NATS ACL. Body has no source field.
+        x-source-schema:
+          $ref: ./schemas/common.schema.json#/definitions/source
+    messages:
+      AppendRequest:
+        $ref: '#/components/messages/AppendRequest'
+      AppendResponse:
+        $ref: '#/components/messages/AppendResponse'
+      ServiceError:
+        $ref: '#/components/messages/ServiceError'
+  listQuery:
+    address: brai.history.v1.query.list
+    messages:
+      ListRequest:
+        $ref: '#/components/messages/ListRequest'
+      ListResponse:
+        $ref: '#/components/messages/ListResponse'
+      ServiceError:
+        $ref: '#/components/messages/ServiceError'
+  getQuery:
+    address: brai.history.v1.query.get
+    messages:
+      GetRequest:
+        $ref: '#/components/messages/GetRequest'
+      GetResponse:
+        $ref: '#/components/messages/GetResponse'
+      ServiceError:
+        $ref: '#/components/messages/ServiceError'
+  serviceReply:
+    address: null
+    messages:
+      AppendResponse:
+        $ref: '#/components/messages/AppendResponse'
+      ListResponse:
+        $ref: '#/components/messages/ListResponse'
+      GetResponse:
+        $ref: '#/components/messages/GetResponse'
+      ServiceError:
+        $ref: '#/components/messages/ServiceError'
+operations:
+  append:
+    action: receive
+    channel:
+      $ref: '#/channels/appendEvent'
+    messages:
+      - $ref: '#/channels/appendEvent/messages/AppendRequest'
+    description: >
+      The source is taken from the subject and authorized by NATS ACL, not from JSON.
+      Repeated (source,id) with identical normalized content returns the original event;
+      changed content returns EVENT_ID_CONFLICT.
+    reply:
+      channel:
+        $ref: '#/channels/serviceReply'
+      description: Reply to the request's native NATS reply subject.
+      x-nats-reply-subject: message.reply
+      messages:
+        - $ref: '#/channels/serviceReply/messages/AppendResponse'
+        - $ref: '#/channels/serviceReply/messages/ServiceError'
+    bindings:
+      nats:
+        queue: service_history
+        bindingVersion: 0.1.0
+  list:
+    action: receive
+    channel:
+      $ref: '#/channels/listQuery'
+    messages:
+      - $ref: '#/channels/listQuery/messages/ListRequest'
+    description: >
+      Reads only scope_type=user and scope_id=user_id from the trusted web server.
+      Filters are a fixed allowlist and cursor is bound to the normalized filters and scope.
+    reply:
+      channel:
+        $ref: '#/channels/serviceReply'
+      description: Reply to the request's native NATS reply subject.
+      x-nats-reply-subject: message.reply
+      messages:
+        - $ref: '#/channels/serviceReply/messages/ListResponse'
+        - $ref: '#/channels/serviceReply/messages/ServiceError'
+    bindings:
+      nats:
+        queue: service_history
+        bindingVersion: 0.1.0
+  get:
+    action: receive
+    channel:
+      $ref: '#/channels/getQuery'
+    messages:
+      - $ref: '#/channels/getQuery/messages/GetRequest'
+    description: Returns an event only within the user scope; missing and foreign rows both return NOT_FOUND.
+    reply:
+      channel:
+        $ref: '#/channels/serviceReply'
+      description: Reply to the request's native NATS reply subject.
+      x-nats-reply-subject: message.reply
+      messages:
+        - $ref: '#/channels/serviceReply/messages/GetResponse'
+        - $ref: '#/channels/serviceReply/messages/ServiceError'
+    bindings:
+      nats:
+        queue: service_history
+        bindingVersion: 0.1.0
+components:
+  messages:
+    AppendRequest:
+      name: AppendRequest
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/appendRequest
+    AppendResponse:
+      name: AppendResponse
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/appendResponse
+    ListRequest:
+      name: ListRequest
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/listRequest
+    ListResponse:
+      name: ListResponse
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/listResponse
+    GetRequest:
+      name: GetRequest
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/getRequest
+    GetResponse:
+      name: GetResponse
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/getResponse
+    ServiceError:
+      name: ServiceError
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/serviceError

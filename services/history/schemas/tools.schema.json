@@ -1,0 +1,436 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.invalid/contracts/history/v1/tools.schema.json",
+  "title": "Brai history MCP tool DTOs",
+  "definitions": {
+    "categoriesListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    },
+    "typesListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "category_id": {
+          "$ref": "common.schema.json#/definitions/id"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    },
+    "typeGetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "common.schema.json#/definitions/id"
+        }
+      }
+    },
+    "typeGetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "$ref": "common.schema.json#/definitions/type"
+        }
+      }
+    },
+    "appendRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "id",
+        "type_id",
+        "occurred_at",
+        "scope_type",
+        "scope_id"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "common.schema.json#/definitions/source"
+        },
+        "id": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "type_id": {
+          "$ref": "common.schema.json#/definitions/id"
+        },
+        "occurred_at": {
+          "$ref": "common.schema.json#/definitions/timestamp"
+        },
+        "actor_id": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/definitions/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope_type": {
+          "$ref": "common.schema.json#/definitions/scopeType"
+        },
+        "scope_id": {
+          "$ref": "common.schema.json#/definitions/identifier"
+        },
+        "object_type": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "object_id": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/definitions/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "data": {
+          "$ref": "common.schema.json#/definitions/data"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "object_type"
+            ],
+            "properties": {
+              "object_type": {
+                "type": "string"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "object_id"
+            ],
+            "properties": {
+              "object_id": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "object_id"
+            ],
+            "properties": {
+              "object_id": {
+                "type": "string"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "object_type"
+            ],
+            "properties": {
+              "object_type": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "appendResponse": {
+      "$ref": "messages.schema.json#/definitions/appendResponse"
+    },
+    "getRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "id"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "common.schema.json#/definitions/source"
+        },
+        "id": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        }
+      }
+    },
+    "getResponse": {
+      "$ref": "messages.schema.json#/definitions/getResponse"
+    },
+    "searchRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "filters": {
+          "$ref": "common.schema.json#/definitions/mcpFilters"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      }
+    },
+    "searchResponse": {
+      "$ref": "messages.schema.json#/definitions/listResponse"
+    },
+    "categoryCreateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "code",
+        "name",
+        "description"
+      ],
+      "properties": {
+        "event_id": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "code": {
+          "$ref": "common.schema.json#/definitions/code"
+        },
+        "name": {
+          "$ref": "common.schema.json#/definitions/name"
+        },
+        "description": {
+          "$ref": "common.schema.json#/definitions/description"
+        },
+        "actor_id": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/definitions/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "categoryUpdateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "id",
+        "name",
+        "description"
+      ],
+      "properties": {
+        "event_id": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "id": {
+          "$ref": "common.schema.json#/definitions/id"
+        },
+        "name": {
+          "$ref": "common.schema.json#/definitions/name"
+        },
+        "description": {
+          "$ref": "common.schema.json#/definitions/description"
+        },
+        "actor_id": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/definitions/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "typeCreateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "category_id",
+        "code",
+        "name",
+        "description"
+      ],
+      "properties": {
+        "event_id": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "category_id": {
+          "$ref": "common.schema.json#/definitions/id"
+        },
+        "code": {
+          "$ref": "common.schema.json#/definitions/code"
+        },
+        "name": {
+          "$ref": "common.schema.json#/definitions/name"
+        },
+        "description": {
+          "$ref": "common.schema.json#/definitions/description"
+        },
+        "actor_id": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/definitions/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "typeUpdateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "id",
+        "name",
+        "description"
+      ],
+      "properties": {
+        "event_id": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "id": {
+          "$ref": "common.schema.json#/definitions/id"
+        },
+        "name": {
+          "$ref": "common.schema.json#/definitions/name"
+        },
+        "description": {
+          "$ref": "common.schema.json#/definitions/description"
+        },
+        "actor_id": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/definitions/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "mutationResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result",
+        "audit_event"
+      ],
+      "properties": {
+        "result": {
+          "oneOf": [
+            {
+              "$ref": "common.schema.json#/definitions/category"
+            },
+            {
+              "$ref": "common.schema.json#/definitions/type"
+            }
+          ]
+        },
+        "audit_event": {
+          "$ref": "common.schema.json#/definitions/event"
+        }
+      }
+    },
+    "categoriesListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/definitions/category"
+          }
+        },
+        "next_cursor": {
+          "$ref": "common.schema.json#/definitions/nextCursor"
+        }
+      }
+    },
+    "typesListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "common.schema.json#/definitions/type"
+          }
+        },
+        "next_cursor": {
+          "$ref": "common.schema.json#/definitions/nextCursor"
+        }
+      }
+    }
+  }
+}

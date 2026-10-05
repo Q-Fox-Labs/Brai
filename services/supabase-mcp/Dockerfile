@@ -6,6 +6,7 @@ COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
 COPY services/agent/package.json services/agent/package.json
 COPY services/artifacts/package.json services/artifacts/package.json
+COPY services/history/package.json services/history/package.json
 COPY services/auth/package.json services/auth/package.json
 COPY services/supabase-mcp/package.json services/supabase-mcp/package.json
 COPY services/timer/package.json services/timer/package.json
@@ -19,6 +20,7 @@ COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/apps/web/package.json apps/web/package.json
 COPY --from=build /app/services/agent/package.json services/agent/package.json
 COPY --from=build /app/services/artifacts/package.json services/artifacts/package.json
+COPY --from=build /app/services/history/package.json services/history/package.json
 COPY --from=build /app/services/auth/package.json services/auth/package.json
 COPY --from=build /app/services/supabase-mcp/package.json services/supabase-mcp/package.json
 COPY --from=build /app/services/timer/package.json services/timer/package.json

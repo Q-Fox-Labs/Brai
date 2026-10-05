@@ -13,8 +13,8 @@
     "typecheck:web": "npm run typecheck --workspace=@brai/web",
     "typecheck:timer": "npm run typecheck --workspace=@brai/timer",
     "typecheck:agent": "npm run typecheck --workspace=@brai/agent",
-    "build": "npm run build:web && npm run build:timer && npm run build:auth && npm run build:agent && npm run build:supabase-mcp && npm run build:artifacts",
-    "typecheck": "npm run typecheck:web && npm run typecheck:timer && npm run typecheck:auth && npm run typecheck:agent && npm run typecheck:supabase-mcp && npm run typecheck:artifacts",
+    "build": "npm run build:web && npm run build:timer && npm run build:auth && npm run build:agent && npm run build:supabase-mcp && npm run build:artifacts && npm run build:history",
+    "typecheck": "npm run typecheck:web && npm run typecheck:timer && npm run typecheck:auth && npm run typecheck:agent && npm run typecheck:supabase-mcp && npm run typecheck:artifacts && npm run typecheck:history",
     "lint": "npm run lint --workspaces --if-present",
     "test:web": "npm test --workspace=@brai/web",
     "build:auth": "npm run build --workspace=@brai/auth",
@@ -30,7 +30,13 @@
     "build:artifacts": "npm run build --workspace=@brai/artifacts",
     "typecheck:artifacts": "npm run typecheck --workspace=@brai/artifacts",
     "test:artifacts": "npm test --workspace=@brai/artifacts",
-    "test:integration:artifacts": "npm run test:integration --workspace=@brai/artifacts"
+    "test:integration:artifacts": "npm run test:integration --workspace=@brai/artifacts",
+    "build:history": "npm run build --workspace=@brai/history",
+    "typecheck:history": "npm run typecheck --workspace=@brai/history",
+    "test:history": "npm run test --workspace=@brai/history",
+    "migrate:history": "npm run migrate --workspace=@brai/history",
+    "health:history": "npm run health --workspace=@brai/history",
+    "test:integration:history": "npm run test:integration --workspace=@brai/history"
   },
   "engines": {
     "node": "24.21.0",

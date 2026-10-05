@@ -8,6 +8,7 @@ COPY services/timer/package.json services/timer/package.json
 COPY services/auth/package.json services/auth/package.json
 COPY services/agent/package.json services/agent/package.json
 COPY services/artifacts/package.json services/artifacts/package.json
+COPY services/history/package.json services/history/package.json
 COPY services/supabase-mcp/package.json services/supabase-mcp/package.json
 RUN npm ci
 COPY services/auth services/auth
@@ -21,6 +22,7 @@ COPY services/timer/package.json services/timer/package.json
 COPY services/auth/package.json services/auth/package.json
 COPY services/agent/package.json services/agent/package.json
 COPY services/artifacts/package.json services/artifacts/package.json
+COPY services/history/package.json services/history/package.json
 COPY services/supabase-mcp/package.json services/supabase-mcp/package.json
 RUN npm ci --omit=dev --workspace=@brai/auth
 WORKDIR /app/services/auth
