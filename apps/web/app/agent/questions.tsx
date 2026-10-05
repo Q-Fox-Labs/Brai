@@ -15,7 +15,8 @@ function Icon({ kind }: { kind: "previous" | "next" | "close" | "edit" | "submit
 /** Сохраняет ответы при навигации и сворачивании; send=true блокирует повтор до сверки. */
 export default function QuestionCard({ request, disabled, send }: Props) {
   const questions: Question[] = request.params.questions ?? [];
-  const [index, setIndex] = useState(0), [highlighted, setHighlighted] = useState(0), [collapsed, setCollapsed] = useState(false);
+  const [position, setIndex] = useState(0), [highlighted, setHighlighted] = useState(0), [collapsed, setCollapsed] = useState(false);
+  const index = Math.min(position, Math.max(0, questions.length - 1));
   const [answers, setAnswers] = useState<Record<string, string[]>>({}), [drafts, setDrafts] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<"idle" | "sending" | "locked">("idle");
   const sending = useRef(false), focusRequested = useRef(false), form = useRef<HTMLFormElement>(null), reopen = useRef<HTMLButtonElement>(null);
