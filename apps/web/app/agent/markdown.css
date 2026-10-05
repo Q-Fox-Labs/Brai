@@ -24,6 +24,12 @@
 .agent-markdown .markdown-code-block code { padding: 0; background: transparent; font-size: .86em; }
 .agent-item .agent-markdown .markdown-code-block { overflow-wrap: normal; white-space: pre; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .agent-item .agent-markdown .markdown-code-block code { font-family: inherit; }
+.agent-markdown .markdown-mermaid { max-width: 100%; overflow: hidden; margin: 12px 0; border: 1px solid rgb(148 163 184 / 22%); border-radius: 12px; background: #111827; }
+.agent-markdown .markdown-mermaid-canvas { max-width: 100%; overflow-x: auto; padding: 18px; }
+.agent-markdown .markdown-mermaid-canvas svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+.agent-markdown .markdown-mermaid-status, .agent-markdown .markdown-mermaid-error { display: block; padding: 10px 14px; color: rgb(203 213 225 / 78%); font-size: 12px; }
+.agent-markdown .markdown-mermaid-error { border-top: 1px solid rgb(148 163 184 / 18%); }
+.agent-markdown .markdown-mermaid-error .markdown-code-block { margin-bottom: 0; }
 .agent-markdown a { color: #93c5fd; text-decoration: underline; text-underline-offset: 2px; }
 .agent-markdown del { opacity: .8; }
 .agent-markdown hr { margin: 16px 0; border: 0; border-top: 1px solid rgb(148 163 184 / 30%); }

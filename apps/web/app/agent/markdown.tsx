@@ -1,6 +1,6 @@
 // ABOUTME: Отображает ответы агента как ограниченный безопасный Markdown.
 // ABOUTME: Разбирает разметку локально и никогда не вставляет сырой HTML в DOM.
-import type { ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import "./markdown.css";
 
 type InlinePart = string | ReactNode;
@@ -10,6 +10,58 @@ const listMarker = /^( *)([-+*]|(\d+)[.)])\s+(.*)$/;
 const heading = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
 const fence = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const tableRule = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
+let mermaidInitialized = false;
+
+function MermaidDiagram({ source }: { source: string }) {
+  const host = useRef<HTMLDivElement>(null);
+  const [state, setState] = useState<"loading" | "rendered" | "failed">("loading");
+  const id = `brai-mermaid-${useId().replace(/:/g, "")}`;
+
+  useEffect(() => {
+    let active = true;
+    setState("loading");
+    void import("mermaid").then(async ({ default: mermaid }) => {
+      if (!mermaidInitialized) {
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: "strict",
+          theme: "dark",
+          layout: "dagre",
+          themeVariables: {
+            fontFamily: "ui-sans-serif, system-ui, sans-serif",
+            primaryColor: "#263449",
+            primaryTextColor: "#e5e7eb",
+            primaryBorderColor: "#64748b",
+            lineColor: "#94a3b8",
+            background: "#111827",
+          },
+          flowchart: { wrappingWidth: 240 },
+        });
+        mermaidInitialized = true;
+      }
+      return mermaid.render(id, source);
+    }).then(({ svg }) => {
+      if (!active || !host.current) return;
+      host.current.innerHTML = svg;
+      setState("rendered");
+    }).catch(() => {
+      if (active) setState("failed");
+    });
+    return () => {
+      active = false;
+      host.current?.replaceChildren();
+    };
+  }, [id, source]);
+
+  return <figure className="markdown-mermaid">
+    <div ref={host} className="markdown-mermaid-canvas" role="img" aria-label="Диаграмма Mermaid" aria-busy={state === "loading"} />
+    {state === "loading" && <figcaption className="markdown-mermaid-status">Отрисовываю диаграмму…</figcaption>}
+    {state === "failed" && <figcaption className="markdown-mermaid-error">
+      <span>Не удалось отрисовать диаграмму. Исходный код:</span>
+      <pre className="markdown-code-block"><code className="language-mermaid">{source}</code></pre>
+    </figcaption>}
+  </figure>;
+}
 
 function safeHref(input: string): string | null {
   const href = input.trim();
@@ -124,8 +176,12 @@ function parseBlocks(lines: string[], key = "b"): ReactNode[] {
       i++;
       while (i < lines.length && !new RegExp(`^ {0,3}${marker[0]}{${marker.length},}\\s*$`).test(lines[i])) code.push(lines[i++]);
       if (i < lines.length) i++;
-      const langClass = /^[a-z\d_-]+$/i.test(language) ? `language-${language}` : undefined;
-      blocks.push(<pre className="markdown-code-block" key={`${key}-${i}`}><code className={langClass}>{code.join("\n")}</code></pre>);
+      const source = code.join("\n");
+      if (language.toLowerCase() === "mermaid") blocks.push(<MermaidDiagram key={`${key}-${i}`} source={source} />);
+      else {
+        const langClass = /^[a-z\d_-]+$/i.test(language) ? `language-${language}` : undefined;
+        blocks.push(<pre className="markdown-code-block" key={`${key}-${i}`}><code className={langClass}>{source}</code></pre>);
+      }
       continue;
     }
     const title = line.match(heading);
