@@ -8,6 +8,7 @@ import { createAgentClient, AgentError } from "../../lib/agent/client";
 import { mergeThreadMetadata } from "../../lib/agent/thread";
 import ModelSettings, { AgentModeButton, ComposerIcon } from "./settings";
 import NativeForm from "./request";
+import TurnErrorNotice from "./turn-error";
 import { createLazyReads } from "../../lib/agent/lazy";
 import Activities from "./activities";
 import Markdown from "./markdown";
@@ -357,7 +358,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       return;
     }
     const next = queuedMessages.find(value => value.chat === currentChat.current);
-    if (!next || next.state !== "waiting" || awaiting || disabled || locked.current || active || goalUnfinished || view.requests.length || !catalogFresh || view.thread.canAcceptDirectInput === false) return;
+    if (!next || next.state !== "waiting" || awaiting || disabled || locked.current || active || goalUnfinished || view.requests.some(request => request.kind !== "unsupported" && !request.answered) || !catalogFresh || view.thread.canAcceptDirectInput === false) return;
     const choice = models!.data.find(value => value.model === next.model);
     if (next.generation !== view.generation || !choice || !choice.efforts.includes(next.effort) || (next.draft.images.length && (next.agentMode === "goal" || !choice.inputModalities.includes("image") || next.draft.images.length > choice.imageLimit))) {
       setQueuedMessages(previous => previous.map(value => value.id === next.id ? { ...value, state: "failed" } : value));
@@ -459,7 +460,8 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           {timeline.map(entry => entry.kind === "message" ? entry.item.type === "plan" ? <button key={entry.item.id} type="button" className="agent-material-card" onClick={() => chooseMaterial(`plan:${entry.item.id}`)}>Предложенный план <span>{materialView.updated.includes(`plan:${entry.item.id}`) ? "Обновлено · " : ""}Открыть →</span></button> : <Item key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.item.id}`} item={entry.item} context={activityContext} reads={lazyReads} /> : <Activities key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.id}`} items={entry.items} context={activityContext} reads={lazyReads} />)}
           {materials.filter(value => value.kind !== "plan").map(value => <button key={value.id} type="button" className="agent-material-card" onClick={() => chooseMaterial(value.id)}>{value.title}<span>{materialView.updated.includes(value.id) ? "Обновлено · " : ""}Открыть →</span></button>)}
           {pendingCorrections.map(value => <Item key={value.item.id} item={value.item} context={activityContext} reads={lazyReads} pending={value.state} dismiss={() => setCorrections(previous => previous.filter(item => item.item.id !== value.item.id))} />)}
-          {connected && view?.requests.map(request => <NativeForm key={`${view.generation}:${view.epoch}:${request.requestId}`} request={request} disabled={disabled} send={answer => mutate("answer", { requestId: request.requestId, answer })} />)}
+          {view?.turn?.error && <TurnErrorNotice error={view.turn.error} />}
+          {view?.requests.map(request => (connected || request.kind === "unsupported") && <NativeForm key={view.generation + ":" + view.epoch + ":" + request.requestId} request={request} disabled={disabled} send={answer => mutate("answer", { requestId: request.requestId, answer })} />)}
         </div>
       </div>
       {(threadId || message || accountMessage) && <footer className="agent-composer-area">

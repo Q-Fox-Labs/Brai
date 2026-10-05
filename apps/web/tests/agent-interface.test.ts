@@ -86,6 +86,23 @@ function component(name: string) {
   return module.exports.default;
 }
 
+test("turn errors show Codex's model-capacity message and a next step", () => {
+  const html = renderToStaticMarkup(createElement(component("turn-error"), { error: { code: "serverOverloaded", message: "Selected model is at capacity. Please try a different model." } }));
+  assert.match(html, /role="alert"/);
+  assert.match(html, /Selected model is at capacity/);
+  assert.match(html, /Выберите другую модель/);
+});
+
+test("rejected server requests explain that no user answer is needed", () => {
+  const request = { requestId: "string:42", kind: "unsupported", method: "item/future/request", turnId: "turn", params: {}, answered: false, reason: "request-too-large" };
+  const html = renderToStaticMarkup(createElement(component("request"), { request, disabled: false, send: async () => true }));
+  assert.match(html, /role="alert"/);
+  assert.match(html, /Превышен лимит отдельного запроса Codex/);
+  assert.match(html, /не длины вашего сообщения/);
+  assert.match(html, /отвечать не нужно/);
+  assert.doesNotMatch(html, /Отправить ответ|Ответ отправлен/);
+});
+
 test("real React renders closed activities without list markup, summaries or owner reads", () => {
   let calls = 0;
   const reads = createLazyReads(async () => { calls++; throw new Error("closed groups cannot read"); });

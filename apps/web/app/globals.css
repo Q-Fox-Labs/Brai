@@ -162,6 +162,13 @@ button:focus-visible, a:focus-visible { outline: 2px solid #b3a2ff; outline-offs
   .agent-composer-icon, .agent-send { width: 28px; height: 28px; }
 }
 .agent-request { margin: 22px 0; padding: 22px; border: 1px solid #45464b; border-radius: 20px; background: #303136; font-size: 14px; }
+.agent-request-notice, .agent-turn-error { color: #eeeef2; border-color: #665b4a; background: #302e2b; }
+.agent-request-notice p, .agent-turn-error p { margin: 0 0 12px; line-height: 1.55; }
+.agent-request-notice button { margin-top: 8px; }
+.agent-request-notice code { display: block; overflow-wrap: anywhere; margin-top: 8px; }
+.agent-turn-error { margin: 22px 0; padding: 18px 22px; border: 1px solid #665b4a; border-radius: 16px; }
+.agent-turn-error strong { display: block; margin-bottom: 8px; }
+.agent-turn-error p:last-child { margin-bottom: 0; }
 .agent-request fieldset { min-width: 0; }
 .agent-request legend { color: var(--agent-muted); font-size: 13px; }
 .agent-request-question { margin: 16px 0 20px; font-size: 16px; line-height: 1.6; }

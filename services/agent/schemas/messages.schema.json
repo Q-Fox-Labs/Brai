@@ -952,6 +952,24 @@
             "interrupted",
             "failed"
           ]
+        },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "message": {
+              "type": "string",
+              "maxLength": 2048
+            },
+            "code": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          },
+          "required": [
+            "message"
+          ]
         }
       },
       "required": [

@@ -20,6 +20,8 @@ Core NATS `brai.agent.v2.event` передаёт только AG-UI `STATE_SNAPS
 
 Размеры и ёмкости экспортированы из `@brai/agent/contracts`. При переполнении интерфейс получает отказ либо восстановление снимка. Brai не выбирает замену модели; для созданных им чатов provider fallback отключён. Для прежних чатов настройкой fallback владеет Codex. Остановка agent закрывает его подключения; Codex daemon остаётся владельцем собственного выполнения.
 
+Отклонённые server request получают RPC-ошибку с отдельной причиной и не входят в ожидание ответа пользователя. Снимок сохраняет из ошибки завершённого хода только ограниченные поля message и код codexErrorInfo; additionalDetails и misalignment не передаются.
+
 ## Проверки
 
 `npm run typecheck:agent`, `npm run test:agent`, `npm run build:agent`. Unit проверки не используют аккаунт, сервер Codex или модель. Upstream wire schemas закреплены в [contracts/codex](contracts/codex/README.md); обновление требует проверки фактического протокола, а не собственного форка.

@@ -20,6 +20,7 @@ function fixture() {
   const port = {
     status: () => ({ generation, connection: 'connected', authorization: 'ready' }),
     subscribe: fn => { observer = fn; return () => {}; },
+    reject: async (id, reason) => { calls.push({ method: 'reject', id, reason }); },
     call: async (method, params) => {
       calls.push({ method, params });
       settings.beforeCall?.(method, params);
@@ -106,6 +107,35 @@ test('message timestamps stay fixed across delta; activity follows turn lifecycl
   assert.equal(f.events.at(-1).event.snapshot.thread.lastMessageAt, at);
   f.observe({ method: 'turn/completed', params: { threadId: 't', turn: { id: 'live', status: 'completed' } } });
   assert.equal(f.events.at(-1).event.snapshot.thread.active, false);
+});
+test('turn failures stay visible and rejected server requests never wait for a user answer', async t => {
+  const f = fixture(); t.after(() => f.app.close());
+  await f.read('open');
+  f.observe({ type: 'request', id: 41, method: 'item/new/request', params: { threadId: 't', turnId: 'turn', privatePayload: 'discard' }, supported: false, reason: 'invalid-params' });
+  let snapshot = f.events.at(-1).event.snapshot;
+  assert.equal(snapshot.state, 'completed');
+  assert.equal(snapshot.thread.awaitingReply, false);
+  assert.deepEqual(snapshot.requests[0], { requestId: 'number:41', turnId: 'turn', method: 'item/new/request', kind: 'unsupported', params: {}, answered: false, reason: 'invalid-params' });
+
+  f.observe({ type: 'request', id: 42, method: 'item/new/client-ui', params: { threadId: 't', turnId: 'turn' }, supported: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(f.calls.some(call => call.method === 'reject' && call.id === 42 && call.reason === 'unsupported-method'));
+
+  f.observe({ method: 'turn/completed', params: { threadId: 't', turn: { id: 'failed-turn', status: 'failed', error: { message: 'Selected model is at capacity. Please try a different model.', codexErrorInfo: 'serverOverloaded', additionalDetails: 'private upstream data' } } } });
+  snapshot = f.events.at(-1).event.snapshot;
+  assert.deepEqual(snapshot.turn, { id: 'failed-turn', status: 'failed', error: { message: 'Selected model is at capacity. Please try a different model.', code: 'serverOverloaded' } });
+  assert.equal(snapshot.thread.awaitingReply, false);
+  assert.equal(snapshot.requests.length, 2);
+  assert.equal(JSON.stringify(snapshot).includes('private upstream data'), false);
+  const snapshotAjv = new Ajv({ strict: false });
+  snapshotAjv.addSchema(schema, 'https://brai.local/schemas/messages.schema.json');
+  const snapshotValid = snapshotAjv.compile({ $ref: 'https://brai.local/schemas/messages.schema.json#/definitions/NativeSnapshot' });
+  assert.equal(snapshotValid(snapshot), true, JSON.stringify(snapshotValid.errors));
+
+  f.observe({ type: 'request', id: 43, method: 'item/commandExecution/requestApproval', params: { threadId: 't', turnId: 'failed-turn' }, supported: true });
+  snapshot = f.events.at(-1).event.snapshot;
+  assert.equal(snapshot.state, 'waiting');
+  assert.equal(snapshot.thread.awaitingReply, true);
 });
 test('thread order uses messages despite later tool updates; command bounds are closed', async () => {
   const f = fixture(), page = await f.app.request({ action: 'threads', projectId: 'p' });

@@ -196,10 +196,12 @@ test('native Codex boundary validates the new rate-limit request, result, and sp
   assert.equal(resultValid({ rateLimits: {}, rateLimitsByLimitId: { codex: { primary: { usedPercent: 38 } } } }), true);
   assert.equal(notificationValid({ rateLimits: {} }), true);
   const dir = mkdtempSync('/tmp/brai-limits-'), socketPath = join(dir, 'native.sock');
-  const server = createServer(), wss = new WebSocketServer({ server }), calls = [];
+  const server = createServer(), wss = new WebSocketServer({ server }), calls = [], wireReplies = [];
+  let peer;
   wss.on('error', () => {});
-  wss.on('connection', socket => socket.on('message', raw => {
+  wss.on('connection', socket => { peer = socket; socket.on('message', raw => {
     const packet = JSON.parse(raw.toString()); calls.push(packet);
+    if (typeof packet.method !== 'string') { wireReplies.push(packet); return; }
     if (!Object.hasOwn(packet, 'id')) return;
     const result = packet.method === 'initialize' ? { codexHome: '/tmp/mock', platformFamily: 'unix', platformOs: 'linux', userAgent: 'test' }
       : packet.method === 'account/read' ? { account: { type: 'apiKey' }, requiresOpenaiAuth: false }
@@ -208,7 +210,7 @@ test('native Codex boundary validates the new rate-limit request, result, and sp
     assert.ok(result, packet.method);
     socket.send(JSON.stringify({ id: packet.id, result }));
     if (packet.method === 'account/rateLimits/read') socket.send(JSON.stringify({ method: 'account/rateLimits/updated', params: { rateLimits: {} } }));
-  }));
+  }); });
   try { await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); }); }
   catch (error) {
     await new Promise(resolve => wss.close(resolve)); rmSync(dir, { recursive: true });
@@ -233,6 +235,32 @@ test('native Codex boundary validates the new rate-limit request, result, and sp
     assert.deepEqual(notification.params, { rateLimits: {} });
     unsubscribe();
     await assert.rejects(codex.call('account/rateLimits/read', { excludeResetCreditDetails: 'true' }), error => error.code === 'INVALID_ARGUMENT');
+    const requestEvent = id => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { stop(); reject(new Error('server request timeout')); }, 1_000);
+      const stop = codex.subscribe(event => {
+        if (event.type === 'request' && event.id === id) { clearTimeout(timer); stop(); resolve(event); }
+      });
+    });
+    const sendServerRequest = async packet => {
+      const received = requestEvent(packet.id);
+      peer.send(JSON.stringify(packet));
+      const event = await received;
+      for (let attempt = 0; attempt < 20 && !wireReplies.some(reply => reply.id === packet.id); attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+      return { event, reply: wireReplies.find(reply => reply.id === packet.id) };
+    };
+    const unknown = await sendServerRequest({ id: 'unknown-method', method: 'item/future/request', params: { threadId: 't', turnId: 't1' } });
+    assert.equal(unknown.event.reason, 'unsupported-method');
+    assert.deepEqual(unknown.event.params, { threadId: 't', turnId: 't1' });
+    assert.equal(unknown.reply.error.code, -32601);
+    assert.equal(codex.validateAnswer('unknown-method', {}), false);
+    const invalid = await sendServerRequest({ id: 'invalid-params', method: 'item/tool/requestUserInput', params: { threadId: 't', turnId: 't1' } });
+    assert.equal(invalid.event.reason, 'invalid-params');
+    assert.equal(invalid.reply.error.code, -32602);
+    const oversized = await sendServerRequest({ id: 'oversized', method: 'item/tool/requestUserInput', params: { threadId: 't', turnId: 't1', payload: 'x'.repeat(33000) } });
+    assert.equal(oversized.event.reason, 'request-too-large');
+    assert.equal(oversized.reply.error.code, -32000);
+    assert.deepEqual(oversized.event.params, { threadId: 't', turnId: 't1' });
+    assert.equal(JSON.stringify(oversized.event).includes('x'.repeat(128)), false);
   } finally {
     await codex.close();
     for (const socket of wss.clients) socket.terminate();

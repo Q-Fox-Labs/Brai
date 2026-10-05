@@ -2,13 +2,20 @@
 // ABOUTME: Владеет только bounded live проекцией; историю читает у Codex.
 import { randomUUID, createHash } from 'node:crypto';
 import { bytes, limits, validateCommand } from '../contracts/index.mjs';
-import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, ModelCatalog, DisplayItem, GoalProjection, PlanProgress } from '../contracts/index.mjs';
+import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, NativeTurn, ModelCatalog, DisplayItem, GoalProjection, PlanProgress } from '../contracts/index.mjs';
 import type { CodexPort, Observation } from './codex.js';
 import { createLimitsMonitor } from './limits.js';
 import { nameThread } from './title.js';
 import { display, metadata, text, compact, summary, messageAttention, goal, progress } from './display.js';
 export type Config = { codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
 type Session = { attention: ReturnType<typeof messageAttention>; view: NativeSnapshot & { goal: GoalProjection; planProgress: PlanProgress }; mutating?: boolean; goalRevision: number; opened: boolean; fresh: boolean; titleNeeded: boolean; titleRequest: string; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
+function pendingRequest(request: PendingRequest) { return request.kind !== 'unsupported' && !request.answered; }
+function projectTurn(turn: any): NativeTurn {
+  const info = turn.error?.codexErrorInfo;
+  const code = typeof info === 'string' ? info : info && typeof info === 'object' ? Object.keys(info)[0] : undefined;
+  const message = typeof turn.error?.message === 'string' ? text(turn.error.message, 2048) : '';
+  return { id: turn.id, status: turn.status, ...(message ? { error: { message, ...(code ? { code } : {}) } } : {}) };
+}
 /** Собирает команды и единственного владельца live items/pending. */
 export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void) {
   const sessions = new Map<string, Session>();
@@ -42,7 +49,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     const latestMessage = [...s.view.items].reverse().find(item => item.type === 'userMessage' || item.type === 'agentMessage');
     if (latestMessage) s.attention = messageAttention(latestMessage);
     Object.assign(s.view.thread, s.attention);
-    s.view.thread.awaitingReply = s.view.requests.some(request => !request.answered) || (!s.view.thread.active && s.attention.awaitingReply);
+    s.view.thread.awaitingReply = s.view.requests.some(pendingRequest) || (!s.view.thread.active && s.attention.awaitingReply);
     s.view.seq++;
     while (s.view.items.length > 128 || bytes(s.view) > limits.state) {
       const dropped = s.view.items.shift();
@@ -91,7 +98,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     await previous;
     try {
     if (sessions.size >= limits.threads) {
-      const victim = [...sessions.values()].find(s => s.view.turn?.status !== 'inProgress' && !s.view.requests.length && !s.naming && !s.mutating && s.view.goal.value?.status !== 'active');
+      const victim = [...sessions.values()].find(s => s.view.turn?.status !== 'inProgress' && !s.view.requests.some(pendingRequest) && !s.naming && !s.mutating && s.view.goal.value?.status !== 'active');
       if (!victim) fail('CAPACITY_EXHAUSTED');
       victim.closing = true;
       let response: any;
@@ -134,8 +141,8 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       s.view.items = [...items.data.slice().reverse().map((entry: any) => s!.view.items.find(item => item.id === entry.item.id)!), ...s.view.items.filter(item => !pageIds.has(item.id) && (s!.revisions.get(item.id) ?? 0) > cut)];
       if (s.view.turn === previousTurn) {
         const turn = turns.data[0];
-        s.view.turn = turn ? { id: turn.id, status: turn.status } : null;
-        s.view.state = s.view.requests.some(form => !form.answered) ? 'waiting' : turn?.status === 'inProgress' && resumed.thread.status.type !== 'active' ? 'executor-unavailable' : turn?.status ?? 'idle';
+        s.view.turn = turn ? projectTurn(turn) : null;
+        s.view.state = s.view.requests.some(pendingRequest) ? 'waiting' : turn?.status === 'inProgress' && resumed.thread.status.type !== 'active' ? 'executor-unavailable' : turn?.status ?? 'idle';
       }
       s.opened = true;
       publish(s);
@@ -210,7 +217,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
         s.raw.clear();
         s.activeModel = undefined;
         s.details.clear();
-        s.view.requests = [];
+        s.view.requests = s.view.requests.filter(request => request.kind === 'unsupported');
         s.view.generation = current();
         s.view.epoch = randomUUID();
         s.view.state = 'connection-lost';
@@ -223,15 +230,28 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     const p = e.params, s = sessions.get(p?.threadId);
     if (!s) return;
     if (e.type === 'request') {
-      const requestId = `${typeof e.id}:${e.id}`, kinds: Record<string, PendingRequest['kind']> = { 'item/commandExecution/requestApproval': 'command-approval', 'item/fileChange/requestApproval': 'file-change-approval', 'item/permissions/requestApproval': 'permissions', 'item/tool/requestUserInput': 'question' };
+      const requestId = typeof e.id + ':' + e.id, kinds: Record<string, PendingRequest['kind']> = { 'item/commandExecution/requestApproval': 'command-approval', 'item/fileChange/requestApproval': 'file-change-approval', 'item/permissions/requestApproval': 'permissions', 'item/tool/requestUserInput': 'question' };
       if (s.view.requests.some(f => f.requestId === requestId)) return;
-      if (s.view.requests.length >= limits.pending) { s.view.state = 'executor-unavailable'; publish(s); return; }
-      const supported = e.supported && s.view.requests.length < limits.pending && bytes(s.view.requests) + bytes(p) < 131072;
-      s.view.requests.push({ requestId, turnId: p.turnId, method: e.method!, kind: supported ? kinds[e.method!] ?? 'unsupported' : 'unsupported', params: supported ? p : {}, answered: false, ...(supported ? {} : { reason: 'unsupported-or-too-large' }) });
-      s.raw.set(requestId, e.id!);
+      const kind = kinds[e.method!], pendingCount = s.view.requests.filter(pendingRequest).length;
+      const reason = e.reason ?? (!kind ? 'unsupported-method' : pendingCount >= limits.pending ? 'too-many-pending' : bytes(s.view.requests) + bytes(p) >= 131072 ? 'presentation-limit' : undefined);
+      const supported = e.supported === true && !reason;
+      if (!supported) {
+        const rejection = reason ?? 'unsupported-method';
+        if (e.supported === true && e.id !== undefined) void codex.reject(e.id, rejection).catch(() => {});
+        if (s.view.requests.length >= limits.pending) {
+          const oldestNotice = s.view.requests.findIndex(request => request.kind === 'unsupported');
+          if (oldestNotice >= 0) s.view.requests.splice(oldestNotice, 1);
+          else { s.view.state = 'executor-unavailable'; publish(s); return; }
+        }
+        const turnId = typeof p?.turnId === 'string' && p.turnId ? text(p.turnId, 128) : 'unknown';
+        s.view.requests.push({ requestId, turnId, method: e.method!, kind: 'unsupported', params: {}, answered: false, reason: rejection });
+      } else {
+        s.view.requests.push({ requestId, turnId: p.turnId, method: e.method!, kind: kind!, params: p, answered: false });
+        s.raw.set(requestId, e.id!);
+      }
     } else if (e.method === 'serverRequest/resolved') {
-      const id = `${typeof p.requestId}:${p.requestId}`;
-      s.view.requests = s.view.requests.filter(f => f.requestId !== id);
+      const id = typeof p.requestId + ':' + p.requestId;
+      s.view.requests = s.view.requests.filter(f => f.requestId !== id || f.kind === 'unsupported');
       s.raw.delete(id);
     } else if (e.method === 'thread/name/updated') {
       s.view.thread.title = text(p.threadName ?? '', 512);
@@ -243,11 +263,11 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       s.view.thread.model = p.threadSettings.model;
       s.view.thread.reasoningEffort = p.threadSettings.effort ?? null;
     } else if (e.method === 'turn/started' || e.method === 'turn/completed') {
-      s.view.turn = { id: p.turn.id, status: p.turn.status };
+      s.view.turn = projectTurn(p.turn);
       s.view.state = p.turn.status;
       if (e.method === 'turn/started') s.fresh = false;
       if (e.method === 'turn/started' && s.view.planProgress.turnId !== p.turn.id) s.view.planProgress = { state: 'unavailable', turnId: p.turn.id, explanation: null, steps: [], truncated: false };
-      if (p.turn.status !== 'inProgress') { s.activeModel = undefined; s.view.requests = []; s.raw.clear(); }
+      if (p.turn.status !== 'inProgress') { s.activeModel = undefined; s.view.requests = s.view.requests.filter(request => request.kind === 'unsupported'); s.raw.clear(); }
     } else if (e.method === 'item/started' || e.method === 'item/completed') put(s, p.item.type === 'plan' ? { ...p.item, status: e.method === 'item/completed' ? 'completed' : 'inProgress' } : p.item, p.turnId);
     else if (e.method?.endsWith('/delta') || e.method?.endsWith('/outputDelta')) {
       const item = s.details.get(p.itemId);
@@ -266,7 +286,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       }
     } else if (e.method === 'turn/plan/updated') s.view.planProgress = progress(p);
     else return;
-    if (s.view.requests.some(f => !f.answered)) s.view.state = 'waiting';
+    if (s.view.requests.some(pendingRequest)) s.view.state = 'waiting';
     publish(s);
   }
   const limitMonitor = createLimitsMonitor(codex);
@@ -448,7 +468,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       }); }
       catch (error: any) { if (r.action === 'start' && error.outcome === 'not-sent' && r.generation === current() && s.view.turn?.id === 'starting') { s.view.turn = previousTurn; s.view.state = previousState; s.activeModel = previousModel; publish(s); } throw error; }
       turnId = value.turn?.id ?? value.turnId;
-      if (r.action === 'start' && s.view.turn?.id === 'starting') { s.view.turn = { id: turnId!, status: value.turn.status }; publish(s); }
+      if (r.action === 'start' && s.view.turn?.id === 'starting') { s.view.turn = projectTurn(value.turn); publish(s); }
       if (r.action === 'start') { s.view.thread.model = r.model ?? s.view.thread.model; s.view.thread.reasoningEffort = r.effort ?? s.view.thread.reasoningEffort ?? null; publish(s); }
       s.fresh = false;
     }

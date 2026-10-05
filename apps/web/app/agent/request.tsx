@@ -1,10 +1,19 @@
 "use client";
-// ABOUTME: Показывает вопрос и понятные действия для ожидающего native запроса.
-// ABOUTME: Отправляет исходное решение без изменения его области и без повторной отправки.
+// ABOUTME: Показывает формы ожидающих запросов и уведомления об отказах Brai.
+// ABOUTME: Отправляет решение только для поддерживаемого ожидающего native запроса.
 import { useRef, useState } from "react";
 import type { PendingRequest } from "@brai/agent/contracts";
 type Question = { id: string; header: string; question: string; isOther?: boolean; isSecret?: boolean; options?: { label: string; description: string }[] };
 type Decision = string | { acceptWithExecpolicyAmendment: { execpolicy_amendment: string[] } } | { applyNetworkPolicyAmendment: { network_policy_amendment: { action: string; host: string } } };
+function rejectionText(reason?: string) {
+  return ({
+    "unsupported-method": "Codex отправил запрос, который Brai не поддерживает. Запрос отклонён; отвечать не нужно.",
+    "invalid-params": "Codex отправил параметры запроса в неподдерживаемом формате. Запрос отклонён; отвечать не нужно.",
+    "request-too-large": "Превышен лимит отдельного запроса Codex к Brai. Это ограничение запроса, а не длины вашего сообщения. Запрос отклонён; отвечать не нужно.",
+    "too-many-pending": "У Brai уже есть максимальное число ожидающих запросов Codex. Новый запрос отклонён; отвечать на него не нужно.",
+    "presentation-limit": "Brai не может безопасно показать этот запрос Codex. Запрос отклонён; отвечать не нужно.",
+  } as Record<string, string>)[reason ?? ""] ?? "Brai отклонил запрос Codex, который не может обработать. Ответ не требуется.";
+}
 
 function decisionLabel(choice: Decision): string {
   if (typeof choice === "string") return ({ accept: "Разрешить один раз", acceptForSession: "Разрешить для этого сеанса", decline: "Отклонить", cancel: "Отклонить и остановить ход" } as Record<string, string>)[choice] ?? "Неподдерживаемое решение";
@@ -15,11 +24,15 @@ function decisionLabel(choice: Decision): string {
 
 /** Показывает только предложенные сервером решения; принятый или неизвестный исход блокирует повтор. */
 export default function NativeForm({ request, disabled, send }: { request: PendingRequest; disabled: boolean; send: (answer: unknown) => Promise<boolean> }) {
-  const [values, setValues] = useState<Record<string, string>>({}), [sent, setSent] = useState(false), sending = useRef(false);
+  const [values, setValues] = useState<Record<string, string>>({}), [sent, setSent] = useState(false), [hidden, setHidden] = useState(false), sending = useRef(false);
   const p = request.params, questions: Question[] = p.questions ?? [];
   const approval = request.kind === "command-approval" || request.kind === "file-change-approval";
   const choices: Decision[] = request.kind === "file-change-approval" ? ["accept", "acceptForSession", "decline", "cancel"] : p.availableDecisions ?? ["accept", "acceptForSession", "decline", "cancel"];
-  if (request.kind === "unsupported") return <p>Запрос пока не поддерживается: {request.reason ?? request.method}</p>;
+  if (request.kind === "unsupported") return hidden ? null : <section className="agent-request agent-request-notice" data-request-id={request.requestId} role="alert">
+    <p>{rejectionText(request.reason)}</p>
+    <details className="agent-request-details"><summary>Техническая информация</summary><code>{request.method}</code></details>
+    <button type="button" onClick={() => setHidden(true)}>Скрыть уведомление</button>
+  </section>;
   function answer(value: unknown) {
     if (sent || sending.current || disabled || request.answered) return;
     sending.current = true; setSent(true);
