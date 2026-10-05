@@ -138,9 +138,7 @@ async function handle(socket, raw) {
       reply(socket, message.id, message.method, { data: record.thread.turns, nextCursor: null, backwardsCursor: null });
     } else if (message.method === 'thread/items/list') {
       const record = threadRecord(message.params.threadId);
-      const limit = message.params.limit ?? 100;
-      const entries = record.items.slice(-limit).map(entry => ({ item: entry.item, turnId: entry.turnId }));
-      reply(socket, message.id, message.method, { data: entries, nextCursor: null, backwardsCursor: null });
+      reply(socket, message.id, message.method, itemPage(record, message.params));
     } else if (message.method === 'thread/name/set') {
       const record = threadRecord(message.params.threadId);
       record.thread.name = message.params.name;
@@ -251,4 +249,43 @@ function scheduleFinish(record, turn) {
     }
     event('turn/completed', { threadId: record.thread.id, turn: { ...turn, status: 'completed' } });
   }, remainingHold).unref();
+}
+
+function itemPage(record, params) {
+  const direction = params.sortDirection ?? 'asc';
+  const limit = params.limit ?? 100;
+  assert.ok(direction === 'asc' || direction === 'desc');
+  assert.ok(Number.isSafeInteger(limit) && limit >= 0);
+  const turnId = params.turnId ?? null;
+  const visible = record.items.filter(entry => turnId === null || entry.turnId === turnId);
+  const ordered = direction === 'desc' ? [...visible].reverse() : visible;
+  let anchorId;
+  if (typeof params.cursor === 'string') {
+    assert.ok(params.cursor.startsWith('fixture-items-v1:') && params.cursor.length <= 2048);
+    const encoded = params.cursor.slice('fixture-items-v1:'.length);
+    const bytes = Buffer.from(encoded, 'base64url');
+    assert.equal(bytes.toString('base64url'), encoded);
+    const cursor = JSON.parse(bytes.toString('utf8'));
+    assert.deepEqual(Object.keys(cursor).sort(), ['itemId', 'threadId', 'turnId']);
+    assert.equal(cursor.threadId, record.thread.id);
+    assert.equal(cursor.turnId, turnId);
+    assert.equal(typeof cursor.itemId, 'string');
+    anchorId = cursor.itemId;
+  } else if (params.cursor !== undefined && params.cursor !== null) {
+    assert.ok(turnId && params.cursor.type === 'item');
+    anchorId = params.cursor.itemId;
+  }
+  let offset = 0;
+  if (anchorId !== undefined) {
+    const position = ordered.findIndex(entry => entry.item.id === anchorId);
+    assert.ok(position >= 0, 'Cursor item is outside the requested visible history');
+    offset = position + 1;
+  }
+  const page = ordered.slice(offset, offset + limit);
+  const encode = entry => `fixture-items-v1:${Buffer.from(JSON.stringify({ threadId: record.thread.id, turnId, itemId: entry.item.id })).toString('base64url')}`;
+  return {
+    data: page.map(entry => ({ item: entry.item, turnId: entry.turnId })),
+    nextCursor: page.length && offset + page.length < ordered.length ? encode(page.at(-1)) : null,
+    backwardsCursor: page.length ? encode(page[0]) : null,
+  };
 }
