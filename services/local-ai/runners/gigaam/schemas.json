@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "HealthParams": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "HealthResult": {
+      "type": "object",
+      "required": ["ready", "model_id", "revision", "vad_repository", "vad_revision"],
+      "properties": {
+        "ready": { "const": true },
+        "model_id": { "const": "gigaam-v3-e2e-ctc" },
+        "revision": {
+          "const": "cec030b4c4f35d928e4a9044a3bdb29ebd499fac"
+        },
+        "vad_repository": { "const": "pyannote/segmentation-3.0" },
+        "vad_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+      },
+      "additionalProperties": false
+    },
+    "TranscribeParams": {
+      "type": "object",
+      "required": ["audio_path"],
+      "properties": {
+        "audio_path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^/",
+          "description": "Absolute path to a local audio file readable by the runner; FFmpeg must decode it."
+        }
+      },
+      "additionalProperties": false
+    },
+    "TranscribeResult": {
+      "oneOf": [
+        { "$ref": "#/definitions/ShortformResult" },
+        { "$ref": "#/definitions/LongformResult" }
+      ]
+    },
+    "ShortformResult": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "Punctuated, normalized transcription returned by the upstream e2e CTC model."
+        }
+      },
+      "additionalProperties": false
+    },
+    "LongformResult": {
+      "type": "object",
+      "required": ["text", "segments"],
+      "properties": {
+        "text": { "type": "string" },
+        "segments": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/LongformSegment" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "LongformSegment": {
+      "type": "object",
+      "required": ["text", "start_seconds", "end_seconds"],
+      "properties": {
+        "text": { "type": "string" },
+        "start_seconds": { "type": "number", "minimum": 0 },
+        "end_seconds": { "type": "number", "exclusiveMinimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  }
+}
