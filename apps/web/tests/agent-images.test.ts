@@ -14,7 +14,7 @@ test("accepted removes sent IDs and preserves later attachments and text edits, 
   const sent = { text: "text", revision: 2, images: [image("old")] };
   assert.deepEqual(acceptedDraft(sent, sent), { ...sent, text: "", images: [] });
   const edited = { text: "text", revision: 4, images: [image("old"), image("new")] };
-  assert.deepEqual(acceptedDraft(edited, sent), { ...edited, images: [image("new")] });
+  assert.deepEqual(acceptedDraft(edited, sent), { ...edited, images: [edited.images[1]] });
   const other = { text: "other chat", revision: 1, images: [image("other")] };
   const cache = new Map([["sent", sent], ["other", other]]);
   cache.set("sent", acceptedDraft(cache.get("sent")!, sent));

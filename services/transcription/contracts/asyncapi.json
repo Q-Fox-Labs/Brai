@@ -1,0 +1,355 @@
+{
+  "asyncapi": "3.0.0",
+  "info": {
+    "title": "Brai transcription",
+    "version": "1.0.0",
+    "description": "NATS Services: brai_transcription, queue brai_transcription; PING/INFO/STATS; trusted caller mapping from runtime. Request/reply metadata only, byte bounds configured, no JetStream text."
+  },
+  "defaultContentType": "application/json",
+  "servers": {
+    "private": {
+      "host": "{host}:{port}",
+      "protocol": "nats",
+      "variables": {
+        "host": {
+          "default": "localhost"
+        },
+        "port": {
+          "default": "4222"
+        }
+      }
+    }
+  },
+  "channels": {
+    "request_submit": {
+      "address": "brai.transcription.v1.request.submit",
+      "messages": {
+        "request": {
+          "$ref": "#/components/messages/PublicSubmitParams"
+        }
+      }
+    },
+    "request_get": {
+      "address": "brai.transcription.v1.request.get",
+      "messages": {
+        "request": {
+          "$ref": "#/components/messages/PublicGetParams"
+        }
+      }
+    },
+    "request_cancel": {
+      "address": "brai.transcription.v1.request.cancel",
+      "messages": {
+        "request": {
+          "$ref": "#/components/messages/PublicCancelParams"
+        }
+      }
+    },
+    "models_list": {
+      "address": "brai.transcription.v1.models.list",
+      "messages": {
+        "request": {
+          "$ref": "#/components/messages/PublicSettingsGetParams"
+        }
+      }
+    },
+    "settings_get": {
+      "address": "brai.transcription.v1.settings.get",
+      "messages": {
+        "request": {
+          "$ref": "#/components/messages/PublicSettingsGetParams"
+        }
+      }
+    },
+    "settings_set": {
+      "address": "brai.transcription.v1.settings.set",
+      "messages": {
+        "request": {
+          "$ref": "#/components/messages/PublicSettingsSetParams"
+        }
+      }
+    },
+    "replies": {
+      "address": null,
+      "messages": {
+        "PublicSubmitResult": {
+          "$ref": "#/components/messages/PublicSubmitResult"
+        },
+        "PublicCancelResult": {
+          "$ref": "#/components/messages/PublicCancelResult"
+        },
+        "ModelsListResult": {
+          "$ref": "#/components/messages/ModelsListResult"
+        },
+        "SettingsResult": {
+          "$ref": "#/components/messages/SettingsResult"
+        },
+        "ErrorResponse": {
+          "$ref": "#/components/messages/ErrorResponse"
+        }
+      }
+    }
+  },
+  "operations": {
+    "request_submit": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/request_submit"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/request_submit/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/replies"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/replies/messages/PublicSubmitResult"
+          },
+          {
+            "$ref": "#/channels/replies/messages/ErrorResponse"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "brai_transcription",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "request_get": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/request_get"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/request_get/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/replies"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/replies/messages/PublicSubmitResult"
+          },
+          {
+            "$ref": "#/channels/replies/messages/ErrorResponse"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "brai_transcription",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "request_cancel": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/request_cancel"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/request_cancel/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/replies"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/replies/messages/PublicCancelResult"
+          },
+          {
+            "$ref": "#/channels/replies/messages/ErrorResponse"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "brai_transcription",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "models_list": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/models_list"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/models_list/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/replies"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/replies/messages/ModelsListResult"
+          },
+          {
+            "$ref": "#/channels/replies/messages/ErrorResponse"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "brai_transcription",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "settings_get": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/settings_get"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/settings_get/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/replies"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/replies/messages/SettingsResult"
+          },
+          {
+            "$ref": "#/channels/replies/messages/ErrorResponse"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "brai_transcription",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "settings_set": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/settings_set"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/settings_set/messages/request"
+        }
+      ],
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/replies"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/replies/messages/SettingsResult"
+          },
+          {
+            "$ref": "#/channels/replies/messages/ErrorResponse"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "brai_transcription",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    }
+  },
+  "components": {
+    "messages": {
+      "PublicSubmitParams": {
+        "name": "PublicSubmitParams",
+        "payload": {
+          "$ref": "../schemas/messages.schema.json#/definitions/PublicSubmitParams"
+        }
+      },
+      "PublicSubmitResult": {
+        "name": "PublicSubmitResult",
+        "payload": {
+          "$ref": "../schemas/messages.schema.json#/definitions/PublicSubmitResult"
+        }
+      },
+      "PublicGetParams": {
+        "name": "PublicGetParams",
+        "payload": {
+          "$ref": "../schemas/messages.schema.json#/definitions/PublicGetParams"
+        }
+      },
+      "PublicCancelParams": {
+        "name": "PublicCancelParams",
+        "payload": {
+          "$ref": "../schemas/messages.schema.json#/definitions/PublicCancelParams"
+        }
+      },
+      "PublicCancelResult": {
+        "name": "PublicCancelResult",
+        "payload": {
+          "$ref": "../schemas/messages.schema.json#/definitions/PublicCancelResult"
+        }
+      },
+      "PublicSettingsGetParams": {
+        "name": "PublicSettingsGetParams",
+        "payload": {
+          "$ref": "../schemas/messages.schema.json#/definitions/PublicSettingsGetParams"
+        }
+      },
+      "ModelsListResult": {
+        "name": "ModelsListResult",
+        "payload": {
+          "$ref": "../schemas/messages.schema.json#/definitions/ModelsListResult"
+        }
+      },
+      "SettingsResult": {
+        "name": "SettingsResult",
+        "payload": {
+          "$ref": "../schemas/messages.schema.json#/definitions/SettingsResult"
+        }
+      },
+      "PublicSettingsSetParams": {
+        "name": "PublicSettingsSetParams",
+        "payload": {
+          "$ref": "../schemas/messages.schema.json#/definitions/PublicSettingsSetParams"
+        }
+      },
+      "ErrorResponse": {
+        "name": "ErrorResponse",
+        "headers": {
+          "type": "object",
+          "required": [
+            "Nats-Service-Error",
+            "Nats-Service-Error-Code"
+          ],
+          "properties": {
+            "Nats-Service-Error": {
+              "$ref": "../schemas/messages.schema.json#/definitions/ErrorCode"
+            },
+            "Nats-Service-Error-Code": {
+              "type": "string",
+              "pattern": "^[0-9]{3}$"
+            }
+          }
+        },
+        "payload": {
+          "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+        }
+      }
+    }
+  }
+}

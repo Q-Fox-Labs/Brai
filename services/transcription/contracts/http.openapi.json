@@ -1,0 +1,330 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "http://json-schema.org/draft-07/schema#",
+  "info": {
+    "title": "Brai transcription HTTP",
+    "version": "1.0.0",
+    "description": "No request or result payload logging; result text responses use Cache-Control: no-store."
+  },
+  "paths": {
+    "/v1/transcription/request.submit": {
+      "post": {
+        "operationId": "request_submit",
+        "description": "Trusted caller requires transcription:use. Text only in result.get while volatile buffer lives.",
+        "security": [
+          {
+            "trustedSession": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/messages.schema.json#/definitions/PublicSubmitParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Application DTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/PublicSubmitResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Safe application error; status distinguishes invalid input, permission, conflict, capacity and dependency failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/transcription/request.get": {
+      "post": {
+        "operationId": "request_get",
+        "description": "Trusted caller requires transcription:use. Text only in result.get while volatile buffer lives.",
+        "security": [
+          {
+            "trustedSession": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/messages.schema.json#/definitions/PublicGetParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Application DTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/PublicSubmitResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Safe application error; status distinguishes invalid input, permission, conflict, capacity and dependency failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/transcription/request.cancel": {
+      "post": {
+        "operationId": "request_cancel",
+        "description": "Trusted caller requires transcription:use. Text only in result.get while volatile buffer lives.",
+        "security": [
+          {
+            "trustedSession": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/messages.schema.json#/definitions/PublicCancelParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Application DTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/PublicCancelResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Safe application error; status distinguishes invalid input, permission, conflict, capacity and dependency failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/transcription/models.list": {
+      "post": {
+        "operationId": "models_list",
+        "description": "Trusted caller requires transcription:use. Text only in result.get while volatile buffer lives.",
+        "security": [
+          {
+            "trustedSession": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/messages.schema.json#/definitions/PublicSettingsGetParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Application DTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/ModelsListResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Safe application error; status distinguishes invalid input, permission, conflict, capacity and dependency failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/transcription/settings.get": {
+      "post": {
+        "operationId": "settings_get",
+        "description": "Trusted caller requires transcription:use. Text only in result.get while volatile buffer lives.",
+        "security": [
+          {
+            "trustedSession": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/messages.schema.json#/definitions/PublicSettingsGetParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Application DTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/SettingsResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Safe application error; status distinguishes invalid input, permission, conflict, capacity and dependency failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/transcription/settings.set": {
+      "post": {
+        "operationId": "settings_set",
+        "description": "Trusted caller requires transcription:settings:write. Text only in result.get while volatile buffer lives.",
+        "security": [
+          {
+            "trustedSession": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/messages.schema.json#/definitions/PublicSettingsSetParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Application DTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/SettingsResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Safe application error; status distinguishes invalid input, permission, conflict, capacity and dependency failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/transcription/result.get": {
+      "post": {
+        "operationId": "result_get",
+        "description": "Trusted caller requires transcription:use. Text only in result.get while volatile buffer lives.",
+        "security": [
+          {
+            "trustedSession": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "../schemas/messages.schema.json#/definitions/ResultGetParams"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Application DTO",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/ResultGetResult"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "description": "Volatile private transcript must not be cached.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Safe application error; status distinguishes invalid input, permission, conflict, capacity and dependency failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "trustedSession": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Verified transport/session maps caller to trusted principal; body does not assert identity."
+      }
+    }
+  }
+}

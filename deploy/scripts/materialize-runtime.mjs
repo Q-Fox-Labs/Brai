@@ -25,6 +25,8 @@ for (const [lockPath, entry] of Object.entries(lock.packages)) {
   if (!lockPath || lockPath.startsWith('node_modules/') || !entry.name?.startsWith('@brai/')) continue;
   workspaces.set(entry.name, { lockPath, entry });
 }
+// AIDEV-NOTE: npm размещает несовместимые версии внутри workspace; их virtual lock paths сохраняются в bundle.
+const moduleRoots = ['node_modules/', ...[...workspaces.values()].map(({ lockPath }) => `${lockPath}/node_modules/`)];
 const requested = [...workspaces].find(([, value]) => value.lockPath === (workspace === '@brai/web' ? 'apps/web' : `services/${workspace.slice('@brai/'.length)}`));
 if (!requested) throw Error('WORKSPACE_NOT_IN_LOCKFILE');
 const [packageName, { lockPath: workspacePath, entry: workspaceEntry }] = requested;
@@ -100,7 +102,7 @@ async function visitDependencies(path, entry, packageDir) {
       await copyWorkspace(name, installed);
       continue;
     }
-    if (!rel.startsWith('node_modules/')) throw Error(`UNSUPPORTED_RUNTIME_PACKAGE_PATH:${name}`);
+    if (!moduleRoots.some(prefix => rel.startsWith(prefix))) throw Error(`UNSUPPORTED_RUNTIME_PACKAGE_PATH:${name}`);
     const packageEntry = virtualEntry;
     if (!packageEntry || packageEntry.link || packageEntry.version !== installedPackage.version) throw Error(`LOCKED_PACKAGE_VERSION_MISMATCH:${name}`);
     runtimePackages.set(rel, { virtualLockPath: rel, name: installedPackage.name ?? name, version: installedPackage.version, ...(packageEntry.integrity ? { integrity: packageEntry.integrity } : {}), ...(packageEntry.resolved ? { resolved: packageEntry.resolved } : {}) });

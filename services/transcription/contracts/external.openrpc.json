@@ -1,0 +1,206 @@
+{
+  "openrpc": "1.3.2",
+  "info": {
+    "title": "Brai transcription external",
+    "version": "1.0.0",
+    "description": "JSON-RPC 2.0 UTF-8 stdio NDJSON; bounded line bytes, batch and notifications; named closed params. No compute replay on timeout."
+  },
+  "methods": [
+    {
+      "name": "execute",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "requestId",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/ExternalExecuteParams/properties/requestId"
+          }
+        },
+        {
+          "name": "audioArtifactId",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/ExternalExecuteParams/properties/audioArtifactId"
+          }
+        },
+        {
+          "name": "ownerId",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/ExternalExecuteParams/properties/ownerId"
+          }
+        },
+        {
+          "name": "model",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/ExternalExecuteParams/properties/model"
+          }
+        },
+        {
+          "name": "deadlineAt",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/ExternalExecuteParams/properties/deadlineAt"
+          }
+        },
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/ExternalExecuteParams/properties/operationId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/messages.schema.json#/definitions/ExternalExecuteResult"
+        }
+      },
+      "errors": [
+        {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        {
+          "code": -32600,
+          "message": "Invalid Request"
+        },
+        {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        {
+          "code": -32603,
+          "message": "Internal error"
+        },
+        {
+          "code": -32000,
+          "message": "Application error",
+          "data": {
+            "errorCode": "STATE_CONFLICT"
+          },
+          "x-data-schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+          }
+        }
+      ],
+      "x-params-schema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/ExternalExecuteParams"
+      }
+    },
+    {
+      "name": "health",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/messages.schema.json#/definitions/ExternalHealthResult"
+        }
+      },
+      "errors": [
+        {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        {
+          "code": -32600,
+          "message": "Invalid Request"
+        },
+        {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        {
+          "code": -32603,
+          "message": "Internal error"
+        },
+        {
+          "code": -32000,
+          "message": "Application error",
+          "data": {
+            "errorCode": "STATE_CONFLICT"
+          },
+          "x-data-schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+          }
+        }
+      ],
+      "x-params-schema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/ExecutorHealthParams"
+      }
+    },
+    {
+      "name": "cancel",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "requestId",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/LocalCancelParams/properties/requestId"
+          }
+        },
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/LocalCancelParams/properties/operationId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/messages.schema.json#/definitions/ExternalCancelResult"
+        }
+      },
+      "errors": [
+        {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        {
+          "code": -32600,
+          "message": "Invalid Request"
+        },
+        {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        {
+          "code": -32603,
+          "message": "Internal error"
+        },
+        {
+          "code": -32000,
+          "message": "Application error",
+          "data": {
+            "errorCode": "STATE_CONFLICT"
+          },
+          "x-data-schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+          }
+        }
+      ],
+      "x-params-schema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/LocalCancelParams"
+      }
+    }
+  ]
+}

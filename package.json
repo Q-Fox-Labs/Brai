@@ -13,8 +13,8 @@
     "typecheck:web": "npm run typecheck --workspace=@brai/web",
     "typecheck:timer": "npm run typecheck --workspace=@brai/timer",
     "typecheck:agent": "npm run typecheck --workspace=@brai/agent",
-    "build": "npm run build:web && npm run build:timer && npm run build:auth && npm run build:agent && npm run build:supabase-mcp && npm run build:artifacts && npm run build:history",
-    "typecheck": "npm run typecheck:web && npm run typecheck:timer && npm run typecheck:auth && npm run typecheck:agent && npm run typecheck:supabase-mcp && npm run typecheck:artifacts && npm run typecheck:history",
+    "build": "npm run build:web && npm run build:timer && npm run build:auth && npm run build:agent && npm run build:supabase-mcp && npm run build:artifacts && npm run build:history && npm run build:transcription",
+    "typecheck": "npm run typecheck:web && npm run typecheck:timer && npm run typecheck:auth && npm run typecheck:agent && npm run typecheck:supabase-mcp && npm run typecheck:artifacts && npm run typecheck:history && npm run typecheck:transcription",
     "lint": "npm run lint --workspaces --if-present",
     "test:web": "npm test --workspace=@brai/web",
     "build:auth": "npm run build --workspace=@brai/auth",
@@ -41,7 +41,14 @@
     "typecheck:local-ai": "npm run typecheck --workspace=@brai/local-ai",
     "test:local-ai": "npm test --workspace=@brai/local-ai",
     "test:integration:local-ai": "npm run test:integration --workspace=@brai/local-ai",
-    "migrate:local-ai": "npm run migrate --workspace=@brai/local-ai"
+    "migrate:local-ai": "npm run migrate --workspace=@brai/local-ai",
+    "build:transcription": "npm run build --workspace=@brai/transcription",
+    "typecheck:transcription": "npm run typecheck --workspace=@brai/transcription",
+    "test:transcription": "npm test --workspace=@brai/transcription",
+    "test:integration:transcription:postgres": "npm run test:integration:postgres --workspace=@brai/transcription",
+    "test:integration:transcription:helper:rpc": "npm run test:integration:helper:rpc --workspace=@brai/transcription",
+    "test:integration:transcription:nats": "npm run test:integration:nats --workspace=@brai/transcription",
+    "test:transcription:metadata": "npm run test:integration:metadata --workspace=@brai/transcription"
   },
   "engines": {
     "node": "24.21.0",

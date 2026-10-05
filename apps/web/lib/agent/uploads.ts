@@ -78,7 +78,7 @@ export async function uploadAttachment(image: Attachment, scope: UploadScope, si
     headers: { "X-Brai-User": scope.userId, "Content-Type": "application/json" },
     body: JSON.stringify({ projectId: scope.projectId, threadId: scope.threadId, requestId: image.relationRequestId, originalArtifactId, modelArtifactId }),
   });
-  const result = await jsonResponse(response);
+  await jsonResponse(response);
   if (!response.ok) {
     if (response.status === 409) throw new Error("Загрузка ещё не подтверждена. Черновик сохранён; повторите отправку.");
     throw new Error("Не удалось связать копию изображения с оригиналом. Черновик сохранён; повторите отправку.");
