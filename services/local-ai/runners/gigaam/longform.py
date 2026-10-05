@@ -23,15 +23,15 @@ class InvalidLongformResult(ValueError):
 
 VAD_REPOSITORY = "pyannote/segmentation-3.0"
 VAD_FILES = {"config.yaml", "pytorch_model.bin", "LICENSE"}
+VAD_MANIFEST = Path(__file__).with_name("vad_manifest.json")
 
 
-def verify_vad_snapshot(model_path: Path) -> str:
-    """Сверить локальные файлы с неизменяемым манифестом gated VAD snapshot."""
-    manifest_path = model_path / "manifest.json"
-    if model_path.is_symlink() or manifest_path.is_symlink():
+def _manifest_at(path: Path) -> dict[str, Any]:
+    """Прочитать manifest только с ожидаемой структурой."""
+    if path.is_symlink() or not path.is_file():
         raise LongformUnavailable("манифест локальной VAD-модели недоступен")
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise LongformUnavailable("манифест локальной VAD-модели недоступен") from exc
     if (
@@ -50,18 +50,41 @@ def verify_vad_snapshot(model_path: Path) -> str:
         name = entry["path"]
         if name in entries or Path(name).name != name:
             raise LongformUnavailable("манифест локальной VAD-модели некорректен")
+        expected_bytes = entry.get("bytes")
+        expected_sha = entry.get("sha256")
+        if (
+            isinstance(expected_bytes, bool)
+            or not isinstance(expected_bytes, int)
+            or expected_bytes <= 0
+            or not isinstance(expected_sha, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None
+        ):
+            raise LongformUnavailable("манифест локальной VAD-модели некорректен")
         entries[name] = entry
     if set(entries) != VAD_FILES:
         raise LongformUnavailable("манифест локальной VAD-модели неполон")
+    return manifest
 
-    for name, entry in entries.items():
+
+def verify_vad_snapshot(model_path: Path) -> str:
+    """Сверить локальные файлы с неизменяемым манифестом gated VAD snapshot."""
+    manifest_path = model_path / "manifest.json"
+    if model_path.is_symlink():
+        raise LongformUnavailable("манифест локальной VAD-модели недоступен")
+    manifest = _manifest_at(manifest_path)
+    pinned_manifest = _manifest_at(VAD_MANIFEST)
+    if manifest != pinned_manifest:
+        raise LongformUnavailable("локальный VAD snapshot не совпадает с закреплённой ревизией")
+
+    for entry in manifest["files"]:
+        name = entry["path"]
         expected_bytes = entry.get("bytes")
         expected_sha = entry.get("sha256")
         artifact = model_path / name
         if (
             isinstance(expected_bytes, bool)
             or not isinstance(expected_bytes, int)
-            or expected_bytes < 0
+            or expected_bytes <= 0
             or not isinstance(expected_sha, str)
             or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None
             or artifact.is_symlink()

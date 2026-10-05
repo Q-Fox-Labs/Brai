@@ -2,7 +2,7 @@
 // ABOUTME: Проверяет границу и сроки запроса; не закрывает общую NATS connection.
 import { randomUUID } from 'node:crypto';
 import { Events } from 'nats';
-import type { NatsConnection, Service, ServiceMsg } from 'nats';
+import type { NatsConnection, QueuedIterator, Service, ServiceMsg, Status } from 'nats';
 import { serviceName, subjects, validateError, validateRequest, validateResponse } from '../../contracts/index.mjs';
 import { LocalAiError } from '../errors.js';
 import type { OperationContext, ServiceErrorCode } from '../types.js';
@@ -244,8 +244,14 @@ export async function startLocalAiNats(
   }
 
   void service.stopped.then(() => { serviceAvailable = false; }, () => { serviceAvailable = false; });
-  const statusIterator = nc.status()[Symbol.asyncIterator]();
-  void (async () => {
+  const statusEvents = nc.status() as unknown as QueuedIterator<Status>;
+  if (typeof statusEvents.stop !== 'function') {
+    serviceAvailable = false;
+    await service.stop();
+    throw new LocalAiError('DEPENDENCY_UNAVAILABLE', 'DEPENDENCY_UNAVAILABLE', true);
+  }
+  const statusIterator = statusEvents[Symbol.asyncIterator]();
+  const statusMonitor = (async () => {
     try {
       for (;;) {
         const event = await statusIterator.next();
@@ -257,11 +263,16 @@ export async function startLocalAiNats(
       connected = false;
     }
   })();
+  const stopStatusMonitor = async (): Promise<void> => {
+    statusEvents.stop();
+    await statusMonitor;
+  };
   void nc.closed().then(() => { connected = false; }, () => { connected = false; });
 
   if (service.isStopped) {
     serviceAvailable = false;
-    await statusIterator.return?.();
+    await service.stop();
+    await stopStatusMonitor();
     throw new LocalAiError('DEPENDENCY_UNAVAILABLE', 'DEPENDENCY_UNAVAILABLE', true);
   }
 
@@ -273,7 +284,7 @@ export async function startLocalAiNats(
       try {
         await service.stop();
       } finally {
-        await statusIterator.return?.();
+        await stopStatusMonitor();
       }
     })();
     return stopPromise;

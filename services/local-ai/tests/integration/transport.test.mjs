@@ -16,6 +16,28 @@ const clientPassword = process.env.BRAI_LOCAL_AI_TEST_NATS_CLIENT_PASSWORD;
 const encode = value => Buffer.from(JSON.stringify(value));
 const decode = message => JSON.parse(new TextDecoder().decode(message.data));
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+function withTimeout(promise, milliseconds, label) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out`)), milliseconds);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+async function finishConnection(connection, label) {
+  if (!connection) return;
+  try {
+    await withTimeout(connection.drain(), 2000, `${label} drain`);
+  } catch {
+    try {
+      await withTimeout(connection.close(), 1000, `${label} close`);
+    } catch {
+      // Cleanup must stay bounded if the broker or connection is already unhealthy.
+    }
+  }
+}
 
 function loadFixtureUrl(value) {
   const parsed = new URL(value);
@@ -35,6 +57,7 @@ async function connectFixture(server, user, password, inboxPrefix) {
 }
 
 test('real NATS service validates DTOs, bounds work, and drains without closing its connection', {
+  timeout: 30000,
   skip: !required && !url && 'Set BRAI_LOCAL_AI_TEST_REQUIRED for the protected acceptance wrapper',
 }, async t => {
   assert.ok(url, 'BRAI_LOCAL_AI_TEST_NATS_URL is required');
@@ -47,9 +70,19 @@ test('real NATS service validates DTOs, bounds work, and drains without closing 
   let transport;
   t.after(async () => {
     releaseSlow?.();
-    await transport?.close().catch(() => {});
-    await serviceNc.drain().catch(() => {});
-    await clientNc?.drain().catch(() => {});
+    if (transport) {
+      try {
+        await withTimeout(transport.close(), 3000, 'transport close');
+      } catch {
+        try {
+          await withTimeout(serviceNc.close(), 1000, 'service connection close');
+        } catch {
+          // The test runner has a finite timeout if even hard close cannot complete.
+        }
+      }
+    }
+    await finishConnection(clientNc, 'fixture client');
+    await finishConnection(serviceNc, 'local-ai service');
   });
   clientNc = await connectFixture(server, clientUser, clientPassword, `_INBOX.brai_fixture.local_ai.${suffix}`);
   const serverInfo = serviceNc.info;
@@ -184,8 +217,8 @@ test('real NATS service validates DTOs, bounds work, and drains without closing 
   await transport.service.stop();
   assert.equal(transport.connected(), false);
   assert.equal(serviceNc.isClosed(), false);
-  await transport.stopAdmission();
-  await transport.drainHandlers();
+  await withTimeout(transport.stopAdmission(), 3000, 'stop admission');
+  await withTimeout(transport.drainHandlers(), 3000, 'handler drain');
   assert.equal(transport.connected(), false);
   assert.equal(serviceNc.isClosed(), false);
 });
