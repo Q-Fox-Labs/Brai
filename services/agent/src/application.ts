@@ -257,7 +257,11 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
           else { s.view.state = 'executor-unavailable'; publish(s); return; }
         }
         const turnId = typeof p?.turnId === 'string' && p.turnId ? text(p.turnId, 128) : 'unknown';
-        s.view.requests.push({ requestId, turnId, method: e.method!, kind: 'unsupported', params: {}, answered: false, reason: rejection });
+        const metadata = e.method === 'item/tool/call' ? {
+          ...(typeof p?.tool === 'string' ? { tool: p.tool } : {}),
+          ...(typeof p?.namespace === 'string' ? { namespace: p.namespace } : {}),
+        } : {};
+        s.view.requests.push({ requestId, turnId, method: e.method!, kind: 'unsupported', params: metadata, answered: false, reason: rejection });
       } else {
         s.view.requests.push({ requestId, turnId: p.turnId, method: e.method!, kind: kind!, params: p, answered: false });
         s.raw.set(requestId, e.id!);
@@ -538,7 +542,8 @@ function validAnswer(f: PendingRequest, answer: any): boolean {
   if (f.kind === 'command-approval' && f.params.availableDecisions) return f.params.availableDecisions.some((v: any) => JSON.stringify(v) === JSON.stringify(answer?.decision));
   if (f.kind === 'question') {
     if (Object.keys(answer?.answers ?? {}).sort().join() !== f.params.questions.map((q: any) => q.id).sort().join()) return false;
-    return f.params.questions.every((q: any) => answer.answers[q.id].answers.length > 0 && answer.answers[q.id].answers.every((value: string) => value.trim() && (!q.options?.length || q.isOther || q.options.some((option: any) => option.label === value))));
+    // AIDEV-NOTE: Native schema допускает пустой answers — это явный пропуск, а не отсутствующий вопрос.
+    return f.params.questions.every((q: any) => answer.answers[q.id].answers.every((value: string) => value.trim() && (!q.options?.length || q.isOther || q.options.some((option: any) => option.label === value))));
   }
   if (f.kind === 'permissions') return answer?.scope === 'turn' && answer?.strictAutoReview !== true && (JSON.stringify(answer?.permissions) === JSON.stringify(f.params.permissions) || JSON.stringify(answer?.permissions) === '{}');
   return true;

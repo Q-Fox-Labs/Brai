@@ -13,48 +13,116 @@ const tableRule = /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/;
 let mermaidInitialized = false;
 
 function MermaidDiagram({ source }: { source: string }) {
-  const host = useRef<HTMLDivElement>(null);
+  const dialog = useRef<HTMLDialogElement>(null);
+  const viewport = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
   const [state, setState] = useState<"loading" | "rendered" | "failed">("loading");
+  const [svg, setSvg] = useState("");
+  const [expanded, setExpanded] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [size, setSize] = useState({ width: 800, height: 400 });
   const id = `brai-mermaid-${useId().replace(/:/g, "")}`;
+  const changeZoom = (value: number) => setZoom(Math.max(0.1, Math.min(8, value)));
+  const fit = () => {
+    if (!viewport.current) return;
+    changeZoom(Math.min((viewport.current.clientWidth - 48) / size.width, (viewport.current.clientHeight - 48) / size.height, 1));
+    viewport.current.scrollTo(0, 0);
+  };
+
+  useEffect(() => {
+    if (!expanded || !dialog.current) return;
+    const element = dialog.current;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    element.showModal();
+    fit();
+    return () => {
+      element.close();
+      document.body.style.overflow = overflow;
+    };
+  }, [expanded, size]);
 
   useEffect(() => {
     let active = true;
     setState("loading");
     void import("mermaid").then(async ({ default: mermaid }) => {
+      if (!active) return;
       if (!mermaidInitialized) {
         mermaid.initialize({
           startOnLoad: false,
+          suppressErrorRendering: true,
           securityLevel: "strict",
-          theme: "dark",
-          layout: "dagre",
+          theme: "base",
+          look: "classic",
           themeVariables: {
+            darkMode: true,
             fontFamily: "ui-sans-serif, system-ui, sans-serif",
-            primaryColor: "#263449",
+            primaryColor: "#14203b",
             primaryTextColor: "#e5e7eb",
-            primaryBorderColor: "#64748b",
-            lineColor: "#94a3b8",
-            background: "#111827",
+            primaryBorderColor: "#263553",
+            lineColor: "#737780",
+            secondaryColor: "#202735",
+            tertiaryColor: "#252830",
+            background: "#202124",
           },
-          flowchart: { wrappingWidth: 240 },
+          flowchart: { wrappingWidth: 240, curve: "linear" },
         });
         mermaidInitialized = true;
       }
-      return mermaid.render(id, source);
-    }).then(({ svg }) => {
-      if (!active || !host.current) return;
-      host.current.innerHTML = svg;
-      setState("rendered");
+      // Mermaid needs an attached element for measurements. Own its temporary DOM
+      // so failed or cancelled renders cannot leave error diagrams in the page.
+      const staging = document.createElement("div");
+      staging.style.cssText = "position:absolute;left:-100000px;top:0;visibility:hidden;pointer-events:none";
+      staging.setAttribute("aria-hidden", "true");
+      document.body.append(staging);
+      try {
+        const { svg } = await mermaid.render(`${id}-${crypto.randomUUID()}`, source, staging);
+        if (!active) return;
+        const box = new DOMParser().parseFromString(svg, "text/html").querySelector("svg")?.getAttribute("viewBox")?.split(/[\s,]+/).map(Number);
+        if (box?.length === 4 && box[2] > 0 && box[3] > 0) setSize({ width: box[2], height: box[3] });
+        setSvg(svg);
+        setState("rendered");
+      } finally {
+        staging.remove();
+      }
     }).catch(() => {
-      if (active) setState("failed");
+      if (active) { setSvg(""); setState("failed"); }
     });
     return () => {
       active = false;
-      host.current?.replaceChildren();
     };
   }, [id, source]);
 
   return <figure className="markdown-mermaid">
-    <div ref={host} className="markdown-mermaid-canvas" role="img" aria-label="Диаграмма Mermaid" aria-busy={state === "loading"} />
+    {state === "rendered" && <div className="markdown-mermaid-toolbar"><button type="button" title="Развернуть диаграмму" aria-label="Развернуть диаграмму" onClick={() => setExpanded(true)}>⤢</button></div>}
+    {!expanded && <div className="markdown-mermaid-canvas" role="img" aria-label="Диаграмма Mermaid" aria-busy={state === "loading"} dangerouslySetInnerHTML={{ __html: svg }} />}
+    <dialog ref={dialog} className="markdown-mermaid-dialog" aria-label="Диаграмма Mermaid на весь экран" onClose={() => { if (!dialog.current?.open) setExpanded(false); }} onKeyDown={event => {
+      if (event.key === "+" || event.key === "=") { event.preventDefault(); changeZoom(zoom * 1.25); }
+      if (event.key === "-") { event.preventDefault(); changeZoom(zoom / 1.25); }
+      if (event.key === "0") { event.preventDefault(); fit(); }
+      event.stopPropagation();
+    }}>
+      <div className="markdown-mermaid-viewer-toolbar">
+        <span>Диаграмма</span>
+        <button type="button" aria-label="Уменьшить диаграмму" onClick={() => changeZoom(zoom / 1.25)}>−</button>
+        <output aria-label="Масштаб диаграммы">{Math.round(zoom * 100)}%</output>
+        <button type="button" aria-label="Увеличить диаграмму" onClick={() => changeZoom(zoom * 1.25)}>+</button>
+        <button type="button" onClick={fit}>Вписать</button>
+        <button type="button" onClick={() => changeZoom(1)}>100%</button>
+        <button type="button" aria-label="Закрыть диаграмму" title="Закрыть (Escape)" onClick={() => dialog.current?.close()}>×</button>
+      </div>
+      <div ref={viewport} className="markdown-mermaid-viewport" tabIndex={0} aria-label="Область диаграммы, перетащите для перемещения" onPointerDown={event => {
+        if (event.button !== 0) return;
+        drag.current = { x: event.clientX, y: event.clientY, left: event.currentTarget.scrollLeft, top: event.currentTarget.scrollTop };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }} onPointerMove={event => {
+        if (!drag.current) return;
+        event.currentTarget.scrollLeft = drag.current.left - (event.clientX - drag.current.x);
+        event.currentTarget.scrollTop = drag.current.top - (event.clientY - drag.current.y);
+      }} onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }}>
+        {expanded && <div className="markdown-mermaid-drawing" style={{ width: size.width * zoom, height: size.height * zoom }} role="img" aria-label="Диаграмма Mermaid" dangerouslySetInnerHTML={{ __html: svg }} />}
+      </div>
+    </dialog>
     {state === "loading" && <figcaption className="markdown-mermaid-status">Отрисовываю диаграмму…</figcaption>}
     {state === "failed" && <figcaption className="markdown-mermaid-error">
       <span>Не удалось отрисовать диаграмму. Исходный код:</span>
@@ -171,13 +239,17 @@ function parseBlocks(lines: string[], key = "b"): ReactNode[] {
     if (!line.trim()) { i++; continue; }
     const codeFence = line.match(fence);
     if (codeFence) {
+      const blockKey = `${key}-${i}`;
       const marker = codeFence[1], language = codeFence[2].trim().split(/\s+/, 1)[0];
       const code: string[] = [];
       i++;
       while (i < lines.length && !new RegExp(`^ {0,3}${marker[0]}{${marker.length},}\\s*$`).test(lines[i])) code.push(lines[i++]);
-      if (i < lines.length) i++;
+      const closed = i < lines.length;
+      if (closed) i++;
       const source = code.join("\n");
-      if (language.toLowerCase() === "mermaid") blocks.push(<MermaidDiagram key={`${key}-${i}`} source={source} />);
+      if (language.toLowerCase() === "mermaid") blocks.push(closed
+        ? <MermaidDiagram key={blockKey} source={source} />
+        : <figure className="markdown-mermaid" key={blockKey}><figcaption className="markdown-mermaid-status" role="status">Диаграмма появится после получения кода…</figcaption></figure>);
       else {
         const langClass = /^[a-z\d_-]+$/i.test(language) ? `language-${language}` : undefined;
         blocks.push(<pre className="markdown-code-block" key={`${key}-${i}`}><code className={langClass}>{source}</code></pre>);

@@ -1,0 +1,8 @@
+# ABOUTME: Закрепляет Instaloader и полный набор его runtime-зависимостей.
+# ABOUTME: Используется только для отдельного контейнерного инструмента.
+instaloader==4.15.3
+requests==2.34.2
+charset-normalizer==3.5.2
+idna==3.20
+urllib3==2.8.0
+certifi==2026.7.22

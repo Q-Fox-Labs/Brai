@@ -8,6 +8,7 @@ import { createAgentClient, AgentError } from "../../lib/agent/client";
 import { mergeThreadMetadata } from "../../lib/agent/thread";
 import ModelSettings, { AgentModeButton, ComposerIcon } from "./settings";
 import NativeForm from "./request";
+import QuestionCard from "./questions";
 import TurnErrorNotice from "./turn-error";
 import { createLazyReads } from "../../lib/agent/lazy";
 import Activities from "./activities";
@@ -316,6 +317,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   }
 
   const view = snapshot?.projectId === projectId && snapshot?.threadId === threadId ? snapshot : null;
+  const questionRequest = view?.requests.find(request => request.kind === "question" && !request.answered);
   const goalUnfinished = goalBlocksNewTask(view);
   const active = view?.turn?.status === "inProgress", disabled = busy || !view || !connected || uncertain.current;
   const project = projects.find(value => value.projectId === projectId);
@@ -536,10 +538,11 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           {materials.filter(value => value.kind !== "plan").map(value => <button key={value.id} type="button" className="agent-material-card" onClick={() => chooseMaterial(value.id)}>{value.title}<span>{materialView.updated.includes(value.id) ? "Обновлено · " : ""}Открыть →</span></button>)}
           {pendingCorrections.map(value => <Item key={value.item.id} item={value.item} context={activityContext} reads={lazyReads} pending={value.state} dismiss={() => setCorrections(previous => previous.filter(item => item.item.id !== value.item.id))} />)}
           {view?.turn?.error && <TurnErrorNotice error={view.turn.error} />}
-          {view?.requests.map(request => (connected || request.kind === "unsupported") && <NativeForm key={view.generation + ":" + view.epoch + ":" + request.requestId} request={request} disabled={disabled} send={answer => mutate("answer", { requestId: request.requestId, answer })} />)}
+          {view?.requests.filter(request => request.kind !== "question").map(request => (connected || request.kind === "unsupported") && <NativeForm key={view.generation + ":" + view.epoch + ":" + request.requestId} request={request} disabled={disabled} send={answer => mutate("answer", { requestId: request.requestId, answer })} />)}
         </div>
       </div>
       {(threadId || message || accountMessage) && <footer className="agent-composer-area">
+        {questionRequest && <QuestionCard key={`${projectId}:${threadId}:${view!.generation}:${view!.epoch}:${questionRequest.requestId}`} request={questionRequest} disabled={disabled} send={answer => mutate("answer", { requestId: questionRequest.requestId, answer })} />}
         {queuedMessages.some(value => value.chat === currentChat.current) && <ul className="agent-message-queue" aria-label="Очередь сообщений">{queuedMessages.filter(value => value.chat === currentChat.current).map(value => <li key={value.id}>
           <span>{value.draft.text || "Изображения"}{!!value.draft.images.length && ` · Изображений: ${value.draft.images.length}`} · {value.agentMode === "plan" ? "Планирование" : value.agentMode === "goal" ? "Цель" : "Обычный"} · {value.state === "sending" ? "Отправляется" : value.state === "unknown" ? "Результат неизвестен — проверьте чат" : value.state === "failed" ? "Не отправлено — очередь остановлена" : "В очереди"}</span>
           <button type="button" disabled={value.state === "sending"} onClick={() => { const removed = queuedMessages.find(item => item.id === value.id); if (removed) for (const image of removed.draft.images) releaseAttachmentPreview(image); setQueuedMessages(previous => previous.filter(item => item.id !== value.id)); }} aria-label="Удалить сообщение из очереди">×</button>

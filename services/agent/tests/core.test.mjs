@@ -36,6 +36,16 @@ function fixture() {
   const create = operationId => app.request({ action: 'create', projectId: 'demo', generation, operationId });
   return { app, command, open, create, settings, observe: event => observer(event), counts: () => ({ creates, starts, answers }), changeGeneration: () => { generation = 'g2'; observer({ type: 'connection', status: port.status() }); } };
 }
+test('rejected tool metadata reaches the notice without creating a pending user answer', async () => {
+  const f = fixture();
+  await f.create('tool-notice');
+  f.observe({ type: 'request', method: 'item/tool/call', id: 'tool', supported: false, reason: 'unsupported-method', params: { threadId: 't1', turnId: 'turn1', namespace: 'codex_app', tool: 'list_artifacts' } });
+  const view = await f.open();
+  assert.deepEqual(view.requests[0].params, { namespace: 'codex_app', tool: 'list_artifacts' });
+  assert.equal(view.requests[0].kind, 'unsupported');
+  assert.notEqual(view.state, 'waiting');
+  await assert.rejects(f.app.request(f.command('answer', { requestId: 'string:tool', answer: {} })), error => error.code === 'INVALID_ARGUMENT');
+});
 test('one operation has one effect; busy/stale/different-body commands are rejected', async () => {
   const f = fixture();
   await Promise.all([f.create('create1'), f.create('create1')]);
@@ -84,6 +94,21 @@ test('question without Other rejects unoffered values', async () => {
   assert.equal((await f.open()).thread.awaitingReply, true);
   await f.app.request({ ...answer, operationId: 'answer2', answer: { answers: { q: { answers: ['Yes'] } } } });
   assert.equal((await f.open()).thread.awaitingReply, false);
+});
+test('question skips keep every original ID and accept mixed or entirely empty answers', async t => {
+  for (const skipAll of [false, true]) {
+    const f = fixture(); t.after(() => f.app.close());
+    await f.create('create1');
+    f.observe({ type: 'request', method: 'item/tool/requestUserInput', id: 3, supported: true, params: { threadId: 't1', turnId: 'turn1', questions: [{ id: 'first', options: [{ label: 'Yes' }] }, { id: 'second', isOther: true }] } });
+    const command = f.command('answer', { requestId: 'number:3' });
+    for (const answers of [{ first: { answers: [] } }, { first: { answers: [] }, second: { answers: ['   '] } }, { first: { answers: [] }, second: { answers: [] }, extra: { answers: [] } }]) {
+      await assert.rejects(f.app.request({ ...command, operationId: 'invalid-' + JSON.stringify(answers), answer: { answers } }), error => error.code === 'INVALID_ARGUMENT');
+    }
+    await f.app.request({ ...command, answer: { answers: { first: { answers: [] }, second: { answers: skipAll ? [] : ['Custom response'] } } } });
+    assert.equal(f.counts().answers, 1);
+    assert.equal((await f.open()).thread.awaitingReply, false);
+    assert.equal((await f.open()).requests[0].answered, true);
+  }
 });
 test('sixteen concurrent admissions fit; seventeenth has no native effect', async () => {
   const f = fixture();

@@ -1,0 +1,108 @@
+"use client";
+// ABOUTME: Показывает один native вопрос за раз и собирает ответы перед отправкой.
+// ABOUTME: Выделение не означает выбор; явный пропуск передаётся пустым массивом.
+import { useEffect, useId, useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
+import type { PendingRequest } from "@brai/agent/contracts";
+
+type Question = { id: string; question: string; isOther?: boolean; isSecret?: boolean; options?: { label: string; description: string }[] | null };
+type Props = { request: PendingRequest; disabled: boolean; send: (answer: unknown) => Promise<boolean> };
+
+function Icon({ kind }: { kind: "previous" | "next" | "close" | "edit" | "submit" }) {
+  const paths = { previous: "m14 6-6 6 6 6", next: "m10 6 6 6-6 6", close: "m6 6 12 12M6 18 18 6", edit: "m15 5 4 4M4 20l4-1L20 7a3 3 0 0 0-4-4L4 15Z", submit: "M4 12h16m-7-7 7 7-7 7" };
+  return <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[kind]} /></svg>;
+}
+
+/** Сохраняет ответы при навигации и сворачивании; send=true блокирует повтор до сверки. */
+export default function QuestionCard({ request, disabled, send }: Props) {
+  const questions: Question[] = request.params.questions ?? [];
+  const [index, setIndex] = useState(0), [highlighted, setHighlighted] = useState(0), [collapsed, setCollapsed] = useState(false);
+  const [answers, setAnswers] = useState<Record<string, string[]>>({}), [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [status, setStatus] = useState<"idle" | "sending" | "locked">("idle");
+  const sending = useRef(false), focusRequested = useRef(false), form = useRef<HTMLFormElement>(null), reopen = useRef<HTMLButtonElement>(null);
+  const titleId = useId(), cardId = useId();
+  const question = questions[index], blocked = disabled || status !== "idle" || request.answered;
+  useEffect(() => {
+    if (!focusRequested.current) return;
+    focusRequested.current = false;
+    if (collapsed) reopen.current?.focus();
+    else form.current?.querySelector<HTMLElement>(".agent-question-option.is-active, input, textarea, [data-question-skip]")?.focus();
+  }, [index, collapsed]);
+  if (!question) return null;
+  const options = question.options ?? [], custom = !options.length || question.isOther;
+  const draft = drafts[question.id] ?? "";
+  const inputProps = {
+    value: draft, disabled: blocked, autoComplete: "off", placeholder: options.length ? "Нет. Расскажите Brai, что сделать по-другому" : "Напишите свой ответ",
+    onChange: (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      setDrafts(previous => ({ ...previous, [question.id]: event.target.value }));
+      setAnswers(previous => { const next = { ...previous }; delete next[question.id]; return next; });
+    },
+    onKeyDown: (event: KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+      event.preventDefault(); if (!event.repeat && draft.trim()) complete([draft]);
+    },
+  };
+
+  function navigate(next: number, saved = answers) {
+    if (next < 0 || next >= questions.length) return;
+    const selected = questions[next].options?.findIndex(option => option.label === saved[questions[next].id]?.[0]) ?? -1;
+    setHighlighted(Math.max(0, selected)); setIndex(next); focusRequested.current = true;
+  }
+
+  function complete(value: string[]) {
+    if (blocked || sending.current) return;
+    const next = { ...answers, [question.id]: value };
+    setAnswers(next);
+    if (index < questions.length - 1) { navigate(index + 1, next); return; }
+    // AIDEV-NOTE: Неотвеченный вопрос отличается от явного пропуска; навигация не пропускает вопросы.
+    const missing = questions.findIndex(value => !Object.hasOwn(next, value.id));
+    if (missing !== -1) { navigate(missing, next); return; }
+    sending.current = true; setStatus("sending");
+    void send({ answers: Object.fromEntries(questions.map(value => [value.id, { answers: next[value.id] }])) }).then(locked => {
+      if (locked) setStatus("locked");
+      else { sending.current = false; setStatus("idle"); }
+    });
+  }
+
+  return <section className="agent-questions" data-request-id={request.requestId} data-request-kind="question" aria-label="Вопросы агента">
+    {collapsed && <button ref={reopen} type="button" className="agent-question-reopen" aria-expanded="false" aria-controls={cardId} onClick={() => { focusRequested.current = true; setCollapsed(false); }}>Ответить на вопросы <span>{index + 1} из {questions.length}</span><Icon kind="next" /></button>}
+    <form ref={form} id={cardId} hidden={collapsed} className="agent-question-card" aria-labelledby={titleId} aria-busy={status === "sending"} onSubmit={event => { event.preventDefault(); if (custom && draft.trim()) complete([draft]); }} onKeyDown={event => {
+      if (event.key === "Enter" && event.repeat) event.preventDefault();
+      if (event.key === "Escape") { event.preventDefault(); focusRequested.current = true; setCollapsed(true); }
+    }}>
+      <div className="agent-question-heading">
+        <h2 id={titleId} aria-live="polite">{question.question}</h2>
+        <div className="agent-question-navigation">
+          <button type="button" aria-label="Предыдущий вопрос" disabled={blocked || index === 0} onClick={() => navigate(index - 1)}><Icon kind="previous" /></button>
+          <span aria-live="polite">{index + 1} из {questions.length}</span>
+          <button type="button" aria-label="Следующий вопрос" disabled={blocked || index === questions.length - 1} onClick={() => navigate(index + 1)}><Icon kind="next" /></button>
+          <button type="button" aria-label="Свернуть вопросы" onClick={() => { focusRequested.current = true; setCollapsed(true); }}><Icon kind="close" /></button>
+        </div>
+      </div>
+      <div className="agent-question-body" role="group" aria-labelledby={titleId} aria-disabled={blocked}>
+        <div className="agent-question-options">
+          {options.map((option, optionIndex) => {
+            const recommendation = /\s*\((?:recommended|рекомендуемый|рекомендуется)\)\s*$/i;
+            const recommended = recommendation.test(option.label);
+            return <button type="button" key={option.label} disabled={blocked} data-question-option={optionIndex} className={`agent-question-option${highlighted === optionIndex ? " is-active" : ""}`} aria-pressed={answers[question.id]?.[0] === option.label} onFocus={() => setHighlighted(optionIndex)} onClick={() => complete([option.label])} onKeyDown={event => {
+              if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+              event.preventDefault();
+              const next = (optionIndex + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+              form.current?.querySelector<HTMLElement>(`[data-question-option="${next}"]`)?.focus();
+            }}>
+              <span className="agent-question-number" aria-hidden="true">{optionIndex + 1}</span>
+              <span className="agent-question-option-copy"><span className="agent-question-option-title">{recommended ? option.label.replace(recommendation, "") : option.label}{recommended && <span className="agent-question-recommended">Рекомендуемый</span>}</span><span className="agent-question-description">{option.description}</span></span>
+              <span className="agent-question-option-arrow"><Icon kind="submit" /></span>
+            </button>;
+          })}
+        </div>
+        <div className="agent-question-footer">
+          {custom && <label className="agent-question-custom"><Icon kind="edit" /><span className="sr-only">{question.isSecret ? "Секретный ответ" : "Свой ответ"}</span>
+            {question.isSecret ? <input {...inputProps} type="password" /> : <textarea {...inputProps} rows={1} />}
+          </label>}
+          {custom && draft.trim() ? <button type="submit" disabled={blocked} className="agent-question-continue">{index === questions.length - 1 ? "Отправить" : "Далее"}<Icon kind="submit" /></button> : <button type="button" disabled={blocked} className="agent-question-skip" data-question-skip onClick={() => complete([])}>Пропустить</button>}
+        </div>
+      </div>
+      {status !== "idle" && <p className="agent-question-status" role="status">{status === "sending" ? "Отправляем ответы…" : "Ожидаем обновления чата…"}</p>}
+    </form>
+  </section>;
+}

@@ -1,0 +1,22 @@
+# ABOUTME: Запускает Instaloader по запросу как контейнерную зависимость Brai.
+# ABOUTME: Загрузки и сессии сохраняются в явно переданном каталоге хоста.
+name: brai-instaloader
+services:
+  instaloader:
+    image: brai-instaloader:4.15.3
+    build:
+      context: .
+    init: true
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 512m
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    volumes:
+      - type: bind
+        source: ${BRAI_INSTALOADER_DATA_DIR:?Set an absolute prepared data directory writable by UID 1000}
+        target: /data
+        bind:
+          create_host_path: false

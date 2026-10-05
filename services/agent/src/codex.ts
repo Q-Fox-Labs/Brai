@@ -59,6 +59,9 @@ export function createCodex(options: { socketUrl: string }) {
     const safeParams = {
       ...(typeof params?.threadId === 'string' ? { threadId: params.threadId } : {}),
       ...(typeof params?.turnId === 'string' ? { turnId: params.turnId } : {}),
+      // AIDEV-NOTE: Имя инструмента помогает диагностике; аргументы остаются у Codex.
+      ...(method === 'item/tool/call' && typeof params?.tool === 'string' && /^[\w-]{1,64}$/.test(params.tool) ? { tool: params.tool } : {}),
+      ...(method === 'item/tool/call' && typeof params?.namespace === 'string' && /^[\w-]{1,64}$/.test(params.namespace) ? { namespace: params.namespace } : {}),
     };
     void send({ id, error: rejection(reason) }, false)
       .then(() => notify({ type: 'request', id, method, params: safeParams, supported: false, reason }))
