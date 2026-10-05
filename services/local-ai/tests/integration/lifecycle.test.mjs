@@ -90,3 +90,30 @@ test('runtime close kills surviving descendants and waits for the whole process 
   assert.throws(() => process.kill(descendantPid, 0), error => error.code === 'ESRCH');
   await rm(root, { recursive: true, force: true });
 });
+
+test('exited eventually confirms real process-group cleanup after bounded close rejects', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'local-ai-gigaam-late-exit-test-'));
+  const source = `const {spawn}=require('node:child_process');const readline=require('node:readline');const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:'ignore'});const r=readline.createInterface({input:process.stdin});r.on('line',l=>{const q=JSON.parse(l);const result=q.method==='health'?{ready:true,model_id:'gigaam-v3-e2e-ctc',revision:'rev-giga',vad_revision:'vad-rev'}:{text:String(child.pid)};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\\n')});`;
+  const factory = createProfileRuntimeFactory({ profiles: {
+    llama_cpp: { ...common(process.execPath, ['-e', 'process.exit(2)']), host: '127.0.0.1', port: () => 1, dimensions: 1024, contextTokens: 2048, maxBatchTokens: 2048, queryInstruction: 'unused' },
+    gigaam_pytorch: { ...common(process.execPath, ['-e', source]), stopGraceMs: 0, vadModelPath: '/local/vad', vadRevision: 'vad-rev', threads: 1, longformMaximumSeconds: 40, audioDecodeTimeoutSeconds: 15 },
+  } });
+  const model = { model: { modelId: 'gigaam-v3-e2e-ctc', revision: 'rev-giga', profileId: 'gigaam_pytorch' }, installation: {
+    modelId: 'gigaam-v3-e2e-ctc', revision: 'rev-giga', profileId: 'gigaam_pytorch', directory: root,
+    files: [{ path: 'config.json', sizeBytes: 5, sha256: '0'.repeat(64) }], installedAt: new Date().toISOString(),
+  } };
+  const runtime = await factory.open(model, context());
+  const result = await runtime.transcribe({ model: model.model, audioPath: '/tmp/audio-fixture' }, context());
+  const descendantPid = Number(result.text);
+  let exited = false;
+  void runtime.exited.then(() => { exited = true; });
+  await assert.rejects(runtime.close(), error => error.code === 'ENGINE_UNAVAILABLE');
+  assert.equal(exited, false, 'a bounded close failure must not claim resource release');
+  await Promise.race([
+    runtime.exited,
+    new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('process group did not exit')), 2000); timer.unref(); }),
+  ]);
+  assert.equal(exited, true);
+  assert.throws(() => process.kill(descendantPid, 0), error => error.code === 'ESRCH');
+  await rm(root, { recursive: true, force: true });
+});

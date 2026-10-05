@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import sys
-import hashlib
 import json
 import tempfile
 import types
@@ -156,37 +155,29 @@ class LongformTests(unittest.TestCase):
         modules["pyannote.audio.core"] = types.ModuleType("pyannote.audio.core")
         modules["pyannote.audio.core.task"] = task
         modules["pyannote.audio.pipelines"] = pipelines
-        original_get_pipeline = get_pipeline
         with tempfile.TemporaryDirectory() as directory:
             model_path = Path(directory)
-            manifest_files = []
-            for name, content in (("config.yaml", b"config"), ("pytorch_model.bin", b"checkpoint"), ("LICENSE", b"license")):
-                artifact = model_path / name
-                artifact.write_bytes(content)
-                manifest_files.append(
-                    {"path": name, "bytes": len(content), "sha256": hashlib.sha256(content).hexdigest()}
-                )
-            (model_path / "manifest.json").write_text(
-                json.dumps(
-                    {
-                        "repository": "pyannote/segmentation-3.0",
-                        "revision": "a" * 40,
-                        "files": manifest_files,
-                    }
-                ),
-                encoding="utf-8",
-            )
             with patch.dict(sys.modules, modules), patch.dict(
                 "os.environ",
-                {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"},
-            ), patch.object(sys.modules[__name__], "get_pipeline", original_get_pipeline):
-                self.assertEqual(longform.configure_local_vad(FakeModel(), model_path), "a" * 40)
+                {
+                    "HF_HUB_OFFLINE": "1",
+                    "TRANSFORMERS_OFFLINE": "1",
+                    "PYANNOTE_METRICS_ENABLED": "0",
+                },
+            ), patch.object(
+                longform, "verify_vad_snapshot", return_value="e66f3d3b9eb0873085418a7b813d3b369bf160bb"
+            ) as verify:
+                self.assertEqual(
+                    longform.configure_local_vad(FakeModel(), model_path),
+                    "e66f3d3b9eb0873085418a7b813d3b369bf160bb",
+                )
+                verify.assert_called_once_with(model_path.resolve())
                 self.assertIsInstance(get_pipeline("cpu"), VoiceActivityDetection)
                 self.assertEqual(get_pipeline("cpu").parameters, {"min_duration_on": 0.0, "min_duration_off": 0.0})
                 self.assertEqual(get_pipeline("cpu").device, "cpu")
 
-    def test_rejects_vad_manifest_hash_mismatch(self) -> None:
-        """Не загружать локальный VAD, если байты не совпадают с манифестом."""
+    def test_rejects_unpinned_vad_manifest(self) -> None:
+        """Отклонить syntactically valid, но не совпадающий с source pin manifest."""
         with tempfile.TemporaryDirectory() as directory:
             model_path = Path(directory)
             files = []

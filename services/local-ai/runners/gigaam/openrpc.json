@@ -3,7 +3,7 @@
   "info": {
     "title": "Brai private GigaAM v3 e2e CTC runner",
     "version": "1.0.0",
-    "description": "Private UTF-8 JSON-RPC 2.0 over stdin/stdout, one JSON document per line. stdout contains RPC responses only; stderr contains diagnostics. GigaAM, VAD model, and audio paths are local to the service container."
+    "description": "Private UTF-8 JSON-RPC 2.0 over stdin/stdout, one JSON document per line. stdout contains RPC responses only; stderr contains diagnostics. Audio input is limited to WAV, FLAC, MP3, and OGG containers with one audio stream; the runner normalizes it to mono 16 kHz PCM WAV before inference. GigaAM, VAD model, and audio paths are local to the service container."
   },
   "servers": [],
   "methods": [
@@ -34,7 +34,7 @@
             "type": "string",
             "minLength": 1,
             "pattern": "^/",
-            "description": "Absolute local path to an FFmpeg-decodable audio file readable by the runner."
+            "description": "Absolute local path to one WAV, FLAC, MP3, or OGG audio file readable by the runner. Playlist and other container formats are rejected."
           }
         }
       ],
@@ -59,7 +59,7 @@
     "notification": "No response line",
     "batch": "One response array line in request order; notifications are omitted; all-notification batch emits no line",
     "diagnostics": "stderr only",
-    "offline": "GigaAM and pyannote VAD are loaded from checksum-verified local snapshots; runtime network access is disabled."
+    "offline": "GigaAM and pyannote VAD are loaded from checksum-verified local snapshots. FFmpeg probe/decode permits only local file protocol and WAV, FLAC, MP3, or OGG demuxers."
   },
   "x-jsonrpc-errors": {
     "-32700": "Parse error; id is null",

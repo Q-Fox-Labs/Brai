@@ -28,7 +28,7 @@
           "type": "string",
           "minLength": 1,
           "pattern": "^/",
-          "description": "Absolute path to a local audio file readable by the runner; FFmpeg must decode it."
+          "description": "Absolute path to a local WAV, FLAC, MP3, or OGG audio file. The runner rejects other demuxers and playlists, then normalizes accepted audio to mono 16 kHz PCM WAV."
         }
       },
       "additionalProperties": false

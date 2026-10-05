@@ -18,19 +18,29 @@ class RunnerDispatchTests(unittest.TestCase):
         """Сохранить текущий результат `{text}` для короткой записи."""
 
         class Model:
+            received_path: str | None = None
+
             def transcribe(self, _path: str) -> str:
+                self.received_path = _path
                 return "Короткая речь."
 
         with tempfile.TemporaryDirectory() as directory:
             audio = Path(directory) / "short.wav"
             audio.touch()
+            model = Model()
             with patch.object(runner, "_audio_duration", return_value=25.0), patch.object(
                 runner, "transcribe_longform", side_effect=AssertionError("unexpected longform")
-            ):
+            ), patch.object(runner, "_decode_audio_to_wav") as decode:
+                decode.side_effect = lambda _src, dest, *_args: Path(dest).write_bytes(
+                    b"normalized wav"
+                )
                 self.assertEqual(
-                    runner._transcribe({"audio_path": str(audio)}, Model(), 90.0),
+                    runner._transcribe({"audio_path": str(audio)}, model, 90.0, 15.0),
                     {"text": "Короткая речь."},
                 )
+                self.assertNotEqual(Path(model.received_path or ""), audio.resolve())
+                self.assertEqual(Path(model.received_path or "").name, "audio.wav")
+            self.assertEqual(list(Path(directory).glob(".brai-audio-*")), [])
 
     def test_long_audio_uses_longform_and_forwards_segment_offsets(self) -> None:
         """При превышении короткого лимита вернуть сегменты с реальными границами."""
@@ -49,14 +59,24 @@ class RunnerDispatchTests(unittest.TestCase):
             audio = Path(directory) / "long.wav"
             audio.touch()
             model = Model()
+            def check_normalized(_model: object, normalized: Path, duration: float) -> dict[str, object]:
+                self.assertNotEqual(normalized, audio.resolve())
+                self.assertTrue(normalized.parent.name.startswith(".brai-audio-"))
+                self.assertTrue(normalized.is_file())
+                self.assertEqual(duration, 30.0)
+                return expected
+
             with patch.object(runner, "_audio_duration", return_value=30.0), patch.object(
-                runner, "transcribe_longform", return_value=expected
-            ) as longform:
+                runner, "transcribe_longform", side_effect=check_normalized
+            ), patch.object(runner, "_decode_audio_to_wav") as decode:
+                decode.side_effect = lambda _src, dest, *_args: Path(dest).write_bytes(
+                    b"normalized wav"
+                )
                 self.assertEqual(
-                    runner._transcribe({"audio_path": str(audio)}, model, 90.0),
+                    runner._transcribe({"audio_path": str(audio)}, model, 90.0, 15.0),
                     expected,
                 )
-                longform.assert_called_once_with(model, audio.resolve(), 30.0)
+            self.assertEqual(list(Path(directory).glob(".brai-audio-*")), [])
 
 
 if __name__ == "__main__":

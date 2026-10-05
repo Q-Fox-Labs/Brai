@@ -11,7 +11,9 @@ import math
 import os
 import subprocess
 import sys
+import wave
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from prepare import verify_snapshot
@@ -22,6 +24,11 @@ from longform import LongformUnavailable, configure_local_vad, transcribe_longfo
 MODEL_ID = "gigaam-v3-e2e-ctc"
 MODEL_REVISION = "cec030b4c4f35d928e4a9044a3bdb29ebd499fac"
 MAX_AUDIO_SECONDS = 25.0
+ALLOWED_AUDIO_FORMATS = "wav,flac,mp3,ogg"
+DECODE_SAMPLE_RATE = 16_000
+DECODE_CHANNELS = 1
+DECODE_SAMPLE_BYTES = 2
+DECODE_HEADER_BYTES = 4096
 REQUIRED_FILES = ("config.json", "modeling_gigaam.py", "pytorch_model.bin", "tokenizer.model")
 
 
@@ -31,17 +38,20 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--vad-model-path", required=True)
     parser.add_argument("--longform-max-seconds", type=float, required=True)
+    parser.add_argument("--audio-decode-timeout-seconds", type=float, required=True)
     parser.add_argument("--threads", type=int, required=True)
     parser.add_argument("--help", action="store_true")
     args, unknown = parser.parse_known_args(argv)
     if args.help:
-        print("Usage: runner.py --model-path ABSOLUTE_DIR --vad-model-path ABSOLUTE_DIR --longform-max-seconds N --threads N", file=sys.stderr)
+        print("Usage: runner.py --model-path ABSOLUTE_DIR --vad-model-path ABSOLUTE_DIR --longform-max-seconds N --audio-decode-timeout-seconds N --threads N", file=sys.stderr)
         raise SystemExit(0)
     if (
         unknown
         or args.threads < 1
         or not math.isfinite(args.longform_max_seconds)
         or args.longform_max_seconds <= 0
+        or not math.isfinite(args.audio_decode_timeout_seconds)
+        or args.audio_decode_timeout_seconds <= 0
         or not Path(args.model_path).is_absolute()
         or not Path(args.vad_model_path).is_absolute()
     ):
@@ -88,17 +98,23 @@ def _load_model(model_path: Path, threads: int) -> Any:
 
 
 def _audio_duration(path: Path, maximum_seconds: float) -> float:
-    """Получить длительность локального файла через ffprobe до чтения сигнала."""
+    """Проверить контейнер, единственный аудиопоток и длительность через ffprobe."""
     try:
         completed = subprocess.run(
             [
                 "ffprobe",
                 "-v",
                 "error",
+                "-protocol_whitelist",
+                "file",
+                "-format_whitelist",
+                ALLOWED_AUDIO_FORMATS,
+                "-max_streams",
+                "1",
                 "-show_entries",
-                "format=duration",
+                "format=format_name,duration:stream=codec_type",
                 "-of",
-                "default=noprint_wrappers=1:nokey=1",
+                "json",
                 str(path),
             ],
             check=True,
@@ -107,15 +123,100 @@ def _audio_duration(path: Path, maximum_seconds: float) -> float:
             text=True,
             timeout=15,
         )
-        raw_duration = completed.stdout.strip()
-        if not raw_duration or len(raw_duration) > 128:
-            raise ValueError("invalid ffprobe duration")
-        duration = float(raw_duration)
+        if not completed.stdout or len(completed.stdout) > 4096:
+            raise ValueError("invalid ffprobe metadata")
+        metadata = json.loads(completed.stdout)
+        format_names = set(str(metadata["format"]["format_name"]).split(","))
+        streams = metadata.get("streams")
+        if (
+            not format_names
+            or not format_names <= set(ALLOWED_AUDIO_FORMATS.split(","))
+            or not isinstance(streams, list)
+            or len(streams) != 1
+            or streams[0].get("codec_type") != "audio"
+        ):
+            raise ValueError("unsupported audio container or stream layout")
+        duration = float(metadata["format"]["duration"])
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise RpcFault(-32001, "Audio file is unavailable or invalid") from exc
     if not math.isfinite(duration) or not 0 < duration <= maximum_seconds:
         raise RpcFault(-32001, "Audio file is unavailable, invalid, or exceeds the operation limit")
     return duration
+
+
+def _decode_audio_to_wav(
+    source: Path,
+    destination: Path,
+    maximum_seconds: float,
+    timeout_seconds: float,
+) -> None:
+    """Декодировать разрешённый контейнер в ограниченный моно PCM WAV."""
+    maximum_output_bytes = (
+        math.ceil(maximum_seconds * DECODE_SAMPLE_RATE)
+        * DECODE_CHANNELS
+        * DECODE_SAMPLE_BYTES
+        + DECODE_HEADER_BYTES
+    )
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-v",
+                "error",
+                "-protocol_whitelist",
+                "file",
+                "-format_whitelist",
+                ALLOWED_AUDIO_FORMATS,
+                "-i",
+                str(source),
+                "-map",
+                "0:a:0",
+                "-vn",
+                "-sn",
+                "-dn",
+                "-map_metadata",
+                "-1",
+                "-ac",
+                str(DECODE_CHANNELS),
+                "-ar",
+                str(DECODE_SAMPLE_RATE),
+                "-c:a",
+                "pcm_s16le",
+                "-fs",
+                str(maximum_output_bytes + 1),
+                "-f",
+                "wav",
+                "-n",
+                str(destination),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout_seconds,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RpcFault(-32001, "Audio file is unavailable or invalid") from exc
+    if (
+        destination.is_symlink()
+        or not destination.is_file()
+        or destination.stat().st_size > maximum_output_bytes
+    ):
+        raise RpcFault(-32001, "Audio file is unavailable or exceeds the decode limit")
+    try:
+        with wave.open(str(destination), "rb") as decoded:
+            if (
+                decoded.getnchannels() != DECODE_CHANNELS
+                or decoded.getframerate() != DECODE_SAMPLE_RATE
+                or decoded.getsampwidth() != DECODE_SAMPLE_BYTES
+                or decoded.getcomptype() != "NONE"
+                or decoded.getnframes() < 1
+            ):
+                raise ValueError("normalized WAV parameters are invalid")
+            if len(decoded.readframes(1)) != DECODE_CHANNELS * DECODE_SAMPLE_BYTES:
+                raise ValueError("normalized WAV has no complete audio frame")
+    except (EOFError, OSError, wave.Error, ValueError) as exc:
+        raise RpcFault(-32001, "Audio file is unavailable or invalid") from exc
 
 
 def _health(
@@ -138,7 +239,10 @@ def _health(
 
 
 def _transcribe(
-    params: dict[str, Any], model: Any, longform_max_seconds: float
+    params: dict[str, Any],
+    model: Any,
+    longform_max_seconds: float,
+    audio_decode_timeout_seconds: float,
 ) -> dict[str, Any]:
     """Распознать запись короткой моделью или VAD longform по её длительности."""
     if set(params) != {"audio_path"} or not isinstance(params["audio_path"], str):
@@ -153,15 +257,22 @@ def _transcribe(
     if not path.is_file():
         raise RpcFault(-32001, "Audio file is unavailable or invalid")
     duration = _audio_duration(path, longform_max_seconds)
-    if duration > MAX_AUDIO_SECONDS:
-        try:
-            return transcribe_longform(model, path, duration)
-        except LongformUnavailable as exc:
-            raise RpcFault(-32603, "Longform is unavailable") from exc
-        except Exception as exc:
-            raise RpcFault(-32603, "Inference failed") from exc
     try:
-        text = model.transcribe(str(path))
+        with TemporaryDirectory(prefix=".brai-audio-", dir=path.parent) as temp_dir:
+            normalized_path = Path(temp_dir) / "audio.wav"
+            _decode_audio_to_wav(
+                path,
+                normalized_path,
+                longform_max_seconds,
+                audio_decode_timeout_seconds,
+            )
+            if duration > MAX_AUDIO_SECONDS:
+                return transcribe_longform(model, normalized_path, duration)
+            text = model.transcribe(str(normalized_path))
+    except LongformUnavailable as exc:
+        raise RpcFault(-32603, "Longform is unavailable") from exc
+    except RpcFault:
+        raise
     except Exception as exc:
         raise RpcFault(-32603, "Inference failed") from exc
     if not isinstance(text, str):
@@ -170,18 +281,30 @@ def _transcribe(
 
 
 def _methods(
-    model: Any, vad_revision: str, longform_max_seconds: float
+    model: Any,
+    vad_revision: str,
+    longform_max_seconds: float,
+    audio_decode_timeout_seconds: float,
 ) -> dict[str, Method]:
     """Связать RPC-методы с экземпляром модели, принадлежащим процессу."""
     return {
         "health": lambda params: _health(params, vad_revision=vad_revision),
-        "transcribe": lambda params: _transcribe(params, model, longform_max_seconds),
+        "transcribe": lambda params: _transcribe(
+            params, model, longform_max_seconds, audio_decode_timeout_seconds
+        ),
     }
 
 
-def _serve(model: Any, vad_revision: str, longform_max_seconds: float) -> int:
+def _serve(
+    model: Any,
+    vad_revision: str,
+    longform_max_seconds: float,
+    audio_decode_timeout_seconds: float,
+) -> int:
     """Читать UTF-8 JSON-документы и писать только ответы JSON-RPC."""
-    methods = _methods(model, vad_revision, longform_max_seconds)
+    methods = _methods(
+        model, vad_revision, longform_max_seconds, audio_decode_timeout_seconds
+    )
     rpc_stdout = sys.stdout.buffer
     for line in sys.stdin.buffer:
         try:
@@ -218,7 +341,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"GigaAM runner ready: {MODEL_ID} {MODEL_REVISION}; VAD {vad_revision}", file=sys.stderr)
     try:
-        return _serve(model, vad_revision, args.longform_max_seconds)
+        return _serve(
+            model,
+            vad_revision,
+            args.longform_max_seconds,
+            args.audio_decode_timeout_seconds,
+        )
     finally:
         del model
 

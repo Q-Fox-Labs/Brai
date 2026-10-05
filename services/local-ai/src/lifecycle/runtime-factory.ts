@@ -103,29 +103,51 @@ function spawnRuntime(config: ProfileConfig, args: readonly string[]): SpawnedRu
   let parentClosedResolve!: () => void;
   const exited = new Promise<void>(resolve => { exitResolve = resolve; });
   const parentClosed = new Promise<void>(resolve => { parentClosedResolve = resolve; });
+  const pid = child.pid;
+  let didCloseParent = false;
+  let didConfirmExit = false;
+  let monitorTimer: NodeJS.Timeout | undefined;
+  const confirmExit = (): boolean => {
+    if (didConfirmExit) return true;
+    if (!didCloseParent || pid !== undefined && groupExists(pid)) return false;
+    didConfirmExit = true;
+    if (monitorTimer) clearTimeout(monitorTimer);
+    monitorTimer = undefined;
+    exitResolve();
+    return true;
+  };
+  const monitorExit = (): void => {
+    if (confirmExit() || monitorTimer) return;
+    monitorTimer = setTimeout(() => {
+      monitorTimer = undefined;
+      if (!confirmExit()) monitorExit();
+    }, 50);
+    monitorTimer.unref();
+  };
   let stopping: Promise<void> | undefined;
   const stop = (): Promise<void> => {
     if (stopping) return stopping;
     stopping = (async () => {
-      const pid = child.pid;
-      if (!pid) { await parentClosed; exitResolve(); return; }
+      if (!pid) { await parentClosed; confirmExit(); return; }
       signalGroup(pid, 'SIGTERM');
       if (!await waitGroupGone(pid, config.stopGraceMs)) {
         signalGroup(pid, 'SIGKILL');
         if (!await waitGroupGone(pid, config.stopGraceMs)) throw serviceError('ENGINE_UNAVAILABLE', 'PROCESS_GROUP_EXIT_UNCONFIRMED');
       }
+      let timer: NodeJS.Timeout | undefined;
       const closed = await Promise.race([parentClosed.then(() => true), new Promise<false>(resolve => {
-        const timer = setTimeout(() => resolve(false), config.stopGraceMs);
+        timer = setTimeout(() => resolve(false), config.stopGraceMs);
         timer.unref();
-      })]);
+      })]).finally(() => { if (timer) clearTimeout(timer); });
       if (!closed) throw serviceError('ENGINE_UNAVAILABLE', 'PROCESS_EXIT_UNCONFIRMED');
-      if (groupExists(pid)) throw serviceError('ENGINE_UNAVAILABLE', 'PROCESS_GROUP_EXIT_UNCONFIRMED');
-      exitResolve();
+      if (!confirmExit()) throw serviceError('ENGINE_UNAVAILABLE', 'PROCESS_GROUP_EXIT_UNCONFIRMED');
     })();
     return stopping;
   };
   child.once('close', () => {
+    didCloseParent = true;
     parentClosedResolve();
+    monitorExit();
     if (!stopping) void stop().catch(() => undefined);
   });
   child.once('error', () => { /* close remains the authoritative parent-exit signal */ });
