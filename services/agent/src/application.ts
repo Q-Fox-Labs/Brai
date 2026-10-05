@@ -253,7 +253,11 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
           else { s.view.state = 'executor-unavailable'; publish(s); return; }
         }
         const turnId = typeof p?.turnId === 'string' && p.turnId ? text(p.turnId, 128) : 'unknown';
-        s.view.requests.push({ requestId, turnId, method: e.method!, kind: 'unsupported', params: {}, answered: false, reason: rejection });
+        const metadata = e.method === 'item/tool/call' ? {
+          ...(typeof p?.tool === 'string' ? { tool: p.tool } : {}),
+          ...(typeof p?.namespace === 'string' ? { namespace: p.namespace } : {}),
+        } : {};
+        s.view.requests.push({ requestId, turnId, method: e.method!, kind: 'unsupported', params: metadata, answered: false, reason: rejection });
       } else {
         s.view.requests.push({ requestId, turnId: p.turnId, method: e.method!, kind: kind!, params: p, answered: false });
         s.raw.set(requestId, e.id!);

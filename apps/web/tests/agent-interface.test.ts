@@ -82,7 +82,7 @@ function component(name: string) {
   const source = readFileSync(new URL(`../app/agent/${name}.tsx`, import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const module = { exports: {} as { default: ComponentType<Record<string, unknown>> } };
-  new Function("require", "module", "exports", compiled)((name: string) => name.endsWith(".css") ? {} : name === "./markdown" ? { default: component("markdown") } : name === "../../lib/agent/limits" ? { formatLimitReset, limitCountdown } : require(name), module, module.exports);
+  new Function("require", "module", "exports", compiled)((name: string) => name.endsWith(".css") ? {} : name.startsWith("./") ? { default: component(name.slice(2)) } : name === "../../lib/agent/limits" ? { formatLimitReset, limitCountdown } : require(name), module, module.exports);
   return module.exports.default;
 }
 
@@ -101,6 +101,18 @@ test("rejected server requests explain that no user answer is needed", () => {
   assert.match(html, /не длины вашего сообщения/);
   assert.match(html, /отвечать не нужно/);
   assert.doesNotMatch(html, /Отправить ответ|Ответ отправлен/);
+});
+
+test("tool notices identify the Codex app without exposing arguments or claiming execution failed", () => {
+  const request = { requestId: "string:42", kind: "unsupported", method: "item/tool/call", turnId: "turn", params: { namespace: "codex_app", tool: "list_artifacts", arguments: { secret: "private-input" } }, answered: false, reason: "unsupported-method" };
+  const html = renderToStaticMarkup(createElement(component("request"), { request, disabled: false, send: async () => true }));
+  assert.match(html, /codex_app.list_artifacts/);
+  assert.match(html, /Источник: приложение Codex/);
+  assert.match(html, /итог выполнения здесь неизвестен/);
+  assert.match(html, /Отвечать не нужно/);
+  assert.doesNotMatch(html, /private-input|Отправить ответ|Запрос отклонён/);
+  const legacy = renderToStaticMarkup(createElement(component("request"), { request: { ...request, params: {} }, disabled: false, send: async () => true }));
+  assert.match(legacy, /Его имя недоступно/);
 });
 
 test("real React renders closed activities without list markup, summaries or owner reads", () => {

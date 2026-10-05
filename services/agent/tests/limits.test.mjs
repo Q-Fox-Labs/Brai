@@ -253,6 +253,12 @@ test('native Codex boundary validates the new rate-limit request, result, and sp
     assert.deepEqual(unknown.event.params, { threadId: 't', turnId: 't1' });
     assert.equal(unknown.reply.error.code, -32601);
     assert.equal(codex.validateAnswer('unknown-method', {}), false);
+    const dynamic = await sendServerRequest({ id: 'dynamic-tool', method: 'item/tool/call', params: { threadId: 't', turnId: 't1', namespace: 'codex_app', tool: 'list_artifacts', arguments: { secret: 'private-input' }, callId: 'private-call' } });
+    assert.equal(dynamic.reply.error.code, -32601);
+    assert.deepEqual(dynamic.event.params, { threadId: 't', turnId: 't1', namespace: 'codex_app', tool: 'list_artifacts' });
+    assert.equal(JSON.stringify(dynamic.event).includes('private-'), false);
+    const malformedTool = await sendServerRequest({ id: 'malformed-tool', method: 'item/tool/call', params: { threadId: 't', turnId: 't1', namespace: 'x'.repeat(65), tool: '<script>private-input</script>' } });
+    assert.deepEqual(malformedTool.event.params, { threadId: 't', turnId: 't1' });
     const invalid = await sendServerRequest({ id: 'invalid-params', method: 'item/tool/requestUserInput', params: { threadId: 't', turnId: 't1' } });
     assert.equal(invalid.event.reason, 'invalid-params');
     assert.equal(invalid.reply.error.code, -32602);
