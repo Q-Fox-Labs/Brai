@@ -242,7 +242,7 @@ test('idle removal guard blocks a durable admission in flight', async () => {
   await lifecycle.close();
 });
 
-test('new work accepted during unloading waits for actual exit and opens a fresh generation', async () => {
+test('new work is rejected during explicit unload and opens a fresh generation afterward', async () => {
   const old = new FakeRuntime({ holdExit: true });
   const next = new FakeRuntime();
   let opens = 0;
@@ -253,17 +253,74 @@ test('new work accepted during unloading waits for actual exit and opens a fresh
   const unloading = lifecycle.unload(value, localContext('unload-old'));
   await waitFor(() => old.closeCalls === 1);
   const request = embedRequest('after-unload');
-  const invocation = lifecycle.invoke(request, invocationContext(request));
-  await delay(30);
+  await assert.rejects(lifecycle.invoke(request, invocationContext(request)), error => error.code === 'MODEL_IN_USE');
   assert.equal(opens, 1);
-  assert.equal(lifecycle.status().active, 1);
   old.finishExit();
   await unloading;
+  const invocation = lifecycle.invoke(request, invocationContext(request));
   const result = await invocation;
   assert.equal(result.operation, 'embed');
   assert.equal(opens, 2);
   assert.equal(lifecycle.readRuntimeState(value.modelId, value.revision), 'ready');
   await lifecycle.close();
+});
+
+test('explicit unload locks admission before its outbox reservation and through actual process exit', async () => {
+  const store = makeStore();
+  const old = new FakeRuntime({ holdExit: true });
+  const next = new FakeRuntime();
+  let opens = 0;
+  const lifecycle = manager(store, { async open() { opens++; return opens === 1 ? old : next; } });
+  const value = selector();
+  await lifecycle.load(value, localContext('unload-gate-load'));
+  store.blockAdmission();
+  const unloading = lifecycle.unload(value, localContext('unload-gate'));
+  await store.admissionWaiting.promise;
+  const duringReservation = embedRequest('invoke-during-unload-reservation');
+  await assert.rejects(lifecycle.invoke(duringReservation, invocationContext(duringReservation)), error => error.code === 'MODEL_IN_USE');
+  store.releaseAdmission();
+  await waitFor(() => old.closeCalls === 1);
+  const duringExit = embedRequest('invoke-during-unload-exit');
+  await assert.rejects(lifecycle.invoke(duringExit, invocationContext(duringExit)), error => error.code === 'MODEL_IN_USE');
+  old.finishExit();
+  await unloading;
+  const afterUnload = embedRequest('invoke-after-unload');
+  await lifecycle.invoke(afterUnload, invocationContext(afterUnload));
+  assert.equal(opens, 2);
+  await lifecycle.close();
+});
+
+test('close joins a pending invocation admission and writes its reserved terminal event without loading', async () => {
+  const store = makeStore();
+  store.blockAdmission();
+  let opens = 0;
+  const lifecycle = manager(store, { async open() { opens++; return new FakeRuntime(); } });
+  const request = embedRequest('admission-close-race');
+  const invoking = lifecycle.invoke(request, invocationContext(request));
+  await store.admissionWaiting.promise;
+  const closing = lifecycle.close();
+  store.releaseAdmission();
+  await assert.rejects(invoking, error => error.code === 'CANCELLED');
+  await closing;
+  assert.equal(opens, 0);
+  assert.ok(store.events.some(entry => entry.operationId === request.operationId && entry.event.data.outcome === 'cancelled'));
+});
+
+test('close joins pending management admission and finalizes it without starting a runtime', async () => {
+  const store = makeStore();
+  store.blockAdmission();
+  let opens = 0;
+  const lifecycle = manager(store, { async open() { opens++; return new FakeRuntime(); } });
+  const loading = lifecycle.load(selector(), localContext('load-close-race'));
+  await store.admissionWaiting.promise;
+  const closing = lifecycle.close();
+  store.releaseAdmission();
+  await assert.rejects(loading, error => error.code === 'CANCELLED');
+  await closing;
+  assert.equal(opens, 0);
+  const accepted = store.events.find(entry => entry.event?.data.operation === 'load')?.event;
+  assert.ok(accepted);
+  assert.ok(store.events.some(entry => entry.operationId === accepted.data.operationId && entry.event.data.outcome === 'cancelled'));
 });
 
 test('expired queued call is removed without loading or retrying its model', async () => {
