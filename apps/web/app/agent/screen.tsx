@@ -18,7 +18,8 @@ import { limits } from "@brai/agent/contracts";
 import MessageImages from "./message-images";
 import Materials from "./materials";
 import { collectMaterials, goalBlocksNewTask, emptyMaterialView, executionText, openMaterial, reconcileMaterialView, type MaterialView } from "./materials-model";
-import { acceptedDraft, imageModel, prepareImage, type ComposerDraft } from "../../lib/agent/images";
+import { acceptedDraft, imageModel, prepareImage, releaseAttachmentPreview, type Attachment, type ComposerDraft } from "../../lib/agent/images";
+import { uploadAttachment } from "../../lib/agent/uploads";
 
 type CachedChat = { snapshot: NativeSnapshot | null; history: DisplayItem[]; generation: string; cursor: string | null; draft: ComposerDraft; model: string; effort: string; permissionMode: PermissionMode; agentMode: AgentMode; materials: MaterialView; ready: boolean; uncertain: boolean };
 type QueuedMessage = { id: string; chat: string; generation: string; draft: ComposerDraft; model: string; effort: string; permissionMode: PermissionMode; agentMode: AgentMode; state: "waiting" | "sending" | "failed" | "unknown" };
@@ -44,18 +45,28 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const scrollAnchor = useRef<{ height: number; top: number } | null>(null);
   const [historyGeneration, setHistoryGeneration] = useState(""), [history, setHistory] = useState<DisplayItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null), [sidebarOpen, setSidebarOpen] = useState(false);
-  const [composer, setComposer] = useState<ComposerDraft>(emptyDraft), [message, setMessage] = useState(""), [busy, setBusy] = useState(false);
+  const [composer, setComposer] = useState<ComposerDraft>(emptyDraft), [message, setMessage] = useState(""), [busy, setBusy] = useState(false), [uploading, setUploading] = useState(false);
   const [corrections, setCorrections] = useState<PendingCorrection[]>([]);
-  const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]);
+  const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]), queuedMessagesRef = useRef<QueuedMessage[]>([]);
+  queuedMessagesRef.current = queuedMessages;
   const [awaitingTurn, setAwaitingTurn] = useState<{ chat: string; generation: string; turnId: string | null; seq: number; agentMode: AgentMode }[]>([]);
   const draft = composer.text, attachments = composer.images;
   const composerRef = useRef(composer), currentChat = useRef(`${projectId}:${threadId}`);
-  const fileInput = useRef<HTMLInputElement>(null), preparationVersion = useRef(0), alive = useRef(true);
+  const fileInput = useRef<HTMLInputElement>(null), preparationVersion = useRef(0), alive = useRef(true), attachmentUpload = useRef<AbortController | null>(null);
   const queue = useRef<{ file: File; version: number; context: string; duplicate: string; limit: number }[]>([]), preparing = useRef(false);
   const [preparationCount, setPreparationCount] = useState(0);
   const attachmentContext = useRef("");
   currentChat.current = `${projectId}:${threadId}`;
-  function changeDraft(next: ComposerDraft) { composerRef.current = next; setComposer(next); }
+  function changeDraft(next: ComposerDraft, releasePrevious = true) {
+    if (releasePrevious) {
+      const nextById = new Map(next.images.map(image => [image.id, image]));
+      for (const previous of composerRef.current.images) {
+        const current = nextById.get(previous.id);
+        if (!current || current.previewUrl !== previous.previewUrl || !current.previewObjectUrl) releaseAttachmentPreview(previous);
+      }
+    }
+    composerRef.current = next; setComposer(next);
+  }
   function cancelPreparation() { ++preparationVersion.current; queue.current = []; setPreparationCount(0); }
   const locked = useRef(false), selection = useRef(0), uncertain = useRef(false);
   const cache = useRef(new Map<string, CachedChat>());
@@ -107,7 +118,16 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       for (const project of value.projects) if (project.available) void loadThreads(project.projectId);
     }).catch(error => { if (active) setMessage(errorText(error)); });
     alive.current = true;
-    return () => { active = false; alive.current = false; ++preparationVersion.current; queue.current = []; cache.current.clear(); composerRef.current = emptyDraft(); requests.clear(); stopMetadata(); stopLimits(); liveMetadata.current.clear(); client.dispose(); };
+    return () => {
+      active = false; alive.current = false; attachmentUpload.current?.abort(); attachmentUpload.current = null;
+      ++preparationVersion.current; queue.current = [];
+      const previews = new Map<string, Attachment>();
+      for (const image of composerRef.current.images) previews.set(image.id, image);
+      for (const chat of cache.current.values()) for (const image of chat.draft.images) previews.set(image.id, image);
+      for (const queued of queuedMessagesRef.current) for (const image of queued.draft.images) previews.set(image.id, image);
+      for (const image of previews.values()) releaseAttachmentPreview(image);
+      cache.current.clear(); composerRef.current = emptyDraft(); requests.clear(); stopMetadata(); stopLimits(); liveMetadata.current.clear(); client.dispose();
+    };
   }, [client, loadThreads]);
 
   useEffect(() => {
@@ -149,12 +169,18 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   function selectChat(id: string, chatId = "") {
     if (id === projectId && chatId === threadId) { setSidebarOpen(false); return; }
     ++selection.current;
+    attachmentUpload.current?.abort(); attachmentUpload.current = null;
     cancelPreparation();
     if (threadId) {
       const key = `${projectId}:${threadId}`;
       cache.current.delete(key);
       cache.current.set(key, { snapshot, history, generation: historyGeneration, cursor, draft: composerRef.current, model, effort, permissionMode, agentMode, materials: materialView, ready: historyReady.current, uncertain: uncertain.current });
-      if (cache.current.size > 8) cache.current.delete(cache.current.keys().next().value!);
+      if (cache.current.size > 8) {
+        const oldest = cache.current.keys().next().value!;
+        const evicted = cache.current.get(oldest);
+        if (evicted) for (const image of evicted.draft.images) releaseAttachmentPreview(image);
+        cache.current.delete(oldest);
+      }
     }
     const saved = cache.current.get(`${id}:${chatId}`);
     historyReady.current = saved?.ready ?? false;
@@ -162,7 +188,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     setSnapshot(live ?? saved?.snapshot ?? null); setHistory(saved?.history ?? []); setHistoryGeneration(saved?.generation ?? ""); setCursor(saved?.cursor ?? null);
     currentChat.current = `${id}:${chatId}`;
     uncertain.current = saved?.uncertain ?? false;
-    changeDraft(saved?.draft ?? emptyDraft()); setModel(saved?.model ?? ""); setEffort(saved?.effort ?? ""); setPermissionMode(saved?.permissionMode ?? "auto"); setAgentMode(saved?.agentMode ?? "default"); setMaterialView(saved?.materials ?? emptyMaterialView()); setConnected(!!live);
+    changeDraft(saved?.draft ?? emptyDraft(), false); setModel(saved?.model ?? ""); setEffort(saved?.effort ?? ""); setPermissionMode(saved?.permissionMode ?? "auto"); setAgentMode(saved?.agentMode ?? "default"); setMaterialView(saved?.materials ?? emptyMaterialView()); setConnected(!!live);
     followBottom.current = true; scrollAnchor.current = null;
     setProjectId(id); setThreadId(chatId); setMessage(""); setSidebarOpen(false);
   }
@@ -189,6 +215,8 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         return page ? { ...previous, [id]: { ...page, data: page.data.filter(thread => thread.id !== chatId) } } : previous;
       });
       if (currentChat.current === key) selectChatRef.current(id);
+      const removed = cache.current.get(key);
+      if (removed) for (const image of removed.draft.images) releaseAttachmentPreview(image);
       cache.current.delete(key);
     } catch (error) {
       if (alive.current) setMessage(errorText(error));
@@ -209,15 +237,15 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     } catch (error) { if (token === selection.current) setMessage(errorText(error)); }
   }
 
-  async function mutate(action: "create" | "start" | "steer" | "interrupt" | "answer" | "goalSet" | "goalClear", extra: Record<string, unknown> = {}, targetProject = projectId, queuedDraft?: ComposerDraft) {
+  async function mutate(action: "create" | "start" | "steer" | "interrupt" | "answer" | "goalSet" | "goalClear", extra: Record<string, unknown> = {}, targetProject = projectId, queuedDraft?: ComposerDraft, sentOverride?: ComposerDraft) {
     if (!targetProject || locked.current || uncertain.current || (action !== "create" && (!connected || !snapshot || snapshot.projectId !== projectId || snapshot.threadId !== threadId))) return false;
-    const selected = snapshot, sent = queuedDraft ?? composerRef.current, sentChat = `${projectId}:${threadId}`, token = selection.current, operationId = crypto.randomUUID();
+    const selected = snapshot, sent = sentOverride ?? queuedDraft ?? composerRef.current, sentChat = `${projectId}:${threadId}`, token = selection.current, operationId = crypto.randomUUID();
     locked.current = true; setBusy(true); setMessage("");
     if (action === "steer") {
       followBottom.current = true;
       setCorrections(previous => [...previous, { chat: sentChat, generation: selected!.generation,
         knownIds: mergeTimeline(history, selected!.items).map(item => item.id), state: "sending",
-        item: { id: operationId, turnId: selected!.turn!.id, type: "userMessage", text: sent.text, imageCount: sent.images.length, images: sent.images.map(image => image.dataUrl) } }]);
+        item: { id: operationId, turnId: selected!.turn!.id, type: "userMessage", text: sent.text, imageCount: sent.images.length, attachments: sent.images.map(image => ({ originalArtifactId: image.originalArtifactId!, modelArtifactId: image.modelArtifactId!, status: "ready" as const, mimeType: image.model.type, filename: image.name, url: image.url })) } }]);
     }
     try {
       const generation = action === "create" ? (await client.request({ action: "status" })).generation : selected!.generation;
@@ -254,6 +282,37 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       setMessage(errorText(error));
       return !queuedDraft && (uncertain.current || (error instanceof AgentError && error.code === "STALE_REQUEST"));
     } finally { locked.current = false; if (alive.current) setBusy(false); }
+  }
+
+  async function sendDraft(action: "start" | "steer", sent: ComposerDraft, targetProject: string, targetThread: string, settings: Record<string, unknown>, queuedDraft?: ComposerDraft): Promise<boolean> {
+    if (!sent.images.length) return mutate(action, { text: sent.text, ...settings }, targetProject, queuedDraft);
+    const chatKey = `${targetProject}:${targetThread}`, selectionToken = selection.current, controller = new AbortController();
+    attachmentUpload.current?.abort(); attachmentUpload.current = controller; setUploading(true); setBusy(true); setMessage("");
+    try {
+      const readyImages: Attachment[] = [];
+      for (const image of sent.images) {
+        const ready = await uploadAttachment(image, { userId, projectId: targetProject, threadId: targetThread }, controller.signal);
+        readyImages.push({ ...image, originalArtifactId: ready.originalArtifactId, modelArtifactId: ready.modelArtifactId, url: ready.url, previewUrl: ready.url, previewObjectUrl: false });
+      }
+      if (!alive.current || controller.signal.aborted || currentChat.current !== chatKey || selection.current !== selectionToken) return false;
+      const byId = new Map(readyImages.map(image => [image.id, image]));
+      const sentReady = { ...sent, images: readyImages };
+      if (!queuedDraft) {
+        const current = composerRef.current;
+        changeDraft({ ...current, images: current.images.map(image => byId.get(image.id) ?? image) });
+        const saved = cache.current.get(chatKey);
+        if (saved) saved.draft = { ...saved.draft, images: saved.draft.images.map(image => byId.get(image.id) ?? image) };
+      }
+      const attachments = readyImages.map(image => ({ originalArtifactId: image.originalArtifactId!, modelArtifactId: image.modelArtifactId! }));
+      return await mutate(action, { text: sent.text, attachments, ...settings }, targetProject, queuedDraft, sentReady);
+    } catch (error) {
+      if (alive.current && !controller.signal.aborted && currentChat.current === chatKey && selection.current === selectionToken) setMessage(errorText(error));
+      return false;
+    } finally {
+      if (attachmentUpload.current === controller) attachmentUpload.current = null;
+      setUploading(false);
+      if (alive.current) setBusy(false);
+    }
   }
 
   const view = snapshot?.projectId === projectId && snapshot?.threadId === threadId ? snapshot : null;
@@ -338,12 +397,12 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const action = !draft.trim() && !attachments.length && goalUnfinished ? "goalClear" : composerAction(active, draft, attachments.length);
   const catalogFresh = !!view && models?.generation === view.generation;
   const imageError = attachments.length && !active && agentMode === "goal" ? "В режиме «Цель» отправьте описание задачи без изображений. Удалите вложения или выберите другой режим." : attachments.length && !imagesAllowed ? !catalogFresh ? "Дождитесь свежего каталога моделей и соединения с чатом." : "Эта модель не принимает изображения. Выберите другую модель или удалите вложения." : attachments.length > imageLimit ? `В этом чате можно прикрепить не более ${imageLimit} изображений. Удалите лишние вложения.` : "";
-  const sendDisabled = disabled || (action === "goalClear" && view?.goal?.state !== "ready") || preparationCount > 0 || !!imageError || (action === "steer" && corrections.length >= 64) || (action !== "interrupt" && action !== "goalClear" && !catalogFresh) || (action === "start" && (goalUnfinished || (!draft.trim() && !attachments.length) || !selectedModel || view?.thread.canAcceptDirectInput === false || awaitingTurn.some(value => value.chat === currentChat.current)));
+  const sendDisabled = disabled || uploading || (action === "goalClear" && view?.goal?.state !== "ready") || preparationCount > 0 || !!imageError || (action === "steer" && corrections.length >= 64) || (action !== "interrupt" && action !== "goalClear" && !catalogFresh) || (action === "start" && (goalUnfinished || (!draft.trim() && !attachments.length) || !selectedModel || view?.thread.canAcceptDirectInput === false || awaitingTurn.some(value => value.chat === currentChat.current)));
   const submit = () => {
     if (sendDisabled) return;
     if (action === "goalClear") void mutate("goalClear");
     else if (action === "interrupt") void mutate("interrupt", { turnId: view!.turn!.id });
-    else void mutate(action, { text: draft, ...(attachments.length ? { images: attachments.map(image => image.dataUrl) } : {}), ...(action === "steer" ? { expectedTurnId: view!.turn!.id } : selectedModel ? { model: selectedModel.model, effort: selectedEffort, permissionMode, agentMode } : {}) });
+    else void sendDraft(action, composerRef.current, projectId, threadId, action === "steer" ? { expectedTurnId: view!.turn!.id } : selectedModel ? { model: selectedModel.model, effort: selectedEffort, permissionMode, agentMode } : {});
   };
 
   function enqueueMessage() {
@@ -352,7 +411,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     if (queuedMessages.length >= 16) { setMessage("Очередь заполнена. Дождитесь отправки или удалите сообщение."); return; }
     const sent = composerRef.current;
     setQueuedMessages(previous => [...previous, { id: crypto.randomUUID(), chat: currentChat.current, generation: view!.generation, draft: sent, model: selectedModel.model, effort: selectedEffort, permissionMode, agentMode, state: "waiting" }]);
-    changeDraft(acceptedDraft(sent, sent));
+    changeDraft(acceptedDraft(sent, sent), false);
     setMessage("Сообщение поставлено в очередь.");
   }
 
@@ -373,8 +432,9 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     }
     setQueuedMessages(previous => previous.map(value => value.id === next.id ? { ...value, state: "sending" } : value));
     // AIDEV-NOTE: Следующее сообщение ждёт нового native turn ID, а не только HTTP accepted со старым idle snapshot.
-    void mutate("start", { text: next.draft.text, ...(next.draft.images.length ? { images: next.draft.images.map(image => image.dataUrl) } : {}), model: next.model, effort: next.effort, permissionMode: next.permissionMode, agentMode: next.agentMode }, projectId, next.draft).then(accepted => {
+    void sendDraft("start", next.draft, projectId, threadId, { model: next.model, effort: next.effort, permissionMode: next.permissionMode, agentMode: next.agentMode }, next.draft).then(accepted => {
       if (!alive.current) return;
+      if (accepted) for (const image of next.draft.images) releaseAttachmentPreview(image);
       setQueuedMessages(previous => accepted ? previous.filter(value => value.id !== next.id) : previous.map(value => value.id === next.id && value.state === "sending" ? { ...value, state: "failed" } : value));
     });
   });
@@ -391,6 +451,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           if (current.images.length >= job.limit) throw new Error(`Можно прикрепить не более ${job.limit} изображений. Удалите одно из вложений.`);
           const image = await prepareImage(job.file, limits.imageBytes - current.images.reduce((sum, image) => sum + image.bytes, 0));
           if (alive.current && job.version === preparationVersion.current && job.context === attachmentContext.current) changeDraft({ ...composerRef.current, images: [...composerRef.current.images, image] });
+          else releaseAttachmentPreview(image);
         } catch (error) {
           if (alive.current && job.version === preparationVersion.current && job.context === attachmentContext.current) setMessage(`${job.file.name || "Изображение"}: ${errorText(error)}`);
         } finally {
@@ -481,11 +542,11 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       {(threadId || message || accountMessage) && <footer className="agent-composer-area">
         {queuedMessages.some(value => value.chat === currentChat.current) && <ul className="agent-message-queue" aria-label="Очередь сообщений">{queuedMessages.filter(value => value.chat === currentChat.current).map(value => <li key={value.id}>
           <span>{value.draft.text || "Изображения"}{!!value.draft.images.length && ` · Изображений: ${value.draft.images.length}`} · {value.agentMode === "plan" ? "Планирование" : value.agentMode === "goal" ? "Цель" : "Обычный"} · {value.state === "sending" ? "Отправляется" : value.state === "unknown" ? "Результат неизвестен — проверьте чат" : value.state === "failed" ? "Не отправлено — очередь остановлена" : "В очереди"}</span>
-          <button type="button" disabled={value.state === "sending"} onClick={() => setQueuedMessages(previous => previous.filter(item => item.id !== value.id))} aria-label="Удалить сообщение из очереди">×</button>
+          <button type="button" disabled={value.state === "sending"} onClick={() => { const removed = queuedMessages.find(item => item.id === value.id); if (removed) for (const image of removed.draft.images) releaseAttachmentPreview(image); setQueuedMessages(previous => previous.filter(item => item.id !== value.id)); }} aria-label="Удалить сообщение из очереди">×</button>
         </li>)}</ul>}
         {threadId && <form className="agent-composer" onSubmit={event => { event.preventDefault(); submit(); }}>
           <label className="sr-only" htmlFor="agent-draft">{active ? "Дополнить текущий ход" : "Сообщение"}</label>
-          {!!attachments.length && <ul className="agent-attachments" aria-label="Прикреплённые изображения">{attachments.map(image => <li key={image.id}><img src={image.dataUrl} alt={image.name} /><span className="agent-attachment-name" title={image.name}>{image.name}</span>{image.reduced && <span className="agent-image-reduced">Уменьшено</span>}<button type="button" className="agent-attachment-remove" aria-label={`Удалить ${image.name}`} onClick={() => changeDraft({ ...composerRef.current, images: composerRef.current.images.filter(value => value.id !== image.id) })}>×</button></li>)}</ul>}
+          {!!attachments.length && <ul className="agent-attachments" aria-label="Прикреплённые изображения">{attachments.map(image => <li key={image.id}><img src={image.url ?? image.previewUrl} alt={image.name} /><span className="agent-attachment-name" title={image.name}>{image.name}</span>{image.reduced && <span className="agent-image-reduced">Уменьшено</span>}<button type="button" className="agent-attachment-remove" aria-label={`Удалить ${image.name}`} onClick={() => { attachmentUpload.current?.abort(); attachmentUpload.current = null; changeDraft({ ...composerRef.current, images: composerRef.current.images.filter(value => value.id !== image.id) }); }}>×</button></li>)}</ul>}
           <div className="agent-composer-input">
           <textarea ref={composerInput} id="agent-draft" style={{ height: inputHeight }} placeholder={active ? "Дополнить текущее задание…" : agentMode === "goal" ? "Какой цели нужно достичь?" : agentMode === "plan" ? "Что нужно спланировать?" : "Что нужно сделать?"} value={draft} onChange={event => changeDraft({ ...composerRef.current, text: event.target.value, revision: composerRef.current.revision + 1 })} onPaste={event => {
             const files = Array.from(event.clipboardData.files);
@@ -530,7 +591,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         </form>}
         <p className="agent-feedback" role="alert">{uncertain.current ? "Результат неизвестен. Обновите страницу и проверьте чат перед новой отправкой." : imageError || message || accountMessage}</p>
         {corrections.length >= 64 && <p role="status">Дождитесь применения корректировок или уберите сообщения с ошибкой перед новой корректировкой.</p>}
-        {preparationCount > 0 && <p className="agent-image-preparing" role="status">Подготовка изображений: {preparationCount}…</p>}
+        {preparationCount > 0 && <p className="agent-image-preparing" role="status">Подготовка изображений: {preparationCount}…</p>}{uploading && <p className="agent-image-preparing" role="status">Загружаем изображения перед отправкой…</p>}
       </footer>}
     </section>
     {materialView.open && <Materials focus={materialView.focus} materials={materials} selected={materialView.selected} choose={chooseMaterial} close={() => setMaterialView(previous => ({ ...previous, open: false }))} disabled={disabled || !catalogFresh || awaitingTurn.some(value => value.chat === currentChat.current)} active={!!active || goalUnfinished} connected={connected} execute={item => { void executePlan(item); }} revise={revisePlan} goal={action => { void mutate(action === "stop" ? "goalClear" : "goalSet", action === "stop" ? {} : { status: action === "pause" ? "paused" : "active" }); }} />}
@@ -543,7 +604,7 @@ function Item({ item, context, reads, pending, dismiss }: { item: DisplayItem; c
     <span className="agent-message-author">{item.type === "userMessage" ? "Вы" : "Brai"}{item.phase && <span className="agent-message-phase">{item.phase === "final_answer" ? "Итог" : item.phase === "commentary" ? "Промежуточное сообщение" : item.phase}</span>}</span>
     {pending && <span className="agent-correction-status" role="status"><span aria-hidden="true">{pending === "failed" || pending === "unknown" ? "⚠" : "◷"}</span> {pending === "sending" ? "Отправляется…" : pending === "waiting" ? "Ожидает применения" : pending === "unknown" ? "Отправка не подтверждена. Проверьте чат." : "Не отправлено. Повторите из поля ввода."}{pending === "failed" && <button type="button" onClick={dismiss}>Убрать</button>}</span>}
     <MessageText key={JSON.stringify([item.revision, item.text, item.truncated])} item={item} context={context} reads={reads} />
-    {!!item.imageCount && (pending ? <ul className="agent-message-thumbnails" aria-label="Изображения сообщения">{item.images?.map((src, index) => <li key={index}><img src={src} alt={`Прикреплённое изображение ${index + 1}`} /></li>)}</ul> : <MessageImages item={item} context={context} reads={reads} />)}
+    {!!item.imageCount && <MessageImages item={item} context={context} reads={reads} />}
   </article>;
 }
 

@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import Ajv from 'ajv';
+import artifactSchemas from '../../artifacts/schemas/messages.schema.json' with { type: 'json' };
 import { createApplication } from '../dist/application.js';
 import { validateCommand } from '../contracts/index.mjs';
 import schema from '../schemas/messages.schema.json' with { type: 'json' };
@@ -25,7 +26,7 @@ function fixture({ cwd = '/tmp/p', error } = {}) {
   return { app, calls };
 }
 test('archive validates the closed command and calls native once without resume', async t => {
-  const validate = new Ajv({ strict: false }).compile(schema.definitions.Command);
+  const validate = new Ajv({ strict: false, validateFormats: false, schemas: [artifactSchemas] }).compile(schema.definitions.Command);
   for (const value of [command, { ...command, turnId: 'extra' }, { ...command, generation: undefined }]) assert.equal(validate(value), validateCommand(value));
   assert.equal(validateCommand(command), true);
   const f = fixture(); t.after(() => f.app.close());
@@ -33,7 +34,7 @@ test('archive validates the closed command and calls native once without resume'
   assert.deepEqual(first, repeated);
   assert.deepEqual(first, { generation: 'g', operationId: 'archive-1', outcome: 'accepted', threadId: 't' });
   assert.deepEqual(f.calls.map(c => c.method), ['thread/read', 'thread/archive']);
-  const ajv = new Ajv({ strict: false, validateFormats: false }); ajv.addSchema(nativeSchema, 'native');
+  const ajv = new Ajv({ strict: false, validateFormats: false, schemas: [artifactSchemas] }); ajv.addSchema(nativeSchema, 'native');
   assert.equal(ajv.compile({ $ref: 'native#/definitions/ThreadArchiveParams' })(f.calls[1].params), true);
   assert.deepEqual(f.calls[1], { method: 'thread/archive', params: { threadId: 't' }, options: { mutation: true } });
 });

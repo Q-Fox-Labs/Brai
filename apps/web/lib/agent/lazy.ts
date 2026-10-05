@@ -24,9 +24,9 @@ export function createLazyReads(request: Request) {
     cache.delete(id); cache.set(id, item);
     while (cache.size > maximum) cache.delete(cache.keys().next().value!);
   };
-  async function read(context: Context, items: DisplayItem[], full: boolean): Promise<DisplayItem[]> {
-    const cache = full ? details : summaries, missing = items.filter(item => !cache.has(key(context, item)));
-    const result = new Map(items.filter(item => cache.has(key(context, item))).map(item => [item.id, cache.get(key(context, item))!]));
+  async function read(context: Context, items: DisplayItem[], full: boolean, refresh = false): Promise<DisplayItem[]> {
+    const cache = full ? details : summaries, missing = items.filter(item => refresh || !cache.has(key(context, item)));
+    const result = new Map(items.filter(item => !refresh && cache.has(key(context, item))).map(item => [item.id, cache.get(key(context, item))!]));
     for (let offset = 0; offset < missing.length; offset += full ? 1 : 100) {
       const batch = missing.slice(offset, offset + (full ? 1 : 100));
       // AIDEV-NOTE: Между сообщениями могут идти действия разных ходов; owner принимает только один turnId.
@@ -70,7 +70,7 @@ export function createLazyReads(request: Request) {
   }
   return {
     summaries: (context: Context, items: DisplayItem[]) => read(context, items, false),
-    detail: async (context: Context, item: DisplayItem) => (await read(context, [item], true))[0],
+    detail: async (context: Context, item: DisplayItem, refresh = false) => (await read(context, [item], true, refresh))[0],
   };
 }
 export type LazyReads = ReturnType<typeof createLazyReads>;

@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import Ajv from 'ajv';
+import artifactSchemas from '../../artifacts/schemas/messages.schema.json' with { type: 'json' };
 import schema from '../contracts/codex/schema.json' with { type: 'json' };
 import { validateCommand, commandSchema } from '../contracts/index.mjs';
 import { createApplication } from '../dist/application.js';
@@ -22,7 +23,7 @@ function fixture() {
   const command = (action, extra = {}) => ({ action, generation, operationId: `${action}-${++operation}`, projectId: 'p', ...(action !== 'create' ? { threadId: 't1', text: 'hello' } : {}), ...extra });
   return { app, calls, command, changeGeneration: () => { generation = 'g2'; observer({ type: 'connection' }); } };
 }
-const ajv = new Ajv({ strict: false, validateFormats: false }); ajv.addSchema(schema, 'schema.json');
+const ajv = new Ajv({ strict: false, validateFormats: false, schemas: [artifactSchemas] }); ajv.addSchema(schema, 'schema.json');
 const native = type => ajv.compile({ $ref: `schema.json#/definitions/${type}` });
 test('native catalogue is filtered, shared and reset per generation without inference', async () => {
   const f = fixture();

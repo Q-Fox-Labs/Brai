@@ -3,12 +3,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import Ajv from 'ajv';
+import artifactSchemas from '../../artifacts/schemas/messages.schema.json' with { type: 'json' };
 import { createApplication } from '../dist/application.js';
 import { compact, display } from '../dist/display.js';
 import { commandSchema, validateCommand, bytes, limits } from '../contracts/index.mjs';
 import schema from '../schemas/messages.schema.json' with { type: 'json' };
 import nativeSchema from '../contracts/codex/schema.json' with { type: 'json' };
-const ajv = new Ajv({ strict: false, validateFormats: false });
+const ajv = new Ajv({ strict: false, validateFormats: false, schemas: [artifactSchemas] });
 ajv.addSchema(schema, 'public'); ajv.addSchema(nativeSchema, 'native');
 const native = name => ajv.compile({ $ref: `native#/definitions/${name}` });
 const goalValue = status => ({ threadId: 't', objective: 'A goal', status, timeUsedSeconds: 10, tokensUsed: 20, tokenBudget: 1000, createdAt: 1, updatedAt: 2 });

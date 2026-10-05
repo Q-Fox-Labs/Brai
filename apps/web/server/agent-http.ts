@@ -1,4 +1,4 @@
-// ABOUTME: Передаёт закрытые HTTP команды agent v2 и ограниченный поток снимков.
+// ABOUTME: Передаёт закрытые HTTP команды agent v3 и ограниченный поток снимков.
 // ABOUTME: Авторизует web сессию; не повторяет мутации и не хранит историю агента.
 import { checkOrigin, requireTimerSession, type Session } from "./auth";
 import { GatewayError, natsConnection } from "./gateway";
@@ -6,7 +6,7 @@ import { bytes, limits, subjects, validateCommand, validateEnvelope, validateLim
 import type { AgentLimits, Command, ErrorResponse, EventEnvelope, NativeSnapshot } from "@brai/agent/contracts";
 import { encodeFrame } from "../lib/agent/stream";
 const reads = new Set(["projects", "status", "models", "threads", "open", "turns", "items", "activities", "item", "goalGet"]);
-const key = Symbol.for("brai.web.agent-streams.v2");
+const key = Symbol.for("brai.web.agent-streams.v3");
 const globals = globalThis as typeof globalThis & { [key]?: Map<() => void, string> };
 const streams = globals[key] ??= new Map<() => void, string>();
 const watched = new WeakSet<object>();
@@ -14,10 +14,10 @@ let pending = 0;
 class Failure extends Error {
   constructor(public status: number, public body: ErrorResponse) { super(body.code); }
 }
-const permitted = (session: Session) => (process.env.BRAI_AGENT_ALLOWED_EMAILS ?? "").split(",").map(email => email.trim().toLowerCase()).filter(Boolean).includes(session.user.email.trim().toLowerCase());
+export const permittedAgent = (session: Session) => (process.env.BRAI_AGENT_ALLOWED_EMAILS ?? "").split(",").map(email => email.trim().toLowerCase()).filter(Boolean).includes(session.user.email.trim().toLowerCase());
 const fail = (status: number, code: string, outcome: ErrorResponse["outcome"]) => new Failure(status, { code, outcome });
 /** Делает один request-reply; любой транспортный сбой после отправки мутации имеет неизвестный исход. */
-async function rpc<T = unknown>(command: Command): Promise<T> {
+export async function rpc<T = unknown>(command: Command): Promise<T> {
   const mutation = !reads.has(command.action);
   const nc = await natsConnection().catch(() => { throw fail(503, "UNAVAILABLE", mutation ? "not-sent" : "query"); });
   try {
@@ -134,14 +134,14 @@ async function events(request: Request, session: Session, command?: Command): Pr
         checking = true;
         const checkedGeneration = generation;
         const current = await requireTimerSession(request, true).catch(() => null);
-        const status = !closed && current && permitted(current) && checkedGeneration ? await rpc<{ generation: string; ready: boolean; limits?: unknown }>({ action: "status" }).catch(() => null) : null;
+        const status = !closed && current && permittedAgent(current) && checkedGeneration ? await rpc<{ generation: string; ready: boolean; limits?: unknown }>({ action: "status" }).catch(() => null) : null;
         checking = false;
         if (closed || generation !== checkedGeneration) return;
         if (generation) {
           missedStatus = status ? 0 : missedStatus + 1;
           if ((status && (!status.ready || status.generation !== generation)) || missedStatus >= 3) close();
         }
-        if (!current || !permitted(current) || current.session.id !== session.session.id || current.user.id !== session.user.id) close();
+        if (!current || !permittedAgent(current) || current.session.id !== session.session.id || current.user.id !== session.user.id) close();
         if (!command && status && status.generation === checkedGeneration && status.ready) {
           const next = validateLimits(status.limits) ? status.limits : unavailableLimits();
           publishLimits(next);
@@ -183,7 +183,7 @@ async function handle(request: Request, context: { params: Promise<{ path: strin
     const { path } = await context.params, url = new URL(request.url), eventStream = path[0] === "events";
     if (request.method === "POST") checkOrigin(request);
     const session = await requireTimerSession(request, eventStream);
-    if (!permitted(session)) throw fail(403, "AGENT_ACCESS_DENIED", outcome);
+    if (!permittedAgent(session)) throw fail(403, "AGENT_ACCESS_DENIED", outcome);
     if (path.length !== 1 || (eventStream && request.method !== "GET")) throw fail(404, "NOT_FOUND", outcome);
     if (url.searchParams.getAll("expectedUserId").length > 1 || (!eventStream && url.searchParams.has("expectedUserId"))) throw fail(400, "INVALID_ARGUMENT", outcome);
     const query = [...url.searchParams].filter(([key]) => key !== "expectedUserId");
@@ -201,6 +201,8 @@ async function handle(request: Request, context: { params: Promise<{ path: strin
     value += decoder.decode();
     if (eventStream && !query.length) return await events(request, session);
     const command = { action: eventStream ? "open" : path[0], ...(value ? JSON.parse(value) : Object.fromEntries(query)) };
+    if (Object.hasOwn(command, "ownerId")) throw fail(400, "INVALID_ARGUMENT", outcome);
+    if (typeof command.threadId === "string") command.ownerId = session.user.id;
     if (typeof command.itemIds === "string") command.itemIds = JSON.parse(command.itemIds);
     if (command.action !== (eventStream ? "open" : path[0])) throw fail(400, "INVALID_ARGUMENT", outcome);
     if (!validateCommand(command) || (!eventStream && reads.has(command.action) !== (request.method === "GET"))) throw fail(400, "INVALID_ARGUMENT", outcome);

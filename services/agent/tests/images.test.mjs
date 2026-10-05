@@ -1,7 +1,9 @@
-// ABOUTME: Проверяет image команды, модели и отсутствие media в display.
-// ABOUTME: Использует fake native порт и локальный WebSocket без аккаунта и inference.
+// ABOUTME: Проверяет durable file references, native correlation и отсутствие media в публичных чтениях.
+// ABOUTME: Native и artifacts заменены контрактными mock; inference и аккаунт не используются.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { performance } from 'node:perf_hooks';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -9,228 +11,179 @@ import { WebSocketServer } from 'ws';
 import Ajv from 'ajv';
 import nativeSchema from '../contracts/codex/schema.json' with { type: 'json' };
 import publicSchema from '../schemas/messages.schema.json' with { type: 'json' };
-import { limits, bytes, validateCommand, commandSchema } from '../contracts/index.mjs';
+import artifactSchemas from '../../artifacts/schemas/messages.schema.json' with { type: 'json' };
+import { subjects as artifactSubjects, validateRequest, validateResponse } from '../../artifacts/contracts/index.mjs';
+import { validateCommand, commandSchema, limits } from '../contracts/index.mjs';
 import { createApplication } from '../dist/application.js';
+import { createAttachments, createArtifactsPort } from '../dist/attachments.js';
 import { createCodex } from '../dist/codex.js';
-import { display, compact } from '../dist/display.js';
-
-const png = size => { const data = Buffer.alloc(size); Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(data); return `data:image/png;base64,${data.toString('base64')}`; };
-const image = png(8);
-const base = { action: 'start', projectId: 'p', threadId: 't', generation: 'g', operationId: 'o' };
-const ajv = new Ajv({ strict: false, validateFormats: false });
-ajv.addSchema(nativeSchema, 'native');
-ajv.addSchema(publicSchema, 'public');
-const native = type => ajv.compile({ $ref: `native#/definitions/${type}` });
-const models = [{ model: 'vision' }, { model: 'text-only', inputModalities: ['text'] }, { model: 'explicit', inputModalities: ['text', 'image'] }].map(m => ({ ...m, displayName: m.model, defaultReasoningEffort: 'low', supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }] }));
+import { display, messagePage } from '../dist/display.js';
+const uuid = '11111111-1111-4111-8111-111111111111', copy = '22222222-2222-4222-8222-222222222222';
+const pair = { originalArtifactId: uuid, modelArtifactId: uuid };
+const data = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const image = `data:image/png;base64,${data.toString('base64')}`;
+const base = { action: 'start', ownerId: 'owner', projectId: 'p', threadId: 't', generation: 'g', operationId: 'o', attachments: [pair] };
+const ajv = new Ajv({ strict: false, validateFormats: false, schemas: [artifactSchemas] });
+ajv.addSchema(nativeSchema, 'native'); ajv.addSchema(publicSchema, 'public');
+ajv.addSchema(artifactSchemas, '../../artifacts/schemas/messages.schema.json');
+const native = name => ajv.compile({ $ref: `native#/definitions/${name}` });
 function fixture() {
-  const calls = [], events = [];
-  let observer, operation = 0, hook;
-  const port = {
-    status: () => ({ generation: 'g', connection: 'connected', authorization: 'ready' }),
-    subscribe: fn => { observer = fn; return () => {}; },
-    call: async (method, params) => {
-      if (method === 'account/rateLimits/read') return { rateLimits: null };
-      calls.push({ method, params });
-      await hook?.(method, params);
-      if (method === 'model/list') return { data: models };
-      if (method === 'thread/start') return { thread: { id: 't', model: params.model ?? 'vision', status: { type: 'idle' }, updatedAt: 1 }, model: params.model ?? 'vision' };
-      if (method === 'turn/start') return { turn: { id: 'turn', status: 'inProgress' } };
-      if (method === 'turn/steer') return { turnId: 'turn' };
-      throw new Error(method);
-    },
-  };
-  const app = createApplication(port, { projects: [{ projectId: 'p', name: 'P', cwd: '/tmp/p' }], allowedModels: models.map(m => m.model), newThread: { model: 'vision' } }, e => events.push(e));
-  const command = (action, extra = {}) => { const value = { ...base, action, operationId: `o${++operation}`, ...extra }; if (action === 'create') delete value.threadId; return value; };
-  return { app, calls, events, command, setHook: fn => { hook = fn; }, observe: (method, params) => observer({ type: 'notification', method, params: { threadId: 't', ...params } }) };
-}
-
-test('validator and both JSON schemas agree on image/text structure and canonical base64', () => {
-  assert.deepEqual(publicSchema.definitions.Command.oneOf, commandSchema.oneOf);
-  const validators = [ajv.compile(commandSchema), ajv.compile({ $ref: 'public#/definitions/Command' })];
-  const cases = [
-    [{ text: 'hello' }, true], [{ images: [image] }, true], [{ text: '', images: [image] }, true],
-    [{ text: '  ', images: [image, image] }, true], [{}, false], [{ text: '' }, false], [{ text: '\n \t\uFEFF' }, false],
-    [{ text: 'a'.repeat(65537) }, false], [{ images: [] }, false], [{ images: Array(9).fill(image) }, false],
-    [{ images: [42] }, false], [{ images: ['https://example.com/image.png'] }, false], [{ images: ['/tmp/image.png'] }, false],
-    [{ images: ['data:image/svg+xml;base64,AAAA'] }, false], [{ images: ['data:image/png;base64,'] }, false],
-    [{ images: ['data:image/png;base64,YQ'] }, false], [{ images: ['data:image/png;base64,YR=='] }, false],
-    [{ images: ['data:image/png;base64,YWF='] }, false], [{ images: ['data:image/png;base64,YQ==\n'] }, false],
-    [{ images: ['data:image/png;base64,YQ=='] }, true], [{ images: ['data:image/png;base64,YWE='] }, true],
-    [{ images: [image], model: 'vision', cwd: '/other' }, false],
-  ];
-  for (const action of ['start', 'steer']) for (const [extra, expected] of cases) {
-    const value = { ...base, action, ...(action === 'steer' ? { expectedTurnId: 'turn' } : {}), ...extra };
-    assert.equal(validateCommand(value), expected);
-    for (const validate of validators) assert.equal(validate(value), expected, JSON.stringify(validate.errors));
-  }
-  assert.equal(validateCommand({ ...base, text: 'x', images: undefined }), true);
-  assert.equal(validateCommand({ ...base, action: 'interrupt', turnId: 'turn', images: [image] }), false);
-});
-
-test('catalog publishes native modalities and Brai count without invented model limits', async () => {
-  const f = fixture(), catalog = await f.app.request({ action: 'models' });
-  assert.deepEqual(catalog.data.map(m => [m.inputModalities, m.imageLimit]), [[['text', 'image'], 8], [['text'], 0], [['text', 'image'], 8]]);
-  assert.ok(ajv.compile({ $ref: 'public#/definitions/Models' })(catalog));
-});
-
-test('image-only start/steer use native URL union; repeats retain one effect and distinguish images', async () => {
-  const f = fixture(); await f.app.request(f.command('create'));
-  const command = f.command('start', { images: [image] });
-  await Promise.all([f.app.request(command), f.app.request({ ...command })]);
-  const started = f.calls.filter(c => c.method === 'turn/start');
-  assert.equal(started.length, 1);
-  assert.deepEqual(started[0].params.input, [{ type: 'image', url: image }]);
-  assert.ok(native('TurnStartParams')(started[0].params));
-  await assert.rejects(f.app.request({ ...command, images: [png(9)] }), e => e.code === 'OPERATION_CONFLICT');
-  await f.app.request(f.command('steer', { expectedTurnId: 'turn', text: '', images: [image] }));
-  assert.ok(native('TurnSteerParams')(f.calls.at(-1).params));
-  assert.deepEqual(f.calls.at(-1).params.input, [{ type: 'image', url: image }]);
-  f.observe('item/completed', { turnId: 'turn', item: { id: 'u', type: 'userMessage', content: [{ type: 'image', url: image }] } });
-  assert.equal(f.events.at(-1).event.snapshot.items[0].imageCount, 1);
-  assert.equal(JSON.stringify(f.events).includes(image), false);
-});
-
-test('decoded aggregate budget and MIME signatures fail before any native mutation', async () => {
-  const f = fixture();
-  for (const images of [[png(limits.imageBytes + 1)], [png(400000), png(300000)], ['data:image/png;base64,YQ=='], [image.replace('png', 'jpeg')], [image.replace('png', 'webp')]]) {
-    await assert.rejects(f.app.request(f.command('start', { images })), e => e.code === 'INVALID_ARGUMENT' && e.outcome === 'not-sent');
-    assert.equal(f.calls.length, 0);
-  }
-  await f.app.request(f.command('create'));
-  await f.app.request(f.command('start', { images: [png(limits.imageBytes)] }));
-  assert.equal(f.calls.at(-1).method, 'turn/start');
-  assert.ok(bytes(f.calls.at(-1).params) < limits.input);
-});
-
-test('eight images fit the aggregate boundary; JPEG/WebP signatures and serialized bytes are enforced', async () => {
-  const jpeg = 'data:image/jpeg;base64,' + Buffer.from([255, 216, 255, 224]).toString('base64');
-  const webp = 'data:image/webp;base64,' + Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP')]).toString('base64');
-  for (const images of [[jpeg, webp], Array(8).fill(png(limits.imageBytes / 8))]) {
-    const f = fixture(); await f.app.request(f.command('create'));
-    await f.app.request(f.command('start', { images }));
-    assert.equal(f.calls.at(-1).params.input.length, images.length);
-  }
-  const f = fixture();
-  const highBitWebp = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP')]); highBitWebp[0] += 128;
-  await assert.rejects(f.app.request(f.command('start', { images: ['data:image/webp;base64,' + highBitWebp.toString('base64')] })), e => e.code === 'INVALID_ARGUMENT');
-  const overInput = { ...base, text: '\0'.repeat(65536), images: [png(limits.imageBytes)] };
-  assert.ok(bytes(overInput) > limits.input); assert.ok(ajv.compile(commandSchema)(overInput));
-  assert.equal(validateCommand(overInput), false);
-  await assert.rejects(f.app.request(overInput), e => e.code === 'INVALID_ARGUMENT');
-  assert.equal(f.calls.length, 0);
-});
-
-test('text-only models reject images for selected start and active steer without fallback', async () => {
-  const f = fixture(); await f.app.request(f.command('create'));
-  await assert.rejects(f.app.request(f.command('start', { model: 'text-only', images: [image] })), e => e.code === 'UNSUPPORTED' && e.outcome === 'not-sent');
-  assert.equal(f.calls.some(c => c.method === 'turn/start'), false);
-  await f.app.request(f.command('start', { model: 'text-only', text: 'hello' }));
-  await assert.rejects(f.app.request(f.command('steer', { expectedTurnId: 'turn', images: [image] })), e => e.code === 'UNSUPPORTED');
-  assert.equal(f.calls.some(c => c.method === 'turn/steer'), false);
-});
-
-test('late catalogue result rechecks the steer turn and never sends to a completed turn', async () => {
-  const f = fixture(); await f.app.request(f.command('create'));
-  await f.app.request(f.command('start', { text: 'hello' }));
-  f.setHook(method => { if (method === 'model/list') f.observe('turn/completed', { turn: { id: 'turn', status: 'completed' } }); });
-  await assert.rejects(f.app.request(f.command('steer', { expectedTurnId: 'turn', images: [image] })), e => e.code === 'OPERATION_CONFLICT');
-  assert.equal(f.calls.some(c => c.method === 'turn/steer'), false);
-});
-
-test('steer observes the selected active model before start result updates thread metadata', async () => {
-  const f = fixture(); await f.app.request(f.command('create'));
-  f.setHook(async method => {
-    if (method !== 'turn/start') return;
-    f.observe('turn/started', { turn: { id: 'turn', status: 'inProgress' } });
-    await assert.rejects(f.app.request(f.command('steer', { expectedTurnId: 'turn', images: [image] })), e => e.code === 'UNSUPPORTED');
-  });
-  await f.app.request(f.command('start', { model: 'text-only', text: 'hello' }));
-  assert.equal(f.calls.some(c => c.method === 'turn/steer'), false);
-});
-
-test('native image and localImage history exposes only count and text', () => {
-  const item = { id: 'u', type: 'userMessage', content: [{ type: 'image', url: image }, { type: 'localImage', path: '/private/image.png' }, { type: 'text', text: 'look' }] };
-  for (const value of [display(item, 'turn'), display(item, 'turn', true), compact(display(item, 'turn'))]) {
-    assert.equal(value.imageCount, 2); assert.equal(value.text, 'look');
-    assert.equal(JSON.stringify(value).includes('data:'), false); assert.equal(JSON.stringify(value).includes('/private/'), false);
-    assert.ok(ajv.compile({ $ref: 'public#/definitions/DisplayItem' })(value));
-  }
-});
-
-test('real local WebSocket validates image commands and restores >2 MiB raw page as compact history', async t => {
-  const dir = mkdtempSync('/tmp/brai-images-'), socketPath = join(dir, 'native.sock');
-  const server = createServer(), wss = new WebSocketServer({ server });
-  wss.on('error', () => {}); // Ошибка listen обработана ниже; WSS также пересылает её.
-  const calls = [], turn = { id: 'turn', status: 'inProgress', items: [] };
+  const calls = [], events = [], refs = new Map(), artifacts = new Map(); let history = [], observer, hook, generation = 'g', lostReserve = false, lostNative = false, persist = true, next = null;
+  const artifact = id => ({ artifactId: id, ownerId: 'owner', requestId: id, kind: id === uuid ? 'original' : 'copy', status: 'ready', title: 'picture', filename: 'private.png', extension: 'png', mimeType: 'image/png', source: 'agent', details: { projectId: 'p', threadId: 't' }, sizeBytes: data.length, sha256: createHash('sha256').update(data).digest('hex'), internalUrl: `http://artifacts/files/${id}`, createdAt: '2026-10-05T00:00:00Z', updatedAt: '2026-10-05T00:00:00Z' });
+  artifacts.set(uuid, artifact(uuid)); artifacts.set(copy, artifact(copy));
+  const key = scope => [scope.ownerId, scope.projectId, scope.threadId, scope.operationId].join('\0');
+  const error = (code, outcome = 'query') => Object.assign(new Error(code), { code, outcome });
+  const artifactPort = { fetch: async () => new Response(data, { headers: { 'content-type': 'application/octet-stream' } }), request: async (subject, value) => {
+    assert.ok(validateRequest(subject, value), `${subject} request`); let out;
+    if (subject === artifactSubjects.get) { const found = artifacts.get(value.artifactId); if (!found) throw error('NOT_FOUND'); out = structuredClone(found); }
+    else if (subject === artifactSubjects.relationList) out = { items: [{ originalArtifactId: uuid, modelArtifactId: copy, createdAt: '2026-10-05T00:00:00Z' }] };
+    else if (subject === artifactSubjects.referenceList) out = { items: [...refs.values()].filter(ref => ref.state === 'confirmed' && ref.scope.ownerId === value.scope.ownerId && ref.scope.projectId === value.scope.projectId && ref.scope.threadId === value.scope.threadId && value.nativeItemIds.includes(ref.itemId)) };
+    else {
+      const id = key(value.scope), old = refs.get(id);
+      if (subject === artifactSubjects.referenceReserve) {
+        if (old && (old.commandHash !== value.commandHash || old.clientUserMessageId !== value.clientUserMessageId || JSON.stringify(old.attachments) !== JSON.stringify(value.attachments))) throw error('OPERATION_CONFLICT');
+        const ref = old ?? { ...structuredClone(value), state: 'pending', createdAt: '2026-10-05T00:00:00Z', updatedAt: '2026-10-05T00:00:00Z' }; refs.set(id, ref); out = { created: !old, reference: ref }; if (lostReserve) { lostReserve = false; throw error('TIMEOUT'); }
+      } else { if (!old) throw error('NOT_FOUND');
+        if (subject === artifactSubjects.referenceConfirm) { assert.equal(value.clientUserMessageId, old.clientUserMessageId); if (old.state === 'confirmed' && (value.turnId !== old.turnId || value.itemId !== old.itemId)) throw error('OPERATION_CONFLICT'); Object.assign(old, { state: 'confirmed', turnId: value.turnId, itemId: value.itemId }); }
+        if (subject === artifactSubjects.referenceUpdateState && old.state !== 'confirmed') old.state = value.state;
+        out = { reference: old };
+      }
+    }
+    assert.ok(validateResponse(subject, out), `${subject} response`); return structuredClone(out);
+  } };
   const thread = { id: 't', cliVersion: 'test', createdAt: 1, cwd: '/tmp/p', ephemeral: false, model: 'vision', modelProvider: 'openai', preview: '', projectId: null, sessionId: 's', source: 'appServer', status: { type: 'active', activeFlags: [] }, turns: [], updatedAt: 1 };
   const response = { thread, model: 'vision', modelProvider: 'openai', cwd: '/tmp/p', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', sandbox: { type: 'workspaceWrite' } };
-  const bigImage = png(limits.imageBytes);
-  const history = Array.from({ length: 10 }, (_, i) => ({ turnId: 'turn', item: { id: `u${i}`, type: 'userMessage', content: [{ type: 'image', url: bigImage }] } }));
-  assert.ok(bytes({ data: history }) > 2097152 && bytes({ data: history }) < 16777216);
-  wss.on('connection', socket => socket.on('message', raw => {
-    const packet = JSON.parse(raw.toString()); calls.push(packet);
-    if (!Object.hasOwn(packet, 'id')) return;
-    const result = {
-      initialize: { codexHome: '/tmp/mock', platformFamily: 'unix', platformOs: 'linux', userAgent: 'test' },
-      'account/read': { account: { type: 'apiKey' }, requiresOpenaiAuth: false },
-      'account/rateLimits/read': { rateLimits: {} },
-      'model/list': { data: models.map((m, i) => ({ ...m, id: m.model, description: '', hidden: false, isDefault: i === 0 })) },
-      'thread/start': response, 'thread/read': { thread }, 'thread/resume': response,
-      'turn/start': { turn }, 'turn/steer': { turnId: 'turn' },
-      'thread/goal/get': { goal: null }, 'thread/turns/list': { data: [turn] }, 'thread/items/list': { data: history, nextCursor: null },
-    }[packet.method];
-    assert.ok(result, packet.method);
-    if (packet.method === 'account/rateLimits/read') {
-      const validateResult = native('GetAccountRateLimitsResponse');
-      assert.equal(validateResult(result), true, JSON.stringify(validateResult.errors));
-    }
-    socket.send(JSON.stringify({ id: packet.id, result }));
-  }));
-  try {
-    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
-  } catch (error) {
-    await new Promise(resolve => wss.close(resolve)); rmSync(dir, { recursive: true });
-    if (error.code === 'EPERM') { t.skip('Среда запрещает локальные Unix sockets'); return; }
-    throw error;
-  }
-  const codex = createCodex({ socketUrl: `ws+unix:${socketPath}:/` });
-  const app = createApplication(codex, { projects: [{ projectId: 'p', name: 'P', cwd: '/tmp/p' }], allowedModels: models.map(m => m.model), newThread: { model: 'vision' } }, () => {});
-  try {
-    await codex.connect();
-    const generation = codex.status().generation;
-    await app.request({ action: 'create', projectId: 'p', generation, operationId: 'create' });
-    await app.request({ ...base, generation, images: [bigImage], operationId: 'start' });
-    await app.request({ ...base, action: 'steer', generation, expectedTurnId: 'turn', images: [image], operationId: 'steer' });
-    const sentStarts = calls.filter(c => c.method === 'turn/start').length;
-    await assert.rejects(codex.call('turn/start', { threadId: 't', input: [{ type: 'image', url: bigImage.repeat(3) }] }, { mutation: true }), e => e.code === 'CAPACITY_EXHAUSTED' && e.outcome === 'not-sent');
-    assert.equal(calls.filter(c => c.method === 'turn/start').length, sentStarts);
-    const restoring = createApplication(codex, { projects: [{ projectId: 'p', name: 'P', cwd: '/tmp/p' }], allowedModels: models.map(m => m.model) }, () => {});
-    try {
-      const snapshot = await restoring.request({ action: 'open', projectId: 'p', threadId: 't' });
-      const page = await restoring.request({ action: 'items', projectId: 'p', threadId: 't' });
-      assert.equal(snapshot.items.length, 10); assert.equal(snapshot.items[0].imageCount, 1);
-      assert.equal(page.data[0].imageCount, 1); assert.equal(bytes(snapshot) < limits.state, true);
-      assert.equal(JSON.stringify([snapshot, page]).includes('data:image/'), false);
-      assert.ok(calls.filter(c => c.method === 'thread/items/list').every(c => c.params.limit === 10));
-    } finally { restoring.close(); }
-  } finally {
-    app.close(); await codex.close();
-    for (const socket of wss.clients) socket.terminate();
-    await new Promise(resolve => wss.close(resolve)); await new Promise(resolve => server.close(resolve)); rmSync(dir, { recursive: true });
+  const turn = { id: 'turn', status: 'inProgress', items: [] };
+  const port = { status: () => ({ generation, connection: 'connected', authorization: 'ready' }), subscribe: fn => { observer = fn; return () => {}; }, call: async (method, params) => {
+    calls.push({ method, params }); await hook?.(method, params);
+    if (method === 'turn/start' || method === 'turn/steer') { assert.ok(native(method === 'turn/start' ? 'TurnStartParams' : 'TurnSteerParams')(params)); if (persist) history.push({ turnId: 'turn', item: { id: `u${history.length}`, type: 'userMessage', clientId: params.clientUserMessageId, content: params.input } }); if (lostNative) throw error('TIMEOUT', 'unknown'); return method === 'turn/start' ? { turn } : { turnId: 'turn' }; }
+    if (method === 'thread/items/list') { let items = history.slice().reverse(); if (params.cursor?.type === 'item') { const index = items.findIndex(entry => entry.item.id === params.cursor.itemId); items = params.sortDirection === 'desc' ? items.slice(index + 1) : history.slice(history.findIndex(entry => entry.item.id === params.cursor.itemId) + 1); } else if (params.sortDirection === 'asc') items = history.slice(); return { data: items.slice(0, params.limit), nextCursor: next }; }
+    return { 'account/rateLimits/read': { rateLimits: null }, 'model/list': { data: [{ id: 'vision', model: 'vision', displayName: 'Vision', description: '', hidden: false, isDefault: true, defaultReasoningEffort: 'low', supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }] }] }, 'thread/start': response, 'thread/resume': response, 'thread/read': { thread }, 'thread/goal/get': { goal: null }, 'thread/turns/list': { data: [turn] } }[method] ?? (() => { throw new Error(method); })();
+  } };
+  const config = { codex: { socketUrl: 'mock' }, projects: [{ projectId: 'p', name: 'P', cwd: '/tmp/p' }], newThread: { model: 'vision' }, allowedModels: ['vision'], artifacts: { baseUrl: 'http://artifacts' } };
+  let app = createApplication(port, config, e => events.push(e), artifactPort);
+  const read = (action, extra = {}) => app.request({ action, projectId: 'p', threadId: 't', ownerId: 'owner', ...extra });
+  return { get app() { return app; }, port, config, artifactPort, calls, events, refs, artifacts, read, setHistory: value => { history = value; }, history: () => history, observe: (method, params) => observer({ type: 'notification', method, params: { threadId: 't', ...params } }), setHook: value => { hook = value; }, lostReserve: () => { lostReserve = true; }, lostNative: () => { lostNative = true; }, noPersist: () => { persist = false; }, incomplete: () => { next = 'same'; }, restart: () => { app.close(); generation = 'g2'; app = createApplication(port, config, e => events.push(e), artifactPort); return { ...base, generation }; }, create: () => app.request({ action: 'create', projectId: 'p', generation, operationId: 'create' }) };
+}
+test('closed v3 DTO and owner schemas reject raw media, invalid UUIDs and excess attachments', () => {
+  assert.deepEqual(publicSchema.definitions.Command.oneOf, commandSchema.oneOf);
+  const schema = ajv.compile(commandSchema);
+  for (const value of [base, { ...base, text: '' }, { ...base, action: 'steer', expectedTurnId: 'turn' }, { ...base, attachments: undefined, text: 'hello' }]) { assert.equal(validateCommand(value), true); assert.equal(schema(value), true, JSON.stringify(schema.errors)); }
+  for (const extra of [{ images: [image] }, { attachments: [] }, { attachments: Array(9).fill(pair) }, { ownerId: undefined }, { attachments: [{ ...pair, url: image }] }, { attachments: [{ ...pair, modelArtifactId: 'bad' }] }, { attachments: [{ ...pair, modelArtifactId: '00000000-0000-0000-0000-000000000000' }] }, { agentMode: 'goal' }]) { const value = { ...base, ...extra }; assert.equal(validateCommand(value), false); assert.equal(schema(value), false); }
+});
+test('image-only start and steer are native-valid; reserve is durable and RPC projections use owner metadata', async () => {
+  const f = fixture(); await f.create(); await Promise.all([f.app.request(base), f.app.request(base)]);
+  assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1); assert.deepEqual(f.calls.find(call => call.method === 'turn/start').params.input, [{ type: 'image', url: image }]);
+  await f.app.request({ ...base, action: 'steer', expectedTurnId: 'turn', operationId: 'steer', attachments: [{ originalArtifactId: uuid, modelArtifactId: copy }] });
+  const items = await f.read('items'); assert.equal(items.data[0].attachments[0].filename, 'private.png'); assert.match(items.data[0].attachments[0].url, /expectedUserId=owner/);
+  assert.equal(JSON.stringify(items).includes(image), false); const other = await f.read('items', { ownerId: 'other' }); assert.equal(JSON.stringify(other).includes('private.png'), false);
+  const detail = await f.read('item', { turnId: 'turn', itemId: 'u0' }); assert.equal(detail.item.attachments[0].status, 'ready');
+  const activities = await f.read('activities', { turnId: 'turn', itemIds: ['u0'] }); assert.equal(activities.data[0].attachments[0].status, 'ready');
+  f.observe('item/completed', { turnId: 'turn', item: f.history()[0].item }); assert.equal(JSON.stringify(f.events).includes('private.png'), false); assert.equal(JSON.stringify(f.events).includes(image), false);
+  const reopened = f.restart(); const open = await f.read('open'); assert.equal(open.items[0].attachments[0].status, 'ready'); await f.app.request(reopened); assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+  f.artifacts.get(uuid).source = 'edited'; f.artifacts.get(uuid).details = { projectId: 'edited', threadId: 'edited' }; f.artifacts.get(uuid).filename = 'renamed.png';
+  const edited = (await f.read('items')).data[0].attachments[0]; assert.equal(edited.status, 'ready'); assert.equal(edited.filename, 'renamed.png'); assert.match(edited.url, /itemId=u0/); assert.match(edited.url, /turnId=turn/);
+  f.artifacts.get(uuid).status = 'deleted'; f.artifacts.get(uuid).deletedAt = '2026-10-05T00:00:00Z'; delete f.artifacts.get(uuid).internalUrl;
+  assert.equal((await f.read('items')).data[0].attachments[0].status, 'deleted'); await assert.rejects(f.app.request({ ...reopened, text: 'changed' }), e => e.code === 'OPERATION_CONFLICT' || e.outcome === 'unknown');
+  const deletedReplay = f.restart(); await assert.rejects(f.app.request({ ...deletedReplay, text: 'changed' }), e => e.outcome === 'unknown');
+  f.app.close();
+});
+test('owner/scope, missing/deleted, count, decoded budget, MIME signature and copied relation fail before native send', async () => {
+  for (const mutate of [f => f.artifacts.get(uuid).ownerId = 'other', f => f.artifacts.get(uuid).details.threadId = 'other', f => f.artifacts.get(uuid).source = 'other', f => f.artifacts.delete(uuid), f => { f.artifacts.get(uuid).status = 'deleted'; delete f.artifacts.get(uuid).internalUrl; }, f => f.artifacts.get(uuid).sizeBytes = limits.imageBytes + 1, f => f.artifacts.get(uuid).mimeType = 'image/svg+xml', f => f.artifactPort.fetch = async () => new Response(Buffer.alloc(8), { headers: { 'content-type': 'image/png' } }), f => f.artifactPort.fetch = async () => new Response(Buffer.alloc(limits.imageBytes + 1), { headers: { 'content-type': 'image/png' } }), f => f.artifacts.get(uuid).internalUrl = 'http://other/files/' + uuid]) {
+    const f = fixture(); await f.create(); mutate(f); await assert.rejects(f.app.request(base)); assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 0); f.app.close();
   }
 });
-
-
-test('image detail rejects remote URLs, local paths and oversized media', () => {
-  const native = content => ({ id: 'u', type: 'userMessage', content });
-  const valid = display(native([{ type: 'image', url: image }]), 'turn', false, true);
-  assert.deepEqual(valid.images, [image]);
-  assert.equal(compact(valid).images, undefined);
-  for (const content of [
-    [{ type: 'image', url: 'https://example.com/x.png' }],
-    [{ type: 'localImage', path: '/private/image.png' }],
-    [{ type: 'image', url: 'data:image/svg+xml;base64,AAAA' }],
-    [{ type: 'image', url: png(limits.imageBytes + 1) }],
-  ]) assert.equal(display(native(content), 'turn', false, true).images, undefined);
-  assert.ok(bytes(display(native([{ type: 'image', url: png(limits.imageBytes) }]), 'turn', false, true)) < limits.frame);
+test('lost reserve response and pending restart never resend; exact native history recovers unknown', async () => {
+  const f = fixture(); await f.create(); f.lostReserve(); await assert.rejects(f.app.request(base), e => e.outcome === 'unknown'); const replay = f.restart(); await assert.rejects(f.app.request(replay), e => e.outcome === 'unknown'); assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 0);
+  const reference = [...f.refs.values()][0]; f.setHistory([{ turnId: 'turn', item: { id: 'native', type: 'userMessage', clientId: reference.clientUserMessageId, content: [{ type: 'image', url: image }] } }]);
+  assert.equal((await f.app.request(replay)).outcome, 'accepted'); assert.equal(reference.itemId, 'native'); f.app.close();
+});
+test('lost native result recovers after restart; no exact, duplicates and incomplete scan remain unknown', async () => {
+  const f = fixture(); await f.create(); f.lostNative(); await assert.rejects(f.app.request(base), e => e.outcome === 'unknown'); const replay = f.restart(); assert.equal((await f.app.request(replay)).outcome, 'accepted'); assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1); f.app.close();
+  for (const modify of [f => f.setHistory([]), f => f.setHistory([{ turnId: 'turn', item: { ...f.history()[0].item, clientId: 'wrong' } }]), f => f.setHistory([...f.history(), { turnId: 'turn', item: { ...f.history()[0].item, id: 'duplicate' } }]), f => f.incomplete()]) {
+    const x = fixture(); await x.create(); x.lostNative(); await assert.rejects(x.app.request(base)); modify(x); await assert.rejects(x.app.request(x.restart()), e => e.outcome === 'unknown'); assert.equal(x.calls.filter(call => call.method === 'turn/start').length, 1); assert.equal([...x.refs.values()][0].state, 'unknown'); x.app.close();
+  }
+});
+test('legacy raw URLs, local paths and images stay absent in every display/page/read projection', async () => {
+  const f = fixture(), item = { id: 'legacy', type: 'userMessage', content: [{ type: 'text', text: 'hello' }, { type: 'image', url: image }, { type: 'localImage', path: '/private/local.png' }] }; f.setHistory([{ turnId: 'turn', item }]);
+  for (const result of [display(item, 'turn'), messagePage(item, 'turn'), await f.read('open'), await f.read('items'), await f.read('item', { turnId: 'turn', itemId: 'legacy' }), await f.read('activities', { turnId: 'turn', itemIds: ['legacy'] })]) { assert.equal(JSON.stringify(result).includes(image), false); assert.equal(JSON.stringify(result).includes('/private/local.png'), false); }
+  assert.equal((await f.read('item', { turnId: 'turn', itemId: 'legacy' })).item.imageCount, 2); assert.equal(f.refs.size, 0);
+  f.artifactPort.request = async () => { throw new Error('offline'); }; assert.equal((await f.read('items')).data[0].attachmentsState, 'unavailable'); f.app.close();
+});
+test('two independent agents concurrent reserve permit only one native start', async () => {
+  const f = fixture(); await f.create(); const second = createApplication(f.port, f.config, () => {}, f.artifactPort);
+  const results = await Promise.allSettled([f.app.request(base), second.request(base)]); assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1); assert.ok(results.some(result => result.status === 'fulfilled')); f.app.close(); second.close();
+});
+test('model modality, aggregate decoded cap and MIME signature reject before reserve/send', async () => {
+  const f = fixture(); await f.create(); const originalCall = f.port.call;
+  f.port.call = async (method, params) => { const value = await originalCall(method, params); if (method === 'model/list') value.data[0].inputModalities = ['text']; return value; };
+  await assert.rejects(f.app.request(base), e => e.code === 'UNSUPPORTED' && e.outcome === 'not-sent'); assert.equal(f.refs.size, 0); f.app.close();
+  for (const signatureValid of [true, false]) {
+    const x = fixture(); await x.create(); const bytes = signatureValid ? Buffer.alloc(limits.imageBytes) : Buffer.alloc(8); if (signatureValid) data.copy(bytes);
+    const artifact = x.artifacts.get(uuid); artifact.sizeBytes = bytes.length; artifact.sha256 = createHash('sha256').update(bytes).digest('hex'); x.artifactPort.fetch = async () => new Response(bytes, { headers: { 'content-type': 'application/octet-stream' } });
+    await assert.rejects(x.app.request({ ...base, attachments: signatureValid ? [pair, pair] : [pair] }), e => e.outcome === 'not-sent'); assert.equal(x.refs.size, 0); assert.equal(x.calls.filter(call => call.method === 'turn/start').length, 0); x.app.close();
+  }
+});
+test('unresolved new exact clientId is unavailable rather than legacy, and not-sent never resends', async () => {
+  const f = fixture(); await f.create(); f.lostNative(); await assert.rejects(f.app.request(base)); f.incomplete(); const replay = f.restart();
+  const item = (await f.read('open')).items[0]; assert.equal(item.attachmentsState, 'unavailable'); assert.equal(item.attachments, undefined); await assert.rejects(f.app.request(replay), e => e.outcome === 'unknown'); assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1); f.app.close();
+  const x = fixture(); await x.create(); x.setHook(method => { if (method === 'turn/start') throw Object.assign(new Error('capacity'), { code: 'CAPACITY_EXHAUSTED', outcome: 'not-sent' }); });
+  await assert.rejects(x.app.request(base), e => e.outcome === 'not-sent'); assert.equal([...x.refs.values()][0].state, 'not-sent'); const notSentReplay = x.restart(); await assert.rejects(x.app.request(notSentReplay), e => e.outcome === 'not-sent'); assert.equal(x.calls.filter(call => call.method === 'turn/start').length, 1); x.app.close();
+});
+test('slow multiattachment NATS reads share one model phase budget and never reserve/send late', async () => {
+  const f = fixture(); f.config.artifacts.timeoutMs = 100; const command = f.restart(); await f.create();
+  const timeouts = [], transport = createArtifactsPort({ request: async (subject, raw, options) => {
+    const value = JSON.parse(Buffer.from(raw).toString()); const delay = subject === artifactSubjects.get ? 45 : 0;
+    timeouts.push(options.timeout);
+    await new Promise((resolve, reject) => setTimeout(() => options.timeout < delay ? reject(Object.assign(new Error('TIMEOUT'), { code: 'TIMEOUT' })) : resolve(), Math.min(delay, options.timeout)));
+    return { data: Buffer.from(JSON.stringify(await f.artifactPort.originalRequest(subject, value))) };
+  } }, 100);
+  f.artifactPort.originalRequest = f.artifactPort.request; f.artifactPort.request = transport.request;
+  const start = performance.now(); await assert.rejects(f.app.request({ ...command, attachments: Array(8).fill(pair) }), e => e.outcome === 'not-sent');
+  assert.ok(performance.now() - start < 220); assert.ok(timeouts.at(-1) < 45); assert.equal(f.refs.size, 0);
+  await new Promise(resolve => setTimeout(resolve, 60)); assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 0); f.app.close();
+});
+test('stalled HTTP body uses remaining phase budget; late metadata/generation cannot send', async () => {
+  const f = fixture(); f.config.artifacts.timeoutMs = 100; const command = f.restart(); await f.create(); const original = f.artifactPort.request;
+  f.artifactPort.request = async (...args) => { if (args[0] === artifactSubjects.get) await new Promise(resolve => setTimeout(resolve, 40)); return original(...args); };
+  f.artifactPort.fetch = async (_url, options) => new Response(new ReadableStream({ start(controller) { options.signal.addEventListener('abort', () => controller.error(options.signal.reason), { once: true }); } }), { headers: { 'content-type': 'application/octet-stream' } });
+  const start = performance.now(); await assert.rejects(f.app.request({ ...command, attachments: Array(8).fill(pair) }), e => e.outcome === 'not-sent'); assert.ok(performance.now() - start < 220); assert.equal(f.refs.size, 0); assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 0); f.app.close();
+  const x = fixture(); x.config.artifacts.timeoutMs = 30; const late = x.restart(); await x.create(); const get = x.artifactPort.request;
+  x.artifactPort.request = async (...args) => { const result = await get(...args); if (args[0] === artifactSubjects.get) await new Promise(resolve => setTimeout(resolve, 60)); return result; };
+  await assert.rejects(x.app.request(late), e => e.code === 'TIMEOUT' && e.outcome === 'not-sent'); assert.equal(x.refs.size, 0); assert.equal(x.calls.filter(call => call.method === 'turn/start').length, 0); x.app.close();
+  const y = fixture(); await y.create(); const before = y.artifactPort.request;
+  y.artifactPort.request = async (...args) => { const result = await before(...args); if (args[0] === artifactSubjects.get) y.restart(); return result; };
+  const oldApp = y.app; await assert.rejects(oldApp.request(base), e => e.outcome === 'not-sent'); assert.equal(y.refs.size, 0); assert.equal(y.calls.filter(call => call.method === 'turn/start').length, 0); y.app.close();
+});
+test('decorator stops remaining metadata reads after its total deadline or first availability failure', async () => {
+  for (const offline of [false, true]) {
+    const f = fixture(); await f.create(); await f.app.request(base); const reference = [...f.refs.values()][0]; reference.attachments = Array(8).fill(pair);
+    const original = f.artifactPort.request, timeouts = []; let gets = 0;
+    const transport = createArtifactsPort({ request: async (subject, raw, options) => {
+      timeouts.push(options.timeout); const delay = subject === artifactSubjects.get ? 45 : 20;
+      if (subject === artifactSubjects.get) gets++;
+      if (offline && subject === artifactSubjects.get) throw new Error('offline');
+      await new Promise((resolve, reject) => setTimeout(() => options.timeout < delay ? reject(new Error('timeout')) : resolve(), Math.min(options.timeout, delay)));
+      return { data: Buffer.from(JSON.stringify(await original(subject, JSON.parse(Buffer.from(raw).toString())))) };
+    } }, 100);
+    const helper = createAttachments(f.port, { baseUrl: 'http://artifacts', timeoutMs: 100 }, { ...f.artifactPort, request: transport.request });
+    const start = performance.now(), items = await helper.decorate(base, [{ id: 'u0', turnId: 'turn', type: 'userMessage', text: '', imageCount: 8 }]);
+    assert.ok(performance.now() - start < 220); assert.ok(gets <= 2); assert.equal(items[0].attachments.length, 8); assert.equal(items[0].attachments.at(-1).status, 'unavailable'); assert.equal(items[0].attachmentsState, 'unavailable'); if (!offline) assert.ok(timeouts.at(-1) < 45); f.app.close();
+  }
+});
+test('real local WebSocket validates image-only native input without daemon or inference', async t => {
+  const f = fixture(), dir = mkdtempSync('/tmp/brai-artifact-ws-'), socketPath = join(dir, 'native.sock'), server = createServer(), wss = new WebSocketServer({ server });
+  wss.on('error', () => {});
+  wss.on('connection', socket => socket.on('message', async raw => { const packet = JSON.parse(raw.toString()); if (!Object.hasOwn(packet, 'id')) return; let result;
+    if (packet.method === 'initialize') result = { codexHome: '/tmp/mock', platformFamily: 'unix', platformOs: 'linux', userAgent: 'test' };
+    else if (packet.method === 'account/read') result = { account: { type: 'apiKey' }, requiresOpenaiAuth: false };
+    else if (packet.method === 'account/rateLimits/read') result = { rateLimits: {} };
+    else result = await f.port.call(packet.method, packet.params);
+    socket.send(JSON.stringify({ id: packet.id, result }));
+  }));
+  try { await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); }); }
+  catch (error) { await new Promise(resolve => wss.close(resolve)); rmSync(dir, { recursive: true }); if (error.code === 'EPERM') { t.skip('Sandbox blocks Unix sockets'); return; } throw error; }
+  const codex = createCodex({ socketUrl: `ws+unix:${socketPath}:/` }), app = createApplication(codex, f.config, () => {}, f.artifactPort);
+  try { await codex.connect(); const generation = codex.status().generation; await app.request({ action: 'create', projectId: 'p', generation, operationId: 'create' }); await app.request({ ...base, generation }); await app.request({ ...base, generation, action: 'steer', expectedTurnId: 'turn', operationId: 'steer' }); assert.equal((await app.request({ action: 'items', ownerId: 'owner', projectId: 'p', threadId: 't' })).data.length, 2); }
+  finally { app.close(); f.app.close(); await codex.close(); await new Promise(resolve => wss.close(resolve)); await new Promise(resolve => server.close(resolve)); rmSync(dir, { recursive: true }); }
 });

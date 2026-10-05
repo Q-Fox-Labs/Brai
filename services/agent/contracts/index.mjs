@@ -1,19 +1,19 @@
-// ABOUTME: Задаёт закрытые команды и пределы публичной границы agent v2.
+// ABOUTME: Задаёт закрытые команды и пределы публичной границы agent v3.
 // ABOUTME: Не импортирует исполнитель или Node; native payload проверяет владелец.
-export const subjects = { rpc: 'brai.agent.v2.rpc', event: 'brai.agent.v2.event' };
+import artifactSchemas from '../../artifacts/schemas/messages.schema.json' with { type: 'json' };
+export const subjects = { rpc: 'brai.agent.v3.rpc', event: 'brai.agent.v3.event' };
 export const limits = { frame: 1048576, input: 983040, images: 8, imageBytes: 655360, state: 524288, clients: 128, queue: 64, threads: 16, pending: 64, operations: 4096, request: 32768 };
 export const bytes = value => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 const string = { type: 'string', minLength: 1, maxLength: 128 };
-// AIDEV-NOTE: Последние символы проверяют нулевые pad bits; конец исключает даже завершающий перевод строки.
-const imagePattern = '^data:image/(?:png|jpeg|webp);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=|[A-Za-z0-9+/][AQgw]==)(?![\\s\\S])';
-const properties = { agentMode: { enum: ['default', 'plan', 'goal'] }, objective: { type: 'string', minLength: 1, maxLength: 65536, pattern: '\\S' }, status: { enum: ['active', 'paused'] }, tokenBudget: { type: ['integer', 'null'], minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, permissionMode: { type: 'string', minLength: 1, maxLength: 128, enum: ['ask', 'auto', 'full'] }, model: string, effort: string, action: string, projectId: string, threadId: string, generation: string, operationId: string, turnId: string, expectedTurnId: string, requestId: string, itemId: string, itemIds: { type: 'array', minItems: 1, maxItems: 100, uniqueItems: true, items: string }, text: { type: 'string', minLength: 0, maxLength: 65536 }, images: { type: 'array', minItems: 1, maxItems: limits.images, items: { type: 'string', pattern: imagePattern } }, answer: {}, cursor: { type: 'string', minLength: 1, maxLength: 2048 } };
-const read = ['projectId', 'threadId'];
+const attachmentDefinition = artifactSchemas.definitions.ReferenceAttachment;
+const properties = { agentMode: { enum: ['default', 'plan', 'goal'] }, objective: { type: 'string', minLength: 1, maxLength: 65536, pattern: '\\S' }, status: { enum: ['active', 'paused'] }, tokenBudget: { type: ['integer', 'null'], minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, permissionMode: { type: 'string', minLength: 1, maxLength: 128, enum: ['ask', 'auto', 'full'] }, model: string, effort: string, ownerId: string, action: string, projectId: string, threadId: string, generation: string, operationId: string, turnId: string, expectedTurnId: string, requestId: string, itemId: string, itemIds: { type: 'array', minItems: 1, maxItems: 100, uniqueItems: true, items: string }, text: { type: 'string', minLength: 0, maxLength: 65536 }, attachments: { type: 'array', minItems: 1, maxItems: limits.images, items: { $ref: artifactSchemas.$id + '#/definitions/ReferenceAttachment' } }, answer: {}, cursor: { type: 'string', minLength: 1, maxLength: 2048 } };
+const read = ['projectId', 'threadId', '?ownerId'];
 const write = [...read, 'generation', 'operationId'];
-const fields = { projects: [], status: [], models: [], threads: ['projectId', '?cursor'], create: ['projectId', 'generation', 'operationId', '?model', '?permissionMode'], open: read, turns: [...read, '?cursor'], items: [...read, '?turnId', '?cursor'], activities: [...read, 'turnId', 'itemIds'], item: [...read, 'turnId', 'itemId', '?cursor'], start: [...write, '?text', '?images', '?model', '?effort', '?permissionMode', '?agentMode', '?tokenBudget'], steer: [...write, 'expectedTurnId', '?text', '?images'], archive: write, interrupt: [...write, 'turnId'], answer: [...write, 'requestId', 'answer'], goalGet: read, goalSet: [...write, '?objective', '?status', '?tokenBudget'], goalClear: write };
-const nonEmptyInput = { anyOf: [{ required: ['text'], properties: { text: { pattern: '\\S' } } }, { required: ['images'] }] };
+const fields = { projects: [], status: [], models: [], threads: ['projectId', '?cursor'], create: ['projectId', 'generation', 'operationId', '?model', '?permissionMode'], open: read, turns: [...read, '?cursor'], items: [...read, '?turnId', '?cursor'], activities: [...read, 'turnId', 'itemIds'], item: [...read, 'turnId', 'itemId', '?cursor'], start: [...write, '?text', '?attachments', '?model', '?effort', '?permissionMode', '?agentMode', '?tokenBudget'], steer: [...write, 'expectedTurnId', '?text', '?attachments'], archive: write, interrupt: [...write, 'turnId'], answer: [...write, 'requestId', 'answer'], goalGet: read, goalSet: [...write, '?objective', '?status', '?tokenBudget'], goalClear: write };
+const nonEmptyInput = { anyOf: [{ required: ['text'], properties: { text: { pattern: '\\S' } } }, { required: ['attachments'] }] };
 const goalStart = {
   if: { required: ['agentMode'], properties: { agentMode: { const: 'goal' } } },
-  then: { required: ['text'], properties: { text: { pattern: '\\S' }, tokenBudget: { type: 'integer', minimum: 1 } }, not: { required: ['images'] } },
+  then: { required: ['text'], properties: { text: { pattern: '\\S' }, tokenBudget: { type: 'integer', minimum: 1 } }, not: { required: ['attachments'] } },
   else: { not: { required: ['tokenBudget'] } },
 };
 export const commandSchema = {
@@ -21,7 +21,7 @@ export const commandSchema = {
   oneOf: Object.entries(fields).map(([action, names]) => ({
     type: 'object', additionalProperties: false,
     required: ['action', ...names.filter(name => !name.startsWith('?'))],
-    ...(['start', 'steer'].includes(action) ? nonEmptyInput : {}),
+    ...(['start', 'steer'].includes(action) ? { ...nonEmptyInput, dependencies: { attachments: ['ownerId'] } } : {}),
     ...(action === 'start' ? { allOf: [goalStart] } : {}),
     ...(action === 'goalSet' ? { anyOf: [{ required: ['objective'] }, { required: ['status'] }, { required: ['tokenBudget'] }] } : {}),
     properties: Object.fromEntries([['action', { const: action }], ...names.map(name => [name.replace('?', ''), properties[name.replace('?', '')]])]),
@@ -37,7 +37,7 @@ export function validateCommand(value) {
     if (field === undefined && name.startsWith('?')) continue;
     if (rule.type === 'array') {
       if (!Array.isArray(field) || field.length < rule.minItems || field.length > rule.maxItems) return false;
-      if (key === 'images') { if (field.some(image => typeof image !== 'string' || !new RegExp(imagePattern).test(image))) return false; }
+      if (key === 'attachments') { if (field.some(pair => !pair || typeof pair !== 'object' || Array.isArray(pair) || Object.keys(pair).sort().join() !== attachmentDefinition.required.slice().sort().join() || Object.entries(attachmentDefinition.properties).some(([name, rule]) => typeof pair[name] !== 'string' || !new RegExp(artifactSchemas.definitions[rule.$ref.split('/').at(-1)].pattern).test(pair[name])))) return false; }
       else if (new Set(field).size !== field.length || field.some(id => typeof id !== 'string' || Array.from(id).length < 1 || Array.from(id).length > 128)) return false;
     }
     if (rule.enum && !rule.enum.includes(field)) return false;
@@ -45,8 +45,9 @@ export function validateCommand(value) {
     if (key === 'objective' && (typeof field !== 'string' || !field.trim())) return false;
     if (field === undefined || (rule.type === 'string' && (typeof field !== 'string' || Array.from(field).length < rule.minLength || Array.from(field).length > rule.maxLength))) return false;
   }
-  if (['start', 'steer'].includes(value.action) && !value.text?.trim() && !value.images?.length) return false;
-  if (value.action === 'start' && (value.agentMode === 'goal' ? !value.text?.trim() || value.images || value.tokenBudget === null : value.tokenBudget !== undefined)) return false;
+  if (value.attachments?.length && (typeof value.ownerId !== 'string' || !value.ownerId)) return false;
+  if (['start', 'steer'].includes(value.action) && !value.text?.trim() && !value.attachments?.length) return false;
+  if (value.action === 'start' && (value.agentMode === 'goal' ? !value.text?.trim() || value.attachments || value.tokenBudget === null : value.tokenBudget !== undefined)) return false;
   if (value.action === 'goalSet' && value.objective === undefined && value.status === undefined && value.tokenBudget === undefined) return false;
   return bytes(value) <= limits.input;
 }

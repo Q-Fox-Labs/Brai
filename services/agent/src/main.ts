@@ -3,6 +3,7 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { connect, headers, ServiceErrorHeader, ServiceErrorCodeHeader } from 'nats';
+import { createArtifactsPort } from './attachments.js';
 import { createCodex } from './codex.js';
 import { createApplication, type Config } from './application.js';
 import { subjects, bytes, limits } from '../contracts/index.mjs';
@@ -10,9 +11,13 @@ import type { Command, EventEnvelope } from '../contracts/index.mjs';
 /** Запускает собственные подключения; рестарт agent не перезапускает app-server. */
 export async function startAgent(config: Config) {
   if (!config.codex?.socketUrl || !config.nats?.servers?.length || !config.projects?.length || config.projects.some(p => !p.projectId || !p.cwd.startsWith('/')) || new Set(config.projects.map(p => p.projectId)).size !== config.projects.length) throw new Error('INVALID_AGENT_CONFIG');
+  if (config.artifacts) {
+    const base = new URL(config.artifacts.baseUrl);
+    if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash || config.artifacts.timeoutMs !== undefined && (!Number.isSafeInteger(config.artifacts.timeoutMs) || config.artifacts.timeoutMs < 1 || config.artifacts.timeoutMs > 10000)) throw new Error('INVALID_AGENT_CONFIG');
+  }
   const codex = createCodex(config.codex);
   const nc = await connect({ ...config.nats, pass: config.nats.password, inboxPrefix: config.nats.inboxPrefix ?? '_INBOX.brai_agent', maxReconnectAttempts: -1 });
-  const service = await nc.services.add({ name: 'brai_agent', version: '2.0.0', queue: 'brai_agent' });
+  const service = await nc.services.add({ name: 'brai_agent', version: '3.0.0', queue: 'brai_agent' });
   let closed = false, brokerConnected = true, sending = false, activeRequests = 0;
   const queue = new Map<string, EventEnvelope>();
   async function drain() {
@@ -43,7 +48,7 @@ export async function startAgent(config: Config) {
     }
     queue.set(key, event);
     void drain();
-  });
+  }, createArtifactsPort(nc, config.artifacts?.timeoutMs));
   const codes: Record<string, number> = { INVALID_ARGUMENT: 400, REQUEST_TOO_LARGE: 413, ITEM_TOO_LARGE: 413, STALE_GENERATION: 409, STALE_ITEM: 409, STALE_REQUEST: 409, OPERATION_CONFLICT: 409, CAPACITY_EXHAUSTED: 503, UPSTREAM_UNAVAILABLE: 503, TIMEOUT: 504, NOT_FOUND: 404, UNSUPPORTED: 501 };
   service.addEndpoint('rpc', { subject: subjects.rpc, handler: (_error, message) => {
     void (async () => {

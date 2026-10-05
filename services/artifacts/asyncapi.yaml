@@ -1,0 +1,438 @@
+# ABOUTME: Описывает subjects и payload NATS Service artifacts.
+# ABOUTME: HTTP передаёт байты; payload schemas принадлежат Draft-07 owner schema.
+asyncapi: 3.1.0
+info:
+  title: Brai artifacts service
+  version: '1.0.0'
+  description: >-
+    NATS Service name brai_artifacts; Core NATS request-reply, queue brai_artifacts.
+    Instances support the standard PING, INFO and STATS endpoints.
+    Successful replies are direct DTO payloads without JSON-RPC wrapping.
+    Errors use Nats-Service-Error and Nats-Service-Error-Code response headers.
+    A lost response has unknown outcome; prepare and link.create are retried with
+    the same requestId. HTTP transfers raw file bytes only.
+servers:
+  privateNats:
+    host: '{host}:{port}'
+    protocol: nats
+    description: Private NATS endpoint supplied by runtime configuration.
+    variables:
+      host:
+        default: localhost
+      port:
+        default: '4222'
+defaultContentType: application/json
+x-http-upload:
+  method: PUT
+  path: /upload/{token}
+  successStatus: 201
+  successBody: absent
+  responseHeaders:
+    $ref: ./schemas/messages.schema.json#/definitions/UploadResponseHeaders
+channels:
+  prepare:
+    address: brai.artifacts.v1.prepare
+    messages:
+      request:
+        $ref: "#/components/messages/PrepareRequest"
+  get:
+    address: brai.artifacts.v1.get
+    messages:
+      request:
+        $ref: "#/components/messages/GetRequest"
+  update:
+    address: brai.artifacts.v1.update
+    messages:
+      request:
+        $ref: "#/components/messages/UpdateRequest"
+  list:
+    address: brai.artifacts.v1.list
+    messages:
+      request:
+        $ref: "#/components/messages/ListRequest"
+  stats:
+    address: brai.artifacts.v1.stats
+    messages:
+      request:
+        $ref: "#/components/messages/StatsRequest"
+  delete:
+    address: brai.artifacts.v1.delete
+    messages:
+      request:
+        $ref: "#/components/messages/DeleteRequest"
+  relationAdd:
+    address: brai.artifacts.v1.relation.add
+    messages:
+      request:
+        $ref: "#/components/messages/RelationMutationRequest"
+  relationRemove:
+    address: brai.artifacts.v1.relation.remove
+    messages:
+      request:
+        $ref: "#/components/messages/RelationMutationRequest"
+  relationList:
+    address: brai.artifacts.v1.relation.list
+    messages:
+      request:
+        $ref: "#/components/messages/RelationListRequest"
+  referenceReserve:
+    address: brai.artifacts.v1.reference.reserve
+    messages:
+      request:
+        $ref: "#/components/messages/ReferenceReserveRequest"
+  referenceGet:
+    address: brai.artifacts.v1.reference.get
+    messages:
+      request:
+        $ref: "#/components/messages/ReferenceGetRequest"
+  referenceConfirm:
+    address: brai.artifacts.v1.reference.confirm
+    messages:
+      request:
+        $ref: "#/components/messages/ReferenceConfirmRequest"
+  referenceList:
+    address: brai.artifacts.v1.reference.list
+    messages:
+      request:
+        $ref: "#/components/messages/ReferenceListRequest"
+  referenceUpdateState:
+    address: brai.artifacts.v1.reference.update-state
+    messages:
+      request:
+        $ref: "#/components/messages/ReferenceUpdateStateRequest"
+  linkCreate:
+    address: brai.artifacts.v1.link.create
+    messages:
+      request:
+        $ref: "#/components/messages/LinkCreateRequest"
+  linkRevoke:
+    address: brai.artifacts.v1.link.revoke
+    messages:
+      request:
+        $ref: "#/components/messages/LinkRevokeRequest"
+  replies:
+    address: null
+    description: Transient reply inbox from the NATS requester.
+    x-nats-reply-subject: message.reply
+    messages:
+      PrepareResponse:
+        $ref: "#/components/messages/PrepareResponse"
+      Artifact:
+        $ref: "#/components/messages/Artifact"
+      ListResponse:
+        $ref: "#/components/messages/ListResponse"
+      StatsResponse:
+        $ref: "#/components/messages/StatsResponse"
+      RelationResponse:
+        $ref: "#/components/messages/RelationResponse"
+      RelationListResponse:
+        $ref: "#/components/messages/RelationListResponse"
+      ReferenceReserveResponse:
+        $ref: "#/components/messages/ReferenceReserveResponse"
+      ReferenceResponse:
+        $ref: "#/components/messages/ReferenceResponse"
+      ReferenceListResponse:
+        $ref: "#/components/messages/ReferenceListResponse"
+      LinkCreateResponse:
+        $ref: "#/components/messages/LinkCreateResponse"
+      LinkRevokeResponse:
+        $ref: "#/components/messages/LinkRevokeResponse"
+      ServiceError:
+        $ref: "#/components/messages/ServiceError"
+operations:
+  prepare:
+    action: receive
+    channel: { $ref: "#/channels/prepare" }
+    messages: [{ $ref: "#/channels/prepare/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/PrepareResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  get:
+    action: receive
+    channel: { $ref: "#/channels/get" }
+    messages: [{ $ref: "#/channels/get/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/Artifact" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  update:
+    action: receive
+    channel: { $ref: "#/channels/update" }
+    messages: [{ $ref: "#/channels/update/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/Artifact" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  list:
+    action: receive
+    channel: { $ref: "#/channels/list" }
+    messages: [{ $ref: "#/channels/list/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/ListResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  stats:
+    action: receive
+    channel: { $ref: "#/channels/stats" }
+    messages: [{ $ref: "#/channels/stats/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/StatsResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  delete:
+    action: receive
+    channel: { $ref: "#/channels/delete" }
+    messages: [{ $ref: "#/channels/delete/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/Artifact" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  relationAdd:
+    action: receive
+    channel: { $ref: "#/channels/relationAdd" }
+    messages: [{ $ref: "#/channels/relationAdd/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/RelationResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  relationRemove:
+    action: receive
+    channel: { $ref: "#/channels/relationRemove" }
+    messages: [{ $ref: "#/channels/relationRemove/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/RelationResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  relationList:
+    action: receive
+    channel: { $ref: "#/channels/relationList" }
+    messages: [{ $ref: "#/channels/relationList/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/RelationListResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  referenceReserve:
+    action: receive
+    channel: { $ref: "#/channels/referenceReserve" }
+    messages: [{ $ref: "#/channels/referenceReserve/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/ReferenceReserveResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  referenceGet:
+    action: receive
+    channel: { $ref: "#/channels/referenceGet" }
+    messages: [{ $ref: "#/channels/referenceGet/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/ReferenceResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  referenceConfirm:
+    action: receive
+    channel: { $ref: "#/channels/referenceConfirm" }
+    messages: [{ $ref: "#/channels/referenceConfirm/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/ReferenceResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  referenceList:
+    action: receive
+    channel: { $ref: "#/channels/referenceList" }
+    messages: [{ $ref: "#/channels/referenceList/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/ReferenceListResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  referenceUpdateState:
+    action: receive
+    channel: { $ref: "#/channels/referenceUpdateState" }
+    messages: [{ $ref: "#/channels/referenceUpdateState/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/ReferenceResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  linkCreate:
+    action: receive
+    channel: { $ref: "#/channels/linkCreate" }
+    messages: [{ $ref: "#/channels/linkCreate/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/LinkCreateResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  linkRevoke:
+    action: receive
+    channel: { $ref: "#/channels/linkRevoke" }
+    messages: [{ $ref: "#/channels/linkRevoke/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/LinkRevokeResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+components:
+  messages:
+    Artifact:
+      name: Artifact
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/Artifact"
+    DeleteRequest:
+      name: DeleteRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/DeleteRequest"
+    GetRequest:
+      name: GetRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/GetRequest"
+    LinkCreateRequest:
+      name: LinkCreateRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/LinkCreateRequest"
+    LinkCreateResponse:
+      name: LinkCreateResponse
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/LinkCreateResponse"
+    LinkRevokeRequest:
+      name: LinkRevokeRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/LinkRevokeRequest"
+    LinkRevokeResponse:
+      name: LinkRevokeResponse
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/LinkRevokeResponse"
+    ListRequest:
+      name: ListRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/ListRequest"
+    ListResponse:
+      name: ListResponse
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/ListResponse"
+    PrepareRequest:
+      name: PrepareRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/PrepareRequest"
+    PrepareResponse:
+      name: PrepareResponse
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/PrepareResponse"
+    ReferenceConfirmRequest:
+      name: ReferenceConfirmRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/ReferenceConfirmRequest"
+    ReferenceGetRequest:
+      name: ReferenceGetRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/ReferenceGetRequest"
+    ReferenceListRequest:
+      name: ReferenceListRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/ReferenceListRequest"
+    ReferenceListResponse:
+      name: ReferenceListResponse
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/ReferenceListResponse"
+    ReferenceReserveRequest:
+      name: ReferenceReserveRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/ReferenceReserveRequest"
+    ReferenceReserveResponse:
+      name: ReferenceReserveResponse
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/ReferenceReserveResponse"
+    ReferenceResponse:
+      name: ReferenceResponse
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/ReferenceResponse"
+    ReferenceUpdateStateRequest:
+      name: ReferenceUpdateStateRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/ReferenceUpdateStateRequest"
+    RelationListRequest:
+      name: RelationListRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/RelationListRequest"
+    RelationListResponse:
+      name: RelationListResponse
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/RelationListResponse"
+    RelationMutationRequest:
+      name: RelationMutationRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/RelationMutationRequest"
+    RelationResponse:
+      name: RelationResponse
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/RelationResponse"
+    StatsRequest:
+      name: StatsRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/StatsRequest"
+    StatsResponse:
+      name: StatsResponse
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/StatsResponse"
+    UpdateRequest:
+      name: UpdateRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/UpdateRequest"
+    ServiceError:
+      name: ServiceError
+      description: Error status is carried in the required native service headers; no JSON payload.
+      headers:
+        type: object
+        additionalProperties: false
+        required: [Nats-Service-Error, Nats-Service-Error-Code]
+        properties:
+          Nats-Service-Error:
+            type: string
+            minLength: 1
+          Nats-Service-Error-Code:
+            type: string
+            enum: ['400', '404', '409', '413', '429', '500', '503']

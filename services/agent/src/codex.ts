@@ -127,7 +127,7 @@ export function createCodex(options: { socketUrl: string }) {
           socket.once('open', () => { clearTimeout(timer); resolve(); });
           socket.once('error', () => { clearTimeout(timer); reject(fail('UPSTREAM_UNAVAILABLE')); });
         });
-        await call('initialize', { clientInfo: { name: 'brai_agent', version: '2.0.0' }, capabilities: { experimentalApi: true } });
+        await call('initialize', { clientInfo: { name: 'brai_agent', version: '3.0.0' }, capabilities: { experimentalApi: true } });
         await send({ method: 'initialized', params: {} }, false);
         const account = await call('account/read', { refreshToken: false });
         authorization = account.account ? 'ready' : 'required';

@@ -270,7 +270,7 @@ test("HTTP lazy reads parse bounded JSON itemIds and reject malformed or duplica
     await f.response;
     const query = new URLSearchParams({ projectId: "brai", threadId: "thread-fixture", turnId: "turn-fixture", itemIds: JSON.stringify(["first", "second"]) });
     assert.equal((await f.get("activities", query)).status, 200);
-    assert.deepEqual(f.commands.at(-1), { action: "activities", projectId: "brai", threadId: "thread-fixture", turnId: "turn-fixture", itemIds: ["first", "second"] });
+    assert.deepEqual(f.commands.at(-1), { action: "activities", projectId: "brai", threadId: "thread-fixture", turnId: "turn-fixture", itemIds: ["first", "second"], ownerId: "user-fixture" });
     const published = f.commands.length;
     query.set("itemIds", "first,second"); assert.equal((await f.get("activities", query)).status, 400);
     query.set("itemIds", JSON.stringify(Array.from({ length: 101 }, (_, i) => String(i)))); assert.equal((await f.get("activities", query)).status, 400);

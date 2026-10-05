@@ -13,8 +13,8 @@
     "typecheck:web": "npm run typecheck --workspace=@brai/web",
     "typecheck:timer": "npm run typecheck --workspace=@brai/timer",
     "typecheck:agent": "npm run typecheck --workspace=@brai/agent",
-    "build": "npm run build:web && npm run build:timer && npm run build:auth && npm run build:agent && npm run build:supabase-mcp",
-    "typecheck": "npm run typecheck:web && npm run typecheck:timer && npm run typecheck:auth && npm run typecheck:agent && npm run typecheck:supabase-mcp",
+    "build": "npm run build:web && npm run build:timer && npm run build:auth && npm run build:agent && npm run build:supabase-mcp && npm run build:artifacts",
+    "typecheck": "npm run typecheck:web && npm run typecheck:timer && npm run typecheck:auth && npm run typecheck:agent && npm run typecheck:supabase-mcp && npm run typecheck:artifacts",
     "lint": "npm run lint --workspaces --if-present",
     "test:web": "npm test --workspace=@brai/web",
     "build:auth": "npm run build --workspace=@brai/auth",
@@ -26,7 +26,11 @@
     "build:supabase-mcp": "npm run build --workspace=@brai/supabase-mcp",
     "typecheck:supabase-mcp": "npm run typecheck --workspace=@brai/supabase-mcp",
     "test:supabase-mcp": "npm test --workspace=@brai/supabase-mcp",
-    "test:integration:supabase-mcp": "npm run test:integration --workspace=@brai/supabase-mcp"
+    "test:integration:supabase-mcp": "npm run test:integration --workspace=@brai/supabase-mcp",
+    "build:artifacts": "npm run build --workspace=@brai/artifacts",
+    "typecheck:artifacts": "npm run typecheck --workspace=@brai/artifacts",
+    "test:artifacts": "npm test --workspace=@brai/artifacts",
+    "test:integration:artifacts": "npm run test:integration --workspace=@brai/artifacts"
   },
   "engines": {
     "node": "24.21.0",

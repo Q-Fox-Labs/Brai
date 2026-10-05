@@ -1,0 +1,1114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.invalid/services/artifacts/schemas/messages.schema.json",
+  "title": "Brai artifacts NATS payloads",
+  "type": "object",
+  "definitions": {
+    "OpaqueId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "\\S"
+    },
+    "OwnerId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "\\S"
+    },
+    "Uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$"
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "Metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "filename",
+        "extension",
+        "mimeType",
+        "source"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "\\S"
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "\\S"
+        },
+        "extension": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9._-]*$"
+        },
+        "mimeType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "geotag": {
+          "type": "object"
+        },
+        "materialCreatedAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    },
+    "MetadataPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "\\S"
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "\\S"
+        },
+        "extension": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9._-]*$"
+        },
+        "mimeType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "geotag": {
+          "type": "object"
+        },
+        "materialCreatedAt": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    },
+    "Artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "ownerId",
+        "requestId",
+        "kind",
+        "status",
+        "title",
+        "filename",
+        "extension",
+        "mimeType",
+        "source",
+        "sizeBytes",
+        "sha256",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "artifactId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        },
+        "requestId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "kind": {
+          "enum": [
+            "original",
+            "copy"
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "ready",
+            "deleting",
+            "deleted",
+            "failed"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "extension": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[a-zA-Z0-9._-]*$"
+        },
+        "mimeType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "geotag": {
+          "type": "object"
+        },
+        "materialCreatedAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "details": {
+          "type": "object"
+        },
+        "sizeBytes": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "internalUrl": {
+          "type": "string",
+          "minLength": 1
+        },
+        "createdAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "updatedAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "deletedAt": {
+          "$ref": "#/definitions/Timestamp"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "ready"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "sizeBytes",
+              "sha256",
+              "internalUrl"
+            ],
+            "properties": {
+              "sizeBytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "sha256": {
+                "$ref": "#/definitions/Sha256"
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "internalUrl"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "deleting",
+                  "deleted"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "sizeBytes",
+              "sha256"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "deleted"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "deletedAt"
+            ],
+            "properties": {
+              "sizeBytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "sha256": {
+                "$ref": "#/definitions/Sha256"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ReferenceQueryScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId",
+        "projectId",
+        "threadId"
+      ],
+      "properties": {
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        },
+        "projectId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "threadId": {
+          "$ref": "#/definitions/OpaqueId"
+        }
+      }
+    },
+    "Scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId",
+        "projectId",
+        "threadId",
+        "operationId"
+      ],
+      "properties": {
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        },
+        "projectId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "threadId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "operationId": {
+          "$ref": "#/definitions/OpaqueId"
+        }
+      }
+    },
+    "ReferenceAttachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "originalArtifactId",
+        "modelArtifactId"
+      ],
+      "properties": {
+        "originalArtifactId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "modelArtifactId": {
+          "$ref": "#/definitions/Uuid"
+        }
+      }
+    },
+    "Reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "clientUserMessageId",
+        "commandHash",
+        "attachments",
+        "state",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/definitions/Scope"
+        },
+        "clientUserMessageId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "commandHash": {
+          "$ref": "#/definitions/Sha256"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ReferenceAttachment"
+          }
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "unknown",
+            "confirmed",
+            "not-sent"
+          ]
+        },
+        "turnId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "itemId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "createdAt": {
+          "$ref": "#/definitions/Timestamp"
+        },
+        "updatedAt": {
+          "$ref": "#/definitions/Timestamp"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "confirmed"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "required": [
+              "turnId",
+              "itemId"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "turnId"
+                  ]
+                },
+                {
+                  "required": [
+                    "itemId"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "Link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "linkId",
+        "artifactId",
+        "url",
+        "expiresAt",
+        "revokedAt"
+      ],
+      "properties": {
+        "linkId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "artifactId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expiresAt": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revokedAt": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "PrepareRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "ownerId",
+        "kind",
+        "metadata"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        },
+        "kind": {
+          "enum": [
+            "original",
+            "copy"
+          ]
+        },
+        "metadata": {
+          "$ref": "#/definitions/Metadata"
+        }
+      }
+    },
+    "PrepareResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact",
+        "uploadUrl"
+      ],
+      "properties": {
+        "artifact": {
+          "$ref": "#/definitions/Artifact"
+        },
+        "uploadUrl": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "GetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId"
+      ],
+      "properties": {
+        "artifactId": {
+          "$ref": "#/definitions/Uuid"
+        }
+      }
+    },
+    "UpdateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "artifactId",
+        "metadata"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "artifactId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "metadata": {
+          "$ref": "#/definitions/MetadataPatch"
+        }
+      }
+    },
+    "ListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filter",
+        "sort",
+        "order",
+        "limit",
+        "offset"
+      ],
+      "properties": {
+        "filter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ownerId"
+          ],
+          "properties": {
+            "ownerId": {
+              "$ref": "#/definitions/OwnerId"
+            },
+            "kind": {
+              "enum": [
+                "original",
+                "copy"
+              ]
+            },
+            "status": {
+              "enum": [
+                "pending",
+                "ready",
+                "deleting",
+                "deleted",
+                "failed"
+              ]
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        "sort": {
+          "enum": [
+            "sizeBytes",
+            "createdAt"
+          ]
+        },
+        "order": {
+          "enum": [
+            "asc",
+            "desc"
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "ListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "total",
+        "limit",
+        "offset",
+        "sort",
+        "order"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Artifact"
+          }
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sort": {
+          "enum": [
+            "sizeBytes",
+            "createdAt"
+          ]
+        },
+        "order": {
+          "enum": [
+            "asc",
+            "desc"
+          ]
+        }
+      }
+    },
+    "StatsRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId"
+      ],
+      "properties": {
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        }
+      }
+    },
+    "StatsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "originalCount",
+        "copyCount",
+        "totalCount",
+        "originalBytes",
+        "copyBytes",
+        "totalBytes"
+      ],
+      "properties": {
+        "originalCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "copyCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "originalBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "copyBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "DeleteRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "artifactId"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "artifactId": {
+          "$ref": "#/definitions/Uuid"
+        }
+      }
+    },
+    "RelationMutationRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "modelArtifactId",
+        "originalArtifactId"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "modelArtifactId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "originalArtifactId": {
+          "$ref": "#/definitions/Uuid"
+        }
+      }
+    },
+    "RelationListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId"
+      ],
+      "properties": {
+        "artifactId": {
+          "$ref": "#/definitions/Uuid"
+        }
+      }
+    },
+    "Relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "modelArtifactId",
+        "originalArtifactId",
+        "createdAt"
+      ],
+      "properties": {
+        "modelArtifactId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "originalArtifactId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "createdAt": {
+          "$ref": "#/definitions/Timestamp"
+        }
+      }
+    },
+    "RelationResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relation"
+      ],
+      "properties": {
+        "relation": {
+          "$ref": "#/definitions/Relation"
+        }
+      }
+    },
+    "RelationListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Relation"
+          }
+        }
+      }
+    },
+    "ReferenceReserveRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "clientUserMessageId",
+        "commandHash",
+        "attachments"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/definitions/Scope"
+        },
+        "clientUserMessageId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "commandHash": {
+          "$ref": "#/definitions/Sha256"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ReferenceAttachment"
+          }
+        }
+      }
+    },
+    "ReferenceReserveResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "created",
+        "reference"
+      ],
+      "properties": {
+        "created": {
+          "type": "boolean"
+        },
+        "reference": {
+          "$ref": "#/definitions/Reference"
+        }
+      }
+    },
+    "ReferenceGetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/definitions/Scope"
+        }
+      }
+    },
+    "ReferenceConfirmRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "clientUserMessageId",
+        "turnId",
+        "itemId"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/definitions/Scope"
+        },
+        "clientUserMessageId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "turnId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "itemId": {
+          "$ref": "#/definitions/OpaqueId"
+        }
+      }
+    },
+    "ReferenceListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "nativeItemIds"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/definitions/ReferenceQueryScope"
+        },
+        "nativeItemIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/OpaqueId"
+          }
+        }
+      }
+    },
+    "ReferenceUpdateStateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "state"
+      ],
+      "properties": {
+        "scope": {
+          "$ref": "#/definitions/Scope"
+        },
+        "state": {
+          "enum": [
+            "unknown",
+            "not-sent"
+          ]
+        }
+      }
+    },
+    "ReferenceResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference"
+      ],
+      "properties": {
+        "reference": {
+          "$ref": "#/definitions/Reference"
+        }
+      }
+    },
+    "ReferenceListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Reference"
+          }
+        }
+      }
+    },
+    "ServiceError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "Nats-Service-Error",
+        "Nats-Service-Error-Code"
+      ],
+      "properties": {
+        "Nats-Service-Error": {
+          "type": "string",
+          "minLength": 1
+        },
+        "Nats-Service-Error-Code": {
+          "type": "string",
+          "enum": [
+            "400",
+            "404",
+            "409",
+            "413",
+            "429",
+            "500",
+            "503"
+          ]
+        }
+      }
+    },
+    "LinkCreateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "artifactId"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "artifactId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "expiresAt": {
+          "$ref": "#/definitions/Timestamp"
+        }
+      }
+    },
+    "LinkCreateResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "link"
+      ],
+      "properties": {
+        "link": {
+          "$ref": "#/definitions/Link"
+        }
+      }
+    },
+    "LinkRevokeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestId",
+        "linkId"
+      ],
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "linkId": {
+          "$ref": "#/definitions/OpaqueId"
+        }
+      }
+    },
+    "LinkRevokeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "link"
+      ],
+      "properties": {
+        "link": {
+          "$ref": "#/definitions/Link"
+        }
+      }
+    },
+    "UploadResponseHeaders": {
+      "type": "object",
+      "description": "HTTP 201 response headers after a complete artifact upload; the body is empty.",
+      "required": [
+        "X-Artifact-Id",
+        "X-Artifact-State",
+        "X-Artifact-Size",
+        "X-Artifact-SHA256",
+        "Location"
+      ],
+      "properties": {
+        "X-Artifact-Id": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "X-Artifact-State": {
+          "const": "ready"
+        },
+        "X-Artifact-Size": {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        },
+        "X-Artifact-SHA256": {
+          "$ref": "#/definitions/Sha256"
+        },
+        "Location": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -1,13 +1,15 @@
 // ABOUTME: Управляет native чатами, ходами и формами через один CodexPort.
 // ABOUTME: Владеет только bounded live проекцией; историю читает у Codex.
+import { performance } from 'node:perf_hooks';
 import { randomUUID, createHash } from 'node:crypto';
 import { bytes, limits, validateCommand } from '../contracts/index.mjs';
 import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, NativeTurn, ModelCatalog, DisplayItem, GoalProjection, PlanProgress } from '../contracts/index.mjs';
 import type { CodexPort, Observation } from './codex.js';
+import { createAttachments, type ArtifactsConfig, type ArtifactsPort } from './attachments.js';
 import { createLimitsMonitor } from './limits.js';
 import { nameThread } from './title.js';
 import { display, messagePage, metadata, text, compact, summary, messageAttention, goal, progress } from './display.js';
-export type Config = { codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
+export type Config = { artifacts?: ArtifactsConfig; codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
 type Session = { attention: ReturnType<typeof messageAttention>; view: NativeSnapshot & { goal: GoalProjection; planProgress: PlanProgress }; mutating?: boolean; goalRevision: number; opened: boolean; fresh: boolean; titleNeeded: boolean; titleRequest: string; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
 function pendingRequest(request: PendingRequest) { return request.kind !== 'unsupported' && !request.answered; }
 function projectTurn(turn: any): NativeTurn {
@@ -17,7 +19,8 @@ function projectTurn(turn: any): NativeTurn {
   return { id: turn.id, status: turn.status, ...(message ? { error: { message, ...(code ? { code } : {}) } } : {}) };
 }
 /** Собирает команды и единственного владельца live items/pending. */
-export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void) {
+export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void, artifactsPort?: ArtifactsPort) {
+  const attachments = createAttachments(codex, config.artifacts, artifactsPort);
   const sessions = new Map<string, Session>();
   const messageTimes = new Map<string, { updatedAt: number; lastMessageAt: number; finalMessageId: string | null; awaitingReply: boolean }>();
   let creating = 0, admission = Promise.resolve();
@@ -76,7 +79,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     while (s.details.size > 128) s.details.delete(s.details.keys().next().value!);
     s.revisions.set(value.id, s.view.seq + 1);
   }
-  async function detail(s: Session, turnId: string, itemId: string, fullMessage = false, cursor?: string): Promise<{ item: DisplayItem; nextCursor?: string | null }> {
+  async function detail(s: Session, turnId: string, itemId: string, fullMessage = false, cursor?: string, ownerId?: string): Promise<{ item: DisplayItem; nextCursor?: string | null }> {
     const cached = s.details.get(itemId);
     if (cached?.turnId === turnId && !cached.imageCount && !cursor && !(fullMessage && cached.truncated && ['userMessage', 'agentMessage'].includes(cached.type))) return { item: structuredClone(cached) };
     const generation = current(), cut = s.view.seq;
@@ -89,15 +92,15 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (!entry) fail('NOT_FOUND', 'query');
     const newer = s.details.get(itemId);
     if (newer?.turnId === turnId && !newer.imageCount && !cursor && !(fullMessage && newer.truncated && ['userMessage', 'agentMessage'].includes(newer.type)) && (s.revisions.get(itemId) ?? 0) > cut) return { item: structuredClone(newer) };
+    await attachments.recoverItems({ action: 'item', projectId: s.view.projectId, threadId: s.view.threadId, ownerId }, [entry]);
     const native = historyItem(entry, s.view.turn), revision = s.view.items.find(i => i.id === itemId)?.revision ?? 0;
     if (fullMessage && ['userMessage', 'agentMessage'].includes(native.type)) {
       const page = messagePage(native, turnId, cursor);
-      if (!cursor && native.type === 'userMessage') page.item.images = display(native, turnId, false, true).images;
       page.item.revision = revision;
       return page;
     }
     if (cursor) fail('INVALID_ARGUMENT', 'query');
-    return { item: { ...display(native, turnId, false, true), revision } };
+    return { item: { ...display(native, turnId), revision } };
   }
   async function admit(projectId: string, thread: any, fresh = false): Promise<Session> {
     const previous = admission;
@@ -145,6 +148,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       const latestMessage = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
       if (latestMessage) s.view.thread.lastMessageAt = Math.max(s.view.thread.lastMessageAt ?? 0, latestMessage.startedAtMs ?? latestMessage.completedAtMs ?? s.view.thread.updatedAt * 1000);
       for (const entry of items.data.slice().reverse()) if ((s.revisions.get(entry.item.id) ?? 0) <= cut) put(s, historyItem(entry, turns.data[0]), entry.turnId, entry.startedAtMs ?? entry.completedAtMs ?? s.view.thread.updatedAt * 1000, true);
+      await attachments.recoverItems(r, items.data);
       const pageIds = new Set(items.data.map((entry: any) => entry.item.id));
       s.view.items = [...items.data.slice().reverse().map((entry: any) => s!.view.items.find(item => item.id === entry.item.id)!), ...s.view.items.filter(item => !pageIds.has(item.id) && (s!.revisions.get(item.id) ?? 0) > cut)];
       if (s.view.turn === previousTurn) {
@@ -369,15 +373,18 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: r.threadId };
     }
     const s = await open(r);
-    if (r.action === 'open') return structuredClone(s.view);
+    const buildInput = (images: { type: string; url: string }[]) => ({ threadId: r.threadId, input: [...(r.text?.trim() ? [{ type: 'text', text: r.text }] : []), ...images], ...(r.attachments?.length ? { clientUserMessageId: attachments.clientId(r) } : {}), ...(r.action === 'steer' ? { expectedTurnId: r.expectedTurnId } : { ...permissions(r.permissionMode, p.cwd), ...(r.model ? { model: r.model } : {}), ...(r.effort ? { effort: r.effort } : {}), collaborationMode: collaboration(r.agentMode === 'plan' ? 'plan' : 'default', r.model ?? s.view.thread.model ?? config.newThread?.model ?? '', r.effort ?? s.view.thread.reasoningEffort) }) });
+    if (r.attachments?.length) { const existing = await attachments.existing(r, buildInput); if (existing) return existing; }
+    if (r.action === 'open') { const view = structuredClone(s.view); view.items = await attachments.decorate(r, view.items); return view; }
     if (r.action === 'goalGet') { await readGoal(s); publish(s); return { generation: current(), goal: structuredClone(s.view.goal) }; }
     if (r.action === 'activities' || r.action === 'item') {
       const generation = current();
       const pages: { item: DisplayItem; nextCursor?: string | null }[] = [];
       const ids = r.action === 'item' ? [r.itemId!] : r.itemIds!;
-      for (let offset = 0; offset < ids.length; offset += 4) pages.push(...await Promise.all(ids.slice(offset, offset + 4).map(id => detail(s, r.turnId!, id, r.action === 'item', r.cursor))));
+      for (let offset = 0; offset < ids.length; offset += 4) pages.push(...await Promise.all(ids.slice(offset, offset + 4).map(id => detail(s, r.turnId!, id, r.action === 'item', r.cursor, r.ownerId))));
       if (generation !== current()) fail('STALE_GENERATION', 'query');
-      return r.action === 'item' ? { generation, ...pages[0] } : { generation, data: pages.map(page => summary(page.item)) };
+      const decorated = await attachments.decorate(r, pages.map(page => page.item));
+      return r.action === 'item' ? { generation, ...pages[0], item: decorated[0] } : { generation, data: decorated.map(item => ({ ...summary(item), ...(item.attachments ? { attachments: item.attachments, attachmentsState: item.attachmentsState } : {}), ...(item.imageCount ? { imageCount: item.imageCount, ...(item.attachmentsState ? { attachmentsState: item.attachmentsState } : {}) } : {}) })) };
     }
     if (r.action === 'items' || r.action === 'turns') {
       if (s.fresh) return { generation: current(), data: [], nextCursor: null };
@@ -389,6 +396,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
         const part = await codex.call(r.action === 'items' ? 'thread/items/list' : 'thread/turns/list', { threadId: r.threadId, limit: r.action === 'items' ? Math.min(10 - messages, 1000 - page.data.length, Math.max(1, Math.floor((limits.state - bytes(page) - 2048) / 49152))) : 100, cursor: page.nextCursor, sortDirection: 'desc', ...(r.action === 'items' ? { turnId: r.turnId } : { itemsView: 'notLoaded' }) });
         if (generation !== current()) fail('STALE_GENERATION', 'query');
         if (part.nextCursor && (!part.data.length || part.nextCursor === page.nextCursor)) fail('UPSTREAM_UNAVAILABLE', 'query');
+        if (r.action === 'items') await attachments.recoverItems(r, part.data);
         messages += part.data.filter((e: any) => e.item?.type === 'userMessage' || e.item?.type === 'agentMessage').length;
         page.data.push(...(r.action === 'items' ? part.data.map((e: any) => {
           const revision = s.view.items.find(i => i.id === e.item.id)?.revision ?? 0;
@@ -397,7 +405,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
         }) : part.data.map((t: any) => ({ id: t.id, status: t.status }))));
         page.nextCursor = part.nextCursor ?? null;
       } while (r.action === 'items' && page.nextCursor && messages < 10 && page.data.length < 1000 && bytes(page) < limits.state - 51200);
-      return { generation, data: r.action === 'items' ? page.data.reverse() : page.data, nextCursor: page.nextCursor };
+      return { generation, data: r.action === 'items' ? await attachments.decorate(r, page.data.reverse()) : page.data, nextCursor: page.nextCursor };
     }
     if (r.generation !== current()) fail('STALE_GENERATION');
     if (s.closing) fail('CAPACITY_EXHAUSTED');
@@ -429,12 +437,12 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     const active = s.view.turn?.status === 'inProgress';
     if (r.action === 'start' && (active || s.view.thread.canAcceptDirectInput === false)) fail('OPERATION_CONFLICT');
     if ((r.action === 'steer' || r.action === 'interrupt') && (!active || s.view.turn?.id !== (r.expectedTurnId ?? r.turnId))) fail('OPERATION_CONFLICT');
-    if (r.action === 'start' || r.action === 'steer' && r.images?.length) {
+    if (r.action === 'start' || r.action === 'steer' && r.attachments?.length) {
       const model = r.action === 'steer' ? s.activeModel ?? s.view.thread.model : r.model ?? s.view.thread.model;
       if (config.allowedModels && !config.allowedModels.includes(model ?? '')) fail('UNSUPPORTED');
-      if (r.model || r.effort || r.images?.length) {
+      if (r.model || r.effort || r.attachments?.length) {
         const choice = (await catalog()).data.find(m => m.model === model);
-        if (!choice || (r.effort && !choice.efforts.includes(r.effort)) || (r.images?.length && choice.imageLimit === 0)) fail('UNSUPPORTED');
+        if (!choice || (r.effort && !choice.efforts.includes(r.effort)) || (r.attachments?.length && choice.imageLimit === 0)) fail('UNSUPPORTED');
       }
     }
     if (r.generation !== current()) fail('STALE_GENERATION');
@@ -460,6 +468,20 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       title(s, r);
       return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: r.threadId, goal: structuredClone(s.view.goal) };
     }
+    let reference: Awaited<ReturnType<typeof attachments.reserve>> | undefined;
+    let nativeParams: any;
+    if (r.attachments?.length) {
+      const deadline = performance.now() + (config.artifacts?.timeoutMs ?? 10000);
+      try {
+        nativeParams = buildInput(await attachments.modelInput(r, deadline));
+        if (performance.now() >= deadline) fail('TIMEOUT');
+        if (r.generation !== current()) fail('STALE_GENERATION');
+      }
+      catch (error: any) { error.outcome = 'not-sent'; throw error; }
+      reference = await attachments.reserve(r, nativeParams);
+      if (!reference!.created) return attachments.result(reference!.reference, r);
+      if (r.generation !== current() || s.closing || r.action === 'start' && s.view.turn?.status === 'inProgress' || r.action === 'steer' && (s.view.turn?.status !== 'inProgress' || s.view.turn.id !== r.expectedTurnId)) { await attachments.state(reference!.reference, 'not-sent'); fail('OPERATION_CONFLICT'); }
+    }
     if (r.action === 'start') { s.activeModel = r.model ?? s.view.thread.model; s.view.turn = { id: 'starting', status: 'inProgress' }; s.view.state = 'inProgress'; publish(s); }
     let turnId = r.turnId;
     if (r.action === 'answer') {
@@ -472,15 +494,16 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       catch (error: any) { if (error.outcome === 'not-sent' && r.generation === current() && s.view.requests.includes(f)) { f.answered = false; publish(s); } throw error; }
     } else if (r.action === 'interrupt') await codex.call('turn/interrupt', { threadId: r.threadId, turnId: r.turnId }, { mutation: true });
     else {
-      const input = [...(r.text?.trim() ? [{ type: 'text', text: r.text }] : []), ...(r.images ?? []).map(url => ({ type: 'image', url }))];
-      const params = { threadId: r.threadId, input, ...(r.action === 'steer' ? { expectedTurnId: r.expectedTurnId } : { ...permissions(r.permissionMode, p.cwd), ...(r.model ? { model: r.model } : {}), ...(r.effort ? { effort: r.effort } : {}), collaborationMode: collaboration(r.agentMode === 'plan' ? 'plan' : 'default', r.model ?? s.view.thread.model ?? config.newThread?.model ?? '', r.effort ?? s.view.thread.reasoningEffort) }) };
+      const params = nativeParams ?? buildInput([]);
       let value: any;
       try { value = r.action === 'steer' ? await codex.call('turn/steer', params, { mutation: true }) : await mutation(s, r, async call => {
         if (s.view.goal.value?.status === 'active') await changeGoal(s, { threadId: r.threadId, status: 'paused' }, call);
         if (s.view.turn?.status === 'inProgress' && s.view.turn.id !== 'starting') fail('OPERATION_CONFLICT');
         return call('turn/start', params);
       }); }
-      catch (error: any) { if (r.action === 'start' && error.outcome === 'not-sent' && r.generation === current() && s.view.turn?.id === 'starting') { s.view.turn = previousTurn; s.view.state = previousState; s.activeModel = previousModel; publish(s); } throw error; }
+      catch (error: any) {
+        if (reference) { try { await attachments.state(reference.reference, error.outcome === 'not-sent' ? 'not-sent' : 'unknown'); } catch { error.outcome = 'unknown'; } }
+        if (r.action === 'start' && error.outcome === 'not-sent' && r.generation === current() && s.view.turn?.id === 'starting') { s.view.turn = previousTurn; s.view.state = previousState; s.activeModel = previousModel; publish(s); } throw error; }
       turnId = value.turn?.id ?? value.turnId;
       if (r.action === 'start' && s.view.turn?.id === 'starting') { s.view.turn = projectTurn(value.turn); publish(s); }
       if (r.action === 'start') { s.view.thread.model = r.model ?? s.view.thread.model; s.view.thread.reasoningEffort = r.effort ?? s.view.thread.reasoningEffort ?? null; publish(s); }
@@ -488,12 +511,12 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     }
     if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
     if (r.action === 'start') title(s, r);
+    if (reference) return attachments.result(reference.reference, r);
     return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: r.threadId, turnId, ...(r.requestId ? { requestId: r.requestId } : {}) };
   }
   /** Повтор того же operation ID возвращает исходный результат без native вызова. */
   async function request(r: Command): Promise<any> {
     if (!validateCommand(r)) fail('INVALID_ARGUMENT');
-    if (r.images?.length && !validImages(r.images)) fail('INVALID_ARGUMENT');
     if (!r.operationId) return execute(r);
     if (r.generation !== current()) fail('STALE_GENERATION');
     const hash = commandHash(r), old = operations.get(r.operationId);
@@ -501,6 +524,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (operations.size >= limits.operations) fail('CAPACITY_EXHAUSTED');
     const result = Promise.resolve().then(() => execute(r));
     operations.set(r.operationId, { hash, result });
+    if (r.attachments?.length) void result.catch(() => { if (operations.get(r.operationId!)?.result === result) operations.delete(r.operationId!); });
     return result;
   }
   return { request, close() { unsubscribe(); limitMonitor.close(); } };
@@ -509,20 +533,6 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
 function commandHash(command: Command): string {
   const canonical = JSON.stringify(command, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value);
   return createHash('sha256').update(canonical).digest('hex');
-}
-/** Проверяет суммарные decoded bytes и сигнатуру MIME до открытия/изменения хода. */
-function validImages(images: string[]): boolean {
-  let total = 0;
-  return images.every(image => {
-    const comma = image.indexOf(','), mime = image.slice(5, image.indexOf(';'));
-    const encoded = image.slice(comma + 1);
-    total += encoded.length / 4 * 3 - (encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0);
-    if (total > limits.imageBytes) return false;
-    const data = Buffer.from(encoded, 'base64');
-    if (mime === 'image/png') return data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-    if (mime === 'image/jpeg') return data.length >= 3 && data[0] === 255 && data[1] === 216 && data[2] === 255;
-    return mime === 'image/webp' && data.length >= 12 && data.subarray(0, 4).equals(Buffer.from('RIFF')) && data.subarray(8, 12).equals(Buffer.from('WEBP'));
-  });
 }
 function validAnswer(f: PendingRequest, answer: any): boolean {
   if (f.kind === 'command-approval' && f.params.availableDecisions) return f.params.availableDecisions.some((v: any) => JSON.stringify(v) === JSON.stringify(answer?.decision));

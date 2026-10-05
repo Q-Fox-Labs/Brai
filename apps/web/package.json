@@ -13,7 +13,7 @@
   "dependencies": {
     "@ag-ui/client": "1.0.1",
     "@ag-ui/core": "1.0.1",
-    "@brai/agent": "2.0.0",
+    "@brai/agent": "3.0.0",
     "@radix-ui/react-separator": "1.1.15",
     "ajv": "8.17.1",
     "ajv-formats": "3.0.1",

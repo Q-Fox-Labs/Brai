@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { createApplication } from '../dist/application.js';
 import { validateCommand } from '../contracts/index.mjs';
 import Ajv from 'ajv';
+import artifactSchemas from '../../artifacts/schemas/messages.schema.json' with { type: 'json' };
 import schema from '../schemas/messages.schema.json' with { type: 'json' };
 import nativeSchema from '../contracts/codex/schema.json' with { type: 'json' };
 import { summary, messageAttention } from '../dist/display.js';
@@ -78,7 +79,7 @@ test('reasoning headings distinguish empty summaries and detail preserves public
     const items = result.items ?? result.data;
     assert.deepEqual(items.filter(item => item.type === 'reasoning').map(item => item.hasContent), [false, false, true]);
     assert.ok(items.filter(item => item.type === 'reasoning').every(item => item.text === ''));
-    assert.ok(items.every(item => new Ajv({ strict: false }).compile(schema.definitions.DisplayItem)(item)));
+    assert.ok(items.every(item => new Ajv({ strict: false, validateFormats: false, schemas: [artifactSchemas] }).compile({ ...schema, $ref: '#/definitions/DisplayItem' })(item)));
   }
   f.observe({ method: 'item/completed', params: { threadId: 't', turnId: 'turn', item: { id: 'empty', type: 'reasoning', summary: ['Now visible'] } } });
   assert.equal(f.events.at(-1).event.snapshot.items.find(item => item.id === 'empty').hasContent, true);
@@ -127,7 +128,7 @@ test('turn failures stay visible and rejected server requests never wait for a u
   assert.equal(snapshot.thread.awaitingReply, false);
   assert.equal(snapshot.requests.length, 2);
   assert.equal(JSON.stringify(snapshot).includes('private upstream data'), false);
-  const snapshotAjv = new Ajv({ strict: false });
+  const snapshotAjv = new Ajv({ strict: false, validateFormats: false, schemas: [artifactSchemas] });
   snapshotAjv.addSchema(schema, 'https://brai.local/schemas/messages.schema.json');
   const snapshotValid = snapshotAjv.compile({ $ref: 'https://brai.local/schemas/messages.schema.json#/definitions/NativeSnapshot' });
   assert.equal(snapshotValid(snapshot), true, JSON.stringify(snapshotValid.errors));
@@ -158,7 +159,7 @@ test('older message fallback does not override latest native message timestamp',
   assert.equal((await f.read('open')).thread.lastMessageAt, 2000);
 });
 test('public response schemas and native anchor parameters match runtime', async () => {
-  const ajv = new Ajv({ strict: false, validateFormats: false });
+  const ajv = new Ajv({ strict: false, validateFormats: false, schemas: [artifactSchemas] });
   ajv.addSchema(nativeSchema, 'https://brai.local/contracts/codex/schema.json');
   ajv.addSchema(schema, 'https://brai.local/schemas/messages.schema.json');
   const response = ajv.compile({ $ref: 'https://brai.local/schemas/messages.schema.json#/definitions/Response' });
@@ -215,7 +216,7 @@ test('history bounds action-only pages and rejects a generation change mid-page'
 });
 
 
-test('message images survive reopening and live snapshots stay compact', async () => {
+test('legacy image indicators survive reopening without raw media in any projection', async () => {
   const f = fixture();
   const url = 'data:image/png;base64,iVBORw0KGgo=';
   f.entries[0].item.content.push({ type: 'image', url });
@@ -225,11 +226,12 @@ test('message images survive reopening and live snapshots stay compact', async (
   const history = await f.read('items');
   assert.equal(JSON.stringify(history).includes(url), false);
   const detail = await f.read('item', { turnId: 'turn', itemId: 'user' });
-  assert.deepEqual(detail.item.images, [url]);
-  assert.equal(new Ajv({ strict: false }).compile(schema.definitions.DisplayItem)(detail.item), true);
+  assert.equal(detail.item.images, undefined);
+  assert.equal(detail.item.imageCount, 1);
+  assert.equal(new Ajv({ strict: false, validateFormats: false, schemas: [artifactSchemas] }).compile({ ...schema, $ref: '#/definitions/DisplayItem' })(detail.item), true);
   f.observe({ method: 'item/completed', params: { threadId: 't', turnId: 'turn', item: f.entries[0].item } });
   assert.equal(JSON.stringify(f.events).includes(url), false);
-  assert.deepEqual((await f.read('item', { turnId: 'turn', itemId: 'user' })).item.images, [url]);
+  assert.equal((await f.read('item', { turnId: 'turn', itemId: 'user' })).item.images, undefined);
   await assert.rejects(f.read('item', { turnId: 'other', itemId: 'user' }), error => error.code === 'NOT_FOUND');
   f.app.close();
 });
@@ -270,7 +272,7 @@ test('messages are read completely through bounded pages, including truncated li
   f.entries.at(-1).item.text = original;
   await f.read('open');
   assert.equal((await f.read('items')).data.find(i => i.id === 'agent').truncated, true);
-  const ajv = new Ajv({ strict: false }), valid = ajv.compile({ ...schema, $ref: '#/definitions/Item' });
+  const ajv = new Ajv({ strict: false, validateFormats: false, schemas: [artifactSchemas] }), valid = ajv.compile({ ...schema, $ref: '#/definitions/Item' });
   let cursor, restored = '', pages = 0;
   do {
     const command = { turnId: 'turn', itemId: 'agent', ...(cursor ? { cursor } : {}) };

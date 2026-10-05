@@ -6,7 +6,7 @@ import { acceptedDraft, imageModel, prepareImage, validateImageFile, type Attach
 import { composerAction } from "../app/agent/timeline.ts";
 import type { ModelCatalog, NativeSnapshot } from "@brai/agent/contracts";
 
-const image = (id: string): Attachment => ({ id, name: `${id}.png`, bytes: 100, dataUrl: "data:image/png;base64,AQ==", reduced: false });
+const image = (id: string): Attachment => ({ id, name: `${id}.png`, original: file(), model: new Blob([png], { type: "image/png" }), bytes: 100, reduced: false, previewUrl: "blob:fixture", previewObjectUrl: false, originalRequestId: `original-${id}`, modelRequestId: null, relationRequestId: `relation-${id}` });
 const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
 const file = (size = 100) => new File([png, new Uint8Array(size - png.length)], "example.png", { type: "image/png" });
 
@@ -52,11 +52,14 @@ test("original bytes remain intact, corrupt files fail, bitmap closes, pixel and
     const prepared = await prepareImage(original, original.size);
     assert.equal(prepared.reduced, false);
     assert.equal(prepared.bytes, original.size);
-    assert.deepEqual(Buffer.from(prepared.dataUrl.split(",")[1], "base64"), Buffer.from(await original.arrayBuffer()));
+    assert.equal(prepared.original, original);
+    assert.deepEqual(Buffer.from(await prepared.model.arrayBuffer()), Buffer.from(await original.arrayBuffer()));
+    const small = await prepareImage(file(png.length), 10 * 1024);
+    assert.equal(small.reduced, false); assert.equal(small.bytes, png.length); URL.revokeObjectURL(small.previewUrl);
     await assert.rejects(prepareImage(original, 1), /не хватает места/);
     width = 8000; height = 5000;
     await assert.rejects(prepareImage(original, 655360), /32 миллионов пикселей/);
-    assert.equal(closed, 3);
+    assert.equal(closed, 4); URL.revokeObjectURL(prepared.previewUrl);
     globalThis.createImageBitmap = async () => { throw new Error("codec"); };
     await assert.rejects(prepareImage(original, 655360), /повреждён/);
   } finally { globalThis.createImageBitmap = previous; }
@@ -72,11 +75,11 @@ test("canvas reduction has bounded dimensions, preserves readable lower bound an
   try {
     const prepared = await prepareImage(file(100000), 20000);
     assert.equal(prepared.reduced, true); assert.equal(prepared.bytes, 1000);
-    assert.ok(prepared.dataUrl.startsWith("data:image/webp;base64,"));
+    assert.equal(prepared.model.type, "image/webp"); assert.equal(prepared.model.size, 1000);
     assert.equal(sizes[0], 2048);
     fit = false;
     await assert.rejects(prepareImage(file(100000), 20000), /без потери читаемости/);
     assert.ok(sizes.every(size => size >= 512 && size <= 2048));
-    assert.equal(sizes.at(-1), 512); assert.equal(closed, 2);
+    assert.equal(sizes.at(-1), 512); assert.equal(closed, 2); URL.revokeObjectURL(prepared.previewUrl);
   } finally { globalThis.createImageBitmap = oldBitmap; globalThis.document = oldDocument; }
 });

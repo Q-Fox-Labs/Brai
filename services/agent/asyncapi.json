@@ -2,12 +2,12 @@
   "asyncapi": "3.0.0",
   "info": {
     "title": "Brai agent native state service",
-    "version": "2.0.0"
+    "version": "3.0.0"
   },
   "defaultContentType": "application/json",
   "channels": {
     "rpc": {
-      "address": "brai.agent.v2.rpc",
+      "address": "brai.agent.v3.rpc",
       "messages": {
         "command": {
           "payload": {
@@ -41,7 +41,7 @@
       }
     },
     "event": {
-      "address": "brai.agent.v2.event",
+      "address": "brai.agent.v3.event",
       "messages": {
         "snapshot": {
           "payload": {
@@ -87,7 +87,7 @@
   },
   "x-nats-service": {
     "name": "brai_agent",
-    "version": "2.0.0",
+    "version": "3.0.0",
     "queueGroup": "brai_agent"
   },
   "x-limits": {

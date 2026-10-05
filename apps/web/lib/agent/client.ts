@@ -32,9 +32,11 @@ export class AgentError extends Error {
 export function createAgentClient(userId: string, unauthorized: () => void) {
   const abort = new AbortController();
   async function request<A extends Command["action"]>(command: Command & { action: A }): Promise<Replies[A]> {
-    if (!validateCommand(command)) throw new AgentError("INVALID_ARGUMENT", "not-sent");
+    if (Object.hasOwn(command, "ownerId")) throw new AgentError("INVALID_ARGUMENT", "not-sent");
+    const checked = command.threadId ? { ...command, ownerId: userId } : command;
+    if (!validateCommand(checked)) throw new AgentError("INVALID_ARGUMENT", "not-sent");
     const reading = ["projects", "status", "models", "threads", "open", "turns", "items", "activities", "item", "goalGet"].includes(command.action);
-    const { action, ...body } = command;
+    const { action, ownerId: _trustedOwnerId, ...body } = checked;
     const query = new URLSearchParams(Object.entries(body).map(([key, value]) => [key, Array.isArray(value) ? JSON.stringify(value) : String(value)]));
     try {
       const response = await fetch(`/api/agent/${action}${reading ? `?${query}` : ""}`, {
