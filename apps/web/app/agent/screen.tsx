@@ -11,9 +11,7 @@ import NativeForm from "./request";
 import TurnErrorNotice from "./turn-error";
 import { createLazyReads } from "../../lib/agent/lazy";
 import Activities from "./activities";
-import Markdown from "./markdown";
-import { desktopMessage } from "../../lib/agent/desktop-message";
-import { questionReplies } from "../../lib/agent/question-reply";
+import MessageText from "./message-text";
 import { composerAction, groupTimeline, mergeTimeline, reconcileCorrections, type PendingCorrection } from "./timeline";
 import Sidebar, { type Project, type ThreadPage } from "./sidebar";
 import { limits } from "@brai/agent/contracts";
@@ -305,10 +303,12 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   useEffect(() => {
     const messageId = readMessageId;
     if (!visible || active || !messageId) return;
-    const marker = Array.from(conversation.current?.querySelectorAll<HTMLElement>("[data-read-message]") ?? []).find(element => element.dataset.readMessage === messageId);
-    if (!marker) return;
+    const element = conversation.current;
+    if (!element) return;
+    let marker: HTMLElement | undefined;
     const key = `${projectId}:${threadId}`;
     const markRead = () => {
+      if (!marker) return;
       const rect = marker.getBoundingClientRect(), area = conversation.current?.getBoundingClientRect();
       if (document.visibilityState !== "visible" || !marker.getClientRects().length || !area || rect.bottom < area.top || rect.top > area.bottom + 1) return;
       setReadMessages(previous => {
@@ -319,13 +319,19 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       });
     };
     // AIDEV-NOTE: Частые snapshot не пересоздают observer; scroll и первый кадр снимают зависимость от задержки его callback.
-    const element = conversation.current;
-    const frame = requestAnimationFrame(markRead);
     const observer = new IntersectionObserver(markRead, { root: element, threshold: 0 });
-    observer.observe(marker);
+    const findMarker = () => {
+      const next = Array.from(element.querySelectorAll<HTMLElement>("[data-read-message]")).find(value => value.dataset.readMessage === messageId);
+      if (next !== marker) { if (marker) observer.unobserve(marker); marker = next; if (marker) observer.observe(marker); }
+      markRead();
+    };
+    // AIDEV-NOTE: Полное сообщение добавляет маркер после отдельного чтения, без нового snapshot.
+    const changes = new MutationObserver(findMarker);
+    changes.observe(element, { childList: true, subtree: true });
+    const frame = requestAnimationFrame(findMarker);
     element?.addEventListener("scroll", markRead, { passive: true });
     document.addEventListener("visibilitychange", markRead);
-    return () => { cancelAnimationFrame(frame); observer.disconnect(); element?.removeEventListener("scroll", markRead); document.removeEventListener("visibilitychange", markRead); };
+    return () => { cancelAnimationFrame(frame); observer.disconnect(); changes.disconnect(); element?.removeEventListener("scroll", markRead); document.removeEventListener("visibilitychange", markRead); };
   }, [visible, userId, projectId, threadId, readMessageId, readEpoch, active, history]);
   const timeline = groupTimeline(items);
   const activityContext = useMemo(() => ({ generation: view?.generation ?? historyGeneration, epoch: view?.epoch ?? "", projectId, threadId }), [view?.generation, view?.epoch, historyGeneration, projectId, threadId]);
@@ -416,6 +422,14 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     if (anchor) { element.scrollTop = anchor.top + element.scrollHeight - anchor.height; scrollAnchor.current = null; }
     else if (followBottom.current) element.scrollTop = element.scrollHeight;
   }, [threadId, history, snapshot, visible, corrections]);
+
+  useEffect(() => {
+    const element = conversation.current, timeline = element?.querySelector(".agent-timeline");
+    if (!element || !timeline || !visible) return;
+    const observer = new ResizeObserver(() => { if (followBottom.current) element.scrollTop = element.scrollHeight; });
+    observer.observe(timeline);
+    return () => observer.disconnect();
+  }, [visible, threadId]);
 
   async function executePlan(item: DisplayItem) {
     if (disabled || active || goalUnfinished || !catalogFresh || !selectedModel || view?.thread.canAcceptDirectInput === false || awaitingTurn.some(value => value.chat === currentChat.current)) return;
@@ -525,12 +539,10 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
 
 /** Сообщения используют безопасный Markdown; тела действий принадлежат отдельному ленивому списку. */
 function Item({ item, context, reads, pending, dismiss }: { item: DisplayItem; context: Parameters<typeof MessageImages>[0]["context"]; reads: Parameters<typeof MessageImages>[0]["reads"]; pending?: PendingCorrection["state"]; dismiss?: () => void }) {
-  const replies = item.type === "userMessage" ? questionReplies(item.text) : null;
   return <article data-item-id={item.id} className={`agent-item ${item.type === "userMessage" ? "agent-user-message" : "agent-assistant-message"}`}>
     <span className="agent-message-author">{item.type === "userMessage" ? "Вы" : "Brai"}{item.phase && <span className="agent-message-phase">{item.phase === "final_answer" ? "Итог" : item.phase === "commentary" ? "Промежуточное сообщение" : item.phase}</span>}</span>
     {pending && <span className="agent-correction-status" role="status"><span aria-hidden="true">{pending === "failed" || pending === "unknown" ? "⚠" : "◷"}</span> {pending === "sending" ? "Отправляется…" : pending === "waiting" ? "Ожидает применения" : pending === "unknown" ? "Отправка не подтверждена. Проверьте чат." : "Не отправлено. Повторите из поля ввода."}{pending === "failed" && <button type="button" onClick={dismiss}>Убрать</button>}</span>}
-    {replies ? <div className="agent-markdown">{replies.map((reply, index) => <div key={index}><p>{reply.question}</p><p><strong>Ответ: </strong>{reply.answer}</p></div>)}</div> : <Markdown text={item.type === "userMessage" ? desktopMessage(item.text) : item.text} />}
-    {item.type === "agentMessage" && item.phase === "final_answer" && <span className="agent-message-read-marker" data-read-message={item.id} aria-hidden="true" />}
+    <MessageText key={JSON.stringify([item.revision, item.text, item.truncated])} item={item} context={context} reads={reads} />
     {!!item.imageCount && (pending ? <ul className="agent-message-thumbnails" aria-label="Изображения сообщения">{item.images?.map((src, index) => <li key={index}><img src={src} alt={`Прикреплённое изображение ${index + 1}`} /></li>)}</ul> : <MessageImages item={item} context={context} reads={reads} />)}
   </article>;
 }

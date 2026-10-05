@@ -270,6 +270,11 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 128
+            },
+            "cursor": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
             }
           }
         },
@@ -1591,6 +1596,13 @@
         },
         "item": {
           "$ref": "#/definitions/DisplayItem"
+        },
+        "nextCursor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2048
         }
       },
       "required": [

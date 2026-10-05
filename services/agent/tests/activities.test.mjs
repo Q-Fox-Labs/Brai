@@ -263,3 +263,40 @@ test('final attention survives reading and tool updates, clears on reply, and re
   assert.equal(f.events.at(-1).event.snapshot.thread.finalMessageId, 'done');
   assert.equal(f.events.at(-1).event.snapshot.thread.awaitingReply, false);
 });
+
+test('messages are read completely through bounded pages, including truncated live cache and UTF-16 boundaries', async t => {
+  const f = fixture(); t.after(() => f.app.close());
+  const original = 'я'.repeat(8191) + '😀' + '\n| Поле | Значение |\n'.repeat(12000) + '\nПоследняя строка';
+  f.entries.at(-1).item.text = original;
+  await f.read('open');
+  assert.equal((await f.read('items')).data.find(i => i.id === 'agent').truncated, true);
+  const ajv = new Ajv({ strict: false }), valid = ajv.compile({ ...schema, $ref: '#/definitions/Item' });
+  let cursor, restored = '', pages = 0;
+  do {
+    const command = { turnId: 'turn', itemId: 'agent', ...(cursor ? { cursor } : {}) };
+    assert.equal(validateCommand({ action: 'item', projectId: 'p', threadId: 't', ...command }), true);
+    const reply = await f.read('item', command);
+    assert.equal(valid(reply), true, JSON.stringify(valid.errors));
+    assert.ok(Buffer.byteLength(JSON.stringify(reply)) < 50000);
+    assert.ok(!reply.item.text.includes('[содержимое сокращено]'));
+    assert.ok(!reply.item.text.includes('\uFFFD'));
+    restored += reply.item.text; cursor = reply.nextCursor; pages++;
+  } while (cursor);
+  assert.ok(pages > 10); assert.equal(restored, original);
+  assert.ok(!f.calls.some(call => call.method === 'turn/start'));
+});
+
+test('continuation rejects changed text and invalid cursors; user input parts remain ordered', async t => {
+  const f = fixture(); t.after(() => f.app.close());
+  const original = 'Первая часть\n' + 'ю'.repeat(20000) + '\nПоследняя часть';
+  f.entries[0].item.content = [{ type: 'text', text: 'Первая часть' }, { type: 'inputText', text: 'ю'.repeat(20000) }, { type: 'text', text: 'Последняя часть' }];
+  const first = await f.read('item', { turnId: 'turn', itemId: 'user' });
+  let reply = first, result = reply.item.text;
+  while (reply.nextCursor) { reply = await f.read('item', { turnId: 'turn', itemId: 'user', cursor: reply.nextCursor }); result += reply.item.text; }
+  assert.equal(result, original);
+  f.entries[0].item.content[1].text += 'изменено';
+  await assert.rejects(f.read('item', { turnId: 'turn', itemId: 'user', cursor: first.nextCursor }), { code: 'STALE_ITEM', outcome: 'query' });
+  await assert.rejects(f.read('item', { turnId: 'turn', itemId: 'user', cursor: 'invalid' }), { code: 'STALE_ITEM' });
+  f.settings.beforeCall = method => { if (method === 'thread/items/list') f.rotate(); };
+  await assert.rejects(f.read('item', { turnId: 'turn', itemId: 'user' }), { code: 'STALE_GENERATION' });
+});

@@ -17,7 +17,7 @@ type Replies = Record<"create" | "start" | "steer" | "interrupt" | "answer" | "a
   turns: Page<{ id: string; status: string }>;
   items: Page<DisplayItem>;
   activities: { generation: string; data: DisplayItem[] };
-  item: { generation: string; item: DisplayItem };
+  item: { generation: string; item: DisplayItem; nextCursor?: string | null };
   open: NativeSnapshot;
   goalGet: { generation: string; goal: GoalProjection };
 };

@@ -1,5 +1,6 @@
 // ABOUTME: Преобразует native item в единственное безопасное представление.
 // ABOUTME: Передаёт только текст и явные поля; raw reasoning исключены; изображения доступны только в отдельном чтении.
+import { createHash } from 'node:crypto';
 import { bytes, limits, validateCommand } from '../contracts/index.mjs';
 import type { DisplayItem, ThreadMetadata, AgentGoal, PlanProgress } from '../contracts/index.mjs';
 /** Сохраняет UTF-8 границу и явный маркер сокращения. */
@@ -45,6 +46,27 @@ export function display(item: any, turnId: string, history = false, media = fals
     value.truncated = true;
   }
   return value;
+}
+
+/** Читает текст сообщения частями без сокращения; курсор связывает смещение с неизменным содержимым. */
+export function messagePage(item: any, turnId: string, cursor?: string): { item: DisplayItem; nextCursor: string | null } {
+  const source: string = item.type === 'userMessage'
+    ? (item.content ?? []).filter((part: any) => (part.type === 'text' || part.type === 'inputText') && typeof part.text === 'string').map((part: any) => part.text).join('\n')
+    : item.text ?? '';
+  const hash = createHash('sha256').update(source).digest('hex');
+  const match = cursor?.match(/^([a-f0-9]{64}):([1-9][0-9]*)$/);
+  const start = match ? Number(match[2]) : 0;
+  if (cursor && (!match || match[1] !== hash || !Number.isSafeInteger(start) || start >= source.length || /[\uDC00-\uDFFF]/.test(source[start]))) {
+    throw Object.assign(new Error('STALE_ITEM'), { code: 'STALE_ITEM', outcome: 'query' });
+  }
+  // AIDEV-NOTE: 8192 UTF-16 единиц помещаются даже при JSON escaping; surrogate pair не разрываем.
+  let end = Math.min(source.length, start + 8192);
+  if (end < source.length && /[\uDC00-\uDFFF]/.test(source[end])) end--;
+  const value = display({ ...item, ...(item.type === 'userMessage' ? { content: [] } : { text: '' }) }, turnId);
+  value.text = source.slice(start, end);
+  value.truncated = end < source.length;
+  if (item.type === 'userMessage') value.imageCount = (item.content ?? []).filter((part: any) => part.type === 'image' || part.type === 'localImage').length;
+  return { item: value, nextCursor: value.truncated ? `${hash}:${end}` : null };
 }
 
 /** Скрытые действия передают идентификаторы; reasoning также сообщает наличие публичного текста. */

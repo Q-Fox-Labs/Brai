@@ -6,7 +6,7 @@ import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, NativeTurn
 import type { CodexPort, Observation } from './codex.js';
 import { createLimitsMonitor } from './limits.js';
 import { nameThread } from './title.js';
-import { display, metadata, text, compact, summary, messageAttention, goal, progress } from './display.js';
+import { display, messagePage, metadata, text, compact, summary, messageAttention, goal, progress } from './display.js';
 export type Config = { codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
 type Session = { attention: ReturnType<typeof messageAttention>; view: NativeSnapshot & { goal: GoalProjection; planProgress: PlanProgress }; mutating?: boolean; goalRevision: number; opened: boolean; fresh: boolean; titleNeeded: boolean; titleRequest: string; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
 function pendingRequest(request: PendingRequest) { return request.kind !== 'unsupported' && !request.answered; }
@@ -76,9 +76,9 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     while (s.details.size > 128) s.details.delete(s.details.keys().next().value!);
     s.revisions.set(value.id, s.view.seq + 1);
   }
-  async function detail(s: Session, turnId: string, itemId: string): Promise<DisplayItem> {
+  async function detail(s: Session, turnId: string, itemId: string, fullMessage = false, cursor?: string): Promise<{ item: DisplayItem; nextCursor?: string | null }> {
     const cached = s.details.get(itemId);
-    if (cached?.turnId === turnId && !cached.imageCount) return structuredClone(cached);
+    if (cached?.turnId === turnId && !cached.imageCount && !cursor && !(fullMessage && cached.truncated && ['userMessage', 'agentMessage'].includes(cached.type))) return { item: structuredClone(cached) };
     const generation = current(), cut = s.view.seq;
     // AIDEV-NOTE: native anchor исключает сам item; predecessor позволяет прочитать его без сканирования всей истории.
     const previous = await codex.call('thread/items/list', { threadId: s.view.threadId, turnId, limit: 1, sortDirection: 'desc', cursor: { type: 'item', itemId } });
@@ -88,8 +88,16 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     const entry = page.data.find((e: any) => e.item.id === itemId && e.turnId === turnId);
     if (!entry) fail('NOT_FOUND', 'query');
     const newer = s.details.get(itemId);
-    if (newer?.turnId === turnId && !newer.imageCount && (s.revisions.get(itemId) ?? 0) > cut) return structuredClone(newer);
-    return { ...display(historyItem(entry, s.view.turn), turnId, false, true), revision: s.view.items.find(i => i.id === itemId)?.revision ?? 0 };
+    if (newer?.turnId === turnId && !newer.imageCount && !cursor && !(fullMessage && newer.truncated && ['userMessage', 'agentMessage'].includes(newer.type)) && (s.revisions.get(itemId) ?? 0) > cut) return { item: structuredClone(newer) };
+    const native = historyItem(entry, s.view.turn), revision = s.view.items.find(i => i.id === itemId)?.revision ?? 0;
+    if (fullMessage && ['userMessage', 'agentMessage'].includes(native.type)) {
+      const page = messagePage(native, turnId, cursor);
+      if (!cursor && native.type === 'userMessage') page.item.images = display(native, turnId, false, true).images;
+      page.item.revision = revision;
+      return page;
+    }
+    if (cursor) fail('INVALID_ARGUMENT', 'query');
+    return { item: { ...display(native, turnId, false, true), revision } };
   }
   async function admit(projectId: string, thread: any, fresh = false): Promise<Session> {
     const previous = admission;
@@ -365,11 +373,11 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (r.action === 'goalGet') { await readGoal(s); publish(s); return { generation: current(), goal: structuredClone(s.view.goal) }; }
     if (r.action === 'activities' || r.action === 'item') {
       const generation = current();
-      const data: DisplayItem[] = [];
+      const pages: { item: DisplayItem; nextCursor?: string | null }[] = [];
       const ids = r.action === 'item' ? [r.itemId!] : r.itemIds!;
-      for (let offset = 0; offset < ids.length; offset += 4) data.push(...await Promise.all(ids.slice(offset, offset + 4).map(id => detail(s, r.turnId!, id))));
+      for (let offset = 0; offset < ids.length; offset += 4) pages.push(...await Promise.all(ids.slice(offset, offset + 4).map(id => detail(s, r.turnId!, id, r.action === 'item', r.cursor))));
       if (generation !== current()) fail('STALE_GENERATION', 'query');
-      return r.action === 'item' ? { generation, item: data[0] } : { generation, data: data.map(summary) };
+      return r.action === 'item' ? { generation, ...pages[0] } : { generation, data: pages.map(page => summary(page.item)) };
     }
     if (r.action === 'items' || r.action === 'turns') {
       if (s.fresh) return { generation: current(), data: [], nextCursor: null };

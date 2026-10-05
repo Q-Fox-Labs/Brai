@@ -237,3 +237,31 @@ test("context ring uses the native window, caps its percent and distinguishes un
     assert.doesNotMatch(html, /stroke-dasharray/);
   }
 });
+
+test("long message details concatenate all pages and cache only the complete text", async () => {
+  const message = { ...item("message"), type: "agentMessage", text: "preview", truncated: true };
+  const chunks = ['я'.repeat(9000), '\n| Поле | Значение |\n', 'Последняя строка 😀'], calls: Command[] = [];
+  const reads = createLazyReads(async command => {
+    calls.push(command);
+    const index = command.cursor ? Number(command.cursor) : 0;
+    return { generation: "gen", item: { ...message, text: chunks[index], truncated: index < 2 }, nextCursor: index < 2 ? String(index + 1) : null };
+  });
+  const value = await reads.detail(context, message);
+  assert.equal(value.text, chunks.join("")); assert.equal(value.truncated, false); assert.equal(calls.length, 3);
+  assert.equal((await reads.detail(context, message)).text, value.text); assert.equal(calls.length, 3);
+});
+
+test("message continuation errors, repeated cursors and revisions never cache partial success", async () => {
+  const message = { ...item("message"), type: "userMessage", truncated: true };
+  for (const failure of ["generation", "revision", "cursor", "legacy", "network"]) {
+    let fail = true, calls = 0;
+    const reads = createLazyReads(async command => {
+      calls++;
+      if (fail && command.cursor && failure === "network") throw new Error("offline");
+      return { generation: fail && command.cursor && failure === "generation" ? "old" : "gen", item: { ...message, text: command.cursor ? "tail" : "start", revision: fail && command.cursor && failure === "revision" ? 3 : 0, truncated: fail && failure === "legacy" || !command.cursor || fail && failure === "cursor" }, nextCursor: fail && failure === "legacy" ? undefined : !command.cursor || fail && failure === "cursor" ? "next" : null };
+    });
+    await assert.rejects(reads.detail(context, message));
+    const previous = calls; fail = false;
+    assert.equal((await reads.detail(context, message)).text, "starttail"); assert.equal(calls, previous + 2);
+  }
+});

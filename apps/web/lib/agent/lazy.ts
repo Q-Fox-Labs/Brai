@@ -1,7 +1,7 @@
 // ABOUTME: Ограничивает кеш и параллельные чтения раскрываемых действий выбранного чата.
 // ABOUTME: Поколение и revision входят в ключ; чтения не запускают и не повторяют ход.
 import type { Command, DisplayItem } from "@brai/agent/contracts";
-type Reply = { generation: string; data?: DisplayItem[]; item?: DisplayItem };
+type Reply = { generation: string; data?: DisplayItem[]; item?: DisplayItem; nextCursor?: string | null };
 type Context = { generation: string; epoch: string; projectId: string; threadId: string };
 type Request = (command: Command & { action: "activities" | "item" }) => Promise<Reply>;
 
@@ -36,10 +36,24 @@ export function createLazyReads(request: Request) {
         let promise = pending.get(token);
         if (!promise) {
           promise = limited(async () => {
-            const reply = await request({ action: full ? "item" : "activities", projectId: context.projectId, threadId: context.threadId, turnId, ...(full ? { itemId: part[0].id } : { itemIds: part.map(item => item.id) }) });
+            let reply = await request({ action: full ? "item" : "activities", projectId: context.projectId, threadId: context.threadId, turnId, ...(full ? { itemId: part[0].id } : { itemIds: part.map(item => item.id) }) });
             if (reply.generation !== context.generation) throw new Error("Чат обновился. Повторите чтение.");
             const values = full ? reply.item ? [reply.item] : [] : reply.data ?? [];
             if (values.length !== part.length || part.some(item => !values.some(value => value.id === item.id && value.turnId === item.turnId && value.type === item.type))) throw new Error("Некорректный ответ. Повторите чтение.");
+            if (full && values[0] && ["userMessage", "agentMessage"].includes(values[0].type)) {
+              const chunks = [values[0].text], seen = new Set<string>();
+              while (reply.nextCursor) {
+                const cursor = reply.nextCursor;
+                if (seen.has(cursor)) throw new Error("Некорректное продолжение сообщения.");
+                seen.add(cursor);
+                reply = await request({ action: "item", projectId: context.projectId, threadId: context.threadId, turnId, itemId: part[0].id, cursor });
+                if (reply.generation !== context.generation) throw new Error("Чат обновился. Повторите чтение.");
+                if (!reply.item || reply.item.id !== values[0].id || reply.item.turnId !== turnId || reply.item.type !== values[0].type || reply.item.revision !== values[0].revision) throw new Error("Сообщение обновилось. Повторите чтение.");
+                chunks.push(reply.item.text);
+              }
+              if (reply.item?.truncated) throw new Error("Не удалось загрузить полное сообщение.");
+              values[0] = { ...values[0], text: chunks.join(""), truncated: false };
+            }
             for (const item of part) {
               const value = values.find(value => value.id === item.id)!;
               store(cache, key(context, { ...item, revision: value.revision ?? item.revision }), value, full ? 16 : 256);
