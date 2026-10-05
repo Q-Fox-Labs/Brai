@@ -1,0 +1,99 @@
+# ABOUTME: Описывает subjects и owner JSON Schema сервиса local-ai.
+# ABOUTME: Ошибки используют заголовки NATS Service; payload схемы живут рядом.
+asyncapi: 3.1.0
+info:
+  title: Brai local-ai service
+  version: 1.0.0
+  description: >
+    NATS Services request/reply API. Queue brai_local_ai; стандартные PING, INFO и STATS.
+    Service errors use Nats-Service-Error and Nats-Service-Error-Code headers.
+servers:
+  brai:
+    host: '{host}:{port}'
+    protocol: nats
+    description: Private NATS address from runtime configuration.
+    variables:
+      host: { default: localhost }
+      port: { default: '4222' }
+defaultContentType: application/json
+channels:
+  modelsList: { address: brai.local_ai.v1.models.list, messages: { request: { $ref: '#/components/messages/ModelsListRequest' } } }
+  modelsGet: { address: brai.local_ai.v1.models.get, messages: { request: { $ref: '#/components/messages/ModelsGetRequest' } } }
+  catalogSearch: { address: brai.local_ai.v1.catalog.search, messages: { request: { $ref: '#/components/messages/CatalogSearchRequest' } } }
+  modelsInstall: { address: brai.local_ai.v1.models.install, messages: { request: { $ref: '#/components/messages/InstallRequest' } } }
+  operationsGet: { address: brai.local_ai.v1.operations.get, messages: { request: { $ref: '#/components/messages/OperationGetRequest' } } }
+  modelsConfigure: { address: brai.local_ai.v1.models.configure, messages: { request: { $ref: '#/components/messages/ConfigureRequest' } } }
+  modelsLoad: { address: brai.local_ai.v1.models.load, messages: { request: { $ref: '#/components/messages/ModelRevisionRequest' } } }
+  modelsUnload: { address: brai.local_ai.v1.models.unload, messages: { request: { $ref: '#/components/messages/ModelRevisionRequest' } } }
+  modelsRemove: { address: brai.local_ai.v1.models.remove, messages: { request: { $ref: '#/components/messages/ModelRevisionRequest' } } }
+  invokeEmbed: { address: brai.local_ai.v1.invoke.embed, messages: { request: { $ref: '#/components/messages/EmbedRequest' } } }
+  invokeTranscribe: { address: brai.local_ai.v1.invoke.transcribe, messages: { request: { $ref: '#/components/messages/TranscribeRequest' } } }
+  cancel: { address: brai.local_ai.v1.cancel, messages: { request: { $ref: '#/components/messages/CancelRequest' } } }
+  status: { address: brai.local_ai.v1.status, messages: { request: { $ref: '#/components/messages/StatusRequest' } } }
+  replies:
+    address: null
+    messages:
+      ModelsListResponse: { $ref: '#/components/messages/ModelsListResponse' }
+      ModelCard: { $ref: '#/components/messages/ModelCard' }
+      CatalogSearchResponse: { $ref: '#/components/messages/CatalogSearchResponse' }
+      InstallOperation: { $ref: '#/components/messages/InstallOperation' }
+      ConfiguredResponse: { $ref: '#/components/messages/ConfiguredResponse' }
+      ModelMutationResponse: { $ref: '#/components/messages/ModelMutationResponse' }
+      EmbedResponse: { $ref: '#/components/messages/EmbedResponse' }
+      TranscribeResponse: { $ref: '#/components/messages/TranscribeResponse' }
+      CancelResponse: { $ref: '#/components/messages/CancelResponse' }
+      StatusResponse: { $ref: '#/components/messages/StatusResponse' }
+      ServiceError: { $ref: '#/components/messages/ServiceError' }
+operations:
+  modelsList: { action: receive, channel: { $ref: '#/channels/modelsList' }, messages: [{ $ref: '#/channels/modelsList/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/ModelsListResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+  modelsGet: { action: receive, channel: { $ref: '#/channels/modelsGet' }, messages: [{ $ref: '#/channels/modelsGet/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/ModelCard' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+  catalogSearch: { action: receive, channel: { $ref: '#/channels/catalogSearch' }, messages: [{ $ref: '#/channels/catalogSearch/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/CatalogSearchResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+  modelsInstall: { action: receive, channel: { $ref: '#/channels/modelsInstall' }, messages: [{ $ref: '#/channels/modelsInstall/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/InstallOperation' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+  operationsGet: { action: receive, channel: { $ref: '#/channels/operationsGet' }, messages: [{ $ref: '#/channels/operationsGet/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/InstallOperation' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+  modelsConfigure: { action: receive, channel: { $ref: '#/channels/modelsConfigure' }, messages: [{ $ref: '#/channels/modelsConfigure/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/ConfiguredResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+  modelsLoad: { action: receive, channel: { $ref: '#/channels/modelsLoad' }, messages: [{ $ref: '#/channels/modelsLoad/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/ModelMutationResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+  modelsUnload: { action: receive, channel: { $ref: '#/channels/modelsUnload' }, messages: [{ $ref: '#/channels/modelsUnload/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/ModelMutationResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+  modelsRemove: { action: receive, channel: { $ref: '#/channels/modelsRemove' }, messages: [{ $ref: '#/channels/modelsRemove/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/ModelMutationResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+  invokeEmbed: { action: receive, channel: { $ref: '#/channels/invokeEmbed' }, messages: [{ $ref: '#/channels/invokeEmbed/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/EmbedResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+  invokeTranscribe: { action: receive, channel: { $ref: '#/channels/invokeTranscribe' }, messages: [{ $ref: '#/channels/invokeTranscribe/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/TranscribeResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+  cancel: { action: receive, channel: { $ref: '#/channels/cancel' }, messages: [{ $ref: '#/channels/cancel/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/CancelResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+  status: { action: receive, channel: { $ref: '#/channels/status' }, messages: [{ $ref: '#/channels/status/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/StatusResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+components:
+  messages:
+    ModelsListRequest: { name: ModelsListRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/ModelsListRequest' } }
+    ModelsListResponse: { name: ModelsListResponse, payload: { $ref: './schemas/messages.schema.json#/definitions/ModelsListResponse' } }
+    ModelsGetRequest: { name: ModelsGetRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/ModelsGetRequest' } }
+    ModelCard: { name: ModelCard, payload: { $ref: './schemas/messages.schema.json#/definitions/ModelCard' } }
+    CatalogSearchRequest: { name: CatalogSearchRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/CatalogSearchRequest' } }
+    CatalogSearchResponse: { name: CatalogSearchResponse, payload: { $ref: './schemas/messages.schema.json#/definitions/CatalogSearchResponse' } }
+    InstallRequest: { name: InstallRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/InstallRequest' } }
+    OperationGetRequest: { name: OperationGetRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/OperationGetRequest' } }
+    InstallOperation: { name: InstallOperation, payload: { $ref: './schemas/messages.schema.json#/definitions/InstallOperation' } }
+    ConfigureRequest: { name: ConfigureRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/ConfigureRequest' } }
+    ConfiguredResponse: { name: ConfiguredResponse, payload: { $ref: './schemas/messages.schema.json#/definitions/ConfiguredResponse' } }
+    ModelRevisionRequest: { name: ModelRevisionRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/ModelRevisionRequest' } }
+    ModelMutationResponse: { name: ModelMutationResponse, payload: { $ref: './schemas/messages.schema.json#/definitions/ModelMutationResponse' } }
+    EmbedRequest: { name: EmbedRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/EmbedRequest' } }
+    TranscribeRequest: { name: TranscribeRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/TranscribeRequest' } }
+    EmbedResponse: { name: EmbedResponse, payload: { $ref: './schemas/messages.schema.json#/definitions/EmbedResponse' } }
+    TranscribeResponse: { name: TranscribeResponse, payload: { $ref: './schemas/messages.schema.json#/definitions/TranscribeResponse' } }
+    CancelRequest: { name: CancelRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/CancelRequest' } }
+    CancelResponse: { name: CancelResponse, payload: { $ref: './schemas/messages.schema.json#/definitions/CancelResponse' } }
+    StatusRequest: { name: StatusRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/StatusRequest' } }
+    StatusResponse: { name: StatusResponse, payload: { $ref: './schemas/messages.schema.json#/definitions/StatusResponse' } }
+    ServiceError:
+      name: ServiceError
+      description: Safe error DTO body plus code and numeric status in required NATS service headers.
+      headers:
+        type: object
+        additionalProperties: false
+        required: [Nats-Service-Error, Nats-Service-Error-Code]
+        properties:
+          Nats-Service-Error:
+            type: string
+            enum: [INVALID_ARGUMENT, MODEL_NOT_FOUND, MODEL_NOT_INSTALLED, UNSUPPORTED_OPERATION, MODEL_IN_USE, INPUT_TOO_LARGE, RESULT_TOO_LARGE, BUSY, MODEL_LOAD_FAILED, ENGINE_UNAVAILABLE, DEADLINE_EXCEEDED, CANCELLED, ARTIFACT_NOT_AVAILABLE, DEPENDENCY_UNAVAILABLE, INSTALLATION_FAILED, REVISION_CONFLICT, NOT_SUPPORTED, INTERNAL]
+          Nats-Service-Error-Code:
+            type: string
+            enum: ['400', '404', '409', '413', '429', '500', '503', '504']
+      payload:
+        $ref: './schemas/messages.schema.json#/definitions/ErrorResponse'
