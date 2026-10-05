@@ -6,6 +6,9 @@ COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
 COPY services/timer/package.json services/timer/package.json
 COPY services/auth/package.json services/auth/package.json
+COPY services/agent/package.json services/agent/package.json
+COPY services/artifacts/package.json services/artifacts/package.json
+COPY services/supabase-mcp/package.json services/supabase-mcp/package.json
 RUN npm ci
 COPY services/timer services/timer
 RUN npm run build --workspace=@brai/timer
@@ -17,6 +20,9 @@ COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
 COPY services/timer/package.json services/timer/package.json
 COPY services/auth/package.json services/auth/package.json
+COPY services/agent/package.json services/agent/package.json
+COPY services/artifacts/package.json services/artifacts/package.json
+COPY services/supabase-mcp/package.json services/supabase-mcp/package.json
 RUN npm ci --omit=dev --workspace=@brai/timer
 WORKDIR /app/services/timer
 COPY --from=build /app/services/timer/package.json ./package.json

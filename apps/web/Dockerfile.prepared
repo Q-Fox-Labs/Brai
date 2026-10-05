@@ -1,0 +1,12 @@
+# ABOUTME: Запускает локально собранный web runtime с prepared dependency closure.
+# ABOUTME: Использует next start и не устанавливает npm пакеты.
+FROM node:24.21.0-bookworm-slim AS runtime
+ARG BRAI_SOURCE_REVISION
+LABEL org.opencontainers.image.revision=${BRAI_SOURCE_REVISION}
+ENV NODE_ENV=production
+ENV HOSTNAME=0.0.0.0
+WORKDIR /app
+COPY . /app/
+WORKDIR /app/apps/web
+EXPOSE 3000
+CMD ["node", "../../node_modules/next/dist/bin/next", "start"]

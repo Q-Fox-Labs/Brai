@@ -1,0 +1,131 @@
+# ABOUTME: Включает отдельное хранилище и закрытую раздачу готовых artifacts.
+# ABOUTME: Подключается только при включённой возможности artifacts.
+services:
+  artifacts-volume-init:
+    profiles: [artifacts-initialize]
+    image: ${BRAI_ARTIFACTS_IMAGE:-brai-artifacts:production}
+    build:
+      context: ..
+      dockerfile: services/artifacts/Dockerfile
+    user: "0:0"
+    restart: "no"
+    command:
+      - node
+      - -e
+      - "const f=require('node:fs/promises'); const root='/var/lib/brai-artifacts'; (async()=>{await f.mkdir(root,{recursive:true}); for (const [name,mode] of [['files',0o750],['tmp',0o700]]) { const path=root+'/'+name; await f.mkdir(path,{recursive:true}); await f.chown(path,1000,1000); await f.chmod(path,mode); } await f.chown(root,1000,1000); await f.chmod(root,0o750); })().catch(()=>process.exit(1));"
+    volumes:
+      - type: volume
+        source: artifacts_data
+        target: /var/lib/brai-artifacts
+
+  artifacts:
+    image: ${BRAI_ARTIFACTS_IMAGE:-brai-artifacts:production}
+    build:
+      context: ..
+      dockerfile: services/artifacts/Dockerfile
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${ARTIFACTS_ENV_FILE:-./artifacts.env}
+    environment:
+      NODE_ENV: production
+      ARTIFACTS_HTTP_HOST: 0.0.0.0
+      ARTIFACTS_HTTP_PORT: "3004"
+      ARTIFACTS_DATA_DIR: /var/lib/brai-artifacts
+    volumes:
+      - type: volume
+        source: artifacts_data
+        target: /var/lib/brai-artifacts
+    networks:
+      - messaging
+      - database
+      - artifacts_private
+
+  artifacts-files:
+    image: caddy:2.11.4-alpine
+    user: "${BRAI_ARTIFACTS_CADDY_UID:-1000}:${BRAI_ARTIFACTS_CADDY_GID:-1000}"
+    restart: unless-stopped
+    init: true
+    read_only: true
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    environment:
+      XDG_CONFIG_HOME: /config
+      XDG_DATA_HOME: /data
+    tmpfs:
+      - /config:uid=1000,gid=1000,mode=0750
+      - /data:uid=1000,gid=1000,mode=0750
+    ports:
+      - "${BRAI_ARTIFACTS_PRIVATE_HOST_IP:?Set private host interface IP}:${BRAI_ARTIFACTS_INTERNAL_HOST_PORT:-9080}:9080"
+    volumes:
+      - type: bind
+        source: ./Caddyfile.artifacts-files
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: artifacts_data
+        target: /srv/artifacts
+        read_only: true
+        volume:
+          subpath: files
+    networks:
+      - artifacts_private
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:9080/health"]
+      interval: 30s
+      timeout: 6s
+      start_period: 5s
+      retries: 3
+
+  artifacts-migrate:
+    image: ${BRAI_ARTIFACTS_IMAGE:-brai-artifacts:production}
+    build:
+      context: ..
+      dockerfile: services/artifacts/Dockerfile
+    profiles: [migration]
+    restart: "no"
+    init: true
+    working_dir: /app/services/artifacts
+    command: ["node", "dist/migrate.js"]
+    healthcheck:
+      disable: true
+    env_file:
+      - ${ARTIFACTS_MIGRATION_ENV_FILE:-./artifacts-migration.env}
+    environment:
+      NODE_ENV: production
+    networks:
+      - database
+
+  artifacts-mcp:
+    image: ${BRAI_ARTIFACTS_IMAGE:-brai-artifacts:production}
+    build:
+      context: ..
+      dockerfile: services/artifacts/Dockerfile
+    profiles: [artifacts-mcp]
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${ARTIFACTS_MCP_ENV_FILE:-./artifacts-mcp.env}
+    environment:
+      NODE_ENV: production
+      ARTIFACTS_MCP_HOST: 0.0.0.0
+      ARTIFACTS_MCP_PORT: "3005"
+    command: ["node", "dist/mcp.js"]
+    healthcheck:
+      disable: true
+    ports:
+      - "127.0.0.1:${BRAI_ARTIFACTS_MCP_HOST_PORT:-3005}:3005"
+    networks:
+      - messaging
+      - mcp
+
+volumes:
+  artifacts_data:
+    name: ${BRAI_ARTIFACTS_DATA_VOLUME:?Set dedicated artifacts persistent volume}
+    external: true
+
+networks:
+  artifacts_private:
+    name: ${BRAI_ARTIFACTS_PRIVATE_NETWORK:?Set private shared host/container network}
+    external: true

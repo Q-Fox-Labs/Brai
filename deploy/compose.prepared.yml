@@ -1,0 +1,33 @@
+# ABOUTME: Выбирает offline materialized runtime contexts для тестов и выпуска.
+# ABOUTME: Все образы получают один точный source revision через build arg.
+services:
+  web:
+    build:
+      context: ${BRAI_WEB_RUNTIME_CONTEXT:?Set prepared web runtime context}
+      dockerfile: Dockerfile
+      args:
+        BRAI_SOURCE_REVISION: ${BRAI_SOURCE_REVISION:?Set exact Brai source commit}
+  artifacts:
+    build:
+      context: ${BRAI_ARTIFACTS_RUNTIME_CONTEXT:?Set prepared artifacts runtime context}
+      dockerfile: Dockerfile
+      args:
+        BRAI_SOURCE_REVISION: ${BRAI_SOURCE_REVISION:?Set exact Brai source commit}
+  artifacts-volume-init:
+    build:
+      context: ${BRAI_ARTIFACTS_RUNTIME_CONTEXT:?Set prepared artifacts runtime context}
+      dockerfile: Dockerfile
+      args:
+        BRAI_SOURCE_REVISION: ${BRAI_SOURCE_REVISION:?Set exact Brai source commit}
+  artifacts-migrate:
+    build:
+      context: ${BRAI_ARTIFACTS_RUNTIME_CONTEXT:?Set prepared artifacts runtime context}
+      dockerfile: Dockerfile
+      args:
+        BRAI_SOURCE_REVISION: ${BRAI_SOURCE_REVISION:?Set exact Brai source commit}
+  artifacts-mcp:
+    build:
+      context: ${BRAI_ARTIFACTS_RUNTIME_CONTEXT:?Set prepared artifacts runtime context}
+      dockerfile: Dockerfile
+      args:
+        BRAI_SOURCE_REVISION: ${BRAI_SOURCE_REVISION:?Set exact Brai source commit}

@@ -11,6 +11,7 @@ services:
     volumes:
       - ../services/timer/tests/integration/init.sql:/docker-entrypoint-initdb.d/01-timer.sql:ro
       - ./auth-test-database.sql:/docker-entrypoint-initdb.d/02-auth.sql:ro
+      - ./artifacts-test-database.sql:/docker-entrypoint-initdb.d/03-artifacts.sql:ro
     healthcheck:
       test: [CMD, pg_isready, -U, timer_owner, -d, brai_timer_test]
       interval: 1s
@@ -23,22 +24,17 @@ services:
     image: nats:2.15.0
     command: ["--config", "/etc/nats/nats.conf"]
     environment:
-      NATS_ADMIN_PASSWORD: fixture-admin
-      NATS_WEB_PASSWORD: fixture-web
-      NATS_TIMER_PASSWORD: fixture-timer
-      NATS_AUTH_PASSWORD: fixture-auth
+      NATS_TEST_PASSWORD: fixture-nats
     tmpfs:
       - /data
     volumes:
-      - ../dependencies/nats/nats.conf:/etc/nats/nats.conf:ro
+      - ./artifacts-test-nats.conf:/etc/nats/nats.conf:ro
     networks:
       messaging:
         aliases: [nats]
 
   timer-migrate:
-    build:
-      context: ..
-      dockerfile: services/timer/Dockerfile
+    image: ${BRAI_TIMER_IMAGE:?Set accepted timer-migrate image}
     command: ["node", "dist/migrate.js"]
     healthcheck:
       disable: true
@@ -54,15 +50,13 @@ services:
       - database
 
   timer:
-    build:
-      context: ..
-      dockerfile: services/timer/Dockerfile
+    image: ${BRAI_TIMER_IMAGE:?Set accepted timer image}
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://timer_app:fixture-app@db:5432/brai_timer_test
       NATS_URL: nats://nats:4222
-      NATS_USER: timer
-      NATS_PASSWORD: fixture-timer
+      NATS_USER: fixture
+      NATS_PASSWORD: fixture-nats
       NATS_INBOX_PREFIX: _INBOX.brai_timer
     depends_on:
       timer-migrate:
@@ -74,9 +68,7 @@ services:
       - database
 
   auth-migrate:
-    build:
-      context: ..
-      dockerfile: services/auth/Dockerfile
+    image: ${BRAI_AUTH_IMAGE:?Set accepted auth-migrate image}
     command: ["node", "dist/migrate.js"]
     healthcheck:
       disable: true
@@ -94,9 +86,7 @@ services:
       - database
 
   auth:
-    build:
-      context: ..
-      dockerfile: services/auth/Dockerfile
+    image: ${BRAI_AUTH_IMAGE:?Set accepted auth image}
     environment:
       NODE_ENV: production
       AUTH_DATABASE_URL: postgresql://brai_auth_app:fixture-auth-app@db:5432/brai_auth_test
@@ -105,8 +95,8 @@ services:
       AUTH_EMAIL_FROM: fixture@example.test
       RESEND_API_KEY: fixture-no-real-email
       NATS_URL: nats://nats:4222
-      NATS_USER: auth
-      NATS_PASSWORD: fixture-auth
+      NATS_USER: fixture
+      NATS_PASSWORD: fixture-nats
     depends_on:
       auth-migrate:
         condition: service_completed_successfully
@@ -116,18 +106,152 @@ services:
       - messaging
       - database
 
+  artifacts-migrate:
+    profiles: [migration]
+    image: ${BRAI_ARTIFACTS_IMAGE:?Set prepared artifacts image tag}
+    build:
+      context: ${BRAI_ARTIFACTS_RUNTIME_CONTEXT:?Set prepared artifacts runtime context}
+      dockerfile: Dockerfile
+      args:
+        BRAI_SOURCE_REVISION: ${BRAI_SOURCE_REVISION:?Set exact Brai source commit}
+    command: ["node", "dist/migrate.js"]
+    healthcheck:
+      disable: true
+    environment:
+      ARTIFACTS_DATABASE_URL: postgresql://artifacts_owner:fixture-artifacts-owner@db:5432/brai_artifacts_test
+      ARTIFACTS_OWNER_ROLE: artifacts_owner
+      ARTIFACTS_APP_ROLE: artifacts_app
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - database
+
+  artifacts-volume-init:
+    profiles: [artifacts-initialize]
+    image: ${BRAI_ARTIFACTS_IMAGE:?Set prepared artifacts image tag}
+    build:
+      context: ${BRAI_ARTIFACTS_RUNTIME_CONTEXT:?Set prepared artifacts runtime context}
+      dockerfile: Dockerfile
+      args:
+        BRAI_SOURCE_REVISION: ${BRAI_SOURCE_REVISION:?Set exact Brai source commit}
+    user: "0:0"
+    restart: "no"
+    command:
+      - node
+      - -e
+      - "const f=require('node:fs/promises'); const root='/var/lib/brai-artifacts'; (async()=>{await f.mkdir(root,{recursive:true}); const files=root+'/files'; await f.mkdir(files,{recursive:true}); await f.mkdir(root+'/tmp',{recursive:true}); await f.writeFile(files+'/11111111-1111-4111-8111-111111111111',Buffer.from('artifact fixture bytes\n')); await f.chown(root,1000,1000); await f.chmod(root,0o750); await f.chown(files,1000,1000); await f.chmod(files,0o750); await f.chown(root+'/tmp',1000,1000); await f.chmod(root+'/tmp',0o700); await f.chown(files+'/11111111-1111-4111-8111-111111111111',1000,1000); await f.chmod(files+'/11111111-1111-4111-8111-111111111111',0o640); })().catch(()=>process.exit(1));"
+    volumes:
+      - type: volume
+        source: artifacts_data
+        target: /var/lib/brai-artifacts
+    networks:
+      - artifacts_private
+
+  artifacts:
+    image: ${BRAI_ARTIFACTS_IMAGE:?Set prepared artifacts image tag}
+    build:
+      context: ${BRAI_ARTIFACTS_RUNTIME_CONTEXT:?Set prepared artifacts runtime context}
+      dockerfile: Dockerfile
+      args:
+        BRAI_SOURCE_REVISION: ${BRAI_SOURCE_REVISION:?Set exact Brai source commit}
+    environment:
+      NODE_ENV: production
+      ARTIFACTS_DATABASE_URL: postgresql://artifacts_app:fixture-artifacts-app@db:5432/brai_artifacts_test
+      NATS_URL: nats://nats:4222
+      NATS_USER: fixture
+      NATS_PASSWORD: fixture-nats
+      ARTIFACTS_DATA_DIR: /var/lib/brai-artifacts
+      ARTIFACTS_UPLOAD_BASE_URL: http://127.0.0.1:13000
+      ARTIFACTS_INTERNAL_BASE_URL: http://${BRAI_ARTIFACTS_PRIVATE_HOST_IP:?Set test private gateway IP}:${BRAI_ARTIFACTS_INTERNAL_HOST_PORT:-19080}
+      ARTIFACTS_HTTP_HOST: 0.0.0.0
+      ARTIFACTS_HTTP_PORT: "3004"
+    volumes:
+      - type: volume
+        source: artifacts_data
+        target: /var/lib/brai-artifacts
+    depends_on:
+      nats:
+        condition: service_started
+    networks:
+      - messaging
+      - database
+      - artifacts_private
+
+  artifacts-files:
+    image: caddy:2.11.4-alpine
+    user: "1000:1000"
+    read_only: true
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    environment:
+      XDG_CONFIG_HOME: /config
+      XDG_DATA_HOME: /data
+    tmpfs:
+      - /config:uid=1000,gid=1000,mode=0750
+      - /data:uid=1000,gid=1000,mode=0750
+    ports:
+      - "${BRAI_ARTIFACTS_PRIVATE_HOST_IP:?Set test private gateway IP}:${BRAI_ARTIFACTS_INTERNAL_HOST_PORT:-19080}:9080"
+    volumes:
+      - type: bind
+        source: ./Caddyfile.artifacts-files
+        target: /etc/caddy/Caddyfile
+        read_only: true
+      - type: volume
+        source: artifacts_data
+        target: /srv/artifacts
+        read_only: true
+        volume:
+          subpath: files
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:9080/health"]
+      interval: 30s
+      timeout: 6s
+      start_period: 5s
+      retries: 3
+    networks:
+      - artifacts_private
+
+  artifacts-mcp:
+    image: ${BRAI_ARTIFACTS_IMAGE:?Set prepared artifacts image tag}
+    build:
+      context: ${BRAI_ARTIFACTS_RUNTIME_CONTEXT:?Set prepared artifacts runtime context}
+      dockerfile: Dockerfile
+      args:
+        BRAI_SOURCE_REVISION: ${BRAI_SOURCE_REVISION:?Set exact Brai source commit}
+    command: ["node", "dist/mcp.js"]
+    healthcheck:
+      disable: true
+    environment:
+      NODE_ENV: production
+      NATS_URL: nats://nats:4222
+      NATS_USER: fixture
+      NATS_PASSWORD: fixture-nats
+      ARTIFACTS_MCP_HOST: 0.0.0.0
+      ARTIFACTS_MCP_PORT: "3005"
+      ARTIFACTS_MCP_ALLOWED_HOSTS: "127.0.0.1:13005,artifacts-mcp:3005"
+      ARTIFACTS_MCP_ALLOWED_ORIGINS: "http://127.0.0.1:13005"
+    ports:
+      - "127.0.0.1:13005:3005"
+    depends_on:
+      nats:
+        condition: service_started
+    networks:
+      - messaging
+
   web:
     build:
-      context: ..
-      dockerfile: apps/web/Dockerfile
+      context: ${BRAI_WEB_RUNTIME_CONTEXT:?Set prepared runtime context}
+      dockerfile: Dockerfile
+      args:
+        BRAI_SOURCE_REVISION: ${BRAI_SOURCE_REVISION:?Set exact Brai source commit}
     environment:
       NODE_ENV: production
       HOSTNAME: 0.0.0.0
       PORT: "3000"
       WEB_ORIGIN: http://127.0.0.1:13000
       NATS_URL: nats://nats:4222
-      NATS_USER: web
-      NATS_PASSWORD: fixture-web
+      NATS_USER: fixture
+      NATS_PASSWORD: fixture-nats
       NATS_INBOX_PREFIX: _INBOX.brai_web
     ports:
       - "127.0.0.1:13000:3000"
@@ -144,7 +268,16 @@ services:
       start_period: 10s
       retries: 3
 
+volumes:
+  artifacts_data:
+
 networks:
+  artifacts_private:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${BRAI_ARTIFACTS_TEST_SUBNET:?Set unused private test subnet}
+          gateway: ${BRAI_ARTIFACTS_PRIVATE_HOST_IP:?Set test private gateway IP}
   messaging:
     internal: false
   database:
