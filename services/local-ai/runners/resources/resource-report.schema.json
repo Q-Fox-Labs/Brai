@@ -1,0 +1,121 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:brai:local-ai:resource-report:v1",
+  "title": "Local AI process-group resource observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "subject",
+    "metricSemantics",
+    "window",
+    "samples",
+    "summary",
+    "observedIdentities"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pid", "processGroupId", "leaderStartTicks", "sessionId"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1 },
+        "processGroupId": { "type": "integer", "minimum": 1 },
+        "leaderStartTicks": { "type": "integer", "minimum": 1 },
+        "sessionId": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "metricSemantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rss", "cpu"],
+      "properties": {
+        "rss": {
+          "const": "sampled_aggregate_sum_shared_pages_may_be_double_counted"
+        },
+        "cpu": {
+          "const": "observed_delta_same_pid_and_start_ticks_only"
+        }
+      }
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requestedDurationMs",
+        "observedDurationMs",
+        "samplingIntervalMs",
+        "sampleCount",
+        "terminationReason"
+      ],
+      "properties": {
+        "requestedDurationMs": { "type": "number", "exclusiveMinimum": 0, "maximum": 300000 },
+        "observedDurationMs": { "type": "number", "minimum": 0, "maximum": 300000 },
+        "samplingIntervalMs": { "type": "integer", "minimum": 50, "maximum": 5000 },
+        "sampleCount": { "type": "integer", "minimum": 1, "maximum": 6001 },
+        "terminationReason": { "enum": ["process_group_gone", "deadline_reached"] }
+      }
+    },
+    "samples": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6001,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sample",
+          "offsetMs",
+          "processCount",
+          "threadCount",
+          "aggregateSampledRssBytes",
+          "observedCpuTicksDelta"
+        ],
+        "properties": {
+          "sample": { "type": "integer", "minimum": 1, "maximum": 6001 },
+          "offsetMs": { "type": "number", "minimum": 0, "maximum": 300000 },
+          "processCount": { "type": "integer", "minimum": 1 },
+          "threadCount": { "type": "integer", "minimum": 1 },
+          "aggregateSampledRssBytes": { "type": "integer", "minimum": 0 },
+          "observedCpuTicksDelta": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "peakConcurrentProcessCount",
+        "peakConcurrentThreadCount",
+        "peakAggregateSampledRssBytes",
+        "totalObservedCpuTicks",
+        "ticksPerSecond",
+        "totalObservedCpuSeconds"
+      ],
+      "properties": {
+        "peakConcurrentProcessCount": { "type": "integer", "minimum": 1 },
+        "peakConcurrentThreadCount": { "type": "integer", "minimum": 1 },
+        "peakAggregateSampledRssBytes": { "type": "integer", "minimum": 0 },
+        "totalObservedCpuTicks": { "type": "integer", "minimum": 0 },
+        "ticksPerSecond": { "type": "integer", "minimum": 1 },
+        "totalObservedCpuSeconds": { "type": "number", "minimum": 0 }
+      }
+    },
+    "observedIdentities": {
+      "type": "array",
+      "maxItems": 8192,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pid", "startTicks", "firstSample", "lastSample"],
+        "properties": {
+          "pid": { "type": "integer", "minimum": 1 },
+          "startTicks": { "type": "integer", "minimum": 1 },
+          "firstSample": { "type": "integer", "minimum": 1, "maximum": 6001 },
+          "lastSample": { "type": "integer", "minimum": 1, "maximum": 6001 }
+        }
+      }
+    }
+  }
+}
