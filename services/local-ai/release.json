@@ -89,6 +89,17 @@
       },
       "abi": "CPython 3.12, Ubuntu 24.04 / glibc 2.39"
     },
+    "nativeLibrarySearchDirectories": [
+      "llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/app",
+      "llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/system",
+      "system-libs",
+      "python/lib",
+      "python/lib/python3.12/lib-dynload",
+      "gigaam_pytorch/.venv/lib/python3.12/site-packages/torch/lib",
+      "gigaam_pytorch/.venv/lib/python3.12/site-packages/torchcodec",
+      "gigaam_pytorch/.venv/lib/python3.12/site-packages/torio/lib",
+      "gigaam_pytorch/.venv/lib/python3.12/site-packages/torchaudio/lib"
+    ],
     "payloadMustBeSelfContained": true,
     "hostVenvOrHostLibrarySymlinksAllowed": false,
     "transformersModulesCache": {

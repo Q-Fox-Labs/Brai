@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -133,6 +134,50 @@ def select_torchcodec_elfs(root: Path) -> tuple[list[Path], list[Path]]:
     }:
         raise ValueError("TorchCodec FFmpeg-6 active ELF names differ from the supported set")
     return active, inactive
+
+
+def select_torio_elfs(root: Path) -> tuple[list[Path], list[Path]]:
+    expected = {
+        f"{prefix}torio_ffmpeg{major}.so"
+        for prefix in ("_", "lib")
+        for major in (4, 5, 6)
+    }
+    actual = {path.name for path in root.glob("*.so") if path.is_file() and not path.is_symlink()}
+    if actual != expected:
+        raise ValueError("torio FFmpeg backend ELF set differs from the exact supported 4/5/6 inventory")
+    active = sorted((root / "_torio_ffmpeg6.so", root / "libtorio_ffmpeg6.so"))
+    inactive = sorted(path for path in root.glob("*.so") if path not in active)
+    return active, inactive
+
+
+def inventory_torchaudio_elfs(root: Path) -> tuple[list[Path], list[Path]]:
+    expected = {"_torchaudio.so", "libtorchaudio.so", "_torchaudio_sox.so", "libtorchaudio_sox.so"}
+    files = {path.name: path for path in root.glob("*.so") if path.is_file() and not path.is_symlink()}
+    if set(files) != expected or any(not is_elf(path) for path in files.values()):
+        raise ValueError("torchaudio native ELF set differs from the exact core/optional-SoX inventory")
+    active = sorted((files["_torchaudio.so"], files["libtorchaudio.so"]))
+    optional_sox = sorted((files["_torchaudio_sox.so"], files["libtorchaudio_sox.so"]))
+    return active, optional_sox
+
+
+# The deadline covers the entire active ELF set; each child process gets only the remaining budget.
+def preflight_elf_dependencies(elf_files: list[Path], env: dict[str, str], *, timeout_seconds: float = 60.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    seen: set[Path] = set()
+    for binary in elf_files:
+        resolved = binary.resolve(strict=True)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"aggregate ELF dependency preflight exceeded its {timeout_seconds:.1f}s deadline")
+        output = run(["/usr/bin/ldd", str(binary)], env=env, timeout=remaining)
+        missing = [line.strip() for line in output.splitlines() if "not found" in line]
+        if missing:
+            raise ValueError(f"unresolved ELF dependency in source input {binary}: {'; '.join(missing)}")
+    if time.monotonic() >= deadline:
+        raise TimeoutError(f"aggregate ELF dependency preflight exceeded its {timeout_seconds:.1f}s deadline")
 
 
 def inventory_tree_symlinks(root: Path, *, allowed_external: dict[str, dict[str, object]] | None = None) -> list[dict[str, object]]:
@@ -517,6 +562,15 @@ def main() -> int:
             raise ValueError(f"allowlisted Python vendor data does not match its exact hash/size pin: {relative}")
     omitted_preflight = preflight_omitted_vendor_assets(site_source)
     active_torchcodec_preflight, inactive_torchcodec_preflight = select_torchcodec_elfs(site_source / "torchcodec")
+    active_torio_preflight, inactive_torio_preflight = select_torio_elfs(site_source / "torio/lib")
+    active_torchaudio_preflight, optional_sox_preflight = inventory_torchaudio_elfs(site_source / "torchaudio/lib")
+    optional_sox_inventory = [{
+        "path": f"{SITE_PACKAGES}/{path.relative_to(site_source).as_posix()}",
+        "sha256": sha256(path),
+        "bytes": path.stat().st_size,
+        "reason": "lazy optional SoX backend; product audio path uses FFmpeg/TorchCodec and torchaudio functional transforms",
+        "requiredLibrary": "libsox.so",
+    } for path in optional_sox_preflight]
     vendor_data = [{"path": path, "bytes": size, "sha256": digest} for path, (size, digest) in sorted(VENDOR_DATA.items())]
     python_base_lib = python_base / "lib/python3.12"
     python_base_symlinks = inventory_tree_symlinks(
@@ -541,6 +595,51 @@ def main() -> int:
     accepted_llama_files, llama_symlinks = preflight_llama_tree(llama_root, llama_manifest_file, llama_manifest)
     llama_manifest_sha = sha256(llama_manifest_file)
     llama_files = llama_manifest["files"]
+    torchcodec_source_root = site_source / "torchcodec"
+    torio_source_root = site_source / "torio/lib"
+    torchaudio_source_root = site_source / "torchaudio/lib"
+    source_elf_files: list[Path] = [node_root / "bin/node", python_binary, args.ffmpeg, args.ffprobe]
+    for package in node_packages:
+        package_root = (product_root / package).resolve(strict=True)
+        source_elf_files.extend(path for path in package_root.rglob("*") if path.is_file() and is_elf(path))
+    for path in python_base_lib.rglob("*"):
+        relative = path.relative_to(python_base_lib)
+        if any(part in {"__pycache__", "test", "tests"} for part in relative.parts):
+            continue
+        if path.is_symlink() and relative.as_posix() in PYTHON_BASE_OMITTED_LINKS:
+            continue
+        if path.is_file() and is_elf(path):
+            source_elf_files.append(path)
+    for path in site_source.rglob("*"):
+        if not path.is_file() or not is_elf(path):
+            continue
+        relative = path.relative_to(site_source)
+        if any(part == "pip" or part.startswith("pip-") or part in {"__pycache__", ".pytest_cache"} for part in relative.parts):
+            continue
+        if path.is_relative_to(torchcodec_source_root) or path.is_relative_to(torio_source_root) or path.is_relative_to(torchaudio_source_root):
+            continue
+        source_elf_files.append(path)
+    source_elf_files.extend(active_torchcodec_preflight)
+    source_elf_files.extend(active_torio_preflight)
+    source_elf_files.extend(active_torchaudio_preflight)
+    source_elf_files.extend(path.resolve(strict=True) for path in libpython_sources if path.is_file())
+    source_elf_files.extend(accepted_llama_files)
+    source_ldd_env = {
+        "PATH": "/usr/bin:/bin",
+        "LD_LIBRARY_PATH": ":".join((
+            str(llama_root / "app"),
+            str(llama_root / "system"),
+            str(site_source / "torch/lib"),
+            str(torchcodec_source_root),
+            str(torio_source_root),
+            str(torchaudio_source_root),
+            "/usr/lib/x86_64-linux-gnu",
+            "/lib/x86_64-linux-gnu",
+        )),
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
+    preflight_elf_dependencies(source_elf_files, source_ldd_env)
 
     output_parent = out.parent
     output_parent.mkdir(parents=True, exist_ok=True)
@@ -618,11 +717,24 @@ def main() -> int:
         active_torchcodec, inactive_torchcodec = select_torchcodec_elfs(torchcodec_root)
         if [path.name for path in active_torchcodec] != [path.name for path in active_torchcodec_preflight] or [path.name for path in inactive_torchcodec] != [path.name for path in inactive_torchcodec_preflight]:
             raise ValueError("TorchCodec ABI files changed between preflight and copy")
+        torio_root = py_dest / "lib/python3.12/site-packages/torio/lib"
+        active_torio, inactive_torio = select_torio_elfs(torio_root)
+        if [path.name for path in active_torio] != [path.name for path in active_torio_preflight] or [path.name for path in inactive_torio] != [path.name for path in inactive_torio_preflight]:
+            raise ValueError("torio FFmpeg ABI files changed between preflight and copy")
+        torchaudio_root = py_dest / "lib/python3.12/site-packages/torchaudio/lib"
+        active_torchaudio, optional_sox = inventory_torchaudio_elfs(torchaudio_root)
+        if [path.name for path in active_torchaudio] != [path.name for path in active_torchaudio_preflight] or [path.name for path in optional_sox] != [path.name for path in optional_sox_preflight]:
+            raise ValueError("torchaudio core/optional-SoX ABI files changed between preflight and copy")
+        for path, expected in zip(optional_sox, optional_sox_inventory, strict=True):
+            if path.name != Path(expected["path"]).name or sha256(path) != expected["sha256"] or path.stat().st_size != expected["bytes"]:
+                raise ValueError("optional torchaudio SoX file changed between preflight and copy")
         elf_sources.extend(
             path for path in (py_dest / "lib/python3.12/site-packages").rglob("*")
-            if path.is_file() and is_elf(path) and not path.is_relative_to(torchcodec_root)
+            if path.is_file() and is_elf(path) and not path.is_relative_to(torchcodec_root) and not path.is_relative_to(torio_root) and not path.is_relative_to(torchaudio_root)
         )
         elf_sources.extend(active_torchcodec)
+        elf_sources.extend(active_torio)
+        elf_sources.extend(active_torchaudio)
         for elf_root in (python_lib, runtime / "llama_cpp"):
             elf_sources.extend(path for path in elf_root.rglob("*") if path.is_file() and is_elf(path))
         ldd_env = {
@@ -632,6 +744,8 @@ def main() -> int:
                 str(llama_root / "system"),
                 str(py_dest / "lib/python3.12/site-packages/torch/lib"),
                 str(torchcodec_root),
+                str(torio_root),
+                str(torchaudio_root),
             )),
             "LANG": "C",
             "LC_ALL": "C",
@@ -642,6 +756,9 @@ def main() -> int:
             "python/lib",
             "python/lib/python3.12/lib-dynload",
             "gigaam_pytorch/.venv/lib/python3.12/site-packages/torch/lib",
+            "gigaam_pytorch/.venv/lib/python3.12/site-packages/torchcodec",
+            "gigaam_pytorch/.venv/lib/python3.12/site-packages/torio/lib",
+            "gigaam_pytorch/.venv/lib/python3.12/site-packages/torchaudio/lib",
             "system-libs",
         }
         ldd_closure(elf_sources, runtime, runtime / "system-libs", rows, ldd_env, loader_search_dirs)
@@ -664,6 +781,15 @@ def main() -> int:
                 "activeFfmpegMajor": 6,
                 "activeFiles": [{"path": str(path.relative_to(runtime)), "sha256": sha256(path), "bytes": path.stat().st_size} for path in active_torchcodec],
                 "inactiveFallbackFiles": [{"path": str(path.relative_to(runtime)), "sha256": sha256(path), "bytes": path.stat().st_size} for path in inactive_torchcodec],
+            },
+            "torioAbiSelection": {
+                "activeFfmpegMajor": 6,
+                "activeFiles": [{"path": str(path.relative_to(runtime)), "sha256": sha256(path), "bytes": path.stat().st_size} for path in active_torio],
+                "inactiveFallbackFiles": [{"path": str(path.relative_to(runtime)), "sha256": sha256(path), "bytes": path.stat().st_size} for path in inactive_torio],
+            },
+            "torchaudioAbiSelection": {
+                "activeFiles": [{"path": str(path.relative_to(runtime)), "sha256": sha256(path), "bytes": path.stat().st_size} for path in active_torchaudio],
+                "optionalSoxBackend": {"active": False, "requiredLibrary": "libsox.so", "files": optional_sox_inventory},
             },
             "cachePythonExecutable": "gigaam_pytorch/.venv/bin/python",
             "cachePythonExecutableHost": str(venv / "bin/python"),

@@ -28,6 +28,17 @@ ALLOWED_CONTEXT_FILES = {
     "services/local-ai/Dockerfile.dockerignore",
     "services/local-ai/release.json",
 }
+NATIVE_LIBRARY_SEARCH_DIRECTORIES = [
+    "llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/app",
+    "llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/system",
+    "system-libs",
+    "python/lib",
+    "python/lib/python3.12/lib-dynload",
+    "gigaam_pytorch/.venv/lib/python3.12/site-packages/torch/lib",
+    "gigaam_pytorch/.venv/lib/python3.12/site-packages/torchcodec",
+    "gigaam_pytorch/.venv/lib/python3.12/site-packages/torio/lib",
+    "gigaam_pytorch/.venv/lib/python3.12/site-packages/torchaudio/lib",
+]
 
 
 def sha256(path: Path) -> str:
@@ -111,6 +122,13 @@ def main() -> int:
     selection = inventory.get("torchcodecAbiSelection")
     if not isinstance(selection, dict) or selection.get("activeFfmpegMajor") != 6 or len(selection.get("activeFiles", [])) != 3 or len(selection.get("inactiveFallbackFiles", [])) != 9:
         raise ValueError("context lacks exact TorchCodec FFmpeg-6 selection accounting")
+    torio_selection = inventory.get("torioAbiSelection")
+    if not isinstance(torio_selection, dict) or torio_selection.get("activeFfmpegMajor") != 6 or len(torio_selection.get("activeFiles", [])) != 2 or len(torio_selection.get("inactiveFallbackFiles", [])) != 4:
+        raise ValueError("context lacks exact torio FFmpeg-6 selection accounting")
+    torchaudio_selection = inventory.get("torchaudioAbiSelection")
+    optional_sox = torchaudio_selection.get("optionalSoxBackend") if isinstance(torchaudio_selection, dict) else None
+    if not isinstance(torchaudio_selection, dict) or len(torchaudio_selection.get("activeFiles", [])) != 2 or not isinstance(optional_sox, dict) or optional_sox.get("active") is not False or optional_sox.get("requiredLibrary") != "libsox.so" or len(optional_sox.get("files", [])) != 2:
+        raise ValueError("context lacks exact torchaudio core and optional-SoX accounting")
     actual_context_files = {path.relative_to(context).as_posix() for path in context.rglob("*") if path.is_file()}
     if actual_context_files != ALLOWED_CONTEXT_FILES | {f"payload/{name}" for name in expected} | {"payload/SHA256SUMS"}:
         raise ValueError("context contains an unapproved or missing file")
@@ -127,6 +145,15 @@ def main() -> int:
     base = dockerfile.get("image", {}).get("baseImage", {})
     if base.get("reference") != "ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4" or dockerfile.get("image", {}).get("copyOnly") is not True:
         raise ValueError("release descriptor base or copy-only contract mismatch")
+    native_dirs = dockerfile.get("runtimePayload", {}).get("nativeLibrarySearchDirectories")
+    if native_dirs != NATIVE_LIBRARY_SEARCH_DIRECTORIES:
+        raise ValueError("release descriptor native library search directories differ from the supported runtime set")
+    dockerfile_text = (context / "services/local-ai/Dockerfile").read_text(encoding="utf-8")
+    ld_lines = [line.strip().rstrip("\\") for line in dockerfile_text.splitlines() if line.strip().startswith("LD_LIBRARY_PATH=")]
+    docker_dirs = ld_lines[0].split("=", 1)[1].split(":") if len(ld_lines) == 1 else []
+    expected_docker_dirs = [f"/opt/brai/local-ai/runtime/{relative}" for relative in NATIVE_LIBRARY_SEARCH_DIRECTORIES]
+    if docker_dirs != expected_docker_dirs:
+        raise ValueError("Dockerfile LD_LIBRARY_PATH differs from the declared native runtime directories")
     print(json.dumps({"sourceRevision": args.source_revision, "payloadFiles": len(actual), "verified": True}, sort_keys=True))
     return 0
 

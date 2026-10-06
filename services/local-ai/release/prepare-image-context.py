@@ -184,6 +184,13 @@ def main() -> int:
     selection = inventory.get("torchcodecAbiSelection")
     if not isinstance(selection, dict) or selection.get("activeFfmpegMajor") != 6 or len(selection.get("activeFiles", [])) != 3 or len(selection.get("inactiveFallbackFiles", [])) != 9:
         raise ValueError("runtime inventory lacks the pinned TorchCodec FFmpeg-6 selection and fallback accounting")
+    torio_selection = inventory.get("torioAbiSelection")
+    if not isinstance(torio_selection, dict) or torio_selection.get("activeFfmpegMajor") != 6 or len(torio_selection.get("activeFiles", [])) != 2 or len(torio_selection.get("inactiveFallbackFiles", [])) != 4:
+        raise ValueError("runtime inventory lacks the pinned torio FFmpeg-6 selection and fallback accounting")
+    torchaudio_selection = inventory.get("torchaudioAbiSelection")
+    optional_sox = torchaudio_selection.get("optionalSoxBackend") if isinstance(torchaudio_selection, dict) else None
+    if not isinstance(torchaudio_selection, dict) or len(torchaudio_selection.get("activeFiles", [])) != 2 or not isinstance(optional_sox, dict) or optional_sox.get("active") is not False or optional_sox.get("requiredLibrary") != "libsox.so" or len(optional_sox.get("files", [])) != 2:
+        raise ValueError("runtime inventory lacks exact torchaudio core and optional-SoX accounting")
     if inventory.get("nodePackageLockSha256") != digest(source / "package-lock.json"):
         raise ValueError("runtime inventory Node dependency lock differs from this source revision")
     llama_manifest_sha = inventory.get("llamaManifestSha256", "")
@@ -335,15 +342,16 @@ def main() -> int:
         cache_home.mkdir()
         cache_tmp.mkdir()
         (cache_home / "huggingface").mkdir()
+        release_descriptor = json.loads((source / "services/local-ai/release.json").read_text(encoding="utf-8"))
+        native_library_dirs = release_descriptor.get("runtimePayload", {}).get("nativeLibrarySearchDirectories")
+        if not isinstance(native_library_dirs, list) or not native_library_dirs or any(not isinstance(item, str) for item in native_library_dirs):
+            raise ValueError("release descriptor lacks native runtime library search directories")
+        native_library_paths = [runtime / safe_relative(item) for item in native_library_dirs]
+        if any(not path.is_dir() or path.is_symlink() for path in native_library_paths):
+            raise ValueError("native runtime library search directory is missing or unsafe")
         offline_env = {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
-            "LD_LIBRARY_PATH": ":".join((
-                "/opt/brai/local-ai/runtime/llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/app",
-                "/opt/brai/local-ai/runtime/llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/system",
-                "/opt/brai/local-ai/runtime/gigaam_pytorch/.venv/lib/python3.12/site-packages/torch/lib",
-                "/usr/lib/x86_64-linux-gnu",
-                "/lib/x86_64-linux-gnu",
-            )),
+            "LD_LIBRARY_PATH": ":".join(map(str, native_library_paths)) + ":/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu",
             "HOME": str(cache_home),
             "HF_HOME": str(cache_home / "huggingface"),
             "HF_MODULES_CACHE": str(cache_root),
@@ -397,6 +405,8 @@ def main() -> int:
             "allowedVendorFiles": allowed_vendor_files,
             "omittedVendorAssets": inventory["omittedVendorAssets"],
             "torchcodecAbiSelection": inventory["torchcodecAbiSelection"],
+            "torioAbiSelection": inventory["torioAbiSelection"],
+            "torchaudioAbiSelection": inventory["torchaudioAbiSelection"],
             "modelIncluded": False,
             "files": sorted(rows, key=lambda row: str(row["path"])),
             "recipes": {

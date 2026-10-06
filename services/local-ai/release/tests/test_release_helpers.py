@@ -61,11 +61,12 @@ def write_context_fixture(context: Path, relative_payload: str, content: bytes) 
     recipes_dir = context / "services/local-ai"
     recipes_dir.mkdir(parents=True)
     recipe_contents = {
-        "Dockerfile": "FROM ubuntu@sha256:fixture\n",
+        "Dockerfile": "FROM ubuntu@sha256:fixture\nENV NODE_ENV=production \\\n    LD_LIBRARY_PATH=" + ":".join(f"/opt/brai/local-ai/runtime/{item}" for item in context_verify.NATIVE_LIBRARY_SEARCH_DIRECTORIES) + "\n",
         "Dockerfile.dockerignore": "!payload/\n",
         "release.json": json.dumps({
             "source": {"revisionBuildArgument": "BRAI_SOURCE_REVISION"},
             "image": {"copyOnly": True, "baseImage": {"reference": "ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4"}},
+            "runtimePayload": {"nativeLibrarySearchDirectories": context_verify.NATIVE_LIBRARY_SEARCH_DIRECTORIES},
         }),
     }
     recipe_inventory = {}
@@ -81,6 +82,8 @@ def write_context_fixture(context: Path, relative_payload: str, content: bytes) 
         "recipes": recipe_inventory,
         "allowedVendorFiles": vendor_files,
         "torchcodecAbiSelection": {"activeFfmpegMajor": 6, "activeFiles": [{"path": "active6.so"}] * 3, "inactiveFallbackFiles": [{"path": "fallback.so"}] * 9},
+        "torioAbiSelection": {"activeFfmpegMajor": 6, "activeFiles": [{"path": "active6.so"}] * 2, "inactiveFallbackFiles": [{"path": "fallback.so"}] * 4},
+        "torchaudioAbiSelection": {"activeFiles": [{"path": "libtorchaudio.so"}, {"path": "_torchaudio.so"}], "optionalSoxBackend": {"active": False, "requiredLibrary": "libsox.so", "files": [{"path": "libtorchaudio_sox.so", "sha256": "a" * 64, "bytes": 1}, {"path": "_torchaudio_sox.so", "sha256": "b" * 64, "bytes": 1}]}},
     }), encoding="utf-8")
     return revision, payload_file
 
@@ -202,6 +205,28 @@ class ReleaseHelperTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "conflicting ELF"):
                     runtime.ldd_closure([first, second], root / "runtime", root / "out", [], {"PATH": "/usr/bin:/bin"}, set())
 
+    def test_elf_preflight_uses_one_aggregate_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            first, second = Path(temp) / "first.so", Path(temp) / "second.so"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            with patch.object(runtime.time, "monotonic", side_effect=[10.0, 10.0, 71.0]), patch.object(runtime, "run", return_value="") as mocked_run:
+                with self.assertRaisesRegex(TimeoutError, "aggregate ELF dependency preflight"):
+                    runtime.preflight_elf_dependencies([first, second], {"PATH": "/usr/bin:/bin"})
+            self.assertEqual(mocked_run.call_count, 1)
+            self.assertEqual(mocked_run.call_args.kwargs["timeout"], 60.0)
+
+    def test_elf_preflight_shrinks_timeout_across_successful_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            binaries = [Path(temp) / f"{index}.so" for index in range(3)]
+            for binary in binaries:
+                binary.write_bytes(b"ELF fixture")
+            with patch.object(runtime.time, "monotonic", side_effect=[10.0, 10.0, 15.0, 71.0]), patch.object(runtime, "run", return_value="") as mocked_run:
+                with self.assertRaisesRegex(TimeoutError, "aggregate ELF dependency preflight"):
+                    runtime.preflight_elf_dependencies(binaries, {"PATH": "/usr/bin:/bin"})
+            self.assertEqual(mocked_run.call_count, 2)
+            self.assertEqual([call.kwargs["timeout"] for call in mocked_run.call_args_list], [60.0, 55.0])
+
     def test_ldd_closure_skips_identical_library_only_in_loader_search_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -235,6 +260,73 @@ class ReleaseHelperTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "TorchCodec wheel"):
                 runtime.select_torchcodec_elfs(root)
 
+    def test_torio_selects_only_exact_ffmpeg6_backends(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for prefix in ("_", "lib"):
+                for major in (4, 5, 6):
+                    (root / f"{prefix}torio_ffmpeg{major}.so").write_bytes(f"{prefix}-{major}".encode())
+            active, inactive = runtime.select_torio_elfs(root)
+            self.assertEqual({path.name for path in active}, {"_torio_ffmpeg6.so", "libtorio_ffmpeg6.so"})
+            self.assertEqual({path.name for path in inactive}, {
+                "_torio_ffmpeg4.so", "_torio_ffmpeg5.so", "libtorio_ffmpeg4.so", "libtorio_ffmpeg5.so",
+            })
+            (root / "libtorio_ffmpeg7.so").write_bytes(b"unsupported")
+            with self.assertRaisesRegex(ValueError, "exact supported"):
+                runtime.select_torio_elfs(root)
+
+    def test_torchaudio_accounts_exact_optional_sox_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            names = {"_torchaudio.so", "libtorchaudio.so", "_torchaudio_sox.so", "libtorchaudio_sox.so"}
+            for name in names:
+                (root / name).write_bytes(b"\x7fELF-fixture")
+            active, optional = runtime.inventory_torchaudio_elfs(root)
+            self.assertEqual({path.name for path in active}, {"_torchaudio.so", "libtorchaudio.so"})
+            self.assertEqual({path.name for path in optional}, {"_torchaudio_sox.so", "libtorchaudio_sox.so"})
+            (root / "libtorchaudio_sox7.so").write_bytes(b"unexpected")
+            with self.assertRaisesRegex(ValueError, "exact core/optional-SoX"):
+                runtime.inventory_torchaudio_elfs(root)
+
+    def test_ldd_closure_resolves_active_torio_ffmpeg6_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runtime_root = root / "runtime"
+            torio = runtime_root / "gigaam_pytorch/.venv/lib/python3.12/site-packages/torio/lib"
+            binary = torio / "_torio_ffmpeg6.so"
+            sibling = torio / "libtorio_ffmpeg6.so"
+            torio.mkdir(parents=True)
+            binary.write_bytes(b"active backend ELF fixture")
+            sibling.write_bytes(b"active companion ELF fixture")
+            row = {
+                "destination": str(sibling),
+                "sha256": sha(sibling),
+            }
+            with patch.object(runtime, "run", return_value=f"\tlibtorio_ffmpeg6.so => {sibling} (0x1)"):
+                runtime.ldd_closure(
+                    [binary], runtime_root, runtime_root / "system-libs", [row], {"PATH": "/usr/bin:/bin"},
+                    {"gigaam_pytorch/.venv/lib/python3.12/site-packages/torio/lib", "system-libs"},
+                )
+            self.assertFalse((runtime_root / "system-libs/libtorio_ffmpeg6.so").exists())
+
+    def test_ldd_closure_resolves_active_torchaudio_core_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runtime_root = root / "runtime"
+            library_dir = runtime_root / "gigaam_pytorch/.venv/lib/python3.12/site-packages/torchaudio/lib"
+            binary = library_dir / "_torchaudio.so"
+            sibling = library_dir / "libtorchaudio.so"
+            library_dir.mkdir(parents=True)
+            binary.write_bytes(b"active torchaudio ELF fixture")
+            sibling.write_bytes(b"active torchaudio library fixture")
+            row = {"destination": str(sibling), "sha256": sha(sibling)}
+            with patch.object(runtime, "run", return_value=f"\tlibtorchaudio.so => {sibling} (0x1)"):
+                runtime.ldd_closure(
+                    [binary], runtime_root, runtime_root / "system-libs", [row], {"PATH": "/usr/bin:/bin"},
+                    {"gigaam_pytorch/.venv/lib/python3.12/site-packages/torchaudio/lib", "system-libs"},
+                )
+            self.assertFalse((runtime_root / "system-libs/libtorchaudio.so").exists())
+
     def test_context_verifier_accepts_exact_payload_and_recipe_inventories(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             context = Path(temp)
@@ -257,6 +349,18 @@ class ReleaseHelperTests(unittest.TestCase):
             revision, _ = write_context_fixture(context, "runtime/gigaam/pytorch_model.bin", b"fixture model bytes")
             with patch.object(sys, "argv", ["verify-image-context.py", "--context", str(context), "--source-revision", revision]):
                 with self.assertRaisesRegex(ValueError, "unapproved vendor binary data"):
+                    context_verify.main()
+
+    def test_context_verifier_rejects_torchaudio_backend_accounting_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            context = Path(temp)
+            revision, _ = write_context_fixture(context, "app/services/local-ai/src/main.mjs", b"export {};\n")
+            inventory_path = context / "payload-inputs.json"
+            inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+            inventory["torchaudioAbiSelection"]["optionalSoxBackend"]["active"] = True
+            inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+            with patch.object(sys, "argv", ["verify-image-context.py", "--context", str(context), "--source-revision", revision]):
+                with self.assertRaisesRegex(ValueError, "torchaudio core and optional-SoX"):
                     context_verify.main()
 
     def test_portable_manifest_copies_through_context_consumer(self) -> None:
