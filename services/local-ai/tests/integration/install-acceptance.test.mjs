@@ -12,8 +12,9 @@ import { supportedProfiles } from '../../src/main.mjs';
 import { createHuggingFaceCatalog, createModelInstaller, registerSupportedProfiles } from '../../dist/install/huggingface.js';
 import { createPostgresStore } from '../../dist/storage/postgres.js';
 import {
-  assertFreshInstallNamespace,
   assertInstallDatabaseIdentity,
+  assertExpectedHashMismatch,
+  classifyHashNamespaceState,
   installAcceptanceCaseDirectories,
   isNativeEnospcWitness,
   readAcceptanceStoreRows,
@@ -63,12 +64,22 @@ test('protected real installer acceptance uses only isolated fixture resources',
     await assertRunDirectory(directories.enospcDirectory);
 
     const store = createPostgresStore(pool, { outboxCapacity: 8, queryTimeoutMs: 5_000 });
-    await assertPhaseDatabaseState(pool, store, profile, config);
-    if (config.phase === 'hash') await registerSupportedProfiles(store, [profile]);
+    const phaseState = await assertPhaseDatabaseState(pool, store, profile, config);
+    if (config.phase === 'hash') {
+      await registerSupportedProfiles(store, [profile]);
+      const registered = await readAcceptanceState(pool, store, profile, config.runId);
+      check(classifyHashNamespaceState(registered, profile) === 'registered', 'HASH_PROFILE_REGISTRATION_VALID');
+      if (phaseState.hashNamespace === 'registered') {
+        check(sameAcceptanceCounts(phaseState.state, registered), 'HASH_RESUME_REGISTRATION_COUNTS_UNCHANGED');
+        check(isDeepStrictEqual(phaseState.state.models, registered.models)
+          && isDeepStrictEqual(phaseState.state.events, registered.events), 'HASH_RESUME_REGISTRATION_FACTS_UNCHANGED');
+      }
+      phaseState.state = registered;
+    }
 
     if (config.phase === 'hash') {
       await assertHashCandidate(directories.hashCandidateDirectory, profile);
-      const before = await readAcceptanceState(pool, store, profile, config.runId);
+      const before = phaseState.state;
       installer = createInstaller(store, profile, directories.hashCandidateDirectory, config.maxOperationMs, files, realPublicFetch);
       const mismatch = await safeOutcome(() => installer.importVerified({
         modelId: profile.modelId, revision: profile.revision, profileId: profile.profileId,
@@ -351,11 +362,7 @@ async function safeOutcome(run) {
 async function assertPhaseDatabaseState(pool, store, profile, config) {
   const state = await readAcceptanceState(pool, store, profile, config.runId);
   if (config.phase === 'hash') {
-    assertFreshInstallNamespace({
-      models: state.models.length, installations: state.installations.length,
-      operations: state.operations.length, settings: state.settings, outbox: state.events.length,
-    });
-    return;
+    return { state, hashNamespace: classifyHashNamespaceState(state, profile) };
   }
   check(state.models.length === 1 && isDeepStrictEqual(state.models[0], profile.record), 'OWN_PROFILE_REGISTERED');
   check(state.operations.every(row => row.owner_id === config.runId && row.model_id === profile.modelId), 'ONLY_OWN_INSTALL_OPERATIONS');
@@ -371,13 +378,14 @@ async function assertPhaseDatabaseState(pool, store, profile, config) {
     check(state.installations.length === 1, 'INSPECT_OWN_FINAL_INSTALLATION');
     check(failed?.record.status === 'failed' && state.operations.some(row => row.operation_id === phaseRequestId(config.runId, 'public') && row.record.status === 'completed'), 'INSPECT_OWN_OPERATION_HISTORY');
   }
+  return { state, hashNamespace: null };
 }
 
 async function readAcceptanceState(pool, store, profile, ownerId) {
   const { models, installations } = await readAcceptanceStoreRows(store);
   const operationResult = await pool.query('SELECT operation_id,owner_id,model_id,record FROM local_ai.installation_operations ORDER BY operation_id');
   const settingsResult = await pool.query('SELECT count(*)::bigint AS count FROM local_ai.settings');
-  const eventResult = await pool.query('SELECT event FROM local_ai.outbox ORDER BY event_id');
+  const eventResult = await pool.query('SELECT event_id,state,event FROM local_ai.outbox ORDER BY event_id');
   const status = await store.status();
   check(Number(settingsResult.rows[0].count) === 0, 'NO_SETTINGS_ROWS');
   for (const row of operationResult.rows) check(validateSchema('InstallOperation', row.record), 'INSTALL_OPERATION_SCHEMA');
@@ -412,7 +420,7 @@ async function assertHashCandidate(rootDirectory, profile) {
     const digest = await hashFile(targetFile);
     if (digest !== file.sha256.toLowerCase()) mismatches.push(file.path);
   }
-  check(mismatches.length === 1 && mismatches[0] === 'pytorch_model.bin', 'HASH_CANDIDATE_SINGLE_PINNED_FILE_MISMATCH');
+  assertExpectedHashMismatch(profile, mismatches);
 }
 
 async function assertEnospcMount(directory) {
@@ -524,6 +532,9 @@ function safeCode(error) {
     'PUBLIC_CASE_EMPTY_BEFORE_UNSUPPORTED', 'UNSUPPORTED_REJECTIONS_NO_FETCH',
     'UNSUPPORTED_REJECTIONS_NO_FILESYSTEM_CHANGE', 'NEW_PROCESS_REPEAT_READS_FAILED_OPERATION',
     'NEW_PROCESS_REPEATS_NO_DATABASE_CHANGE',
+    'HASH_NAMESPACE_INVALID', 'HASH_CANDIDATE_MISMATCH_NOT_EXPECTED',
+    'HASH_PROFILE_REGISTRATION_VALID', 'HASH_RESUME_REGISTRATION_COUNTS_UNCHANGED',
+    'HASH_RESUME_REGISTRATION_FACTS_UNCHANGED',
     'PUBLIC_RETRY_REQUIRES_PRIOR_ENOSPC_FAILURE', 'INSTALL_OPERATION_SCHEMA', 'METADATA_EVENT_SCHEMA',
     'ONLY_PINNED_MODEL_ROW', 'ONLY_PINNED_INSTALLATION_ROW', 'ONLY_RUN_OPERATION_ROWS', 'BOUNDED_UNDELIVERED_OUTBOX',
     'INSPECT_OWN_OPERATION_HISTORY', 'INSPECT_OWN_FINAL_STATE', 'CASE_DIRECTORY_NOT_LINK', 'CASE_DIRECTORY_REALPATH',

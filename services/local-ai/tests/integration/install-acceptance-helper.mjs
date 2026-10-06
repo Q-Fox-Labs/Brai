@@ -4,6 +4,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
+import { isDeepStrictEqual } from 'node:util';
+import { validateMetadataEvent } from '../../contracts/index.mjs';
 
 const REQUIRED_ENV = 'BRAI_LOCAL_AI_INSTALL_ACCEPTANCE_REQUIRED';
 const BASE_DIRECTORY = '/var/lib/brai-local-ai-installation-acceptance';
@@ -66,6 +68,53 @@ export async function readAcceptanceStoreRows(store) {
   const models = await store.transaction(tx => tx.models.list({}));
   const installations = await store.transaction(tx => tx.installations.list({}));
   return { models, installations };
+}
+
+/** Принимает только пустой hash namespace или неизменённую регистрацию закреплённого профиля.
+ * @param {{models: unknown[], installations: unknown[], operations: unknown[], settings: number, events: Array<{event_id: string, state: string, event: Record<string, unknown>}>, status: {reserved: number, pending: number, sending: number, permanentlyFailed: number}}} state
+ * @param {{modelId: string, revision: string, profileId: string, record: Record<string, unknown>}} profile
+ * @returns {'empty'|'registered'}
+ */
+export function classifyHashNamespaceState(state, profile) {
+  const status = state?.status;
+  const empty = state?.models?.length === 0 && state?.installations?.length === 0
+    && state?.operations?.length === 0 && state?.settings === 0 && state?.events?.length === 0
+    && status?.reserved === 0 && status?.pending === 0 && status?.sending === 0 && status?.permanentlyFailed === 0
+    && status?.oldestCreatedAt === null && status?.lastErrorCode === null;
+  if (empty) return 'empty';
+
+  const model = state?.models?.[0];
+  const row = state?.events?.[0];
+  const event = row?.event;
+  const data = event?.data;
+  const eventDataKeys = ['modelId', 'operation', 'operationId', 'outcome', 'phase', 'profileId', 'revision'];
+  const exactEventData = data && isDeepStrictEqual(Object.keys(data).sort(), eventDataKeys);
+  const registered = state?.models?.length === 1 && isDeepStrictEqual(model, profile.record)
+    && state?.installations?.length === 0 && state?.operations?.length === 0 && state?.settings === 0
+    && state?.events?.length === 1 && row?.state === 'pending'
+    && isUuid(row?.event_id) && event?.id === row?.event_id && event?.type_id === 1301
+    && validateMetadataEvent(event)
+    && event?.actor_id === null && event?.scope_type === 'system' && event?.scope_id === 'local_ai'
+    && event?.object_type === 'model' && event?.object_id === profile.modelId && exactEventData
+    && data?.operation === 'configure' && data?.modelId === profile.modelId
+    && data?.revision === profile.revision && data?.profileId === profile.profileId
+    && isUuid(data?.operationId) && data?.outcome === 'succeeded' && data?.phase === 'configure'
+    && status?.reserved === 0 && status?.pending === 1 && status?.sending === 0 && status?.permanentlyFailed === 0
+    && status?.oldestCreatedAt !== null && status?.lastErrorCode === null;
+  if (registered) return 'registered';
+  throw Object.assign(new Error('protected hash namespace is neither empty nor the pinned registration'), { safeCode: 'HASH_NAMESPACE_INVALID' });
+}
+
+/** Требует ровно одно изменение хеша именно в первом закреплённом файле.
+ * @param {{files: Array<{path: string}>}} profile
+ * @param {string[]} mismatchPaths
+ */
+export function assertExpectedHashMismatch(profile, mismatchPaths) {
+  const expectedPath = profile?.files?.[0]?.path;
+  if (typeof expectedPath !== 'string' || !expectedPath || !Array.isArray(mismatchPaths)
+    || mismatchPaths.length !== 1 || mismatchPaths[0] !== expectedPath) {
+    throw Object.assign(new Error('protected hash candidate mismatch does not match the pinned first file'), { safeCode: 'HASH_CANDIDATE_MISMATCH_NOT_EXPECTED' });
+  }
 }
 
 /** Проверяет настоящую ошибку ENOSPC, увиденную при FileHandle.writeFile. @param {NativeWriteWitness} witness */

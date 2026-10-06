@@ -10,6 +10,8 @@ import { open as namedOpen } from 'node:fs/promises';
 import {
   assertFreshInstallNamespace,
   assertInstallDatabaseIdentity,
+  assertExpectedHashMismatch,
+  classifyHashNamespaceState,
   installAcceptanceCaseDirectories,
   isNativeEnospcWitness,
   readAcceptanceStoreRows,
@@ -66,6 +68,53 @@ test('acceptance state reader supplies required empty filters to both real-store
   };
   assert.deepEqual(await readAcceptanceStoreRows(store), { models, installations });
   assert.deepEqual(calls, ['models', 'installations']);
+});
+
+test('hash candidate accepts only the exact first pinned file as its sole hash mismatch', () => {
+  const profile = { files: [{ path: 'config.json' }, { path: 'pytorch_model.bin' }] };
+  assert.doesNotThrow(() => assertExpectedHashMismatch(profile, ['config.json']));
+  for (const mismatches of [[], ['pytorch_model.bin'], ['config.json', 'pytorch_model.bin']]) {
+    assert.throws(() => assertExpectedHashMismatch(profile, mismatches), error => error?.safeCode === 'HASH_CANDIDATE_MISMATCH_NOT_EXPECTED');
+  }
+});
+
+test('hash namespace resume accepts only empty state or the exact pending configure fact', () => {
+  const profile = { modelId: 'gigaam-v3-e2e-ctc', revision: 'a'.repeat(40), profileId: 'gigaam_pytorch', record: { modelId: 'gigaam-v3-e2e-ctc', revision: 'a'.repeat(40), profileId: 'gigaam_pytorch', supported: true } };
+  const empty = {
+    models: [], installations: [], operations: [], settings: 0, events: [],
+    status: { reserved: 0, pending: 0, sending: 0, permanentlyFailed: 0, oldestCreatedAt: null, lastErrorCode: null },
+  };
+  const event = {
+    id: '76dcb8a1-951c-4dd9-bcd0-f6874528268d', type_id: 1301, occurred_at: '2026-10-06T00:00:00.000Z',
+    actor_id: null, scope_type: 'system', scope_id: 'local_ai', object_type: 'model', object_id: profile.modelId,
+    data: { operation: 'configure', modelId: profile.modelId, revision: profile.revision, profileId: profile.profileId,
+      operationId: '8593c623-2812-495f-bfab-b2a0d86ee3b2', outcome: 'succeeded', phase: 'configure' },
+  };
+  const registered = {
+    models: [profile.record], installations: [], operations: [], settings: 0,
+    events: [{ event_id: event.id, state: 'pending', event }],
+    status: { reserved: 0, pending: 1, sending: 0, permanentlyFailed: 0, oldestCreatedAt: event.occurred_at, lastErrorCode: null },
+  };
+  assert.equal(classifyHashNamespaceState(empty, profile), 'empty');
+  assert.equal(classifyHashNamespaceState(registered, profile), 'registered');
+
+  const invalidStates = [
+    { ...registered, models: [{ ...profile.record, revision: 'b'.repeat(40) }] },
+    { ...registered, events: [{ ...registered.events[0], event: { ...event, type_id: 902 } }] },
+    { ...registered, events: [{ ...registered.events[0], event: { ...event, scope_id: 'another-service' } }] },
+    { ...registered, events: [{ ...registered.events[0], event: { ...event, occurred_at: 'not-a-timestamp' } }] },
+    { ...registered, events: [{ ...registered.events[0], event: { ...event, extra: true } }] },
+    { ...registered, events: [{ ...registered.events[0], event: { ...event, data: { ...event.data, operation: 'install' } } }] },
+    { ...registered, events: [{ ...registered.events[0], event: { ...event, data: { ...event.data, extra: 'forbidden' } } }] },
+    { ...registered, events: [...registered.events, { ...registered.events[0], event_id: 'a3d78155-248f-4e2a-a322-7f6b5d7edc1f', event: { ...event, id: 'a3d78155-248f-4e2a-a322-7f6b5d7edc1f' } }] },
+    { ...registered, events: [{ ...registered.events[0], state: 'reserved' }], status: { ...registered.status, reserved: 1, pending: 0 } },
+    { ...registered, operations: [{ ownerId: 'foreign' }] },
+    { ...registered, settings: 1 },
+    { ...registered, installations: [{ modelId: profile.modelId }] },
+  ];
+  for (const state of invalidStates) {
+    assert.throws(() => classifyHashNamespaceState(state, profile), error => error?.safeCode === 'HASH_NAMESPACE_INVALID');
+  }
 });
 
 test('native write observer forwards an ordinary write and restores fs.promises.open', async t => {
