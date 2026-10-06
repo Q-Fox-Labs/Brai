@@ -92,6 +92,15 @@ class ReleaseHelperTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 context_builder.safe_relative(value)
 
+    def test_hashed_lock_parser_handles_extras_and_matches_distribution_metadata(self) -> None:
+        lock = RELEASE.parent / "runners/gigaam/requirements.lock"
+        locked = runtime.parse_lock(lock)
+        self.assertEqual(len(locked), 98)
+        self.assertEqual(locked["fsspec"], "2026.9.0")
+        installed = json.dumps(locked)
+        with patch.object(runtime, "run", return_value=installed):
+            self.assertEqual(runtime.verify_python_closure(Path("/fixture/python"), lock), locked)
+
     def test_ldd_closure_copies_external_needed_library_by_soname(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

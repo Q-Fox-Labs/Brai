@@ -245,7 +245,7 @@ def parse_lock(path: Path) -> dict[str, str]:
         if not line or line.startswith("#") or line.startswith("--"):
             continue
         requirement = line.split("\\", 1)[0].strip()
-        match = re.match(r"([A-Za-z0-9_.-]+)==([^ ;]+)", requirement)
+        match = re.match(r"([A-Za-z0-9_.-]+)(?:\[[A-Za-z0-9_,.-]+\])?==([^ ;]+)", requirement)
         if match:
             locked[re.sub(r"[-_.]+", "-", match.group(1)).lower()] = match.group(2)
     return locked

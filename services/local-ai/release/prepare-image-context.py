@@ -189,8 +189,8 @@ def main() -> int:
     llama_manifest_sha = inventory.get("llamaManifestSha256", "")
     if len(llama_manifest_sha) != 64 or any(char not in "0123456789abcdef" for char in llama_manifest_sha):
         raise ValueError("runtime inventory lacks the exact pinned llama source manifest hash")
-    if not isinstance(inventory.get("pythonDistributions"), dict) or len(inventory["pythonDistributions"]) != 97:
-        raise ValueError("runtime inventory lacks the complete 97-package Python closure")
+    if not isinstance(inventory.get("pythonDistributions"), dict) or len(inventory["pythonDistributions"]) != 98:
+        raise ValueError("runtime inventory lacks the complete 98-package Python closure")
     entries = inventory.get("files")
     if not isinstance(entries, list) or not entries:
         raise ValueError("runtime inventory must contain an explicit file list")
