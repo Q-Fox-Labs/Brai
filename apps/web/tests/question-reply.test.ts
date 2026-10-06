@@ -1,5 +1,5 @@
 // ABOUTME: Проверяет понятный вывод ответов Codex вместо протокольных тегов и JSON.
-// ABOUTME: Обычные сообщения сохраняются; настоящий Item рендерится через React SSR.
+// ABOUTME: Настоящий Item и shared UI рендерятся через React SSR.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -11,6 +11,18 @@ import { questionReplies } from "../lib/agent/question-reply.ts";
 const wrap = (rows: unknown) => `<send_user_message_question_reply>\n${JSON.stringify(rows)}\n</send_user_message_question_reply>`;
 const reply = { questionItemId: '["tool","private-id",0]', question: "Как назвать чат?", answer: "По смыслу" };
 const require = createRequire(import.meta.url), ts = require("typescript") as typeof import("typescript");
+const uiCache = new Map<string, Record<string, unknown>>();
+function ui(name: string): Record<string, unknown> {
+  const path = name.slice("@/components/ui/".length), cached = uiCache.get(path);
+  if (cached) return cached;
+  const extension = path === "cn" ? "ts" : "tsx", source = readFileSync(new URL(`../components/ui/${path}.${extension}`, import.meta.url), "utf8");
+  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  const loaded = { exports: {} as Record<string, unknown> };
+  uiCache.set(path, loaded.exports);
+  new Function("require", "module", "exports", compiled)((dependency: string) => dependency.startsWith("@/components/ui/") ? ui(dependency) : require(dependency), loaded, loaded.exports);
+  uiCache.set(path, loaded.exports);
+  return loaded.exports;
+}
 const source = readFileSync(new URL("../app/agent/screen.tsx", import.meta.url), "utf8");
 const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
 const module = { exports: {} as { Item: (props: { item: { id: string; type: string; text: string }; context: Record<string, never> }) => Parameters<typeof renderToStaticMarkup>[0] } };
@@ -18,7 +30,7 @@ const messageSource = readFileSync(new URL("../app/agent/message-text.tsx", impo
 const messageOutput = ts.transpileModule(messageSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
 const messageModule = { exports: {} as { default: Parameters<typeof createElement>[0] } };
 new Function("require", "module", "exports", messageOutput)((name: string) => name === "../../lib/agent/question-reply" ? { questionReplies } : name === "../../lib/agent/desktop-message" ? { desktopMessage } : name === "./markdown" ? { default: ({ text }: { text: string }) => createElement("p", null, text) } : require(name), messageModule, messageModule.exports);
-new Function("require", "module", "exports", output + "\nmodule.exports.Item = Item;")((name: string) => name === "./message-text" ? messageModule.exports : ["react", "react/jsx-runtime"].includes(name) ? require(name) : {}, module, module.exports);
+new Function("require", "module", "exports", output + "\nmodule.exports.Item = Item;")((name: string) => name === "./message-text" ? messageModule.exports : name.startsWith("@/components/ui/") ? ui(name) : ["react", "react/jsx-runtime"].includes(name) ? require(name) : {}, module, module.exports);
 const render = (text: string) => renderToStaticMarkup(module.exports.Item({ item: { id: "reply", type: "userMessage", text }, context: {} }));
 test("recognized reply shows question and answer without protocol IDs, JSON or tags", () => {
   const html = render(wrap([reply])); assert.match(html, /Как назвать чат\?/); assert.match(html, /Ответ: /); assert.match(html, /По смыслу/); assert.doesNotMatch(html, /private-id|questionItemId|send_user_message_question_reply|&quot;/);

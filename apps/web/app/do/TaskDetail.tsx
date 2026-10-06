@@ -3,6 +3,7 @@
 import type { Task } from "./types";
 import { useTasks } from "./TasksContext";
 import type { DetailField } from "./task-ui";
+import { Textarea } from "@/components/ui/textarea";
 
 const MIN_DETAIL_HEIGHT = 42;
 const MAX_DETAIL_HEIGHT = 240;
@@ -31,7 +32,7 @@ export default function TaskDetail({ task, field }: { task: Task; field: DetailF
 
   return (
     <section>
-      <textarea
+      <Textarea
         id={`${field}-${task.id}`}
         ref={(element) => {
           const key = detailElementKey(task.id, field, "right");
@@ -43,7 +44,8 @@ export default function TaskDetail({ task, field }: { task: Task; field: DetailF
           }
         }}
         data-task-detail
-        className={`block min-h-[42px] max-h-60 w-full resize-none overflow-y-hidden rounded-lg border px-3 py-2.5 text-[13px] leading-[1.55] outline-none transition-[border-color,box-shadow,background] disabled:cursor-wait disabled:opacity-65 ${isResult ? "border-[#b8e2d5] bg-[#e7f8f2] text-[#0d624e] placeholder:text-[#4a9d85]/70 focus:border-[#4a9d85] focus:bg-[#ddf5eb] focus:shadow-[0_0_0_3px_rgba(77,185,157,0.15)] dark:border-[#28613d] dark:bg-[#173b27] dark:text-[#9ce2ba] dark:placeholder:text-[#65bd82]/65 dark:focus:bg-[#1e4a30]" : "border-brai-line bg-brai-surface-subtle text-brai-ink placeholder:text-brai-muted/75 focus:border-brai-accent/45 focus:bg-brai-field focus:shadow-[0_0_0_3px_rgba(232,94,67,0.08)]"}`}
+        bare
+        className={`do-detail-field block min-h-[42px] max-h-60 w-full resize-none overflow-y-hidden rounded-md border px-3 py-2.5 text-sm leading-6 outline-none transition-[border-color,box-shadow,background] disabled:cursor-wait disabled:opacity-65 ${isResult ? "do-result-field" : "border-brai-line bg-brai-surface-subtle text-brai-ink placeholder:text-brai-muted/75 focus:border-brai-accent/45 focus:bg-brai-field focus:shadow-[0_0_0_3px_var(--do-surface-focus)]"}`}
         defaultValue={value}
         rows={1}
         placeholder={isResult ? "Введите результат" : "Введите описание"}

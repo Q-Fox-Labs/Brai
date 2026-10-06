@@ -7,14 +7,21 @@ import Timer from "./timer";
 import AgentScreen from "./agent/screen";
 import DoScreen from "./do/screen";
 import Navigation from "./navigation";
+import "./navigation.css";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { BraiBrandIcon } from "@/components/ui/brai-brand-icon";
+import { LoginGalaxy } from "./shell/login-galaxy";
 type User = { id: string; email: string };
 /** Собирает общую оболочку; таймер явно передаёт отсчёт в навигацию текущего аккаунта. */
 export default function Account() {
  const [timerElapsed, setTimerElapsed] = useState<string | null>(null);
- return <div className="workspace-shell"><Navigation timerElapsed={timerElapsed} /><div className="workspace-content"><AccountSession onTimerElapsed={setTimerElapsed} /></div></div>;
+ return <AccountSession timerElapsed={timerElapsed} onTimerElapsed={setTimerElapsed} />;
 }
 /** Управляет подтверждённой сервером сессией без хранения токена в браузере. */
-function AccountSession({ onTimerElapsed }: { onTimerElapsed: (elapsed: string | null) => void }) {
+function AccountSession({ timerElapsed, onTimerElapsed }: { timerElapsed: string | null; onTimerElapsed: (elapsed: string | null) => void }) {
  const pathname = usePathname();
  const view = pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : "timer";
  const [user, setUser] = useState<User | null>(null), [ready, setReady] = useState(false), [exiting, setExiting] = useState(false);
@@ -58,21 +65,40 @@ function AccountSession({ onTimerElapsed }: { onTimerElapsed: (elapsed: string |
   } catch { setMessage("Не удалось подтвердить выход. Проверьте соединение и повторите."); }
   finally { locked.current = false; setExiting(false); }
  };
- if (!ready) return <main className="p-8" role="status">Проверяем вход…</main>;
- if (user && !exiting) return <AccountScreens key={user.id} view={view} user={user} onLogout={() => { void logout(); }} onUnauthorized={unauthorized} accountMessage={message} onTimerElapsed={onTimerElapsed} />;
- if (exiting) return <main className="p-8" role="status">Выходим…</main>;
- return <main className="mx-auto flex min-h-full max-w-md flex-col justify-center px-6 py-12">
-  <h1 className="mb-8 text-3xl font-semibold tracking-tight">Brai</h1>
-  {sent && <p className="mb-6 break-words text-slate-400">Письмо отправлено на {email}</p>}
-  <form onSubmit={event => { event.preventDefault(); void submit(sent ? "verify-code" : "send-code"); }} className="flex flex-col gap-4">
-   <label htmlFor={sent ? "otp" : "email"} className="text-sm font-medium">{sent ? "Код из письма" : "Почта"}</label>
-   {sent ? <input ref={codeInput} id="otp" name="otp" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={event => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} className="auth-input text-2xl tracking-[.3em]" />
-    : <input id="email" name="email" type="email" autoComplete="email" required autoFocus value={email} onChange={event => setEmail(event.target.value)} className="auth-input" />}
-   <button disabled={busy} className="rounded-xl bg-blue-600 px-5 py-3 font-medium text-white">{busy ? "Подождите…" : sent ? "Войти" : "Получить код"}</button>
-  </form>
-  {sent && <div className="mt-5 flex flex-wrap gap-5 text-sm"><button disabled={busy} className="text-blue-300" onClick={() => { setSent(false); setCode(""); setMessage(""); }}>Изменить почту</button><button disabled={busy} className="text-blue-300" onClick={() => { void submit("send-code"); }}>Отправить код ещё раз</button></div>}
-  <p role="status" aria-live="polite" className="mt-5 min-h-12 text-sm text-slate-400">{message}</p>
- </main>;
+ if (!ready) return <div className="workspace-shell brai-workspace-shell"><main className="p-8" role="status">Проверяем вход…</main></div>;
+ if (user && !exiting) return <div className="workspace-shell brai-workspace-shell">
+  <Navigation key={user.id} timerElapsed={timerElapsed} email={user.email} onLogout={() => { void logout(); }} />
+  <div className="workspace-content"><AccountScreens key={user.id} view={view} user={user} onLogout={() => { void logout(); }} onUnauthorized={unauthorized} accountMessage={message} onTimerElapsed={onTimerElapsed} /></div>
+ </div>;
+ if (exiting) return <div className="workspace-shell brai-workspace-shell"><main className="p-8" role="status">Выходим…</main></div>;
+ return <div className="workspace-shell brai-workspace-shell brai-auth-shell">
+  <main className="brai-login-surface dark">
+   <LoginGalaxy />
+   <Card className="brai-login-card">
+    <CardHeader className="brai-login-header">
+     <BraiBrandIcon className="size-9" />
+     <CardTitle className="text-2xl">Вход в Brai</CardTitle>
+     <CardDescription>{sent ? <>Письмо с кодом отправлено на {email}</> : "Продолжите работу с личным пространством"}</CardDescription>
+    </CardHeader>
+    <CardContent>
+     <form onSubmit={event => { event.preventDefault(); void submit(sent ? "verify-code" : "send-code"); }} className="flex flex-col gap-4">
+      <Field>
+       <FieldLabel htmlFor={sent ? "otp" : "email"}>{sent ? "Код из письма" : "Почта"}</FieldLabel>
+       {sent
+        ? <Input ref={codeInput} id="otp" name="otp" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={event => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} className="h-12 text-center text-2xl tracking-[.3em]" />
+        : <Input id="email" name="email" type="email" autoComplete="email" required autoFocus value={email} onChange={event => setEmail(event.target.value)} className="h-12" />}
+      </Field>
+      <Button disabled={busy} className="h-12 w-full">{busy ? "Подождите…" : sent ? "Войти" : "Получить код"}</Button>
+     </form>
+     {sent && <div className="mt-4 flex flex-wrap justify-between gap-3 text-sm">
+      <Button variant="link" size="sm" disabled={busy} onClick={() => { setSent(false); setCode(""); setMessage(""); }}>Изменить почту</Button>
+      <Button variant="link" size="sm" disabled={busy} onClick={() => { void submit("send-code"); }}>Отправить код ещё раз</Button>
+     </div>}
+     <p role="status" aria-live="polite" className="mt-3 min-h-6 text-sm text-muted-foreground">{message}</p>
+    </CardContent>
+   </Card>
+  </main>
+ </div>;
 }
 
 /** Сохраняет состояние посещённых экранов; выход или смена пользователя удаляют их. */

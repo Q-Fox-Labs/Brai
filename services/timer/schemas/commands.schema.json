@@ -8,6 +8,12 @@
     },
     {
       "$ref": "#/definitions/StopCommand"
+    },
+    {
+      "$ref": "#/definitions/EditCommand"
+    },
+    {
+      "$ref": "#/definitions/DeleteCommand"
     }
   ],
   "definitions": {
@@ -110,6 +116,62 @@
           }
         }
       ]
+    },
+    "EditCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "userId",
+        "commandId",
+        "timerId",
+        "expectedVersion",
+        "startedAt",
+        "stoppedAt"
+      ],
+      "properties": {
+        "userId": {
+          "$ref": "common.schema.json#/definitions/userId"
+        },
+        "commandId": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "timerId": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "expectedVersion": {
+          "$ref": "common.schema.json#/definitions/version"
+        },
+        "startedAt": {
+          "$ref": "#/definitions/IntentTimestamp"
+        },
+        "stoppedAt": {
+          "$ref": "#/definitions/IntentTimestamp"
+        }
+      }
+    },
+    "DeleteCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "userId",
+        "commandId",
+        "timerId",
+        "expectedVersion"
+      ],
+      "properties": {
+        "userId": {
+          "$ref": "common.schema.json#/definitions/userId"
+        },
+        "commandId": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "timerId": {
+          "$ref": "common.schema.json#/definitions/uuid"
+        },
+        "expectedVersion": {
+          "$ref": "common.schema.json#/definitions/version"
+        }
+      }
     },
     "IntentTimestamp": {
       "allOf": [

@@ -1,7 +1,9 @@
 "use client";
-// ABOUTME: Показывает формы ожидающих запросов и уведомления об отказах Brai.
+// ABOUTME: Показывает ожидающие решения в shared карточках и уведомляет об отказах.
 // ABOUTME: Отправляет решение только для поддерживаемого ожидающего native запроса.
 import { useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import type { PendingRequest } from "@brai/agent/contracts";
 import RequestNotice from "./request-notice";
 type Decision = string | { acceptWithExecpolicyAmendment: { execpolicy_amendment: string[] } } | { applyNetworkPolicyAmendment: { network_policy_amendment: { action: string; host: string } } };
@@ -28,21 +30,21 @@ export default function NativeForm({ request, disabled, send }: { request: Pendi
   const p = request.params;
   const approval = request.kind === "command-approval" || request.kind === "file-change-approval";
   const choices: Decision[] = request.kind === "file-change-approval" ? ["accept", "acceptForSession", "decline", "cancel"] : p.availableDecisions ?? ["accept", "acceptForSession", "decline", "cancel"];
-  if (request.kind === "unsupported") return hidden ? null : <section className="agent-request agent-request-notice" data-request-id={request.requestId} role="alert">
+  if (request.kind === "unsupported") return hidden ? null : <section className="agent-request-wrap" data-request-id={request.requestId} role="alert"><Card className="agent-request agent-request-notice">
     {request.method === "item/tool/call" ? <RequestNotice request={request} /> : <p>{rejectionText(request.reason)}</p>}
     <details className="agent-request-details"><summary>Техническая информация</summary><code>{request.method}</code></details>
-    <button type="button" onClick={() => setHidden(true)}>Скрыть уведомление</button>
-  </section>;
+    <Button type="button" variant="ghost" size="sm" onClick={() => setHidden(true)}>Скрыть уведомление</Button>
+  </Card></section>;
   function answer(value: unknown) {
     if (sent || sending.current || disabled || request.answered) return;
     sending.current = true; setSent(true);
     void send(value).then(accepted => { if (!accepted) { sending.current = false; setSent(false); } });
   }
-  const button = (choice: Decision, index: number) => <button type="button" key={index} className={choice === "accept" ? "agent-approval-accept" : ""} onClick={() => answer({ decision: choice })}>{decisionLabel(choice)}</button>;
+  const button = (choice: Decision, index: number) => <Button type="button" key={index} variant={choice === "accept" ? "default" : "outline"} className={choice === "accept" ? "agent-approval-accept" : ""} onClick={() => answer({ decision: choice })}>{decisionLabel(choice)}</Button>;
   return <form className="agent-request" data-request-id={request.requestId} data-request-kind={request.kind} onSubmit={event => {
     event.preventDefault();
     if (!approval) answer({ permissions: values.decision === "grant" ? p.permissions : {}, scope: "turn" });
-  }}>
+  }}><Card className="agent-request-card">
     <fieldset disabled={disabled || sent || request.answered}>
       <legend>{approval ? "Запрос разрешения" : "Дополнительные права"}</legend>
       {approval ? <>
@@ -53,9 +55,9 @@ export default function NativeForm({ request, disabled, send }: { request: Pendi
       </> : <>
         {p.reason && <p className="agent-request-question">{p.reason}</p>}
         <details><summary>Запрошенные права</summary><pre>{JSON.stringify(p.permissions, null, 2)}</pre></details><label>Решение <select required value={values.decision ?? ""} onChange={event => setValues({ decision: event.target.value })}><option value="">Выберите решение</option><option value="grant">Предоставить запрошенные права на ход</option><option value="none">Не предоставлять</option></select></label>
-        <button>Отправить ответ</button>
+        <Button type="submit">Отправить ответ</Button>
       </>}
       {(sent || request.answered) && <p className="agent-note" role="status">Ответ отправлен</p>}
     </fieldset>
-  </form>;
+  </Card></form>;
 }

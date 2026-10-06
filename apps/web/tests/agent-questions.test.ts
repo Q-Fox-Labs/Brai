@@ -1,5 +1,5 @@
-// ABOUTME: Проверяет переходы реальной карточки и точные native ответы без внешних сервисов.
-// ABOUTME: Hook runner моделирует React state; DOM и фокус проверяются отдельно в Chrome.
+// ABOUTME: Проверяет переходы карточки Agent и точные ответы без внешних сервисов.
+// ABOUTME: Shared UI загружается из исходников, hook runner сохраняет проверку состояния.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -9,6 +9,18 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { PendingRequest } from "@brai/agent/contracts";
 
 const require = createRequire(import.meta.url), ts = require("typescript") as typeof import("typescript");
+const uiCache = new Map<string, Record<string, unknown>>();
+function ui(name: string): Record<string, unknown> {
+  const path = name.slice("@/components/ui/".length), cached = uiCache.get(path);
+  if (cached) return cached;
+  const extension = path === "cn" ? "ts" : "tsx", source = readFileSync(new URL(`../components/ui/${path}.${extension}`, import.meta.url), "utf8");
+  const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  const module = { exports: {} as Record<string, unknown> };
+  uiCache.set(path, module.exports);
+  new Function("require", "module", "exports", output)((dependency: string) => dependency.startsWith("@/components/ui/") ? ui(dependency) : require(dependency), module, module.exports);
+  uiCache.set(path, module.exports);
+  return module.exports;
+}
 const source = readFileSync(new URL("../app/agent/questions.tsx", import.meta.url), "utf8");
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
 type KeyEvent = { key: string; shiftKey: boolean; repeat: boolean; preventDefault: () => void; nativeEvent: { isComposing?: boolean; keyCode?: number } };
@@ -25,9 +37,20 @@ function fixture(value = request(), send: (answer: unknown) => Promise<boolean> 
     useId: () => `question-${cursor++}`, useEffect: () => {},
   };
   const module = { exports: {} as { default: (props: { request: PendingRequest; disabled: boolean; send: typeof send }) => Node } };
-  new Function("require", "module", "exports", compiled)((name: string) => name === "react" ? hooks : require(name), module, module.exports);
+  new Function("require", "module", "exports", compiled)((name: string) => name === "react" ? hooks : name.startsWith("@/components/ui/") ? ui(name) : require(name), module, module.exports);
   const render = () => { cursor = 0; return module.exports.default({ request: value, disabled, send }); };
-  const nodes = (node: ReactNode): Node[] => Array.isArray(node) ? node.flatMap(nodes) : isValidElement<TestProps>(node) ? [node, ...nodes(node.props.children)] : [];
+  const nodes = (node: ReactNode): Node[] => {
+    if (Array.isArray(node)) return node.flatMap(nodes);
+    if (!isValidElement<TestProps>(node)) return [];
+    const wrappers = [uiCache.get("button")?.Button, uiCache.get("input")?.Input, uiCache.get("textarea")?.Textarea, uiCache.get("card")?.Card];
+    if (node.type === uiCache.get("card")?.Card) return nodes(node.props.children);
+    if (wrappers.includes(node.type)) {
+      if (typeof node.type === "function") return nodes((node.type as (props: TestProps) => ReactNode)(node.props));
+      const render = (node.type as unknown as { render?: (props: TestProps, ref: null) => ReactNode }).render;
+      if (render) return nodes(render(node.props, null));
+    }
+    return [node, ...nodes(node.props.children)];
+  };
   const find = (predicate: (node: Node) => boolean) => { const found = nodes(render()).find(predicate); assert.ok(found); return found; };
   const option = (index: number) => find(node => node.props["data-question-option"] === index);
   const button = (label: string) => find(node => node.type === "button" && node.props["aria-label"] === label);

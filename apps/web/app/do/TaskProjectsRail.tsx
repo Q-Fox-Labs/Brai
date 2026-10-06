@@ -6,8 +6,9 @@
 import { useMemo, useState } from "react";
 import { isContainer, isCountedStatus, taskTreeProjectId } from "./model";
 import { useTasks } from "./TasksContext";
+import { Button } from "@/components/ui/button";
 
-const itemClassName = "flex min-h-9 w-full items-center rounded-[7px] border-0 bg-transparent px-2.5 text-left text-[13px] font-semibold text-brai-ink hover:bg-brai-surface-soft aria-pressed:bg-brai-surface-soft aria-pressed:shadow-[inset_3px_0_0_var(--accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brai-accent/40";
+const itemClassName = "flex min-h-9 w-full items-center rounded-md border-0 bg-transparent px-2.5 text-left text-sm font-medium text-brai-ink hover:bg-brai-surface-soft aria-pressed:bg-brai-surface-soft aria-pressed:shadow-[inset_3px_0_0_var(--do-accent)] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brai-accent/40";
 
 /** Сохраняет разметку и взаимодействия исходного компонента September на локальных данных. */
 export default function TaskProjectsRail({
@@ -59,8 +60,10 @@ export default function TaskProjectsRail({
   return (
     <div className="grid gap-0.5">
       <div className="flex min-h-9 items-center px-2.5">
-        <button
-          className="mr-1 grid size-7 shrink-0 place-items-center rounded-[6px] border-0 bg-transparent text-brai-muted hover:bg-brai-surface-soft hover:text-brai-ink focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-brai-accent/40 [&_svg]:size-[18px] [&_svg]:fill-none [&_svg]:stroke-current [&_svg]:stroke-[1.7] [&_svg]:[stroke-linecap:round] [&_svg]:[stroke-linejoin:round]"
+        <Button
+          className="mr-1 size-8 shrink-0 p-0 text-brai-muted hover:bg-brai-surface-soft hover:text-brai-ink [&_svg]:size-[18px] [&_svg]:fill-none [&_svg]:stroke-current [&_svg]:stroke-[1.7] [&_svg]:[stroke-linecap:round] [&_svg]:[stroke-linejoin:round]"
+          variant="ghost"
+          size="icon-sm"
           type="button"
           aria-label="Скрыть меню проектов"
           aria-controls="task-projects-panel"
@@ -70,10 +73,12 @@ export default function TaskProjectsRail({
             <rect x="3" y="4" width="18" height="16" rx="2" />
             <path d="M9 4v16m-2.5-5L5 12l1.5-3" />
           </svg>
-        </button>
+        </Button>
         <h2 className="m-0 text-[13px] font-bold text-brai-ink">Проекты</h2>
-        <button
-          className="ml-auto grid size-7 place-items-center rounded-[6px] border-0 bg-transparent text-[20px] leading-none font-normal text-brai-muted hover:bg-brai-surface-soft hover:text-brai-ink focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-brai-accent/40"
+        <Button
+          className="ml-auto size-8 p-0 text-base font-normal text-brai-muted hover:bg-brai-surface-soft hover:text-brai-ink"
+          variant="ghost"
+          size="icon-sm"
           type="button"
           aria-label="Добавить проект"
           aria-expanded={isCreating}
@@ -83,7 +88,7 @@ export default function TaskProjectsRail({
           }}
         >
           +
-        </button>
+        </Button>
       </div>
 
       {isCreating && (
@@ -95,7 +100,7 @@ export default function TaskProjectsRail({
         >
           <input
             ref={projectInputRef}
-            className="h-9 w-full rounded-[7px] border border-brai-line bg-brai-surface-subtle px-2.5 text-[13px] text-brai-ink outline-none placeholder:text-brai-muted focus:border-brai-accent/65 focus:shadow-[0_0_0_3px_rgba(232,94,67,0.1)] disabled:opacity-65"
+            className="h-9 w-full rounded-md border border-brai-line bg-brai-surface-subtle px-2.5 text-sm text-brai-ink placeholder:text-brai-muted focus-visible:border-brai-accent/65 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brai-accent/20"
             type="text"
             value={projectTitle}
             onChange={(event) => setProjectTitle(event.target.value)}
@@ -131,7 +136,7 @@ export default function TaskProjectsRail({
         <span className={countClassName}>{projectCounts.all}</span>
       </button>
       <button
-        className={`${itemClassName} ${noProjectTarget ? "bg-brai-accent/15 shadow-[inset_0_0_0_2px_var(--accent)]" : ""}`}
+        className={`${itemClassName} ${noProjectTarget ? "bg-brai-accent/15 shadow-[inset_0_0_0_2px_var(--do-accent)]" : ""}`}
         type="button"
         aria-current={selectedProjectFilter === "none" ? "page" : undefined}
         aria-pressed={selectedProjectFilter === "none"}

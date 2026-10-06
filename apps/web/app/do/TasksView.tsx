@@ -5,6 +5,9 @@ import ErrorToast from "./ErrorToast";
 import { useTasks } from "./TasksContext";
 import TaskInspector from "./TaskInspector";
 import TaskRow from "./TaskRow";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card } from "@/components/ui/card";
 
 type TasksViewProps = {
   isProjectsDrawerOpen: boolean;
@@ -23,8 +26,10 @@ function ProjectsButton({
   onClick: () => void;
 }) {
   return (
-    <button
-      className={`${className} size-12 shrink-0 place-items-center rounded-[10px] border border-brai-line bg-brai-surface-subtle text-brai-muted hover:bg-brai-surface-soft hover:text-brai-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brai-accent/40 [&_svg]:size-5 [&_svg]:fill-none [&_svg]:stroke-current [&_svg]:stroke-[1.7] [&_svg]:[stroke-linecap:round] [&_svg]:[stroke-linejoin:round]`}
+    <Button
+      className={`${className} size-10 shrink-0 rounded-lg border-brai-line bg-brai-surface-subtle p-0 text-brai-muted hover:bg-brai-surface-soft hover:text-brai-ink [&_svg]:size-5 [&_svg]:fill-none [&_svg]:stroke-current [&_svg]:stroke-[1.7] [&_svg]:[stroke-linecap:round] [&_svg]:[stroke-linejoin:round]`}
+      variant="outline"
+      size="icon-lg"
       type="button"
       aria-label="Открыть меню проектов"
       aria-controls="task-projects-panel"
@@ -35,7 +40,7 @@ function ProjectsButton({
         <rect x="3" y="4" width="18" height="16" rx="2" />
         <path d="M9 4v16M5.5 8h1" />
       </svg>
-    </button>
+    </Button>
   );
 }
 
@@ -116,27 +121,30 @@ export default function TasksView({
 
   return (
     <>
-      <div className="relative grid h-full min-h-0 grid-cols-2 items-stretch gap-4 overflow-hidden max-[800px]:grid-cols-1">
-        <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-brai-line bg-brai-card max-[480px]:rounded-[14px]" aria-labelledby="tasks-heading">
+      <div className="relative grid h-full min-h-0 min-w-0 grid-cols-2 items-stretch gap-3 overflow-hidden max-[861px]:grid-cols-1">
+        <Card
+          render={<section aria-labelledby="tasks-heading" />}
+          className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border-brai-line bg-brai-card shadow-sm"
+        >
         <h1 className="sr-only" id="tasks-heading">Дела</h1>
-        <div className="flex min-w-0 gap-2.5 border-b border-brai-line p-3.5 max-[480px]:flex-wrap">
+        <div className="flex min-w-0 gap-2 border-b border-brai-line p-3 max-[480px]:flex-wrap">
         <form className="min-w-0 flex-1" onSubmit={(event) => void addTask(event)}>
           <div className="flex min-w-0 items-center gap-2.5">
             {!isProjectsExpanded && (
               <ProjectsButton
-                className="grid max-[800px]:hidden"
+                className="grid max-[861px]:hidden"
                 isExpanded={isProjectsExpanded}
                 onClick={onExpandProjects}
               />
             )}
             <ProjectsButton
-              className="hidden max-[800px]:grid"
+              className="hidden max-[861px]:grid"
               isExpanded={isProjectsDrawerOpen}
               onClick={onOpenProjectsDrawer}
             />
             <input
               ref={inputRef}
-              className="h-12 min-w-0 flex-1 rounded-[10px] border border-brai-line bg-brai-surface-subtle px-[15px] text-[15px] text-brai-ink outline-none transition-[border-color,box-shadow] duration-150 placeholder:text-brai-muted focus:border-brai-accent/65 focus:shadow-[0_0_0_3px_rgba(232,94,67,0.1)] disabled:opacity-65"
+              className="h-10 min-w-0 flex-1 rounded-lg border border-brai-line bg-brai-surface-subtle px-3 text-sm text-brai-ink placeholder:text-brai-muted focus-visible:border-brai-accent/65 focus-visible:ring-2 focus-visible:ring-brai-accent/20"
               type="text"
               value={title}
               onChange={(event) => setTitle(event.target.value)}
@@ -152,8 +160,8 @@ export default function TasksView({
         </form>
         <form className="flex shrink-0 items-center gap-1.5 max-[480px]:w-full" onSubmit={findTaskByIdentifier}>
           <label className="sr-only" htmlFor="task-identifier-search">Найти элемент по ID</label>
-          <input
-            className="h-12 w-[108px] rounded-[10px] border border-brai-line bg-brai-surface-subtle px-3 font-mono text-[14px] tabular-nums text-brai-ink outline-none placeholder:font-sans placeholder:text-brai-muted focus:border-brai-accent/65 focus:shadow-[0_0_0_3px_rgba(232,94,67,0.1)] max-[480px]:min-w-0 max-[480px]:flex-1"
+          <Input
+            className="h-10 w-[88px] rounded-lg border-brai-line bg-brai-surface-subtle px-3 font-mono text-sm tabular-nums text-brai-ink placeholder:font-sans placeholder:text-brai-muted max-[480px]:min-w-0 max-[480px]:flex-1"
             id="task-identifier-search"
             inputMode="numeric"
             autoComplete="off"
@@ -163,8 +171,10 @@ export default function TasksView({
             onChange={(event) => setIdentifierQuery(event.target.value.replace(/\D/g, ""))}
             disabled={isSearchingIdentifier}
           />
-          <button
-            className="grid size-12 place-items-center rounded-[10px] border border-brai-line bg-brai-surface-subtle text-brai-muted hover:bg-brai-surface-soft hover:text-brai-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brai-accent/40 disabled:cursor-wait disabled:opacity-60"
+          <Button
+            className="size-10 rounded-lg border-brai-line bg-brai-surface-subtle p-0 text-brai-muted hover:bg-brai-surface-soft hover:text-brai-ink"
+            variant="outline"
+            size="icon-lg"
             type="submit"
             aria-label="Найти элемент по ID"
             disabled={isSearchingIdentifier}
@@ -173,7 +183,7 @@ export default function TasksView({
               <circle cx="11" cy="11" r="6" />
               <path d="m16 16 4 4" />
             </svg>
-          </button>
+          </Button>
         </form>
         </div>
         <div
@@ -209,9 +219,9 @@ export default function TasksView({
             </>
           )}
         </div>
-        </section>
+        </Card>
         <button
-          className={`absolute inset-0 z-20 hidden border-0 bg-black/30 p-0 transition-opacity duration-200 max-[800px]:block ${selectedTask ? "visible opacity-100 pointer-events-auto" : "invisible opacity-0 pointer-events-none"}`}
+          className={`absolute inset-0 z-20 hidden border-0 bg-foreground/20 p-0 transition-opacity duration-200 max-[861px]:block ${selectedTask ? "visible opacity-100 pointer-events-auto" : "invisible opacity-0 pointer-events-none"}`}
           type="button"
           aria-label="Закрыть подробности"
           tabIndex={selectedTask ? 0 : -1}
@@ -220,7 +230,7 @@ export default function TasksView({
         <aside
           id="task-inspector-sheet"
           data-task-inspector-sheet
-          className={`h-full min-h-0 min-w-0 transition-[transform,visibility] duration-200 ease-out max-[800px]:absolute max-[800px]:inset-x-0 max-[800px]:bottom-0 max-[800px]:z-30 max-[800px]:h-[82%] max-[800px]:max-h-[680px] max-[800px]:overflow-hidden max-[800px]:rounded-t-[20px] max-[800px]:shadow-[0_-14px_36px_rgba(25,27,25,0.2)] ${selectedTask ? "max-[800px]:visible max-[800px]:translate-y-0" : "max-[800px]:invisible max-[800px]:translate-y-[calc(100%+16px)]"}`}
+          className={`h-full min-h-0 min-w-0 transition-[transform,visibility] duration-200 ease-out max-[861px]:absolute max-[861px]:inset-x-0 max-[861px]:bottom-0 max-[861px]:z-30 max-[861px]:h-[82%] max-[861px]:max-h-[680px] max-[861px]:overflow-hidden max-[861px]:rounded-t-2xl max-[861px]:shadow-xl ${selectedTask ? "max-[861px]:visible max-[861px]:translate-y-0" : "max-[861px]:invisible max-[861px]:translate-y-[calc(100%+16px)]"}`}
           aria-label="Подробности выбранного элемента"
         >
           <TaskInspector />

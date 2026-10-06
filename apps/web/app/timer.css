@@ -1,40 +1,79 @@
-/* ABOUTME: Сохраняет геометрию двух карточек таймера September в тёмной палитре Brai. */
-/* ABOUTME: Стили ограничены таймером и его отсчётом в общей навигации. */
-.timer-shell { height: 100%; min-height: 0; padding: 20px 24px; font-family: "Brai Do Manrope", Arial, sans-serif; }
-.timer-grid { display: grid; height: 100%; min-height: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: 16px; }
-.timer-card { height: 100%; min-height: 0; border: 1px solid var(--workspace-border); border-radius: 16px; background: #25272b; }
-.timer-control { overflow-y: auto; padding: 44px 32px 32px; text-align: center; transition: border-color .18s; }
-.timer-control.is-running { border-color: #b3a2ff80; }
-.timer-clock { display: block; margin-bottom: 30px; font-size: clamp(52px, 12vw, 76px); line-height: 1; letter-spacing: -.06em; font-variant-numeric: tabular-nums; }
-.timer-command { height: 48px; min-width: 148px; border: 0; border-radius: 10px; padding: 0 24px; background: #b3a2ff; color: #212326; font-size: 14px; font-weight: 700; transition: background-color .15s, transform .15s; }
-.timer-command:hover { background: #c6b9ff; transform: translateY(-1px); }
-.timer-command.is-running { background: #e7e9e3; color: #1c1e1a; }
-.timer-command.is-running:hover { background: #fff; }
-.timer-message { max-width: 360px; margin: 18px auto 0; color: var(--workspace-muted); font-size: 13px; line-height: 1.6; }
-.timer-history { display: flex; flex-direction: column; overflow: hidden; }
-.timer-history-header { display: flex; flex: none; height: 60px; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--workspace-border); padding: 0 20px; }
-.timer-history-header h1 { margin: 0; font-size: 14px; font-weight: 700; }
-.timer-history-header strong { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.timer-history-scroll { min-height: 0; flex: 1; overflow-y: auto; scrollbar-width: thin; scrollbar-color: #4e5157 transparent; }
-.timer-history-scroll ol { margin: 0; padding: 0; list-style: none; }
-.timer-history-empty { margin: 0; padding: 22px 20px; text-align: center; color: var(--workspace-muted); font-size: 13px; }
-.timer-history-row { display: flex; min-height: 54px; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--workspace-border); padding: 0 20px; }
-.timer-history-row:last-child { border-bottom: 0; }
-.timer-history-row time { flex: none; color: var(--workspace-muted); font-size: 13px; }
-.timer-history-row strong { flex: none; margin-left: auto; font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.timer-history-more { display: block; margin: 16px auto; border: 1px solid var(--workspace-border); border-radius: 8px; padding: 8px 16px; font-size: 13px; }
-.workspace-tabs .workspace-timer-tab { flex-direction: column; gap: 2px; }
-.workspace-timer-countdown { font-size: 11px; line-height: 1; font-variant-numeric: tabular-nums; color: #c6b9ff; }
-@media (max-width: 800px) {
- .timer-shell { height: auto; min-height: 100%; padding: 16px; }
- .timer-grid { height: auto; grid-template-columns: minmax(0, 1fr); align-items: start; }
- .timer-card { height: auto; }
- .timer-history-scroll { max-height: 320px; }
+/* ABOUTME: Задаёт геометрию экрана фокуса, его контекстных панелей и крупных цифр. */
+/* ABOUTME: Таймер заполняет доступную область, а длинное содержимое прокручивается внутри ScrollArea. */
+.timer-shell { position: relative; height: 100%; min-height: 0; min-width: 0; overflow: hidden; box-sizing: border-box; padding: 14px 0 44px; font: inherit; }
+.timer-workspace { position: relative; z-index: 1; display: grid; height: 100%; min-height: 0; grid-template-rows: auto minmax(0, 1fr); gap: 8px; }
+.timer-page-header { display: grid; min-height: 56px; box-sizing: border-box; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 8px 28px; background: var(--background); }
+.timer-page-title { display: flex; min-width: 0; align-items: center; gap: 12px; color: var(--foreground); }
+.timer-page-title > svg { width: 20px; height: 20px; flex: none; }
+.timer-title-separator { width: 1px; height: 16px; margin-right: 8px; background: var(--border); }
+.timer-page-title h1 { overflow: hidden; margin: 0; font-size: 24px; font-weight: 600; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.timer-workspace-toolbar { display: flex; align-items: center; gap: 12px; }
+.timer-context-trigger { position: relative; width: 42px; height: 42px; flex: none; border-color: var(--border); border-radius: 8px; background: var(--card); color: var(--muted-foreground); }
+.timer-context-trigger:hover { color: var(--primary); }
+.timer-context-trigger[aria-pressed="true"] { border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); background: var(--accent); color: var(--accent-foreground); }
+.timer-context-trigger svg { width: 20px; height: 20px; }
+.timer-context-body { position: relative; display: grid; height: 100%; min-height: 0; min-width: 0; margin-left: 28px; grid-template-columns: minmax(0, 1fr); gap: 0; }
+.timer-context-body.has-panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.timer-context-scroll { min-height: 0; }
+.timer-context-scroll .timer-goals { overflow: visible; }
+.timer-focus { position: relative; isolation: isolate; width: 100%; height: 100%; min-height: 0; min-width: 0; overflow: hidden; }
+.timer-focus.is-centered { max-width: 768px; justify-self: center; }
+.timer-focus-background { position: absolute; z-index: 0; inset: 0; overflow: hidden; pointer-events: none; background: var(--background); }
+.timer-galaxy-background, .timer-evil-eye-background { position: absolute; inset: 0; opacity: 0; filter: invert(1); transition: opacity 1.5s ease-in-out; }
+.dark .timer-galaxy-background, .dark .timer-evil-eye-background { filter: none; }
+.timer-galaxy-background.is-visible, .timer-evil-eye-background.is-visible { opacity: 1; transition-delay: 1.5s; }
+.timer-focus-scroll { height: 100%; min-height: 0; min-width: 0; }
+.timer-screen { position: relative; display: grid; box-sizing: content-box; width: 100%; height: 100%; min-height: 100%; grid-template-rows: minmax(100%, auto) auto; gap: 24px; padding-bottom: 144px; }
+.timer-screen.is-centered { justify-items: center; }
+.timer-primary { display: grid; width: 100%; height: 100%; min-height: 0; grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr); justify-items: center; }
+.timer-face { position: relative; z-index: 0; grid-row: 2; width: 100%; max-width: 100%; justify-self: center; overflow: hidden; border-color: var(--border); border-radius: 18px; padding: 20px; background: color-mix(in srgb, var(--card) 60%, transparent); text-align: center; }
+.timer-face.is-centered { width: min(640px, 100%); padding: clamp(20px, 5vw, 34px); }
+.timer-face.is-active { border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); }
+.timer-border-trail { pointer-events: none; }
+.timer-digits { position: relative; z-index: 1; max-width: 100%; margin: 24px 0 22px; color: var(--foreground); font-size: 3rem; font-weight: 600; line-height: .95; font-variant-numeric: tabular-nums; text-align: center; white-space: nowrap; }
+.timer-digits-row { display: inline-flex; align-items: center; gap: .125rem; }
+.timer-digits-row [data-slot="timer-hours"], .timer-digits-row [data-slot="timer-minutes"], .timer-digits-row [data-slot="timer-seconds"] { display: inline-flex; }
+.timer-scroll-hint { position: relative; grid-row: 3; width: 100%; height: 100%; color: color-mix(in srgb, var(--muted-foreground) 55%, transparent); pointer-events: none; }
+.timer-scroll-hint > svg, .timer-scroll-hint-icon { position: absolute; top: calc(50% - 16px); left: calc(50% - 16px); width: 32px; height: 32px; }
+.timer-scroll-hint-icon { display: grid; place-items: center; }
+.timer-scroll-hint-icon svg { width: 32px; height: 32px; }
+.timer-actions { display: grid; width: min(640px, 100%); justify-items: center; gap: 8px; justify-self: center; }
+.timer-session-line { min-height: 16px; margin: 0; color: color-mix(in srgb, var(--muted-foreground) 55%, transparent); font-size: 12px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.timer-session-line.is-hidden { visibility: hidden; }
+.timer-action-button { width: 120px; height: 40px; min-height: 40px; border-radius: 999px; padding: 0 16px; font-size: 16px; box-shadow: 0 1px 2px color-mix(in srgb, var(--foreground) 12%, transparent); white-space: nowrap; }
+.timer-background-toggle { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 12px; }
+.timer-background-toggle button { color: var(--muted-foreground); }
+.timer-background-toggle button[aria-pressed="true"] { border-color: color-mix(in srgb, var(--primary) 50%, transparent); color: var(--foreground); }
+.timer-background-toggle svg { width: 16px; height: 16px; }
+.timer-message { max-width: 360px; margin: 8px auto 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.6; text-align: center; }
+@media (min-width: 640px) { .timer-digits.is-centered { font-size: 3.75rem; } }
+@media (min-width: 768px) { .timer-digits.is-centered { font-size: 4.5rem; } }
+@media (min-width: 1024px) { .timer-digits.is-centered { font-size: 6rem; } }
+@media (max-width: 860px) {
+ .timer-shell { padding: 0 0 28px; }
+ .timer-page-header { min-height: 44px; gap: 8px; padding: 4px 14px; }
+ .timer-page-title { gap: 8px; }
+ .timer-title-separator { margin-right: 4px; }
+ .timer-workspace-toolbar { gap: 6px; }
+ .timer-context-trigger { width: 32px; height: 32px; border-radius: 6px; }
+ .timer-context-trigger svg { width: 18px; height: 18px; }
+ .timer-context-body { margin-left: 14px; }
+ .timer-context-body.has-panel { grid-template-columns: minmax(0, 1fr); }
+ .timer-action-button { width: 100%; }
+}
+@media (min-width: 861px) {
+ .brai-workspace-shell .workspace-content:has(.workspace-screen.workspace-timer:not([hidden])) { padding-bottom: 0; }
 }
 @media (max-width: 480px) {
- .timer-shell { padding: 12px; }
- .timer-card { border-radius: 14px; }
- .timer-control { padding: 36px 16px 24px; }
- .timer-clock { margin-bottom: 24px; font-size: clamp(48px, 16vw, 66px); }
+ .timer-focus { border-radius: 14px; }
+ .timer-face { border-radius: 15px; }
+ .timer-face.is-centered { padding: 20px 12px; }
+ .timer-digits { margin: 20px 0; }
+ .timer-actions { width: 100%; }
 }
-@media (prefers-reduced-motion: reduce) { .timer-control, .timer-command { transition: none; } }
+@media (prefers-reduced-motion: reduce) {
+ .timer-galaxy-background, .timer-evil-eye-background { transition: none; }
+}
+
+/* Source ScrollArea in desktop and mobile owns content scrolling. */
+.timer-mobile-context-sheet .timer-goals { height: auto; overflow: visible; }

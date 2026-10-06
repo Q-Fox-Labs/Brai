@@ -7,9 +7,11 @@ import type { Command, EventKind } from "./domain.js";
 /** Отображает смысл события на публичный транспортный адрес. */
 export function eventSubject(kind: EventKind): string { return "brai.timer.v2.event." + kind; }
 /** Отображает проверенный транспортный адрес на операцию ядра. */
-export function commandType(subject: string): "start" | "stop" {
+export function commandType(subject: string): "start" | "stop" | "edit" | "delete" {
  if (subject === "brai.timer.v2.command.start") return "start";
  if (subject === "brai.timer.v2.command.stop") return "stop";
+ if (subject === "brai.timer.v2.command.edit") return "edit";
+ if (subject === "brai.timer.v2.command.delete") return "delete";
  throw new Error("INVALID_ARGUMENT");
 }
 const Ajv = AjvImport as unknown as typeof AjvImport.default;
@@ -21,7 +23,9 @@ const commandBase="https://brai.invalid/contracts/timer/v2/commands.schema.json#
 const messageBase="https://brai.invalid/contracts/timer/v2/messages.schema.json#/definitions/";
 const start=ajv.compile({$ref:commandBase+"StartCommand"});
 const stop=ajv.compile({$ref:commandBase+"StopCommand"});
-const queries: Record<string,ValidateFunction> = Object.fromEntries(["SnapshotRequest", "HistoryRequest", "CommandLookupRequest"].map(name=>[name,ajv.compile({$ref:messageBase+name})]));
+const edit=ajv.compile({$ref:commandBase+"EditCommand"});
+const remove=ajv.compile({$ref:commandBase+"DeleteCommand"});
+const queries: Record<string,ValidateFunction> = Object.fromEntries(["SnapshotRequest", "HistoryRequest", "CommandLookupRequest", "StatisticsRequest"].map(name=>[name,ajv.compile({$ref:messageBase+name})]));
 /** Извлекает идентичность полного JSON до schema validation для конфликтов уже принятого ID. */
 export function identity(data: Uint8Array): {userId: string | null;commandId: string | null;content: string | null} {
  try {
@@ -34,7 +38,7 @@ export function identity(data: Uint8Array): {userId: string | null;commandId: st
 export function parseCommand(subject: string, data: Uint8Array): Command | null {
   try {
     const input=JSON.parse(new TextDecoder("utf-8", {fatal:true}).decode(data));
-    const validate=subject === "brai.timer.v2.command.start" ? start : subject === "brai.timer.v2.command.stop" ? stop : undefined;
+    const validate=subject === "brai.timer.v2.command.start" ? start : subject === "brai.timer.v2.command.stop" ? stop : subject === "brai.timer.v2.command.edit" ? edit : subject === "brai.timer.v2.command.delete" ? remove : undefined;
     return validate?.(input) ? input as Command : null;
   } catch { return null; }
 }

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { Pool } from "pg";
 const quote=(name:string)=>'"'+name.replaceAll('"','""')+'"';
-/** Применяет версии 1–2 и grants в одной транзакции; роли создаёт оператор. */
+/** Применяет миграции и grants в одной транзакции; роли создаёт оператор. */
 export async function migrate(pool: Pool, ownerRole: string, appRole: string) {
   if (!ownerRole || !appRole || ownerRole===appRole) throw new Error("OWNER_AND_APP_MUST_DIFFER");
   const client=await pool.connect();
@@ -18,19 +18,25 @@ export async function migrate(pool: Pool, ownerRole: string, appRole: string) {
     await client.query(`REVOKE ALL ON DATABASE ${quote(rows[0].db)} FROM PUBLIC`);
     await client.query("REVOKE CREATE ON SCHEMA public FROM PUBLIC");
     const exists=(await client.query("SELECT to_regclass('timer.migrations') AS table_name")).rows[0].table_name;
-    const v2=exists && (await client.query("SELECT 1 FROM timer.migrations WHERE version=2")).rowCount;
-    if (!v2) {
+    if (!exists) {
       await client.query(readFileSync(new URL("../migrations/001.sql",import.meta.url),"utf8"));
       await client.query(readFileSync(new URL("../migrations/002.sql",import.meta.url),"utf8"));
     }
+    const versions=new Set((await client.query("SELECT version FROM timer.migrations")).rows.map(row=>Number(row.version)));
+    if (!versions.has(2)) await client.query(readFileSync(new URL("../migrations/002.sql",import.meta.url),"utf8"));
+    if (!versions.has(3)) await client.query(readFileSync(new URL("../migrations/003.sql",import.meta.url),"utf8"));
+    // AIDEV-NOTE: Проверка закреплённой конфигурации выполняется и после уже применённой версии 4.
+    await client.query(readFileSync(new URL("../migrations/004.sql",import.meta.url),"utf8"));
     await client.query(`REVOKE ALL ON ALL TABLES IN SCHEMA timer FROM PUBLIC,${quote(appRole)}`);
     await client.query(`GRANT CONNECT ON DATABASE ${quote(rows[0].db)} TO ${quote(appRole)}`);
     await client.query(`REVOKE ALL ON SCHEMA timer FROM ${quote(appRole)}`);
     await client.query(`GRANT USAGE ON SCHEMA timer TO ${quote(appRole)}`);
     await client.query(`GRANT SELECT ON timer.state,timer.intervals,timer.commands TO ${quote(appRole)}`);
     await client.query(`GRANT INSERT ON timer.state,timer.intervals,timer.commands TO ${quote(appRole)}`);
-    await client.query(`GRANT UPDATE(version,active_timer_id) ON timer.state TO ${quote(appRole)}`);
-    await client.query(`GRANT UPDATE(stopped_at,duration_ms) ON timer.intervals TO ${quote(appRole)}`);
+    await client.query(`GRANT UPDATE(version,active_timer_id,history_revision) ON timer.state TO ${quote(appRole)}`);
+    await client.query(`GRANT UPDATE(started_at,stopped_at,duration_ms,deleted_at) ON timer.intervals TO ${quote(appRole)}`);
+    await client.query(`GRANT SELECT,INSERT ON timer.interval_facts TO ${quote(appRole)}`);
+    await client.query(`GRANT SELECT ON timer.sys_challenge TO ${quote(appRole)}`);
     await client.query("COMMIT");
   } catch(error){await client.query("ROLLBACK").catch(()=>{});throw error;}finally{client.release();}
 }

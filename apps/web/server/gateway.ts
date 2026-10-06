@@ -2,7 +2,7 @@
 // ABOUTME: Секреты используются только в серверном процессе; HTTP 202 требует PubAck.
 import { connect, AckPolicy, DeliverPolicy, ReplayPolicy, nanos, type NatsConnection, type Consumer } from "nats";
 import { valid } from "./contracts";
-import type { Snapshot, History, CommandResult, TimerEvent } from "../lib/types";
+import type { Snapshot, History, CommandResult, Statistics, TimerEvent } from "../lib/types";
 /** Ошибка границы HTTP; unknown означает возможное сохранение команды. */
 export class GatewayError extends Error {
  constructor(public status: number, public code: string, public outcome: "not-published" | "unknown" | "query" = "query") { super(code); }
@@ -29,8 +29,8 @@ export async function natsConnection(): Promise<NatsConnection> {
  return nc;
 }
 /** Выполняет NATS Services query; проверяет стандартные заголовки до DTO. */
-export async function query<T>(name: "snapshot" | "history" | "command", body: object): Promise<T> {
- const dto = name === "snapshot" ? "Snapshot" : name === "history" ? "History" : "CommandLookup";
+export async function query<T>(name: "snapshot" | "history" | "command" | "statistics", body: object): Promise<T> {
+ const dto = name === "snapshot" ? "Snapshot" : name === "history" ? "History" : name === "command" ? "CommandLookup" : "Statistics";
  if (!valid(`messages.schema.json#/definitions/${dto}Request`, body)) throw new GatewayError(400, "INVALID_ARGUMENT");
  try {
   const nc = await natsConnection();
@@ -40,7 +40,9 @@ export async function query<T>(name: "snapshot" | "history" | "command", body: o
    const error: unknown = JSON.parse(Buffer.from(reply.data).toString());
    if (!valid("common.schema.json#/definitions/error", error)) throw new GatewayError(502, "BAD_REPLY");
    const code = (error as { code: string }).code;
-   throw new GatewayError(code === "NOT_FOUND" ? 404 : code === "INVALID_ARGUMENT" ? 400 : 503, code);
+   const status = code === "NOT_FOUND" ? 404 : code === "INVALID_ARGUMENT" ? 400 :
+    ["HISTORY_CHANGED", "INTERVAL_OVERLAP", "VERSION_CONFLICT"].includes(code) ? 409 : 503;
+   throw new GatewayError(status, code);
   }
   const data: unknown = JSON.parse(Buffer.from(reply.data).toString());
   if (!valid(`messages.schema.json#/definitions/${dto}Response`, data)) throw new GatewayError(502, "BAD_REPLY");
@@ -51,8 +53,9 @@ export async function query<T>(name: "snapshot" | "history" | "command", body: o
  }
 }
 /** Проверяет вход до публикации; повтор требует исходного body и commandId. */
-export async function publish(type: "start" | "stop", body: unknown): Promise<void> {
- if (!valid(`commands.schema.json#/definitions/${type === "start" ? "StartCommand" : "StopCommand"}`, body)) throw new GatewayError(400, "INVALID_ARGUMENT", "not-published");
+export async function publish(type: "start" | "stop" | "edit" | "delete", body: unknown): Promise<void> {
+ const dto = { start: "StartCommand", stop: "StopCommand", edit: "EditCommand", delete: "DeleteCommand" }[type];
+ if (!valid(`commands.schema.json#/definitions/${dto}`, body)) throw new GatewayError(400, "INVALID_ARGUMENT", "not-published");
  let nc: NatsConnection;
  try { nc = await natsConnection(); } catch { throw new GatewayError(503, "UNAVAILABLE", "not-published"); }
  if (!ready(nc)) throw new GatewayError(503, "UNAVAILABLE", "not-published");
@@ -75,7 +78,7 @@ export async function eventConsumer(nc: NatsConnection): Promise<Consumer> {
 /** Валидирует одно событие по варианту owner schema. */
 export function parseEvent(data: Uint8Array): TimerEvent {
  const event: unknown = JSON.parse(Buffer.from(data).toString());
- if (!["StartedEvent", "StoppedEvent", "RejectedEvent"].some(dto => valid(`messages.schema.json#/definitions/${dto}`, event))) throw new Error("BAD_EVENT");
+ if (!["StartedEvent", "StoppedEvent", "TimerEditedEvent", "TimerDeletedEvent", "RejectedEvent"].some(dto => valid(`messages.schema.json#/definitions/${dto}`, event))) throw new Error("BAD_EVENT");
  return event as TimerEvent;
 }
 /** Читает согласованный снимок владельца. */
@@ -84,3 +87,5 @@ export const snapshot = (userId: string) => query<Snapshot>("snapshot", { userId
 export const history = (userId: string, limit: number, cursor: string | null) => query<History>("history", { userId, limit, cursor });
 /** Читает окончательный ledger result; NOT_FOUND не отменяет команду. */
 export const command = (userId: string, commandId: string) => query<CommandResult>("command", { userId, commandId });
+/** Возвращает полную дневную и челлендж статистику timer владельца. */
+export const statistics = (userId: string) => query<Statistics>("statistics", { userId });

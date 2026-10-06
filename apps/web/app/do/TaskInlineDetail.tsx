@@ -10,6 +10,7 @@ import {
 import type { Task } from "./types";
 import { useTasks } from "./TasksContext";
 import type { TaskDragArea } from "./use-task-drag";
+import { Textarea } from "@/components/ui/textarea";
 
 /** Сохраняет разметку и взаимодействия исходного компонента September на локальных данных. */
 export default function TaskInlineDetail({
@@ -41,7 +42,7 @@ export default function TaskInlineDetail({
   const kind = task.isMission ? "миссии" : task.isQuest ? "квеста" : task.isGoal ? "цели" : "задачи";
   const label = `${isResult ? "Результат" : "Описание"} ${kind} «${task.title}»`;
   const toneClassName = isResult
-    ? "rounded bg-[#e7f8f2] text-[#0d624e] shadow-[0_0_0_3px_#e7f8f2] dark:bg-[#173b27] dark:text-[#9ce2ba] dark:shadow-[0_0_0_3px_#173b27]"
+    ? "do-result-inline rounded"
     : "text-brai-text-secondary";
 
   if (isEditing) {
@@ -51,7 +52,7 @@ export default function TaskInlineDetail({
         data-task-detail-editor
         data-task-editor-control
       >
-        <textarea
+        <Textarea
           ref={(element) => {
             const key = detailElementKey(task.id, field, area);
             if (element) {
@@ -61,7 +62,8 @@ export default function TaskInlineDetail({
               detailElementsRef.current.delete(key);
             }
           }}
-          className={`block max-h-[2.7em] min-h-[1.35em] w-full resize-none overflow-y-auto border-0 bg-transparent p-0 text-[12px] leading-[1.35] whitespace-pre-wrap outline-none focus:bg-brai-surface-focus focus:shadow-[0_0_0_3px_var(--surface-focus)] ${toneClassName}`}
+          bare
+          className={`block max-h-[2.7em] min-h-[1.35em] w-full resize-none overflow-y-auto border-0 bg-transparent p-0 text-sm leading-5 whitespace-pre-wrap outline-none focus:bg-brai-surface-focus focus:shadow-[0_0_0_3px_var(--do-surface-focus)] ${toneClassName}`}
           defaultValue={value}
           aria-label={label}
           spellCheck

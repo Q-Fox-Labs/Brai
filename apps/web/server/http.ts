@@ -8,7 +8,7 @@ export function failure(error: unknown): Response {
  return Response.json({ code: known.code, outcome: known.outcome }, { status: known.status, headers: { "Cache-Control": "no-store" } });
 }
 /** Читает не более 2048 bytes и публикует только owner-valid DTO. */
-export async function postCommand(request: Request, type: "start" | "stop"): Promise<Response> {
+export async function postCommand(request: Request, type: "start" | "stop" | "edit" | "delete"): Promise<Response> {
  try {
   checkOrigin(request);
   const session = await requireTimerSession(request);

@@ -131,7 +131,7 @@ export default function TaskMenu({
             </button>
           )}
           <button
-            className={deleteConfirmationId === task.id ? "!bg-[#c94432] !font-bold !text-white hover:!bg-[#af3627]" : ""}
+            className={deleteConfirmationId === task.id ? "!bg-brai-danger !font-bold !text-destructive-foreground hover:!bg-brai-danger/85" : ""}
             type="button"
             disabled={isTaskChanging(task.id)}
             onClick={(event) => {

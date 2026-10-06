@@ -22,7 +22,7 @@ export default function TaskAgentPanel({ canRun }: { taskId: string; canRun: boo
             Состояние
           </span>
           <div className="flex items-center gap-2 text-[14px] font-semibold text-brai-ink">
-            <span className={`size-2 rounded-full ${effectiveStatus.isRunning ? "bg-brai-accent animate-pulse" : effectiveStatus.isInterrupted || effectiveStatus.events.at(-1)?.kind === "failed" ? "bg-[#c94432]" : "bg-brai-muted/50"}`} />
+            <span className={`size-2 rounded-full ${effectiveStatus.isRunning ? "bg-brai-accent animate-pulse" : effectiveStatus.isInterrupted || effectiveStatus.events.at(-1)?.kind === "failed" ? "bg-brai-danger" : "bg-brai-muted/50"}`} />
             <span>{isLoading ? "Загрузка…" : statusLabel()}</span>
             {elapsed && <span className="font-mono text-[12px] font-normal tabular-nums text-brai-muted">{elapsed}</span>}
           </div>

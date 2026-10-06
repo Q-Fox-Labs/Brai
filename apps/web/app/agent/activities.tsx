@@ -1,6 +1,7 @@
-// ABOUTME: Раскрывает группу действий, затем отдельно читает полное содержимое каждого действия.
+// ABOUTME: Показывает native действия в общих карточках и читает детали по раскрытию.
 // ABOUTME: Пустые группы скрыты; закрытые группы не читают содержимое; рассуждения используют Markdown.
 import { useEffect, useState } from "react";
+import { Card } from "@/components/ui/card";
 import type { DisplayItem } from "@brai/agent/contracts";
 import type { LazyReads } from "../../lib/agent/lazy";
 import Markdown from "./markdown";
@@ -27,21 +28,21 @@ export default function Activities({ items, context, reads }: Props) {
   }, [open, reads, context.generation, context.epoch, context.projectId, context.threadId, signature, retry]);
   const visible = data?.filter(item => item.type !== "reasoning" || item.summary?.trim());
   if (!items.length || items.every(item => item.type === "reasoning" && item.hasContent === false) || (visible?.length === 0 && !loading && !error)) return null;
-  return <details className="agent-activity-group" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
+  return <Card className="agent-activity-card"><details className="agent-activity-group" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
     <summary>Думаю <span className="agent-note">{visible?.length ?? items.length}</span></summary>
     {open && <div className="agent-activity-list">
     {loading && <p className="agent-note" role="status">{data ? "Обновляем действия…" : "Загружаем действия…"}</p>}
     {error && <p className="agent-note" role="alert">{error} <button onClick={() => setRetry(value => value + 1)}>Повторить</button></p>}
     {visible?.map(item => <Activity key={item.id} item={item} context={context} reads={reads} />)}
     </div>}
-  </details>;
+  </details></Card>;
 }
 function Activity({ item, context, reads }: { item: DisplayItem; context: Context; reads: LazyReads }) {
   const [open, setOpen] = useState(false);
-  return <article data-item-id={item.id} className="agent-item agent-tool-item"><details onToggle={event => setOpen(event.currentTarget.open)}>
+  return <article data-item-id={item.id} className="agent-item"><Card className="agent-tool-item"><details onToggle={event => setOpen(event.currentTarget.open)}>
     <summary><span>{label(item)}</span>{item.type === "reasoning" ? <div className="agent-activity-title agent-reasoning-title"><Markdown text={item.summary ?? ""} /></div> : <span className="agent-activity-title">{item.summary}</span>}<span className="agent-note">{item.status === "inProgress" ? "Выполняется" : item.status === "failed" ? "Ошибка" : item.status === "completed" ? "Готово" : ""}{item.exitCode !== undefined && ` · код ${item.exitCode}`}</span></summary>
     {open && <ActivityDetail key={`${context.generation}:${context.epoch}:${item.revision ?? 0}`} item={item} context={context} reads={reads} />}
-  </details></article>;
+  </details></Card></article>;
 }
 function ActivityDetail({ item, context, reads }: { item: DisplayItem; context: Context; reads: LazyReads }) {
   const [data, setData] = useState<DisplayItem | null>(null), [error, setError] = useState(""), [retry, setRetry] = useState(0);

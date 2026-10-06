@@ -1,6 +1,6 @@
 "use client";
-// ABOUTME: Показывает выбранный native чат рядом с группами проектов и чатов.
-// ABOUTME: История и команды используют существующий клиент; раскладка не управляет исполнителем.
+// ABOUTME: Собирает Agent workspace на shared controls и текущем native клиенте.
+// ABOUTME: История, команды, черновики и исполнение остаются у прежних владельцев.
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DisplayItem, NativeSnapshot, ModelCatalog, PermissionMode, ThreadMetadata, AgentMode } from "@brai/agent/contracts";
 import type { AgentLimits } from "@brai/agent/contracts";
@@ -21,6 +21,11 @@ import Materials from "./materials";
 import { collectMaterials, goalBlocksNewTask, emptyMaterialView, executionText, openMaterial, reconcileMaterialView, type MaterialView } from "./materials-model";
 import { acceptedDraft, imageModel, prepareImage, releaseAttachmentPreview, type Attachment, type ComposerDraft } from "../../lib/agent/images";
 import { uploadAttachment } from "../../lib/agent/uploads";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Card } from "@/components/ui/card";
+import { Textarea } from "@/components/ui/textarea";
+import "./agent.css";
 
 type CachedChat = { snapshot: NativeSnapshot | null; history: DisplayItem[]; generation: string; cursor: string | null; draft: ComposerDraft; model: string; effort: string; permissionMode: PermissionMode; agentMode: AgentMode; materials: MaterialView; ready: boolean; uncertain: boolean };
 type QueuedMessage = { id: string; chat: string; generation: string; draft: ComposerDraft; model: string; effort: string; permissionMode: PermissionMode; agentMode: AgentMode; state: "waiting" | "sending" | "failed" | "unknown" };
@@ -517,26 +522,26 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     requestAnimationFrame(() => composerInput.current?.focus());
   }
 
-  return <main className="agent-shell">
+  return <main className="agent-shell bg-background text-foreground">
     <Sidebar readMessages={readMessages} projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={sidebarOpen} email={email} busy={busy || uncertain.current} accountLimits={accountLimits}
       select={selectChat} create={id => { void mutate("create", defaultModel ? { model: defaultModel.model, permissionMode } : { permissionMode }, id); }} more={id => { const next = pages[id]?.nextCursor; if (next) void loadThreads(id, next); }}
       archive={(id, chatId) => { void archiveChat(id, chatId); }} refresh={id => { void loadThreads(id); }} close={() => setSidebarOpen(false)} logout={onLogout} />
     <section className="agent-workspace" aria-labelledby="agent-chat-title">
-      <header className="agent-toolbar">
-        <button className="agent-mobile-toggle" aria-controls="agent-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(value => !value)}>☰ <span>Чаты</span></button>
+      <header className="agent-toolbar border-b border-border bg-background">
+        <Button type="button" variant="ghost" className="agent-mobile-toggle" aria-controls="agent-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(value => !value)}>☰ <span>Чаты</span></Button>
         <div className="agent-heading"><p>{project?.name ?? "Агент"}</p><h1 id="agent-chat-title" title={title}>{title}</h1></div>
-        {materials.length > 0 && <button type="button" className="agent-materials-toggle" aria-expanded={materialView.open} onClick={() => chooseMaterial(materialView.selected || materials.at(-1)!.id)}>Материалы{materialView.updated.length > 0 ? " · обновлено" : ""}</button>}
-        <span className="agent-chat-status" role="status">{view && connected ? view.goal?.state === "ready" && view.goal.value?.status === "active" ? "Достигает цели" : stateLabels[view.state] ?? "Состояние обновляется" : view ? "Переподключение…" : threadId ? "Подключаемся…" : "Готов к выбору"}</span>
+        {materials.length > 0 && <Button type="button" variant={materialView.open ? "secondary" : "outline"} size="sm" className="agent-materials-toggle" aria-expanded={materialView.open} onClick={() => chooseMaterial(materialView.selected || materials.at(-1)!.id)}>Материалы{materialView.updated.length > 0 ? " · обновлено" : ""}</Button>}
+        <Badge variant="outline" className="agent-chat-status" role="status">{view && connected ? view.goal?.state === "ready" && view.goal.value?.status === "active" ? "Достигает цели" : stateLabels[view.state] ?? "Состояние обновляется" : view ? "Переподключение…" : threadId ? "Подключаемся…" : "Готов к выбору"}</Badge>
       </header>
       <div ref={conversation} className="agent-conversation" aria-label="История" onScroll={event => {
         const element = event.currentTarget;
         followBottom.current = element.scrollHeight - element.clientHeight - element.scrollTop <= 1;
       }}>
-        {!threadId && <div className="agent-empty"><span className="agent-empty-symbol" aria-hidden="true">✳</span><h2>С чего начнём?</h2><p>Выберите чат слева или создайте новый в нужном проекте.</p>{project && <button className="agent-primary" disabled={busy || uncertain.current} onClick={() => void mutate("create", defaultModel ? { model: defaultModel.model, permissionMode } : { permissionMode })}>Новый чат · {project.name}</button>}</div>}
+        {!threadId && <div className="agent-empty"><Card className="agent-empty-card"><span className="agent-empty-symbol" aria-hidden="true">✳</span><h2>С чего начнём?</h2><p>Выберите чат слева или создайте новый в нужном проекте.</p>{project && <Button type="button" className="agent-primary" disabled={busy || uncertain.current} onClick={() => void mutate("create", defaultModel ? { model: defaultModel.model, permissionMode } : { permissionMode })}>Новый чат · {project.name}</Button>}</Card></div>}
         <div className="agent-timeline">
-          {cursor && <button className="agent-history-more" onClick={() => void moreHistory()}>Загрузить предыдущие сообщения</button>}
-          {timeline.map(entry => entry.kind === "message" ? entry.item.type === "plan" ? <button key={entry.item.id} type="button" className="agent-material-card" onClick={() => chooseMaterial(`plan:${entry.item.id}`)}>Предложенный план <span>{materialView.updated.includes(`plan:${entry.item.id}`) ? "Обновлено · " : ""}Открыть →</span></button> : <Item key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.item.id}`} item={entry.item} context={activityContext} reads={lazyReads} /> : <Activities key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.id}`} items={entry.items} context={activityContext} reads={lazyReads} />)}
-          {materials.filter(value => value.kind !== "plan").map(value => <button key={value.id} type="button" className="agent-material-card" onClick={() => chooseMaterial(value.id)}>{value.title}<span>{materialView.updated.includes(value.id) ? "Обновлено · " : ""}Открыть →</span></button>)}
+          {cursor && <Button type="button" variant="outline" className="agent-history-more" onClick={() => void moreHistory()}>Загрузить предыдущие сообщения</Button>}
+          {timeline.map(entry => entry.kind === "message" ? entry.item.type === "plan" ? <Button key={entry.item.id} type="button" variant="outline" className="agent-material-card" onClick={() => chooseMaterial(`plan:${entry.item.id}`)}>Предложенный план <span>{materialView.updated.includes(`plan:${entry.item.id}`) ? "Обновлено · " : ""}Открыть →</span></Button> : <Item key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.item.id}`} item={entry.item} context={activityContext} reads={lazyReads} /> : <Activities key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.id}`} items={entry.items} context={activityContext} reads={lazyReads} />)}
+          {materials.filter(value => value.kind !== "plan").map(value => <Button key={value.id} type="button" variant="outline" className="agent-material-card" onClick={() => chooseMaterial(value.id)}>{value.title}<span>{materialView.updated.includes(value.id) ? "Обновлено · " : ""}Открыть →</span></Button>)}
           {pendingCorrections.map(value => <Item key={value.item.id} item={value.item} context={activityContext} reads={lazyReads} pending={value.state} dismiss={() => setCorrections(previous => previous.filter(item => item.item.id !== value.item.id))} />)}
           {view?.turn?.error && <TurnErrorNotice error={view.turn.error} />}
           {view?.requests.filter(request => request.kind !== "question").map(request => (connected || request.kind === "unsupported") && <NativeForm key={view.generation + ":" + view.epoch + ":" + request.requestId} request={request} disabled={disabled} send={answer => mutate("answer", { requestId: request.requestId, answer })} />)}
@@ -552,7 +557,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           <label className="sr-only" htmlFor="agent-draft">{active ? "Дополнить текущий ход" : "Сообщение"}</label>
           {!!attachments.length && <ul className="agent-attachments" aria-label="Прикреплённые изображения">{attachments.map(image => <li key={image.id}><img src={image.url ?? image.previewUrl} alt={image.name} /><span className="agent-attachment-name" title={image.name}>{image.name}</span>{image.reduced && <span className="agent-image-reduced">Уменьшено</span>}<button type="button" className="agent-attachment-remove" aria-label={`Удалить ${image.name}`} onClick={() => { attachmentUpload.current?.abort(); attachmentUpload.current = null; changeDraft({ ...composerRef.current, images: composerRef.current.images.filter(value => value.id !== image.id) }); }}>×</button></li>)}</ul>}
           <div className="agent-composer-input">
-          <textarea ref={composerInput} id="agent-draft" style={{ height: inputHeight }} placeholder={active ? "Дополнить текущее задание…" : agentMode === "goal" ? "Какой цели нужно достичь?" : agentMode === "plan" ? "Что нужно спланировать?" : "Что нужно сделать?"} value={draft} onChange={event => changeDraft({ ...composerRef.current, text: event.target.value, revision: composerRef.current.revision + 1 })} onPaste={event => {
+          <Textarea bare className="agent-draft-input" ref={composerInput} id="agent-draft" style={{ height: inputHeight }} placeholder={active ? "Дополнить текущее задание…" : agentMode === "goal" ? "Какой цели нужно достичь?" : agentMode === "plan" ? "Что нужно спланировать?" : "Что нужно сделать?"} value={draft} onChange={event => changeDraft({ ...composerRef.current, text: event.target.value, revision: composerRef.current.revision + 1 })} onPaste={event => {
             const files = Array.from(event.clipboardData.files);
             if (!files.length) for (const item of Array.from(event.clipboardData.items)) { if (item.kind === "file") { const file = item.getAsFile(); if (file) files.push(file); } }
             if (files.length) { if (!event.clipboardData.getData("text/plain")) event.preventDefault(); addFiles(files); }
@@ -563,7 +568,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
             if (event.ctrlKey || event.metaKey) enqueueMessage();
             else if (draft.trim() || attachments.length) event.currentTarget.form?.requestSubmit();
           }} />
-          <button type="button" className="agent-input-resize" aria-label="Изменить высоту поля ввода" title="Потяните вверх, чтобы увеличить поле" tabIndex={-1}
+          <Button type="button" variant="ghost" className="agent-input-resize" aria-label="Изменить высоту поля ввода" title="Потяните вверх, чтобы увеличить поле" tabIndex={-1}
             onPointerDown={event => {
               if (!event.isPrimary || event.button !== 0) return;
               event.preventDefault();
@@ -579,17 +584,17 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
               resizing.current = null;
               event.currentTarget.releasePointerCapture(event.pointerId);
             }}
-            onPointerCancel={() => { resizing.current = null; }} onLostPointerCapture={() => { resizing.current = null; }}><ComposerIcon kind="resize" /></button>
+            onPointerCancel={() => { resizing.current = null; }} onLostPointerCapture={() => { resizing.current = null; }}><ComposerIcon kind="resize" /></Button>
           </div>
           <div className="agent-composer-actions">
           <div className="agent-composer-tools">
           <input ref={fileInput} type="file" hidden multiple accept="image/png,image/jpeg,image/webp" onChange={event => { addFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
-          <button type="button" className="agent-composer-icon" aria-label="Прикрепить изображения" title={imagesAllowed ? "Прикрепить PNG, JPEG или WebP" : !active && agentMode === "goal" ? "В режиме «Цель» изображения недоступны" : "Текущая модель не принимает изображения"} disabled={disabled || !imagesAllowed || attachments.length + preparationCount >= imageLimit} onClick={() => fileInput.current?.click()}><ComposerIcon kind="plus" /></button>
+          <Button type="button" variant="outline" size="icon-sm" className="agent-composer-icon" aria-label="Прикрепить изображения" title={imagesAllowed ? "Прикрепить PNG, JPEG или WebP" : !active && agentMode === "goal" ? "В режиме «Цель» изображения недоступны" : "Текущая модель не принимает изображения"} disabled={disabled || !imagesAllowed || attachments.length + preparationCount >= imageLimit} onClick={() => fileInput.current?.click()}><ComposerIcon kind="plus" /></Button>
           {/* Настройки относятся к следующему start или очереди; steer сохраняет настройки активного хода. */}
           <AgentModeButton mode={agentMode} disabled={disabled} choose={value => { cancelPreparation(); setAgentMode(value); }} />
           <ModelSettings key={`settings:${projectId}:${threadId}`} contextUsage={connected && view?.state !== "connection-lost" && view?.state !== "executor-unavailable" ? view?.contextUsage : null} models={models?.data ?? []} model={selectedModel?.model ?? ""} effort={selectedEffort} permissionMode={permissionMode} choosePermissions={setPermissionMode} disabled={busy || uncertain.current || (!!threadId && !connected)} chooseModel={value => { cancelPreparation(); setModel(value); setEffort(value === defaultModelId ? defaultEffort : ""); }} chooseEffort={setEffort} />
           </div>
-          <button className="agent-send" disabled={sendDisabled} aria-label={action === "interrupt" || action === "goalClear" ? "Стоп" : action === "steer" ? "Скорректировать" : "Отправить"} title={action === "interrupt" || action === "goalClear" ? "Стоп" : action === "steer" ? "Скорректировать" : "Отправить"}><ComposerIcon kind={action === "interrupt" || action === "goalClear" ? "stop" : "send"} /></button>
+          <Button type="submit" size="icon" className="agent-send" disabled={sendDisabled} aria-label={action === "interrupt" || action === "goalClear" ? "Стоп" : action === "steer" ? "Скорректировать" : "Отправить"} title={action === "interrupt" || action === "goalClear" ? "Стоп" : action === "steer" ? "Скорректировать" : "Отправить"}><ComposerIcon kind={action === "interrupt" || action === "goalClear" ? "stop" : "send"} /></Button>
           </div>
           {agentMode === "goal" && !active && <small className="agent-composer-hint">В режиме «Цель» отправьте описание задачи без изображений.</small>}
         </form>}
@@ -604,11 +609,14 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
 
 /** Сообщения используют безопасный Markdown; тела действий принадлежат отдельному ленивому списку. */
 function Item({ item, context, reads, pending, dismiss }: { item: DisplayItem; context: Parameters<typeof MessageImages>[0]["context"]; reads: Parameters<typeof MessageImages>[0]["reads"]; pending?: PendingCorrection["state"]; dismiss?: () => void }) {
-  return <article data-item-id={item.id} className={`agent-item ${item.type === "userMessage" ? "agent-user-message" : "agent-assistant-message"}`}>
+  const content = <>
     <span className="agent-message-author">{item.type === "userMessage" ? "Вы" : "Brai"}{item.phase && <span className="agent-message-phase">{item.phase === "final_answer" ? "Итог" : item.phase === "commentary" ? "Промежуточное сообщение" : item.phase}</span>}</span>
-    {pending && <span className="agent-correction-status" role="status"><span aria-hidden="true">{pending === "failed" || pending === "unknown" ? "⚠" : "◷"}</span> {pending === "sending" ? "Отправляется…" : pending === "waiting" ? "Ожидает применения" : pending === "unknown" ? "Отправка не подтверждена. Проверьте чат." : "Не отправлено. Повторите из поля ввода."}{pending === "failed" && <button type="button" onClick={dismiss}>Убрать</button>}</span>}
+    {pending && <span className="agent-correction-status" role="status"><span aria-hidden="true">{pending === "failed" || pending === "unknown" ? "⚠" : "◷"}</span> {pending === "sending" ? "Отправляется…" : pending === "waiting" ? "Ожидает применения" : pending === "unknown" ? "Отправка не подтверждена. Проверьте чат." : "Не отправлено. Повторите из поля ввода."}{pending === "failed" && <Button type="button" variant="link" size="sm" onClick={dismiss}>Убрать</Button>}</span>}
     <MessageText key={JSON.stringify([item.revision, item.text, item.truncated])} item={item} context={context} reads={reads} />
     {!!item.imageCount && <MessageImages item={item} context={context} reads={reads} />}
+  </>;
+  return <article data-item-id={item.id} className={`agent-item ${item.type === "userMessage" ? "agent-user-message-container" : "agent-assistant-message"}`}>
+    {item.type === "userMessage" ? <Card className="agent-user-message">{content}</Card> : content}
   </article>;
 }
 

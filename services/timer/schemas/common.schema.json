@@ -26,7 +26,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["code", "message", "retryable"],
       "properties": {
-        "code": {"type": "string", "enum": ["INVALID_ARGUMENT", "VERSION_CONFLICT", "TIMER_ALREADY_ACTIVE", "TIMER_NOT_ACTIVE", "COMMAND_ID_CONFLICT", "NOT_FOUND", "INTERNAL"]},
+        "code": {"type": "string", "enum": ["INVALID_ARGUMENT", "VERSION_CONFLICT", "TIMER_ALREADY_ACTIVE", "TIMER_NOT_ACTIVE", "COMMAND_ID_CONFLICT", "INTERVAL_OVERLAP", "HISTORY_CHANGED", "NOT_FOUND", "INTERNAL"]},
         "message": {"type": "string", "minLength": 1},
         "retryable": {"type": "boolean"},
         "currentVersion": {"$ref": "#/definitions/version"}

@@ -1,5 +1,5 @@
-/* ABOUTME: Оформляет семантические Markdown-элементы в сообщении агента.
-   ABOUTME: Ограничивает стили контейнером renderer и сохраняет переносы кода. */
+/* ABOUTME: Оформляет Markdown Agent через общие светлые и тёмные токены.
+   ABOUTME: Сохраняет точный вывод команд и палитру диаграмм Mermaid. */
 .agent-markdown { min-width: 0; overflow-wrap: anywhere; }
 .agent-markdown > :first-child { margin-top: 0; }
 .agent-markdown > :last-child { margin-bottom: 0; }
@@ -16,24 +16,24 @@
 .agent-markdown li > ol { list-style-type: lower-alpha; }
 .agent-markdown li { padding-left: .15em; }
 .agent-markdown li > p { margin: 4px 0; }
-.agent-markdown blockquote { margin: 10px 0; padding: 2px 0 2px 14px; border-left: 3px solid rgb(148 163 184 / 45%); color: rgb(203 213 225 / 85%); }
+.agent-markdown blockquote { margin: 10px 0; padding: 2px 0 2px 14px; border-left: 3px solid var(--border); color: var(--muted-foreground); }
 .agent-markdown blockquote > :first-child { margin-top: 0; }
 .agent-markdown blockquote > :last-child { margin-bottom: 0; }
-.agent-markdown code { border-radius: 4px; background: rgb(15 23 42 / 75%); padding: .12em .35em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
-.agent-markdown .markdown-code-block { overflow-x: auto; margin: 10px 0; border: 1px solid rgb(148 163 184 / 20%); border-radius: 8px; background: rgb(15 23 42 / 70%); padding: 12px 14px; white-space: pre; }
+.agent-markdown code { border-radius: 4px; background: var(--secondary); padding: .12em .35em; font-family: var(--font-app-mono); font-size: .9em; }
+.agent-markdown .markdown-code-block { overflow-x: auto; margin: 10px 0; border: 1px solid var(--border); border-radius: 8px; background: var(--card); padding: 12px 14px; white-space: pre; }
 .agent-markdown .markdown-code-block code { padding: 0; background: transparent; font-size: .86em; }
-.agent-item .agent-markdown .markdown-code-block { overflow-wrap: normal; white-space: pre; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.agent-item .agent-markdown .markdown-code-block { overflow-wrap: normal; white-space: pre; font-family: var(--font-app-mono); }
 .agent-item .agent-markdown .markdown-code-block code { font-family: inherit; }
-.agent-markdown .markdown-mermaid { max-width: 100%; overflow: hidden; margin: 12px 0; border: 1px solid rgb(148 163 184 / 22%); border-radius: 12px; background: #202124; }
+.agent-markdown .markdown-mermaid { max-width: 100%; overflow: hidden; margin: 12px 0; border: 1px solid var(--border); border-radius: 12px; background: #202124; color: #e5e7eb; }
 .markdown-mermaid-toolbar { display: flex; justify-content: flex-end; padding: 8px 8px 0; }
-.markdown-mermaid-toolbar button, .markdown-mermaid-viewer-toolbar button { display: inline-flex; align-items: center; justify-content: center; min-width: 40px; min-height: 40px; padding: 6px 12px; border: 1px solid #45474e; border-radius: 8px; background: #2e3036; color: #e5e7eb; font: inherit; cursor: pointer; }
-.markdown-mermaid-toolbar button:hover, .markdown-mermaid-viewer-toolbar button:hover { background: #3a3d44; }
-.markdown-mermaid-toolbar button:focus-visible, .markdown-mermaid-viewer-toolbar button:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
+.markdown-mermaid-toolbar button, .markdown-mermaid-viewer-toolbar button { display: inline-flex; align-items: center; justify-content: center; min-width: 40px; min-height: 40px; padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--foreground); font: inherit; cursor: pointer; }
+.markdown-mermaid-toolbar button:hover, .markdown-mermaid-viewer-toolbar button:hover { background: var(--accent); }
+.markdown-mermaid-toolbar button:focus-visible, .markdown-mermaid-viewer-toolbar button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .markdown-mermaid-toolbar button { font-size: 24px; }
 .markdown-mermaid-dialog { box-sizing: border-box; width: 100vw; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: #202124; color: #e5e7eb; }
 .markdown-mermaid-dialog[open] { display: flex; flex-direction: column; }
 .markdown-mermaid-dialog::backdrop { background: #202124; }
-.markdown-mermaid-viewer-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; border-bottom: 1px solid #45474e; }
+.markdown-mermaid-viewer-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; border-bottom: 1px solid var(--border); }
 .markdown-mermaid-viewer-toolbar > span { margin-right: auto; }
 .markdown-mermaid-viewer-toolbar output { min-width: 48px; text-align: center; font-variant-numeric: tabular-nums; }
 .markdown-mermaid-viewport { display: flex; flex: 1; min-height: 0; overflow: auto; padding: 24px; cursor: grab; touch-action: none; }
@@ -43,13 +43,13 @@
 .markdown-mermaid .node rect { rx: 8px; ry: 8px; }
 .agent-markdown .markdown-mermaid-canvas { max-width: 100%; overflow-x: auto; padding: 18px; }
 .agent-markdown .markdown-mermaid-canvas svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
-.agent-markdown .markdown-mermaid-status, .agent-markdown .markdown-mermaid-error { display: block; padding: 10px 14px; color: rgb(203 213 225 / 78%); font-size: 12px; }
-.agent-markdown .markdown-mermaid-error { border-top: 1px solid rgb(148 163 184 / 18%); }
+.agent-markdown .markdown-mermaid-status, .agent-markdown .markdown-mermaid-error { display: block; padding: 10px 14px; color: var(--muted-foreground); font-size: 12px; }
+.agent-markdown .markdown-mermaid-error { border-top: 1px solid var(--border); }
 .agent-markdown .markdown-mermaid-error .markdown-code-block { margin-bottom: 0; }
-.agent-markdown a { color: #93c5fd; text-decoration: underline; text-underline-offset: 2px; }
+.agent-markdown a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
 .agent-markdown del { opacity: .8; }
-.agent-markdown hr { margin: 16px 0; border: 0; border-top: 1px solid rgb(148 163 184 / 30%); }
+.agent-markdown hr { margin: 16px 0; border: 0; border-top: 1px solid var(--border); }
 .agent-markdown .markdown-table-wrap { max-width: 100%; overflow-x: auto; margin: 10px 0; }
 .agent-markdown table { width: 100%; border-collapse: collapse; font-size: .92em; }
-.agent-markdown th, .agent-markdown td { border: 1px solid rgb(148 163 184 / 25%); padding: 6px 9px; text-align: left; vertical-align: top; }
-.agent-markdown th { background: rgb(148 163 184 / 10%); font-weight: 600; }
+.agent-markdown th, .agent-markdown td { border: 1px solid var(--border); padding: 6px 9px; text-align: left; vertical-align: top; }
+.agent-markdown th { background: var(--muted); font-weight: 600; }

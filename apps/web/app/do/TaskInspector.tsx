@@ -11,6 +11,9 @@ import TaskHistory from "./TaskHistory";
 import TaskStructure from "./TaskStructure";
 import { useTasks } from "./TasksContext";
 import type { Task } from "./types";
+import { Card } from "@/components/ui/card";
+import { Textarea } from "@/components/ui/textarea";
+import { Button } from "@/components/ui/button";
 
 const inspectorTabs = [
   { id: "details", label: "Подробности" },
@@ -38,8 +41,9 @@ function TaskConnections({
   return (
     <div className="grid gap-2">
       {task.blockers.map((blocker) => (
-        <button
-          className="w-full rounded-lg border border-brai-line bg-brai-surface-subtle px-3 py-2.5 text-left text-[13px] text-brai-ink hover:bg-brai-surface-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brai-accent/40"
+        <Button
+          className="h-auto w-full justify-start rounded-lg border-brai-line bg-brai-surface-subtle px-3 py-2.5 text-left text-sm font-normal text-brai-ink whitespace-normal hover:bg-brai-surface-soft"
+          variant="outline"
           type="button"
           key={`blocker-${blocker.id}`}
           aria-label={`Открыть блокер «${blocker.title}»`}
@@ -50,11 +54,12 @@ function TaskConnections({
             {blocker.publicId}
           </span>
           {blocker.title}
-        </button>
+        </Button>
       ))}
       {blockedTasks.map((blockedTask) => (
-        <button
-          className="w-full rounded-lg border border-brai-line bg-brai-surface-subtle px-3 py-2.5 text-left text-[13px] text-brai-ink hover:bg-brai-surface-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brai-accent/40"
+        <Button
+          className="h-auto w-full justify-start rounded-lg border-brai-line bg-brai-surface-subtle px-3 py-2.5 text-left text-sm font-normal text-brai-ink whitespace-normal hover:bg-brai-surface-soft"
+          variant="outline"
           type="button"
           key={`blocked-${blockedTask.id}`}
           aria-label={`Открыть зависимый элемент «${blockedTask.title}»`}
@@ -65,7 +70,7 @@ function TaskConnections({
             {blockedTask.publicId}
           </span>
           {blockedTask.title}
-        </button>
+        </Button>
       ))}
     </div>
   );
@@ -96,14 +101,14 @@ export default function TaskInspector() {
 
   if (!task) {
     return (
-      <section
-        className="flex h-full min-h-[220px] items-center justify-center rounded-2xl border border-brai-line bg-brai-card px-5 py-8 max-[800px]:rounded-b-none max-[800px]:rounded-t-[20px]"
+      <Card
+        className="flex h-full min-h-[220px] items-center justify-center rounded-xl border-brai-line bg-brai-card px-5 py-8 text-center text-sm text-brai-muted shadow-sm max-[861px]:rounded-b-none max-[861px]:rounded-t-2xl"
         aria-live="polite"
       >
         <p className="m-0 text-center text-[13px] text-brai-muted">
           Выберите элемент слева
         </p>
-      </section>
+      </Card>
     );
   }
 
@@ -125,7 +130,7 @@ export default function TaskInspector() {
       ? "border-brai-quest checked:!border-brai-quest checked:!bg-brai-quest-fill"
       : task.isGoal
         ? "border-brai-goal checked:!border-brai-goal checked:!bg-brai-goal-fill"
-        : "border-brai-muted checked:border-brai-muted checked:bg-brai-muted";
+    : "border-brai-muted checked:border-brai-accent checked:bg-brai-accent";
   const selectTab = (tab: InspectorTab) => {
     setActiveTab(tab);
     window.requestAnimationFrame(() => {
@@ -134,17 +139,16 @@ export default function TaskInspector() {
   };
 
   return (
-    <section
-      className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-brai-line bg-brai-card max-[800px]:rounded-b-none max-[800px]:rounded-t-[20px]"
-      aria-labelledby="selected-task-heading"
-      aria-live="polite"
+    <Card
+      render={<section aria-labelledby="selected-task-heading" aria-live="polite" />}
+      className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border-brai-line bg-brai-card shadow-sm max-[861px]:rounded-b-none max-[861px]:rounded-t-2xl"
     >
-      <header className={`shrink-0 border-b border-brai-line px-5 py-4 transition-colors ${isCompleted ? "bg-[#eaf8ef] dark:bg-[#173924]" : ""}`}>
+      <header className={`shrink-0 border-b border-brai-line px-4 py-3 transition-colors ${isCompleted ? "do-completed-header" : ""}`} data-task-completed-header={isCompleted || undefined}>
         <div className="flex items-start justify-between gap-4">
           <div className="flex min-w-0 flex-1 items-start gap-[13px]">
             <span className="relative mt-[5px] size-[19px] shrink-0">
               <input
-                className={`size-full appearance-none rounded border-2 bg-brai-field disabled:cursor-wait ${checkboxToneClassName} ${task.status === "not_completed" ? "!border-[#c94432] !bg-brai-field checked:!border-[#c94432] checked:!bg-brai-field" : ""}`}
+                className={`size-full appearance-none rounded border-2 bg-brai-field disabled:cursor-wait ${checkboxToneClassName} ${task.status === "not_completed" ? "!border-brai-danger !bg-brai-field checked:!border-brai-danger checked:!bg-brai-field" : ""}`}
                 type="checkbox"
                 checked={isCountedStatus(task.status)}
                 disabled={isContainer(task) || task.isDraft || isTaskChanging(task.id) || isBlocked}
@@ -159,15 +163,16 @@ export default function TaskInspector() {
               {isCountedStatus(task.status) && (
                 <span
                   aria-hidden="true"
-                  className={`pointer-events-none absolute inset-0 grid place-items-center text-[15px] leading-none font-bold ${task.status === "not_completed" ? "text-[#c94432]" : "text-white"}`}
+                  className={`pointer-events-none absolute inset-0 grid place-items-center text-sm leading-none font-bold ${task.status === "not_completed" ? "text-brai-danger" : isContainer(task) ? "text-[#191b19]" : "text-primary-foreground"}`}
                 >
                   {task.status === "not_completed" ? "×" : "✓"}
                 </span>
               )}
             </span>
             <div className="min-w-0 flex-1">
-              <textarea
-                className="[field-sizing:content] block min-h-[1.3em] w-full resize-none overflow-hidden rounded border-0 bg-transparent p-0 text-[22px] leading-[1.3] font-semibold tracking-[-0.02em] text-brai-ink wrap-anywhere outline-none read-only:cursor-text focus:bg-brai-surface-focus focus:shadow-[0_0_0_3px_var(--surface-focus)] disabled:cursor-wait disabled:opacity-65"
+              <Textarea
+                bare
+                className="[field-sizing:content] block min-h-[1.3em] w-full resize-none overflow-hidden rounded border-0 bg-transparent p-0 text-xl leading-tight font-semibold tracking-tight text-brai-ink wrap-anywhere outline-none read-only:cursor-text focus:bg-brai-surface-focus focus:shadow-[0_0_0_3px_var(--do-surface-focus)] disabled:cursor-wait disabled:opacity-65"
                 id="selected-task-heading"
                 value={taskTitleDrafts.get(task.id) ?? task.title}
                 rows={1}
@@ -198,7 +203,7 @@ export default function TaskInspector() {
               />
               <div className="mt-2.5 flex min-w-0 items-center justify-between gap-3 text-[13px] text-brai-muted">
                 <div className="flex items-center gap-2">
-                  <span className={`inline-flex min-h-8 shrink-0 items-center rounded-lg border px-3 py-1.5 text-[12px] font-bold tracking-[0.02em] uppercase ${kindClassName}`}>
+                  <span className={`inline-flex min-h-7 shrink-0 items-center rounded-md border px-2.5 py-1 text-xs font-bold uppercase ${kindClassName}`}>
                     {kind.label}
                   </span>
                   <span className="font-mono text-[12px] tabular-nums text-brai-muted">
@@ -224,24 +229,28 @@ export default function TaskInspector() {
               )}
             </div>
           </div>
-          <button
-            className="grid size-8 shrink-0 place-items-center rounded-lg border-0 bg-transparent text-[22px] leading-none font-light text-brai-muted hover:bg-brai-surface-soft hover:text-brai-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brai-accent/40"
+          <Button
+            className="size-8 shrink-0 p-0 text-xl font-light text-brai-muted hover:bg-brai-surface-soft hover:text-brai-ink"
+            variant="ghost"
+            size="icon-sm"
             type="button"
             aria-label="Закрыть подробности"
             onClick={() => setSelectedTaskId(null)}
           >
             ×
-          </button>
+          </Button>
         </div>
       </header>
 
-      <nav className="shrink-0 border-b border-brai-line px-5" aria-label="Разделы элемента">
-        <div className="flex min-w-0 gap-6 overflow-x-auto" role="tablist" aria-label="Разделы элемента">
+      <nav className="shrink-0 border-b border-brai-line px-4" aria-label="Разделы элемента">
+        <div className="flex min-w-0 gap-4 overflow-x-auto" role="tablist" aria-label="Разделы элемента">
           {inspectorTabs.map((tab, index) => {
             const isActive = activeTab === tab.id;
             return (
-              <button
-                className={`relative min-h-11 shrink-0 border-0 border-b-2 bg-transparent px-0 text-[13px] font-medium transition-colors ${isActive ? "border-brai-accent text-brai-ink" : "border-transparent text-brai-muted hover:text-brai-ink"}`}
+              <Button
+                className={`relative min-h-10 shrink-0 rounded-none border-0 border-b-2 bg-transparent px-0 text-sm font-medium transition-colors hover:bg-transparent ${isActive ? "border-brai-accent text-brai-ink" : "border-transparent text-brai-muted hover:text-brai-ink"}`}
+                variant="ghost"
+                size="sm"
                 type="button"
                 role="tab"
                 id={`task-${task.id}-${tab.id}-tab`}
@@ -274,14 +283,14 @@ export default function TaskInspector() {
                     </span>
                   )}
                 </span>
-              </button>
+              </Button>
             );
           })}
         </div>
       </nav>
 
       <div
-        className="grid min-h-0 flex-1 content-start gap-4 overscroll-contain overflow-y-auto px-5 py-4"
+        className="grid min-h-0 flex-1 content-start gap-3 overscroll-contain overflow-y-auto px-4 py-3"
         id={`task-${task.id}-panel`}
         role="tabpanel"
         aria-labelledby={`task-${task.id}-${activeTab}-tab`}
@@ -335,6 +344,6 @@ export default function TaskInspector() {
           />
         </div>
       </div>
-    </section>
+    </Card>
   );
 }

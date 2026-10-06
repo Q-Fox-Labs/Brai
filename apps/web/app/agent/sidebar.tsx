@@ -1,8 +1,10 @@
 "use client";
-// ABOUTME: Показывает группы проектов и названия чатов в левой панели.
-// ABOUTME: Только выбор и раскрытие списка; запросы и команды принадлежат экрану.
+// ABOUTME: Показывает компактный список проектов и чатов в shared controls.
+// ABOUTME: Выбор и раскрытие списка не переносят запросы из экрана.
 import { useEffect, useId, useRef, useState } from "react";
-import * as Separator from "@radix-ui/react-separator";
+import { Button } from "@/components/ui/button";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
 import type { AgentLimits, ThreadMetadata } from "@brai/agent/contracts";
 import { formatLimitReset, limitCountdown } from "../../lib/agent/limits";
 
@@ -20,39 +22,39 @@ type Props = {
 /** Группирует уже прочитанные чаты; длинное название доступно полностью через title. */
 export default function Sidebar({ projects, pages, projectId, threadId, open, email, busy, accountLimits, readMessages = {}, select, create, more, refresh, archive, close, logout }: Props) {
   const [visible, setVisible] = useState<Record<string, number>>({});
-  return <aside id="agent-sidebar" className="agent-sidebar" data-open={open} aria-label="Проекты и чаты" onKeyDown={event => { if (event.key === "Escape") close(); }}>
-    <header className="agent-sidebar-header"><h2 className="agent-brand">Проекты</h2><button className="agent-sidebar-close" aria-label="Закрыть список чатов" onClick={close}>×</button></header>
-    <Separator.Root className="agent-separator" />
-    <nav className="agent-projects" aria-label="Проекты и чаты">
+  return <aside id="agent-sidebar" className="agent-sidebar" data-open={open} aria-label="Проекты и чаты" onKeyDown={event => { if (event.key === "Escape" && !event.defaultPrevented) close(); }}>
+    <header className="agent-sidebar-header"><h2 className="agent-brand">Проекты</h2><Button type="button" variant="ghost" size="icon-sm" className="agent-sidebar-close" aria-label="Закрыть список чатов" onClick={close}>×</Button></header>
+    <Separator className="agent-separator" />
+    <ScrollArea className="agent-projects" contentInset="none"><nav className="agent-project-list" aria-label="Проекты и чаты">
       {!projects.length && <p className="agent-sidebar-note">Загружаем проекты…</p>}
       {projects.map((project, index) => {
         const page = pages[project.projectId], count = visible[project.projectId] ?? 5;
         return <section className="agent-project" key={project.projectId} aria-label={project.name}>
           <div className="agent-project-heading">
-            <button className="agent-project-select" aria-label={`Проект ${project.name}`} aria-pressed={projectId === project.projectId} disabled={!project.available} onClick={() => select(project.projectId)}>
+            <Button type="button" variant="ghost" className="agent-project-select" aria-label={`Проект ${project.name}`} aria-pressed={projectId === project.projectId} disabled={!project.available} onClick={() => select(project.projectId)}>
               <svg className={`agent-project-icon agent-project-color-${index % 3}`} width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /><path d="m8 12 3 2-3 2m6 0h3" /></svg>
               <span>{project.name}</span><span className={`agent-project-dot ${project.available ? "is-available" : ""}`} title={project.available ? "Проект доступен" : "Проект недоступен"} />
-            </button>
-            <button className="agent-icon-button" aria-label={`Новый чат в ${project.name}`} title="Новый чат" disabled={!project.available || busy} onClick={() => create(project.projectId)}>+</button>
+            </Button>
+            <Button type="button" variant="ghost" size="icon-sm" className="agent-icon-button" aria-label={`Новый чат в ${project.name}`} title="Новый чат" disabled={!project.available || busy} onClick={() => create(project.projectId)}>+</Button>
           </div>
           <div className="agent-thread-list">
             {sortThreads(page?.data ?? []).slice(0, count).map(thread => {
               const title = thread.title || thread.preview || "Новый чат", selected = projectId === project.projectId && threadId === thread.id;
               return <div key={thread.id} data-thread-id={thread.id} className={`agent-thread ${selected ? "is-selected" : ""}`}>
-                <button className="agent-thread-select" title={title} aria-pressed={selected} onClick={() => select(project.projectId, thread.id)}><span className="agent-thread-title">{title}</span>{thread.awaitingReply ? <span className="agent-thread-indicator is-question" role="status" aria-label="Агент ждёт ответа" title="Агент ждёт ответа">?</span> : thread.active ? <span className="agent-thread-spinner" role="status" aria-label="Агент работает" /> : thread.finalMessageId && readMessages[`${project.projectId}:${thread.id}`] !== thread.finalMessageId ? <span className="agent-thread-indicator is-completed" role="status" aria-label="Непрочитанный итог" title="Непрочитанный итог"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg></span> : null}</button>
+                <Button type="button" variant="ghost" className="agent-thread-select" title={title} aria-pressed={selected} onClick={() => select(project.projectId, thread.id)}><span className="agent-thread-title">{title}</span>{thread.awaitingReply ? <span className="agent-thread-indicator is-question" role="status" aria-label="Агент ждёт ответа" title="Агент ждёт ответа">?</span> : thread.active ? <span className="agent-thread-spinner" role="status" aria-label="Агент работает" /> : thread.finalMessageId && readMessages[`${project.projectId}:${thread.id}`] !== thread.finalMessageId ? <span className="agent-thread-indicator is-completed" role="status" aria-label="Непрочитанный итог" title="Непрочитанный итог"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg></span> : null}</Button>
                 <ThreadActions title={title} disabled={busy || !project.available} archive={() => archive(project.projectId, thread.id)} />
               </div>;
             })}
-            {page?.error && <p className="agent-sidebar-note" role="alert">Не удалось загрузить чаты. <button onClick={() => refresh(project.projectId)}>Повторить</button></p>}
+            {page?.error && <p className="agent-sidebar-note" role="alert">Не удалось загрузить чаты. <Button type="button" variant="link" size="sm" onClick={() => refresh(project.projectId)}>Повторить</Button></p>}
             {page?.loading && <p className="agent-sidebar-note" role="status">Загружаем чаты…</p>}
             {page && !page.loading && !page.error && !page.data.length && <p className="agent-sidebar-note">Пока нет чатов</p>}
-            {page && (page.data.length > count || page.nextCursor) && <button className="agent-more" disabled={page.loading} onClick={() => { if (count >= page.data.length) more(project.projectId); setVisible(previous => ({ ...previous, [project.projectId]: count + 5 })); }}>Показать больше</button>}
+            {page && (page.data.length > count || page.nextCursor) && <Button type="button" variant="ghost" size="sm" className="agent-more" disabled={page.loading} onClick={() => { if (count >= page.data.length) more(project.projectId); setVisible(previous => ({ ...previous, [project.projectId]: count + 5 })); }}>Показать больше</Button>}
           </div>
         </section>;
       })}
-    </nav>
-    <Separator.Root className="agent-separator" />
-    <footer className="agent-sidebar-footer"><span className="agent-account" title={email}>{email}</span><div><button onClick={logout}>Выйти</button></div><AccountLimits value={accountLimits} /></footer>
+    </nav></ScrollArea>
+    <Separator className="agent-separator" />
+    <footer className="agent-sidebar-footer"><span className="agent-account" title={email}>{email}</span><div><Button type="button" variant="ghost" size="sm" onClick={logout}>Выйти</Button></div><AccountLimits value={accountLimits} /></footer>
   </aside>;
 }
 
@@ -66,7 +68,7 @@ function ThreadActions({ title, disabled, archive }: { title: string; disabled: 
       setPosition({ left: Math.max(8, rect.right - 176), top: Math.min(rect.bottom + 4, window.innerHeight - 56) });
     }}>⋯</button>
     <div ref={menu} id={id} popover="auto" className="agent-thread-menu" style={position} onKeyDown={event => { if (event.key === "Escape") event.stopPropagation(); }}>
-      <button type="button" disabled={disabled} onClick={() => { menu.current?.hidePopover(); archive(); }}>Архивировать</button>
+      <Button type="button" variant="ghost" size="sm" disabled={disabled} onClick={() => { menu.current?.hidePopover(); archive(); }}>Архивировать</Button>
     </div>
   </>;
 }

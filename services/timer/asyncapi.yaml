@@ -29,6 +29,16 @@ channels:
     messages:
       StopCommand:
         $ref: '#/components/messages/StopCommand'
+  editCommand:
+    address: brai.timer.v2.command.edit
+    messages:
+      EditCommand:
+        $ref: '#/components/messages/EditCommand'
+  deleteCommand:
+    address: brai.timer.v2.command.delete
+    messages:
+      DeleteCommand:
+        $ref: '#/components/messages/DeleteCommand'
   startedEvent:
     address: brai.timer.v2.event.started
     messages:
@@ -39,6 +49,16 @@ channels:
     messages:
       StoppedEvent:
         $ref: '#/components/messages/StoppedEvent'
+  editedEvent:
+    address: brai.timer.v2.event.edited
+    messages:
+      TimerEditedEvent:
+        $ref: '#/components/messages/TimerEditedEvent'
+  deletedEvent:
+    address: brai.timer.v2.event.deleted
+    messages:
+      TimerDeletedEvent:
+        $ref: '#/components/messages/TimerDeletedEvent'
   rejectedEvent:
     address: brai.timer.v2.event.rejected
     messages:
@@ -65,6 +85,13 @@ channels:
         $ref: '#/components/messages/CommandLookupRequest'
       CommandLookupResponse:
         $ref: '#/components/messages/CommandLookupResponse'
+  statisticsQuery:
+    address: brai.timer.v2.query.statistics
+    messages:
+      StatisticsRequest:
+        $ref: '#/components/messages/StatisticsRequest'
+      StatisticsResponse:
+        $ref: '#/components/messages/StatisticsResponse'
   serviceReply:
     address: null
     messages:
@@ -74,6 +101,8 @@ channels:
         $ref: '#/components/messages/HistoryResponse'
       CommandLookupResponse:
         $ref: '#/components/messages/CommandLookupResponse'
+      StatisticsResponse:
+        $ref: '#/components/messages/StatisticsResponse'
       ServiceError:
         $ref: '#/components/messages/ServiceError'
 operations:
@@ -95,6 +124,23 @@ operations:
     description: Durable immutable intention with client timerId and canonical UTC millisecond timestamp;
       authenticated expectedVersion command remains supported. Persist state and result, publish the saved event,
       wait for PubAck before ACK. New intentions do not require the preceding owner version.
+  acceptEdit:
+    action: receive
+    channel:
+      $ref: '#/channels/editCommand'
+    messages:
+    - $ref: '#/channels/editCommand/messages/EditCommand'
+    description: Owner-version CAS against a completed interval. Both UTC millisecond boundaries are absolute; the
+      service derives duration, rejects overlap with another completed interval or the active interval, atomically
+      saves the projection and immutable command result, publishes TimerEditedEvent, waits for PubAck, then ACKs.
+  acceptDelete:
+    action: receive
+    channel:
+      $ref: '#/channels/deleteCommand'
+    messages:
+    - $ref: '#/channels/deleteCommand/messages/DeleteCommand'
+    description: Owner-version CAS that soft-deletes a completed interval from history and totals while retaining the
+      immutable command ledger. Persist the result, publish TimerDeletedEvent, wait for PubAck, then ACK.
   publishStarted:
     action: send
     channel:
@@ -107,6 +153,18 @@ operations:
       $ref: '#/channels/stoppedEvent'
     messages:
     - $ref: '#/channels/stoppedEvent/messages/StoppedEvent'
+  publishEdited:
+    action: send
+    channel:
+      $ref: '#/channels/editedEvent'
+    messages:
+    - $ref: '#/channels/editedEvent/messages/TimerEditedEvent'
+  publishDeleted:
+    action: send
+    channel:
+      $ref: '#/channels/deletedEvent'
+    messages:
+    - $ref: '#/channels/deletedEvent/messages/TimerDeletedEvent'
   publishRejected:
     action: send
     channel:
@@ -176,6 +234,27 @@ operations:
       nats:
         queue: brai_timer
         bindingVersion: 0.1.0
+  statistics:
+    action: receive
+    channel:
+      $ref: '#/channels/statisticsQuery'
+    messages:
+    - $ref: '#/channels/statisticsQuery/messages/StatisticsRequest'
+    reply:
+      address:
+        location: $message.header#/replyTo
+        description: Reply is sent to the request NATS message reply subject; x-nats-reply-subject maps AsyncAPI
+          reply address to native NATS metadata. Clients do not set a JSON/HTTP header.
+        x-nats-reply-subject: message.reply
+      channel:
+        $ref: '#/channels/serviceReply'
+      messages:
+      - $ref: '#/channels/serviceReply/messages/StatisticsResponse'
+      - $ref: '#/channels/serviceReply/messages/ServiceError'
+    bindings:
+      nats:
+        queue: brai_timer
+        bindingVersion: 0.1.0
 components:
   messages:
     StartCommand:
@@ -186,6 +265,14 @@ components:
       name: StopCommand
       payload:
         $ref: ./schemas/commands.schema.json#/definitions/StopCommand
+    EditCommand:
+      name: EditCommand
+      payload:
+        $ref: ./schemas/commands.schema.json#/definitions/EditCommand
+    DeleteCommand:
+      name: DeleteCommand
+      payload:
+        $ref: ./schemas/commands.schema.json#/definitions/DeleteCommand
     StartedEvent:
       name: StartedEvent
       payload:
@@ -194,6 +281,14 @@ components:
       name: StoppedEvent
       payload:
         $ref: ./schemas/messages.schema.json#/definitions/StoppedEvent
+    TimerEditedEvent:
+      name: TimerEditedEvent
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/TimerEditedEvent
+    TimerDeletedEvent:
+      name: TimerDeletedEvent
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/TimerDeletedEvent
     RejectedEvent:
       name: RejectedEvent
       payload:
@@ -238,6 +333,7 @@ components:
             enum:
             - '400'
             - '404'
+            - '409'
             - '500'
             - '503'
     CommandLookupRequest:
@@ -261,6 +357,28 @@ components:
             - '404'
             - '500'
             - '503'
+    StatisticsRequest:
+      name: StatisticsRequest
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/StatisticsRequest
+    StatisticsResponse:
+      name: StatisticsResponse
+      payload:
+        $ref: ./schemas/messages.schema.json#/definitions/StatisticsResponse
+      headers:
+        type: object
+        additionalProperties: true
+        properties:
+          Nats-Service-Error:
+            type: string
+          Nats-Service-Error-Code:
+            type: string
+            enum:
+            - '400'
+            - '404'
+            - '409'
+            - '500'
+            - '503'
     ServiceError:
       name: ServiceError
       description: NATS Service error; the two error headers are required for this response.
@@ -278,6 +396,7 @@ components:
             enum:
             - '400'
             - '404'
+            - '409'
             - '500'
             - '503'
       payload:

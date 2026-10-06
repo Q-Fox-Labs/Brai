@@ -9,6 +9,7 @@ import MissionTimer from "./MissionTimer";
 import TaskMenu from "./TaskMenu";
 import TaskInlineDetail from "./TaskInlineDetail";
 import type { TaskDragArea } from "./use-task-drag";
+import { Textarea } from "@/components/ui/textarea";
 
 function resizeTaskTitle(element: HTMLTextAreaElement) {
   element.style.height = "auto";
@@ -77,7 +78,7 @@ export default function TaskContent({
       ? "bg-brai-quest-fill text-[#191b19]"
       : task.isGoal
         ? "bg-brai-goal-fill text-[#191b19]"
-        : "bg-brai-muted text-[#191b19]";
+        : "bg-brai-surface-soft text-brai-ink";
   const completedToneClassName = isCountedStatus(task.status)
     ? isContainer(task) ? "opacity-[0.68]" : "opacity-[0.42]"
     : "";
@@ -91,13 +92,14 @@ export default function TaskContent({
               {task.publicId}
             </span>
           )}
-          <textarea
+          <Textarea
             ref={(element) => {
               const key = titleElementKey(task.id, area);
               if (element) titleElementsRef.current.set(key, element);
               else titleElementsRef.current.delete(key);
             }}
-            className={`${isEditingTitle ? "block" : "hidden"} min-h-[1.45em] max-h-[2.9em] min-w-0 flex-1 resize-none overflow-y-auto rounded border-0 bg-transparent p-0 text-[15px] leading-[1.45] wrap-anywhere outline-none focus:bg-brai-surface-focus focus:shadow-[0_0_0_3px_var(--surface-focus)]`}
+            bare
+            className={`${isEditingTitle ? "block" : "hidden"} min-h-[1.45em] max-h-[2.9em] min-w-0 flex-1 resize-none overflow-y-auto rounded border-0 bg-transparent p-0 text-sm leading-5 wrap-anywhere outline-none focus:bg-brai-surface-focus focus:shadow-[0_0_0_3px_var(--do-surface-focus)]`}
             value={title}
             aria-label={`Название задачи «${task.title}»`}
             spellCheck
@@ -163,7 +165,7 @@ export default function TaskContent({
           {primaryBlockedTask ? (
             <a
               aria-label={`Перейти к записи «${primaryBlockedTask.title}»`}
-              className="relative z-1 ml-1 inline-flex h-[22px] w-[18px] shrink-0 items-center justify-end text-[16px] leading-none font-bold text-brai-quest no-underline hover:text-[#2468b6] focus-visible:rounded-[3px] focus-visible:outline focus-visible:outline-current focus-visible:outline-offset-1 hover:after:block focus-visible:after:block after:absolute after:top-[calc(100%+3px)] after:right-[-6px] after:z-10 after:hidden after:w-max after:max-w-[min(280px,80vw)] after:rounded after:border after:border-brai-line after:bg-brai-card after:px-[7px] after:py-[5px] after:text-left after:text-[11px] after:leading-[1.3] after:font-medium after:text-brai-ink after:content-[attr(data-tooltip)] after:wrap-anywhere"
+              className="relative z-1 ml-1 inline-flex h-[22px] w-[18px] shrink-0 items-center justify-end text-base leading-none font-bold text-brai-quest no-underline hover:text-brai-quest/80 focus-visible:rounded-sm focus-visible:outline focus-visible:outline-current focus-visible:outline-offset-1 hover:after:block focus-visible:after:block after:absolute after:top-[calc(100%+3px)] after:right-[-6px] after:z-10 after:hidden after:w-max after:max-w-[min(280px,80vw)] after:rounded after:border after:border-brai-line after:bg-brai-card after:px-2 after:py-1.5 after:text-left after:text-xs after:leading-5 after:font-medium after:text-brai-ink after:content-[attr(data-tooltip)] after:wrap-anywhere"
               draggable={false}
               href={`#task-${primaryBlockedTask.id}`}
               data-tooltip={blockedTasks.map((blockedTask) => blockedTask.title).join(", ")}
@@ -205,7 +207,7 @@ export default function TaskContent({
               const kind = taskKind(blocker);
               const isCompleted = isCountedStatus(blocker.status);
               return (
-                <div className="group/blocker flex min-w-0 items-center gap-1 text-[#b93f2a]" key={blocker.id}>
+                <div className="group/blocker flex min-w-0 items-center gap-1 text-brai-danger" key={blocker.id}>
                   <button
                     aria-label={`Удалить блокер: ${blocker.title}`}
                     className="relative mr-1 inline-flex size-[15px] shrink-0 items-center justify-center border-0 bg-transparent p-0 text-inherit disabled:cursor-wait focus-visible:outline focus-visible:outline-current focus-visible:outline-offset-2"
@@ -221,16 +223,16 @@ export default function TaskContent({
                       className={[
                         "inline-flex size-[15px] items-center justify-center leading-none align-[-2px] transition-opacity group-hover/blocker:opacity-0 group-focus-within/blocker:opacity-0",
                         isCompleted
-                          ? "rounded-[3px] border-[1.5px] border-brai-muted bg-brai-muted text-[12px] font-extrabold text-white"
-                          : "rounded-full border border-brai-danger bg-brai-danger before:block before:h-1 before:w-[9px] before:rounded-sm before:bg-white before:content-['']",
-                        isCompleted && kind.kind === "goal" ? "border-brai-goal bg-brai-goal-fill" : "",
-                        isCompleted && kind.kind === "quest" ? "border-brai-quest bg-brai-quest-fill" : "",
-                        isCompleted && kind.kind === "mission" ? "border-brai-mission bg-brai-mission-fill" : "",
+                          ? "rounded-sm border-[1.5px] border-brai-line bg-brai-surface-soft text-xs font-extrabold text-brai-ink"
+                          : "rounded-full border border-brai-danger bg-brai-danger before:block before:h-1 before:w-[9px] before:rounded-sm before:bg-destructive-foreground before:content-['']",
+                        isCompleted && kind.kind === "goal" ? "border-brai-goal bg-brai-goal-fill text-[#191b19]" : "",
+                        isCompleted && kind.kind === "quest" ? "border-brai-quest bg-brai-quest-fill text-[#191b19]" : "",
+                        isCompleted && kind.kind === "mission" ? "border-brai-mission bg-brai-mission-fill text-[#191b19]" : "",
                       ].filter(Boolean).join(" ")}
                     >
                       {isCompleted ? "✓" : null}
                     </span>
-                    <span aria-hidden="true" className="pointer-events-none absolute inset-0 flex items-center justify-center text-[18px] leading-none font-normal text-[#b93f2a] opacity-0 group-hover/blocker:opacity-100 group-focus-within/blocker:opacity-100">×</span>
+                    <span aria-hidden="true" className="pointer-events-none absolute inset-0 flex items-center justify-center text-lg leading-none font-normal text-brai-danger opacity-0 group-hover/blocker:opacity-100 group-focus-within/blocker:opacity-100">×</span>
                   </button>
                   <a
                     aria-label={`Блокер: ${blocker.title} (${kind.label}${isCompleted ? ", выполнен" : ""})`}
@@ -268,7 +270,7 @@ export default function TaskContent({
             : `Выполнено ${task.isMission ? "квестов" : task.isQuest ? "целей" : "задач"}: ${completedChildCount} из ${childTasks.length}`}
         >
           {childTasks.length === 0 ? (
-            <span className="relative size-[9px] shrink-0 rounded-full border border-[#9c9f9b] before:absolute before:top-[3px] before:left-[-2px] before:h-px before:w-[11px] before:rotate-[-45deg] before:rounded before:bg-[#9c9f9b] before:content-['']" aria-hidden="true" />
+            <span className="relative size-[9px] shrink-0 rounded-full border border-brai-muted before:absolute before:top-[3px] before:left-[-2px] before:h-px before:w-[11px] before:rotate-[-45deg] before:rounded before:bg-brai-muted before:content-['']" aria-hidden="true" />
           ) : childTasks.map((childTask, index) => (
             <span
               className={[
@@ -283,7 +285,7 @@ export default function TaskContent({
                       : "bg-brai-goal-fill"
                   : "",
                 blockedTaskIds.has(childTask.id) && !isCountedStatus(childTask.status)
-                  ? "after:absolute after:top-1/2 after:left-1/2 after:size-[3px] after:-translate-x-1/2 after:-translate-y-1/2 after:rounded-full after:bg-[#c94432] after:content-['']"
+                  ? "after:absolute after:top-1/2 after:left-1/2 after:size-[3px] after:-translate-x-1/2 after:-translate-y-1/2 after:rounded-full after:bg-brai-danger after:content-['']"
                   : "",
               ].filter(Boolean).join(" ")}
               aria-hidden="true"

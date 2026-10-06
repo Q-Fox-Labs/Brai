@@ -180,7 +180,7 @@ export default function TaskRow({
       ? "pointer-events-none border-brai-quest checked:!border-brai-quest checked:!bg-brai-quest-fill"
       : task.isGoal
         ? "pointer-events-none border-brai-goal checked:!border-brai-goal checked:!bg-brai-goal-fill"
-        : "border-brai-muted checked:border-brai-muted checked:bg-brai-muted";
+        : "border-brai-muted checked:border-brai-accent checked:bg-brai-accent";
   const blockedTasks = blockedTasksByBlocker.get(task.id) ?? [];
   const primaryBlockedTask = blockedTasks[0];
   const nestingClassName = [
@@ -196,18 +196,18 @@ export default function TaskRow({
     "before:left-[-102px] after:left-[-102px]",
   ][task.nestingDepth] ?? "";
   const kindClassName = task.isMission
-    ? "cursor-pointer border-l-[7px] border-l-[#16864a] bg-[#effaf3] pl-[11px] hover:bg-[#e2f6e9] dark:border-l-[#31955c] dark:bg-[#173924] dark:hover:bg-[#1d472d]"
+    ? "cursor-pointer border-l-[3px] border-l-brai-mission bg-brai-mission/10 pl-[15px] hover:bg-brai-mission/15"
     : task.isQuest
-      ? "cursor-pointer hover:bg-[#f4f8ff] dark:hover:bg-[#1d334d]"
+      ? "cursor-pointer hover:bg-brai-quest/10"
       : task.isGoal
-        ? "cursor-pointer hover:bg-[#fffdf3] dark:hover:bg-[#37301b]"
+        ? "cursor-pointer hover:bg-brai-goal/10"
         : "";
   const dropClassName = isContainerDropTarget || isOutsideDropTarget
     ? task.isMission
-      ? "bg-[#eaf8ef] shadow-[inset_0_0_0_2px_rgba(47,152,100,0.55)] dark:bg-[#1d472d]"
+      ? "bg-brai-mission/12 shadow-[inset_0_0_0_2px_var(--do-mission)]"
       : task.isQuest
-        ? "bg-[#edf5ff] shadow-[inset_0_0_0_2px_rgba(57,127,211,0.55)] dark:bg-[#1e3d61]"
-        : "bg-[#fff9dc] shadow-[inset_0_0_0_2px_rgba(220,174,42,0.55)] dark:bg-[#413918]"
+        ? "bg-brai-quest/12 shadow-[inset_0_0_0_2px_var(--do-quest)]"
+        : "bg-brai-goal/12 shadow-[inset_0_0_0_2px_var(--do-goal)]"
     : "";
   const rowInteractionProps = {
     role: "button",
@@ -239,8 +239,8 @@ export default function TaskRow({
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     element.animate(
       [
-        { backgroundColor: "rgba(232, 94, 67, 0.18)" },
-        { backgroundColor: "rgba(232, 94, 67, 0)" },
+        { backgroundColor: "color-mix(in srgb, var(--do-accent) 18%, transparent)" },
+        { backgroundColor: "transparent" },
       ],
       { duration: 260, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" },
     );
@@ -252,24 +252,24 @@ export default function TaskRow({
         {...rowInteractionProps}
         id={isLeft ? `task-${task.id}` : undefined}
         className={[
-          "relative flex min-h-[72px] cursor-grab items-start gap-[13px] border-b border-brai-line px-[18px] py-[14px] transition-[opacity,background,box-shadow] duration-150 last:border-b-0 focus-visible:z-1",
+          "relative flex min-h-[54px] cursor-grab items-start gap-2 border-b border-brai-line px-3 py-2.5 transition-[opacity,background,box-shadow] duration-150 last:border-b-0 focus-visible:z-1",
           nestingClassName,
           kindClassName,
           isContainer(task) && isDraggable ? "cursor-grab" : "",
           blockerSearchTaskId === task.id && blockerSearchArea === area
             ? "border-b-0 pb-2"
             : "",
-          isLeft && selectedTaskId === task.id ? "z-1 bg-brai-surface-hover shadow-[inset_3px_0_0_var(--accent)]" : "",
+          isLeft && selectedTaskId === task.id ? "z-1 rounded-lg bg-brai-surface-hover shadow-[inset_3px_0_0_var(--do-accent)]" : "",
           isLocalDrag && draggedId === task.id ? "cursor-grabbing opacity-20" : "",
           dropClassName,
           task.isGoal ? "focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brai-goal/55" : "",
           task.isQuest ? "focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brai-quest/55" : "",
           task.isMission ? "focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-brai-mission/55" : "",
           isInsertBefore || isInsertGoalBefore || isInsertQuestBefore || isInsertContainerBefore
-            ? `before:absolute before:z-4 before:right-0 before:top-[-2px] before:h-1 before:rounded-sm before:bg-[#ff6a3d] before:shadow-[0_0_0_1px_var(--card),0_0_10px_rgba(255,106,61,0.9)] before:content-[''] ${insertionOffsetClassName}`
+            ? `before:absolute before:z-4 before:right-0 before:top-[-2px] before:h-1 before:rounded-sm before:bg-brai-accent before:shadow-[0_0_0_1px_var(--do-card),0_0_10px_var(--do-accent)] before:content-[''] ${insertionOffsetClassName}`
             : "",
           isInsertAfter || isInsertGoalAfter || isInsertQuestAfter || isInsertContainerAfter
-            ? `after:absolute after:z-4 after:right-0 after:bottom-[-2px] after:h-1 after:rounded-sm after:bg-[#ff6a3d] after:shadow-[0_0_0_1px_var(--card),0_0_10px_rgba(255,106,61,0.9)] after:content-[''] ${insertionOffsetClassName}`
+            ? `after:absolute after:z-4 after:right-0 after:bottom-[-2px] after:h-1 after:rounded-sm after:bg-brai-accent after:shadow-[0_0_0_1px_var(--do-card),0_0_10px_var(--do-accent)] after:content-[''] ${insertionOffsetClassName}`
             : "",
         ].filter(Boolean).join(" ")}
         data-selected={isLeft && selectedTaskId === task.id}
@@ -359,8 +359,8 @@ export default function TaskRow({
             className={[
               "size-full appearance-none rounded border-2 bg-brai-field disabled:cursor-wait",
               checkboxToneClass,
-              isBlocked && !isCountedStatus(task.status) ? "bg-[radial-gradient(circle,#c94432_0_2.5px,transparent_3px)] bg-[length:100%_100%]" : "",
-              task.status === "not_completed" ? "!border-[#c94432] !bg-brai-field checked:!border-[#c94432] checked:!bg-brai-field" : "",
+              isBlocked && !isCountedStatus(task.status) ? "bg-[radial-gradient(circle,var(--do-danger)_0_2.5px,transparent_3px)] bg-[length:100%_100%]" : "",
+              task.status === "not_completed" ? "!border-brai-danger !bg-brai-field checked:!border-brai-danger checked:!bg-brai-field" : "",
             ].filter(Boolean).join(" ")}
             type="checkbox"
             checked={isCountedStatus(task.status)}
@@ -382,7 +382,7 @@ export default function TaskRow({
           {isCountedStatus(task.status) && (
             <span
               aria-hidden="true"
-              className={`pointer-events-none absolute inset-0 grid place-items-center text-[15px] leading-none font-bold ${task.status === "not_completed" ? "text-[#c94432]" : "text-white"}`}
+              className={`pointer-events-none absolute inset-0 grid place-items-center text-sm leading-none font-bold ${task.status === "not_completed" ? "text-brai-danger" : isContainer(task) ? "text-[#191b19]" : "text-primary-foreground"}`}
             >
               {task.status === "not_completed" ? "×" : "✓"}
             </span>

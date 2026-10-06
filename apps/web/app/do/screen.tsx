@@ -8,6 +8,7 @@ import { TasksContext } from "./TasksContext";
 import TasksView from "./TasksView";
 import TaskProjectsRail from "./TaskProjectsRail";
 import { useTasksController } from "./use-tasks-controller";
+import { Card } from "@/components/ui/card";
 
 type Props = { active: boolean; email: string; onLogout: () => void; accountMessage: string };
 
@@ -20,12 +21,12 @@ export default function DoScreen({ active }: Props) {
 
   useEffect(() => {
     const closeTemporaryPanels = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.defaultPrevented) return;
       if (isProjectsDrawerOpen) {
         setIsProjectsDrawerOpen(false);
         return;
       }
-      if (window.matchMedia("(max-width: 800px)").matches) {
+      if (window.matchMedia("(max-width: 860px)").matches) {
         setSelectedTaskId(null);
       }
     };
@@ -41,32 +42,30 @@ export default function DoScreen({ active }: Props) {
 
   return (
     <TasksContext.Provider value={controller}>
-      <main className="do-shell flex h-full min-h-0 flex-col" data-do-theme="dark" aria-label="Дела">
+      <main className="do-shell flex h-full min-h-0 min-w-0 flex-col" aria-label="Дела">
         <div
-          className={`relative grid min-h-0 flex-1 grid-cols-1 items-stretch gap-4 overflow-hidden ${isProjectsExpanded ? "min-[801px]:grid-cols-[220px_minmax(0,1fr)]" : "min-[801px]:grid-cols-[minmax(0,1fr)]"}`}
+          className={`relative grid min-h-0 min-w-0 flex-1 grid-cols-1 items-stretch gap-3 overflow-hidden ${isProjectsExpanded ? "min-[861px]:grid-cols-[220px_minmax(0,1fr)]" : "min-[861px]:grid-cols-[minmax(0,1fr)]"}`}
         >
           <button
-            className={`absolute inset-0 z-40 hidden border-0 bg-black/30 p-0 transition-opacity duration-200 max-[800px]:block ${isProjectsDrawerOpen ? "visible opacity-100 pointer-events-auto" : "invisible opacity-0 pointer-events-none"}`}
+            className={`absolute inset-0 z-40 hidden border-0 bg-foreground/20 p-0 transition-opacity duration-200 max-[861px]:block ${isProjectsDrawerOpen ? "visible opacity-100 pointer-events-auto" : "invisible opacity-0 pointer-events-none"}`}
             type="button"
             aria-label="Закрыть меню проектов"
             tabIndex={isProjectsDrawerOpen ? 0 : -1}
             onClick={() => setIsProjectsDrawerOpen(false)}
           />
-          <aside
-            id="task-projects-panel"
-            data-projects-drawer
-            className={`min-h-0 overflow-y-auto rounded-2xl border border-brai-line bg-brai-card p-[5px] transition-[transform,visibility] duration-200 ease-out max-[800px]:absolute max-[800px]:inset-y-0 max-[800px]:left-0 max-[800px]:z-50 max-[800px]:w-[min(280px,calc(100%-48px))] max-[800px]:overscroll-contain max-[800px]:shadow-[12px_0_32px_rgba(25,27,25,0.18)] max-[480px]:rounded-[14px] ${isProjectsExpanded ? "min-[801px]:block" : "min-[801px]:hidden"} ${isProjectsDrawerOpen ? "max-[800px]:visible max-[800px]:translate-x-0" : "max-[800px]:invisible max-[800px]:-translate-x-[calc(100%+16px)]"}`}
-            aria-label="Проекты"
+          <Card
+            render={<aside id="task-projects-panel" data-projects-drawer aria-label="Проекты" />}
+            className={`min-h-0 overflow-y-auto rounded-xl border-brai-line bg-brai-card p-1 transition-[transform,visibility] duration-200 ease-out max-[861px]:absolute max-[861px]:inset-y-0 max-[861px]:left-0 max-[861px]:z-50 max-[861px]:w-[min(280px,calc(100%-48px))] max-[861px]:overscroll-contain max-[861px]:shadow-xl ${isProjectsExpanded ? "min-[861px]:block" : "min-[861px]:hidden"} ${isProjectsDrawerOpen ? "max-[861px]:visible max-[861px]:translate-x-0" : "max-[861px]:invisible max-[861px]:-translate-x-[calc(100%+16px)]"}`}
           >
             <TaskProjectsRail
               onClose={closeProjects}
               onSelectProject={() => {
-                if (window.matchMedia("(max-width: 800px)").matches) {
+                if (window.matchMedia("(max-width: 860px)").matches) {
                   setIsProjectsDrawerOpen(false);
                 }
               }}
             />
-          </aside>
+          </Card>
           <div className="min-h-0 min-w-0">
             <TasksView
               isProjectsExpanded={isProjectsExpanded}

@@ -44,11 +44,11 @@ test("late STOP, stale snapshot and rejection cannot replace a newer local START
  const [first,stop,last]=records(f).map((item:{command:Record<string,string>})=>item.command);
  f.streams[0].event({userId: USER,eventId:"start",commandId:first.commandId,version:1,timerId:first.timerId,startedAt:first.startedAt});
  f.streams[0].event({userId: USER,eventId:"stop",commandId:stop.commandId,version:2,interval:{timerId:first.timerId,startedAt:first.startedAt,stoppedAt:stop.stoppedAt,durationMs:200}});
- f.streams[0].snapshot({...snapshot,version:1,active:{timerId:first.timerId,startedAt:first.startedAt}});
  f.streams[0].event({userId: USER,eventId:"reject",commandId:stop.commandId,correlationId:"old",error:{code:"TIMER_NOT_ACTIVE",message:"old",retryable:false}});
  assert.equal(f.client.getView().local?.timerId,last.timerId);assert.equal(f.client.getView().queued,1);
  f.streams[0].event({userId: USER,eventId:"last",commandId:last.commandId,version:3,timerId:last.timerId,startedAt:last.startedAt});
- assert.equal(f.client.getView().queued,0);f.client.stop();
+ f.streams[0].snapshot({...snapshot,version:1,active:{timerId:first.timerId,startedAt:first.startedAt}});
+ assert.equal(f.client.getView().local?.timerId,last.timerId);assert.equal(f.client.getView().queued,0);assert.equal(f.client.getView().connected,false);f.client.stop();
 });
 test("unknown retry keeps identical body; terminal rejection ends waiting and STOP remains zero",async t=>{
  t.mock.timers.enable({apis:["setInterval"]});const bodies:string[]=[];
@@ -144,7 +144,7 @@ test("legacy DTO reads every page, sums milliseconds once and handles history ar
  const row={timerId:"base",startedAt:snapshot.serverTime,stoppedAt:snapshot.serverTime,durationMs:600};
  const rows=Array.from({length:50},(_,n)=>({...row,timerId:`row-${n}`}));
  let requests=0;
- const f=fixture(async()=>{requests++;return Response.json({items:requests===1?[{...row,timerId:"future"},{...row,timerId:"future"}]:[row],nextCursor:requests===1?"last":null});});
+ const f=fixture(async path=>{if(path==="/api/timer/statistics")return Response.json({});requests++;return Response.json({items:requests===1?[{...row,timerId:"future"},{...row,timerId:"future"}]:[row],nextCursor:requests===1?"last":null});});
  f.streams[0].snapshot({...snapshot,version:1,recentCompleted:rows,nextCursor:"tail"});
  assert.equal(f.client.getView().totalCompletedMs,null);await turn();await turn();
  assert.equal(requests,2);assert.equal(f.client.getView().items.length,52);assert.equal(f.client.getView().totalCompletedMs,31200);
@@ -155,10 +155,95 @@ test("legacy DTO reads every page, sums milliseconds once and handles history ar
 test("snapshot resets a pagination boundary while an older page is in flight",async()=>{
  const row={timerId:"base",startedAt:snapshot.serverTime,stoppedAt:snapshot.serverTime,durationMs:600};
  let finish:(response:Response)=>void=()=>{};
- const f=fixture(async()=>new Promise(resolve=>{finish=resolve;}));
+ const f=fixture(async path=>path==="/api/timer/statistics"?Response.json({}):new Promise(resolve=>{finish=resolve;}));
  f.streams[0].snapshot({...snapshot,version:2,totalCompletedMs:600,recentCompleted:[row],nextCursor:"old"});
  const loading=f.client.loadHistory();
  f.streams[0].snapshot({...snapshot,version:4,totalCompletedMs:1200,recentCompleted:[{...row,timerId:"new"}],nextCursor:"new"});
  finish(Response.json({items:[row],nextCursor:null}));await loading;
  assert.equal(f.client.getView().cursor,"new");assert.equal(f.client.getView().totalCompletedMs,1200);f.client.stop();
+});
+
+test("edit command keeps canonical milliseconds and retries the exact body after unknown publish",async t=>{
+ t.mock.timers.enable({apis:["setInterval"]});const bodies:string[]=[];let attempts=0;
+ const f=fixture(async(path,options)=>{
+  if(path==="/api/timer/statistics")return Response.json({});
+  if(path.includes("/commands/"))return Response.json({},{status:404});
+  if(options?.method==="POST"){bodies.push(options.body as string);attempts++;return Response.json({outcome:attempts===1?"unknown":"not-published"},{status:503});}
+  return Response.json({},{status:404});
+ });
+ const timerId="91ae2be0-8d8f-4c50-9fd3-000000000099",startedAt="2026-10-05T09:10:11.123Z",stoppedAt="2026-10-05T09:10:12.456Z";
+ const commandId=f.client.editInterval(timerId,startedAt,stoppedAt);assert.ok(commandId);assert.equal(f.client.getView().local,null);
+ await turn();t.mock.timers.tick(2000);await turn();
+ assert.equal(bodies.length,2);assert.equal(bodies[0],bodies[1]);
+ assert.deepEqual(JSON.parse(bodies[0]),{commandId,timerId,expectedVersion:0,startedAt,stoppedAt});
+ assert.equal(records(f)[0].command.startedAt,startedAt);assert.equal(records(f)[0].command.stoppedAt,stoppedAt);f.client.stop();
+});
+
+test("mutation receipt before PubAck response removes only its command and preserves the running local clock",async()=>{
+ let finish:(response:Response)=>void=()=>{};
+ const f=fixture(async(path,options)=>path==="/api/timer/statistics"?Response.json({}):options?.method==="POST"?new Promise(resolve=>{finish=resolve;}):Response.json({},{status:404}));
+ f.streams[0].snapshot({...snapshot,active:{timerId:"91ae2be0-8d8f-4c50-9fd3-000000000090",startedAt:snapshot.serverTime},version:7});
+ const before=f.client.getView().local;
+ const commandId=f.client.deleteInterval("91ae2be0-8d8f-4c50-9fd3-000000000099");assert.ok(commandId);await turn();
+ f.streams[0].event({userId:USER,eventId:"edit-result",commandId,version:8,operation:"delete",timerId:"91ae2be0-8d8f-4c50-9fd3-000000000099"});
+ assert.equal(f.client.getView().queued,0);assert.deepEqual(f.client.getView().local,before);
+ finish(Response.json({},{status:202}));await turn();assert.equal(f.client.getView().queued,0);assert.deepEqual(f.client.getView().local,before);f.client.stop();
+});
+
+test("an older mutation lookup receipt resolves its outbox entry without resetting a newer snapshot",async()=>{
+ const f=fixture(async(path,options)=>path==="/api/timer/statistics"?Response.json({}):options?.method==="POST"?Response.json({},{status:202}):Response.json({},{status:404}));
+ const commandId=f.client.deleteInterval("91ae2be0-8d8f-4c50-9fd3-000000000099");assert.ok(commandId);await turn();
+ const row={timerId:"91ae2be0-8d8f-4c50-9fd3-000000000088",startedAt:snapshot.serverTime,stoppedAt:snapshot.serverTime,durationMs:500};
+ f.streams[0].snapshot({...snapshot,version:9,historyRevision:4,recentCompleted:[row],nextCursor:"current-page"});
+ f.streams[0].event({userId:USER,eventId:"old-delete",commandId,version:8,operation:"delete",timerId:"91ae2be0-8d8f-4c50-9fd3-000000000099"});
+ assert.equal(f.client.getView().queued,0);assert.equal(f.client.getView().connected,true);assert.equal(f.client.getView().cursor,"current-page");assert.deepEqual(f.client.getView().items,[row]);f.client.stop();
+});
+
+test("a mutation invalidates old pages so a delayed history reply cannot restore a deleted row",async()=>{
+ let finish:(response:Response)=>void=()=>{};
+ const row={timerId:"91ae2be0-8d8f-4c50-9fd3-000000000099",startedAt:snapshot.serverTime,stoppedAt:snapshot.serverTime,durationMs:500};
+ const f=fixture(async(path)=>path.startsWith("/api/timer/history")?new Promise(resolve=>{finish=resolve;}):path==="/api/timer/statistics"?Response.json({}):Response.json({},{status:404}));
+ f.streams[0].snapshot({...snapshot,version:4,historyRevision:2,recentCompleted:[row],nextCursor:"old-page"});
+ const loading=f.client.loadHistory();
+ f.streams[0].event({userId:USER,eventId:"deleted-elsewhere",commandId:null,version:5,operation:"delete",timerId:row.timerId});
+ assert.deepEqual(f.client.getView().items,[]);assert.equal(f.client.getView().cursor,null);
+ finish(Response.json({items:[row],nextCursor:null,historyRevision:2}));await loading;
+ assert.deepEqual(f.client.getView().items,[]);assert.equal(f.client.getView().cursor,null);f.client.stop();
+});
+
+test("stale bootstrap after a mutation retries until a current snapshot restores totals and rows",async t=>{
+ t.mock.timers.enable({apis:["setTimeout"]});
+ const row={timerId:"91ae2be0-8d8f-4c50-9fd3-000000000099",startedAt:snapshot.serverTime,stoppedAt:snapshot.serverTime,durationMs:250};
+ const f=fixture(async path=>path==="/api/timer/statistics"?Response.json({}):Response.json({},{status:404}));
+ f.streams[0].snapshot({...snapshot,version:10,historyRevision:3,totalCompletedMs:1000,recentCompleted:[row],nextCursor:"cursor"});
+ f.streams[0].event({userId:USER,eventId:"edit",commandId:null,version:11,operation:"edit",interval:{...row,durationMs:250}});
+ assert.deepEqual(f.client.getView().items,[]);assert.equal(f.client.getView().totalCompletedMs,null);
+ t.mock.timers.tick(1000);await turn();assert.equal(f.streams.length,2);
+ f.streams[1].snapshot({...snapshot,version:10,historyRevision:3,totalCompletedMs:1000,recentCompleted:[row],nextCursor:"cursor"});
+ f.streams[1].event({userId:USER,eventId:"edit",commandId:null,version:11,operation:"edit",interval:{...row,durationMs:250}});
+ assert.equal(f.client.getView().connected,false);assert.deepEqual(f.client.getView().items,[]);
+ t.mock.timers.tick(1000);await turn();assert.equal(f.streams.length,3);
+ f.streams[2].snapshot({...snapshot,version:11,historyRevision:4,totalCompletedMs:1250,recentCompleted:[row],nextCursor:null});
+ assert.equal(f.client.getView().connected,true);assert.equal(f.client.getView().version,11);assert.equal(f.client.getView().historyRevision,4);
+ assert.equal(f.client.getView().totalCompletedMs,1250);assert.deepEqual(f.client.getView().items,[row]);f.client.stop();
+});
+
+test("statistics from an older owner version cannot replace a newer response",async()=>{
+ const requests:((response:Response)=>void)[]=[];
+ const f=fixture(async(path)=>path==="/api/timer/statistics"?new Promise(resolve=>{requests.push(resolve);}):Response.json({},{status:404}));
+ const stats=(version:number)=>({userId:USER,version,serverTime:snapshot.serverTime,timeZone:"Europe/Moscow",totalCompletedMs:version,
+  daily:[],challenge:{startDate:"2026-10-04",endDateExclusive:"2026-11-01",timeZone:"Europe/Moscow",days:28,dailyTargetMs:28_800_000,targetMs:806_400_000,
+   completedMs:version,remainingMs:806_400_000-version,percent:0,remainingDays:28,requiredDailyMs:28_800_000,achieved:false,closedDays:0,daily:[]}});
+ assert.equal(requests.length,1);
+ f.streams[0].event({userId:USER,eventId:"started",commandId:null,version:1,timerId:"91ae2be0-8d8f-4c50-9fd3-000000000090",startedAt:snapshot.serverTime});
+ assert.equal(requests.length,2);
+ requests[1](Response.json(stats(1)));await turn();requests[0](Response.json(stats(0)));await turn();
+ assert.equal(f.client.getView().statistics?.version,1);assert.equal(f.client.getView().statisticsLoading,false);f.client.stop();
+});
+
+test("edit validation rejects noncanonical or nonpositive ranges without queuing",()=>{
+ const f=fixture(async()=>Response.json({},{status:404}));
+ assert.equal(f.client.editInterval("91ae2be0-8d8f-4c50-9fd3-000000000099","2026-10-05T09:10:11.12Z","2026-10-05T09:10:12.456Z"),null);
+ assert.equal(f.client.editInterval("91ae2be0-8d8f-4c50-9fd3-000000000099","2026-10-05T09:10:12.456Z","2026-10-05T09:10:12.456Z"),null);
+ assert.equal(f.client.getView().queued,0);assert.match(f.client.getView().message,/корректное начало/);f.client.stop();
 });

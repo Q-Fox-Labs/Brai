@@ -1,0 +1,46 @@
+/* ABOUTME: Оформляет дневную историю фокуса и встроенный редактор canonical интервалов. */
+/* ABOUTME: Классы локальны экрану таймера и не меняют общую оболочку. */
+.timer-history-content { display: grid; min-width: 0; gap: 14px; }
+.timer-history-global-total { display: flex; align-items: baseline; justify-content: flex-end; gap: 8px; padding: 0 4px 2px; color: var(--muted-foreground); font-size: 12px; }
+.timer-history-global-total strong { color: var(--foreground); font-size: 13px; font-variant-numeric: tabular-nums; }
+.timer-history-v2-empty, .timer-history-v2-note { margin: 0; padding: 18px; color: var(--muted-foreground); font-size: 13px; text-align: center; }
+.timer-history-table { table-layout: fixed; }
+.timer-history-entry td:first-child { width: 55%; }
+.timer-history-entry td:nth-child(2) { color: var(--muted-foreground); font-size: 12px; }
+.timer-history-entry-label small { display: block; font-size: 10px; color: var(--muted-foreground); }
+.timer-history-entry td:nth-child(3) { width: 44px; text-align: center; }
+.timer-history-entry-actions { width: 80px; white-space: nowrap; }
+.timer-history-entry-actions button { width: 30px; height: 30px; }
+.timer-history-entry-actions svg { width: 14px; height: 14px; }
+.timer-history-entry-open { display: grid; width: 100%; grid-template-columns: auto minmax(8px, 1fr) auto minmax(8px, 1fr) auto; align-items: center; gap: 7px; border: 0; background: transparent; padding: 3px; color: inherit; text-align: left; cursor: pointer; }
+.timer-history-entry-open time { font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.timer-history-entry-open strong { color: var(--primary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.timer-history-entry-rule { border-top: 1px dashed var(--muted-foreground); opacity: .5; }
+.timer-history-editor td, .timer-history-delete td { background: color-mix(in srgb, var(--primary) 5%, var(--card)); white-space: normal; }
+.timer-history-editor-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.timer-history-editor-fields fieldset { display: grid; min-width: 0; grid-template-columns: 24px minmax(0, 1fr) 24px; align-items: center; gap: 3px; border: 1px solid var(--border); border-radius: 8px; padding: 4px; }
+.timer-history-editor-fields fieldset.is-changed { border-color: color-mix(in srgb, var(--primary) 48%, var(--border)); background: color-mix(in srgb, var(--primary) 7%, transparent); }
+.timer-history-editor-fields legend { margin-inline: auto; padding: 0 4px; color: var(--muted-foreground); font-size: 10px; }
+.timer-history-editor-fields fieldset button { width: 24px; height: 24px; }
+.timer-history-editor-fields fieldset svg { width: 12px; height: 12px; }
+.timer-history-editor-fields input, .timer-history-editor-value { height: 28px; min-width: 0; padding: 0 2px; text-align: center; font-size: 13px; font-variant-numeric: tabular-nums; }
+.timer-history-editor-value { overflow: hidden; border: 0; background: transparent; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.timer-history-editor-range { margin: 8px 0 0; color: var(--muted-foreground); font-size: 11px; text-align: center; }
+.timer-history-editor-error { display: block; margin: 7px 0 0; color: var(--destructive); font-size: 12px; }
+.timer-history-editor-actions, .timer-history-delete td > div { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.timer-history-delete td > span { font-size: 13px; }
+.timer-history-delete td > span + .timer-history-editor-error { margin-top: 5px; }
+.timer-history-v2-more { display: flex; justify-content: center; padding: 14px; }
+@media (max-width: 560px) {
+ .timer-history-entry td { padding: 7px 5px; }
+ .timer-history-entry td:first-child { width: 58%; }
+ .timer-history-entry td:nth-child(2) { overflow: hidden; font-size: 11px; text-overflow: ellipsis; }
+ .timer-history-entry-actions { width: 64px; }
+ .timer-history-entry-open { gap: 3px; }
+ .timer-history-entry-open time, .timer-history-entry-open strong { font-size: 10px; }
+ .timer-history-editor-fields { gap: 4px; }
+ .timer-history-editor-fields fieldset { grid-template-columns: 20px minmax(0, 1fr) 20px; gap: 1px; padding: 3px 1px; }
+ .timer-history-editor-fields fieldset button { width: 20px; height: 22px; }
+ .timer-history-editor-fields input, .timer-history-editor-value { font-size: 12px; }
+}
+

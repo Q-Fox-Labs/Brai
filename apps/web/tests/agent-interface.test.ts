@@ -1,5 +1,5 @@
-// ABOUTME: Проверяет группировку, единственную команду composer и ленивые чтения с ограниченным кешем.
-// ABOUTME: Входы owner заменяются портом; проверки не требуют браузера или внешних сервисов.
+// ABOUTME: Проверяет Agent-компоненты, группировку, composer и ленивые чтения.
+// ABOUTME: Shared UI в SSR harness загружается из реальных исходников без браузера.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -78,11 +78,23 @@ test("concurrent reads coalesce and never exceed four owner requests", async () 
 });
 
 const require = createRequire(import.meta.url), ts = require("typescript") as typeof import("typescript");
+const uiCache = new Map<string, Record<string, unknown>>();
+function ui(name: string): Record<string, unknown> {
+  const path = name.slice("@/components/ui/".length), cached = uiCache.get(path);
+  if (cached) return cached;
+  const extension = path === "cn" ? "ts" : "tsx", source = readFileSync(new URL(`../components/ui/${path}.${extension}`, import.meta.url), "utf8");
+  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  const module = { exports: {} as Record<string, unknown> };
+  uiCache.set(path, module.exports);
+  new Function("require", "module", "exports", compiled)((dependency: string) => dependency.startsWith("@/components/ui/") ? ui(dependency) : require(dependency), module, module.exports);
+  uiCache.set(path, module.exports);
+  return module.exports;
+}
 function component(name: string) {
   const source = readFileSync(new URL(`../app/agent/${name}.tsx`, import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const module = { exports: {} as { default: ComponentType<Record<string, unknown>> } };
-  new Function("require", "module", "exports", compiled)((name: string) => name.endsWith(".css") ? {} : name.startsWith("./") ? { default: component(name.slice(2)) } : name === "../../lib/agent/limits" ? { formatLimitReset, limitCountdown } : require(name), module, module.exports);
+  new Function("require", "module", "exports", compiled)((dependency: string) => dependency.endsWith(".css") ? {} : dependency.startsWith("./") ? { default: component(dependency.slice(2)) } : dependency.startsWith("@/components/ui/") ? ui(dependency) : dependency === "../../lib/agent/limits" ? { formatLimitReset, limitCountdown } : require(dependency), module, module.exports);
   return module.exports.default;
 }
 

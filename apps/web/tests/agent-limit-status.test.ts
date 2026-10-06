@@ -1,5 +1,5 @@
-// ABOUTME: Проверяет стабильность отображения последней квоты при сбое обновления.
-// ABOUTME: Реальный Sidebar рендерится на синтетических данных без сервисов и браузера.
+// ABOUTME: Проверяет квоту при сбое обновления через React SSR.
+// ABOUTME: Sidebar и shared UI рендерятся из исходников на синтетических данных.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -9,9 +9,21 @@ import { renderToStaticMarkup } from "react-dom/server";
 import * as helpers from "../lib/agent/limits.ts";
 
 const require = createRequire(import.meta.url), ts = require("typescript") as typeof import("typescript");
+const uiCache = new Map<string, Record<string, unknown>>();
+function ui(name: string): Record<string, unknown> {
+  const path = name.slice("@/components/ui/".length), cached = uiCache.get(path);
+  if (cached) return cached;
+  const extension = path === "cn" ? "ts" : "tsx", source = readFileSync(new URL(`../components/ui/${path}.${extension}`, import.meta.url), "utf8");
+  const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  const loaded = { exports: {} as Record<string, unknown> };
+  uiCache.set(path, loaded.exports);
+  new Function("require", "module", "exports", output)((dependency: string) => dependency.startsWith("@/components/ui/") ? ui(dependency) : require(dependency), loaded, loaded.exports);
+  uiCache.set(path, loaded.exports);
+  return loaded.exports;
+}
 const compiled = ts.transpileModule(readFileSync(new URL("../app/agent/sidebar.tsx", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
 const module = { exports: {} as { default: ComponentType<Record<string, unknown>> } };
-new Function("require", "module", "exports", compiled)((name: string) => name === "../../lib/agent/limits" ? helpers : require(name), module, module.exports);
+new Function("require", "module", "exports", compiled)((name: string) => name === "../../lib/agent/limits" ? helpers : name.startsWith("@/components/ui/") ? ui(name) : require(name), module, module.exports);
 
 function render(state: string) {
   const noop = () => {};

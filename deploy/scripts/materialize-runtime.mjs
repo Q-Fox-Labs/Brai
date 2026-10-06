@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 const options = Object.fromEntries(process.argv.slice(2).reduce((pairs, value, index, all) => index % 2 ? pairs : [...pairs, [value.slice(2), all[index + 1]]], []));
 const { source, workspace, revision, output } = options;
 if (Object.keys(options).some((key) => !['source', 'workspace', 'revision', 'output'].includes(key)) || !source || !workspace || !output || !isAbsolute(source) || !isAbsolute(output) || !/^[0-9a-f]{40}$/.test(revision ?? '')) throw Error('EXPLICIT_BUILD_INPUTS_REQUIRED');
-if (!['@brai/artifacts', '@brai/agent', '@brai/web'].includes(workspace)) throw Error('UNSUPPORTED_RUNTIME_WORKSPACE');
+if (!['@brai/artifacts', '@brai/agent', '@brai/web', '@brai/timer'].includes(workspace)) throw Error('UNSUPPORTED_RUNTIME_WORKSPACE');
 if (process.version !== 'v24.21.0') throw Error('NODE_VERSION_MISMATCH');
 const run = (file, args) => execFileSync(file, args, { cwd: source, encoding: 'utf8', timeout: 30000 }).trim();
 const actualRevision = run('git', ['rev-parse', 'HEAD']);
@@ -122,7 +122,7 @@ const sourcePackage = join(root, workspacePath);
 const sourceManifest = JSON.parse(await readFile(join(sourcePackage, 'package.json'), 'utf8'));
 if (sourceManifest.version !== workspaceEntry.version) throw Error('WORKSPACE_VERSION_MISMATCH');
 runtimePackages.set(workspacePath, { virtualLockPath: workspacePath, name: packageName, version: workspaceEntry.version });
-const sourceFiles = workspace === '@brai/web' ? ['package.json', '.next', 'public'] : workspace === '@brai/agent' ? ['package.json', 'dist', 'contracts'] : workspace === '@brai/artifacts' ? ['package.json', 'dist', 'contracts', 'schemas', 'migrations'] : ['package.json'];
+const sourceFiles = workspace === '@brai/web' ? ['package.json', '.next', 'public'] : workspace === '@brai/agent' ? ['package.json', 'dist', 'contracts'] : workspace === '@brai/artifacts' ? ['package.json', 'dist', 'contracts', 'schemas', 'migrations'] : workspace === '@brai/timer' ? ['package.json', 'dist', 'schemas', 'migrations'] : ['package.json'];
 const destination = join(output, workspacePath);
 await mkdir(destination, { recursive: true });
 for (const item of sourceFiles) {
@@ -141,7 +141,7 @@ if (workspace === '@brai/web') {
   for (const item of ['package.json', 'dist', 'contracts']) await cp(join(agent, item), join(output, 'services/agent', item), { recursive: true, dereference: true });
 }
 await mkdir(join(output, 'services/artifacts'), { recursive: true });
-if (workspace !== '@brai/artifacts') await copyArtifactSiblings();
+if (workspace === '@brai/web' || workspace === '@brai/agent') await copyArtifactSiblings();
 async function collectPayload(path, rootPath = path, files = []) {
   const info = await lstat(path);
   if (info.isSymbolicLink()) throw Error('RUNTIME_CONTAINS_SYMLINK');

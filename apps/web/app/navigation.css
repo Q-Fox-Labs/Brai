@@ -1,0 +1,90 @@
+/* ABOUTME: Оформляет rail, dock и меню профиля общей навигации Brai. */
+/* ABOUTME: Все селекторы ограничены оболочкой и не меняют стили экранов. */
+.brai-workspace-shell { --brai-rail-width: 48px; position: relative; }
+.brai-workspace-shell.workspace-shell { position: relative; padding-left: var(--brai-rail-width); }
+.brai-auth-shell.workspace-shell { padding-left: 0; }
+.brai-workspace-shell .workspace-content { position: relative; min-height: 0; padding-bottom: 86px; }
+.brai-navigation-rail { position: fixed; z-index: 40; inset: 0 auto 0 0; display: flex; width: 48px; flex-direction: column; align-items: center; gap: 16px; padding: 10px 4px 12px; border-right: 1px solid var(--border); background: color-mix(in srgb, var(--card) 94%, transparent); }
+.brai-rail-brand { display: grid; width: 40px; height: 40px; place-items: center; color: var(--foreground); }
+.brai-rail-brand svg { width: 28px; height: 28px; }
+.brai-rail-links { display: flex; width: 100%; flex: 1; flex-direction: column; align-items: center; gap: 8px; }
+.brai-navigation-link { position: relative; display: flex; min-width: 40px; min-height: 48px; flex-direction: column; align-items: center; justify-content: center; gap: 5px; padding: 5px 7px; border-radius: 14px; color: var(--muted-foreground); font-size: 11px; line-height: 1; text-decoration: none; transition: color .18s, background .18s, transform .18s; }
+.brai-navigation-link:hover { background: color-mix(in srgb, var(--accent) 50%, transparent); color: var(--foreground); }
+.brai-navigation-link.is-current { background: var(--accent); color: var(--accent-foreground); }
+.brai-navigation-icon { display: grid; width: 22px; height: 22px; place-items: center; }
+.brai-navigation-icon svg { width: 21px; height: 21px; }
+.brai-navigation-link.is-compact { width: 40px; height: 40px; min-height: 40px; padding: 8px; }
+.brai-navigation-link.is-compact .brai-navigation-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.brai-rail-footer { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+.brai-theme-button { display: grid; width: 42px; height: 42px; place-items: center; border: 1px solid var(--border); border-radius: 8px; background: var(--secondary); color: var(--secondary-foreground); }
+.brai-theme-button svg { width: 20px; height: 20px; }
+.brai-profile-trigger { display: grid; width: 40px; height: 40px; place-items: center; border: 0; border-radius: 50%; background: transparent; color: inherit; }
+.brai-profile-avatar { width: 32px; height: 32px; border: 1px solid var(--border); background: var(--primary); color: var(--primary-foreground); }
+.brai-profile-menu { width: 288px; padding: 12px; border: 1px solid var(--border); border-radius: 16px; background: var(--popover); color: var(--popover-foreground); box-shadow: 0 14px 38px #0003; }
+.brai-profile-email { overflow: hidden; padding: 10px 8px; color: var(--muted-foreground); text-overflow: ellipsis; white-space: nowrap; }
+.brai-logout-item { color: var(--destructive); cursor: pointer; }
+.brai-navigation-dock { position: fixed; z-index: 35; bottom: 20px; left: 50%; display: flex; height: 64px; align-items: flex-end; gap: 16px; padding: 0 16px 12px; transform: translateX(-50%); border: 1px solid var(--border); border-radius: 16px; background: color-mix(in srgb, var(--card) 94%, transparent); box-shadow: 0 10px 34px #0002; backdrop-filter: blur(18px); }
+.brai-dock-link { position: relative; display: block; color: var(--muted-foreground); text-decoration: none; }
+.brai-dock-icon { position: relative; display: grid; place-items: center; border-radius: 50%; background: var(--card); }
+.brai-dock-link.is-current .brai-dock-icon { background: var(--accent); color: var(--accent-foreground); }
+.brai-dock-glyph { display: grid; place-items: center; }
+.brai-dock-glyph svg { width: 100%; height: 100%; }
+.brai-dock-label { position: absolute; bottom: calc(100% + 2px); left: 50%; padding: 5px 8px; transform: translate(-50%, 4px); border-radius: 6px; background: var(--popover); color: var(--popover-foreground); opacity: 0; pointer-events: none; white-space: nowrap; transition: opacity .15s, transform .15s; }
+.brai-dock-link:hover .brai-dock-label, .brai-dock-link:focus-visible .brai-dock-label { transform: translate(-50%, 0); opacity: 1; }
+.brai-timer-dock-svg { width: 100%; height: 100%; overflow: visible; color: var(--primary); }
+.brai-timer-dock-svg text { fill: currentColor; text-anchor: middle; font-weight: 700; font-variant-numeric: tabular-nums; }
+.brai-timer-dock-ring { transform-origin: 50% 50%; animation: brai-timer-dock-spin 28s linear infinite; }
+@keyframes brai-timer-dock-spin { to { transform: rotate(360deg); } }
+
+.brai-mobile-shell { display: none; }
+.brai-mobile-navigation { display: none; }
+.brai-login-surface { --background: #050607; --foreground: #f4f4f5; --card: rgb(15 17 21 / 70%); --card-foreground: #f4f4f5; --popover: #0f1115; --popover-foreground: #f4f4f5; --primary: #f4f4f5; --primary-foreground: #15171a; --secondary: #1b2026; --secondary-foreground: #f4f4f5; --muted: #1b2026; --muted-foreground: #a1a1aa; --accent: #20252d; --accent-foreground: #f4f4f5; --border: #2a3038; --input: #343a44; --ring: #d4d4d8; position: relative; isolation: isolate; display: grid; min-height: 100dvh; place-items: center; overflow: hidden; padding: 24px; background: var(--background); color: var(--foreground); }
+.brai-login-galaxy { position: absolute; z-index: 0; inset: 0; pointer-events: none; }
+.brai-login-galaxy-host { position: absolute; z-index: 0; inset: 0; pointer-events: none; }
+.brai-login-card { z-index: 1; width: min(100%, 448px); overflow: hidden; background: color-mix(in srgb, var(--card) 88%, transparent); backdrop-filter: blur(18px); }
+.brai-login-header { justify-items: center; gap: 14px; padding: 32px 28px 20px; text-align: center; }
+.brai-login-card [data-slot="card-content"] { padding: 0 28px 28px; }
+@media (max-width: 860px) {
+  .brai-workspace-shell { --brai-rail-width: 0px; }
+  .brai-workspace-shell.workspace-shell { padding-left: 0; }
+  .brai-workspace-shell .workspace-content { padding-bottom: calc(52px + env(safe-area-inset-bottom)); }
+  .brai-workspace-shell:has(.brai-mobile-dock[data-keyboard-open]) .workspace-content { padding-bottom: 0; }
+  .brai-navigation-rail, .brai-navigation-dock { display: none; }
+  .brai-mobile-shell { position: fixed; z-index: 40; inset: auto 0 0; display: block; height: calc(52px + env(safe-area-inset-bottom)); padding-bottom: env(safe-area-inset-bottom); }
+  .brai-mobile-dock { display: flex; height: 52px; align-items: center; justify-content: space-around; gap: 2px; padding: 3px 8px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--card) 96%, transparent); backdrop-filter: blur(16px); touch-action: none; }
+  .brai-mobile-dock[data-keyboard-open] { visibility: hidden; pointer-events: none; }
+  .brai-mobile-dock-link, .brai-mobile-dock-action { position: relative; display: grid; width: 44px; height: 44px; flex: none; place-items: center; border: 0; border-radius: 50%; background: transparent; color: var(--muted-foreground); text-decoration: none; }
+  .brai-mobile-dock-link.is-current { color: var(--primary); background: var(--accent); }
+  .brai-mobile-dock-action svg { width: 19px; height: 19px; }
+  .brai-mobile-dock-icon { display: grid; width: 20px; height: 20px; place-items: center; }
+  .brai-mobile-dock-icon svg { width: 20px; height: 20px; }
+  .brai-mobile-dock-icon.icon-agent svg { width: 21px; height: 21px; }
+  .brai-mobile-dock-time { display: grid; width: 100%; height: 100%; place-items: center; overflow: hidden; }
+  .brai-mobile-dock-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .brai-mobile-panel-layer { position: fixed; z-index: 90; inset: 0; touch-action: none; }
+  .brai-mobile-panel-layer[data-panel="shortcuts"] { bottom: calc(52px + env(safe-area-inset-bottom)); }
+  .brai-mobile-backdrop { position: absolute; inset: 0; background: rgb(0 0 0 / 42%); opacity: var(--mobile-sheet-backdrop-opacity, 1); }
+  .brai-mobile-backdrop.is-shortcut-sheet { bottom: 0; }
+  .brai-mobile-panel { position: absolute; top: 0; bottom: 0; left: 0; display: flex; width: min(86vw, 352px); flex-direction: column; padding: max(16px, env(safe-area-inset-top)) 18px calc(18px + env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; border: 1px solid var(--border); border-radius: 0 20px 20px 0; background: var(--card); color: var(--card-foreground); box-shadow: 0 12px 42px #0004; outline: none; will-change: transform; }
+  .brai-mobile-shortcut-sheet { position: absolute; right: 0; bottom: 0; left: 0; display: grid; height: 64px; grid-template-columns: minmax(0, 1fr) 44px 44px; align-items: center; gap: 4px; padding: 4px 8px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--card) 96%, transparent); box-shadow: 0 -8px 26px #0002; backdrop-filter: blur(16px); will-change: transform; }
+  .brai-mobile-shortcut-sheet nav { display: flex; min-width: 0; align-items: center; justify-content: center; gap: 2px; }
+  .brai-mobile-shortcut-sheet .brai-navigation-link { width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; border-radius: 50%; }
+  .brai-mobile-shortcut-sheet .brai-navigation-link.is-mobile .brai-navigation-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .brai-mobile-shortcut-sheet > button { display: grid; width: 44px; height: 44px; place-items: center; border: 0; border-radius: 50%; background: transparent; color: var(--muted-foreground); }
+  .brai-mobile-shortcut-sheet > button svg { width: 20px; height: 20px; }
+  .brai-mobile-panel.is-dragging { animation: none; transition: none; transform: translateX(var(--brai-mobile-panel-drag-x, 0px)); }
+  .brai-mobile-panel.is-settling { animation: none; transition: transform .2s ease-out; transform: translateX(var(--brai-mobile-panel-drag-x, 0px)); }
+  .brai-mobile-panel-grip { width: 36px; height: 4px; flex: none; align-self: center; margin: 0 0 16px; border-radius: 4px; background: var(--muted-foreground); opacity: .4; }
+  .brai-mobile-panel-heading { display: flex; align-items: center; justify-content: space-between; padding-bottom: 18px; font-size: 16px; font-weight: 650; }
+  .brai-mobile-panel-heading button { display: grid; width: 36px; height: 36px; place-items: center; border: 0; border-radius: 10px; background: var(--secondary); color: var(--secondary-foreground); }
+  .brai-mobile-panel-heading svg { width: 18px; height: 18px; }
+  .brai-mobile-panel-routes { display: flex; flex-direction: column; gap: 8px; }
+  .brai-mobile-panel-routes .brai-navigation-link { min-height: 48px; flex-direction: row; justify-content: flex-start; gap: 12px; padding: 8px 12px; font-size: 14px; }
+  .brai-mobile-panel-account { display: flex; align-items: center; gap: 12px; margin-top: auto; padding: 18px 0 14px; overflow: hidden; border-top: 1px solid var(--border); }
+  .brai-mobile-panel-account .brai-profile-avatar { width: 40px; height: 40px; flex: none; }
+  .brai-mobile-panel-account > span { overflow: hidden; color: var(--muted-foreground); text-overflow: ellipsis; white-space: nowrap; }
+  .brai-mobile-panel-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .brai-mobile-panel-actions .brai-theme-button { width: 42px; height: 42px; }
+  .brai-mobile-logout { padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; background: transparent; color: var(--destructive); }
+}
+@media (prefers-reduced-motion: reduce) { .brai-dock-label, .brai-timer-dock-ring { transition: none; animation: none; } }

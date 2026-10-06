@@ -2,7 +2,7 @@
 // ABOUTME: PostgreSQL и NATS проверяются отдельно настоящим интеграционным стендом.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decide } from '../dist/domain.js';
+import { decide, decideMutation } from '../dist/domain.js';
 import { parseCommand } from '../dist/schema.js';
 import { handleDelivery } from '../dist/flow.js';
 const ids={eventId:'00000000-0000-4000-8000-000000000001',timerId:'00000000-0000-4000-8000-000000000002'};
@@ -66,4 +66,28 @@ test('v2 требует владельца и сохраняет его в ка�
  assert.equal(rejected.event.userId,input.userId);
  const ended=decide('stop',{userId:input.userId,commandId:command.commandId,timerId:ids.timerId,stoppedAt:input.startedAt},begun.state,input.startedAt,ids);
  assert.equal(ended.event.userId,input.userId);
+});
+
+test('edit/delete используют CAS, проверяют границы и сохраняют активный таймер',()=>{
+ const active={timerId:ids.timerId,startedAt:'2026-01-01T00:00:00.000Z'};
+ const state={version:7,active};
+ const target={timerId:'00000000-0000-4000-8000-000000000004',startedAt:'2026-01-01T00:00:01.000Z',stoppedAt:'2026-01-01T00:00:02.000Z',durationMs:1000};
+ const edit={userId:'user-a',commandId:'edit',timerId:target.timerId,expectedVersion:7,startedAt:'2026-01-01T00:00:02.000Z',stoppedAt:'2026-01-01T00:00:03.125Z'};
+ const saved=decideMutation('edit',edit,state,target,false,ids.eventId);
+ assert.equal(saved.event.version,8);assert.equal(saved.event.interval.durationMs,1125);assert.deepEqual(saved.state,{version:8,active});
+ assert.equal(decideMutation('edit',{...edit,expectedVersion:6},state,target,false,ids.eventId).event.error.code,'VERSION_CONFLICT');
+ assert.equal(decideMutation('edit',{...edit,stoppedAt:edit.startedAt},state,target,false,ids.eventId).event.error.code,'INVALID_ARGUMENT');
+ assert.equal(decideMutation('edit',edit,state,target,true,ids.eventId).event.error.code,'INTERVAL_OVERLAP');
+ assert.equal(decideMutation('edit',edit,state,null,false,ids.eventId).event.error.code,'NOT_FOUND');
+ const removed=decideMutation('delete',{...edit,expectedVersion:7},state,target,false,ids.eventId);
+ assert.equal(removed.event.operation,'delete');assert.equal(removed.state.version,8);assert.deepEqual(removed.state.active,active);
+});
+
+test('schema parser accepts only exact owner edit/delete payloads',()=>{
+ const base={userId:'user-a',commandId:ids.eventId,timerId:ids.timerId,expectedVersion:3};
+ const parse=(type,value)=>parseCommand(`brai.timer.v2.command.${type}`,Buffer.from(JSON.stringify(value)));
+ assert.ok(parse('edit',{...base,startedAt:'2026-01-01T00:00:00.000Z',stoppedAt:'2026-01-01T00:00:01.000Z'}));
+ assert.ok(parse('delete',base));
+ assert.equal(parse('edit',{...base,startedAt:'2026-01-01T00:00:00.123456Z',stoppedAt:'2026-01-01T00:00:01.000Z'}),null);
+ assert.equal(parse('delete',{...base,extra:true}),null);
 });

@@ -1,6 +1,7 @@
-// ABOUTME: Компактные настройки используют только модели и уровни native каталога.
-// ABOUTME: Иконки и ползунки передают выбор экрану, не запуская задания.
+// ABOUTME: Shared controls представляют режимы, разрешения и native каталог моделей.
+// ABOUTME: Ползунки передают выбор экрану и не запускают задания.
 import { useId, useState } from "react";
+import { Button } from "@/components/ui/button";
 import type { AgentMode, ModelChoice, PermissionMode, ContextUsage } from "@brai/agent/contracts";
 
 const effortLabels: Record<string, [string, string]> = {
@@ -32,7 +33,7 @@ export function ComposerIcon({ kind }: { kind: AgentMode | PermissionMode | "sen
 
 export function AgentModeButton({ mode, disabled, choose }: { mode: AgentMode; disabled: boolean; choose: (mode: AgentMode) => void }) {
   const label = `Режим агента: ${modeLabels[mode]}`;
-  return <button type="button" className="agent-composer-icon" title={label} aria-label={label} disabled={disabled} onClick={() => choose(modes[(modes.indexOf(mode) + 1) % modes.length])}><ComposerIcon kind={mode} /></button>;
+  return <Button type="button" variant="outline" size="icon-sm" className="agent-composer-icon" title={label} aria-label={label} disabled={disabled} onClick={() => choose(modes[(modes.indexOf(mode) + 1) % modes.length])}><ComposerIcon kind={mode} /></Button>;
 }
 
 function SettingSlider({ label, options, value, disabled, choose }: { label: string; options: { value: string; short: string; title: string }[]; value: string; disabled: boolean; choose: (value: string) => void }) {
@@ -56,7 +57,7 @@ export default function ModelSettings({ models, model, effort, permissionMode, d
   const ordered = modelOrder.flatMap(id => models.filter(value => value.model === id));
   const permissionLabel = `Разрешения: ${permissionLabels[permissionMode]}`;
   return <>
-    <button type="button" className="agent-composer-icon" title={permissionLabel} aria-label={permissionLabel} disabled={disabled} onClick={() => choosePermissions(permissions[(permissions.indexOf(permissionMode) + 1) % permissions.length])}><ComposerIcon kind={permissionMode} /></button>
+    <Button type="button" variant="outline" size="icon-sm" className="agent-composer-icon" title={permissionLabel} aria-label={permissionLabel} disabled={disabled} onClick={() => choosePermissions(permissions[(permissions.indexOf(permissionMode) + 1) % permissions.length])}><ComposerIcon kind={permissionMode} /></Button>
     <ContextWindow usage={contextUsage} />
     <div className="agent-model-settings">
       <SettingSlider label="Модель" options={ordered.map(value => ({ value: value.model, short: modelLabels[value.model], title: value.name }))} value={model} disabled={disabled} choose={chooseModel} />
@@ -72,13 +73,13 @@ function ContextWindow({ usage }: { usage?: ContextUsage | null }) {
   const tokens = (value: number) => value >= 1000 ? `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 }).format(value / 1000)} к` : new Intl.NumberFormat("ru-RU").format(value);
   const label = percent === null ? "Контекстное окно: данные недоступны" : `Контекстное окно: ${percent}% использовано`;
   return <div className="agent-context" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}>
-    <button type="button" className="agent-composer-icon" aria-label={label} aria-describedby={open ? id : undefined} aria-expanded={open} onClick={() => setOpen(true)} onFocus={() => setOpen(true)} onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); setOpen(false); } }}>
+    <Button type="button" variant="outline" size="icon-sm" className="agent-composer-icon" aria-label={label} aria-describedby={open ? id : undefined} aria-expanded={open} onClick={() => setOpen(true)} onFocus={() => setOpen(true)} onKeyDown={event => { if (event.key === "Escape" && !event.defaultPrevented) { event.preventDefault(); setOpen(false); } }}>
       <svg viewBox="0 0 24 24" width="18" height="18" fill="none" aria-hidden="true">
         <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="2.5" opacity=".25" />
         {percent !== null && <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="2.5" pathLength="100" strokeDasharray={`${percent} 100`} transform="rotate(-90 12 12)" />}
         {percent === null && <path d="M12 8v4m0 4h.01" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />}
       </svg>
-    </button>
+    </Button>
     {open && <div id={id} role="tooltip" className="agent-context-tooltip">
       <span>Контекстное окно:</span>
       {percent !== null && <><div>{percent}% использовано</div><div>(осталось {100 - percent}%)</div></>}

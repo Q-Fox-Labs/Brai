@@ -10,6 +10,7 @@ tmp/
 # BEGIN BRAI NODE WORKSPACE
 node_modules/
 .next/
+.next-reference/
 dist/
 *.tsbuildinfo
 npm-debug.log*

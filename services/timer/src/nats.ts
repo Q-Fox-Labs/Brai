@@ -24,7 +24,7 @@ export async function runNats(nc:NatsConnection,cfg:Config,store:Store){
  await store.ready();await setupJetStream(nc,cfg);
  const js=nc.jetstream();
  const service=await nc.services.add({name:"brai_timer",version:"2.0.0",description:"Личный секундомер Brai",queue:"brai_timer"});
- for(const [name,dto] of [["snapshot","SnapshotRequest"],["history","HistoryRequest"],["command","CommandLookupRequest"]]){
+ for(const [name,dto] of [["snapshot","SnapshotRequest"],["history","HistoryRequest"],["command","CommandLookupRequest"],["statistics","StatisticsRequest"]]){
   service.addEndpoint(name,{subject:`brai.timer.v2.query.${name}`,queue:"brai_timer",handler:(error,msg)=>{if(error)return;void respond(name,dto,msg);}});
  }
  let queries=0;
@@ -33,9 +33,9 @@ export async function runNats(nc:NatsConnection,cfg:Config,store:Store){
   queries++;
   try {
    const request=parseQuery(dto,msg.data);
-   const result=name==="snapshot"?await store.snapshot(request.userId as string):name==="history"?await store.history(request.userId as string,request.limit as number,request.cursor):await store.command(request.userId as string,request.commandId as string);
+   const result=name==="snapshot"?await store.snapshot(request.userId as string):name==="history"?await store.history(request.userId as string,request.limit as number,request.cursor):name==="command"?await store.command(request.userId as string,request.commandId as string):await store.statistics(request.userId as string);
    msg.respond(Buffer.from(JSON.stringify(result)));
-  }catch(error){const code=error instanceof Error?error.message:"INTERNAL";const known=code==="INVALID_ARGUMENT"||code==="NOT_FOUND";msg.respondError(code==="NOT_FOUND"?404:known?400:503,known?code:"INTERNAL",Buffer.from(JSON.stringify({code:known?code:"INTERNAL",message:known?code:"Сервис временно недоступен",retryable:!known})));}
+  }catch(error){const code=error instanceof Error?error.message:"INTERNAL";const known=code==="INVALID_ARGUMENT"||code==="NOT_FOUND"||code==="HISTORY_CHANGED";msg.respondError(code==="NOT_FOUND"?404:code==="HISTORY_CHANGED"?409:known?400:503,known?code:"INTERNAL",Buffer.from(JSON.stringify({code:known?code:"INTERNAL",message:known?code:"Сервис временно недоступен",retryable:!known})));}
   finally{queries--;}
  }
  let stopped=false;

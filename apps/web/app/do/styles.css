@@ -1,23 +1,74 @@
-/* ABOUTME: Ограничивает общую тёмную палитру исходным задачником September. */
-/* ABOUTME: Геометрия, типографика и взаимодействия задаются исходными UI-компонентами. */
-@font-face { font-family: "Brai Do Manrope"; src: url("/do/Manrope.ttf") format("truetype"); font-weight: 200 800; font-display: swap; }
+/* ABOUTME: Даёт задачнику компактную геометрию и цвета текущей темы Brai. */
+/* ABOUTME: Не содержит состояния задач, обработчиков переноса или таймера. */
 .do-shell {
-  --background: var(--workspace-bg); --card: #25272b; --ink: #e5e5e8;
-  --muted: var(--workspace-muted); --line: var(--workspace-border); --accent: #b3a2ff;
-  --accent-hover: #c6b9ff; --danger: #ee705d; --goal-accent: #e6c257; --goal-accent-fill: #cda641;
-  --quest-accent: #72acee; --quest-accent-fill: #5796dd; --mission-accent: #6ec990; --mission-accent-fill: #48a96f;
-  --surface-subtle: #282a2e; --surface-soft: #2e3136; --surface-hover: #35383e;
-  --surface-raised: #2b2e33; --surface-focus: #303339; --text-secondary: #c0c3ca;
-  --text-strong: #e5e5e8; --field: #25272b;
-  padding: 20px 24px; color: var(--ink); background: var(--background); color-scheme: dark;
-  font-family: "Brai Do Manrope", Arial, sans-serif;
+  --do-background: var(--background);
+  --do-card: var(--card);
+  --do-ink: var(--foreground);
+  --do-muted: var(--muted-foreground);
+  --do-line: var(--border);
+  --do-accent: var(--primary);
+  --do-accent-hover: var(--primary);
+  --do-danger: var(--destructive);
+  --do-goal: #916500;
+  --do-goal-fill: #a97800;
+  --do-quest: #2464a8;
+  --do-quest-fill: #347bc4;
+  --do-mission: #237445;
+  --do-mission-fill: #2b9257;
+  --do-surface-subtle: var(--muted);
+  --do-surface-soft: var(--accent);
+  --do-surface-hover: var(--accent);
+  --do-surface-raised: var(--card);
+  --do-surface-focus: var(--accent);
+  --do-text-secondary: var(--muted-foreground);
+  --do-text-strong: var(--foreground);
+  --do-field: var(--background);
+  --do-result: #176b4d;
+  --do-result-fill: #e3f4eb;
+  --do-result-line: #a9d7be;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  color: var(--do-ink);
+  background: var(--do-background);
+  font-family: var(--font-app-sans), sans-serif;
 }
-.do-shell [data-task-scroll-container] { scrollbar-width: thin; scrollbar-color: #4e5157 transparent; }
+
+.dark .do-shell {
+  --do-goal: #f0cc62;
+  --do-goal-fill: #d5ad3a;
+  --do-quest: #8ebff3;
+  --do-quest-fill: #5d9bdd;
+  --do-mission: #91d9a9;
+  --do-mission-fill: #54b978;
+  --do-result: #9ce2ba;
+  --do-result-fill: #173b27;
+  --do-result-line: #28613d;
+}
+
+.do-shell [data-task-scroll-container] { scrollbar-width: thin; scrollbar-color: var(--do-line) transparent; }
 .do-shell [data-task-title-row] textarea:focus-visible,
 .do-shell [data-task-detail-editor] textarea:focus-visible,
 .do-shell #selected-task-heading:focus-visible { outline: none; }
 .do-shell [data-task-detail-editor] textarea { scrollbar-width: none; }
 .do-shell [data-task-detail-editor] textarea::-webkit-scrollbar { width: 0; }
-@media (max-width: 800px) { .do-shell { padding: 16px; } }
-@media (max-width: 480px) { .do-shell { padding: 12px; } }
-@media (prefers-reduced-motion: reduce) { .do-shell *, .do-shell *::before, .do-shell *::after { transition: none !important; } }
+.do-shell .do-result-field {
+  border-color: var(--do-result-line);
+  background: var(--do-result-fill);
+  color: var(--do-result);
+}
+.do-shell .do-result-field::placeholder { color: var(--do-result); opacity: 0.7; }
+.do-shell .do-result-field:focus-visible {
+  border-color: var(--do-result);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--do-result) 18%, transparent);
+}
+.do-shell .do-result-inline {
+  background: var(--do-result-fill);
+  color: var(--do-result);
+  box-shadow: 0 0 0 3px var(--do-result-fill);
+}
+.do-shell [data-task-completed-header] { background: var(--do-result-fill); }
+
+@media (prefers-reduced-motion: reduce) {
+  .do-shell *, .do-shell *::before, .do-shell *::after { transition: none !important; }
+}

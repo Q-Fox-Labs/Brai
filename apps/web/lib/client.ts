@@ -1,7 +1,7 @@
 // ABOUTME: Держит локальный секундомер отдельно от подтверждённой личной истории.
 // ABOUTME: Ограниченный FIFO сохраняет неизменные намерения до окончательного owner-результата.
-import type { Active, History, Pending, Snapshot, TimerEvent } from "./types";
-import { applyEvent, applySnapshot, duration, initialView, isPending, mergeIntervals, rejectionMessage, sumCompleted, type View } from "./model.ts";
+import type { Active, History, Pending, Snapshot, Statistics, TimerEvent } from "./types";
+import { applyEvent, applySnapshot, duration, initialView, isIntentTimestamp, isPending, mergeIntervals, rejectionMessage, sumCompleted, type View } from "./model.ts";
 export const OUTBOX_KEY = "brai.timer.outbox.v2";
 export const OUTBOX_LIMIT = 512;
 type Entry = { command: Pending; accepted: boolean; uncertain: boolean };
@@ -20,7 +20,7 @@ export function createClient(ports: ClientPorts, userId: string) {
  };
  const storageKey = `${OUTBOX_KEY}:${encodeURIComponent(userId)}`;
  let view = initialView(), entries: Entry[] = [], disposed = false, close = () => {}, publishing = false, lookingUp = false;
- let hold = false, barrier = 0, pollIndex = 0, generation = 0, localCommandId: string | null = null, storageBlocked = false, fillingHistory = false;
+ let hold = false, barrier = 0, pollIndex = 0, generation = 0, historyEpoch = 0, statisticsRequest = 0, localCommandId: string | null = null, storageBlocked = false, fillingHistory = false;
  let polling: ReturnType<typeof setInterval> | undefined, reconnectTimer: ReturnType<typeof setTimeout> | undefined;
  const lifetime = new AbortController();
  const wall = ports.wall ?? Date.now;
@@ -40,28 +40,45 @@ export function createClient(ports: ClientPorts, userId: string) {
   if (entries.length || hold || view.version < barrier || !view.connected) return;
   update({ ...view, local: view.active, localElapsed: view.active ? Math.max(0, view.anchorServer + ports.now() - view.anchorMono - Date.parse(view.active.startedAt)) : 0, localMono: ports.now() });
  };
+ const invalidateHistory = () => {
+  historyEpoch++;
+  update({ ...view, items: [], cursor: null, paged: false, loading: false, totalCompletedMs: null, totalFromHistory: false });
+ };
+ const mutationEvent = (event: TimerEvent) => !("error" in event) && "operation" in event && (event.operation === "edit" || event.operation === "delete");
  const onEvent = (event: TimerEvent) => {
   if (disposed) return;
+  const previousVersion = view.version, historyMutation = mutationEvent(event);
   const index = entries.findIndex(item => item.command.commandId === event.commandId);
   view = applyEvent(view, event);
+  const successfulTransition = !("error" in event) && "version" in event && event.version > previousVersion;
   if (index >= 0) {
    entries.splice(index, 1);
    if ("error" in event) { if (event.commandId === localCommandId) hold = true; view = { ...view, message: rejectionMessage(event.error.code) }; }
    else { barrier = Math.max(barrier, event.version); if (event.commandId === localCommandId) { hold = false; view = { ...view, message: "" }; } }
    persist();
   }
+  if (historyMutation && successfulTransition) {
+   invalidateHistory();
+   void loadStatistics();
+   reconnect();
+   return;
+  }
   update(view); followOwner();
   if (!view.connected) reconnect();
+  else if (successfulTransition) void loadStatistics();
  };
  const scheduleReconnect = () => { if (!disposed && !reconnectTimer) reconnectTimer = setTimeout(() => { reconnectTimer = undefined; connect(); }, 1000); };
- const reconnect = () => { generation++; close(); update({ ...view, connected: false }); scheduleReconnect(); };
+ const reconnect = () => { generation++; historyEpoch++; close(); update({ ...view, connected: false, loading: false }); scheduleReconnect(); };
  const connect = () => {
   if (disposed) return;
   close(); update({ ...view, connected: false });
   const current = ++generation;
   close = ports.stream(data => {
    if (disposed || generation !== current) return;
+   if (data.version < view.version) { reconnect(); return; }
+   const fresh = data.version >= view.version;
    update(applySnapshot(view, data, ports.now())); followOwner(); void recover(); void completeLegacyHistory();
+   if (fresh) void loadStatistics();
   }, event => { if (!disposed && generation === current) onEvent(event); }, () => { if (!disposed && generation === current) reconnect(); });
  };
  const lookup = async (entry: Entry) => {
@@ -109,12 +126,17 @@ export function createClient(ports: ClientPorts, userId: string) {
  };
  const loadHistory = async () => {
   if (!view.cursor || view.loading || !view.connected) return false;
-  const cursor = view.cursor; update({ ...view, loading: true });
+  const cursor = view.cursor, epoch = historyEpoch, revision = view.historyRevision; update({ ...view, loading: true });
   try {
    const response = await accountFetch(`/api/timer/history?cursor=${encodeURIComponent(cursor)}`, { cache: "no-store", signal: signal() });
-   if (!response.ok) throw new Error("HISTORY");
+   if (!response.ok) {
+    const failure = await response.json().catch(() => ({})) as { code?: string };
+    if (failure.code === "HISTORY_CHANGED") { invalidateHistory(); reconnect(); return false; }
+    throw new Error("HISTORY");
+   }
    const data = await response.json() as History;
    if (disposed) return false;
+   if (epoch !== historyEpoch || revision !== view.historyRevision || data.historyRevision !== undefined && data.historyRevision !== revision) return false;
    const items = mergeIntervals(view.items, data.items);
    // AIDEV-NOTE: Новый snapshot может переставить границу страниц, пока запрос ещё в пути.
    const sameCursor = view.cursor === cursor;
@@ -122,7 +144,32 @@ export function createClient(ports: ClientPorts, userId: string) {
    update({ ...view, items, cursor: nextCursor, paged: sameCursor || view.paged, loading: false,
     totalCompletedMs: view.totalFromHistory && nextCursor === null ? sumCompleted(items) : view.totalCompletedMs });
    return true;
-  } catch { update({ ...view, loading: false, message: "Не удалось загрузить историю. Повторите загрузку." }); return false; }
+  } catch { if (!disposed) update({ ...view, loading: false, message: "Не удалось загрузить историю. Повторите загрузку." }); return false; }
+ };
+ const loadStatistics = async (): Promise<void> => {
+  if (disposed) return;
+  const current = ++statisticsRequest;
+  update({ ...view, statisticsLoading: true });
+  try {
+   const response = await accountFetch("/api/timer/statistics", { cache: "no-store", signal: signal() });
+   if (!response.ok) throw new Error("STATISTICS");
+   const data = await response.json() as Statistics;
+   if (disposed || current !== statisticsRequest) return;
+   update({ ...view, statistics: data.version >= view.version ? data : view.statistics, statisticsLoading: false });
+  } catch {
+   if (!disposed && current === statisticsRequest) update({ ...view, statisticsLoading: false });
+  }
+ };
+ const enqueueMutation = (type: "edit" | "delete", timerId: string, startedAt?: string, stoppedAt?: string): string | null => {
+  if (disposed) return null;
+  if (storageBlocked) { update({ ...view, message: "Это действие не сохранится: хранилище вкладки недоступно или повреждено." }); return null; }
+  if (entries.length >= OUTBOX_LIMIT) { update({ ...view, message: "Очередь заполнена: дождитесь сохранения предыдущих действий." }); return null; }
+  const command: Pending = { type, commandId: ports.id(), timerId, expectedVersion: view.version, ...(startedAt ? { startedAt } : {}), ...(stoppedAt ? { stoppedAt } : {}) };
+  entries.push({ command, accepted: false, uncertain: false });
+  update({ ...view, message: "" });
+  if (!persist()) { entries.pop(); update({ ...view, message: "Не удалось сохранить действие в очереди браузера." }); return null; }
+  void flush();
+  return command.commandId;
  };
  const completeLegacyHistory = async () => {
   if (fillingHistory) return;
@@ -166,6 +213,25 @@ export function createClient(ports: ClientPorts, userId: string) {
    entries.push({ command, accepted: false, uncertain: false });
    update(view); if (persist()) void flush();
   },
+  /** Ставит неизменную millisecond-точную правку в FIFO с ожидаемой версией владельца. */
+  editInterval(timerId: string, startedAt: string, stoppedAt: string): string | null {
+   if (!isIntentTimestamp(startedAt) || !isIntentTimestamp(stoppedAt) || Date.parse(startedAt) >= Date.parse(stoppedAt)) {
+    update({ ...view, message: "Укажите корректное начало раньше завершения с точностью до миллисекунд." }); return null;
+   }
+   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(timerId)) {
+    update({ ...view, message: "Не удалось определить сессию для изменения." }); return null;
+   }
+   return enqueueMutation("edit", timerId, startedAt, stoppedAt);
+  },
+  /** Ставит удаление завершённой сессии в FIFO без изменения локального отсчёта. */
+  deleteInterval(timerId: string): string | null {
+   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(timerId)) {
+    update({ ...view, message: "Не удалось определить сессию для удаления." }); return null;
+   }
+   return enqueueMutation("delete", timerId);
+  },
+  /** Читает полную owner-статистику отдельно от загруженных страниц истории. */
+  loadStatistics,
   /** Загружает устойчивую следующую страницу без замены live истории. */
   async loadHistory() { await loadHistory(); await completeLegacyHistory(); },
   /** Возвращение страницы обновляет только историю и anchor владельца. */
