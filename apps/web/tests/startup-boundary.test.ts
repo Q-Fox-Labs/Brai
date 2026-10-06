@@ -13,7 +13,7 @@ const cache = new Map<string, Record<string, unknown>>();
 function load(path: string): Record<string, unknown> {
   if (cache.has(path)) return cache.get(path)!;
   const source = readFileSync(new URL(path, import.meta.url), "utf8");
-  const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
   const module = { exports: {} as Record<string, unknown> };
   new Function("require", "module", "exports", output)((name: string) => {
     if (name.endsWith(".css")) return {};
@@ -39,4 +39,13 @@ test("root layout covers an arbitrary future page before JavaScript without page
   assert.ok(html.includes('Future page'), "children still mount and can measure beneath the overlay");
   assert.ok(html.includes('window.__braiStartupStartedAt=performance.now()'));
   assert.ok(!html.includes('Проверяем вход'));
+});
+
+test("counter renders its actual digits before hydration and measurement", () => {
+  const SlidingNumber = load("../components/ui/sliding-number.tsx").SlidingNumber as ComponentType<{ value: number; padStart?: boolean }>;
+  for (const [value, expected] of [[0, "00"], [12, "12"], [59, "59"]] as const) {
+    const html = renderToStaticMarkup(createElement(SlidingNumber, { value, padStart: true }));
+    const digits = [...html.matchAll(/<span class="absolute inset-0 flex items-center justify-center">(\d)<\/span>/g)].map(match => match[1]).join("");
+    assert.equal(digits, expected);
+  }
 });

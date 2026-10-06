@@ -45,13 +45,13 @@ function Digit({
     <div className="relative inline-block w-[1ch] overflow-x-visible overflow-y-clip leading-none tabular-nums">
       <div className="invisible">0</div>
       {Array.from({ length: 10 }, (_, i) => (
-        <Number key={i} mv={animatedValue} number={i} />
+        <Number key={i} mv={animatedValue} number={i} fallbackValue={valueRoundedToPlace} />
       ))}
     </div>
   );
 }
 
-function Number({ mv, number }: { mv: MotionValue<number>; number: number }) {
+function Number({ mv, number, fallbackValue }: { mv: MotionValue<number>; number: number; fallbackValue: number }) {
   const [ref, bounds] = useMeasure();
 
   const y = useTransform(mv, (latest) => {
@@ -67,10 +67,10 @@ function Number({ mv, number }: { mv: MotionValue<number>; number: number }) {
     return memo;
   });
 
-  // don't render the animated number until we know the height
+  // Keep the current digit visible while a newly shown counter is measured.
   if (!bounds.height) {
     return (
-      <span ref={ref} className="invisible absolute">
+      <span ref={ref} className={number === fallbackValue ? "absolute inset-0 flex items-center justify-center" : "invisible absolute"}>
         {number}
       </span>
     );
