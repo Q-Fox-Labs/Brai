@@ -66,7 +66,7 @@
   .brai-mobile-backdrop { position: absolute; inset: 0; background: rgb(0 0 0 / 42%); opacity: var(--mobile-sheet-backdrop-opacity, 1); }
   .brai-mobile-backdrop.is-shortcut-sheet { bottom: 0; }
   .brai-mobile-panel { position: absolute; top: 0; bottom: 0; left: 0; display: flex; width: min(86vw, 352px); flex-direction: column; padding: max(16px, env(safe-area-inset-top)) 18px calc(18px + env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y; border: 1px solid var(--border); border-radius: 0 20px 20px 0; background: var(--card); color: var(--card-foreground); box-shadow: 0 12px 42px #0004; outline: none; will-change: transform; }
-  .brai-mobile-shortcut-sheet { position: absolute; right: 0; bottom: 0; left: 0; display: grid; height: 64px; grid-template-columns: minmax(0, 1fr) 44px 44px; align-items: center; gap: 4px; padding: 4px 8px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--card) 96%, transparent); box-shadow: 0 -8px 26px #0002; backdrop-filter: blur(16px); will-change: transform; }
+  .brai-mobile-shortcut-sheet { position: absolute; right: 0; bottom: 0; left: 0; display: grid; height: 64px; grid-template-columns: minmax(0, 1fr) 44px 44px 44px; align-items: center; gap: 4px; padding: 4px 8px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--card) 96%, transparent); box-shadow: 0 -8px 26px #0002; backdrop-filter: blur(16px); will-change: transform; }
   .brai-mobile-shortcut-sheet nav { display: flex; min-width: 0; align-items: center; justify-content: center; gap: 2px; }
   .brai-mobile-shortcut-sheet .brai-navigation-link { width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; border-radius: 50%; }
   .brai-mobile-shortcut-sheet .brai-navigation-link.is-mobile .brai-navigation-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
@@ -88,3 +88,8 @@
   .brai-mobile-logout { padding: 10px 14px; border: 1px solid var(--border); border-radius: 10px; background: transparent; color: var(--destructive); }
 }
 @media (prefers-reduced-motion: reduce) { .brai-dock-label, .brai-timer-dock-ring { transition: none; animation: none; } }
+
+/* Уведомления используют постоянную область действий оболочки. */
+.brai-alerts-bell { position: relative; text-decoration: none; }
+.brai-alerts-badge { position: absolute; bottom: -5px; right: -5px; min-width: 18px; height: 18px; display: grid; place-items: center; padding: 0 4px; border: 2px solid var(--background); border-radius: 12px; background: var(--primary); color: #fff; font-size: 10px; line-height: 1; font-weight: 700; }
+.brai-mobile-shortcut-sheet .brai-alerts-bell { width: 40px; height: 40px; }

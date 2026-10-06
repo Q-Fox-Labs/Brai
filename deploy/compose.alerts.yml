@@ -1,0 +1,46 @@
+# ABOUTME: Запускает alerts из принятого standalone image и внешних inputs.
+# ABOUTME: Не создаёт БД, роли или JetStream; миграция отделена от runtime.
+name: brai-alerts
+services:
+  alerts:
+    image: ${BRAI_ALERTS_IMAGE:?Set accepted alerts image}
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "1000:1000"
+    env_file:
+      - ${ALERTS_ENV_FILE:?Set protected alerts runtime input}
+    environment:
+      NODE_ENV: production
+      ALERTS_CURSOR_HMAC_KEY_FILE: /run/secrets/alerts_cursor_hmac_key
+    volumes:
+      - type: bind
+        source: ${BRAI_ALERTS_CURSOR_KEY_FILE:?Set restored stable cursor key}
+        target: /run/secrets/alerts_cursor_hmac_key
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [database, messaging]
+  alerts-migrate:
+    image: ${BRAI_ALERTS_IMAGE:?Set accepted alerts image}
+    pull_policy: never
+    profiles: [migration]
+    restart: "no"
+    init: true
+    user: "1000:1000"
+    command: [node, dist/migrate.js]
+    healthcheck:
+      disable: true
+    env_file:
+      - ${ALERTS_MIGRATION_ENV_FILE:?Set protected migration input}
+    environment:
+      NODE_ENV: production
+    networks: [database]
+networks:
+  database:
+    name: ${BRAI_DATABASE_NETWORK:?Set restored database network}
+    external: true
+  messaging:
+    name: ${BRAI_NATS_NETWORK:?Set restored messaging network}
+    external: true

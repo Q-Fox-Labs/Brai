@@ -7,6 +7,8 @@ import Timer from "./timer";
 import AgentScreen from "./agent/screen";
 import DoScreen from "./do/screen";
 import Navigation from "./navigation";
+import { AlertsProvider } from "./alerts/provider";
+import AlertsScreen from "./alerts/screen";
 import "./navigation.css";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,7 +25,7 @@ export default function Account() {
 /** Управляет подтверждённой сервером сессией без хранения токена в браузере. */
 function AccountSession({ timerElapsed, onTimerElapsed }: { timerElapsed: string | null; onTimerElapsed: (elapsed: string | null) => void }) {
  const pathname = usePathname();
- const view = pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : "timer";
+ const view = pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : pathname === "/alerts" ? "alerts" : "timer";
  const [user, setUser] = useState<User | null>(null), [ready, setReady] = useState(false), [exiting, setExiting] = useState(false);
  const [email, setEmail] = useState(""), [code, setCode] = useState(""), [sent, setSent] = useState(false), [busy, setBusy] = useState(false), [message, setMessage] = useState("");
  const locked = useRef(false), codeInput = useRef<HTMLInputElement>(null);
@@ -66,10 +68,10 @@ function AccountSession({ timerElapsed, onTimerElapsed }: { timerElapsed: string
   finally { locked.current = false; setExiting(false); }
  };
  if (!ready) return <div className="workspace-shell brai-workspace-shell"><main className="p-8" role="status">Проверяем вход…</main></div>;
- if (user && !exiting) return <div className="workspace-shell brai-workspace-shell">
+ if (user && !exiting) return <AlertsProvider key={user.id} userId={user.id} onUnauthorized={unauthorized}><div className="workspace-shell brai-workspace-shell">
   <Navigation key={user.id} timerElapsed={timerElapsed} email={user.email} onLogout={() => { void logout(); }} />
   <div className="workspace-content"><AccountScreens key={user.id} view={view} user={user} onLogout={() => { void logout(); }} onUnauthorized={unauthorized} accountMessage={message} onTimerElapsed={onTimerElapsed} /></div>
- </div>;
+ </div></AlertsProvider>;
  if (exiting) return <div className="workspace-shell brai-workspace-shell"><main className="p-8" role="status">Выходим…</main></div>;
  return <div className="workspace-shell brai-workspace-shell brai-auth-shell">
   <main className="brai-login-surface dark">
@@ -102,12 +104,13 @@ function AccountSession({ timerElapsed, onTimerElapsed }: { timerElapsed: string
 }
 
 /** Сохраняет состояние посещённых экранов; выход или смена пользователя удаляют их. */
-function AccountScreens({ view, user, onLogout, onUnauthorized, accountMessage, onTimerElapsed }: { view: "agent" | "timer" | "do"; user: User; onLogout: () => void; onUnauthorized: () => void; accountMessage: string; onTimerElapsed: (elapsed: string | null) => void }) {
+function AccountScreens({ view, user, onLogout, onUnauthorized, accountMessage, onTimerElapsed }: { view: "agent" | "timer" | "do" | "alerts"; user: User; onLogout: () => void; onUnauthorized: () => void; accountMessage: string; onTimerElapsed: (elapsed: string | null) => void }) {
  const [visitedDo, setVisitedDo] = useState(view === "do");
  useEffect(() => { if (view === "do") setVisitedDo(true); }, [view]);
  const props = { userId: user.id, email: user.email, onLogout, onUnauthorized, accountMessage };
  // AIDEV-NOTE: Базовые состояния Agent и Timer подключены после входа; hidden сохраняет клиентов.
  return <>
+  <div className="workspace-screen" hidden={view !== "alerts"}><AlertsScreen active={view === "alerts"} /></div>
   <div className="workspace-screen" hidden={view !== "agent"}><AgentScreen {...props} active={view === "agent"} /></div>
   <div className="workspace-screen workspace-timer" hidden={view !== "timer"}><Timer userId={user.id} onUnauthorized={onUnauthorized} accountMessage={accountMessage} onElapsed={onTimerElapsed} /></div>
   <div className="workspace-screen" hidden={view !== "do"}>{(visitedDo || view === "do") && <DoScreen {...props} active={view === "do"} />}</div>

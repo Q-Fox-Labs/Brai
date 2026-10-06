@@ -1,0 +1,535 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.app/schemas/alerts/messages.schema.json",
+  "definitions": {
+    "category": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "description": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 512
+        },
+        "color": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        },
+        "importance": {
+          "type": "integer",
+          "enum": [
+            1,
+            2,
+            3
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "code",
+        "name",
+        "description",
+        "color",
+        "importance"
+      ],
+      "additionalProperties": false
+    },
+    "type": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "category_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "description": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "id",
+        "category_id",
+        "code",
+        "name",
+        "description"
+      ],
+      "additionalProperties": false
+    },
+    "ingest": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "service_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "type_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "scope_type": {
+          "enum": [
+            "user",
+            "system"
+          ]
+        },
+        "scope_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "text": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 8192
+        },
+        "data": {
+          "type": "object"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|[+-]\\d{2}:\\d{2})$"
+        }
+      },
+      "required": [
+        "id",
+        "service_id",
+        "type_id",
+        "scope_type",
+        "scope_id",
+        "title",
+        "text",
+        "occurred_at"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "scope_type": {
+            "const": "system"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "scope_id": {
+            "const": "global"
+          }
+        }
+      }
+    },
+    "notification": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "service_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "type_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "scope_type": {
+          "enum": [
+            "user",
+            "system"
+          ]
+        },
+        "scope_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "text": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 8192
+        },
+        "data": {
+          "type": "object"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|[+-]\\d{2}:\\d{2})$"
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|[+-]\\d{2}:\\d{2})$"
+        },
+        "category": {
+          "$ref": "#/definitions/category"
+        },
+        "type": {
+          "$ref": "#/definitions/type"
+        },
+        "read_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|[+-]\\d{2}:\\d{2})$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "service_id",
+        "type_id",
+        "scope_type",
+        "scope_id",
+        "title",
+        "text",
+        "data",
+        "occurred_at",
+        "recorded_at",
+        "category",
+        "type",
+        "read_at"
+      ],
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "scope_type": {
+            "const": "system"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "scope_id": {
+            "const": "global"
+          }
+        }
+      }
+    },
+    "listRequest": {
+      "type": "object",
+      "properties": {
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "user_id"
+      ],
+      "additionalProperties": false
+    },
+    "listResponse": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/definitions/notification"
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor"
+      ],
+      "additionalProperties": false
+    },
+    "getRequest": {
+      "type": "object",
+      "properties": {
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "service_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "user_id",
+        "service_id",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "getResponse": {
+      "type": "object",
+      "properties": {
+        "notification": {
+          "$ref": "#/definitions/notification"
+        }
+      },
+      "required": [
+        "notification"
+      ],
+      "additionalProperties": false
+    },
+    "summaryRequest": {
+      "type": "object",
+      "properties": {
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "user_id"
+      ],
+      "additionalProperties": false
+    },
+    "summaryResponse": {
+      "type": "object",
+      "properties": {
+        "unread_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "category": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 2147483647
+                },
+                "code": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,63}$"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "color": {
+                  "type": "string",
+                  "pattern": "^#[0-9A-Fa-f]{6}$"
+                },
+                "importance": {
+                  "type": "integer",
+                  "enum": [
+                    1,
+                    2,
+                    3
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "code",
+                "name",
+                "color",
+                "importance"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "unread_count",
+        "category"
+      ],
+      "additionalProperties": false
+    },
+    "readRequest": {
+      "type": "object",
+      "properties": {
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "service_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "user_id",
+        "service_id",
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "readResponse": {
+      "$ref": "#/definitions/summaryResponse"
+    },
+    "readAllRequest": {
+      "type": "object",
+      "properties": {
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "user_id"
+      ],
+      "additionalProperties": false
+    },
+    "readAllResponse": {
+      "$ref": "#/definitions/summaryResponse"
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "INVALID_ARGUMENT",
+            "INVALID_CURSOR",
+            "REQUEST_TOO_LARGE",
+            "RESULT_TOO_LARGE",
+            "NOT_FOUND",
+            "EVENT_ID_CONFLICT",
+            "UNKNOWN_TYPE",
+            "BUSY",
+            "DATABASE_UNAVAILABLE",
+            "DEADLINE_EXCEEDED",
+            "INTERNAL"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "additionalProperties": false
+    },
+    "changed": {
+      "type": "object",
+      "properties": {
+        "user_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "user_id"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

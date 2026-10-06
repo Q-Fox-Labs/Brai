@@ -1,6 +1,7 @@
 "use client";
 // ABOUTME: Показывает desktop rail, dock и мобильные панели оболочки Brai.
 // ABOUTME: Поддерживает только действующие маршруты и состояние текущего аккаунта.
+import { AlertsBell } from "../alerts/bell";
 import Link, { navigateWorkspace } from "./workspace-link";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent as ReactTouchEvent } from "react";
@@ -15,7 +16,7 @@ import { useMobileSheetDrag } from "./use-mobile-sheet-drag";
 import { useSoftwareKeyboardOpen } from "./use-software-keyboard-open";
 import { sectionSwipePageStyle, useLeftEdgeMenuSwipe, useSectionSwipeNavigation } from "./use-section-swipe-navigation";
 
-type Route = { href: "/" | "/agent" | "/do"; label: string; icon: "agent" | "timer" | "do" };
+type Route = { href: "/" | "/agent" | "/do" | "/alerts"; label: string; icon: "agent" | "timer" | "do" };
 type MobilePanel = "profile" | "shortcuts";
 const routes: Route[] = [
   { href: "/agent", label: "Агент", icon: "agent" },
@@ -41,7 +42,7 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
   const keyboardOpen = useSoftwareKeyboardOpen(isMobile);
   const activeSection = pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : "timer";
   const selectSection = useCallback((section: "agent" | "timer" | "do") => navigateWorkspace(section === "timer" ? "/" : `/${section}`), []);
-  const dockSwipe = useSectionSwipeNavigation(activeSection, selectSection, isMobile && panel === null);
+  const dockSwipe = useSectionSwipeNavigation(activeSection, selectSection, isMobile && panel === null && pathname !== "/alerts");
   const currentSwipeStyle = sectionSwipePageStyle(dockSwipe.visual, "current");
   const openPanel = useCallback((next: MobilePanel, source: HTMLElement) => {
     opener.current = source;
@@ -114,7 +115,7 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
       <nav className="brai-rail-links" aria-label="Разделы Brai">
         {routes.map(route => <RouteLink key={route.href} route={route} current={pathname === route.href} compact />)}
       </nav>
-      <div className="brai-rail-footer"><ThemeButton /><ProfileMenu email={email} onLogout={onLogout} open={profileOpen} setOpen={setProfileOpen} /></div>
+      <div className="brai-rail-footer"><AlertsBell /><ThemeButton /><ProfileMenu email={email} onLogout={onLogout} open={profileOpen} setOpen={setProfileOpen} /></div>
     </aside>
     <Dock routes={routes} pathname={pathname} timerElapsed={timerElapsed} />
     <div className="brai-mobile-shell">
@@ -226,12 +227,12 @@ function MobilePanel({ panel, email, onClose, onLogout, onNavigate }: {
       <nav className="brai-mobile-panel-routes" aria-label="Разделы Brai">{routes.map(route => <RouteLink key={route.href} route={route} current={pathname === route.href} mobile
         onNavigate={event => navigateFromPanel(event, route.href, closeSheet, onNavigate)} />)}</nav>
       <div className="brai-mobile-panel-account"><Avatar className="brai-profile-avatar"><AvatarFallback className="bg-primary text-xs font-semibold text-primary-foreground">{email.trim().slice(0, 1).toLocaleUpperCase("ru-RU") || "?"}</AvatarFallback></Avatar><span>{email}</span></div>
-      <div className="brai-mobile-panel-actions"><ThemeButton /><button className="brai-mobile-logout" type="button" onClick={() => closeSheet(() => onLogoutRef.current())}>Выйти</button></div>
+      <div className="brai-mobile-panel-actions"><AlertsBell onClick={event => navigateFromPanel(event, "/alerts", closeSheet, onNavigate)} /><ThemeButton /><button className="brai-mobile-logout" type="button" onClick={() => closeSheet(() => onLogoutRef.current())}>Выйти</button></div>
     </aside> : <aside ref={sheet.sheetRef} className="brai-mobile-shortcut-sheet" style={sheet.sheetStyle} role="dialog" aria-modal="true" aria-label="Быстрые настройки" tabIndex={-1}
       onClick={event => event.stopPropagation()}>
       <nav aria-label="Быстрый переход">{routes.map(route => <RouteLink key={route.href} route={route} current={pathname === route.href} mobile
         onNavigate={event => navigateFromPanel(event, route.href, closeSheet, onNavigate)} />)}</nav>
-      <ThemeButton /><button type="button" aria-label="Закрыть быстрые настройки" onClick={() => closeSheet()}><X /></button>
+      <AlertsBell onClick={event => navigateFromPanel(event, "/alerts", closeSheet, onNavigate)} /><ThemeButton /><button type="button" aria-label="Закрыть быстрые настройки" onClick={() => closeSheet()}><X /></button>
     </aside>}
   </div>;
 }

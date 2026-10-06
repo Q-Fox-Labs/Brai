@@ -136,6 +136,9 @@ if (workspace !== '@brai/agent') await cp(join(root, dockerfile), join(output, '
 await visitDependencies(workspacePath, workspaceEntry, sourcePackage);
 await mkdir(output, { recursive: true });
 if (workspace === '@brai/web') {
+  // AIDEV-NOTE: Схемы alerts принадлежат сервису и должны оставаться доступны веб-шлюзу после упаковки.
+  await mkdir(join(output, 'services/alerts'), { recursive: true });
+  for (const item of ['contracts', 'schemas']) await cp(join(root, 'services/alerts', item), join(output, 'services/alerts', item), { recursive: true, dereference: true });
   await mkdir(join(output, 'services/agent'), { recursive: true });
   const agent = join(root, 'services/agent');
   for (const item of ['package.json', 'dist', 'contracts']) await cp(join(agent, item), join(output, 'services/agent', item), { recursive: true, dereference: true });

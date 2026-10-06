@@ -1,0 +1,34 @@
+{
+  "name": "@brai/alerts",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    "./contracts": "./contracts/index.mjs",
+    "./schemas/messages.schema.json": "./schemas/messages.schema.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/main.js",
+    "migrate": "node dist/migrate.js",
+    "health": "node dist/health.js",
+    "package:runtime": "node scripts/package-runtime.mjs",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "test:integration": "npm run build && node --test --test-concurrency=1 tests/integration/*.test.mjs"
+  },
+  "dependencies": {
+    "ajv": "8.17.1",
+    "ajv-formats": "3.0.1",
+    "nats": "2.29.3",
+    "pg": "8.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/pg": "8.15.6",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

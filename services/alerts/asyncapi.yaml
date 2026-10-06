@@ -1,0 +1,420 @@
+# ABOUTME: Описывает реальную границу NATS Services, JetStream и Core сигналов alerts.
+# ABOUTME: Payload-схемы ссылаются только на owner Draft07, без копий DTO.
+{
+  "asyncapi": "3.1.0",
+  "info": {
+    "title": "Brai alerts service",
+    "version": "1.0.0",
+    "description": "NATS Services service_alerts v1.0.0, unique instance ID, queue service_alerts, PING/INFO/STATS. Trusted web identity alone may query arbitrary declared user_id. service_id is declared, not authenticated until a registry exists. Replies use native NATS reply subjects and canonical service error headers."
+  },
+  "defaultContentType": "application/json",
+  "servers": {
+    "brai": {
+      "host": "{host}:{port}",
+      "protocol": "nats",
+      "variables": {
+        "host": {
+          "default": "localhost"
+        },
+        "port": {
+          "default": "4222"
+        }
+      }
+    }
+  },
+  "channels": {
+    "list": {
+      "address": "brai.alerts.v1.query.list",
+      "messages": {
+        "request": {
+          "$ref": "#/components/messages/listRequest"
+        }
+      }
+    },
+    "get": {
+      "address": "brai.alerts.v1.query.get",
+      "messages": {
+        "request": {
+          "$ref": "#/components/messages/getRequest"
+        }
+      }
+    },
+    "summary": {
+      "address": "brai.alerts.v1.query.summary",
+      "messages": {
+        "request": {
+          "$ref": "#/components/messages/summaryRequest"
+        }
+      }
+    },
+    "read": {
+      "address": "brai.alerts.v1.command.read",
+      "messages": {
+        "request": {
+          "$ref": "#/components/messages/readRequest"
+        }
+      }
+    },
+    "read_all": {
+      "address": "brai.alerts.v1.command.read_all",
+      "messages": {
+        "request": {
+          "$ref": "#/components/messages/readAllRequest"
+        }
+      }
+    },
+    "reply": {
+      "address": null,
+      "messages": {
+        "listResponse": {
+          "$ref": "#/components/messages/listResponse"
+        },
+        "getResponse": {
+          "$ref": "#/components/messages/getResponse"
+        },
+        "summaryResponse": {
+          "$ref": "#/components/messages/summaryResponse"
+        },
+        "readResponse": {
+          "$ref": "#/components/messages/readResponse"
+        },
+        "readAllResponse": {
+          "$ref": "#/components/messages/readAllResponse"
+        },
+        "error": {
+          "$ref": "#/components/messages/error"
+        }
+      }
+    },
+    "ingest": {
+      "address": "brai.alerts.v1.ingest",
+      "messages": {
+        "ingest": {
+          "$ref": "#/components/messages/ingest"
+        }
+      }
+    },
+    "changed": {
+      "address": "brai.alerts.v1.changed",
+      "messages": {
+        "changed": {
+          "$ref": "#/components/messages/changed"
+        }
+      }
+    }
+  },
+  "operations": {
+    "list": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/list"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/list/messages/request"
+        }
+      ],
+      "bindings": {
+        "nats": {
+          "queue": "service_alerts",
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/listResponse"
+          },
+          {
+            "$ref": "#/channels/reply/messages/error"
+          }
+        ],
+        "x-nats-reply-subject": "message.reply"
+      }
+    },
+    "get": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/get"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/get/messages/request"
+        }
+      ],
+      "bindings": {
+        "nats": {
+          "queue": "service_alerts",
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/getResponse"
+          },
+          {
+            "$ref": "#/channels/reply/messages/error"
+          }
+        ],
+        "x-nats-reply-subject": "message.reply"
+      }
+    },
+    "summary": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/summary"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/summary/messages/request"
+        }
+      ],
+      "bindings": {
+        "nats": {
+          "queue": "service_alerts",
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/summaryResponse"
+          },
+          {
+            "$ref": "#/channels/reply/messages/error"
+          }
+        ],
+        "x-nats-reply-subject": "message.reply"
+      }
+    },
+    "read": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/read"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/read/messages/request"
+        }
+      ],
+      "bindings": {
+        "nats": {
+          "queue": "service_alerts",
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/readResponse"
+          },
+          {
+            "$ref": "#/channels/reply/messages/error"
+          }
+        ],
+        "x-nats-reply-subject": "message.reply"
+      }
+    },
+    "read_all": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/read_all"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/read_all/messages/request"
+        }
+      ],
+      "bindings": {
+        "nats": {
+          "queue": "service_alerts",
+          "bindingVersion": "0.1.0"
+        }
+      },
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/reply"
+        },
+        "messages": [
+          {
+            "$ref": "#/channels/reply/messages/readAllResponse"
+          },
+          {
+            "$ref": "#/channels/reply/messages/error"
+          }
+        ],
+        "x-nats-reply-subject": "message.reply"
+      }
+    },
+    "ingest": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/ingest"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/ingest/messages/ingest"
+        }
+      ],
+      "description": "Durable JetStream; ACK only after database COMMIT. Identical replay succeeds; malformed, unknown type and conflicting ID use TERM. Transient errors use NAK delay capped at 30 seconds. Producers must retain the same event ID/content and wait for JetStream PubAck; PubAck acknowledges broker storage, not business insertion.",
+      "x-jetstream": {
+        "stream": "BRAI_ALERTS_INGEST_V1",
+        "durable": "alerts_ingest",
+        "retention": "workqueue",
+        "storage": "file",
+        "max_age": 0,
+        "max_bytes": 268435456,
+        "max_msg_size": 65536,
+        "discard": "new",
+        "ack_policy": "explicit",
+        "ack_wait_ns": 30000000000,
+        "max_deliver": -1,
+        "max_ack_pending": 8,
+        "max_pull_messages": 1
+      }
+    },
+    "changed": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/changed"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/changed/messages/changed"
+        }
+      ],
+      "description": "Best-effort Core NATS after insertion/read COMMIT. user_id=null means common notification; payload never carries notification content. Consumers reconcile every 15 seconds and after reconnect."
+    }
+  },
+  "components": {
+    "messages": {
+      "listRequest": {
+        "name": "listRequest",
+        "payload": {
+          "$ref": "./schemas/messages.schema.json#/definitions/listRequest"
+        }
+      },
+      "listResponse": {
+        "name": "listResponse",
+        "payload": {
+          "$ref": "./schemas/messages.schema.json#/definitions/listResponse"
+        }
+      },
+      "getRequest": {
+        "name": "getRequest",
+        "payload": {
+          "$ref": "./schemas/messages.schema.json#/definitions/getRequest"
+        }
+      },
+      "getResponse": {
+        "name": "getResponse",
+        "payload": {
+          "$ref": "./schemas/messages.schema.json#/definitions/getResponse"
+        }
+      },
+      "summaryRequest": {
+        "name": "summaryRequest",
+        "payload": {
+          "$ref": "./schemas/messages.schema.json#/definitions/summaryRequest"
+        }
+      },
+      "summaryResponse": {
+        "name": "summaryResponse",
+        "payload": {
+          "$ref": "./schemas/messages.schema.json#/definitions/summaryResponse"
+        }
+      },
+      "readRequest": {
+        "name": "readRequest",
+        "payload": {
+          "$ref": "./schemas/messages.schema.json#/definitions/readRequest"
+        }
+      },
+      "readResponse": {
+        "name": "readResponse",
+        "payload": {
+          "$ref": "./schemas/messages.schema.json#/definitions/readResponse"
+        }
+      },
+      "readAllRequest": {
+        "name": "readAllRequest",
+        "payload": {
+          "$ref": "./schemas/messages.schema.json#/definitions/readAllRequest"
+        }
+      },
+      "readAllResponse": {
+        "name": "readAllResponse",
+        "payload": {
+          "$ref": "./schemas/messages.schema.json#/definitions/readAllResponse"
+        }
+      },
+      "error": {
+        "name": "error",
+        "payload": {
+          "$ref": "./schemas/messages.schema.json#/definitions/error"
+        },
+        "headers": {
+          "type": "object",
+          "required": [
+            "Nats-Service-Error",
+            "Nats-Service-Error-Code"
+          ],
+          "properties": {
+            "Nats-Service-Error": {
+              "type": "string"
+            },
+            "Nats-Service-Error-Code": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ingest": {
+        "name": "ingest",
+        "payload": {
+          "$ref": "./schemas/messages.schema.json#/definitions/ingest"
+        }
+      },
+      "changed": {
+        "name": "changed",
+        "payload": {
+          "$ref": "./schemas/messages.schema.json#/definitions/changed"
+        }
+      }
+    }
+  },
+  "x-limits": {
+    "requestBytes": 65536,
+    "eventBytes": 65536,
+    "responseBytes": 524288,
+    "deadlineMs": 10000,
+    "active": 8,
+    "queue": 64
+  },
+  "x-errors": {
+    "INVALID_ARGUMENT": 400,
+    "INVALID_CURSOR": 400,
+    "REQUEST_TOO_LARGE": 413,
+    "RESULT_TOO_LARGE": 413,
+    "NOT_FOUND": 404,
+    "EVENT_ID_CONFLICT": 409,
+    "UNKNOWN_TYPE": 400,
+    "BUSY": 503,
+    "DATABASE_UNAVAILABLE": 503,
+    "DEADLINE_EXCEEDED": 504,
+    "INTERNAL": 500
+  }
+}

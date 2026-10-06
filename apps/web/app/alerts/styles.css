@@ -1,0 +1,35 @@
+/* ABOUTME: Оформляет ленту alerts цветами и размерами существующей оболочки Brai. */
+/* ABOUTME: Длинный текст и JSON остаются внутри карточки на узком экране. */
+.alerts-screen { max-width: 960px; margin: 0 auto; padding: 32px 24px 24px; }
+.alerts-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.alerts-heading h1 { margin: 0; font-size: 24px; font-weight: 600; letter-spacing: -.025em; }
+.alerts-heading p { margin: 4px 0 0; color: var(--muted-foreground); font-size: 13px; }
+.alerts-actions { display: flex; gap: 6px; }
+.alerts-status { min-height: 20px; margin: 16px 0; color: var(--muted-foreground); font-size: 13px; }
+.alerts-list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.alert-record { padding: 18px 20px 12px; border: 1px solid var(--border); border-inline-start: 4px solid; border-radius: 10px; background: var(--card); }
+.alert-record.is-read { background: color-mix(in srgb, var(--card) 65%, var(--background)); }
+.alert-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; color: var(--muted-foreground); font-size: 12px; }
+.alert-meta time { margin-inline-start: auto; }
+.alert-category { color: var(--foreground); font-weight: 600; }
+.alert-title { display: flex; align-items: start; gap: 10px; margin: 12px 0 6px; }
+.alert-title h2 { flex: 1; margin: 0; font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+.alert-unread { width: 7px; height: 7px; margin-top: 7px; flex-shrink: 0; border-radius: 50%; background: var(--foreground); }
+.alert-text { margin: 0; font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.alert-data { margin-top: 12px; font-size: 12px; color: var(--muted-foreground); }
+.alert-data summary { width: fit-content; cursor: pointer; }
+.alert-data pre { max-height: 300px; overflow: auto; margin: 8px 0; padding: 12px; border-radius: 6px; background: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.alert-read-action { display: flex; justify-content: end; margin-top: 8px; }
+.alert-read-action > span { display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px; font-size: 12px; color: var(--muted-foreground); }
+.alert-read-action > span svg { width: 14px; height: 14px; }
+.alerts-empty { padding: 64px 0; text-align: center; color: var(--muted-foreground); }
+.alerts-more { display: flex; justify-content: center; margin: 24px 0; }
+@media (max-width: 860px) {
+ .alerts-screen { padding: 20px 12px; }
+ .alerts-heading { align-items: start; gap: 10px; }
+ .alerts-heading h1 { font-size: 21px; }
+ .alerts-actions { gap: 2px; }
+ .alerts-actions button { font-size: 12px; }
+ .alert-record { padding: 14px 12px 8px; }
+ .alert-meta time { width: 100%; margin-inline-start: 0; }
+}
