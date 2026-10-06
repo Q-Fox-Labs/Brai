@@ -21,5 +21,7 @@ export function config(env: NodeJS.ProcessEnv = process.env, readSecret: (path: 
   if (!/^_INBOX(?:\.[A-Za-z0-9_-]+)+$/.test(natsInboxPrefix)) throw new Error('INVALID_NATS_INBOX_PREFIX');
   const cursorKey = readSecret(required(env, 'ALERTS_CURSOR_HMAC_KEY_FILE'));
   if (cursorKey.length < 32) throw new Error('ALERTS_CURSOR_KEY_TOO_SHORT');
-  return { appDatabaseURL: databaseURL(env, 'ALERTS_APP_DATABASE_URL'), webDatabaseURL: databaseURL(env, 'ALERTS_WEB_DATABASE_URL'), cursorKey, natsServers, natsUser: required(env, 'NATS_USER'), natsPassword: required(env, 'NATS_PASSWORD'), natsInboxPrefix };
+  const appDatabaseURL = databaseURL(env, 'ALERTS_APP_DATABASE_URL'), webDatabaseURL = databaseURL(env, 'ALERTS_WEB_DATABASE_URL');
+  if (decodeURIComponent(new URL(appDatabaseURL).username) === decodeURIComponent(new URL(webDatabaseURL).username)) throw new Error('ALERTS_RUNTIME_ROLES_MUST_DIFFER');
+  return { appDatabaseURL, webDatabaseURL, cursorKey, natsServers, natsUser: required(env, 'NATS_USER'), natsPassword: required(env, 'NATS_PASSWORD'), natsInboxPrefix };
 }

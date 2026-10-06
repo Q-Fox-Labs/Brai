@@ -2,6 +2,7 @@
 // ABOUTME: Подмена хранения не заменяет отдельную проверку PostgreSQL и брокера.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { createAlertsHandlers, normalizeTimestamp } from '../dist/domain.js';
 const key = Buffer.alloc(32, 1);
 const event = { id: 'AAAAAAAA-1111-4111-8111-111111111111', service_id: 'source', type_id: 5, scope_type: 'user', scope_id: 'u', title: 'Готово', text: '', occurred_at: '2026-10-06T12:00:00.123456+03:00' };
@@ -41,4 +42,15 @@ test('data NUL and event byte limit are rejected before external operations', as
   await assert.rejects(f.handlers.ingest({ ...event, occurred_at: '2026-10-06T09:00:60Z' }), { code: 'INVALID_ARGUMENT' });
   const deep = JSON.parse('{"child":'.repeat(8000) + '{}' + '}'.repeat(8000));
   await assert.rejects(f.handlers.ingest({ ...event, data: deep }), { code: 'INVALID_ARGUMENT' });
+});
+test('valid legacy HMAC cursors remain readable after the compact cursor upgrade', async () => {
+  const f = fixture(); await f.handlers.ingest(event);
+  const position = ['2026-10-06T09:00:00.123456Z', event.service_id, event.id.toLowerCase()];
+  const body = Buffer.from(JSON.stringify({ v: 1, user_id: 'u', position })).toString('base64url');
+  const token = body + '.' + createHmac('sha256', key).update(body).digest('base64url');
+  let received;
+  f.tx.list = async after => { received = after; return []; };
+  await f.handlers.execute('list', { user_id: 'u', cursor: token });
+  assert.deepEqual(received, position);
+  await assert.rejects(f.handlers.execute('list', { user_id: 'other', cursor: token }), { code: 'INVALID_CURSOR' });
 });

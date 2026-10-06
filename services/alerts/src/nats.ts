@@ -1,6 +1,6 @@
 // ABOUTME: Подключает JetStream ingestion и NATS Services к чистым операциям alerts.
 // ABOUTME: Ack следует за commit; broker-ресурсы готовит оператор, сигналы не содержат уведомлений.
-import { connect, AckPolicy, DeliverPolicy, DiscardPolicy, RetentionPolicy, StorageType, type NatsConnection, type ServiceMsg, type JsMsg } from 'nats';
+import { connect, AckPolicy, DeliverPolicy, DiscardPolicy, ReplayPolicy, RetentionPolicy, StorageType, type NatsConnection, type ServiceMsg, type JsMsg } from 'nats';
 import { randomUUID } from 'node:crypto';
 import { errorStatus, limits, subjects, type Operation } from '../contracts/index.mjs';
 import { AlertsFault, type AlertsHandlers } from './domain.js';
@@ -9,6 +9,7 @@ import type { Config } from './config.js';
 
 export const streamName = 'BRAI_ALERTS_INGEST_V1';
 export const durableName = 'alerts_ingest';
+const pullExpiresMs = 10_000;
 /** Подключает выделенную сервисную identity и собственный inbox. */
 export function connectNats(cfg: Config): Promise<NatsConnection> {
   return connect({ servers: cfg.natsServers, user: cfg.natsUser, pass: cfg.natsPassword, inboxPrefix: cfg.natsInboxPrefix, maxReconnectAttempts: -1, timeout: 5_000, name: 'service_alerts' });
@@ -17,9 +18,10 @@ export function connectNats(cfg: Config): Promise<NatsConnection> {
 export async function checkJetStream(nc: NatsConnection): Promise<void> {
   const manager = await nc.jetstreamManager();
   const { config: stream } = await manager.streams.info(streamName);
-  if (stream.storage !== StorageType.File || stream.retention !== RetentionPolicy.Workqueue || stream.discard !== DiscardPolicy.New || stream.max_age !== 0 || stream.max_bytes !== 268_435_456 || stream.max_msg_size !== limits.maxRequestBytes || stream.subjects?.length !== 1 || stream.subjects[0] !== subjects.ingest) throw new Error('ALERTS_STREAM_CONFIG_MISMATCH');
+  if (stream.storage !== StorageType.File || stream.retention !== RetentionPolicy.Workqueue || stream.discard !== DiscardPolicy.New || stream.max_age !== 0 || stream.max_bytes !== 268_435_456 || stream.max_msg_size !== limits.maxRequestBytes || stream.max_msgs !== -1 || stream.max_msgs_per_subject !== -1 || stream.subjects?.length !== 1 || stream.subjects[0] !== subjects.ingest) throw new Error('ALERTS_STREAM_CONFIG_MISMATCH');
   const { config: consumer } = await manager.consumers.info(streamName, durableName);
-  if (consumer.durable_name !== durableName || consumer.ack_policy !== AckPolicy.Explicit || consumer.deliver_policy !== DeliverPolicy.All || consumer.filter_subject !== subjects.ingest || consumer.deliver_subject || consumer.max_deliver !== -1 || consumer.ack_wait !== 30_000_000_000 || consumer.max_ack_pending !== limits.active) throw new Error('ALERTS_CONSUMER_CONFIG_MISMATCH');
+  // AIDEV-NOTE: Headers-only превращает валидное событие в пустой payload и приводит к TERM до COMMIT.
+  if (consumer.durable_name !== durableName || consumer.ack_policy !== AckPolicy.Explicit || consumer.deliver_policy !== DeliverPolicy.All || consumer.replay_policy !== ReplayPolicy.Instant || consumer.filter_subject !== subjects.ingest || consumer.deliver_subject || consumer.headers_only || (consumer.inactive_threshold ?? 0) !== 0 || consumer.backoff?.length || consumer.max_deliver !== -1 || consumer.ack_wait !== 30_000_000_000 || consumer.max_ack_pending !== limits.active || (consumer.max_expires && consumer.max_expires < pullExpiresMs * 1_000_000) || (consumer.pause_until && Date.parse(consumer.pause_until) > Date.now())) throw new Error('ALERTS_CONSUMER_CONFIG_MISMATCH');
 }
 function decode(data: Uint8Array): unknown {
   if (data.length > limits.maxRequestBytes) throw new AlertsFault('REQUEST_TOO_LARGE');
@@ -70,7 +72,7 @@ export async function runNats(nc: NatsConnection, handlers: AlertsHandlers, gate
   try {
     for (const operation of ['list', 'get', 'summary', 'read', 'read_all'] as Operation[]) service.addEndpoint(operation, { subject: subjects[operation], queue: 'service_alerts', handler: (error, msg) => { if (!error) void handle(operation, msg); } });
     const consumer = await nc.jetstream().consumers.get(streamName, durableName);
-    messages = await consumer.consume({ max_messages: 1, expires: 10_000, abort_on_missing_resource: true });
+    messages = await consumer.consume({ max_messages: 1, expires: pullExpiresMs, abort_on_missing_resource: true });
   } catch (error) { await service.stop(); throw error; }
   const finished = (async () => { for await (const msg of messages) await ingestMessage(msg, handlers, gate); })();
   // AIDEV-NOTE: Обработчик подключён сразу, чтобы ранний обрыв pull не стал необработанным rejection до сборки runtime.

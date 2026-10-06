@@ -37,11 +37,12 @@ export async function migrate(pool: Pool, ownerRole: string, appRole: string, we
     await client.query(`GRANT INSERT(id,service_id,type_id,scope_type,scope_id,title,text,data,occurred_at) ON alerts.notifications TO ${quote(appRole)}`);
     await client.query(`GRANT SELECT ON alerts.read_marks TO ${quote(appRole)},${quote(webRole)}`);
     await client.query(`GRANT INSERT(user_id,service_id,id) ON alerts.read_marks TO ${quote(webRole)}`);
-    for (const name of ['alerts_internal_read','alerts_internal_append','alerts_web_read']) await client.query(`DROP POLICY IF EXISTS ${name} ON alerts.notifications`);
+    // AIDEV-NOTE: Лишняя permissive policy объединяется через OR и может открыть чужие строки после повторной миграции.
+    const policies = (await client.query("SELECT tablename,policyname FROM pg_policies WHERE schemaname='alerts' AND tablename IN ('notifications','read_marks')")).rows;
+    for (const policy of policies) await client.query(`DROP POLICY ${quote(policy.policyname)} ON alerts.${quote(policy.tablename)}`);
     await client.query(`CREATE POLICY alerts_internal_read ON alerts.notifications FOR SELECT TO ${quote(appRole)} USING(true)`);
     await client.query(`CREATE POLICY alerts_internal_append ON alerts.notifications FOR INSERT TO ${quote(appRole)} WITH CHECK(true)`);
     await client.query(`CREATE POLICY alerts_web_read ON alerts.notifications FOR SELECT TO ${quote(webRole)} USING(NULLIF(current_setting('app.user_id',true),'') IS NOT NULL AND ((scope_type='user' AND scope_id=current_setting('app.user_id',true)) OR (scope_type='system' AND scope_id='global')))`);
-    for (const name of ['alerts_internal_marks','alerts_web_marks','alerts_web_mark']) await client.query(`DROP POLICY IF EXISTS ${name} ON alerts.read_marks`);
     await client.query(`CREATE POLICY alerts_internal_marks ON alerts.read_marks FOR SELECT TO ${quote(appRole)} USING(true)`);
     await client.query(`CREATE POLICY alerts_web_marks ON alerts.read_marks FOR SELECT TO ${quote(webRole)} USING(user_id=NULLIF(current_setting('app.user_id',true),''))`);
     await client.query(`CREATE POLICY alerts_web_mark ON alerts.read_marks FOR INSERT TO ${quote(webRole)} WITH CHECK(user_id=NULLIF(current_setting('app.user_id',true),'') AND EXISTS(SELECT 1 FROM alerts.notifications n WHERE n.service_id=read_marks.service_id AND n.id=read_marks.id))`);

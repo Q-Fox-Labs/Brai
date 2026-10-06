@@ -6,11 +6,12 @@ import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { AckPolicy, DiscardPolicy, RetentionPolicy, StorageType } from 'nats';
 import { brokerConfigured, setup, broker, eventually } from './fixture.mjs';
-import { runNats, streamName, durableName, ingestMessage } from '../../dist/nats.js';
+import { runNats, streamName, durableName, ingestMessage, checkJetStream } from '../../dist/nats.js';
 import { createLoadGate } from '../../dist/load.js';
 import { createAlertsHandlers } from '../../dist/domain.js';
 import { createPostgresStore } from '../../dist/storage.js';
 import { subjects, validateResponse, validateChanged } from '../../contracts/index.mjs';
+import { consumerConfig } from '../../../../deploy/alerts-jetstream-config.mjs';
 let f, admin, sender, web, service, runtime, gate;
 const integration = (name, work) => test(name, { skip: !brokerConfigured, timeout: 50_000 }, work);
 const event = (override = {}) => ({ id: randomUUID(), service_id: 'fixture opaque source', type_id: 5, scope_type: 'user', scope_id: 'user-alice', title: 'Синтетический результат', text: '', occurred_at: '2026-10-06T12:00:00Z', ...override });
@@ -122,4 +123,29 @@ integration('real broker ACL rejects publisher user queries and web ingestion', 
   await assert.rejects(web.request(subjects.ingest, body(event()), { timeout: 300 }), denied);
   await assert.rejects(service.request('$JS.API.STREAM.PURGE.BRAI_ALERTS_INGEST_V1', body({}), { timeout: 300 }), denied);
   assert.equal(await queued(), 0);
+});
+integration('unsafe stream bounds and consumer options fail readiness before any accepted event is consumed', async () => {
+  service = await broker('alerts');
+  const manager = await admin.jetstreamManager();
+  const stream = (await manager.streams.info(streamName)).config;
+  try {
+    for (const patch of [{ max_msgs: 1 }, { max_msgs_per_subject: 1 }]) {
+      await manager.streams.update(streamName, { ...stream, ...patch });
+      await assert.rejects(checkJetStream(service), /ALERTS_STREAM_CONFIG_MISMATCH/);
+    }
+  } finally { await manager.streams.update(streamName, stream); }
+  await sender.jetstream().publish(subjects.ingest, body(event()));
+  for (const patch of [{ headers_only: true }, { inactive_threshold: 60_000_000_000 }, { pause_until: '2099-01-01T00:00:00Z' }, { max_expires: 5_000_000_000 }, { replay_policy: 'original' }, { backoff: [30_000_000_000, 60_000_000_000] }]) {
+    try {
+      await manager.consumers.delete(streamName, durableName);
+      await manager.consumers.add(streamName, { ...consumerConfig, ...patch });
+      await assert.rejects(runNats(service, f.handlers, createLoadGate()), /ALERTS_CONSUMER_CONFIG_MISMATCH/);
+      assert.equal(await queued(), 1); assert.equal(await rows(), 0);
+    } finally {
+      await manager.consumers.delete(streamName, durableName);
+      await manager.consumers.add(streamName, { ...consumerConfig });
+    }
+  }
+  gate = createLoadGate(); runtime = await runNats(service, f.handlers, gate);
+  await eventually(async () => await queued() === 0 && await rows() === 1);
 });

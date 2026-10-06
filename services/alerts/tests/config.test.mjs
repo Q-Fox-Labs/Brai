@@ -3,6 +3,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { config } from '../dist/config.js';
+test('runtime rejects the same decoded SQL identity across distinct URL spellings', () => {
+  const env = { ALERTS_APP_DATABASE_URL: 'postgresql://app:test@localhost/db', ALERTS_WEB_DATABASE_URL: 'postgresql://%61pp:other@127.0.0.1/db', ALERTS_CURSOR_HMAC_KEY_FILE: '/fixture/key', NATS_URL: 'nats://localhost:4222', NATS_USER: 'alerts', NATS_PASSWORD: 'test', NATS_INBOX_PREFIX: '_INBOX.alerts' };
+  assert.throws(() => config(env, () => Buffer.alloc(32)), /ALERTS_RUNTIME_ROLES_MUST_DIFFER/);
+});
 const env = { ALERTS_APP_DATABASE_URL: 'postgresql://app:fixture@localhost/brai_alerts_test', ALERTS_WEB_DATABASE_URL: 'postgresql://web:fixture@localhost/brai_alerts_test', ALERTS_CURSOR_HMAC_KEY_FILE: '/fixture/cursor-key', NATS_URL: 'nats://localhost:4222', NATS_USER: 'alerts', NATS_PASSWORD: 'fixture', NATS_INBOX_PREFIX: '_INBOX.brai_alerts' };
 test('runtime has explicit parameters and no owner credentials', () => {
   const result = config(env, path => { assert.equal(path, '/fixture/cursor-key'); return Buffer.alloc(32); });

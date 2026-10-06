@@ -67,6 +67,37 @@ function port(client: PoolClient, context: OperationContext, userId: string | nu
     },
   };
 }
+const policyExpressions = {
+  webRead: "((NULLIF(current_setting('app.user_id'::text, true), ''::text) IS NOT NULL) AND (((scope_type = 'user'::text) AND (scope_id = current_setting('app.user_id'::text, true))) OR ((scope_type = 'system'::text) AND (scope_id = 'global'::text))))",
+  webMarks: "(user_id = NULLIF(current_setting('app.user_id'::text, true), ''::text))",
+  webMark: "((user_id = NULLIF(current_setting('app.user_id'::text, true), ''::text)) AND (EXISTS ( SELECT 1 FROM alerts.notifications n WHERE ((n.service_id = read_marks.service_id) AND (n.id = read_marks.id)))))",
+};
+const expression = (value: string | null) => value?.replace(/\s+/g, ' ').trim() ?? null;
+async function inspectDatabase(pool: Pool, app: boolean): Promise<{ role: string; database: string }> {
+  const client = await pool.connect();
+  try {
+    const row = (await client.query(`SELECT current_user AS role,current_database() AS database,
+      NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls)
+      AND NOT EXISTS(SELECT 1 FROM pg_auth_members WHERE member=r.oid)
+      AND NOT EXISTS(SELECT 1 FROM pg_class WHERE relowner=r.oid AND relnamespace IN (SELECT oid FROM pg_namespace WHERE nspname IN ('alerts','public')))
+      AND NOT has_database_privilege(current_user,current_database(),'CREATE')
+      AND NOT has_schema_privilege(current_user,'alerts','CREATE')
+      AND NOT has_schema_privilege(current_user,'public','CREATE') AS safe_role,
+      (SELECT count(*)=2 AND bool_and(relrowsecurity AND relowner<>r.oid) FROM pg_class WHERE relnamespace='alerts'::regnamespace AND relname IN ('notifications','read_marks') AND relkind='r') AS secured,
+      (SELECT bool_and(NOT has_table_privilege(current_user,'alerts.'||name,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')) FROM unnest(ARRAY['notifications','read_marks','sys_categories','sys_types']) name) AS immutable,
+      (SELECT bool_and(has_column_privilege(current_user,'alerts.notifications',name,'INSERT')) FROM unnest(ARRAY['id','service_id','type_id','scope_type','scope_id','title','text','data','occurred_at']) name) AS app_insert,
+      (SELECT bool_and(has_column_privilege(current_user,'alerts.read_marks',name,'INSERT')) FROM unnest(ARRAY['user_id','service_id','id']) name) AS web_insert,
+      has_any_column_privilege(current_user,'alerts.notifications','INSERT') AS any_event_insert,
+      has_any_column_privilege(current_user,'alerts.read_marks','INSERT') AS any_mark_insert,
+      has_column_privilege(current_user,'alerts.notifications','recorded_at','INSERT') OR has_column_privilege(current_user,'alerts.read_marks','read_at','INSERT') AS server_time_insert
+      FROM pg_roles r WHERE rolname=current_user`)).rows[0];
+    if (!row?.safe_role || !row.secured || !row.immutable || row.server_time_insert || (app ? !row.app_insert || row.any_mark_insert : !row.web_insert || row.any_event_insert)) throw new AlertsFault('DATABASE_UNAVAILABLE');
+    // AIDEV-NOTE: SELECT 1 не замечает отсутствующих колонок; WHERE false проверяет настоящий DTO без чтения строк пользователей.
+    await client.query(`SELECT ${fields} ${joins} WHERE false`);
+    await client.query('SELECT c.id,c.code,c.name,c.description,c.color,c.importance,t.id,t.category_id,t.code,t.name,t.description FROM alerts.sys_categories c JOIN alerts.sys_types t ON t.category_id=c.id WHERE false');
+    return { role: row.role, database: row.database };
+  } finally { client.release(); }
+}
 /** Подключает готовые отдельные пулы; runtime владеет их закрытием. */
 export function createPostgresStore(appPool: Pool, webPool: Pool): AlertsStore {
   return {
@@ -91,7 +122,20 @@ export function createPostgresStore(appPool: Pool, webPool: Pool): AlertsStore {
       } finally { client?.release(destroy); }
     },
     async ready() {
-      try { await Promise.all([appPool.query('SELECT 1 FROM alerts.sys_types LIMIT 1'), webPool.query('SELECT 1 FROM alerts.notifications LIMIT 1'), webPool.query('SELECT 1 FROM alerts.read_marks LIMIT 1')]); }
+      try {
+        const [app, web] = await Promise.all([inspectDatabase(appPool, true), inspectDatabase(webPool, false)]);
+        if (app.role === web.role || app.database !== web.database) throw new AlertsFault('DATABASE_UNAVAILABLE');
+        const expected = [
+          ['notifications','alerts_internal_read',app.role,'SELECT','true',null],
+          ['notifications','alerts_internal_append',app.role,'INSERT',null,'true'],
+          ['notifications','alerts_web_read',web.role,'SELECT',policyExpressions.webRead,null],
+          ['read_marks','alerts_internal_marks',app.role,'SELECT','true',null],
+          ['read_marks','alerts_web_marks',web.role,'SELECT',policyExpressions.webMarks,null],
+          ['read_marks','alerts_web_mark',web.role,'INSERT',null,policyExpressions.webMark],
+        ];
+        const policies = (await appPool.query("SELECT tablename,policyname,roles::text[],permissive,cmd,qual,with_check FROM pg_policies WHERE schemaname='alerts' AND tablename IN ('notifications','read_marks')")).rows;
+        if (policies.length !== expected.length || expected.some(([table, name, role, command, qual, check]) => !policies.some(p => p.tablename === table && p.policyname === name && p.permissive === 'PERMISSIVE' && p.roles.length === 1 && p.roles[0] === role && p.cmd === command && expression(p.qual) === expression(qual) && expression(p.with_check) === expression(check)))) throw new AlertsFault('DATABASE_UNAVAILABLE');
+      }
       catch (error) { throw failure(error); }
     },
   };

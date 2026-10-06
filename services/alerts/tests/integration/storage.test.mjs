@@ -5,6 +5,9 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { configured, setup, roles, eventually } from './fixture.mjs';
 import { migrate } from '../../dist/migrate.js';
+import { createAlertsHandlers } from '../../dist/domain.js';
+import { createPostgresStore } from '../../dist/storage.js';
+import { validateResponse } from '../../contracts/index.mjs';
 let f;
 before(async () => { if (configured) f = await setup(); });
 after(async () => { await f?.close(); });
@@ -113,4 +116,55 @@ integration('read_all statement snapshot excludes notification committed during 
     await f.owner.query('DROP TRIGGER IF EXISTS test_mark_block ON alerts.read_marks');
     await f.owner.query('DROP FUNCTION IF EXISTS alerts.test_mark_block()');
   }
+});
+integration('all valid Unicode and control IDs paginate within the owner cursor budget', async () => {
+  for (const [user, source] of [['user-alice', '😀'.repeat(200)], ['😀'.repeat(255), '😀'.repeat(255)], ['\u0001'.repeat(255), '\u0001'.repeat(255)]]) {
+    await f.cleanup();
+    for (let i = 0; i < 3; i++) await f.handlers.ingest(event({ service_id: source, scope_id: user }));
+    const ids = []; let cursor = null;
+    for (let i = 0; i < 3; i++) {
+      const page = await f.handlers.execute('list', { user_id: user, limit: 1, cursor });
+      assert.equal(validateResponse('list', page), true);
+      assert.equal(page.items.length, 1); ids.push(page.items[0].id);
+      cursor = page.next_cursor;
+      if (cursor) {
+        assert.ok(cursor.length <= 2048);
+        await assert.rejects(f.handlers.execute('list', { user_id: 'foreign-account', limit: 1, cursor }), { code: 'INVALID_CURSOR' });
+      }
+    }
+    assert.equal(cursor, null); assert.equal(new Set(ids).size, 3);
+  }
+});
+integration('ready rejects wrong identities, disabled RLS, altered policies, missing columns and unsafe grants', async () => {
+  const wrong = createAlertsHandlers(createPostgresStore(f.app, f.app), { cursorKey: Buffer.alloc(32, 7) });
+  await assert.rejects(wrong.ready());
+  const owner = createAlertsHandlers(createPostgresStore(f.app, f.owner), { cursorKey: Buffer.alloc(32, 7) });
+  await assert.rejects(owner.ready());
+  const cases = [
+    ['ALTER TABLE alerts.notifications DISABLE ROW LEVEL SECURITY', 'ALTER TABLE alerts.notifications ENABLE ROW LEVEL SECURITY'],
+    ['CREATE POLICY unexpected_policy ON alerts.notifications FOR SELECT TO alerts_test_web USING(true)', 'DROP POLICY unexpected_policy ON alerts.notifications'],
+    ['ALTER POLICY alerts_web_read ON alerts.notifications USING(true)', null],
+    ['ALTER TABLE alerts.notifications RENAME COLUMN title TO wrong_title', 'ALTER TABLE alerts.notifications RENAME COLUMN wrong_title TO title'],
+    ['ALTER TABLE alerts.sys_categories RENAME COLUMN color TO wrong_color', 'ALTER TABLE alerts.sys_categories RENAME COLUMN wrong_color TO color'],
+    ['REVOKE INSERT(id) ON alerts.notifications FROM alerts_test_app', null],
+    ['GRANT UPDATE ON alerts.notifications TO alerts_test_web', null],
+    ['GRANT INSERT(recorded_at) ON alerts.notifications TO alerts_test_app', null],
+  ];
+  for (const [damage, restore] of cases) {
+    await f.owner.query(damage);
+    try { await assert.rejects(f.handlers.ready()); }
+    finally { if (restore) await f.owner.query(restore); await migrate(f.owner, ...roles); }
+    await f.handlers.ready();
+  }
+});
+integration('repeat migration removes extra permissive policies and preserves notifications and read marks', async () => {
+  const value = event(); await f.handlers.ingest(value);
+  await f.handlers.execute('read', { user_id: 'user-alice', service_id: value.service_id, id: value.id });
+  await f.owner.query('CREATE POLICY extra_policy ON alerts.notifications FOR SELECT TO alerts_test_web USING(true)');
+  assert.equal((await f.handlers.execute('list', { user_id: 'user-bob' })).items.length, 1);
+  await migrate(f.owner, ...roles);
+  await f.handlers.ready();
+  assert.equal((await f.handlers.execute('list', { user_id: 'user-bob' })).items.length, 0);
+  assert.equal((await f.owner.query('SELECT count(*) FROM alerts.notifications')).rows[0].count, '1');
+  assert.equal((await f.owner.query('SELECT count(*) FROM alerts.read_marks')).rows[0].count, '1');
 });

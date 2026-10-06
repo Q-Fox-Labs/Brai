@@ -69,7 +69,8 @@ export function createAlertsHandlers(store: AlertsStore, options: { cursorKey: U
   const key = Buffer.from(options.cursorKey);
   if (key.length < 32) throw new Error('ALERTS_CURSOR_KEY_TOO_SHORT');
   function cursor(userId: string, position: EventKey): string {
-    const body = Buffer.from(JSON.stringify({ v: 1, user_id: userId, position })).toString('base64url');
+    // AIDEV-NOTE: V2 занимает не более 1532 символов для 255 Unicode code points; JSON escaping не увеличивает ID.
+    const body = Buffer.concat([Buffer.from([2]), createHmac('sha256', key).update(userId).digest(), Buffer.from(position[0], 'ascii'), Buffer.from(position[2], 'ascii'), Buffer.from(position[1], 'utf8')]).toString('base64url');
     return body + '.' + createHmac('sha256', key).update(body).digest('base64url');
   }
   function decode(userId: string, token: string | null | undefined): EventKey | null {
@@ -80,9 +81,17 @@ export function createAlertsHandlers(store: AlertsStore, options: { cursorKey: U
       const supplied = Buffer.from(signature, 'base64url');
       const expected = createHmac('sha256', key).update(body).digest();
       if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw 0;
-      const value = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+      const bytes = Buffer.from(body, 'base64url');
+      let value;
+      if (bytes[0] === 2) {
+        if (bytes.length < 97 || bytes.length > 1116 || !timingSafeEqual(bytes.subarray(1, 33), createHmac('sha256', key).update(userId).digest())) throw 0;
+        value = { v: 1, user_id: userId, position: [bytes.subarray(33, 60).toString('ascii'), new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(96)), bytes.subarray(60, 96).toString('ascii')] };
+      } else {
+        // AIDEV-NOTE: Прежние HMAC курсоры V1 остаются действительны после смены image.
+        value = JSON.parse(bytes.toString('utf8'));
+      }
       if (value.v !== 1 || value.user_id !== userId || !Array.isArray(value.position) || value.position.length !== 3 || !value.position.every((v: unknown) => typeof v === 'string') ||
-        normalizeTimestamp(value.position[0]) !== value.position[0] || value.position[1].length < 1 || value.position[1].length > 255 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value.position[2])) throw 0;
+        normalizeTimestamp(value.position[0]) !== value.position[0] || [...value.position[1]].length < 1 || [...value.position[1]].length > 255 || value.position[1].includes('\0') || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value.position[2])) throw 0;
       return value.position;
     } catch { throw new AlertsFault('INVALID_CURSOR'); }
   }

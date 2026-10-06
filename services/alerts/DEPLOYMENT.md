@@ -24,7 +24,11 @@
 
 Web identity может publish только query/command alerts и свои прочие согласованные endpoints, subscribe изменениями alerts и своим inbox. Она отвечает за проверку сессии и использует только её ID. Publisher identity может publish только ingest и subscribe собственный inbox для PubAck; она не получает query/command/changed. ACL необходимо проверять с реальными broker identities, а не только разбором конфигурации.
 
+Runtime сверяет отсутствие дополнительных message count limits, headers-only, consumer expiry, активной паузы, replay original и backoff. Предел pull expiry должен быть отключён либо не короче 10 секунд. При отклонении readiness завершается ошибкой до потребления сообщений.
+
 ## Runtime и поставка
+
+App и web URLs должны задавать разные SQL identities; readiness отдельно сверяет реальные роли, безопасные полномочия, RLS, штатные политики и DTO-запрос. Проверка только доступности соединения не заменяет эту границу. Повтор миграции пересоздаёт все политики двух собственных таблиц и сохраняет данные.
 
 Передайте `ALERTS_APP_DATABASE_URL`, `ALERTS_WEB_DATABASE_URL`, `ALERTS_CURSOR_HMAC_KEY_FILE` (файл не короче 32 байт), `NATS_URL` (один адрес или список через запятую), `NATS_USER`, `NATS_PASSWORD`, `NATS_INBOX_PREFIX` (выделенный `_INBOX.<identity>`). Ключ курсоров должен сохраняться при восстановлении и смене образа; его замена инвалидирует прежние курсоры. Значения секретов не выводятся.
 
