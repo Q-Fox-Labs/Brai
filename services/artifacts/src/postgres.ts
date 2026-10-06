@@ -7,10 +7,30 @@ import {ArtifactError,storageError} from "./errors.js";
 export type PostgresOptions={lockTimeoutMs?:number;queryTimeoutMs?:number};
 const scopeValues=(s:ReferenceScope|ReferenceQueryScope)=>[s.ownerId,s.projectId,s.threadId,...("operationId" in s?[s.operationId]:[])];
 const numeric=(value:unknown)=>{const number=Number(value);if(!Number.isSafeInteger(number)||number<0)throw new ArtifactError("INTERNAL");return number;};
+function unsupportedUnicode(value:unknown):boolean {
+  if(typeof value==="string"){
+    for(let i=0;i<value.length;i++){const code=value.charCodeAt(i);if(code===0)return true;if(code>=0xd800&&code<=0xdbff){const next=value.charCodeAt(++i);if(!(next>=0xdc00&&next<=0xdfff))return true;}else if(code>=0xdc00&&code<=0xdfff)return true;}
+  }else if(value&&typeof value==="object")return Object.entries(value).some(([key,item])=>unsupportedUnicode(key)||unsupportedUnicode(item));
+  return false;
+}
 function session(client:PoolClient,timeout:number,onFailure:()=>void):StoreSession {
-  const query=(text:string,values:unknown[]=[])=>{const config={text,values,query_timeout:timeout};return client.query(config).catch(error=>{onFailure();throw error;});};
+  const query=(text:string,values:unknown[]=[])=>{const config={text,values,query_timeout:timeout};return client.query(config).catch(error=>{
+    onFailure();
+    // AIDEV-NOTE: 22P02 бывает при повреждении данных; 400 допустим лишь с известным неподдерживаемым Unicode во входе.
+    if(["22P05","22021","22P02"].includes(error.code)&&unsupportedUnicode(values))throw new ArtifactError("INVALID_ARGUMENT",{cause:error});
+    throw error;
+  });};
   const one=async<T>(text:string,values:unknown[])=>{const {rows}=await query(text,values);return rows[0]?.document as T|undefined;};
   const artifact=(id:string)=>one<ArtifactRecord>("SELECT document FROM artifacts.artifacts WHERE artifact_id=$1",[id]);
+  async function* cursor<T>(text:string,values:unknown[],map:(document:unknown)=>T,started=false):AsyncIterable<T> {
+    let committed=false;
+    try{
+      if(!started)await query("BEGIN READ ONLY");
+      await query(`DECLARE artifacts_page NO SCROLL CURSOR FOR ${text}`,values);
+      while(true){const {rows}=await query("FETCH FORWARD 16 FROM artifacts_page");if(!rows.length)break;for(const row of rows)yield map(row.document);}
+      await query("CLOSE artifacts_page");await query("COMMIT");committed=true;
+    }finally{if(!committed)await query("ROLLBACK").catch(()=>{});}
+  }
   return {
     artifact,
     prepared:requestId=>one<ArtifactRecord>("SELECT document FROM artifacts.artifacts WHERE request_id=$1",[requestId]),
@@ -28,8 +48,7 @@ function session(client:PoolClient,timeout:number,onFailure:()=>void):StoreSessi
       await query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       try{
         const total=numeric((await query(`SELECT count(*) AS total FROM artifacts.artifacts WHERE ${where}`,values)).rows[0].total);
-        const {rows}=await query(`SELECT document FROM artifacts.artifacts WHERE ${where} ORDER BY ${column} ${order} NULLS LAST,artifact_id ${order} LIMIT $${values.length+1} OFFSET $${values.length+2}`,[...values,input.limit,input.offset]);
-        await query("COMMIT");return {total,items:rows.map(row=>(row.document as ArtifactRecord).artifact)};
+        return {total,items:cursor(`SELECT document->'artifact' AS document FROM artifacts.artifacts WHERE ${where} ORDER BY ${column} ${order} NULLS LAST,artifact_id ${order} LIMIT $${values.length+1} OFFSET $${values.length+2}`,[...values,input.limit,input.offset],document=>document as ArtifactRecord["artifact"],true)};
       }catch(error){await query("ROLLBACK").catch(()=>{});throw error;}
     },
     async stats(ownerId){
@@ -42,14 +61,14 @@ function session(client:PoolClient,timeout:number,onFailure:()=>void):StoreSessi
     relation:(model,original)=>one<Relation>("SELECT document FROM artifacts.artifact_relations WHERE model_artifact_id=$1 AND original_artifact_id=$2",[model,original]),
     async saveRelation(relation){await query("INSERT INTO artifacts.artifact_relations(model_artifact_id,original_artifact_id,document) VALUES($1,$2,$3)",[relation.modelArtifactId,relation.originalArtifactId,relation]);},
     async removeRelation(model,original){await query("DELETE FROM artifacts.artifact_relations WHERE model_artifact_id=$1 AND original_artifact_id=$2",[model,original]);},
-    async relations(artifactId,limit){return (await query("SELECT document FROM artifacts.artifact_relations WHERE model_artifact_id=$1 OR original_artifact_id=$1 ORDER BY model_artifact_id,original_artifact_id LIMIT $2",[artifactId,limit])).rows.map(row=>row.document as Relation);},
+    async relations(artifactId,limit){return cursor("SELECT document FROM artifacts.artifact_relations WHERE model_artifact_id=$1 OR original_artifact_id=$1 ORDER BY model_artifact_id,original_artifact_id LIMIT $2",[artifactId,limit??null],document=>document as Relation);},
     reference:s=>one<ArtifactReference>("SELECT document FROM artifacts.artifact_references WHERE owner_id=$1 AND project_id=$2 AND thread_id=$3 AND operation_id=$4",scopeValues(s)),
     async saveReference(reference,insert=false){
       const params=[...scopeValues(reference.scope),reference];
       if(insert)await query("INSERT INTO artifacts.artifact_references(owner_id,project_id,thread_id,operation_id,document) VALUES($1,$2,$3,$4,$5)",params);
       else {const result=await query("UPDATE artifacts.artifact_references SET document=$5 WHERE owner_id=$1 AND project_id=$2 AND thread_id=$3 AND operation_id=$4",params);if(!result.rowCount)throw new ArtifactError("NOT_FOUND");}
     },
-    async references(s,ids,limit){if(!ids.length)return [];return (await query("SELECT document FROM artifacts.artifact_references WHERE owner_id=$1 AND project_id=$2 AND thread_id=$3 AND document->>'itemId'=ANY($4::text[]) ORDER BY operation_id LIMIT $5",[...scopeValues(s),ids,limit])).rows.map(row=>row.document as ArtifactReference);},
+    async references(s,ids,limit){if(!ids.length)return [];return cursor("SELECT document FROM artifacts.artifact_references WHERE owner_id=$1 AND project_id=$2 AND thread_id=$3 AND document->>'itemId'=ANY($4::text[]) ORDER BY operation_id LIMIT $5",[...scopeValues(s),ids,limit??null],document=>document as ArtifactReference);},
     link:id=>one<LinkRecord>("SELECT document FROM artifacts.artifact_links WHERE link_id=$1",[id]),
     requestedLink:requestId=>one<LinkRecord>("SELECT document FROM artifacts.artifact_links WHERE request_id=$1",[requestId]),
     shared:token=>one<LinkRecord>("SELECT document FROM artifacts.artifact_links WHERE token=$1",[token]),
@@ -61,7 +80,7 @@ function session(client:PoolClient,timeout:number,onFailure:()=>void):StoreSessi
 }
 /** Использует отдельную Pool; её connectionTimeoutMillis задаёт сборка процесса. */
 export function createPostgresStore(pool:Pool,{lockTimeoutMs=5000,queryTimeoutMs=10000}:PostgresOptions={}):ArtifactsStore {
-  if(!Number.isSafeInteger(lockTimeoutMs)||lockTimeoutMs<1||!Number.isSafeInteger(queryTimeoutMs)||queryTimeoutMs<1)throw new ArtifactError("INVALID_ARGUMENT");
+  if(!Number.isSafeInteger(lockTimeoutMs)||lockTimeoutMs<1||lockTimeoutMs>2147483647||!Number.isSafeInteger(queryTimeoutMs)||queryTimeoutMs<1||queryTimeoutMs>2147483647)throw new ArtifactError("INVALID_ARGUMENT");
   return {
     /** Все keys сортируются; потеря соединения отменяет поток и освобождает session locks на сервере. */
     async withLocks(keys,work,tryOnly=false){
@@ -69,7 +88,7 @@ export function createPostgresStore(pool:Pool,{lockTimeoutMs=5000,queryTimeoutMs
       const onError=()=>{broken=true;controller.abort();};
       try{
         client=await pool.connect();client.on("error",onError);
-        const query=(text:string,values:unknown[]=[])=>{const config={text,values,query_timeout:queryTimeoutMs};return client!.query(config);};
+        const query=(text:string,values:unknown[]=[])=>{const config={text,values,query_timeout:queryTimeoutMs};return client!.query(config).catch(error=>{if(["22P05","22021","22P02"].includes(error.code)&&unsupportedUnicode(values))throw new ArtifactError("INVALID_ARGUMENT",{cause:error});throw error;});};
         await query("SELECT set_config('lock_timeout',$1,false),set_config('statement_timeout',$2,false)",[`${lockTimeoutMs}ms`,`${queryTimeoutMs}ms`]);
         for(const key of [...new Set(keys)].sort()){
           const {rows}=await query(tryOnly?"SELECT pg_try_advisory_lock(hashtextextended($1,73490217)) AS acquired":"SELECT pg_advisory_lock(hashtextextended($1,73490217)),true AS acquired",[key]);

@@ -14,8 +14,9 @@ function fixture(overrides={}) {
     artifact:async id=>clone(artifacts.get(id.toLowerCase())),prepared:async requestId=>clone([...artifacts.values()].find(r=>r.artifact.requestId===requestId)),uploading:async token=>clone([...artifacts.values()].find(r=>r.uploadToken===token)),
     saveArtifact:async r=>{artifacts.set(r.artifact.artifactId,clone(r));},
     unfinished:async (after,limit)=>[...artifacts.values()].filter(r=>["pending","failed","deleting"].includes(r.artifact.status)&&(!after||r.artifact.artifactId>after)).map(r=>r.artifact.artifactId).sort().slice(0,limit),
-    relation:async (m,o)=>clone(relations.get(m+o)),saveRelation:async r=>{relations.set(r.modelArtifactId+r.originalArtifactId,clone(r));},removeRelation:async(m,o)=>{relations.delete(m+o);},relations:async(id,limit)=>clone([...relations.values()].filter(r=>[r.modelArtifactId,r.originalArtifactId].includes(id)).slice(0,limit)),
-    reference:async s=>clone(references.get(sk(s))),saveReference:async r=>{references.set(sk(r.scope),clone(r));},references:async(s,ids,limit)=>clone([...references.values()].filter(r=>r.scope.ownerId===s.ownerId&&r.scope.projectId===s.projectId&&r.scope.threadId===s.threadId&&ids.includes(r.itemId)).slice(0,limit)),
+    relation:async (m,o)=>clone(relations.get(m+o)),saveRelation:async r=>{relations.set(r.modelArtifactId+r.originalArtifactId,clone(r));},removeRelation:async(m,o)=>{relations.delete(m+o);},relations:async(id,limit=relations.size)=>clone([...relations.values()].filter(r=>[r.modelArtifactId,r.originalArtifactId].includes(id)).slice(0,limit)),
+    reference:async s=>clone(references.get(sk(s))),saveReference:async r=>{references.set(sk(r.scope),clone(r));},references:async(s,ids,limit=references.size)=>clone([...references.values()].filter(r=>r.scope.ownerId===s.ownerId&&r.scope.projectId===s.projectId&&r.scope.threadId===s.threadId&&ids.includes(r.itemId)).slice(0,limit)),
+    list:async input=>{const items=clone([...artifacts.values()].map(r=>r.artifact).filter(a=>a.ownerId===input.filter.ownerId));return {total:items.length,items:items.slice(input.offset,input.offset+input.limit)};},
     link:async id=>clone(links.get(id)),requestedLink:async requestId=>clone([...links.values()].find(r=>r.requestId===requestId)),shared:async token=>clone([...links.values()].find(r=>r.token===token)),saveLink:async r=>{links.set(r.link.linkId,clone(r));},
     stats:async ownerId=>{const all=[...artifacts.values()].map(r=>r.artifact).filter(a=>a.ownerId===ownerId&&a.status==="ready");const originals=all.filter(a=>a.kind==="original"),copies=all.filter(a=>a.kind==="copy");return {originalCount:originals.length,copyCount:copies.length,totalCount:all.length,originalBytes:originals.reduce((n,a)=>n+a.sizeBytes,0),copyBytes:copies.reduce((n,a)=>n+a.sizeBytes,0),totalBytes:all.reduce((n,a)=>n+a.sizeBytes,0)};}
   };
@@ -99,4 +100,48 @@ test("client cancellation after publication preserves ready completion",async()=
   f.files.publish=async(...args)=>{await publish(...args);controller.abort();};
   const artifact=await f.core.upload(p.uploadUrl.split("/").at(-1),(async function*(){yield Buffer.from("preserved");})(),controller.signal);
   assert.equal(artifact.status,"ready");assert.equal(artifact.sizeBytes,9);assert.equal(f.bytes.size,1);
+});
+
+test("Unicode limits count code points, preserve exact values and reject one extra character",async()=>{
+  const f=fixture(),requestId="😀".repeat(256),ownerId="😀".repeat(128);
+  const input={requestId,ownerId,kind:"original",metadata:{...metadata,title:"😀".repeat(512),filename:"😀".repeat(1024),source:"😀".repeat(128)}};
+  const result=await f.core.execute("prepare",input);assert.equal(validateResponse(subjects.prepare,result),true);assert.equal(result.artifact.title,input.metadata.title);assert.equal(result.artifact.ownerId,ownerId);
+  for(const [field,max] of [["title",512],["filename",1024],["mimeType",255],["source",128]])await assert.rejects(f.core.execute("prepare",{...input,metadata:{...input.metadata,[field]:"😀".repeat(max+1)}}),code("INVALID_ARGUMENT"));
+  await assert.rejects(f.core.execute("prepare",{...input,requestId:requestId+"😀"}),code("INVALID_ARGUMENT"));assert.equal(f.artifacts.size,1);
+});
+
+test("sparse large pages and input arrays fit bytes without hidden default count limits",async()=>{
+  const f=fixture(),original=await f.uploaded(),model=await f.uploaded("copy");
+  const listing=await f.core.execute("list",{filter:{ownerId:"owner"},sort:"createdAt",order:"asc",limit:1001,offset:0});assert.equal(listing.limit,1001);assert.equal(listing.items.length,2);
+  const scope={ownerId:"owner",projectId:"p",threadId:"t",operationId:"large"};
+  const attachments=Array.from({length:101},()=>({originalArtifactId:original.artifactId,modelArtifactId:model.artifactId}));
+  const reserved=await f.core.execute("referenceReserve",{scope,clientUserMessageId:"m",commandHash:"a".repeat(64),attachments});assert.equal(reserved.reference.attachments.length,101);
+  const page=await f.core.execute("referenceList",{scope:{ownerId:"owner",projectId:"p",threadId:"t"},nativeItemIds:Array.from({length:1001},(_,n)=>"item-"+n)});assert.deepEqual(page,{items:[]});
+});
+
+test("streamed list rejects by serialized UTF8 budget and closes producer promptly",async()=>{
+  const f=fixture({maxResultBytes:4096}),artifact=await f.uploaded();let read=0,closed=false;
+  f.session.list=async()=>({total:10000,items:(async function*(){try{while(read<10000){read++;yield {...artifact,title:"😀".repeat(100)};}}finally{closed=true;}})()});
+  await assert.rejects(f.core.execute("list",{filter:{ownerId:"owner"},sort:"createdAt",order:"asc",limit:10000,offset:0}),code("PAYLOAD_TOO_LARGE"));assert.equal(closed,true);assert.ok(read<10,"stop reading when the byte budget fills");
+  f.session.list=async()=>({total:0,items:[]});assert.equal((await f.core.execute("list",{filter:{ownerId:"owner"},sort:"createdAt",order:"asc",limit:10000,offset:0})).total,0);
+});
+
+test("relation and reference iterators respect byte budgets and explicit local count limits",async()=>{
+  const f=fixture({maxResultBytes:4096,maxRelations:2}),artifact=await f.uploaded();let relationClosed=false,referenceClosed=false;
+  const relation={modelArtifactId:artifact.artifactId,originalArtifactId:artifact.artifactId,createdAt:artifact.createdAt};
+  f.session.relations=async()=>((async function*(){try{for(let n=0;n<5;n++)yield relation;}finally{relationClosed=true;}})());
+  await assert.rejects(f.core.execute("relationList",{artifactId:artifact.artifactId}),code("PAYLOAD_TOO_LARGE"));assert.equal(relationClosed,true);
+  f.session.references=async()=>((async function*(){try{for(let n=0;n<1000;n++)yield {details:"😀".repeat(500)};}finally{referenceClosed=true;}})());
+  await assert.rejects(f.core.execute("referenceList",{scope:{ownerId:"owner",projectId:"p",threadId:"t"},nativeItemIds:["i"]}),code("PAYLOAD_TOO_LARGE"));assert.equal(referenceClosed,true);
+});
+
+test("byte budget includes the final response envelope",async()=>{
+  const f=fixture({maxResultBytes:10});
+  await assert.rejects(f.core.execute("list",{filter:{ownerId:"owner"},sort:"createdAt",order:"asc",limit:1,offset:0}),code("PAYLOAD_TOO_LARGE"));
+});
+
+test("recovery preserves mismatched published bytes and closes invalid durable intent",async()=>{
+  const f=fixture(),prepared=await f.prepare(),id=prepared.artifact.artifactId,record=f.artifacts.get(id);
+  record.publication={tempName:id,sizeBytes:6,sha256:createHash("sha256").update("wanted").digest("hex")};f.temps.set(id,Buffer.from("wanted"));f.bytes.set(id,Buffer.from("unknown"));
+  assert.equal((await f.core.reconcile()).failed,1);assert.equal(f.temps.size,0);assert.deepEqual(f.bytes.get(id),Buffer.from("unknown"));assert.equal((await f.core.execute("get",{artifactId:id})).status,"failed");
 });

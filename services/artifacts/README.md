@@ -30,13 +30,13 @@ const core = createArtifactsCore({store, files, config});
 
 | Предел | По умолчанию |
 | --- | ---: |
-| `maxPageSize` | 1000 |
-| `maxReferenceItems` | 1000 |
-| `maxReferenceAttachments` | 100 |
-| `maxRelations` | 1000 |
+| `maxResultBytes` | 1 MiB |
+| `maxPageSize`, `maxReferenceItems`, `maxReferenceAttachments`, `maxRelations` | отсутствуют; необязательные ограничения локального caller |
 | `reconcileBatchSize` | 100 |
 
-Пределы проверяются до запроса. Выборки relations и references используют `LIMIT + 1`; превышение даёт `PAYLOAD_TOO_LARGE`, без скрытого усечения. Сверка читает незавершённые записи страницами по ID и обходит temp последовательно. Сборка процесса запускает сверку при старте и периодически; само ядро не создаёт фоновых таймеров.
+Runtime передаёт `ARTIFACTS_MAX_NATS_RESPONSE_BYTES` как `maxResultBytes`. Ядро считает сериализованные UTF-8 байты каждого выходного DTO и итогового ответа; переполнение даёт `PAYLOAD_TOO_LARGE` без скрытого усечения. PostgreSQL отдаёт list, relations и references через cursor пачками по 16 записей; память ограничена бюджетом ответа и одной пачкой, а прекращение чтения закрывает cursor и транзакцию. List сохраняет единый repeatable-read snapshot для total и страницы. Большой requested limit на пустой или малой странице допустим. Входные attachments и nativeItemIds ограничены wire bytes; явные локальные count limits сохраняют прежнюю проверку до обращения к портам. Сверка читает незавершённые записи страницами по ID и обходит temp последовательно. Сборка процесса запускает сверку при старте и периодически; само ядро не создаёт фоновых таймеров.
+
+Ограничения длины строк считают Unicode code points, как JSON Schema. PostgreSQL не поддерживает NUL и непарные UTF-16 surrogates в текстовых/JSON значениях и ключах; такие входы дают `INVALID_ARGUMENT`, а не ошибку доступности хранения. Иные ошибки драйвера не переклассифицируются в ошибку клиента.
 
 ## Файлы и восстановление
 
@@ -90,7 +90,9 @@ NATS credentials необязательны: `NATS_USER`, `NATS_PASSWORD`; `NATS
 
 `ARTIFACTS_HTTP_HOST` по умолчанию `127.0.0.1`, `ARTIFACTS_HTTP_PORT` — `3004`. Конечные положительные пределы настраиваются через `ARTIFACTS_MAX_UPLOAD_BYTES` (50 MiB), `ARTIFACTS_MAX_CONCURRENT_UPLOADS` (4), `ARTIFACTS_MAX_CONCURRENT_NATS` (32), `ARTIFACTS_MAX_NATS_REQUEST_BYTES` (128 KiB), `ARTIFACTS_MAX_NATS_RESPONSE_BYTES` (1 MiB), `ARTIFACTS_RECEIVE_TIMEOUT_MS` (30 s), `ARTIFACTS_REQUEST_TIMEOUT_MS` (15 s), `ARTIFACTS_LOCK_TIMEOUT_MS` (5 s), `ARTIFACTS_QUERY_TIMEOUT_MS` (10 s), `ARTIFACTS_RECONCILE_INTERVAL_MS` (60 s) и `ARTIFACTS_STALE_TEMP_AGE_MS` (1 h). PostgreSQL pool ограничен 8 подключениями с 5-секундным connect timeout. Upload limit сервиса независим от ограничений клиента/модели.
 
-`GET /health` проверяет собственную таблицу artifacts, доступность файлового тома и состояние NATS; `npm run health --workspace=@brai/artifacts` опрашивает этот маршрут. При SIGINT/SIGTERM runtime прекращает новые запросы, отменяет незавершённые входящие upload streams и ждёт текущие NATS вызовы и сверку в пределах `ARTIFACTS_REQUEST_TIMEOUT_MS`. Если NATS соединение не отвечает к этому сроку, runtime закрывает собственное соединение; результат операции, которая успела изменить данные, может быть неизвестен клиенту и восстанавливается чтением или точным повтором по контракту. Затем закрываются HTTP и PostgreSQL. Если публикация файла уже завершилась, остановка сохраняет ready объект.
+`GET /health` проверяет собственную таблицу artifacts, обе директории файлового тома с правами чтения/записи/обхода и состояние NATS; `npm run health --workspace=@brai/artifacts` опрашивает этот маршрут. При SIGINT/SIGTERM runtime прекращает новые запросы, отменяет незавершённые входящие upload streams и ждёт текущие NATS вызовы и сверку в пределах `ARTIFACTS_REQUEST_TIMEOUT_MS`. Если NATS соединение не отвечает к этому сроку, runtime закрывает собственное соединение; результат операции, которая успела изменить данные, может быть неизвестен клиенту и восстанавливается чтением или точным повтором по контракту. Затем закрываются HTTP и PostgreSQL. Если публикация файла уже завершилась, остановка сохраняет ready объект.
+
+Request timeout не превышает 2147482647 ms: HTTP shutdown резервирует ещё 1000 ms. Receive/reconcile/query/lock timers не превышают 2147483647 ms, чтобы Node не превратил переполнение в 1 ms. Возраст stale temp не является платформенным таймером. Sharing deadline охватывает проверку разрешения, open/stat и передачу; поздно открытый после deadline descriptor закрывается, включая HEAD.
 
 Журналирует результат, код ошибки и длительность вместе с endpoint/executor и известным requestId. Тела, метаданные, имена файлов, upload token и внешние URL не журналируются.
 

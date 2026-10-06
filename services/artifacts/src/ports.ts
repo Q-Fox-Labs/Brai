@@ -9,22 +9,24 @@ export type Link = {linkId:string;artifactId:string;url:string;expiresAt:string|
 export type LinkRecord = {link:Link;requestId:string;expiresInput:string|null;token:string};
 export type ListInput = {filter:{ownerId:string;kind?:Artifact["kind"];status?:Artifact["status"];source?:string};sort:"createdAt"|"sizeBytes";order:"asc"|"desc";limit:number;offset:number};
 export type Stats = {originalCount:number;copyCount:number;totalCount:number;originalBytes:number;copyBytes:number;totalBytes:number};
+/** Результат потребляется внутри withLocks; возврат iterator освобождает незавершённую выборку. */
+export type StoreItems<T> = Iterable<T> | AsyncIterable<T>;
 /** Сессия под согласованными блокировками; отдельная запись фиксируется до возврата. */
 export interface StoreSession {
   artifact(id:string):Promise<ArtifactRecord|undefined>;
   prepared(requestId:string):Promise<ArtifactRecord|undefined>;
   uploading(token:string):Promise<ArtifactRecord|undefined>;
   saveArtifact(record:ArtifactRecord, insert?:boolean):Promise<void>;
-  list(input:ListInput):Promise<{items:Artifact[];total:number}>;
+  list(input:ListInput):Promise<{items:StoreItems<Artifact>;total:number}>;
   stats(ownerId:string):Promise<Stats>;
   unfinished(afterId:string|undefined,limit:number):Promise<string[]>;
   relation(model:string,original:string):Promise<Relation|undefined>;
   saveRelation(relation:Relation):Promise<void>;
   removeRelation(model:string,original:string):Promise<void>;
-  relations(artifactId:string,limit:number):Promise<Relation[]>;
+  relations(artifactId:string,limit?:number):Promise<StoreItems<Relation>>;
   reference(scope:ReferenceScope):Promise<ArtifactReference|undefined>;
   saveReference(reference:ArtifactReference,insert?:boolean):Promise<void>;
-  references(scope:ReferenceQueryScope,nativeItemIds:string[],limit:number):Promise<ArtifactReference[]>;
+  references(scope:ReferenceQueryScope,nativeItemIds:string[],limit?:number):Promise<StoreItems<ArtifactReference>>;
   link(id:string):Promise<LinkRecord|undefined>;
   requestedLink(requestId:string):Promise<LinkRecord|undefined>;
   shared(token:string):Promise<LinkRecord|undefined>;

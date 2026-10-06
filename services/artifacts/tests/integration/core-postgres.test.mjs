@@ -15,6 +15,7 @@ import {createPostgresStore} from "../../dist/postgres.js";
 import {createFileStore} from "../../dist/files.js";
 import {migrate} from "../../dist/migrate.js";
 import {subjects,validateResponse} from "../../contracts/index.mjs";
+import {fixturePool,closeFixturePool} from "./fixture-pool.mjs";
 const fixture=process.env.ARTIFACTS_TEST_ADMIN_URL;if(!fixture)throw new Error("Explicit ARTIFACTS_TEST_ADMIN_URL required");
 const adminURL=new URL(fixture);if(adminURL.hostname!=="127.0.0.1"||adminURL.port!=="25541"||adminURL.pathname!=="/brai_artifacts_test")throw new Error("Refusing non-fixture database");
 const suffix=`${process.pid}_${Date.now()}`,database=`brai_artifacts_test_${suffix}`,ownerRole=`artifacts_owner_${suffix}`,appRole=`artifacts_app_${suffix}`;
@@ -30,13 +31,14 @@ const prepare=async(kind="original",ownerId="owner")=>core.execute("prepare",{re
 const upload=async(kind="original",ownerId="owner",value="test bytes")=>{const p=await prepare(kind,ownerId);return core.upload(p.uploadUrl.split("/").at(-1),(async function*(){yield Buffer.from(value);})());};
 before(async()=>{
   await admin.query(`CREATE ROLE "${ownerRole}" LOGIN`);await admin.query(`CREATE ROLE "${appRole}" LOGIN`);await admin.query(`CREATE DATABASE "${database}" OWNER "${ownerRole}"`);
-  owner=new Pool({connectionString:ownerURL.href,connectionTimeoutMillis:1000});app=new Pool({connectionString:appURL.href,connectionTimeoutMillis:1000});
+  owner=fixturePool({connectionString:ownerURL.href,connectionTimeoutMillis:1000});app=fixturePool({connectionString:appURL.href,connectionTimeoutMillis:1000});
   root=await mkdtemp(join(tmpdir(),"artifacts-pg-"));files=await createFileStore(root);
   await migrate(owner,ownerRole,appRole);store=createPostgresStore(app);core=createArtifactsCore({store,files,config});
 });
 after(async()=>{
-  await app?.end();await owner?.end();
+  const closed=await Promise.allSettled([closeFixturePool(app),closeFixturePool(owner)]);
   try{await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);}finally{await admin.query(`DROP ROLE IF EXISTS "${appRole}"`);await admin.query(`DROP ROLE IF EXISTS "${ownerRole}"`);await admin.end();if(root)await rm(root,{recursive:true,force:true});}
+  for(const result of closed)if(result.status==="rejected")throw result.reason;
 });
 test("migrate repeats safely and refuses invalid/privileged identities before DDL",async()=>{
   const snapshot=async()=>JSON.stringify((await owner.query("SELECT table_name,column_name,data_type FROM information_schema.columns WHERE table_schema='artifacts' ORDER BY table_name,ordinal_position")).rows);
@@ -99,20 +101,20 @@ test("stale temp cleanup preserves arbitrary ready bytes and untouched foreign f
 });
 test("lock timeout evicts uncertain connection instead of leaking future advisory lock",async()=>{
   const blocker=await app.connect(),key="artifact:"+randomUUID();await blocker.query("SELECT pg_advisory_lock(hashtextextended($1,73490217))",[key]);
-  const boundedPool=new Pool({connectionString:appURL.href,connectionTimeoutMillis:500,max:1});const bounded=createPostgresStore(boundedPool,{queryTimeoutMs:30,lockTimeoutMs:2000});
+  const boundedPool=fixturePool({connectionString:appURL.href,connectionTimeoutMillis:500,max:1});const bounded=createPostgresStore(boundedPool,{queryTimeoutMs:30,lockTimeoutMs:2000});
   try{
     await assert.rejects(bounded.withLocks([key],async()=>"never"),code("STORAGE_UNAVAILABLE"));assert.equal(boundedPool.totalCount,0);
     await blocker.query("SELECT pg_advisory_unlock(hashtextextended($1,73490217))",[key]);
     assert.equal(await bounded.withLocks([key],async()=>"acquired"),"acquired");
-  }finally{blocker.release();await boundedPool.end();}
+  }finally{blocker.release();await closeFixturePool(boundedPool);}
 });
 test("unavailable PostgreSQL refuses operation with bounded connection timeout",async()=>{
-  const unavailable=new URL(appURL.href);unavailable.port="25542";const pool=new Pool({connectionString:unavailable.href,connectionTimeoutMillis:100});
-  try{const isolated=createArtifactsCore({store:createPostgresStore(pool),files,config});await assert.rejects(isolated.execute("get",{artifactId:randomUUID()}),code("STORAGE_UNAVAILABLE"));}finally{await pool.end();}
+  const unavailable=new URL(appURL.href);unavailable.port="25542";const pool=fixturePool({connectionString:unavailable.href,connectionTimeoutMillis:100});
+  try{const isolated=createArtifactsCore({store:createPostgresStore(pool),files,config});await assert.rejects(isolated.execute("get",{artifactId:randomUUID()}),code("STORAGE_UNAVAILABLE"));}finally{await closeFixturePool(pool);}
 });
 
 test("PostgreSQL disconnect aborts stalled upload and leaves no ready or partial file",async()=>{
-  const p=await prepare(),name=`artifacts_fault_${suffix}`,pool=new Pool({connectionString:appURL.href,application_name:name,connectionTimeoutMillis:1000,max:1}),isolated=createArtifactsCore({store:createPostgresStore(pool),files,config});
+  const p=await prepare(),name=`artifacts_fault_${suffix}`,pool=fixturePool({connectionString:appURL.href,application_name:name,connectionTimeoutMillis:1000,max:1}),isolated=createArtifactsCore({store:createPostgresStore(pool),files,config});
   let stalled;const started=new Promise(resolve=>{stalled=resolve;});let count=0;
   const source={[Symbol.asyncIterator](){return {next(){if(count++===0)return Promise.resolve({done:false,value:Buffer.from("partial")});stalled();return new Promise(()=>{});},return(){return Promise.resolve({done:true});}};}};
   try{
@@ -120,5 +122,61 @@ test("PostgreSQL disconnect aborts stalled upload and leaves no ready or partial
     const pid=(await admin.query("SELECT pid FROM pg_stat_activity WHERE datname=$1 AND application_name=$2",[database,name])).rows[0].pid;
     await admin.query("SELECT pg_terminate_backend($1)",[pid]);await assert.rejects(operation,code("STORAGE_UNAVAILABLE"));
     const artifact=await core.execute("get",{artifactId:p.artifact.artifactId});assert.notEqual(artifact.status,"ready");assert.equal(artifact.sizeBytes,null);assert.equal(await files.inspect(artifact.artifactId),undefined);assert.equal((await readdir(join(root,"tmp"))).some(name=>name.startsWith(artifact.artifactId)),false);
-  }finally{await pool.end();}
+  }finally{await closeFixturePool(pool);}
+});
+
+test("PostgreSQL classifies unsupported Unicode input without hiding other data errors",async()=>{
+  for(const patch of [{ownerId:"owner\u0000"},{requestId:"key\u0000"},{metadata:{details:{nested:"\u0000"}}},{metadata:{details:{nested:"\ud800"}}},{metadata:{details:{["key\u0000"]:"value"}}}]){
+    const input={requestId:randomUUID(),ownerId:"unicode-owner",kind:"original",...patch,metadata:{...metadata,...patch.metadata}};
+    await assert.rejects(core.execute("prepare",input),error=>error.code==="INVALID_ARGUMENT"&&error.status===400&&["22P05","22021","22P02"].includes(error.cause?.code));
+    assert.equal((await core.execute("list",{filter:{ownerId:"unicode-owner"},sort:"createdAt",order:"asc",limit:1001,offset:0})).total,0);
+  }
+  await assert.rejects(store.withLocks([],session=>session.artifact("not-a-uuid")),error=>error.code==="STORAGE_UNAVAILABLE"&&error.cause?.code==="22P02");
+  const input={requestId:"😀".repeat(256),ownerId:"😀".repeat(128),kind:"original",metadata:{...metadata,title:"😀".repeat(512)}};
+  const prepared=await core.execute("prepare",input);assert.equal(prepared.artifact.title,input.metadata.title);assert.equal(prepared.artifact.ownerId,input.ownerId);assert.equal((await core.execute("prepare",input)).artifact.artifactId,prepared.artifact.artifactId);
+});
+
+test("list cursors retain snapshot consistency and fetch multiple batches",async()=>{
+  const ownerId=randomUUID();for(let n=0;n<35;n++)await prepare("original",ownerId);
+  await store.withLocks([],async session=>{
+    const listing=await session.list({filter:{ownerId},sort:"createdAt",order:"asc",limit:1001,offset:0});assert.equal(listing.total,35);
+    const later=await prepare("original",ownerId),items=[];for await(const artifact of listing.items)items.push(artifact);
+    assert.equal(items.length,35);assert.equal(items.some(a=>a.artifactId===later.artifact.artifactId),false);
+  });
+  const listing=await core.execute("list",{filter:{ownerId},sort:"createdAt",order:"asc",limit:1001,offset:0});assert.equal(listing.total,36);assert.equal(listing.items.length,36);assert.equal(validateResponse(subjects.list,listing),true);
+});
+
+test("byte overflow closes cursor/transaction and reuses the only pooled connection",async()=>{
+  const ownerId=randomUUID();for(let n=0;n<35;n++)await core.execute("prepare",{requestId:randomUUID(),ownerId,kind:"original",metadata:{...metadata,details:{padding:"😀".repeat(512)}}});
+  const pool=fixturePool({connectionString:appURL.href,max:1,connectionTimeoutMillis:1000}),client=await pool.connect(),originalQuery=client.query;
+  let fetches=0,maxRows=0;client.query=function(...args){const text=typeof args[0]==="string"?args[0]:args[0].text,result=originalQuery.apply(this,args);if(!result?.then)return result;return result.then(value=>{if(text.startsWith("FETCH")){fetches++;maxRows=Math.max(maxRows,value.rows.length);}return value;});};const pid=client.processID;client.release();
+  const bounded=createArtifactsCore({store:createPostgresStore(pool),files,config:{...config,maxResultBytes:4096}});
+  try{
+    await assert.rejects(bounded.execute("list",{filter:{ownerId},sort:"createdAt",order:"asc",limit:1001,offset:0}),code("PAYLOAD_TOO_LARGE"));assert.equal(fetches,1);assert.equal(maxRows,16);
+    assert.equal((await pool.query("SELECT count(*) FROM pg_cursors")).rows[0].count,"0");assert.equal((await admin.query("SELECT state FROM pg_stat_activity WHERE pid=$1",[pid])).rows[0].state,"idle");
+    assert.equal((await bounded.execute("list",{filter:{ownerId:"empty-owner"},sort:"createdAt",order:"asc",limit:1001,offset:0})).total,0);assert.equal(pool.totalCount,1);
+  }finally{client.query=originalQuery;await closeFixturePool(pool);}
+});
+
+test("reference cursors return more than former default limits when the response fits",async()=>{
+  const ownerId=randomUUID(),scope={ownerId,projectId:"p",threadId:"t"},createdAt=new Date().toISOString();
+  const refs=Array.from({length:1001},(_,n)=>({scope:{...scope,operationId:"op-"+n},clientUserMessageId:"m-"+n,commandHash:"a".repeat(64),attachments:[],state:"confirmed",turnId:"turn",itemId:"item-"+n,createdAt,updatedAt:createdAt}));
+  await owner.query("INSERT INTO artifacts.artifact_references(owner_id,project_id,thread_id,operation_id,document) SELECT $1,$2,$3,value->'scope'->>'operationId',value FROM jsonb_array_elements($4::jsonb)",[ownerId,"p","t",JSON.stringify(refs)]);
+  const input={scope,nativeItemIds:refs.map(ref=>ref.itemId)},page=await core.execute("referenceList",input);assert.equal(page.items.length,1001);assert.equal(validateResponse(subjects.referenceList,page),true);
+  const bounded=createArtifactsCore({store,files,config:{...config,maxResultBytes:2048}});await assert.rejects(bounded.execute("referenceList",input),code("PAYLOAD_TOO_LARGE"));assert.equal((await core.execute("referenceGet",{scope:refs[0].scope})).reference.itemId,refs[0].itemId);
+});
+
+test("relation cursors cross batches and large attachment arrays retain exact order",async()=>{
+  const ownerId=randomUUID(),original=await upload("original",ownerId),models=[];
+  for(let n=0;n<20;n++){const model=await upload("copy",ownerId);models.push(model);await core.execute("relationAdd",{requestId:randomUUID(),modelArtifactId:model.artifactId,originalArtifactId:original.artifactId});}
+  const page=await core.execute("relationList",{artifactId:original.artifactId});assert.equal(page.items.length,20);assert.equal(validateResponse(subjects.relationList,page),true);
+  const bounded=createArtifactsCore({store,files,config:{...config,maxResultBytes:1024}});await assert.rejects(bounded.execute("relationList",{artifactId:original.artifactId}),code("PAYLOAD_TOO_LARGE"));
+  const attachments=Array.from({length:101},(_,n)=>({originalArtifactId:original.artifactId,modelArtifactId:models[n%models.length].artifactId}));const scope={ownerId,projectId:"p",threadId:"t",operationId:"many-attachments"};
+  const reference=await core.execute("referenceReserve",{scope,clientUserMessageId:"m",commandHash:"a".repeat(64),attachments});assert.deepEqual(reference.reference.attachments,attachments);assert.equal(validateResponse(subjects.referenceReserve,reference),true);
+});
+
+test("fixture lifecycle reports unexpected idle PostgreSQL failures",async()=>{
+  const pool=fixturePool({connectionString:appURL.href,connectionTimeoutMillis:1000}),client=await pool.connect(),pid=client.processID;client.release();
+  const failure=new Promise(resolve=>pool.once("error",resolve));await admin.query("SELECT pg_terminate_backend($1)",[pid]);assert.equal((await failure).code,"57P01");
+  await assert.rejects(closeFixturePool(pool),/unexpected PostgreSQL idle errors/);
 });

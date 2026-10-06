@@ -15,6 +15,7 @@ import { loadArtifactsConfig } from '../../dist/config.js';
 import { startArtifactsRuntime } from '../../dist/main.js';
 import { migrate } from '../../dist/migrate.js';
 import { startMcpServer, loadMcpConfig } from '../../dist/mcp.js';
+import { fixturePool, closeFixturePool } from './fixture-pool.mjs';
 
 const fixture = process.env.ARTIFACTS_TEST_ADMIN_URL;
 const natsFixture = process.env.ARTIFACTS_TEST_NATS_URL;
@@ -55,19 +56,19 @@ test('official MCP client lists and invokes all artifacts operations over NATS',
     await client?.close().catch(() => {});
     await mcp?.close().catch(() => {});
     await runtime?.stop().catch(() => {});
-    await app?.end().catch(() => {});
-    await owner?.end().catch(() => {});
+    const closed = await Promise.allSettled([closeFixturePool(app), closeFixturePool(owner)]);
     await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`).catch(() => {});
     await admin.query(`DROP ROLE IF EXISTS "${appRole}"`).catch(() => {});
     await admin.query(`DROP ROLE IF EXISTS "${ownerRole}"`).catch(() => {});
     if (dataDir) await rm(dataDir, { recursive: true, force: true });
     await admin.end();
+    for (const outcome of closed) if (outcome.status === 'rejected') throw outcome.reason;
   });
   await admin.query(`CREATE ROLE "${ownerRole}" LOGIN`);
   await admin.query(`CREATE ROLE "${appRole}" LOGIN`);
   await admin.query(`CREATE DATABASE "${database}" OWNER "${ownerRole}"`);
-  owner = new Pool({ connectionString: ownerURL.href, connectionTimeoutMillis: 1000 });
-  app = new Pool({ connectionString: appURL.href, connectionTimeoutMillis: 1000 });
+  owner = fixturePool({ connectionString: ownerURL.href, connectionTimeoutMillis: 1000 });
+  app = fixturePool({ connectionString: appURL.href, connectionTimeoutMillis: 1000 });
   await migrate(owner, ownerRole, appRole);
   dataDir = await mkdtemp(join(tmpdir(), 'artifacts-mcp-'));
   const httpPort = await port();
@@ -127,6 +128,22 @@ test('official MCP client lists and invokes all artifacts operations over NATS',
   } finally {
     await sdkLocker.query('SELECT pg_advisory_unlock(hashtextextended($1,73490217))', [`prepare:${sdkRequestId}`]).catch(() => {});
     sdkLocker.release();
+  }
+
+  const duplicateRequestId = randomUUID(), duplicateLocker = await app.connect();
+  await duplicateLocker.query('SELECT pg_advisory_lock(hashtextextended($1,73490217))', [`prepare:${duplicateRequestId}`]);
+  const duplicateHeaders = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'mcp-session-id': transport.sessionId };
+  const rawCall = body => fetch(mcp.url, { method: 'POST', headers: duplicateHeaders, body: JSON.stringify(body) });
+  const pendingOriginal = rawCall({ jsonrpc: '2.0', id: 711, method: 'tools/call', params: { name: 'prepare', arguments: { requestId: duplicateRequestId, ownerId, kind: 'original', metadata: metadata('duplicates.bin', 'application/octet-stream') } } });
+  try {
+    await waitForPrepareLock();
+    for (let n = 0; n < 3; n++) { const duplicate = await rawCall({ jsonrpc: '2.0', id: 711, method: 'tools/list', params: {} }); assert.equal(duplicate.status, 409); assert.equal((await duplicate.json()).error, 'DUPLICATE_REQUEST'); }
+    const distinct = await rawCall({ jsonrpc: '2.0', id: '711', method: 'tools/list', params: {} }); assert.equal(distinct.status, 200); assert.equal((await distinct.json()).id, '711');
+    await duplicateLocker.query('SELECT pg_advisory_unlock(hashtextextended($1,73490217))', [`prepare:${duplicateRequestId}`]);
+    const originalReply = await pendingOriginal; assert.equal(originalReply.status, 200); const reply = await originalReply.json(); assert.equal(reply.id, 711); assert.equal(reply.result.structuredContent.artifact.requestId, duplicateRequestId);
+    const reused = await rawCall({ jsonrpc: '2.0', id: 711, method: 'tools/list', params: {} }); assert.equal(reused.status, 200); await reused.arrayBuffer();
+  } finally {
+    await duplicateLocker.query('SELECT pg_advisory_unlock(hashtextextended($1,73490217))', [`prepare:${duplicateRequestId}`]).catch(() => {}); duplicateLocker.release(); await pendingOriginal.catch(() => {});
   }
 
   const httpRequestId = randomUUID(), httpLocker = await app.connect();

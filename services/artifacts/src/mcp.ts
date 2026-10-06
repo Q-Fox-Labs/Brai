@@ -189,7 +189,7 @@ async function readBody(req: IncomingMessage, max: number, deadlineMs: number): 
   try { return await Promise.race([body, deadline]); } finally { if (timer) clearTimeout(timer); }
 }
 function requestId(body: unknown): string | undefined {
-  if (body && typeof body === 'object' && 'id' in body && (typeof body.id === 'string' || typeof body.id === 'number')) return String(body.id);
+  if (body && typeof body === 'object' && 'id' in body && (typeof body.id === 'string' || typeof body.id === 'number')) return JSON.stringify(body.id);
   return undefined;
 }
 function sendHttpError(req: IncomingMessage, res: ServerResponse, status: number, code: string) {
@@ -246,6 +246,7 @@ export async function startMcpServer(cfg = loadMcpConfig()): Promise<{ url: stri
     req.once('aborted', disconnect);
     req.socket.once('close', disconnect);
     let id: string | undefined;
+    let ownsCall = false;
     try {
       let body: unknown;
       if (req.method === 'POST') {
@@ -262,7 +263,7 @@ export async function startMcpServer(cfg = loadMcpConfig()): Promise<{ url: stri
           const tool = tools.find((candidate) => candidate.name === request.params.name);
           if (!tool) return mcpError(safeFailure('INVALID_ARGUMENT', 400));
           try {
-            const httpSignal = session?.calls.get(String(extra.requestId))?.signal;
+            const httpSignal = session?.calls.get(JSON.stringify(extra.requestId))?.signal;
             const signal = httpSignal ? AbortSignal.any([extra.signal, httpSignal]) : extra.signal;
             const value = await requestNats(nc, cfg, tool, request.params.arguments ?? {}, signal, active, (promise) => {
               pending.add(promise);
@@ -288,6 +289,7 @@ export async function startMcpServer(cfg = loadMcpConfig()): Promise<{ url: stri
       if (id !== undefined) {
         if (session.calls.has(id)) { sendHttpError(req, res, 409, 'DUPLICATE_REQUEST'); return; }
         session.calls.set(id, httpAbort);
+        ownsCall = true;
       }
       session.touched = Date.now();
       await session.transport.handleRequest(req, res, body);
@@ -297,7 +299,7 @@ export async function startMcpServer(cfg = loadMcpConfig()): Promise<{ url: stri
     } finally {
       if (ownsInit) initializing--;
       if (ownsReceive) receiving--;
-      if (id !== undefined) session?.calls.delete(id);
+      if (ownsCall && id !== undefined) session?.calls.delete(id);
       res.removeListener('close', disconnect);
       req.removeListener('aborted', disconnect);
       req.socket.removeListener('close', disconnect);

@@ -6,7 +6,7 @@ import {open,constants} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {pipeline} from 'node:stream/promises';
 import type {Pool} from 'pg';import type {NatsConnection} from 'nats';
-import type {ArtifactsCore} from './core.js';import type {Config} from './config.js';import type {Artifact} from '../contracts/index.mjs';import {artifactsReadiness} from './health.js';import {ArtifactError,storageError} from './errors.js';
+import type {ArtifactsCore} from './core.js';import type {Config} from './config.js';import {artifactsReadiness} from './health.js';import {ArtifactError,storageError} from './errors.js';
 const send=(res:ServerResponse,status:number,code:string,close=false)=>{if(!res.headersSent){res.writeHead(status,{'Cache-Control':'no-store',...(close?{'Connection':'close'}:{})});res.end(code);}};
 const rejectBody=(req:IncomingMessage,res:ServerResponse,status:number,code:string)=>{send(res,status,code,true);res.once('finish',()=>req.destroy());};
 const tokenPath=/^\/(upload|share)\/([A-Za-z0-9_-]{16,512})$/;
@@ -37,10 +37,14 @@ export function startArtifactsHttp(cfg:Config,core:ArtifactsCore,pool:Pool,nc:Na
    if(!cfg.externalBaseURL){send(res,503,'SHARING_NOT_CONFIGURED');return;}
    const abort=new AbortController();let rejectDeadline!: (error:Error)=>void;let handle:Awaited<ReturnType<typeof open>>|undefined;
    const deadlinePromise=new Promise<never>((_,reject)=>{rejectDeadline=reject;});const deadline=setTimeout(()=>{const error=new ArtifactError('STORAGE_UNAVAILABLE');abort.abort(error);rejectDeadline(error);},cfg.requestTimeoutMs);deadline.unref();
-   try{const artifact=await Promise.race([core.shared(match[2]),deadlinePromise]) as Artifact;handle=await open(join(root,artifact.artifactId),constants.O_RDONLY|constants.O_NOFOLLOW);const info=await handle.stat();if(!info.isFile())throw new Error('not-file');
+   const authorizedFile=async()=>{const artifact=await core.shared(match[2]);abort.signal.throwIfAborted();const file=await open(join(root,artifact.artifactId),constants.O_RDONLY|constants.O_NOFOLLOW);
+    // AIDEV-NOTE: open/stat не отменяются AbortSignal; поздний результат сам закрывает свой descriptor.
+    try{abort.signal.throwIfAborted();const info=await file.stat();abort.signal.throwIfAborted();if(!info.isFile())throw new Error('not-file');return {file,info};}catch(error){await file.close().catch(()=>{});throw error;}
+   };
+   try{const result=await Promise.race([authorizedFile(),deadlinePromise]);handle=result.file;const info=result.info;
     res.writeHead(200,{'content-type':'application/octet-stream','content-length':String(info.size),'content-disposition':'attachment; filename=\"artifact\"','cache-control':'private, no-store','x-content-type-options':'nosniff'});
-    if(req.method==='HEAD'){res.end();await handle.close();return;}
-    await pipeline(handle.createReadStream({autoClose:true}),res,{signal:abort.signal});
+    if(req.method==='HEAD'){res.end();const file=handle;handle=undefined;await file.close();return;}
+    const stream=handle.createReadStream({autoClose:true});handle=undefined;await pipeline(stream,res,{signal:abort.signal});
    }catch(error){await handle?.close().catch(()=>{});if(!res.headersSent)send(res,error instanceof ArtifactError?error.status:404,error instanceof ArtifactError?error.code:'NOT_FOUND');else res.destroy(error as Error);}
    finally{clearTimeout(deadline);}
    return;
