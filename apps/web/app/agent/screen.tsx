@@ -37,7 +37,7 @@ type Props = { active: boolean; userId: string; email: string; onLogout: () => v
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Ошибка связи";
 const stateLabels: Record<string, string> = { idle: "Готов", inProgress: "Работает", waiting: "Ждёт ответа", completed: "Завершён", interrupted: "Остановлен", failed: "Ошибка", "connection-lost": "Переподключение", "executor-unavailable": "Codex недоступен" };
 
-/** Сохраняет чат и черновик; active управляет только видимостью и восстановлением прокрутки. */
+/** Сохраняет чаты и общий черновик нового чата; создаёт чат только при первой отправке. */
 export default function AgentScreen({ active: visible, userId, email, onLogout, onUnauthorized, accountMessage }: Props) {
   const client = useMemo(() => createAgentClient(userId, onUnauthorized), [userId, onUnauthorized]);
   const lazyReads = useMemo(() => createLazyReads(client.request), [client]);
@@ -60,17 +60,19 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   queuedMessagesRef.current = queuedMessages;
   const [awaitingTurn, setAwaitingTurn] = useState<{ chat: string; generation: string; turnId: string | null; seq: number; agentMode: AgentMode }[]>([]);
   const draft = composer.text, attachments = composer.images;
+  const newDraft = useRef<ComposerDraft>(emptyDraft()), newDraftUncertain = useRef(false);
+  const newThreads = useRef(new Map<string, { threadId?: string; unknown?: boolean }>());
   const composerRef = useRef(composer), currentChat = useRef(`${projectId}:${threadId}`);
   const fileInput = useRef<HTMLInputElement>(null), preparationVersion = useRef(0), alive = useRef(true), attachmentUpload = useRef<AbortController | null>(null);
   const queue = useRef<{ file: File; version: number; context: string; duplicate: string; limit: number }[]>([]), preparing = useRef(false);
   const [preparationCount, setPreparationCount] = useState(0);
   const [imageProgress, setImageProgress] = useState<Record<string, number>>({});
-  const pendingSubmissions = useRef(new Map<string, { operationId: string; chat: string; unknown: boolean; confirmed?: boolean; completedAt?: number; settleTimer?: ReturnType<typeof setTimeout>; sent: ComposerDraft; queued?: ComposerDraft; projectId: string; threadId: string }>());
+  const pendingSubmissions = useRef(new Map<string, { operationId: string; chat: string; unknown: boolean; confirmed?: boolean; completedAt?: number; settleTimer?: ReturnType<typeof setTimeout>; sent: ComposerDraft; queued?: ComposerDraft; projectId: string; threadId: string; newChat?: boolean; draftAccepted?: boolean }>());
   const checkingSubmission = useRef(false);
   const [failedChats, setFailedChats] = useState<Set<string>>(() => new Set());
   const attachmentContext = useRef("");
   currentChat.current = `${projectId}:${threadId}`;
-  function changeDraft(next: ComposerDraft, releasePrevious = true) {
+  function changeDraft(next: ComposerDraft, releasePrevious = true, saveNewDraft = !threadId) {
     if (releasePrevious) {
       const nextById = new Map(next.images.map(image => [image.id, image]));
       for (const previous of composerRef.current.images) {
@@ -78,6 +80,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         if (!current || current.previewUrl !== previous.previewUrl || !current.previewObjectUrl) releaseAttachmentPreview(previous);
       }
     }
+    if (saveNewDraft) newDraft.current = next;
     composerRef.current = next; setComposer(next);
   }
   function cancelPreparation() { ++preparationVersion.current; queue.current = []; setPreparationCount(0); }
@@ -134,6 +137,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       ++preparationVersion.current; queue.current = [];
       const previews = new Map<string, Attachment>();
       for (const image of composerRef.current.images) previews.set(image.id, image);
+      for (const image of newDraft.current.images) previews.set(image.id, image);
       for (const chat of cache.current.values()) for (const image of chat.draft.images) previews.set(image.id, image);
       for (const queued of queuedMessagesRef.current) for (const image of queued.draft.images) previews.set(image.id, image);
       for (const pending of pendingSubmissions.current.values()) { clearTimeout(pending.settleTimer); for (const image of pending.sent.images) previews.set(image.id, image); }
@@ -202,7 +206,8 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     setSnapshot(live ?? saved?.snapshot ?? null); setHistory(saved?.history ?? []); setHistoryGeneration(saved?.generation ?? ""); setCursor(saved?.cursor ?? null);
     currentChat.current = `${id}:${chatId}`;
     uncertain.current = saved?.uncertain ?? false;
-    changeDraft(saved?.draft ?? emptyDraft(), false); setModel(saved?.model ?? ""); setEffort(saved?.effort ?? ""); setPermissionMode(saved?.permissionMode ?? "auto"); setAgentMode(saved?.agentMode ?? "default"); setMaterialView(saved?.materials ?? emptyMaterialView()); setConnected(!!live);
+    // AIDEV-NOTE: Новый чат имеет один черновик на аккаунт, независимо от выбранного проекта.
+    changeDraft(chatId ? saved?.draft ?? emptyDraft() : newDraft.current, false, false); setModel(saved?.model ?? ""); setEffort(saved?.effort ?? ""); setPermissionMode(saved?.permissionMode ?? "auto"); setAgentMode(saved?.agentMode ?? "default"); setMaterialView(saved?.materials ?? emptyMaterialView()); setConnected(!!live);
     followBottom.current = true; scrollAnchor.current = null;
     setProjectId(id); setThreadId(chatId); setMessage(""); setSidebarOpen(false);
   }
@@ -251,16 +256,16 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     } catch (error) { if (token === selection.current) setMessage(errorText(error)); }
   }
 
-  function beginSubmission(sent: ComposerDraft, chat: string, queued?: ComposerDraft): string {
+  function beginSubmission(sent: ComposerDraft, chat: string, queued?: ComposerDraft, selected = snapshot!, newChat = false): string {
     const operationId = crypto.randomUUID();
-    pendingSubmissions.current.set(operationId, { operationId, chat, unknown: false, sent, queued, projectId, threadId });
-    setFailedChats(previous => new Set([...previous].filter(value => value !== chat)));
+    pendingSubmissions.current.set(operationId, { operationId, chat, unknown: false, sent, queued, projectId: selected.projectId, threadId: selected.threadId, newChat });
+    setFailedChats(previous => new Set([...previous].filter(value => value !== chat && (!newChat || value !== `${selected.projectId}:`))));
     followBottom.current = true;
-    setCorrections(previous => [...previous, { chat, generation: snapshot!.generation,
-      knownIds: mergeTimeline(history, snapshot!.items).map(item => item.id), state: "sending", draft: sent,
-      item: { id: operationId, turnId: snapshot!.turn?.id ?? "", type: "userMessage", text: sent.text } }]);
-    // Перед первым сетевым ожиданием передаём черновик сообщению; его previews ещё нужны.
-    if (!queued) changeDraft(acceptedDraft(composerRef.current, sent), false);
+    setCorrections(previous => [...previous, { chat, generation: selected.generation,
+      knownIds: mergeTimeline(newChat ? [] : history, selected.items).map(item => item.id), state: "sending", draft: sent,
+      item: { id: operationId, turnId: selected.turn?.id ?? "", type: "userMessage", text: sent.text } }]);
+    // AIDEV-NOTE: Новый черновик сохраняется до принятия; существующий чат показывает отправку в истории.
+    if (!queued && !newChat) changeDraft(acceptedDraft(composerRef.current, sent), false);
     return operationId;
   }
 
@@ -268,6 +273,16 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     const pending = pendingSubmissions.current.get(operationId);
     if (!pending) return;
     if (pending.settleTimer) return;
+    if (pending.newChat && !pending.draftAccepted) {
+      pending.draftAccepted = true;
+      newDraft.current = acceptedDraft(newDraft.current, pending.sent);
+      newDraftUncertain.current = false;
+      newThreads.current.delete(pending.projectId);
+      if (currentChat.current === `${pending.projectId}:`) {
+        changeDraft(newDraft.current, false);
+        selectChatRef.current(pending.projectId, pending.threadId);
+      } else if (currentChat.current.endsWith(":")) changeDraft(newDraft.current, false);
+    }
     const chat = pending.chat;
     const remaining = (pending.completedAt ?? 0) + 1300 - performance.now();
     if (pending.sent.images.length && remaining > 0) {
@@ -297,11 +312,12 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     const chat = pending.chat;
     pendingSubmissions.current.delete(operationId);
     const saved = cache.current.get(chat);
-    if (saved) { saved.draft = restoredDraft(saved.draft, pending.sent); saved.uncertain = false; }
-    if (currentChat.current === chat) { changeDraft(restoredDraft(composerRef.current, pending.sent), false); uncertain.current = false; }
+    if (pending.newChat) newDraftUncertain.current = false;
+    if (saved) { if (!pending.newChat) saved.draft = restoredDraft(saved.draft, pending.sent); saved.uncertain = false; }
+    if (currentChat.current === chat) { if (!pending.newChat) changeDraft(restoredDraft(composerRef.current, pending.sent), false); uncertain.current = false; }
     setCorrections(previous => previous.filter(value => value.item.id !== pending.operationId));
     if (pending.queued) setQueuedMessages(previous => previous.filter(value => value.draft !== pending.queued));
-    setFailedChats(previous => new Set([...previous, chat]));
+    setFailedChats(previous => new Set([...previous, pending.newChat ? `${pending.projectId}:` : chat]));
   }
 
   async function checkSubmission(operationId: string): Promise<boolean> {
@@ -334,25 +350,20 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     finally { checkingSubmission.current = false; }
   }
 
-  async function mutate(action: "create" | "start" | "steer" | "interrupt" | "answer" | "goalSet" | "goalClear", extra: Record<string, unknown> = {}, targetProject = projectId, queuedDraft?: ComposerDraft, sentOverride?: ComposerDraft, submissionId?: string) {
-    if (!targetProject || locked.current || uncertain.current || (action !== "create" && (!connected || !snapshot || snapshot.projectId !== projectId || snapshot.threadId !== threadId))) return false;
-    const selected = snapshot, sent = sentOverride ?? queuedDraft ?? composerRef.current, sentChat = `${projectId}:${threadId}`, token = selection.current, operationId = submissionId ?? ((action === "start" || action === "steer") ? beginSubmission(sent, sentChat, queuedDraft) : crypto.randomUUID());
+  async function mutate(action: "start" | "steer" | "interrupt" | "answer" | "goalSet" | "goalClear", extra: Record<string, unknown> = {}, targetProject = projectId, queuedDraft?: ComposerDraft, sentOverride?: ComposerDraft, submissionId?: string, selectedOverride?: NativeSnapshot) {
+    if (!targetProject || locked.current || (!selectedOverride && (uncertain.current || !connected || !snapshot || snapshot.projectId !== projectId || snapshot.threadId !== threadId))) return false;
+    const selected = selectedOverride ?? snapshot, sent = sentOverride ?? queuedDraft ?? composerRef.current, sentChat = `${targetProject}:${selected!.threadId}`, token = selection.current, operationId = submissionId ?? ((action === "start" || action === "steer") ? beginSubmission(sent, sentChat, queuedDraft) : crypto.randomUUID());
     locked.current = true; setBusy(true); setMessage("");
     try {
-      const generation = action === "create" ? (await client.request({ action: "status" })).generation : selected!.generation;
-      const value = await client.request({ action, projectId: targetProject, ...(action === "create" ? {} : { threadId }), generation, operationId, ...extra });
-      if (value.outcome !== "accepted" || value.generation !== generation || (action === "create" ? typeof value.threadId !== "string" : value.threadId !== selected!.threadId) || value.operationId !== operationId || (action === "answer" && value.requestId !== extra.requestId)) throw new AgentError("BAD_REPLY", "unknown");
+      const generation = selected!.generation;
+      const value = await client.request({ action, projectId: targetProject, threadId: selected!.threadId, generation, operationId, ...extra });
+      if (value.outcome !== "accepted" || value.generation !== generation || value.threadId !== selected!.threadId || value.operationId !== operationId || (action === "answer" && value.requestId !== extra.requestId)) throw new AgentError("BAD_REPLY", "unknown");
       if (!alive.current) return true;
       if (action === "start" || action === "steer") setCorrections(previous => previous.map(entry => entry.item.id === operationId ? { ...entry, state: "waiting", item: { ...entry.item, turnId: value.turnId ?? entry.item.turnId } } : entry));
-      if (action === "start" && extra.agentMode === "goal") finishSubmission(operationId);
+      if (action === "start" && (extra.agentMode === "goal" || selectedOverride)) finishSubmission(operationId);
       if (action === "start" || (action === "goalSet" && extra.status === "active")) setAwaitingTurn(previous => [...previous.filter(value => value.chat !== sentChat), { chat: sentChat, generation, turnId: selected!.turn?.id ?? null, seq: selected!.seq, agentMode: action === "goalSet" ? "goal" : (extra.agentMode as AgentMode ?? "default") }]);
-      if (action === "create" || action === "start") void loadThreads(targetProject);
+      if (action === "start") void loadThreads(targetProject);
       if (token !== selection.current) return true;
-      if (action === "create") {
-        const createdModel = typeof extra.model === "string" ? extra.model : "";
-        cache.current.set(`${targetProject}:${value.threadId}`, { snapshot: null, history: [], generation, cursor: null, draft: emptyDraft(), model: createdModel, effort: createdModel === defaultModelId ? defaultEffort : "", permissionMode, agentMode, materials: emptyMaterialView(), ready: false, uncertain: false });
-        selectChat(targetProject, value.threadId);
-      }
       setMessage(""); return true;
     } catch (error) {
       if (!alive.current) return false;
@@ -360,14 +371,17 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         if (error instanceof AgentError && error.outcome === "unknown") {
           if (!pendingSubmissions.current.has(operationId) || pendingSubmissions.current.get(operationId)!.confirmed) return true;
           pendingSubmissions.current.get(operationId)!.unknown = true;
+          if (selectedOverride) newDraftUncertain.current = true;
           setCorrections(previous => previous.map(value => value.item.id === operationId ? { ...value, state: "unknown" } : value));
           const saved = cache.current.get(sentChat);
           if (saved) saved.uncertain = true;
           if (currentChat.current === sentChat) uncertain.current = true;
           if (await checkSubmission(operationId)) return true;
+          if (selectedOverride) setMessage(errorText(error));
           return false;
         }
         rejectSubmission(operationId);
+        if (selectedOverride && !threadId) setMessage(errorText(error));
         return false;
       }
       setFailedChats(previous => new Set([...previous, sentChat]));
@@ -378,10 +392,10 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     } finally { locked.current = false; if (alive.current) setBusy(false); }
   }
 
-  async function sendDraft(action: "start" | "steer", sent: ComposerDraft, targetProject: string, targetThread: string, settings: Record<string, unknown>, queuedDraft?: ComposerDraft): Promise<boolean> {
-    if (locked.current || attachmentUpload.current || uncertain.current) return false;
+  async function sendDraft(action: "start" | "steer", sent: ComposerDraft, targetProject: string, targetThread: string, settings: Record<string, unknown>, queuedDraft?: ComposerDraft, selectedOverride?: NativeSnapshot): Promise<boolean> {
+    if (locked.current || attachmentUpload.current || (!selectedOverride && uncertain.current)) return false;
     const chatKey = `${targetProject}:${targetThread}`, controller = new AbortController();
-    const operationId = beginSubmission(sent, chatKey, queuedDraft);
+    const operationId = beginSubmission(sent, chatKey, queuedDraft, selectedOverride ?? snapshot!, !!selectedOverride);
     attachmentUpload.current = controller; setUploading(!!sent.images.length); setBusy(true); setMessage("");
     try {
       const readyImages: Attachment[] = [];
@@ -396,12 +410,12 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       }
       if (!alive.current) return false;
       if (controller.signal.aborted) { rejectSubmission(operationId); return false; }
-      if (currentChat.current !== chatKey) { rejectSubmission(operationId); return false; }
+      if (!selectedOverride && currentChat.current !== chatKey) { rejectSubmission(operationId); return false; }
       const sentReady = { ...sent, images: readyImages };
       const attachments = readyImages.map(image => ({ originalArtifactId: image.originalArtifactId!, modelArtifactId: image.modelArtifactId! }));
-      return await mutate(action, { text: sent.text, ...(attachments.length ? { attachments } : {}), ...settings }, targetProject, queuedDraft, sentReady, operationId);
-    } catch {
-      if (alive.current) rejectSubmission(operationId);
+      return await mutate(action, { text: sent.text, ...(attachments.length ? { attachments } : {}), ...settings }, targetProject, queuedDraft, sentReady, operationId, selectedOverride);
+    } catch (error) {
+      if (alive.current) { rejectSubmission(operationId); if (selectedOverride) setMessage(errorText(error)); }
       return false;
     } finally {
       if (attachmentUpload.current === controller) attachmentUpload.current = null;
@@ -411,17 +425,49 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     }
   }
 
+  async function sendNewDraft() {
+    if (locked.current || attachmentUpload.current || newDraftUncertain.current || newThreads.current.get(projectId)?.unknown || !selectedModel) return;
+    const id = projectId, sent = composerRef.current;
+    const settings = { model: selectedModel.model, effort: selectedEffort, permissionMode, agentMode };
+    locked.current = true; setBusy(true); setMessage("");
+    try {
+      let created = newThreads.current.get(id);
+      if (!created?.threadId) {
+        const { generation } = await client.request({ action: "status" });
+        const operationId = crypto.randomUUID();
+        // AIDEV-NOTE: Неизвестное создание нельзя повторять: ответ мог потеряться после создания чата.
+        created = { unknown: true }; newThreads.current.set(id, created);
+        try {
+          const reply = await client.request({ action: "create", projectId: id, generation, operationId, model: settings.model, permissionMode: settings.permissionMode });
+          if (reply.outcome !== "accepted" || reply.generation !== generation || reply.operationId !== operationId || typeof reply.threadId !== "string") throw new AgentError("BAD_REPLY", "unknown");
+          created = { threadId: reply.threadId }; newThreads.current.set(id, created);
+        } catch (error) {
+          if (!(error instanceof AgentError && error.outcome === "unknown")) newThreads.current.delete(id);
+          throw error;
+        }
+      }
+      const opened = await client.request({ action: "open", projectId: id, threadId: created.threadId! });
+      if (!alive.current) return;
+      cache.current.set(`${id}:${created.threadId}`, { snapshot: opened, history: [], generation: opened.generation, cursor: null, draft: emptyDraft(), ...settings, materials: emptyMaterialView(), ready: false, uncertain: false });
+      locked.current = false;
+      await sendDraft("start", sent, id, created.threadId!, settings, undefined, opened);
+    } catch (error) {
+      if (alive.current) setMessage(errorText(error));
+    } finally { locked.current = false; if (alive.current) setBusy(false); }
+  }
+
   const view = snapshot?.projectId === projectId && snapshot?.threadId === threadId ? snapshot : null;
   const questionRequest = view?.requests.find(request => request.kind === "question" && !request.answered);
   const goalUnfinished = goalBlocksNewTask(view);
-  const active = view?.turn?.status === "inProgress", disabled = busy || !view || !connected || uncertain.current;
+  const creating = !threadId && !!projectId;
+  const active = view?.turn?.status === "inProgress", disabled = busy || (creating ? newDraftUncertain.current || !!newThreads.current.get(projectId)?.unknown : !view || !connected || uncertain.current);
   const project = projects.find(value => value.projectId === projectId);
   const selectedThread = pages[projectId]?.data.find(thread => thread.id === threadId) ?? view?.thread;
   const defaultModel = models?.data.find(value => value.model === defaultModelId) ?? models?.data.find(value => value.model === models.defaultModel) ?? models?.data[0];
   const selectedModel = models?.data.find(value => value.model === (model || view?.thread.model)) ?? defaultModel;
   const requestedEffort = effort || (selectedModel?.model === view?.thread.model ? view?.thread.reasoningEffort : null);
   const selectedEffort = selectedModel?.efforts.includes(requestedEffort ?? "") ? requestedEffort! : selectedModel?.model === defaultModelId && selectedModel.efforts.includes(defaultEffort) ? defaultEffort : selectedModel?.defaultEffort ?? "";
-  const currentImageModel = imageModel(models, view, selectedModel, active);
+  const currentImageModel = creating ? selectedModel : imageModel(models, view, selectedModel, active);
   const imagesAllowed = (active || agentMode !== "goal") && !!currentImageModel?.inputModalities.includes("image") && currentImageModel.imageLimit > 0;
   const imageLimit = Math.min(limits.images, currentImageModel?.imageLimit ?? 0);
   attachmentContext.current = `${currentChat.current}:${view?.generation ?? ""}:${currentImageModel?.model ?? ""}:${imagesAllowed}:${imageLimit}`;
@@ -433,7 +479,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     return () => { mounted = false; };
   }, [client, modelGeneration, models]);
   useStartupReady(projectsSettled && modelsSettled && (!projectId || !!pages[projectId] && !pages[projectId].loading));
-  const title = selectedThread?.title || selectedThread?.preview || (threadId ? "Новый чат" : "Выберите чат");
+  const title = selectedThread?.title || selectedThread?.preview || (projectId ? "Новый чат" : "Выберите проект");
   const items = mergeTimeline(history, view?.items ?? []);
   const materials = collectMaterials(items, view);
   useEffect(() => {
@@ -509,17 +555,19 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const timeline = groupTimeline(items).filter(entry => entry.kind !== "message" || !pendingAsyncQuestions.some(request => request.params.itemId === entry.item.id || entry.item.type === "agentMessage" && !entry.item.text.trim() && request.turnId === entry.item.turnId));
   const activityContext = useMemo(() => ({ generation: view?.generation ?? historyGeneration, epoch: view?.epoch ?? "", projectId, threadId }), [view?.generation, view?.epoch, historyGeneration, projectId, threadId]);
   const action = !draft.trim() && !attachments.length && goalUnfinished ? "goalClear" : composerAction(active, draft, attachments.length);
-  const catalogFresh = !!view && models?.generation === view.generation;
+  const catalogFresh = creating ? !!models : !!view && models?.generation === view.generation;
   const imageError = attachments.length && !active && agentMode === "goal" ? "В режиме «Цель» отправьте описание задачи без изображений. Удалите вложения или выберите другой режим." : attachments.length && !imagesAllowed ? !catalogFresh ? "Дождитесь свежего каталога моделей и соединения с чатом." : "Эта модель не принимает изображения. Выберите другую модель или удалите вложения." : attachments.length > imageLimit ? `В этом чате можно прикрепить не более ${imageLimit} изображений. Удалите лишние вложения.` : "";
   const sendDisabled = disabled || uploading || (action === "goalClear" && view?.goal?.state !== "ready") || preparationCount > 0 || !!imageError || (action === "steer" && corrections.length >= 64) || (action !== "interrupt" && action !== "goalClear" && !catalogFresh) || (action === "start" && (goalUnfinished || (!draft.trim() && !attachments.length) || !selectedModel || view?.thread.canAcceptDirectInput === false || awaitingTurn.some(value => value.chat === currentChat.current)));
   const submit = () => {
     if (sendDisabled) return;
-    if (action === "goalClear") void mutate("goalClear");
+    if (creating) void sendNewDraft();
+    else if (action === "goalClear") void mutate("goalClear");
     else if (action === "interrupt") void mutate("interrupt", { turnId: view!.turn!.id });
     else void sendDraft(action, composerRef.current, projectId, threadId, action === "steer" ? { expectedTurnId: view!.turn!.id } : selectedModel ? { model: selectedModel.model, effort: selectedEffort, permissionMode, agentMode } : {});
   };
 
   function enqueueMessage() {
+    if (creating) { submit(); return; }
     if (agentMode === "goal" && composerRef.current.images.length) { setMessage("В режиме «Цель» сообщение в очереди должно содержать описание задачи без изображений. Вложения и текст сохранены."); return; }
     if (disabled || preparationCount || imageError || !catalogFresh || !selectedModel || (!draft.trim() && !attachments.length)) return;
     if (queuedMessages.length >= 16) { setMessage("Очередь заполнена. Дождитесь отправки или удалите сообщение."); return; }
@@ -629,20 +677,20 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
 
   return <main className="agent-shell bg-background text-foreground">
     <Sidebar readMessages={readMessages} projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={sidebarOpen} email={email} busy={busy || uncertain.current} accountLimits={accountLimits}
-      select={selectChat} create={id => { void mutate("create", defaultModel ? { model: defaultModel.model, permissionMode } : { permissionMode }, id); }} more={id => { const next = pages[id]?.nextCursor; if (next) void loadThreads(id, next); }}
+      select={selectChat} create={id => { selectChat(id); requestAnimationFrame(() => composerInput.current?.focus()); }} more={id => { const next = pages[id]?.nextCursor; if (next) void loadThreads(id, next); }}
       archive={(id, chatId) => { void archiveChat(id, chatId); }} refresh={id => { void loadThreads(id); }} close={() => setSidebarOpen(false)} logout={onLogout} />
     <section className="agent-workspace" aria-labelledby="agent-chat-title">
       <header className="agent-toolbar border-b border-border bg-background">
         <Button type="button" variant="ghost" className="agent-mobile-toggle" aria-controls="agent-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(value => !value)}>☰ <span>Чаты</span></Button>
         <div className="agent-heading"><p>{project?.name ?? "Агент"}</p><h1 id="agent-chat-title" title={title}>{title}</h1></div>
         {materials.length > 0 && <Button type="button" variant={materialView.open ? "secondary" : "outline"} size="sm" className="agent-materials-toggle" aria-expanded={materialView.open} onClick={() => chooseMaterial(materialView.selected || materials.at(-1)!.id)}>Материалы{materialView.updated.length > 0 ? " · обновлено" : ""}</Button>}
-        <Badge variant="outline" className="agent-chat-status" role="status">{view && connected ? view.goal?.state === "ready" && view.goal.value?.status === "active" ? "Достигает цели" : stateLabels[view.state] ?? "Состояние обновляется" : view ? "Переподключение…" : threadId ? "Подключаемся…" : "Готов к выбору"}</Badge>
+        <Badge variant="outline" className="agent-chat-status" role="status">{view && connected ? view.goal?.state === "ready" && view.goal.value?.status === "active" ? "Достигает цели" : stateLabels[view.state] ?? "Состояние обновляется" : view ? "Переподключение…" : threadId ? "Подключаемся…" : creating ? "Новый чат" : "Готов к выбору"}</Badge>
       </header>
       <div ref={conversation} className="agent-conversation" aria-label="История" onScroll={event => {
         const element = event.currentTarget;
         followBottom.current = element.scrollHeight - element.clientHeight - element.scrollTop <= 1;
       }}>
-        {!threadId && <div className="agent-empty"><Card className="agent-empty-card"><span className="agent-empty-symbol" aria-hidden="true">✳</span><h2>С чего начнём?</h2><p>Выберите чат слева или создайте новый в нужном проекте.</p>{project && <Button type="button" className="agent-primary" disabled={busy || uncertain.current} onClick={() => void mutate("create", defaultModel ? { model: defaultModel.model, permissionMode } : { permissionMode })}>Новый чат · {project.name}</Button>}</Card></div>}
+        {!threadId && <div className="agent-empty"><Card className="agent-empty-card"><span className="agent-empty-symbol" aria-hidden="true">✳</span><h2>С чего начнём?</h2><p>Напишите первое сообщение, чтобы начать новый чат.</p></Card></div>}
         <div className="agent-timeline">
           {cursor && <Button type="button" variant="outline" className="agent-history-more" onClick={() => void moreHistory()}>Загрузить предыдущие сообщения</Button>}
           {timeline.map(entry => entry.kind === "message" ? entry.item.type === "plan" ? <Button key={entry.item.id} type="button" variant="outline" className="agent-material-card" onClick={() => chooseMaterial(`plan:${entry.item.id}`)}>Предложенный план <span>{materialView.updated.includes(`plan:${entry.item.id}`) ? "Обновлено · " : ""}Открыть →</span></Button> : <Item key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.item.id}`} item={entry.item} context={activityContext} reads={lazyReads} localImages={pendingSubmissions.current.get(entry.item.operationId ?? "")?.sent.images} imageProgress={imageProgress} uploadCompletedAt={pendingSubmissions.current.get(entry.item.operationId ?? "")?.completedAt} /> : <Activities key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.id}`} items={entry.items} context={activityContext} reads={lazyReads} />)}
@@ -656,9 +704,9 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           {view?.requests.filter(request => request.kind !== "question").map(request => (connected || request.kind === "unsupported") && <NativeForm key={view.generation + ":" + view.epoch + ":" + request.requestId} request={request} disabled={disabled} send={answer => mutate("answer", { requestId: request.requestId, answer })} />)}
         </div>
       </div>
-      {(threadId || message || accountMessage) && <footer className="agent-composer-area">
+      {(projectId || message || accountMessage) && <footer className="agent-composer-area">
         {questionRequest && <QuestionCard key={`${projectId}:${threadId}:${view!.generation}:${view!.epoch}:${questionRequest.requestId}`} request={questionRequest} disabled={disabled} send={answer => mutate("answer", { requestId: questionRequest.requestId, answer })} />}
-        {threadId && <Card className="agent-composer-card"><form className="agent-composer" onSubmit={event => { event.preventDefault(); submit(); }}>
+        {projectId && <Card className="agent-composer-card"><form className="agent-composer" onSubmit={event => { event.preventDefault(); submit(); }}>
           <label className="sr-only" htmlFor="agent-draft">{active ? "Дополнить текущий ход" : "Сообщение"}</label>
           {!!attachments.length && <ul className="agent-attachments" aria-label="Прикреплённые изображения">{attachments.map(image => <li key={image.id}><div className="agent-attachment-preview"><img src={image.url ?? image.previewUrl} alt={image.name} /><ImageUploadStatus progress={imageProgress[image.id]} /></div><span className="agent-attachment-name" title={image.name}>{image.name}</span>{image.reduced && <span className="agent-image-reduced">Уменьшено</span>}<button type="button" className="agent-attachment-remove" aria-label={`Удалить ${image.name}`} onClick={() => { attachmentUpload.current?.abort(); attachmentUpload.current = null; changeDraft({ ...composerRef.current, images: composerRef.current.images.filter(value => value.id !== image.id) }); }}>×</button></li>)}</ul>}
           <div className="agent-composer-input">

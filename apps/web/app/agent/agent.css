@@ -28,7 +28,7 @@
 .agent-thread:hover, .agent-thread:focus-within { background: var(--accent); }
 .agent-thread.is-selected { background: var(--accent); color: var(--accent-foreground); }
 .agent-thread-select { display: flex; height: 2rem; align-items: center; gap: .5rem; flex: 1; min-width: 0; justify-content: flex-start; padding: .375rem .5rem .375rem 1.75rem; font-size: .875rem; font-weight: 400; text-align: left; }
-.agent-thread-actions { position: absolute; right: .25rem; display: block; width: 2rem; height: 2rem; border-radius: var(--radius-md); opacity: 0; pointer-events: none; }
+.agent-thread-actions, .agent-thread-actions:disabled { position: absolute; right: .25rem; display: block; width: 2rem; height: 2rem; border-radius: var(--radius-md); opacity: 0; pointer-events: none; }
 .agent-thread:hover .agent-thread-actions, .agent-thread-actions:focus-visible, .agent-thread:has(.agent-thread-menu:popover-open) .agent-thread-actions { opacity: 1; pointer-events: auto; }
 .agent-thread:is(:hover, :has(.agent-thread-actions:focus-visible), :has(.agent-thread-menu:popover-open)) .agent-thread-select { padding-right: 2.5rem; }
 .agent-thread:is(:hover, :has(.agent-thread-actions:focus-visible), :has(.agent-thread-menu:popover-open)) :is(.agent-thread-spinner, .agent-thread-indicator) { display: none; }

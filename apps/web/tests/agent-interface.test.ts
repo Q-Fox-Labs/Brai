@@ -288,3 +288,15 @@ test("message continuation errors, repeated cursors and revisions never cache pa
     assert.equal((await reads.detail(context, message)).text, "starttail"); assert.equal(calls, previous + 2);
   }
 });
+
+
+test("new-chat buttons remain usable during mutations and for unavailable projects", () => {
+  const noop = () => {};
+  const html = renderToStaticMarkup(createElement(component("sidebar"), {
+    projects: [{ projectId: "p", name: "P", available: false }], pages: {}, projectId: "p", threadId: "", open: true, email: "fixture@example.test", busy: true,
+    accountLimits: { state: "unavailable", revision: 0, observedAt: null, windows: [] }, select: noop, create: noop, more: noop, refresh: noop, archive: noop, close: noop, logout: noop,
+  }));
+  const trigger = html.match(/<button[^>]*aria-label="Новый чат в P"[^>]*>/)?.[0];
+  assert.ok(trigger);
+  assert.doesNotMatch(trigger, /\sdisabled(?:=|[ >])/);
+});

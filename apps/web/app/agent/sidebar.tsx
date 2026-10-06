@@ -35,7 +35,7 @@ export default function Sidebar({ projects, pages, projectId, threadId, open, bu
               <svg className={`agent-project-icon agent-project-color-${index % 3}`} width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /><path d="m8 12 3 2-3 2m6 0h3" /></svg>
               <span>{project.name}</span><span className={`agent-project-dot ${project.available ? "is-available" : ""}`} title={project.available ? "Проект доступен" : "Проект недоступен"} />
             </Button>
-            <Button type="button" variant="ghost" size="icon-sm" className="agent-icon-button" aria-label={`Новый чат в ${project.name}`} title="Новый чат" disabled={!project.available || busy} onClick={() => create(project.projectId)}>+</Button>
+            <Button type="button" variant="ghost" size="icon-sm" className="agent-icon-button" aria-label={`Новый чат в ${project.name}`} title="Новый чат" onClick={() => create(project.projectId)}>+</Button>
           </div>
           <div className="agent-thread-list">
             {sortThreads(page?.data ?? []).slice(0, count).map(thread => {
