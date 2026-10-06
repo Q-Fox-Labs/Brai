@@ -87,8 +87,12 @@ NATS endpoint/credentials из выделенной изолированной f
 запуск её не включает. Metadata-проверка дополнительно требует `TRANSCRIPTION_TEST_METADATA=1`, собственные artifacts/history и полный coordinator config; она проверяет реальный отказ внешнего маршрута и доставку истории, без утверждения о распознавании. Ни одна из этих команд сама не поднимает fixture.
 
 ASR требует `TRANSCRIPTION_TEST_ASR=1`, отдельный local-ai, установленную GigaAM
-с фактическим холодным состоянием (`null`, `unloaded` или `error`) и закрытый набор синтетических русских WAV в
-`TRANSCRIPTION_TEST_ASR_FIXTURE_ROOT`. Restart требует отдельную конфигурацию
+без переходного состояния и закрытый набор синтетических русских WAV в
+`TRANSCRIPTION_TEST_ASR_FIXTURE_ROOT`. Холодный запуск (`null`, `unloaded` или
+`error`) проверяет autoload; повторная проверка допускает уже готовую модель и
+сохраняет её фактический ready. Такой тёплый запуск сам по себе не доказывает
+холодный autoload; его приёмка требует отдельного холодного сценария.
+Restart требует отдельную конфигурацию
 с `TRANSCRIPTION_TEST_RESTART_READY=1`, полным selector в
 `TRANSCRIPTION_TEST_RESTART_MODEL_JSON` и проверенным Ansible-контроллером
 собственной history в `TRANSCRIPTION_TEST_RESTART_HISTORY_CONTROL`. Эти тесты
