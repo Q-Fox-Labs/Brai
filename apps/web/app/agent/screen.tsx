@@ -88,8 +88,6 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const [agentMode, setAgentMode] = useState<AgentMode>("default");
   const [materialView, setMaterialView] = useState<MaterialView>(emptyMaterialView);
   const composerInput = useRef<HTMLTextAreaElement>(null);
-  const [inputHeight, setInputHeight] = useState(65);
-  const resizing = useRef<{ pointer: number; y: number; height: number } | null>(null);
   const archived = useRef(new Set<string>());
   const pageRequests = useRef(new Map<string, symbol>());
 
@@ -658,7 +656,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           <label className="sr-only" htmlFor="agent-draft">{active ? "Дополнить текущий ход" : "Сообщение"}</label>
           {!!attachments.length && <ul className="agent-attachments" aria-label="Прикреплённые изображения">{attachments.map(image => <li key={image.id}><div className="agent-attachment-preview"><img src={image.url ?? image.previewUrl} alt={image.name} /><ImageUploadStatus progress={imageProgress[image.id]} /></div><span className="agent-attachment-name" title={image.name}>{image.name}</span>{image.reduced && <span className="agent-image-reduced">Уменьшено</span>}<button type="button" className="agent-attachment-remove" aria-label={`Удалить ${image.name}`} onClick={() => { attachmentUpload.current?.abort(); attachmentUpload.current = null; changeDraft({ ...composerRef.current, images: composerRef.current.images.filter(value => value.id !== image.id) }); }}>×</button></li>)}</ul>}
           <div className="agent-composer-input">
-          <Textarea bare className="agent-draft-input" ref={composerInput} id="agent-draft" style={{ height: inputHeight }} placeholder={active ? "Дополнить текущее задание…" : agentMode === "goal" ? "Какой цели нужно достичь?" : agentMode === "plan" ? "Что нужно спланировать?" : "Что нужно сделать?"} value={draft} onChange={event => changeDraft({ ...composerRef.current, text: event.target.value, revision: composerRef.current.revision + 1 })} onPaste={event => {
+          <Textarea bare className="agent-draft-input" ref={composerInput} id="agent-draft" placeholder={active ? "Дополнить текущее задание…" : agentMode === "goal" ? "Какой цели нужно достичь?" : agentMode === "plan" ? "Что нужно спланировать?" : "Что нужно сделать?"} value={draft} onChange={event => changeDraft({ ...composerRef.current, text: event.target.value, revision: composerRef.current.revision + 1 })} onPaste={event => {
             const files = Array.from(event.clipboardData.files);
             if (!files.length) for (const item of Array.from(event.clipboardData.items)) { if (item.kind === "file") { const file = item.getAsFile(); if (file) files.push(file); } }
             if (files.length) { if (!event.clipboardData.getData("text/plain")) event.preventDefault(); addFiles(files); }
@@ -669,23 +667,6 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
             if (event.ctrlKey || event.metaKey) enqueueMessage();
             else if (draft.trim() || attachments.length) event.currentTarget.form?.requestSubmit();
           }} />
-          <Button type="button" variant="ghost" className="agent-input-resize" aria-label="Изменить высоту поля ввода" title="Потяните вверх, чтобы увеличить поле" tabIndex={-1}
-            onPointerDown={event => {
-              if (!event.isPrimary || event.button !== 0) return;
-              event.preventDefault();
-              resizing.current = { pointer: event.pointerId, y: event.clientY, height: composerInput.current?.getBoundingClientRect().height ?? inputHeight };
-              event.currentTarget.setPointerCapture(event.pointerId);
-            }}
-            onPointerMove={event => {
-              const start = resizing.current;
-              if (start?.pointer === event.pointerId) setInputHeight(Math.max(65, Math.min(180, start.height - (event.clientY - start.y))));
-            }}
-            onPointerUp={event => {
-              if (resizing.current?.pointer !== event.pointerId) return;
-              resizing.current = null;
-              event.currentTarget.releasePointerCapture(event.pointerId);
-            }}
-            onPointerCancel={() => { resizing.current = null; }} onLostPointerCapture={() => { resizing.current = null; }}><ComposerIcon kind="resize" /></Button>
           </div>
           <div className="agent-composer-actions">
           <div className="agent-composer-tools">

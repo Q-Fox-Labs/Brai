@@ -157,7 +157,8 @@ test("sidebar renders both account limit windows with accessible remaining value
     ] },
     select: noop, create: noop, more: noop, refresh: noop, close: noop, logout: noop,
   }));
-  assert.match(html, /Основное/);
+  assert.match(html, /Codex/);
+  assert.doesNotMatch(html, /Основное/);
   assert.match(html, /Дополнительное/);
   assert.doesNotMatch(html, /нед\.|agent-limit-time-track/);
   assert.match(html, /aria-valuenow="0"/);
@@ -189,6 +190,7 @@ test("reset formatting uses the local timezone and safely handles missing or inv
     assert.ok(reset);
     assert.match(reset.label, /31/);
     assert.match(reset.label, /17:30/);
+    assert.doesNotMatch(reset.label, /GMT|UTC|PST|PDT/);
     assert.match(reset.title, /17:30/);
     assert.equal(formatLimitReset(null), null);
     assert.equal(formatLimitReset(Number.MAX_SAFE_INTEGER), null);

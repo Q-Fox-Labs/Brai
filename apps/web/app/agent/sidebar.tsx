@@ -76,7 +76,7 @@ function AccountLimits({ value }: { value: AgentLimits }) {
   const stateLabel = value.state === "loading" ? "Загрузка лимитов" : value.state === "unavailable" ? "Лимиты недоступны" : value.windows.length ? "" : "Нет доступных окон";
   // AIDEV-NOTE: Единичный сбой опроса не должен мигать надписями рядом с сохранённой квотой.
   return <section className="agent-limits" aria-label="Лимиты Codex" title={value.state === "stale" ? "Обновление лимита задерживается. Показаны последние полученные данные." : undefined}>
-    <div className="agent-limits-heading"><span>Codex</span>{stateLabel && <span role="status">{stateLabel}</span>}</div>
+    {stateLabel && <div className="agent-limits-heading"><span role="status">{stateLabel}</span></div>}
     {value.windows.map(window => <LimitWindow key={window.slot} window={window} />)}
   </section>;
 }
@@ -90,17 +90,17 @@ function LimitWindow({ window }: { window: AgentLimits["windows"][number] }) {
     return () => clearInterval(timer);
   }, []);
   useEffect(() => { const formatted = formatLimitReset(window.resetsAt); setReset(formatted ? { ...formatted, value: window.resetsAt } : null); }, [window.resetsAt]);
-  const slot = window.slot === "primary" ? "Основное" : "Дополнительное";
+  const slot = window.slot === "primary" ? "Codex" : "Дополнительное";
   const countdown = now === null ? null : limitCountdown(window.resetsAt, window.windowDurationMins, now);
   return <div className="agent-limit-window">
-    <div className="agent-limit-label"><span>{slot}{countdown && ` · ${countdown.label}`}</span><span>Осталось {window.remainingPercent}%</span></div>
+    <div className="agent-limit-label"><span>{slot}</span><span>Осталось {window.remainingPercent}%</span></div>
     <div className="agent-limit-track" role="progressbar" aria-label={`${slot} окно Codex, осталось ${window.remainingPercent}%`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={window.remainingPercent}>
       <span style={{ width: `${window.remainingPercent}%` }} />
     </div>
     {countdown?.percent != null && <div className="agent-limit-track agent-limit-time-track" role="progressbar" aria-label={`${slot} окно Codex, время до сброса`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={countdown.percent} aria-valuetext={countdown.label}>
       <span style={{ width: `${countdown.percent}%` }} />
     </div>}
-    <div className="agent-limit-reset">{reset?.value === window.resetsAt ? <time dateTime={reset.iso} title={reset.title}>{reset.label}</time> : <span>сброс неизвестен</span>}</div>
+    <div className="agent-limit-reset">{reset?.value === window.resetsAt ? <time dateTime={reset.iso} title={reset.title}>{reset.label}</time> : <span>сброс неизвестен</span>}{countdown && ` · ${countdown.label}`}</div>
   </div>;
 }
 

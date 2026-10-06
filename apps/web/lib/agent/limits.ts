@@ -20,8 +20,8 @@ export function formatLimitReset(resetsAt: number | null): { label: string; titl
   if (!Number.isFinite(date.getTime())) return null;
   try {
     return {
-      label: new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", timeZoneName: "short" }).format(date),
-      title: new Intl.DateTimeFormat("ru-RU", { dateStyle: "full", timeStyle: "long" }).format(date),
+      label: new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(date),
+      title: new Intl.DateTimeFormat("ru-RU", { dateStyle: "full", timeStyle: "short" }).format(date),
       iso: date.toISOString(),
     };
   } catch { return null; }

@@ -113,11 +113,13 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
     <aside className="brai-navigation-rail" aria-label="Навигация Brai">
       <Link className="brai-rail-brand" href="/agent" aria-label="Brai — Агент"><BraiBrandIcon /></Link>
       <nav className="brai-rail-links" aria-label="Разделы Brai">
-        {routes.map(route => <RouteLink key={route.href} route={route} current={pathname === route.href} compact />)}
+        {routes.map(route => <RouteLink key={route.href} route={route} current={pathname === route.href} compact timerElapsed={timerElapsed} />)}
       </nav>
       <div className="brai-rail-footer"><AlertsBell /><ThemeButton /><ProfileMenu email={email} onLogout={onLogout} open={profileOpen} setOpen={setProfileOpen} /></div>
     </aside>
+    {/* Dock скрыт по запросу; реализация сохранена для возврата.
     <Dock routes={routes} pathname={pathname} timerElapsed={timerElapsed} />
+    */}
     <div className="brai-mobile-shell">
       <motion.nav ref={dock} className="brai-mobile-dock" aria-label="Разделы Brai" data-keyboard-open={keyboardOpen || undefined}
         data-nav-swipe-zone
@@ -269,6 +271,7 @@ function ProfileMenu({ email, onLogout, open, setOpen }: { email: string; onLogo
   </DropdownMenu>;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- Dock скрыт по запросу, код сохранён.
 function Dock({ routes, pathname, timerElapsed }: { routes: Route[]; pathname: string; timerElapsed: string | null }) {
   const mouseX = useMotionValue(Number.POSITIVE_INFINITY);
   return <motion.nav className="brai-navigation-dock" aria-label="Разделы Brai" onMouseMove={event => mouseX.set(event.pageX)} onMouseLeave={() => mouseX.set(Number.POSITIVE_INFINITY)}>
@@ -310,10 +313,11 @@ function TimerDockIcon({ elapsed }: { elapsed: string }) {
   return <svg className="brai-timer-dock-svg" viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="41" fill="none" stroke="currentColor" strokeWidth="5" strokeOpacity=".2" /><g className="brai-timer-dock-ring"><circle cx="50" cy="50" r="41" fill="none" stroke="currentColor" strokeWidth="5" strokeDasharray="34 258" strokeLinecap="round" /></g><text x="50" y="52" dominantBaseline="middle" fontSize={elapsed.length >= 5 ? 23 : elapsed.length >= 4 ? 27 : 30}>{elapsed}</text></svg>;
 }
 
-function RouteLink({ route, current, compact = false, mobile = false, onNavigate }: { route: Route; current: boolean; compact?: boolean; mobile?: boolean; onNavigate?: (event: MouseEvent<HTMLAnchorElement>) => void }) {
+function RouteLink({ route, current, compact = false, mobile = false, timerElapsed = null, onNavigate }: { route: Route; current: boolean; compact?: boolean; mobile?: boolean; timerElapsed?: string | null; onNavigate?: (event: MouseEvent<HTMLAnchorElement>) => void }) {
+  const elapsed = route.icon === "timer" ? dockElapsed(timerElapsed) : null;
   return <Link className={"brai-navigation-link" + (compact ? " is-compact" : "") + (mobile ? " is-mobile" : "") + (current ? " is-current" : "")} href={route.href}
-    onClick={onNavigate} aria-current={current ? "page" : undefined} aria-label={route.label}>
-    <span className={"brai-navigation-icon icon-" + route.icon} aria-hidden="true"><RouteIcon name={route.icon} /></span><span className="brai-navigation-label">{route.label}</span>
+    onClick={onNavigate} aria-current={current ? "page" : undefined} aria-label={elapsed ? "Таймер, идёт отсчёт " + timerElapsed : route.label}>
+    <span className={"brai-navigation-icon icon-" + route.icon + (elapsed ? " is-running" : "")} aria-hidden="true">{elapsed ? <TimerDockIcon elapsed={elapsed} /> : <RouteIcon name={route.icon} />}</span><span className="brai-navigation-label">{route.label}</span>
   </Link>;
 }
 

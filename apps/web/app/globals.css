@@ -129,3 +129,6 @@ button:focus-visible, a:focus-visible { outline: 2px solid #b3a2ff; outline-offs
 
 .auth-input { min-height: 48px; width: 100%; border: 1px solid var(--workspace-border); border-radius: 12px; padding: 12px 14px; background: #282a2e; color: inherit; }
 .auth-input:focus-visible { outline: 3px solid #2563eb; outline-offset: 3px; }
+
+/* Плейсхолдеры остаются подсказками и визуально слабее введённого текста. */
+input::placeholder, textarea::placeholder { opacity: .5; }
