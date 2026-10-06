@@ -14,10 +14,15 @@
     "context": "Ansible-created temporary directory; never the checkout",
     "baseImage": {
       "buildArgument": "BRAI_LOCAL_AI_BASE",
+      "reference": "ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4",
+      "platform": "linux/amd64",
+      "resolvedTag": "ubuntu:noble-20260911",
       "requiredReference": "Ubuntu 24.04 image pinned by immutable sha256 digest",
       "requiredGlibc": "2.39",
-      "digest": null,
-      "status": "required build input; not yet supplied or verified"
+      "digest": "sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4",
+      "registryEvidence": "https://hub.docker.com/layers/library/ubuntu/noble-20260911/images/sha256-496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4",
+      "registryIndexDigest": "sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3",
+      "status": "official Docker Hub linux/amd64 manifest resolved read-only; image not pulled or locally verified"
     },
     "sourceRevisionBuildArgument": "BRAI_SOURCE_REVISION",
     "copyOnly": true
@@ -153,7 +158,7 @@
     "measuredAsrLimits": "not included; pending runtime acceptance"
   },
   "notAcceptedYet": [
-    "immutable Ubuntu 24.04 base image digest and base artifact identity",
+    "local verification of the pinned Ubuntu base artifact identity",
     "exact staged portable runtime payload inventory and hashes",
     "complete built source snapshot and exact payload inventory verification",
     "built image inspection and offline runtime acceptance",
