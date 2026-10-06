@@ -13,10 +13,13 @@ import TimerHistory from "./timer-history";
 import TimerGoals from "./timer-goals";
 import TimerMobileSheet from "./timer-mobile-sheet";
 import "./timer.css";
+import { useStartupReady } from "./shell/app-startup-boundary";
 
 /** Показывает интервалы владельца и передаёт локальный отсчёт в шапку, включая скрытый экран. */
 export default function Timer({ userId, onUnauthorized, accountMessage, onElapsed }: { userId: string; onUnauthorized: () => void; accountMessage: string; onElapsed: (elapsed: string | null) => void }) {
  const [view, setView] = useState(initialView);
+ const [initialSettled, setInitialSettled] = useState(false);
+ useStartupReady(initialSettled);
  const [mono, setMono] = useState(0);
  const [contextPanel, setContextPanel] = useState<"none" | "history" | "goal">("none");
  const [background, setBackground] = useState<TimerBackgroundMode>("galaxy");
@@ -31,9 +34,9 @@ export default function Timer({ userId, onUnauthorized, accountMessage, onElapse
    fetch: async (path, options) => { const response = await fetch(path, options); if (response.status === 401) onUnauthorized(); return response; },
    stream(snapshot, event, lost) {
     const source = new EventSource(`/api/timer/events?expectedUserId=${encodeURIComponent(userId)}`);
-    source.addEventListener("snapshot", message => { try { snapshot(JSON.parse((message as MessageEvent).data) as Snapshot); } catch { lost(); } });
+    source.addEventListener("snapshot", message => { try { snapshot(JSON.parse((message as MessageEvent).data) as Snapshot); setInitialSettled(true); } catch { setInitialSettled(true); lost(); } });
     source.addEventListener("change", message => { try { event(JSON.parse((message as MessageEvent).data) as TimerEvent); } catch { lost(); } });
-    source.onerror = lost;
+    source.onerror = () => { setInitialSettled(true); lost(); };
     return () => source.close();
    } }, userId);
   client.current = instance;

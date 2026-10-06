@@ -27,6 +27,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import "./agent.css";
+import { useStartupReady } from "../shell/app-startup-boundary";
 
 type CachedChat = { snapshot: NativeSnapshot | null; history: DisplayItem[]; generation: string; cursor: string | null; draft: ComposerDraft; model: string; effort: string; permissionMode: PermissionMode; agentMode: AgentMode; materials: MaterialView; ready: boolean; uncertain: boolean };
 type QueuedMessage = { id: string; chat: string; generation: string; draft: ComposerDraft; model: string; effort: string; permissionMode: PermissionMode; agentMode: AgentMode; state: "waiting" | "sending" | "failed" | "unknown" };
@@ -43,6 +44,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const liveMetadata = useRef(new Map<string, Pick<NativeSnapshot, "generation" | "epoch" | "seq" | "thread"> & { observed: number }>());
   const metadataVersion = useRef(0);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsSettled, setProjectsSettled] = useState(false), [modelsSettled, setModelsSettled] = useState(false);
   const [accountLimits, setAccountLimits] = useState<AgentLimits>({ state: "loading", revision: 0, observedAt: null, windows: [] });
   const [readMessages, setReadMessages] = useState<Record<string, string>>({});
   const [pages, setPages] = useState<Record<string, ThreadPage>>({});
@@ -125,7 +127,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       setProjects(value.projects);
       setProjectId(value.projects.find(project => project.available)?.projectId ?? "");
       for (const project of value.projects) if (project.available) void loadThreads(project.projectId);
-    }).catch(error => { if (active) setMessage(errorText(error)); });
+    }).catch(error => { if (active) setMessage(errorText(error)); }).finally(() => { if (active) setProjectsSettled(true); });
     alive.current = true;
     return () => {
       active = false; alive.current = false; attachmentUpload.current?.abort(); attachmentUpload.current = null;
@@ -398,12 +400,12 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       const sentReady = { ...sent, images: readyImages };
       const attachments = readyImages.map(image => ({ originalArtifactId: image.originalArtifactId!, modelArtifactId: image.modelArtifactId! }));
       return await mutate(action, { text: sent.text, ...(attachments.length ? { attachments } : {}), ...settings }, targetProject, queuedDraft, sentReady, operationId);
-    } catch (error) {
+    } catch {
       if (alive.current) rejectSubmission(operationId);
       return false;
     } finally {
       if (attachmentUpload.current === controller) attachmentUpload.current = null;
-      if (alive.current) setImageProgress(previous => Object.fromEntries(Object.entries(previous).filter(([id, progress]) => progress === 1)));
+      if (alive.current) setImageProgress(previous => Object.fromEntries(Object.entries(previous).filter(([, progress]) => progress === 1)));
       setUploading(false);
       if (alive.current) setBusy(false);
     }
@@ -427,9 +429,10 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   useEffect(() => {
     if (models && (!modelGeneration || models.generation === modelGeneration)) return;
     let mounted = true;
-    void client.request({ action: "models" }).then(value => { if (mounted) setModels(value); }).catch(error => { if (mounted) setMessage(errorText(error)); });
+    void client.request({ action: "models" }).then(value => { if (mounted) setModels(value); }).catch(error => { if (mounted) setMessage(errorText(error)); }).finally(() => { if (mounted) setModelsSettled(true); });
     return () => { mounted = false; };
   }, [client, modelGeneration, models]);
+  useStartupReady(projectsSettled && modelsSettled && (!projectId || !!pages[projectId] && !pages[projectId].loading));
   const title = selectedThread?.title || selectedThread?.preview || (threadId ? "Новый чат" : "Выберите чат");
   const items = mergeTimeline(history, view?.items ?? []);
   const materials = collectMaterials(items, view);

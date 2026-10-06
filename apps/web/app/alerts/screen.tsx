@@ -7,9 +7,11 @@ import { Button } from "@/components/ui/button";
 import { alertKey } from "@/lib/alerts-client";
 import { useAlerts } from "./provider";
 import "./styles.css";
+import { useStartupReady } from "../shell/app-startup-boundary";
 /** Подключает ленту после первого посещения; просмотр сам не отмечает уведомления. */
 export default function AlertsScreen({ active }: { active: boolean }) {
  const { client, summary, items, nextCursor, loading, loadingMore, reading, error, live } = useAlerts();
+ useStartupReady(!active || !!error || !!summary && items !== null);
  useEffect(() => { if (active) client.openFeed(); }, [active, client]);
  return <main className="alerts-screen" aria-label="Уведомления">
   <header className="alerts-heading">

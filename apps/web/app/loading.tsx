@@ -1,8 +1,10 @@
-// ABOUTME: Показывает заставку Brai-old при загрузке нового документа.
-// ABOUTME: Родительская граница охватывает серверную подготовку рабочей оболочки и сессии.
-import { AppStartupSplash } from "./shell/app-startup-splash";
+"use client";
+// ABOUTME: Удерживает общую корневую заставку при серверной загрузке любого маршрута.
+// ABOUTME: Собственная заставка маршруту не нужна; снятие принадлежит корневой границе.
+import { useStartupReady } from "./shell/app-startup-boundary";
 
-/** Снимается Next автоматически, когда готово содержимое маршрута. */
+/** Смена fallback на страницу снимает только ожидание серверного маршрута. */
 export default function Loading() {
-  return <AppStartupSplash />;
+  useStartupReady(false);
+  return null;
 }

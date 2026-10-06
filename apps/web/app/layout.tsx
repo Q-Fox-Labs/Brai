@@ -4,9 +4,10 @@ import type { Metadata, Viewport } from "next";
 import { GeistMono } from "geist/font/mono";
 import { GeistSans } from "geist/font/sans";
 import type { ReactNode } from "react";
+import { AppStartupBoundary } from "./shell/app-startup-boundary";
 import "./globals.css";
 
-const themeBootstrap = `(function(){var root=document.documentElement;var mode="system";try{var savedMode=localStorage.getItem("brai_theme_mode");if(savedMode==="light"||savedMode==="dark")mode=savedMode;}catch(error){}var dark=mode==="dark"||(mode==="system"&&window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches);root.dataset.theme=dark?"dark":"light";root.dataset.themeMode=mode;root.classList.toggle("dark",dark);})();`;
+const themeBootstrap = `(function(){window.__braiStartupStartedAt=performance.now();var root=document.documentElement;var mode="system";try{var savedMode=localStorage.getItem("brai_theme_mode");if(savedMode==="light"||savedMode==="dark")mode=savedMode;}catch(error){}var dark=mode==="dark"||(mode==="system"&&window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches);root.dataset.theme=dark?"dark":"light";root.dataset.themeMode=mode;root.classList.toggle("dark",dark);})();`;
 
 export const metadata: Metadata = {
   title: "Brai",
@@ -46,7 +47,7 @@ export default function RootLayout({ children }: Readonly<{ children: ReactNode 
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeBootstrap }} />
       </head>
-      <body>{children}</body>
+      <body><AppStartupBoundary>{children}</AppStartupBoundary></body>
     </html>
   );
 }
