@@ -29,5 +29,5 @@
   .agent-shell { position: relative; }
   .agent-materials-header { min-height: 2.75rem; padding: .375rem .75rem; }
   .agent-materials-content { padding: 1rem; }
-  .agent-materials-toggle { max-width: 6.25rem; }
+  .agent-materials-toggle { display: block; min-width: 0; max-width: 6.25rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
