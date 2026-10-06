@@ -86,9 +86,13 @@ application-role fixture. NATS проверка требует `TRANSCRIPTION_TE
 NATS endpoint/credentials из выделенной изолированной fixture; обычный unit
 запуск её не включает. Metadata-проверка дополнительно требует `TRANSCRIPTION_TEST_METADATA=1`, собственные artifacts/history и полный coordinator config; она проверяет реальный отказ внешнего маршрута и доставку истории, без утверждения о распознавании. Ни одна из этих команд сама не поднимает fixture.
 
-ASR требует `TRANSCRIPTION_TEST_ASR=1`, отдельный local-ai, установленную ещё
-не загруженную GigaAM и закрытый набор синтетических русских WAV в
-`TRANSCRIPTION_TEST_ASR_FIXTURE_ROOT`. Restart требует отдельную конфигурацию
+ASR требует `TRANSCRIPTION_TEST_ASR=1`, отдельный local-ai, установленную GigaAM
+без переходного состояния и закрытый набор синтетических русских WAV в
+`TRANSCRIPTION_TEST_ASR_FIXTURE_ROOT`. Холодный запуск (`null`, `unloaded` или
+`error`) проверяет autoload; повторная проверка допускает уже готовую модель и
+сохраняет её фактический ready. Такой тёплый запуск сам по себе не доказывает
+холодный autoload; его приёмка требует отдельного холодного сценария.
+Restart требует отдельную конфигурацию
 с `TRANSCRIPTION_TEST_RESTART_READY=1`, полным selector в
 `TRANSCRIPTION_TEST_RESTART_MODEL_JSON` и проверенным Ansible-контроллером
 собственной history в `TRANSCRIPTION_TEST_RESTART_HISTORY_CONTROL`. Эти тесты
@@ -152,7 +156,12 @@ hosts и origins задаются непустыми JSON-массивами с�
 для coordinator парсер требует `_INBOX.` и непустые subject tokens. Числовые
 control/hop timeout не превышают `2147483647`; hop timeout ограничивает ожидание
 одного NATS request, а исходный `deadlineAt` транскрипционного вызова передаётся
-local-ai неизменённым. Endpoint, credentials, limits и prefix forwarded local
+local-ai неизменённым. `TRANSCRIPTION_DEFAULT_EXECUTION_TIMEOUT_MS` нужно
+согласовать с опубликованным `transport.maxRequestMs` local-ai: оставшийся
+срок вызова не должен превышать предел владельца. Hop timeout может включать
+отдельный запас на ответ и не меняет deadline. `requestId` local-ai сохраняет
+ID запроса transcription, `operationId` — отличный от него ID попытки; ответ
+проверяется по обоим идентификаторам. Endpoint, credentials, limits и prefix forwarded local
 child явно; generic `NATS_URL` не является fallback.
 
 ACL coordinator разрешает подписку на шесть metadata subjects из AsyncAPI,
@@ -205,6 +214,6 @@ database owner/runtime роли.
 - [ ] Подтвердить restart/TTL-loss поведение на изолированном runtime и
   проверить, что новый пользовательский запрос использует новый ключ.
 
-Полная runtime-приёмка остаётся открытой до последних трёх проверок.
+Полная runtime-приёмка остаётся открытой до двух оставшихся проверок.
 Реальные PostgreSQL/NATS проверки подтверждают указанные границы; process
 fixtures и unit tests сами по себе не подтверждают успешное распознавание.

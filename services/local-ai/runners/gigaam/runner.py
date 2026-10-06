@@ -286,7 +286,7 @@ def _decode_audio_to_wav(
     maximum_seconds: float,
     timeout_seconds: float,
 ) -> None:
-    """Декодировать разрешённый контейнер в ограниченный моно PCM WAV."""
+    """Декодировать ограниченный моно PCM WAV и проверить точную длительность кадров."""
     maximum_output_bytes = (
         math.ceil(maximum_seconds * DECODE_SAMPLE_RATE)
         * DECODE_CHANNELS
@@ -351,6 +351,9 @@ def _decode_audio_to_wav(
                 raise ValueError("normalized WAV parameters are invalid")
             if len(decoded.readframes(1)) != DECODE_CHANNELS * DECODE_SAMPLE_BYTES:
                 raise ValueError("normalized WAV has no complete audio frame")
+            decoded_duration = decoded.getnframes() / decoded.getframerate()
+            if decoded_duration > maximum_seconds:
+                raise ValueError("normalized WAV exceeds the operation limit")
     except (EOFError, OSError, wave.Error, ValueError) as exc:
         raise RpcFault(-32001, "Audio file is unavailable or invalid") from exc
 
@@ -395,7 +398,7 @@ def _transcribe(
     if not path.is_file():
         raise RpcFault(-32001, "Audio file is unavailable or invalid")
     try:
-        duration = _audio_duration(path, longform_max_seconds)
+        _audio_duration(path, longform_max_seconds)
     except RpcFault as fault:
         cause = fault.__cause__ or fault
         raise _annotate_fault(
@@ -416,18 +419,20 @@ def _transcribe(
                 longform_max_seconds,
                 audio_decode_timeout_seconds,
             )
-            if duration > MAX_AUDIO_SECONDS:
+            with wave.open(str(normalized_path), "rb") as decoded:
+                decoded_duration = decoded.getnframes() / decoded.getframerate()
+            if decoded_duration > MAX_AUDIO_SECONDS:
                 stage = "longform_upstream"
                 try:
                     if private_diagnostics:
                         result = transcribe_longform(
                             model,
                             normalized_path,
-                            duration,
+                            decoded_duration,
                             diagnostic_stage=record_stage,
                         )
                     else:
-                        result = transcribe_longform(model, normalized_path, duration)
+                        result = transcribe_longform(model, normalized_path, decoded_duration)
                 except LongformUnavailable as exc:
                     fault = RpcFault(-32603, "Longform is unavailable")
                     raise _annotate_fault(

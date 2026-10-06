@@ -248,8 +248,10 @@ test('guarded real local route: short and long Russian speech, volatile results 
   });
   assert.ok(!modelsReply.headers?.get('Nats-Service-Error') && localAiResponse(localAiSubjects.modelsList, modelsReply.value));
   const available = modelsReply.value.items.filter(item => item.modelId === 'gigaam-v3-e2e-ctc' && item.profileId === 'gigaam_pytorch' && item.supported &&
-    item.installationState === 'installed' && [null, 'unloaded', 'error'].includes(item.runtimeState)).map(item => ({ selector: { modelId: item.modelId, revision: item.revision, profileId: item.profileId } }));
-  assert.equal(available.length, 1, 'one actual installed GigaAM model with no ready or transitioning runtime required');
+    item.installationState === 'installed' && [null, 'unloaded', 'error', 'ready'].includes(item.runtimeState)).map(item => ({
+      selector: { modelId: item.modelId, revision: item.revision, profileId: item.profileId }, ready: item.runtimeState === 'ready' }));
+  assert.equal(available.length, 1, 'one actual installed GigaAM model with no transitioning runtime required');
+  const initiallyReady = available[0].ready;
   selector = available[0].selector;
   assert.ok(validateDto('ModelSelector', selector), 'published full model selector');
   runtime = await startCoordinator(config);
@@ -273,8 +275,8 @@ test('guarded real local route: short and long Russian speech, volatile results 
   const settings = await api('settings.get', {});
   await api('settings.set', { settings: { ...settings.settings, defaultLocalModel: selector, policyVersion: settings.settings.policyVersion + 1 }, expectedRevision: settings.revision });
   const catalog = await api('models.list', {});
-  assert.ok(catalog.localItems.some(item => JSON.stringify(item.selector) === JSON.stringify(selector) && !item.ready && item.installed && item.supported),
-    'coordinator admits the actual installed model while it is unloaded');
+  assert.ok(catalog.localItems.some(item => JSON.stringify(item.selector) === JSON.stringify(selector) && item.ready === initiallyReady && item.installed && item.supported),
+    'coordinator admits the actual installed model and preserves its initial readiness');
 
   const prepareAudio = async (fixture, label, options = {}) => {
     const requestId = randomUUID();
@@ -337,7 +339,8 @@ test('guarded real local route: short and long Russian speech, volatile results 
   });
   assert.ok(!afterShort.headers?.get('Nats-Service-Error') && localAiResponse(localAiSubjects.modelsList, afterShort.value) &&
     afterShort.value.items.some(item => item.modelId === selector.modelId && item.revision === selector.revision && item.profileId === selector.profileId && item.runtimeState === 'ready'),
-    'first real invocation autoloaded the installed model without a manual load call');
+    initiallyReady ? 'first real invocation used the installed ready model' :
+      'first real invocation autoloaded the installed model without a manual load call');
   const coordinatorCatalog = await api('models.list', {});
   assert.ok(coordinatorCatalog.localItems.some(item => JSON.stringify(item.selector) === JSON.stringify(selector) && item.ready),
     'coordinator catalog observes the automatically loaded model');
@@ -361,21 +364,26 @@ test('guarded real local route: short and long Russian speech, volatile results 
     requestedModel: { route: 'local', selection: 'required', modelId: selector.modelId }, deadlineAt: null }, writer);
   assert.ok(deletedSubmit.status >= 400 && validateDto('ErrorResponse', deletedSubmit.value), 'deleted audio is rejected with a typed public error');
 
-  const malformedArtifactId = await prepareAudio(shortFixture, 'unsupported-format', { extension: 'bin', mimeType: 'application/octet-stream',
-    bytes: Buffer.from([0, 1, 2, 3, 4, 5, 6, 7]) });
-  const malformed = await api('request.submit', { clientIdempotencyKey: randomUUID(), audioArtifactId: malformedArtifactId,
-    requestedModel: { route: 'local', selection: 'required', modelId: selector.modelId }, deadlineAt: null });
-  const malformedDeadline = Date.now() + 180000;
-  let malformedState;
-  do {
-    malformedState = await api('request.get', { requestId: malformed.request.requestId });
-    if (['succeeded', 'failed', 'outcome_unknown'].includes(malformedState.request.taskState)) break;
-    await pause(150);
-  } while (Date.now() < malformedDeadline);
-  assert.ok(['failed', 'outcome_unknown'].includes(malformedState.request.taskState) && malformedState.request.errorCode === 'INVALID_ARGUMENT',
-    'unsupported audio cannot be reported as a successful transcript');
-  const malformedResult = await api('result.get', { requestId: malformed.request.requestId });
-  assert.ok(malformedResult.state !== 'available' && malformedResult.errorCode, 'rejected format has no transcript result');
+  async function rejectsAudio(label, extension, mimeType, expectedErrorCode) {
+    const artifactId = await prepareAudio(shortFixture, label, { extension, mimeType,
+      bytes: Buffer.from([0, 1, 2, 3, 4, 5, 6, 7]) });
+    const accepted = await api('request.submit', { clientIdempotencyKey: randomUUID(), audioArtifactId: artifactId,
+      requestedModel: { route: 'local', selection: 'required', modelId: selector.modelId }, deadlineAt: null });
+    const finishBy = Date.now() + 180000;
+    let current;
+    do {
+      current = await api('request.get', { requestId: accepted.request.requestId });
+      if (['succeeded', 'failed', 'outcome_unknown'].includes(current.request.taskState)) break;
+      await pause(150);
+    } while (Date.now() < finishBy);
+    assert.ok(['failed', 'outcome_unknown'].includes(current.request.taskState) && current.request.errorCode === expectedErrorCode,
+      'rejected audio preserves the exact error from its owner boundary');
+    const result = await api('result.get', { requestId: accepted.request.requestId });
+    assert.ok(result.state !== 'available' && result.errorCode, 'rejected audio has no transcript result');
+  }
+
+  await rejectsAudio('unsupported-mime', 'bin', 'application/octet-stream', 'DEPENDENCY_UNAVAILABLE');
+  await rejectsAudio('malformed-wav', 'wav', 'audio/wav', 'INVALID_ARGUMENT');
 
   const { Client: PgClient } = pg;
   storage = new PgClient({ host: config.children.helper.PGHOST, port: Number(config.children.helper.PGPORT),

@@ -6,11 +6,21 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 from unittest.mock import patch
 
 import runner
 from rpc import RpcFault, process_line
+
+
+def _write_decoded_fixture(path: Path, seconds: float) -> None:
+    """Подменить успешный decode валидным PCM, который затем читает runner."""
+    with wave.open(str(path), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16000)
+        audio.writeframes(b"\0\0" * round(seconds * 16000))
 
 
 class RunnerDiagnosticTests(unittest.TestCase):
@@ -24,7 +34,7 @@ class RunnerDiagnosticTests(unittest.TestCase):
 
         model.transcribe = fail
         with patch.object(runner, "_audio_duration", return_value=5.0), patch.object(
-            runner, "_decode_audio_to_wav", side_effect=lambda _source, dest, *_: Path(dest).touch()
+            runner, "_decode_audio_to_wav", side_effect=lambda _source, dest, *_: _write_decoded_fixture(dest, 5.0)
         ):
             methods = {
                 "transcribe": lambda params: runner._transcribe(
@@ -131,7 +141,7 @@ class RunnerDiagnosticTests(unittest.TestCase):
             audio = Path(directory) / "long.wav"
             audio.touch()
             with patch.object(runner, "_audio_duration", return_value=26.0), patch.object(
-                runner, "_decode_audio_to_wav", side_effect=lambda _source, dest, *_: Path(dest).touch()
+                runner, "_decode_audio_to_wav", side_effect=lambda _source, dest, *_: _write_decoded_fixture(dest, 26.0)
             ):
                 with self.assertRaises(RpcFault) as raised:
                     runner._transcribe(
@@ -151,7 +161,7 @@ class RunnerDiagnosticTests(unittest.TestCase):
             audio = Path(directory) / "long.wav"
             audio.touch()
             with patch.object(runner, "_audio_duration", return_value=26.0), patch.object(
-                runner, "_decode_audio_to_wav", side_effect=lambda _source, dest, *_: Path(dest).touch()
+                runner, "_decode_audio_to_wav", side_effect=lambda _source, dest, *_: _write_decoded_fixture(dest, 26.0)
             ):
                 with self.assertRaises(RpcFault) as raised:
                     runner._transcribe(
