@@ -248,8 +248,8 @@ test('guarded real local route: short and long Russian speech, volatile results 
   });
   assert.ok(!modelsReply.headers?.get('Nats-Service-Error') && localAiResponse(localAiSubjects.modelsList, modelsReply.value));
   const available = modelsReply.value.items.filter(item => item.modelId === 'gigaam-v3-e2e-ctc' && item.profileId === 'gigaam_pytorch' && item.supported &&
-    item.installationState === 'installed' && item.runtimeState === 'unloaded').map(item => ({ selector: { modelId: item.modelId, revision: item.revision, profileId: item.profileId } }));
-  assert.equal(available.length, 1, 'one actual installed but unloaded GigaAM model selector required');
+    item.installationState === 'installed' && item.runtimeState === null).map(item => ({ selector: { modelId: item.modelId, revision: item.revision, profileId: item.profileId } }));
+  assert.equal(available.length, 1, 'one actual installed GigaAM model with a fresh cold runtime slot required');
   selector = available[0].selector;
   assert.ok(validateDto('ModelSelector', selector), 'published full model selector');
   runtime = await startCoordinator(config);
