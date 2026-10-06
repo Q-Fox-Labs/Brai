@@ -553,7 +553,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           <span>{value.draft.text || "Изображения"}{!!value.draft.images.length && ` · Изображений: ${value.draft.images.length}`} · {value.agentMode === "plan" ? "Планирование" : value.agentMode === "goal" ? "Цель" : "Обычный"} · {value.state === "sending" ? "Отправляется" : value.state === "unknown" ? "Результат неизвестен — проверьте чат" : value.state === "failed" ? "Не отправлено — очередь остановлена" : "В очереди"}</span>
           <button type="button" disabled={value.state === "sending"} onClick={() => { const removed = queuedMessages.find(item => item.id === value.id); if (removed) for (const image of removed.draft.images) releaseAttachmentPreview(image); setQueuedMessages(previous => previous.filter(item => item.id !== value.id)); }} aria-label="Удалить сообщение из очереди">×</button>
         </li>)}</ul>}
-        {threadId && <form className="agent-composer" onSubmit={event => { event.preventDefault(); submit(); }}>
+        {threadId && <Card className="agent-composer-card"><form className="agent-composer" onSubmit={event => { event.preventDefault(); submit(); }}>
           <label className="sr-only" htmlFor="agent-draft">{active ? "Дополнить текущий ход" : "Сообщение"}</label>
           {!!attachments.length && <ul className="agent-attachments" aria-label="Прикреплённые изображения">{attachments.map(image => <li key={image.id}><img src={image.url ?? image.previewUrl} alt={image.name} /><span className="agent-attachment-name" title={image.name}>{image.name}</span>{image.reduced && <span className="agent-image-reduced">Уменьшено</span>}<button type="button" className="agent-attachment-remove" aria-label={`Удалить ${image.name}`} onClick={() => { attachmentUpload.current?.abort(); attachmentUpload.current = null; changeDraft({ ...composerRef.current, images: composerRef.current.images.filter(value => value.id !== image.id) }); }}>×</button></li>)}</ul>}
           <div className="agent-composer-input">
@@ -597,7 +597,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           <Button type="submit" size="icon" className="agent-send" disabled={sendDisabled} aria-label={action === "interrupt" || action === "goalClear" ? "Стоп" : action === "steer" ? "Скорректировать" : "Отправить"} title={action === "interrupt" || action === "goalClear" ? "Стоп" : action === "steer" ? "Скорректировать" : "Отправить"}><ComposerIcon kind={action === "interrupt" || action === "goalClear" ? "stop" : "send"} /></Button>
           </div>
           {agentMode === "goal" && !active && <small className="agent-composer-hint">В режиме «Цель» отправьте описание задачи без изображений.</small>}
-        </form>}
+        </form></Card>}
         <p className="agent-feedback" role="alert">{uncertain.current ? "Результат неизвестен. Обновите страницу и проверьте чат перед новой отправкой." : imageError || message || accountMessage}</p>
         {corrections.length >= 64 && <p role="status">Дождитесь применения корректировок или уберите сообщения с ошибкой перед новой корректировкой.</p>}
         {preparationCount > 0 && <p className="agent-image-preparing" role="status">Подготовка изображений: {preparationCount}…</p>}{uploading && <p className="agent-image-preparing" role="status">Загружаем изображения перед отправкой…</p>}

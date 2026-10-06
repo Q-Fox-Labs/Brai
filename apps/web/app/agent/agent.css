@@ -187,7 +187,8 @@
 .agent-message-thumbnails { display: flex; flex-wrap: wrap; gap: .5rem; margin: .5rem 0 0; padding: 0; list-style: none; }
 .agent-message-thumbnails img { display: block; width: 9rem; height: 6.75rem; max-width: 100%; object-fit: contain; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--card); }
 @container (max-width: 458px) {
-  .agent-composer-actions { --agent-slider-width: min(7.5rem, calc((100cqw - 10.25rem) / 2)); gap: .25rem; }
+  /* AIDEV-NOTE: Пять кнопок по 2rem и шесть промежутков по .25rem оставляют остальную ширину двум ползункам. */
+  .agent-composer-actions { --agent-slider-width: min(7.5rem, calc((100cqw - 11.5rem) / 2)); gap: .25rem; }
   .agent-composer-tools, .agent-model-settings { gap: .25rem; }
   .agent-composer-icon, .agent-send { width: 2rem; height: 2rem; }
 }
