@@ -1,0 +1,6 @@
+/* ABOUTME: Ограничивает оформление исходной формы входа её самостоятельной страницей. */
+/* ABOUTME: Рабочая оболочка и общие UI primitives не изменяются. */
+.brai-auth-page { color-scheme: dark; }
+.brai-auth-page button:disabled { cursor: not-allowed; opacity: .54; }
+.brai-auth-page input { color: var(--foreground); }
+.brai-auth-page button:focus-visible, .brai-auth-page a:focus-visible { outline: revert-layer; outline-offset: revert-layer; }

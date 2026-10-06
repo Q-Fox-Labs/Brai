@@ -2,7 +2,6 @@
 /* ABOUTME: Все селекторы ограничены оболочкой и не меняют стили экранов. */
 .brai-workspace-shell { --brai-rail-width: 48px; position: relative; }
 .brai-workspace-shell.workspace-shell { position: relative; padding-left: var(--brai-rail-width); }
-.brai-auth-shell.workspace-shell { padding-left: 0; }
 .brai-workspace-shell .workspace-content { position: relative; min-height: 0; padding-bottom: 86px; }
 .brai-navigation-rail { position: fixed; z-index: 40; inset: 0 auto 0 0; display: flex; width: 48px; flex-direction: column; align-items: center; gap: 16px; padding: 10px 4px 12px; border-right: 1px solid var(--border); background: color-mix(in srgb, var(--card) 94%, transparent); }
 .brai-rail-brand { display: grid; width: 40px; height: 40px; place-items: center; color: var(--foreground); }
@@ -38,12 +37,8 @@
 
 .brai-mobile-shell { display: none; }
 .brai-mobile-navigation { display: none; }
-.brai-login-surface { --background: #050607; --foreground: #f4f4f5; --card: rgb(15 17 21 / 70%); --card-foreground: #f4f4f5; --popover: #0f1115; --popover-foreground: #f4f4f5; --primary: #f4f4f5; --primary-foreground: #15171a; --secondary: #1b2026; --secondary-foreground: #f4f4f5; --muted: #1b2026; --muted-foreground: #a1a1aa; --accent: #20252d; --accent-foreground: #f4f4f5; --border: #2a3038; --input: #343a44; --ring: #d4d4d8; position: relative; isolation: isolate; display: grid; min-height: 100dvh; place-items: center; overflow: hidden; padding: 24px; background: var(--background); color: var(--foreground); }
 .brai-login-galaxy { position: absolute; z-index: 0; inset: 0; pointer-events: none; }
 .brai-login-galaxy-host { position: absolute; z-index: 0; inset: 0; pointer-events: none; }
-.brai-login-card { z-index: 1; width: min(100%, 448px); overflow: hidden; background: color-mix(in srgb, var(--card) 88%, transparent); backdrop-filter: blur(18px); }
-.brai-login-header { justify-items: center; gap: 14px; padding: 32px 28px 20px; text-align: center; }
-.brai-login-card [data-slot="card-content"] { padding: 0 28px 28px; }
 @media (max-width: 860px) {
   .brai-workspace-shell { --brai-rail-width: 0px; }
   .brai-workspace-shell.workspace-shell { padding-left: 0; }

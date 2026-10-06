@@ -12,11 +12,7 @@ import { AlertsProvider } from "./alerts/provider";
 import AlertsScreen from "./alerts/screen";
 import "./navigation.css";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Field, FieldLabel } from "@/components/ui/field";
-import { Input } from "@/components/ui/input";
-import { BraiBrandIcon } from "@/components/ui/brai-brand-icon";
-import { LoginGalaxy } from "./shell/login-galaxy";
+import { AuthRequestError, AuthScreen, type OtpSendResult } from "./auth/screen";
 type User = { id: string; email: string };
 /** Собирает общую оболочку; таймер явно передаёт отсчёт в навигацию текущего аккаунта. */
 export default function Account({ initialSession }: { initialSession: InitialSession }) {
@@ -28,21 +24,23 @@ function AccountSession({ initialSession, timerElapsed, onTimerElapsed }: { init
  const pathname = usePathname();
  const view = pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : pathname === "/alerts" ? "alerts" : "timer";
  const [user, setUser] = useState<User | null>(() => initialSession.status === "authenticated" ? initialSession.user : null), [ready, setReady] = useState(initialSession.status !== "unavailable"), [exiting, setExiting] = useState(false);
- const [email, setEmail] = useState(""), [code, setCode] = useState(""), [sent, setSent] = useState(false), [busy, setBusy] = useState(false), [message, setMessage] = useState("");
- const locked = useRef(false), codeInput = useRef<HTMLInputElement>(null);
+ const [busy, setBusy] = useState(false), [message, setMessage] = useState("");
+ const locked = useRef(false);
+ useEffect(() => { if (pathname === "/auth" && user) window.location.replace("/"); else if (pathname !== "/auth" && ready && !user && !exiting) window.location.replace("/auth"); }, [pathname, user, ready, exiting]);
  const generation = useRef(0);
  const refreshRequest = useRef<AbortController | null>(null);
  const refresh = useCallback(async () => {
-  if (refreshRequest.current) return;
+  if (refreshRequest.current) return false;
   const current = generation.current;
   const request = new AbortController(); refreshRequest.current = request;
   try {
    const response = await fetch("/api/auth/session", { cache: "no-store", signal: request.signal });
-   if (current !== generation.current) return;
-   if (response.ok) { const data = await response.json() as { user: User }; if (current !== generation.current) return; setUser(previous => previous?.id === data.user.id ? previous : data.user); setReady(true); }
+   if (current !== generation.current) return false;
+   if (response.ok) { const data = await response.json() as { user: User }; if (current !== generation.current) return false; setUser(previous => previous?.id === data.user.id ? previous : data.user); setReady(true); return true; }
    else if (response.status === 401) { setUser(null); setReady(true); }
   } catch { /* Потеря связи не превращает подтверждённый вход в успешный выход. */ }
   finally { if (refreshRequest.current === request) refreshRequest.current = null; }
+  return false;
  }, []);
  useEffect(() => {
   const revalidate = () => { if (!locked.current && document.visibilityState === "visible") void refresh(); };
@@ -51,21 +49,24 @@ function AccountSession({ initialSession, timerElapsed, onTimerElapsed }: { init
   window.addEventListener("focus", revalidate); window.addEventListener("online", revalidate); window.addEventListener("pageshow", revalidate); document.addEventListener("visibilitychange", revalidate);
   return () => { clearInterval(timer); window.removeEventListener("focus", revalidate); window.removeEventListener("online", revalidate); window.removeEventListener("pageshow", revalidate); document.removeEventListener("visibilitychange", revalidate); generation.current++; refreshRequest.current?.abort(); refreshRequest.current = null; };
  }, [initialSession.status, refresh]);
- useEffect(() => { if (sent && !busy) codeInput.current?.focus(); }, [sent, busy]);
- const submit = async (operation: "send-code" | "verify-code") => {
-  if (locked.current) return; locked.current = true; setBusy(true); setMessage("");
+ const submit = async (operation: "send-code" | "verify-code", email: string, code = ""): Promise<OtpSendResult> => {
+  if (locked.current) throw new AuthRequestError("Подождите…"); locked.current = true; setBusy(true); setMessage("");
   if (operation === "verify-code") { generation.current++; refreshRequest.current?.abort(); refreshRequest.current = null; }
   try {
    const response = await fetch(`/api/auth/${operation}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(operation === "send-code" ? { email } : { email, otp: code }) });
    if (!response.ok) {
     const data = await response.json() as { code?: string };
-    if (operation === "verify-code" && data.code === "AUTH_OUTCOME_UNKNOWN") { await refresh(); setMessage("Результат входа уточняется. Если страница не открылась, запросите новый код."); }
-    else setMessage(response.status === 429 ? "Слишком много попыток. Подождите и повторите." : operation === "verify-code" ? "Код неверен или истёк. Проверьте его или получите новый." : "Не удалось отправить письмо. Повторите запрос позже.");
-    return;
+    if (operation === "verify-code" && data.code === "AUTH_OUTCOME_UNKNOWN") { await refresh(); throw new AuthRequestError("Результат входа уточняется. Если страница не открылась, запросите новый код."); }
+    throw new AuthRequestError(response.status === 429 ? "Слишком много попыток. Подождите и повторите." : operation === "verify-code" ? "Код не подошел" : "Не удалось отправить код");
    }
-   if (operation === "send-code") { setSent(true); setCode(""); }
-   else { await refresh(); setCode(""); }
-  } catch { setMessage("Связь прервалась. Проверьте почту или состояние входа перед повтором."); if (operation === "verify-code") await refresh(); }
+   if (operation === "verify-code" && !await refresh()) throw new AuthRequestError("Результат входа уточняется. Если страница не открылась, запросите новый код.");
+   // AIDEV-NOTE: HTTP send-code скрывает upstream metadata; сроки заданы контрактом auth владельца.
+   return { expires_in_seconds: 300, resend_after_seconds: 60, resend_strategy: "replace" };
+  } catch (error) {
+   if (error instanceof AuthRequestError) throw error;
+   if (operation === "verify-code") await refresh();
+   throw new AuthRequestError("Связь прервалась. Проверьте почту или состояние входа перед повтором.");
+  }
   finally { locked.current = false; setBusy(false); }
  };
  const unauthorized = useCallback(() => { generation.current++; refreshRequest.current?.abort(); refreshRequest.current = null; setUser(null); setReady(true); }, []);
@@ -74,44 +75,18 @@ function AccountSession({ initialSession, timerElapsed, onTimerElapsed }: { init
   try {
    const response = await fetch("/api/auth/sign-out", { method: "POST" });
    if (!response.ok) { setMessage("Не удалось выйти. Сессия ещё действует; повторите выход."); return; }
-   setUser(null); setSent(false); setCode(""); setEmail("");
+   setUser(null);
   } catch { setMessage("Не удалось подтвердить выход. Проверьте соединение и повторите."); }
   finally { locked.current = false; setExiting(false); }
  };
  if (!ready) return <div className="workspace-shell brai-workspace-shell"><main className="p-8"><p role="status">Сервис входа временно недоступен. Повторим подключение автоматически.</p><Button className="mt-4" onClick={() => { void refresh(); }}>Повторить подключение</Button></main></div>;
+ if (user && pathname === "/auth") return <main role="status" className="p-8">Открываем Brai…</main>;
  if (user && !exiting) return <AlertsProvider key={user.id} userId={user.id} onUnauthorized={unauthorized}><div className="workspace-shell brai-workspace-shell">
   <Navigation key={user.id} timerElapsed={timerElapsed} email={user.email} onLogout={() => { void logout(); }} />
   <div className="workspace-content"><AccountScreens key={user.id} view={view} user={user} onLogout={() => { void logout(); }} onUnauthorized={unauthorized} accountMessage={message} onTimerElapsed={onTimerElapsed} /></div>
  </div></AlertsProvider>;
  if (exiting) return <div className="workspace-shell brai-workspace-shell"><main className="p-8" role="status">Выходим…</main></div>;
- return <div className="workspace-shell brai-workspace-shell brai-auth-shell">
-  <main className="brai-login-surface dark">
-   <LoginGalaxy />
-   <Card className="brai-login-card">
-    <CardHeader className="brai-login-header">
-     <BraiBrandIcon className="size-9" />
-     <CardTitle className="text-2xl">Вход в Brai</CardTitle>
-     <CardDescription>{sent ? <>Письмо с кодом отправлено на {email}</> : "Продолжите работу с личным пространством"}</CardDescription>
-    </CardHeader>
-    <CardContent>
-     <form onSubmit={event => { event.preventDefault(); void submit(sent ? "verify-code" : "send-code"); }} className="flex flex-col gap-4">
-      <Field>
-       <FieldLabel htmlFor={sent ? "otp" : "email"}>{sent ? "Код из письма" : "Почта"}</FieldLabel>
-       {sent
-        ? <Input ref={codeInput} id="otp" name="otp" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required value={code} onChange={event => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} className="h-12 text-center text-2xl tracking-[.3em]" />
-        : <Input id="email" name="email" type="email" autoComplete="email" required autoFocus value={email} onChange={event => setEmail(event.target.value)} className="h-12" />}
-      </Field>
-      <Button disabled={busy} className="h-12 w-full">{busy ? "Подождите…" : sent ? "Войти" : "Получить код"}</Button>
-     </form>
-     {sent && <div className="mt-4 flex flex-wrap justify-between gap-3 text-sm">
-      <Button variant="link" size="sm" disabled={busy} onClick={() => { setSent(false); setCode(""); setMessage(""); }}>Изменить почту</Button>
-      <Button variant="link" size="sm" disabled={busy} onClick={() => { void submit("send-code"); }}>Отправить код ещё раз</Button>
-     </div>}
-     <p role="status" aria-live="polite" className="mt-3 min-h-6 text-sm text-muted-foreground">{message}</p>
-    </CardContent>
-   </Card>
-  </main>
- </div>;
+ return <AuthScreen busy={busy} onRequestOtp={email => submit("send-code", email)} onVerifyOtp={async (email, otp) => { await submit("verify-code", email, otp); }} />;
 }
 
 /** Сохраняет состояние посещённых экранов; выход или смена пользователя удаляют их. */

@@ -20,6 +20,7 @@ new Function("require", "module", "exports", output)((name: string) => {
   if (name.endsWith(".css")) return {};
   if (name === "next/navigation") return { usePathname: () => "/agent" };
   if (name === "./alerts/provider") return { AlertsProvider: control };
+  if (name === "./auth/screen") return { AuthScreen: () => createElement("main", null, "Вход в Brai"), AuthRequestError: Error };
   if (name === "./shell/login-galaxy") return { LoginGalaxy: control };
   if (name.startsWith("@/components/ui/")) return new Proxy({}, { get: () => control });
   if (name.startsWith("./")) return { default: screen };

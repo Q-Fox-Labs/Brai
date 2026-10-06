@@ -32,5 +32,5 @@ export function LoginGalaxy() {
     };
   }, []);
 
-  return <div ref={host} className="brai-login-galaxy-host" aria-hidden="true">{enabled && <Galaxy className="brai-login-galaxy" density={2} glowIntensity={0.2} hueShift={140} saturation={0} rotationSpeed={0.1} speed={1} starSpeed={1} twinkleIntensity={0.3} mouseInteraction={false} transparent />}</div>;
+  return <div ref={host} className="brai-login-galaxy-host" aria-hidden="true">{enabled && <Galaxy className="brai-login-galaxy" density={2} glowIntensity={0.2} hueShift={140} saturation={0} rotationSpeed={0.1} speed={1} starSpeed={1} twinkleIntensity={0.3} mouseInteraction={false} mouseRepulsion={false} repulsionStrength={2.5} autoCenterRepulsion={0} transparent />}</div>;
 }
