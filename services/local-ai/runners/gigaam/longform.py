@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 import os
 import hashlib
@@ -157,7 +158,7 @@ def _vad_namespace(model: Any) -> dict[str, Any]:
     candidates = (getattr(model, "model", None), model)
     for candidate in candidates:
         operation = getattr(candidate, "transcribe_longform", None)
-        function = getattr(operation, "__func__", operation)
+        function = inspect.unwrap(getattr(operation, "__func__", operation))
         namespace = getattr(function, "__globals__", {})
         segment_audio_file = namespace.get("segment_audio_file")
         segment_globals = getattr(segment_audio_file, "__globals__", {})

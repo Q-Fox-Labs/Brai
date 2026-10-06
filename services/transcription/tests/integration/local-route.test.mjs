@@ -248,8 +248,8 @@ test('guarded real local route: short and long Russian speech, volatile results 
   });
   assert.ok(!modelsReply.headers?.get('Nats-Service-Error') && localAiResponse(localAiSubjects.modelsList, modelsReply.value));
   const available = modelsReply.value.items.filter(item => item.modelId === 'gigaam-v3-e2e-ctc' && item.profileId === 'gigaam_pytorch' && item.supported &&
-    item.installationState === 'installed' && item.runtimeState === null).map(item => ({ selector: { modelId: item.modelId, revision: item.revision, profileId: item.profileId } }));
-  assert.equal(available.length, 1, 'one actual installed GigaAM model with a fresh cold runtime slot required');
+    item.installationState === 'installed' && [null, 'unloaded', 'error'].includes(item.runtimeState)).map(item => ({ selector: { modelId: item.modelId, revision: item.revision, profileId: item.profileId } }));
+  assert.equal(available.length, 1, 'one actual installed GigaAM model with no ready or transitioning runtime required');
   selector = available[0].selector;
   assert.ok(validateDto('ModelSelector', selector), 'published full model selector');
   runtime = await startCoordinator(config);
@@ -324,7 +324,7 @@ test('guarded real local route: short and long Russian speech, volatile results 
     while (!invocations.some(value => value.audioArtifactId === artifactId) && Date.now() < invocationEnd) await pause(20);
     const invocation = invocations.find(value => value.audioArtifactId === artifactId);
     assert.ok(invocation && invocation.requestId === requestId && invocation.operationId !== requestId && invocation.operationId.length === 36 &&
-      JSON.stringify(invocation.model) === JSON.stringify(selector), 'local-ai receives attempt ID in both correlation fields and the full selector');
+      JSON.stringify(invocation.model) === JSON.stringify(selector), 'local-ai preserves the service request ID, distinct attempt ID and full selector');
     return { artifactId, requestId, clientIdempotencyKey, result, invocation, durationSeconds: fixture.durationSeconds, emptyTranscript: result.result.text.length === 0 };
   }
 
