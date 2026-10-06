@@ -1,7 +1,7 @@
 // ABOUTME: Проверяет и готовит локальные изображения для загрузки в artifacts.
 // ABOUTME: Оригинальные байты сохраняются отдельно от бюджета копии для модели.
 import { limits } from "@brai/agent/contracts";
-import type { ModelCatalog, ModelChoice, NativeSnapshot } from "@brai/agent/contracts";
+import type { DisplayItem, ModelCatalog, ModelChoice, NativeSnapshot } from "@brai/agent/contracts";
 
 export type Attachment = {
   id: string; name: string; original: File; model: Blob; bytes: number; reduced: boolean;
@@ -9,6 +9,11 @@ export type Attachment = {
   originalArtifactId?: string; modelArtifactId?: string; url?: string;
 };
 export type ComposerDraft = { text: string; revision: number; images: Attachment[] };
+
+/** Only the owner's confirmed operation ID authorizes clearing a lost-ACK draft. */
+export function confirmedSubmission(items: DisplayItem[], operationId: string): boolean {
+  return items.filter(item => item.type === "userMessage" && item.operationId === operationId).length === 1;
+}
 
 /** Удаляет только принятые вложения; текст с правками после отправки сохраняется. */
 export function acceptedDraft(current: ComposerDraft, sent: ComposerDraft): ComposerDraft {

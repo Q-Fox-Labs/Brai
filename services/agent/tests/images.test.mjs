@@ -197,6 +197,23 @@ test('lost native result recovers after restart; no exact, duplicates and incomp
     const x = fixture(); await x.create(); x.lostNative(); await assert.rejects(x.app.request(base)); modify(x); await assert.rejects(x.app.request(x.restart()), e => e.outcome === 'unknown'); assert.equal(x.calls.filter(call => call.method === 'turn/start').length, 1); assert.equal([...x.refs.values()][0].state, 'unknown'); x.app.close();
   }
 });
+
+test('read recovery exposes only the confirmed scoped operation ID without resending', async () => {
+  const f = fixture(); await f.create(); f.lostNative();
+  await assert.rejects(f.app.request(base), error => error.outcome === 'unknown');
+  const reply = await f.read('items');
+  assert.equal(reply.data[0].operationId, base.operationId);
+  assert.ok(ajv.compile({ $ref: 'public#/definitions/DisplayItem' })(reply.data[0]));
+  const foreign = await f.app.request({ action: 'items', ownerId: 'other', projectId: 'p', threadId: 't' });
+  assert.equal(foreign.data[0].operationId, undefined);
+  assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+  f.app.close();
+  const incomplete = fixture(); await incomplete.create(); incomplete.lostNative();
+  await assert.rejects(incomplete.app.request(base)); incomplete.incomplete();
+  const helper = createAttachments(incomplete.port, incomplete.config.artifacts, incomplete.artifactPort);
+  assert.equal((await helper.decorate(base, [{ id: 'u0', turnId: 'turn', type: 'userMessage', text: '' }]))[0].operationId, undefined);
+  incomplete.app.close();
+});
 test('legacy raw URLs, local paths and images stay absent in every display/page/read projection', async () => {
   const f = fixture(), item = { id: 'legacy', type: 'userMessage', content: [{ type: 'text', text: 'hello' }, { type: 'image', url: image }, { type: 'localImage', path: '/private/local.png' }] }; f.setHistory([{ turnId: 'turn', item }]);
   for (const result of [display(item, 'turn'), messagePage(item, 'turn'), await f.read('open'), await f.read('items'), await f.read('item', { turnId: 'turn', itemId: 'legacy' }), await f.read('activities', { turnId: 'turn', itemIds: ['legacy'] })]) { assert.equal(JSON.stringify(result).includes(image), false); assert.equal(JSON.stringify(result).includes('/private/local.png'), false); }

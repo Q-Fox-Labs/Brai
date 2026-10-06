@@ -826,6 +826,12 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "operationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "ID отправки из подтверждённой файловой привязки текущего owner и чата."
+        },
         "id": {
           "type": "string",
           "minLength": 1,

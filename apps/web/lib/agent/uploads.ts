@@ -7,6 +7,7 @@ type UploadScope = { userId: string; projectId: string; threadId: string };
 type PreparedReply = { artifact?: { artifactId?: string; status?: string }; uploadUrl?: string; code?: string };
 type ReadyPair = ReferenceAttachment & { url: string };
 type UploadFileInput = { requestId: string; kind: "original" | "copy"; filename: string; file: Blob };
+type UploadProgress = (loaded: number) => void;
 const mimeExt: Record<string, string> = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" };
 
 async function jsonResponse(response: Response): Promise<PreparedReply> {
@@ -29,7 +30,38 @@ async function prepare(scope: UploadScope, requestId: string, kind: "original" |
   return { id: value.artifact.artifactId, status: value.artifact.status, uploadUrl: value.uploadUrl };
 }
 
-async function uploadOne(scope: UploadScope, input: UploadFileInput, signal: AbortSignal, fetcher: typeof fetch): Promise<string> {
+/** Browser upload reports actual transferred bytes; abort also releases its listener. */
+export function uploadBytes(url: string, file: Blob, signal: AbortSignal, progress: UploadProgress): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const abort = () => xhr.abort();
+    const finish = (error?: Error) => {
+      signal.removeEventListener("abort", abort);
+      if (error) reject(error);
+      else {
+        try {
+          const headers = new Headers();
+          for (const line of xhr.getAllResponseHeaders().trim().split(/[\r\n]+/).filter(Boolean)) {
+            const index = line.indexOf(":");
+            headers.append(line.slice(0, index), line.slice(index + 1).trim());
+          }
+          resolve(new Response(null, { status: xhr.status, headers }));
+        } catch (error) { reject(error); }
+      }
+    };
+    if (signal.aborted) { reject(new DOMException("Aborted", "AbortError")); return; }
+    xhr.open("PUT", url);
+    xhr.setRequestHeader("Content-Type", file.type);
+    xhr.upload.onprogress = event => progress(Math.min(file.size, event.loaded));
+    xhr.onload = () => xhr.responseURL !== url ? finish(new Error("BAD_UPLOAD_URL")) : finish();
+    xhr.onerror = () => finish(new TypeError("Upload connection lost"));
+    xhr.onabort = () => finish(new DOMException("Aborted", "AbortError"));
+    signal.addEventListener("abort", abort, { once: true });
+    try { xhr.send(file); } catch (error) { finish(error instanceof Error ? error : new Error("Upload failed")); }
+  });
+}
+
+async function uploadOne(scope: UploadScope, input: UploadFileInput, signal: AbortSignal, fetcher: typeof fetch, progress: UploadProgress): Promise<string> {
   let prepared: { id: string; status: string; uploadUrl: string };
   prepared = await prepare(scope, input.requestId, input.kind, input.filename, input.file, signal, fetcher);
   if (prepared.status !== "ready") {
@@ -38,7 +70,9 @@ async function uploadOne(scope: UploadScope, input: UploadFileInput, signal: Abo
     try {
       const target = new URL(prepared.uploadUrl, location.href);
       if (target.origin !== location.origin || !/^\/upload\/[A-Za-z0-9_-]{16,512}$/.test(target.pathname) || target.search || target.hash) throw new Error("BAD_UPLOAD_URL");
-      upload = await fetcher(target.toString(), { method: "PUT", body: input.file, signal, cache: "no-store", credentials: "omit", redirect: "error", headers: { "Content-Type": input.file.type } });
+      upload = fetcher === fetch && typeof XMLHttpRequest !== "undefined"
+        ? await uploadBytes(target.toString(), input.file, signal, progress)
+        : await fetcher(target.toString(), { method: "PUT", body: input.file, signal, cache: "no-store", credentials: "omit", redirect: "error", headers: { "Content-Type": input.file.type } });
     } catch (error) {
       if (signal.aborted) throw new Error("Загрузка отменена после смены чата или аккаунта. Черновик сохранён.");
       if (error instanceof Error && error.message === "BAD_UPLOAD_URL") throw new Error("Сервис вернул недопустимый адрес загрузки. Повторите попытку позже.");
@@ -64,14 +98,18 @@ function thumbnailUrl(scope: UploadScope, pair: { originalArtifactId: string; mo
 }
 
 /** Загружает image pair, повторно сверяет uncertain PUT и ждёт relation до вызова Agent. */
-export async function uploadAttachment(image: Attachment, scope: UploadScope, signal: AbortSignal, fetcher: typeof fetch = fetch): Promise<ReadyPair> {
+export async function uploadAttachment(image: Attachment, scope: UploadScope, signal: AbortSignal, fetcher: typeof fetch = fetch, progress: (fraction: number) => void = () => {}): Promise<ReadyPair> {
+  const total = image.original.size + (image.reduced ? image.model.size : 0);
+  const report = (loaded: number) => progress(Math.min(.99, loaded / total));
+  progress(0);
   const originalArtifactId = await uploadOne(scope, {
     requestId: image.originalRequestId, kind: "original", filename: image.name, file: image.original,
-  }, signal, fetcher);
+  }, signal, fetcher, report);
+  report(image.original.size);
   const modelArtifactId = image.reduced
     ? await uploadOne(scope, {
       requestId: image.modelRequestId!, kind: "copy", filename: modelFilename(image.name, image.model.type), file: image.model,
-    }, signal, fetcher)
+    }, signal, fetcher, loaded => report(image.original.size + loaded))
     : originalArtifactId;
   const response = await fetcher("/api/agent/attachments/finalize", {
     method: "POST", cache: "no-store", signal,
@@ -83,6 +121,7 @@ export async function uploadAttachment(image: Attachment, scope: UploadScope, si
     if (response.status === 409) throw new Error("Загрузка ещё не подтверждена. Черновик сохранён; повторите отправку.");
     throw new Error("Не удалось связать копию изображения с оригиналом. Черновик сохранён; повторите отправку.");
   }
+  progress(1);
   return { originalArtifactId, modelArtifactId, url: thumbnailUrl(scope, { originalArtifactId, modelArtifactId }) };
 }
 

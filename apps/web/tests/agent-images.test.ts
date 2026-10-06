@@ -2,13 +2,25 @@
 // ABOUTME: Браузерные кодеки заменены портами; реальный picker и clipboard проверяются отдельно в браузере.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { acceptedDraft, imageModel, prepareImage, validateImageFile, type Attachment } from "../lib/agent/images.ts";
+import { acceptedDraft, confirmedSubmission, imageModel, prepareImage, validateImageFile, type Attachment } from "../lib/agent/images.ts";
 import { composerAction } from "../app/agent/timeline.ts";
 import type { ModelCatalog, NativeSnapshot } from "@brai/agent/contracts";
 
 const image = (id: string): Attachment => ({ id, name: `${id}.png`, original: file(), model: new Blob([png], { type: "image/png" }), bytes: 100, reduced: false, previewUrl: "blob:fixture", previewObjectUrl: false, originalRequestId: `original-${id}`, modelRequestId: null, relationRequestId: `relation-${id}` });
 const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
 const file = (size = 100) => new File([png, new Uint8Array(size - png.length)], "example.png", { type: "image/png" });
+
+test("lost ACK draft clears only with a unique confirmed operation, never matching text or file IDs", () => {
+  const message = { id: "native", turnId: "turn", type: "userMessage", text: "same text", operationId: "sent-op" };
+  assert.equal(confirmedSubmission([message], "sent-op"), true);
+  assert.equal(confirmedSubmission([{ ...message, operationId: undefined }], "sent-op"), false);
+  assert.equal(confirmedSubmission([{ ...message, operationId: "other-op" }], "sent-op"), false);
+  assert.equal(confirmedSubmission([{ ...message, type: "agentMessage" }], "sent-op"), false);
+  assert.equal(confirmedSubmission([message, { ...message, id: "duplicate" }], "sent-op"), false);
+  const sent = { text: "same text", revision: 1, images: [image("sent")] };
+  const current = { text: "next message", revision: 2, images: [sent.images[0], image("new")] };
+  assert.deepEqual(acceptedDraft(current, sent), { ...current, images: [current.images[1]] });
+});
 
 test("accepted removes sent IDs and preserves later attachments and text edits, including edits back to original", () => {
   const sent = { text: "text", revision: 2, images: [image("old")] };

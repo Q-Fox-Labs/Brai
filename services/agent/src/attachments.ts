@@ -160,6 +160,7 @@ export function createAttachments(codex: CodexPort, config: ArtifactsConfig | un
       for (const item of copy) {
         const reference = references.find(ref => ref.state === 'confirmed' && ref.scope.ownerId === r.ownerId && ref.scope.projectId === r.projectId && ref.scope.threadId === r.threadId && ref.itemId === item.id && ref.turnId === item.turnId);
         if (!reference) { if (unresolved.has(itemKey(r, item.id))) item.attachmentsState = 'unavailable'; continue; }
+        item.operationId = reference.scope.operationId;
         item.attachmentsState = 'ready'; item.attachments = [];
         for (const pair of reference.attachments) {
           const attachment: DisplayAttachment = { ...pair, status: 'unavailable' };

@@ -19,8 +19,9 @@ import { limits } from "@brai/agent/contracts";
 import MessageImages from "./message-images";
 import Materials from "./materials";
 import { collectMaterials, goalBlocksNewTask, emptyMaterialView, executionText, openMaterial, reconcileMaterialView, type MaterialView } from "./materials-model";
-import { acceptedDraft, imageModel, prepareImage, releaseAttachmentPreview, type Attachment, type ComposerDraft } from "../../lib/agent/images";
+import { acceptedDraft, confirmedSubmission, imageModel, prepareImage, releaseAttachmentPreview, type Attachment, type ComposerDraft } from "../../lib/agent/images";
 import { uploadAttachment } from "../../lib/agent/uploads";
+import ImageUploadStatus from "./image-upload-status";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -61,6 +62,9 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const fileInput = useRef<HTMLInputElement>(null), preparationVersion = useRef(0), alive = useRef(true), attachmentUpload = useRef<AbortController | null>(null);
   const queue = useRef<{ file: File; version: number; context: string; duplicate: string; limit: number }[]>([]), preparing = useRef(false);
   const [preparationCount, setPreparationCount] = useState(0);
+  const [imageProgress, setImageProgress] = useState<Record<string, number>>({});
+  const pendingSubmissions = useRef(new Map<string, { operationId: string; sent: ComposerDraft; queued?: ComposerDraft; projectId: string; threadId: string }>());
+  const checkingSubmission = useRef(false);
   const attachmentContext = useRef("");
   currentChat.current = `${projectId}:${threadId}`;
   function changeDraft(next: ComposerDraft, releasePrevious = true) {
@@ -132,7 +136,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       for (const chat of cache.current.values()) for (const image of chat.draft.images) previews.set(image.id, image);
       for (const queued of queuedMessagesRef.current) for (const image of queued.draft.images) previews.set(image.id, image);
       for (const image of previews.values()) releaseAttachmentPreview(image);
-      cache.current.clear(); composerRef.current = emptyDraft(); requests.clear(); stopMetadata(); stopLimits(); liveMetadata.current.clear(); client.dispose();
+      cache.current.clear(); pendingSubmissions.current.clear(); composerRef.current = emptyDraft(); requests.clear(); stopMetadata(); stopLimits(); liveMetadata.current.clear(); client.dispose();
     };
   }, [client, loadThreads]);
 
@@ -186,6 +190,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         const evicted = cache.current.get(oldest);
         if (evicted) for (const image of evicted.draft.images) releaseAttachmentPreview(image);
         cache.current.delete(oldest);
+        pendingSubmissions.current.delete(oldest);
       }
     }
     const saved = cache.current.get(`${id}:${chatId}`);
@@ -243,6 +248,41 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     } catch (error) { if (token === selection.current) setMessage(errorText(error)); }
   }
 
+  async function checkSubmission(chatKey: string): Promise<boolean> {
+    const pending = pendingSubmissions.current.get(chatKey);
+    if (!pending || checkingSubmission.current) return false;
+    checkingSubmission.current = true;
+    try {
+      // Only reads: the owner recovers the exact persisted reference, never resends input.
+      const value = await client.request({ action: "items", projectId: pending.projectId, threadId: pending.threadId });
+      let confirmed = confirmedSubmission(value.data, pending.operationId), cursor = value.nextCursor;
+      const cursors = new Set<string>(), deadline = performance.now() + 8000;
+      for (let page = 1; !confirmed && cursor && page < 100 && alive.current && performance.now() < deadline; page++) {
+        if (cursors.has(cursor)) break;
+        cursors.add(cursor);
+        const older = await client.request({ action: "items", projectId: pending.projectId, threadId: pending.threadId, cursor });
+        confirmed = confirmedSubmission(older.data, pending.operationId); cursor = older.nextCursor;
+      }
+      if (!alive.current || !confirmed) return false;
+      pendingSubmissions.current.delete(chatKey);
+      const saved = cache.current.get(chatKey);
+      if (saved) { saved.uncertain = false; if (!pending.queued) saved.draft = acceptedDraft(saved.draft, pending.sent); }
+      if (currentChat.current === chatKey) {
+        uncertain.current = false;
+        if (!pending.queued) changeDraft(acceptedDraft(composerRef.current, pending.sent));
+        setHistory(previous => mergeTimeline(previous, value.data).slice(-1000));
+        setHistoryGeneration(value.generation); setMessage("");
+      }
+      setCorrections(previous => previous.filter(entry => entry.item.id !== pending.operationId));
+      if (pending.queued) {
+        for (const image of pending.queued.images) releaseAttachmentPreview(image);
+        setQueuedMessages(previous => previous.filter(entry => entry.draft !== pending.queued));
+      }
+      return true;
+    } catch { return false; }
+    finally { checkingSubmission.current = false; }
+  }
+
   async function mutate(action: "create" | "start" | "steer" | "interrupt" | "answer" | "goalSet" | "goalClear", extra: Record<string, unknown> = {}, targetProject = projectId, queuedDraft?: ComposerDraft, sentOverride?: ComposerDraft) {
     if (!targetProject || locked.current || uncertain.current || (action !== "create" && (!connected || !snapshot || snapshot.projectId !== projectId || snapshot.threadId !== threadId))) return false;
     const selected = snapshot, sent = sentOverride ?? queuedDraft ?? composerRef.current, sentChat = `${projectId}:${threadId}`, token = selection.current, operationId = crypto.randomUUID();
@@ -279,6 +319,10 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       if (queuedDraft && error instanceof AgentError && error.outcome === "unknown") setQueuedMessages(previous => previous.map(value => value.draft === queuedDraft ? { ...value, state: "unknown" } : value));
       if (action === "steer") setCorrections(previous => previous.map(value => value.item.id === operationId ? { ...value, state: error instanceof AgentError && error.outcome === "unknown" ? "unknown" : "failed" } : value));
       if (error instanceof AgentError && error.outcome === "unknown") {
+        if ((action === "start" || action === "steer") && sent.images.length) {
+          pendingSubmissions.current.set(sentChat, { operationId, sent, queued: queuedDraft, projectId: targetProject, threadId: selected!.threadId });
+          if (await checkSubmission(sentChat)) return true;
+        }
         const saved = cache.current.get(sentChat);
         if (saved) saved.uncertain = true;
         if (currentChat.current === sentChat) { uncertain.current = true; setMessage(errorText(error)); }
@@ -297,7 +341,9 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     try {
       const readyImages: Attachment[] = [];
       for (const image of sent.images) {
-        const ready = await uploadAttachment(image, { userId, projectId: targetProject, threadId: targetThread }, controller.signal);
+        const ready = await uploadAttachment(image, { userId, projectId: targetProject, threadId: targetThread }, controller.signal, fetch, progress => {
+          if (alive.current && !controller.signal.aborted) setImageProgress(previous => ({ ...previous, [image.id]: progress }));
+        });
         readyImages.push({ ...image, originalArtifactId: ready.originalArtifactId, modelArtifactId: ready.modelArtifactId, url: ready.url, previewUrl: ready.url, previewObjectUrl: false });
       }
       if (!alive.current || controller.signal.aborted || currentChat.current !== chatKey || selection.current !== selectionToken) return false;
@@ -316,6 +362,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       return false;
     } finally {
       if (attachmentUpload.current === controller) attachmentUpload.current = null;
+      if (alive.current) setImageProgress(previous => Object.fromEntries(Object.entries(previous).filter(([id, progress]) => progress === 1 && composerRef.current.images.some(image => image.id === id))));
       setUploading(false);
       if (alive.current) setBusy(false);
     }
@@ -553,9 +600,13 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           <span>{value.draft.text || "Изображения"}{!!value.draft.images.length && ` · Изображений: ${value.draft.images.length}`} · {value.agentMode === "plan" ? "Планирование" : value.agentMode === "goal" ? "Цель" : "Обычный"} · {value.state === "sending" ? "Отправляется" : value.state === "unknown" ? "Результат неизвестен — проверьте чат" : value.state === "failed" ? "Не отправлено — очередь остановлена" : "В очереди"}</span>
           <button type="button" disabled={value.state === "sending"} onClick={() => { const removed = queuedMessages.find(item => item.id === value.id); if (removed) for (const image of removed.draft.images) releaseAttachmentPreview(image); setQueuedMessages(previous => previous.filter(item => item.id !== value.id)); }} aria-label="Удалить сообщение из очереди">×</button>
         </li>)}</ul>}
+        {(uncertain.current || imageError || message || accountMessage || corrections.length >= 64) && <div className="agent-feedback" role="alert">
+          {uncertain.current ? "Не удалось подтвердить отправку. Проверьте сообщение в чате перед повторной отправкой." : imageError || message || accountMessage || "Дождитесь применения корректировок или уберите сообщения с ошибкой."}
+          {uncertain.current && pendingSubmissions.current.has(currentChat.current) && <Button type="button" variant="ghost" disabled={busy} onClick={() => { setBusy(true); void checkSubmission(currentChat.current).finally(() => { if (alive.current) setBusy(false); }); }}>Проверить отправку</Button>}
+        </div>}
         {threadId && <Card className="agent-composer-card"><form className="agent-composer" onSubmit={event => { event.preventDefault(); submit(); }}>
           <label className="sr-only" htmlFor="agent-draft">{active ? "Дополнить текущий ход" : "Сообщение"}</label>
-          {!!attachments.length && <ul className="agent-attachments" aria-label="Прикреплённые изображения">{attachments.map(image => <li key={image.id}><img src={image.url ?? image.previewUrl} alt={image.name} /><span className="agent-attachment-name" title={image.name}>{image.name}</span>{image.reduced && <span className="agent-image-reduced">Уменьшено</span>}<button type="button" className="agent-attachment-remove" aria-label={`Удалить ${image.name}`} onClick={() => { attachmentUpload.current?.abort(); attachmentUpload.current = null; changeDraft({ ...composerRef.current, images: composerRef.current.images.filter(value => value.id !== image.id) }); }}>×</button></li>)}</ul>}
+          {!!attachments.length && <ul className="agent-attachments" aria-label="Прикреплённые изображения">{attachments.map(image => <li key={image.id}><div className="agent-attachment-preview"><img src={image.url ?? image.previewUrl} alt={image.name} /><ImageUploadStatus progress={imageProgress[image.id]} /></div><span className="agent-attachment-name" title={image.name}>{image.name}</span>{image.reduced && <span className="agent-image-reduced">Уменьшено</span>}<button type="button" className="agent-attachment-remove" aria-label={`Удалить ${image.name}`} onClick={() => { attachmentUpload.current?.abort(); attachmentUpload.current = null; changeDraft({ ...composerRef.current, images: composerRef.current.images.filter(value => value.id !== image.id) }); }}>×</button></li>)}</ul>}
           <div className="agent-composer-input">
           <Textarea bare className="agent-draft-input" ref={composerInput} id="agent-draft" style={{ height: inputHeight }} placeholder={active ? "Дополнить текущее задание…" : agentMode === "goal" ? "Какой цели нужно достичь?" : agentMode === "plan" ? "Что нужно спланировать?" : "Что нужно сделать?"} value={draft} onChange={event => changeDraft({ ...composerRef.current, text: event.target.value, revision: composerRef.current.revision + 1 })} onPaste={event => {
             const files = Array.from(event.clipboardData.files);
@@ -596,11 +647,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           </div>
           <Button type="submit" size="icon" className="agent-send" disabled={sendDisabled} aria-label={action === "interrupt" || action === "goalClear" ? "Стоп" : action === "steer" ? "Скорректировать" : "Отправить"} title={action === "interrupt" || action === "goalClear" ? "Стоп" : action === "steer" ? "Скорректировать" : "Отправить"}><ComposerIcon kind={action === "interrupt" || action === "goalClear" ? "stop" : "send"} /></Button>
           </div>
-          {agentMode === "goal" && !active && <small className="agent-composer-hint">В режиме «Цель» отправьте описание задачи без изображений.</small>}
         </form></Card>}
-        <p className="agent-feedback" role="alert">{uncertain.current ? "Результат неизвестен. Обновите страницу и проверьте чат перед новой отправкой." : imageError || message || accountMessage}</p>
-        {corrections.length >= 64 && <p role="status">Дождитесь применения корректировок или уберите сообщения с ошибкой перед новой корректировкой.</p>}
-        {preparationCount > 0 && <p className="agent-image-preparing" role="status">Подготовка изображений: {preparationCount}…</p>}{uploading && <p className="agent-image-preparing" role="status">Загружаем изображения перед отправкой…</p>}
       </footer>}
     </section>
     {materialView.open && <Materials focus={materialView.focus} materials={materials} selected={materialView.selected} choose={chooseMaterial} close={() => setMaterialView(previous => ({ ...previous, open: false }))} disabled={disabled || !catalogFresh || awaitingTurn.some(value => value.chat === currentChat.current)} active={!!active || goalUnfinished} connected={connected} execute={item => { void executePlan(item); }} revise={revisePlan} goal={action => { void mutate(action === "stop" ? "goalClear" : "goalSet", action === "stop" ? {} : { status: action === "pause" ? "paused" : "active" }); }} />}

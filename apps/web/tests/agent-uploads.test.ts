@@ -60,7 +60,9 @@ test("reduced copy uploads separately and finalization binds its ID to the origi
     throw new Error(`Unexpected URL ${url}`);
   };
   try {
-    const image = makeAttachment(true), ready = await uploadAttachment(image, scope, new AbortController().signal, fetcher);
+    const progress: number[] = [];
+    const image = makeAttachment(true), ready = await uploadAttachment(image, scope, new AbortController().signal, fetcher, value => progress.push(value));
+    assert.deepEqual(progress, [0, image.original.size / (image.original.size + image.model.size), 1]);
     assert.equal(ready.originalArtifactId, "original-id"); assert.equal(ready.modelArtifactId, "copy-id");
     assert.equal(calls.filter(call => call.url.startsWith("https://app.test/upload/")).length, 2);
     assert.deepEqual(JSON.parse(String(calls.at(-1)?.init?.body)), { projectId: scope.projectId, threadId: scope.threadId, requestId: image.relationRequestId, originalArtifactId: "original-id", modelArtifactId: "copy-id" });
@@ -97,5 +99,17 @@ test("prepare preserves explicit authorization errors for a clear user retry", a
   const restore = fixture();
   try {
     await assert.rejects(uploadAttachment(makeAttachment(false), scope, new AbortController().signal, async () => json({ code: "ACCOUNT_CHANGED" }, 401)), /Сеанс или аккаунт изменился/);
+  } finally { restore(); }
+});
+
+test("completed byte transfer does not show success before finalization", async () => {
+  const restore = fixture(), progress: number[] = [];
+  try {
+    await assert.rejects(uploadAttachment(makeAttachment(false), scope, new AbortController().signal, async input => {
+      if (String(input).endsWith("/prepare")) return json({ artifact: { artifactId: "original-id", status: "ready" }, uploadUrl: "https://app.test/upload/abcdefghijklmnop" });
+      assert.equal(progress.at(-1), .99);
+      return json({ code: "UNAVAILABLE" }, 503);
+    }, value => progress.push(value)), /Не удалось связать/);
+    assert.equal(progress.includes(1), false);
   } finally { restore(); }
 });
