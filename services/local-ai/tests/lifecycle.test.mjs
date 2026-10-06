@@ -15,7 +15,7 @@ const embeddingRecord = (value = selector()) => ({
   limits: { maxInputBytes: null, maxAudioSeconds: null, maxItems: null, maxResultBytes: null, vectorDimensions: 1024 },
   parameters: { embed: { purpose: ['query', 'document', 'symmetric'] }, transcribe: {} },
 });
-function makeStore(records = [embeddingRecord()]) {
+function makeStore(records = [embeddingRecord()], settings = null) {
   const models = new Map(records.map(value => [value.modelId, value]));
   const installations = new Map(records.map(value => [value.modelId, {
     modelId: value.modelId, revision: value.revision, profileId: value.profileId, directory: '/models/' + value.modelId, files: [], installedAt: '2026-01-01T00:00:00Z',
@@ -31,7 +31,7 @@ function makeStore(records = [embeddingRecord()]) {
       const tx = {
         models: { get: async id => models.get(id) ?? null, list: async () => [...models.values()], put: async value => models.set(value.modelId, value), remove: async id => models.delete(id) },
         installations: { get: async (id, revision) => { const row = installations.get(id); return row?.revision === revision ? row : null; }, list: async () => [...installations.values()], put: async row => installations.set(row.modelId, row), remove: async id => installations.delete(id) },
-        settings: { get: async () => null, put: async () => undefined },
+        settings: { get: async () => settings, put: async () => undefined },
         outbox: {
           append: async event => { events.push(event); },
           appendAdmission: async (event, reservation) => { if (admissionGate) { store.admissionWaiting.resolve(); await admissionGate; } if (rejectNextAdmission) { rejectNextAdmission = false; throw new Error('OUTBOX_FULL'); } events.push({ event, reservation }); },
@@ -210,6 +210,45 @@ test('idle guard rejects occupied models and waits for physical exit before remo
   await locked;
   assert.equal(entered, true);
   assert.equal(lifecycle.readRuntimeState(selector().modelId, selector().revision), 'unloaded');
+  await lifecycle.close();
+});
+
+test('explicit load arms idle cleanup after its management waiter leaves and the next invoke reloads', async () => {
+  const value = selector();
+  const store = makeStore([embeddingRecord(value)], { idleUnloadSeconds: 1 });
+  const { factory, runtimes } = factoryFor(async () => new FakeRuntime());
+  let clock = Date.now();
+  const lifecycle = createLifecycleManager({ store, runtimeFactory: factory, artifacts: noArtifacts, limits, now: () => clock });
+  const controller = new AbortController();
+  const originalSetTimeout = globalThis.setTimeout;
+  const heldTimers = [];
+  const idleCallbacks = [];
+  globalThis.setTimeout = (callback, ms, ...args) => {
+    if (ms === 1000) {
+      const timer = originalSetTimeout(() => undefined, 60000);
+      heldTimers.push(timer);
+      idleCallbacks.push(() => callback(...args));
+      return timer;
+    }
+    return originalSetTimeout(callback, ms, ...args);
+  };
+  try {
+    await lifecycle.load(value, localContext('explicit-idle-load', { deadlineAt: new Date(clock + 5000).toISOString(), signal: controller.signal }));
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    controller.abort();
+    heldTimers.forEach(timer => clearTimeout(timer));
+  }
+  assert.equal(runtimes.length, 1);
+  assert.equal(idleCallbacks.length, 1);
+  clock += 1000;
+  idleCallbacks[0]();
+  await waitFor(() => lifecycle.readRuntimeState(value.modelId, value.revision) === 'unloaded');
+  assert.equal(runtimes[0].closeCalls, 1);
+
+  const request = embedRequest('after-explicit-idle-load', value, { deadlineAt: new Date(clock + 5000).toISOString() });
+  await lifecycle.invoke(request, invocationContext(request));
+  assert.equal(runtimes.length, 2);
   await lifecycle.close();
 });
 

@@ -602,7 +602,6 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
         const runtime = await Promise.race([ensureRuntime(slot), waitContext(context)]);
         if (slot.runtime !== runtime) fail('MODEL_LOAD_FAILED');
         slot.idleSince ??= now();
-        armIdle(slot);
         await finishManagement(reservation, 'succeeded');
       } catch (error) {
         const local = errorFrom(error);
@@ -611,6 +610,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       } finally {
         slot.managementWaiters--;
         if (slot.opening && !slotHasWaiter(slot)) slot.loadController?.abort();
+        armIdle(slot);
       }
       } finally { donePendingTask(); }
     },
