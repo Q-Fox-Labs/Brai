@@ -99,7 +99,7 @@ export default function TaskContent({
               else titleElementsRef.current.delete(key);
             }}
             bare
-            className={`${isEditingTitle ? "block" : "hidden"} min-h-[1.45em] max-h-[2.9em] min-w-0 flex-1 resize-none overflow-y-auto rounded border-0 bg-transparent p-0 text-sm leading-5 wrap-anywhere outline-none focus:bg-brai-surface-focus focus:shadow-[0_0_0_3px_var(--do-surface-focus)]`}
+            className={`${isEditingTitle ? "block" : "hidden"} min-h-[1.45em] max-h-[2.9em] min-w-0 flex-1 resize-none overflow-y-auto rounded border-0 bg-transparent p-0 text-[15px] leading-[1.45] wrap-anywhere outline-none focus:bg-brai-surface-focus focus:shadow-[0_0_0_3px_var(--do-surface-focus)]`}
             value={title}
             aria-label={`Название задачи «${task.title}»`}
             spellCheck

@@ -63,7 +63,7 @@ export default function TaskInlineDetail({
             }
           }}
           bare
-          className={`block max-h-[2.7em] min-h-[1.35em] w-full resize-none overflow-y-auto border-0 bg-transparent p-0 text-sm leading-5 whitespace-pre-wrap outline-none focus:bg-brai-surface-focus focus:shadow-[0_0_0_3px_var(--do-surface-focus)] ${toneClassName}`}
+          className={`block max-h-[2.7em] min-h-[1.35em] w-full resize-none overflow-y-auto border-0 bg-transparent p-0 text-[12px] leading-[1.35] whitespace-pre-wrap outline-none focus:bg-brai-surface-focus focus:shadow-[0_0_0_3px_var(--do-surface-focus)] ${toneClassName}`}
           defaultValue={value}
           aria-label={label}
           spellCheck
