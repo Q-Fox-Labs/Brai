@@ -253,12 +253,16 @@ test('native Codex boundary validates the new rate-limit request, result, and sp
     assert.deepEqual(unknown.event.params, { threadId: 't', turnId: 't1' });
     assert.equal(unknown.reply.error.code, -32601);
     assert.equal(codex.validateAnswer('unknown-method', {}), false);
-    const dynamic = await sendServerRequest({ id: 'dynamic-tool', method: 'item/tool/call', params: { threadId: 't', turnId: 't1', namespace: 'codex_app', tool: 'list_artifacts', arguments: { secret: 'private-input' }, callId: 'private-call' } });
-    assert.equal(dynamic.reply.error.code, -32601);
-    assert.deepEqual(dynamic.event.params, { threadId: 't', turnId: 't1', namespace: 'codex_app', tool: 'list_artifacts' });
-    assert.equal(JSON.stringify(dynamic.event).includes('private-'), false);
-    const malformedTool = await sendServerRequest({ id: 'malformed-tool', method: 'item/tool/call', params: { threadId: 't', turnId: 't1', namespace: 'x'.repeat(65), tool: '<script>private-input</script>' } });
-    assert.deepEqual(malformedTool.event.params, { threadId: 't', turnId: 't1' });
+    const toolEvents = [], stopTools = codex.subscribe(event => { if (event.method === 'item/tool/call') toolEvents.push(event); });
+    for (const [id, namespace, tool] of [['worktree', 'codex_app', 'create_worktree'], ['artifacts', 'codex_app', 'list_artifacts'], ['foreign', 'other_client', 'echo'], ['malformed-tool', 'x'.repeat(65), '<script>private-input</script>']]) {
+      peer.send(JSON.stringify({ id, method: 'item/tool/call', params: { threadId: 't', turnId: 't1', namespace, tool, arguments: { secret: 'private-input' } } }));
+    }
+    // AIDEV-NOTE: Ответ RPC служит барьером: все предыдущие кадры уже обработаны клиентом.
+    await codex.call('account/read', { refreshToken: false });
+    assert.deepEqual(toolEvents, []);
+    assert.equal(wireReplies.some(reply => ['worktree', 'artifacts', 'foreign', 'malformed-tool'].includes(reply.id)), false);
+    assert.equal(codex.validateAnswer('worktree', {}), false);
+    stopTools();
     const invalid = await sendServerRequest({ id: 'invalid-params', method: 'item/tool/requestUserInput', params: { threadId: 't', turnId: 't1' } });
     assert.equal(invalid.event.reason, 'invalid-params');
     assert.equal(invalid.reply.error.code, -32602);

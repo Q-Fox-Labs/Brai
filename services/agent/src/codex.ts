@@ -59,9 +59,6 @@ export function createCodex(options: { socketUrl: string }) {
     const safeParams = {
       ...(typeof params?.threadId === 'string' ? { threadId: params.threadId } : {}),
       ...(typeof params?.turnId === 'string' ? { turnId: params.turnId } : {}),
-      // AIDEV-NOTE: Имя инструмента помогает диагностике; аргументы остаются у Codex.
-      ...(method === 'item/tool/call' && typeof params?.tool === 'string' && /^[\w-]{1,64}$/.test(params.tool) ? { tool: params.tool } : {}),
-      ...(method === 'item/tool/call' && typeof params?.namespace === 'string' && /^[\w-]{1,64}$/.test(params.namespace) ? { namespace: params.namespace } : {}),
     };
     void send({ id, error: rejection(reason) }, false)
       .then(() => notify({ type: 'request', id, method, params: safeParams, supported: false, reason }))
@@ -86,6 +83,9 @@ export function createCodex(options: { socketUrl: string }) {
     if (typeof packet.method === 'string') {
       if (Object.hasOwn(packet, 'id')) {
         if (typeof packet.id !== 'string' && typeof packet.id !== 'number') { disconnect(); return; }
+        // AIDEV-NOTE: Brai не регистрирует dynamicTools. Их выполняет объявивший их клиент
+        // (например, Codex app); наш отказ мог бы выиграть гонку ответов и сорвать вызов.
+        if (packet.method === 'item/tool/call') return;
         const definition = definitions.get(packet.method);
         const reason = !definition ? 'unsupported-method'
           : bytes(packet.params) > limits.request ? 'request-too-large'

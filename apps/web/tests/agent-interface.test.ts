@@ -108,23 +108,20 @@ test("turn errors show Codex's model-capacity message and a next step", () => {
 test("rejected server requests explain that no user answer is needed", () => {
   const request = { requestId: "string:42", kind: "unsupported", method: "item/future/request", turnId: "turn", params: {}, answered: false, reason: "request-too-large" };
   const html = renderToStaticMarkup(createElement(component("request"), { request, disabled: false, send: async () => true }));
-  assert.match(html, /role="alert"/);
+  assert.match(html, /<details class="agent-request agent-request-notice"><summary>Техническое уведомление Codex<\/summary>/);
+  assert.doesNotMatch(html, /role="alert"|<details[^>]* open/);
   assert.match(html, /Превышен лимит отдельного запроса Codex/);
   assert.match(html, /не длины вашего сообщения/);
   assert.match(html, /отвечать не нужно/);
   assert.doesNotMatch(html, /Отправить ответ|Ответ отправлен/);
 });
 
-test("tool notices identify the Codex app without exposing arguments or claiming execution failed", () => {
-  const request = { requestId: "string:42", kind: "unsupported", method: "item/tool/call", turnId: "turn", params: { namespace: "codex_app", tool: "list_artifacts", arguments: { secret: "private-input" } }, answered: false, reason: "unsupported-method" };
-  const html = renderToStaticMarkup(createElement(component("request"), { request, disabled: false, send: async () => true }));
-  assert.match(html, /codex_app.list_artifacts/);
-  assert.match(html, /Источник: приложение Codex/);
-  assert.match(html, /итог выполнения здесь неизвестен/);
-  assert.match(html, /Отвечать не нужно/);
-  assert.doesNotMatch(html, /private-input|Отправить ответ|Запрос отклонён/);
-  const legacy = renderToStaticMarkup(createElement(component("request"), { request: { ...request, params: {} }, disabled: false, send: async () => true }));
-  assert.match(legacy, /Его имя недоступно/);
+test("obsolete tool refusals occupy no space, including legacy snapshots", () => {
+  for (const params of [{ namespace: "codex_app", tool: "create_worktree", arguments: { secret: "private-input" } }, { namespace: "codex_app", tool: "list_artifacts" }, {}]) {
+    const request = { requestId: "string:42", kind: "unsupported", method: "item/tool/call", turnId: "turn", params, answered: false, reason: "unsupported-method" };
+    const html = renderToStaticMarkup(createElement(component("request"), { request, disabled: false, send: async () => { throw new Error("a tool notice cannot send an answer"); } }));
+    assert.equal(html, "");
+  }
 });
 
 test("real React renders closed activities without list markup, summaries or owner reads", () => {

@@ -134,7 +134,9 @@
 .agent-feedback:empty { display: none; }
 .agent-request { margin: 1rem 0; }
 .agent-request-card { padding: 1rem; }
-.agent-request-notice { border-color: var(--destructive); }
+.agent-request-notice { margin: .5rem 0; padding: .5rem .75rem; color: var(--muted-foreground); font-size: .8125rem; border: 1px solid var(--border); border-radius: .75rem; }
+.agent-request-notice summary { cursor: pointer; }
+.agent-request-notice[open] summary { margin-bottom: .5rem; }
 .agent-request-notice p, .agent-turn-error p { margin: 0 0 .75rem; line-height: 1.5; }
 .agent-request-notice code { display: block; overflow-wrap: anywhere; margin-top: .5rem; }
 .agent-turn-error { margin: 1rem 0; padding: 1rem; border-color: var(--destructive); }

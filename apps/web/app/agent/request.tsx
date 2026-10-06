@@ -5,7 +5,6 @@ import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import type { PendingRequest } from "@brai/agent/contracts";
-import RequestNotice from "./request-notice";
 type Decision = string | { acceptWithExecpolicyAmendment: { execpolicy_amendment: string[] } } | { applyNetworkPolicyAmendment: { network_policy_amendment: { action: string; host: string } } };
 function rejectionText(reason?: string) {
   return ({
@@ -30,11 +29,16 @@ export default function NativeForm({ request, disabled, send }: { request: Pendi
   const p = request.params;
   const approval = request.kind === "command-approval" || request.kind === "file-change-approval";
   const choices: Decision[] = request.kind === "file-change-approval" ? ["accept", "acceptForSession", "decline", "cancel"] : p.availableDecisions ?? ["accept", "acceptForSession", "decline", "cancel"];
-  if (request.kind === "unsupported") return hidden ? null : <section className="agent-request-wrap" data-request-id={request.requestId} role="alert"><Card className="agent-request agent-request-notice">
-    {request.method === "item/tool/call" ? <RequestNotice request={request} /> : <p>{rejectionText(request.reason)}</p>}
-    <details className="agent-request-details"><summary>Техническая информация</summary><code>{request.method}</code></details>
-    <Button type="button" variant="ghost" size="sm" onClick={() => setHidden(true)}>Скрыть уведомление</Button>
-  </Card></section>;
+  if (request.kind === "unsupported") {
+    // AIDEV-NOTE: Старые снимки могут содержать отказы чужим dynamicTools; это не запрос к пользователю.
+    if (hidden || request.method === "item/tool/call") return null;
+    return <section className="agent-request-wrap" data-request-id={request.requestId}><details className="agent-request agent-request-notice">
+      <summary>Техническое уведомление Codex</summary>
+      <p>{rejectionText(request.reason)}</p>
+      <code>{request.method}</code>
+      <Button type="button" variant="ghost" size="sm" onClick={() => setHidden(true)}>Скрыть уведомление</Button>
+    </details></section>;
+  }
   function answer(value: unknown) {
     if (sent || sending.current || disabled || request.answered) return;
     sending.current = true; setSent(true);
