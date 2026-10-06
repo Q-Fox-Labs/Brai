@@ -1,0 +1,162 @@
+{
+  "formatVersion": 1,
+  "service": "brai-local-ai",
+  "source": {
+    "repository": "https://github.com/Q-Fox-Labs/Brai",
+    "revision": null,
+    "foundationBasis": "cd3957ffabfeb7b7c87545ecfbb3fb5e1b1ab49f",
+    "revisionBuildArgument": "BRAI_SOURCE_REVISION",
+    "revisionLabel": "org.opencontainers.image.revision",
+    "revisionRequirement": "one accepted full Git checkpoint for the entire compiled product snapshot and OCI image"
+  },
+  "image": {
+    "dockerfile": "services/local-ai/Dockerfile",
+    "context": "Ansible-created temporary directory; never the checkout",
+    "baseImage": {
+      "buildArgument": "BRAI_LOCAL_AI_BASE",
+      "requiredReference": "Ubuntu 24.04 image pinned by immutable sha256 digest",
+      "requiredGlibc": "2.39",
+      "digest": null,
+      "status": "required build input; not yet supplied or verified"
+    },
+    "sourceRevisionBuildArgument": "BRAI_SOURCE_REVISION",
+    "copyOnly": true
+  },
+  "payloadInventory": {
+    "required": true,
+    "path": "payload/SHA256SUMS",
+    "imagePath": "/opt/brai/local-ai/payload.SHA256SUMS",
+    "format": "sha256sum output with paths relative to the build context"
+  },
+  "contextLayout": {
+    "services/local-ai/Dockerfile": "copy of the product Dockerfile",
+    "services/local-ai/Dockerfile.dockerignore": "copy of the product Dockerfile-specific ignore rules",
+    "services/local-ai/release.json": "copy of this release descriptor",
+    "payload/app/": "complete built local-ai app root, preserving services/local-ai and app/node_modules paths",
+    "payload/runtime/": "portable runtime tree copied to /opt/brai/local-ai/runtime",
+    "payload/hf-modules-cache/": "verified Transformers dynamic modules for the pinned local model revision; no credentials or weights",
+    "payload/SHA256SUMS": "SHA-256 inventory of every file below payload except this inventory file"
+  },
+  "application": {
+    "workingDirectory": "/opt/brai/local-ai/app/services/local-ai",
+    "entrypoint": [
+      "/opt/brai/local-ai/runtime/node-v24.21.0-linux-x64/bin/node",
+      "src/main.mjs"
+    ],
+    "requiredConfigEnvironment": "LOCAL_AI_CONFIG_JSON",
+    "requiredConfigSections": [
+      "postgres",
+      "nats",
+      "transport",
+      "artifacts",
+      "history",
+      "installer",
+      "lifecycle",
+      "runtime"
+    ],
+    "startupRunsMigrations": false,
+    "containerUser": "1000:1000"
+  },
+  "runtimePayload": {
+    "node": {
+      "path": "payload/runtime/node-v24.21.0-linux-x64/",
+      "version": "24.21.0",
+      "binary": "bin/node"
+    },
+    "llamaCpp": {
+      "path": "payload/runtime/llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/app/",
+      "sourceImage": "ghcr.io/ggml-org/llama.cpp@sha256:7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571",
+      "executable": "llama-server",
+      "include": ["executable", "required system libraries"],
+      "systemLibrariesPath": "payload/runtime/llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/system/"
+    },
+    "gigaam": {
+      "venv": "payload/runtime/gigaam_pytorch/.venv/",
+      "pythonExecutable": "bin/python",
+      "interpreterAndStdlib": "payload/runtime/python/",
+      "ffmpegDirectory": "payload/runtime/ffmpeg/bin/",
+      "requiredExecutables": ["ffmpeg", "ffprobe"],
+      "requiredSystemLibraries": "payload/runtime/system-libs/",
+      "lock": {
+        "productPath": "services/local-ai/runners/gigaam/requirements.lock",
+        "sha256": "840176c57ae94bb8ed8b75117f36e973ddb38a8dc02ad8cf11ef1d0a13fc230e",
+        "bytes": 219285
+      },
+      "abi": "CPython 3.12, Ubuntu 24.04 / glibc 2.39"
+    },
+    "payloadMustBeSelfContained": true,
+    "hostVenvOrHostLibrarySymlinksAllowed": false,
+    "transformersModulesCache": {
+      "contextPath": "payload/hf-modules-cache/",
+      "imagePath": "/var/lib/brai/local-ai/home/huggingface/modules",
+      "sourceRevision": "cec030b4c4f35d928e4a9044a3bdb29ebd499fac",
+      "mustBeVerifiedOffline": true
+    },
+    "externalNetworkAtRuntime": "not required for prepared-model inference; no build-time downloads"
+  },
+  "externalModelData": {
+    "includedInImage": false,
+    "root": "/var/lib/brai/local-ai/models",
+    "models": [
+      {
+        "profileId": "gigaam_pytorch",
+        "revision": "cec030b4c4f35d928e4a9044a3bdb29ebd499fac",
+        "directory": "gigaam-v3-e2e-ctc/cec030b4c4f35d928e4a9044a3bdb29ebd499fac/gigaam_pytorch",
+        "files": 4,
+        "bytes": 442696950
+      },
+      {
+        "profileId": "llama_cpp",
+        "revision": "34da7d5d7e8dd454e7f40bc5dca98b00a5086c3d",
+        "directory": "giga-embeddings-480m-q8/34da7d5d7e8dd454e7f40bc5dca98b00a5086c3d/llama_cpp",
+        "file": "giga-embeddings-0826-480m-q8_0.gguf",
+        "bytes": 520209824,
+        "sha256": "aefcdd69f5b5e6f27188d27fe471eba90df2168ec7653ddde8b2d16de35f69ae"
+      }
+    ],
+    "auxiliaryVad": {
+      "includedInImage": false,
+      "directory": "/var/lib/brai/local-ai/vad/e66f3d3b9eb0873085418a7b813d3b369bf160bb",
+      "revision": "e66f3d3b9eb0873085418a7b813d3b369bf160bb",
+      "files": 3,
+      "manifestSha256": "549319fe11d8a69b88a3aa9e530435e3c740f7b0ab71668f6051a3df701f5d85"
+    }
+  },
+  "writablePaths": [
+    "/var/lib/brai/local-ai/home",
+    "/var/lib/brai/local-ai/models",
+    "/var/lib/brai/local-ai/staging",
+    "/var/lib/brai/local-ai/tmp",
+    "/var/tmp/brai-local-ai"
+  ],
+  "migration": {
+    "automatic": false,
+    "command": [
+      "/opt/brai/local-ai/runtime/node-v24.21.0-linux-x64/bin/node",
+      "/opt/brai/local-ai/app/services/local-ai/dist/storage/migrate.js"
+    ],
+    "requiresSameConfig": false,
+    "requiredEnvironment": [
+      "LOCAL_AI_DATABASE_URL",
+      "LOCAL_AI_OWNER_ROLE",
+      "LOCAL_AI_APP_ROLE"
+    ],
+    "credentialScope": "separate protected migration environment; do not pass application runtime credentials"
+  },
+  "readiness": {
+    "dockerHealthcheck": false,
+    "natsSubject": "brai.local_ai.v1.status",
+    "readinessRule": "state is ready and all six component states are ready",
+    "components": ["database", "nats", "executables", "weights", "history", "outbox"],
+    "processPingIsReadiness": false,
+    "loadedModelsRequired": false,
+    "measuredAsrLimits": "not included; pending runtime acceptance"
+  },
+  "notAcceptedYet": [
+    "immutable Ubuntu 24.04 base image digest and base artifact identity",
+    "exact staged portable runtime payload inventory and hashes",
+    "complete built source snapshot and exact payload inventory verification",
+    "built image inspection and offline runtime acceptance",
+    "measured GigaAM limits and profile acceptance"
+  ]
+}

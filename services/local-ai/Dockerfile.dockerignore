@@ -1,0 +1,10 @@
+# Контекст собирается Ansible из отдельной временной staging-папки.
+# Он содержит только этот Dockerfile, его ignore-файл и принятый payload.
+**
+!payload/
+!payload/**
+!services/
+!services/local-ai/
+!services/local-ai/Dockerfile
+!services/local-ai/Dockerfile.dockerignore
+!services/local-ai/release.json
