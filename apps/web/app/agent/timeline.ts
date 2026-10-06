@@ -48,6 +48,7 @@ export function composerAction(active: boolean, draft: string, imageCount = 0): 
 export type PendingCorrection = {
   chat: string; generation: string; knownIds: string[]; item: DisplayItem;
   state: "sending" | "waiting" | "failed" | "unknown";
+  draft?: import("../../lib/agent/images").ComposerDraft;
 };
 
 /** Native сообщения заменяют локальные корректировки по одному, только в исходном чате и ходе. */
@@ -55,6 +56,8 @@ export function reconcileCorrections(pending: PendingCorrection[], chat: string,
   const used = new Set<string>();
   const remaining = pending.filter(value => {
     if (value.chat !== chat || value.generation !== generation || value.state === "failed") return true;
+    if (items.filter(item => item.type === "userMessage" && item.operationId === value.item.id).length === 1) return false;
+    if (value.draft) return true;
     const match = items.find(item => {
       if (item.type !== "userMessage" || item.turnId !== value.item.turnId || used.has(item.id) || value.knownIds.includes(item.id) || (item.imageCount ?? 0) !== (value.item.imageCount ?? 0)) return false;
       // История может сокращать длинный текст сильнее, чем живой снимок.

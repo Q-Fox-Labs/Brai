@@ -28,6 +28,8 @@ export function display(item: any, turnId: string, history = false): DisplayItem
   if (item.type === 'collabAgentToolCall') content = `${item.tool}\n${Object.entries(item.agentsStates ?? {}).map(([id, state]: any) => `${id}: ${state.status}`).join('\n')}`;
   const cap = item.type === 'plan' ? 32768 : 8192;
   const value: DisplayItem = { id: item.id, turnId, type: item.type, text: text(content, cap), truncated: Buffer.byteLength(content) > cap };
+  // Native clientId подтверждает конкретный ввод, в том числе после потери HTTP ответа.
+  if (item.type === 'userMessage' && typeof item.clientId === 'string' && /^brai:agent:v3:.{1,128}$/.test(item.clientId)) value.operationId = item.clientId.slice('brai:agent:v3:'.length);
   if (item.type === 'userMessage') value.imageCount = (item.content ?? []).filter((part: any) => part.type === 'image' || part.type === 'localImage').length;
   if (typeof item.command === 'string') value.command = text(item.command, 16384);
   if (typeof item.aggregatedOutput === 'string') value.output = text(item.aggregatedOutput, 32768);

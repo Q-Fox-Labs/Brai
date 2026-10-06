@@ -118,7 +118,6 @@
 .agent-attachment-remove { position: absolute; top: -.375rem; right: -.375rem; display: grid; width: 1.5rem; height: 1.5rem; place-items: center; border: 1px solid var(--border); border-radius: 9999px; background: var(--card); color: var(--foreground); }
 .agent-image-reduced { display: block; margin-top: .125rem; color: var(--muted-foreground); }
 .agent-message-images { color: var(--muted-foreground); }
-.agent-feedback { width: min(100%, 50.5rem); margin: 0 auto .5rem; }
 .agent-attachment-preview { position: relative; }
 .agent-image-upload { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
 .agent-image-upload svg { width: 2rem; height: 2rem; padding: .125rem; border-radius: 50%; background: color-mix(in srgb, var(--card) 90%, transparent); color: var(--foreground); }
@@ -130,8 +129,8 @@
 @keyframes agent-upload-fade { to { opacity: 0; visibility: hidden; } }
 @media (prefers-reduced-motion: reduce) { .agent-image-upload-fill { transition: none; } .agent-image-upload.is-complete { animation-duration: .01s; } }
 .agent-send { margin-left: auto; }
-.agent-feedback { color: var(--muted-foreground); }
-.agent-feedback:empty { display: none; }
+.agent-send.is-failed { background: var(--destructive); color: white; }
+.agent-send.is-failed:hover { background: color-mix(in srgb, var(--destructive) 85%, black); }
 .agent-request { margin: 1rem 0; }
 .agent-request-card { padding: 1rem; }
 .agent-request-notice { margin: .5rem 0; padding: .5rem .75rem; color: var(--muted-foreground); font-size: .8125rem; border: 1px solid var(--border); border-radius: .75rem; }

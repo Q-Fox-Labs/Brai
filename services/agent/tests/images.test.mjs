@@ -198,14 +198,15 @@ test('lost native result recovers after restart; no exact, duplicates and incomp
   }
 });
 
-test('read recovery exposes only the confirmed scoped operation ID without resending', async () => {
+test('persisted native operation ID confirms input without exposing another owner attachments', async () => {
   const f = fixture(); await f.create(); f.lostNative();
   await assert.rejects(f.app.request(base), error => error.outcome === 'unknown');
   const reply = await f.read('items');
   assert.equal(reply.data[0].operationId, base.operationId);
   assert.ok(ajv.compile({ $ref: 'public#/definitions/DisplayItem' })(reply.data[0]));
   const foreign = await f.app.request({ action: 'items', ownerId: 'other', projectId: 'p', threadId: 't' });
-  assert.equal(foreign.data[0].operationId, undefined);
+  assert.equal(foreign.data[0].operationId, base.operationId);
+  assert.equal(foreign.data[0].attachments, undefined);
   assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
   f.app.close();
   const incomplete = fixture(); await incomplete.create(); incomplete.lostNative();

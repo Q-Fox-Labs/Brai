@@ -2,7 +2,7 @@
 // ABOUTME: Браузерные кодеки заменены портами; реальный picker и clipboard проверяются отдельно в браузере.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { acceptedDraft, confirmedSubmission, imageModel, prepareImage, validateImageFile, type Attachment } from "../lib/agent/images.ts";
+import { acceptedDraft, restoredDraft, confirmedSubmission, imageModel, prepareImage, validateImageFile, type Attachment } from "../lib/agent/images.ts";
 import { composerAction } from "../app/agent/timeline.ts";
 import type { ModelCatalog, NativeSnapshot } from "@brai/agent/contracts";
 
@@ -94,4 +94,15 @@ test("canvas reduction has bounded dimensions, preserves readable lower bound an
     assert.ok(sizes.every(size => size >= 512 && size <= 2048));
     assert.equal(sizes.at(-1), 512); assert.equal(closed, 2); URL.revokeObjectURL(prepared.previewUrl);
   } finally { globalThis.createImageBitmap = oldBitmap; globalThis.document = oldDocument; }
+});
+
+ test("rejected optimistic message returns text and files without losing later edits", () => {
+  const sent = { text: "original", revision: 4, images: [image("one")] };
+  const cleared = acceptedDraft(sent, sent);
+  assert.equal(cleared.text, ""); assert.equal(cleared.images.length, 0);
+  assert.deepEqual(restoredDraft(cleared, sent), { ...sent, revision: 5 });
+  const edited = { text: "later", revision: 5, images: [image("two")] };
+  const restored = restoredDraft(edited, sent);
+  assert.equal(restored.text, "original\nlater");
+  assert.deepEqual(restored.images.map(image => image.id), ["one", "two"]);
 });

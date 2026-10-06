@@ -47,7 +47,7 @@ test('default auto_review and explicit modes use exact native schemas and roots'
     assert.equal(started.approvalPolicy, mode === 'full' ? 'never' : 'on-request');
     assert.deepEqual(started.sandboxPolicy, mode === 'full' ? { type: 'dangerFullAccess' } : { type: 'workspaceWrite', writableRoots: ['/tmp/p'], networkAccess: false });
     await f.app.request(f.command('steer', { expectedTurnId: 'turn1' }));
-    assert.deepEqual(f.calls.at(-1), { method: 'turn/steer', params: { threadId: 't1', input: [{ type: 'text', text: 'hello' }], expectedTurnId: 'turn1' } });
+    assert.deepEqual(f.calls.at(-1), { method: 'turn/steer', params: { threadId: 't1', input: [{ type: 'text', text: 'hello' }], clientUserMessageId: 'brai:agent:v3:steer-3', expectedTurnId: 'turn1' } });
   }
 });
 test('invalid choices and arbitrary permissions never reach native mutation', async () => {

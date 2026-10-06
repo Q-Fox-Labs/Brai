@@ -21,6 +21,12 @@ export function acceptedDraft(current: ComposerDraft, sent: ComposerDraft): Comp
   return { ...current, text: current.revision === sent.revision ? "" : current.text, images: current.images.filter(image => !ids.has(image.id)) };
 }
 
+/** Возвращает отклонённое сообщение, сохраняя новый текст и добавленные изображения. */
+export function restoredDraft(current: ComposerDraft, sent: ComposerDraft): ComposerDraft {
+  const images = [...new Map([...sent.images, ...current.images].map(image => [image.id, image])).values()];
+  return { text: current.text ? `${sent.text}${sent.text ? "\n" : ""}${current.text}` : sent.text, revision: current.revision + 1, images };
+}
+
 /** Активный ход использует только фактическую модель; каталог другого поколения непригоден. */
 export function imageModel(catalog: ModelCatalog | null, view: NativeSnapshot | null, selected: ModelChoice | undefined, active: boolean): ModelChoice | undefined {
   if (!catalog || !view || catalog.generation !== view.generation) return undefined;

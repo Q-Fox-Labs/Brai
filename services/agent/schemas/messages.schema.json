@@ -830,7 +830,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 128,
-          "description": "ID отправки из подтверждённой файловой привязки текущего owner и чата."
+          "description": "ID принятого ввода из persisted native userMessage.clientId brai:agent:v3: либо confirmed reference; не даёт доступа к артефактам."
         },
         "id": {
           "type": "string",
