@@ -179,6 +179,8 @@ test('guarded real local route: short and long Russian speech, volatile results 
   const tapSettings = envNats('TRANSCRIPTION_TEST_LOCAL_AI_TAP_NATS_', 'transcription_restart_observer', '_INBOX.brai_transcription_restart_observer', 'local-ai observer');
   const connections = [];
   const artifacts = [];
+  const pendingUploads = new Map();
+  let bodyCompleted = false;
   let runtime;
   let uploader;
   let historyReader;
@@ -192,16 +194,21 @@ test('guarded real local route: short and long Russian speech, volatile results 
     return nc;
   };
   t.after(async () => {
-    let cleanupFailed = false;
+    const cleanupFailures = new Set();
     try {
-      try { await runtime?.close(); } catch { cleanupFailed = true; }
+      try { await runtime?.close(); } catch { cleanupFailures.add('COORDINATOR'); }
       for (const artifactId of artifacts) {
         try {
+          // Owner delete accepts ready artifacts; complete this fixture's retained pending upload first.
+          if (pendingUploads.has(artifactId)) {
+            await pendingUploads.get(artifactId)();
+            pendingUploads.delete(artifactId);
+          }
           const input = { requestId: randomUUID(), artifactId };
           assert.ok(artifactRequest(artifactSubjects.delete, input));
           const deleted = await natsRequest(uploader, artifactSubjects.delete, input);
           assert.ok(!deleted.headers?.get('Nats-Service-Error') && artifactResponse(artifactSubjects.delete, deleted.value) && deleted.value.status === 'deleted');
-        } catch { cleanupFailed = true; }
+        } catch { cleanupFailures.add('ARTIFACT_DELETE'); }
       }
     } finally {
       try {
@@ -209,13 +216,14 @@ test('guarded real local route: short and long Russian speech, volatile results 
           if (storageReadOnly) await storage.query('ROLLBACK');
           await storage.end();
         }
-      } catch { cleanupFailed = true; }
+      } catch { cleanupFailures.add('POSTGRES'); }
       try {
         const stopped = await Promise.allSettled(connections.map(connection => connection.close()));
-        if (stopped.some(result => result.status === 'rejected')) cleanupFailed = true;
-      } catch { cleanupFailed = true; }
+        if (stopped.some(result => result.status === 'rejected')) cleanupFailures.add('NATS');
+      } catch { cleanupFailures.add('NATS'); }
     }
-    assert.ok(!cleanupFailed, 'own coordinator, artifacts, database client and NATS connections cleaned up');
+    process.stdout.write(`ASR_FIXTURE bodyCompleted=${bodyCompleted} cleanup=${[...cleanupFailures].join(',') || 'NONE'}\n`);
+    assert.ok(cleanupFailures.size === 0, 'own coordinator, artifacts, database client and NATS connections cleaned up');
   });
 
   uploader = await open(uploaderSettings);
@@ -292,12 +300,15 @@ test('guarded real local route: short and long Russian speech, volatile results 
     const upload = new URL(prepared.value.uploadUrl);
     assert.ok(upload.protocol === 'http:' && upload.hostname === '172.31.246.1' && upload.port === '19681' && upload.pathname.startsWith('/upload/') && !upload.username && !upload.password && !upload.search && !upload.hash,
       'own isolated artifact upload endpoint only');
-    if (options.upload === false) return artifactId;
     const bytes = options.bytes ?? fixture.wav;
-    const response = await fetch(upload, { method: 'PUT', body: bytes, headers: { 'content-type': prepare.metadata.mimeType }, signal: AbortSignal.timeout(timeoutMs), redirect: 'error' });
-    assert.ok(response.status === 201 && response.headers.get('x-artifact-id') === artifactId && response.headers.get('x-artifact-state') === 'ready' && Number(response.headers.get('x-artifact-size')) === bytes.length,
-      'real owner upload reached ready state');
-    await response.arrayBuffer();
+    const completeUpload = async () => {
+      const response = await fetch(upload, { method: 'PUT', body: bytes, headers: { 'content-type': prepare.metadata.mimeType }, signal: AbortSignal.timeout(timeoutMs), redirect: 'error' });
+      assert.ok(response.status === 201 && response.headers.get('x-artifact-id') === artifactId && response.headers.get('x-artifact-state') === 'ready' && Number(response.headers.get('x-artifact-size')) === bytes.length,
+        'real owner upload reached ready state');
+      await response.arrayBuffer();
+    };
+    if (options.upload === false) { pendingUploads.set(artifactId, completeUpload); return artifactId; }
+    await completeUpload();
     return artifactId;
   };
 
@@ -537,4 +548,5 @@ test('guarded real local route: short and long Russian speech, volatile results 
     await pause(100);
   } while (Date.now() < historySettledBy);
   assert.equal(historyBacklog, 0, 'all own fixture metadata is delivered before coordinator shutdown and the restart baseline');
+  bodyCompleted = true;
 });
