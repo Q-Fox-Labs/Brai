@@ -28,9 +28,10 @@ export async function startCoordinator(config: CoordinatorRuntimeConfig) {
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> => closing ??= (async () => {
     // Закрытие channels делает незавершённые вызовы unknown; оно не подтверждает остановку вычисления.
-    const stopIngress = [http?.close(), nats?.close()];
-    const stopWork = [recovery?.close(), children.close(), localAi?.close(), nc?.close()];
-    await Promise.allSettled([...stopIngress, ...stopWork]);
+    const stopResources = [http?.close(), recovery?.close(), children.close(), localAi?.close(), nc?.close()];
+    await Promise.allSettled(stopResources);
+    // SDK service.stop дренирует через PONG; после nc.close он использует безопасный closed fast path.
+    await Promise.allSettled([nats?.close()]);
     core?.clearVolatileResults();
   })();
   try {

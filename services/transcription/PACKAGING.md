@@ -1,9 +1,9 @@
 # Кандидатный выпуск Brai Transcription
 
-Этот документ описывает сборку и пробный запуск текущего кандидата. Он не
-подтверждает полную runtime-приёмку: реальная связка coordinator → helper,
-history, artifacts и local-ai через защищённые сервисы должна быть проверена
-отдельно на изолированном окружении.
+Этот документ описывает сборку и пробный запуск текущего кандидата. На
+изолированном окружении приняты настоящий coordinator, три дочерние программы,
+PostgreSQL, artifacts/history и публичные HTTP/MCP/NATS операции. Реальное
+распознавание через local-ai и фазовые перезапуски ещё проходят приёмку.
 
 ## Состав и запуск
 
@@ -75,13 +75,25 @@ npm run test:transcription
 npm run test:integration:transcription:postgres
 npm run test:integration:transcription:helper:rpc
 npm run test:integration:transcription:nats
+npm run test:transcription:metadata
+npm run test:integration:transcription:asr
+npm run test:integration:transcription:restart
 ```
 
 Первая команда последовательно запускает два destructive теста storage/history
 на изолированной PostgreSQL fixture. Helper RPC использует отдельную
 application-role fixture. NATS проверка требует `TRANSCRIPTION_TEST_NATS=1` и
 NATS endpoint/credentials из выделенной изолированной fixture; обычный unit
-запуск её не включает. Ни одна из этих команд сама не поднимает fixture.
+запуск её не включает. Metadata-проверка дополнительно требует `TRANSCRIPTION_TEST_METADATA=1`, собственные artifacts/history и полный coordinator config; она проверяет реальный отказ внешнего маршрута и доставку истории, без утверждения о распознавании. Ни одна из этих команд сама не поднимает fixture.
+
+ASR требует `TRANSCRIPTION_TEST_ASR=1`, отдельный local-ai, установленную ещё
+не загруженную GigaAM и закрытый набор синтетических русских WAV в
+`TRANSCRIPTION_TEST_ASR_FIXTURE_ROOT`. Restart требует отдельную конфигурацию
+с `TRANSCRIPTION_TEST_RESTART_READY=1`, полным selector в
+`TRANSCRIPTION_TEST_RESTART_MODEL_JSON` и проверенным Ansible-контроллером
+собственной history в `TRANSCRIPTION_TEST_RESTART_HISTORY_CONTROL`. Эти тесты
+проверяют точные адреса и имена изолированного стенда; общие реквизиты сервера
+для них не подходят. Они не входят в обычный набор из 14 файлов.
 
 ## Runtime asset closure
 
@@ -159,6 +171,10 @@ Local executor также требует общие `TRANSCRIPTION_RPC_*` limits
 обязательного ACL prefix, control/hop timeout или response byte cap — ошибка
 конфигурации.
 
+Установленная поддерживаемая модель доступна для выбора и при `ready:false`:
+local-ai загружает её при первом `invoke.transcribe`. Полный selector закреплён
+до отправки; фактический флаг готовности каталога не меняется искусственно.
+
 ## Состояние и rollback
 
 Текст результата хранится только в памяти coordinator до native TTL
@@ -177,15 +193,18 @@ database owner/runtime роли.
 
 ## Оставшаяся приёмка
 
-- [ ] Подготовить отдельные PostgreSQL, NATS, artifacts/history и local-ai ACL
-  fixtures и выполнить три защищённые integration команды.
-- [ ] Пройти полный путь через один coordinator с реальными helper, history,
-  artifacts и local-ai соседями; подтвердить реальные inbox ACL, readiness,
-  request correlation и owner DTO на рабочем broker.
+- [x] Отдельные PostgreSQL и NATS подготовлены без production-изменений;
+  реальные storage/history tests прошли 13/13 и 3/3, app-only helper RPC — 6/6,
+  NATS Services transport — 1/1.
+- [x] Миграция выполнена владельцем базы; runtime helper не получил DDL-права.
+- [x] Настоящий coordinator с helper и artifacts/history: семь HTTP/MCP методов,
+  шесть NATS metadata endpoints, изоляция владельца, внешний отказ и история;
+  metadata integration — 1/1, включая штатное завершение четырёх программ.
+- [ ] Пройти реальное распознавание через local-ai, включая длинное аудио,
+  owner DTO, выбранную модель, учёт попытки и ограничения обработчика.
 - [ ] Подтвердить restart/TTL-loss поведение на изолированном runtime и
   проверить, что новый пользовательский запрос использует новый ключ.
-- [ ] Проверить миграцию владельцем базы и запуск helper только runtime ролью.
 
-До этих проверок candidate не следует описывать как успешную интеграцию с
-реальными соседями. Текущие IPC/process doubles и unit tests подтверждают только
-локальные границы и обработку заданных ответов.
+Полная runtime-приёмка остаётся открытой до последних трёх проверок.
+Реальные PostgreSQL/NATS проверки подтверждают указанные границы; process
+fixtures и unit tests сами по себе не подтверждают успешное распознавание.

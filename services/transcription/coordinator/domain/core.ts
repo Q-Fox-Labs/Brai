@@ -205,7 +205,7 @@ export function createCoordinator(options: {
     const requestedId = input.requestedModel?.modelId ?? settings.defaultLocalModel?.modelId;
     if (!requestedId) return null;
     const { items } = await localCatalog();
-    const candidates = items.filter((candidate: any) => candidate.selector.modelId === requestedId && candidate.supported && candidate.installed && candidate.ready);
+    const candidates = items.filter((candidate: any) => candidate.selector.modelId === requestedId && candidate.supported && candidate.installed);
     if (input.requestedModel === null && settings.defaultLocalModel) {
       return candidates.find((candidate: any) => sameSelector(candidate.selector, settings.defaultLocalModel))?.selector ?? null;
     }
