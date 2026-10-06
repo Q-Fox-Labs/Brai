@@ -12,6 +12,7 @@ import unittest
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 from subprocess import DEVNULL, run
 from threading import Event
 
@@ -73,6 +74,47 @@ class AudioBoundaryTests(unittest.TestCase):
                             normalized.stat().st_size,
                             math.ceil(60 * 16000) * 2 + runner.DECODE_HEADER_BYTES,
                         )
+
+    def test_longform_boundaries_follow_decoded_frames_instead_of_source_metadata(self) -> None:
+        """Принять реальную границу PCM после resampling и округления исходного ffprobe."""
+        class BoundaryModel:
+            def transcribe_longform(self, path: str) -> list[dict[str, object]]:
+                with wave.open(path, "rb") as audio:
+                    duration = audio.getnframes() / audio.getframerate()
+                return [{"transcription": "Фикстура.", "boundaries": (0.0, duration)}]
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.wav"
+            with wave.open(str(source), "wb") as audio:
+                audio.setnchannels(1)
+                audio.setsampwidth(2)
+                audio.setframerate(22050)
+                audio.writeframes(b"\0\0" * 664222)
+            source_duration = runner._audio_duration(source, 120.0)
+            result = runner._transcribe({"audio_path": str(source)}, BoundaryModel(), 120.0, 30.0)
+            segment = result["segments"][0]
+            self.assertGreater(segment["end_seconds"], source_duration)
+            self.assertEqual(segment["end_seconds"] * 16000, round(segment["end_seconds"] * 16000))
+            self.assertEqual(list(Path(directory).glob(".brai-audio-*")), [])
+
+    def test_decoded_frame_duration_cannot_exceed_the_operation_limit(self) -> None:
+        """Не принимать лишний PCM-кадр, даже если файл помещается в бюджет заголовка."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.wav"
+            normalized = Path(directory) / "normalized.wav"
+
+            def oversized_decode(argv: list[str], **_kwargs: object) -> None:
+                with wave.open(argv[-1], "wb") as audio:
+                    audio.setnchannels(1)
+                    audio.setsampwidth(2)
+                    audio.setframerate(16000)
+                    audio.writeframes(b"\0\0" * 16001)
+
+            with patch.object(runner.subprocess, "run", side_effect=oversized_decode):
+                with self.assertRaises(runner.RpcFault) as caught:
+                    runner._decode_audio_to_wav(source, normalized, 1.0, 30.0)
+            self.assertEqual(caught.exception.code, -32001)
+            self.assertIsInstance(caught.exception.__cause__, ValueError)
 
     def test_50ms_pcm_wav_is_accepted_below_header_budget(self) -> None:
         """Не путать допустимый WAV-заголовок с минимальным аудиосодержимым."""

@@ -5,10 +5,20 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 from unittest.mock import patch
 
 import runner
+
+
+def _write_normalized_fixture(path: Path, duration: float) -> None:
+    """Подготовить PCM-кадры после подменённого декодера с точной длительностью."""
+    with wave.open(str(path), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(16000)
+        audio.writeframes(b"\0\0" * round(duration * 16000))
 
 
 class RunnerDispatchTests(unittest.TestCase):
@@ -31,9 +41,7 @@ class RunnerDispatchTests(unittest.TestCase):
             with patch.object(runner, "_audio_duration", return_value=25.0), patch.object(
                 runner, "transcribe_longform", side_effect=AssertionError("unexpected longform")
             ), patch.object(runner, "_decode_audio_to_wav") as decode:
-                decode.side_effect = lambda _src, dest, *_args: Path(dest).write_bytes(
-                    b"normalized wav"
-                )
+                decode.side_effect = lambda _src, dest, *_args: _write_normalized_fixture(dest, 25.0)
                 self.assertEqual(
                     runner._transcribe({"audio_path": str(audio)}, model, 90.0, 15.0),
                     {"text": "Короткая речь."},
@@ -63,15 +71,13 @@ class RunnerDispatchTests(unittest.TestCase):
                 self.assertNotEqual(normalized, audio.resolve())
                 self.assertTrue(normalized.parent.name.startswith(".brai-audio-"))
                 self.assertTrue(normalized.is_file())
-                self.assertEqual(duration, 30.0)
+                self.assertEqual(duration, 25.000125)
                 return expected
 
-            with patch.object(runner, "_audio_duration", return_value=30.0), patch.object(
+            with patch.object(runner, "_audio_duration", return_value=25.0), patch.object(
                 runner, "transcribe_longform", side_effect=check_normalized
             ), patch.object(runner, "_decode_audio_to_wav") as decode:
-                decode.side_effect = lambda _src, dest, *_args: Path(dest).write_bytes(
-                    b"normalized wav"
-                )
+                decode.side_effect = lambda _src, dest, *_args: _write_normalized_fixture(dest, 25.000125)
                 self.assertEqual(
                     runner._transcribe({"audio_path": str(audio)}, model, 90.0, 15.0),
                     expected,
