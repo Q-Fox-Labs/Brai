@@ -601,7 +601,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
         if (!accepting) fail('CANCELLED');
         const runtime = await Promise.race([ensureRuntime(slot), waitContext(context)]);
         if (slot.runtime !== runtime) fail('MODEL_LOAD_FAILED');
-        slot.idleSince ??= now();
+        slot.idleSince = now();
         await finishManagement(reservation, 'succeeded');
       } catch (error) {
         const local = errorFrom(error);

@@ -213,6 +213,90 @@ test('idle guard rejects occupied models and waits for physical exit before remo
   await lifecycle.close();
 });
 
+test('explicit load after cancel or deadline gets a fresh full idle window before unload and reload', async () => {
+  for (const terminalMode of ['cancel', 'deadline']) {
+    const value = selector();
+    const started = deferred();
+    let generation = 0;
+    const { factory, runtimes } = factoryFor(async () => {
+      generation++;
+      if (generation !== 1) return new FakeRuntime();
+      return new FakeRuntime({ embed: (_input, context) => new Promise((_resolve, reject) => {
+        started.resolve();
+        context.signal.addEventListener('abort', () => reject(Object.assign(new Error('cancelled'), { code: 'CANCELLED' })), { once: true });
+      }) });
+    });
+    let clock = Date.now();
+    const lifecycle = createLifecycleManager({ store: makeStore([embeddingRecord(value)]), runtimeFactory: factory,
+      artifacts: noArtifacts, limits, now: () => clock });
+    const originalSetTimeout = globalThis.setTimeout;
+    const heldTimers = [];
+    const idleCallbacks = [];
+    const deadlineCallbacks = [];
+    globalThis.setTimeout = (callback, ms, ...args) => {
+      if (ms === 600000) {
+        const timer = originalSetTimeout(() => undefined, 60000);
+        heldTimers.push(timer);
+        idleCallbacks.push(() => callback(...args));
+        return timer;
+      }
+      if (terminalMode === 'deadline' && ms === 5000) {
+        const timer = originalSetTimeout(() => undefined, 60000);
+        heldTimers.push(timer);
+        deadlineCallbacks.push(() => callback(...args));
+        return timer;
+      }
+      return originalSetTimeout(callback, ms, ...args);
+    };
+    try {
+      const request = embedRequest(`terminal-${terminalMode}-before-explicit-load`, value, {
+        deadlineAt: new Date(clock + 5000).toISOString(),
+      });
+      const call = lifecycle.invoke(request, invocationContext(request));
+      await started.promise;
+      if (terminalMode === 'cancel') {
+        await lifecycle.cancel('user-1', request.operationId);
+        await assert.rejects(call, error => error.code === 'CANCELLED');
+      } else {
+        assert.ok(deadlineCallbacks.length >= 1);
+        clock += 5000;
+        deadlineCallbacks.forEach(callback => callback());
+        await assert.rejects(call, error => error.code === 'DEADLINE_EXCEEDED');
+      }
+      await waitFor(() => lifecycle.status().active === 0 && lifecycle.readRuntimeState(value.modelId, value.revision) === 'unloaded');
+      assert.equal(runtimes[0].closeCalls, 1);
+
+      clock += 601000;
+      const controller = new AbortController();
+      await lifecycle.load(value, localContext(`load-after-old-idle-age-${terminalMode}`, {
+        deadlineAt: new Date(clock + 5000).toISOString(), signal: controller.signal,
+      }));
+      controller.abort();
+      assert.equal(runtimes.length, 2);
+      assert.equal(lifecycle.readRuntimeState(value.modelId, value.revision), 'ready');
+      assert.equal(runtimes[1].closeCalls, 0);
+      assert.equal(idleCallbacks.length, 1);
+
+      clock += 599999;
+      assert.equal(runtimes[1].closeCalls, 0);
+      clock += 1;
+      idleCallbacks[0]();
+      await waitFor(() => lifecycle.readRuntimeState(value.modelId, value.revision) === 'unloaded');
+      assert.equal(runtimes[1].closeCalls, 1);
+
+      const reload = embedRequest(`reload-after-fresh-idle-window-${terminalMode}`, value, {
+        deadlineAt: new Date(clock + 5000).toISOString(),
+      });
+      await lifecycle.invoke(reload, invocationContext(reload));
+      assert.equal(runtimes.length, 3);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      heldTimers.forEach(timer => clearTimeout(timer));
+      await lifecycle.close();
+    }
+  }
+});
+
 test('explicit load arms idle cleanup after its management waiter leaves and the next invoke reloads', async () => {
   const value = selector();
   const store = makeStore([embeddingRecord(value)], { idleUnloadSeconds: 1 });
