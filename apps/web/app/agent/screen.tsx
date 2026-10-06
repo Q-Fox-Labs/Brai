@@ -63,7 +63,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const queue = useRef<{ file: File; version: number; context: string; duplicate: string; limit: number }[]>([]), preparing = useRef(false);
   const [preparationCount, setPreparationCount] = useState(0);
   const [imageProgress, setImageProgress] = useState<Record<string, number>>({});
-  const pendingSubmissions = useRef(new Map<string, { operationId: string; chat: string; unknown: boolean; sent: ComposerDraft; queued?: ComposerDraft; projectId: string; threadId: string }>());
+  const pendingSubmissions = useRef(new Map<string, { operationId: string; chat: string; unknown: boolean; confirmed?: boolean; completedAt?: number; settleTimer?: ReturnType<typeof setTimeout>; sent: ComposerDraft; queued?: ComposerDraft; projectId: string; threadId: string }>());
   const checkingSubmission = useRef(false);
   const [failedChats, setFailedChats] = useState<Set<string>>(() => new Set());
   const attachmentContext = useRef("");
@@ -88,8 +88,6 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const [agentMode, setAgentMode] = useState<AgentMode>("default");
   const [materialView, setMaterialView] = useState<MaterialView>(emptyMaterialView);
   const composerInput = useRef<HTMLTextAreaElement>(null);
-  const [inputHeight, setInputHeight] = useState(65);
-  const resizing = useRef<{ pointer: number; y: number; height: number } | null>(null);
   const archived = useRef(new Set<string>());
   const pageRequests = useRef(new Map<string, symbol>());
 
@@ -136,7 +134,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       for (const image of composerRef.current.images) previews.set(image.id, image);
       for (const chat of cache.current.values()) for (const image of chat.draft.images) previews.set(image.id, image);
       for (const queued of queuedMessagesRef.current) for (const image of queued.draft.images) previews.set(image.id, image);
-      for (const pending of pendingSubmissions.current.values()) for (const image of pending.sent.images) previews.set(image.id, image);
+      for (const pending of pendingSubmissions.current.values()) { clearTimeout(pending.settleTimer); for (const image of pending.sent.images) previews.set(image.id, image); }
       for (const image of previews.values()) releaseAttachmentPreview(image);
       cache.current.clear(); pendingSubmissions.current.clear(); composerRef.current = emptyDraft(); requests.clear(); stopMetadata(); stopLimits(); liveMetadata.current.clear(); client.dispose();
     };
@@ -267,8 +265,21 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   function finishSubmission(operationId: string) {
     const pending = pendingSubmissions.current.get(operationId);
     if (!pending) return;
+    if (pending.settleTimer) return;
     const chat = pending.chat;
+    const remaining = (pending.completedAt ?? 0) + 1300 - performance.now();
+    if (pending.sent.images.length && remaining > 0) {
+      pending.confirmed = true; pending.unknown = false;
+      const saved = cache.current.get(chat);
+      const unresolved = [...pendingSubmissions.current.values()].some(value => value.chat === chat && value.unknown);
+      if (saved) saved.uncertain = unresolved;
+      if (currentChat.current === chat) uncertain.current = unresolved;
+      setCorrections(previous => previous.filter(value => value.item.id !== operationId));
+      pending.settleTimer = setTimeout(() => { pending.settleTimer = undefined; if (alive.current) finishSubmission(operationId); }, remaining);
+      return;
+    }
     pendingSubmissions.current.delete(operationId);
+    setImageProgress(previous => Object.fromEntries(Object.entries(previous).filter(([id]) => !pending.sent.images.some(image => image.id === id))));
     for (const image of pending.sent.images) releaseAttachmentPreview(image);
     const saved = cache.current.get(chat);
     const unresolved = [...pendingSubmissions.current.values()].some(value => value.chat === chat && value.unknown);
@@ -342,7 +353,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       if (!alive.current) return false;
       if (action === "start" || action === "steer") {
         if (error instanceof AgentError && error.outcome === "unknown") {
-          if (!pendingSubmissions.current.has(operationId)) return true;
+          if (!pendingSubmissions.current.has(operationId) || pendingSubmissions.current.get(operationId)!.confirmed) return true;
           pendingSubmissions.current.get(operationId)!.unknown = true;
           setCorrections(previous => previous.map(value => value.item.id === operationId ? { ...value, state: "unknown" } : value));
           const saved = cache.current.get(sentChat);
@@ -371,7 +382,10 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       const readyImages: Attachment[] = [];
       for (const image of sent.images) {
         const ready = await uploadAttachment(image, { userId, projectId: targetProject, threadId: targetThread }, controller.signal, fetch, progress => {
-          if (alive.current && !controller.signal.aborted) setImageProgress(previous => ({ ...previous, [image.id]: progress }));
+          if (alive.current && !controller.signal.aborted) {
+            if (progress === 1) { const pending = pendingSubmissions.current.get(operationId); if (pending) pending.completedAt = performance.now(); }
+            setImageProgress(previous => ({ ...previous, [image.id]: progress }));
+          }
         });
         readyImages.push({ ...image, originalArtifactId: ready.originalArtifactId, modelArtifactId: ready.modelArtifactId, url: ready.url, previewUrl: ready.url, previewObjectUrl: false });
       }
@@ -528,7 +542,6 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     // AIDEV-NOTE: Следующее сообщение ждёт нового native turn ID, а не только HTTP accepted со старым idle snapshot.
     void sendDraft("start", next.draft, projectId, threadId, { model: next.model, effort: next.effort, permissionMode: next.permissionMode, agentMode: next.agentMode }, next.draft).then(accepted => {
       if (!alive.current) return;
-      if (accepted) for (const image of next.draft.images) releaseAttachmentPreview(image);
       setQueuedMessages(previous => accepted ? previous.filter(value => value.id !== next.id) : previous.map(value => value.id === next.id && value.state === "sending" ? { ...value, state: "failed" } : value));
     });
   });
@@ -626,9 +639,9 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         {!threadId && <div className="agent-empty"><Card className="agent-empty-card"><span className="agent-empty-symbol" aria-hidden="true">✳</span><h2>С чего начнём?</h2><p>Выберите чат слева или создайте новый в нужном проекте.</p>{project && <Button type="button" className="agent-primary" disabled={busy || uncertain.current} onClick={() => void mutate("create", defaultModel ? { model: defaultModel.model, permissionMode } : { permissionMode })}>Новый чат · {project.name}</Button>}</Card></div>}
         <div className="agent-timeline">
           {cursor && <Button type="button" variant="outline" className="agent-history-more" onClick={() => void moreHistory()}>Загрузить предыдущие сообщения</Button>}
-          {timeline.map(entry => entry.kind === "message" ? entry.item.type === "plan" ? <Button key={entry.item.id} type="button" variant="outline" className="agent-material-card" onClick={() => chooseMaterial(`plan:${entry.item.id}`)}>Предложенный план <span>{materialView.updated.includes(`plan:${entry.item.id}`) ? "Обновлено · " : ""}Открыть →</span></Button> : <Item key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.item.id}`} item={entry.item} context={activityContext} reads={lazyReads} /> : <Activities key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.id}`} items={entry.items} context={activityContext} reads={lazyReads} />)}
+          {timeline.map(entry => entry.kind === "message" ? entry.item.type === "plan" ? <Button key={entry.item.id} type="button" variant="outline" className="agent-material-card" onClick={() => chooseMaterial(`plan:${entry.item.id}`)}>Предложенный план <span>{materialView.updated.includes(`plan:${entry.item.id}`) ? "Обновлено · " : ""}Открыть →</span></Button> : <Item key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.item.id}`} item={entry.item} context={activityContext} reads={lazyReads} localImages={pendingSubmissions.current.get(entry.item.operationId ?? "")?.sent.images} imageProgress={imageProgress} uploadCompletedAt={pendingSubmissions.current.get(entry.item.operationId ?? "")?.completedAt} /> : <Activities key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.id}`} items={entry.items} context={activityContext} reads={lazyReads} />)}
           {materials.filter(value => value.kind !== "plan").map(value => <Button key={value.id} type="button" variant="outline" className="agent-material-card" onClick={() => chooseMaterial(value.id)}>{value.title}<span>{materialView.updated.includes(value.id) ? "Обновлено · " : ""}Открыть →</span></Button>)}
-          {pendingCorrections.map(value => <Item key={value.item.id} item={value.item} context={activityContext} reads={lazyReads} pending={value.state} localImages={value.draft?.images} imageProgress={imageProgress} />)}
+          {pendingCorrections.map(value => <Item key={value.item.id} item={value.item} context={activityContext} reads={lazyReads} pending={value.state} localImages={value.draft?.images} imageProgress={imageProgress} uploadCompletedAt={pendingSubmissions.current.get(value.item.id)?.completedAt} />)}
         {queuedMessages.some(value => value.chat === currentChat.current) && <ul className="agent-message-queue" aria-label="Очередь сообщений">{queuedMessages.filter(value => value.chat === currentChat.current).map(value => <li key={value.id}>
           <span>{value.draft.text || "Изображения"}{!!value.draft.images.length && ` · Изображений: ${value.draft.images.length}`} · {value.agentMode === "plan" ? "Планирование" : value.agentMode === "goal" ? "Цель" : "Обычный"} · {value.state === "sending" ? "Отправляется" : value.state === "unknown" ? "Результат неизвестен — проверьте чат" : value.state === "failed" ? "Не отправлено — очередь остановлена" : "В очереди"}</span>
           <button type="button" disabled={value.state === "sending"} onClick={() => { const removed = queuedMessages.find(item => item.id === value.id); if (removed) for (const image of removed.draft.images) releaseAttachmentPreview(image); setQueuedMessages(previous => previous.filter(item => item.id !== value.id)); }} aria-label="Удалить сообщение из очереди">×</button>
@@ -643,7 +656,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           <label className="sr-only" htmlFor="agent-draft">{active ? "Дополнить текущий ход" : "Сообщение"}</label>
           {!!attachments.length && <ul className="agent-attachments" aria-label="Прикреплённые изображения">{attachments.map(image => <li key={image.id}><div className="agent-attachment-preview"><img src={image.url ?? image.previewUrl} alt={image.name} /><ImageUploadStatus progress={imageProgress[image.id]} /></div><span className="agent-attachment-name" title={image.name}>{image.name}</span>{image.reduced && <span className="agent-image-reduced">Уменьшено</span>}<button type="button" className="agent-attachment-remove" aria-label={`Удалить ${image.name}`} onClick={() => { attachmentUpload.current?.abort(); attachmentUpload.current = null; changeDraft({ ...composerRef.current, images: composerRef.current.images.filter(value => value.id !== image.id) }); }}>×</button></li>)}</ul>}
           <div className="agent-composer-input">
-          <Textarea bare className="agent-draft-input" ref={composerInput} id="agent-draft" style={{ height: inputHeight }} placeholder={active ? "Дополнить текущее задание…" : agentMode === "goal" ? "Какой цели нужно достичь?" : agentMode === "plan" ? "Что нужно спланировать?" : "Что нужно сделать?"} value={draft} onChange={event => changeDraft({ ...composerRef.current, text: event.target.value, revision: composerRef.current.revision + 1 })} onPaste={event => {
+          <Textarea bare className="agent-draft-input" ref={composerInput} id="agent-draft" placeholder={active ? "Дополнить текущее задание…" : agentMode === "goal" ? "Какой цели нужно достичь?" : agentMode === "plan" ? "Что нужно спланировать?" : "Что нужно сделать?"} value={draft} onChange={event => changeDraft({ ...composerRef.current, text: event.target.value, revision: composerRef.current.revision + 1 })} onPaste={event => {
             const files = Array.from(event.clipboardData.files);
             if (!files.length) for (const item of Array.from(event.clipboardData.items)) { if (item.kind === "file") { const file = item.getAsFile(); if (file) files.push(file); } }
             if (files.length) { if (!event.clipboardData.getData("text/plain")) event.preventDefault(); addFiles(files); }
@@ -654,23 +667,6 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
             if (event.ctrlKey || event.metaKey) enqueueMessage();
             else if (draft.trim() || attachments.length) event.currentTarget.form?.requestSubmit();
           }} />
-          <Button type="button" variant="ghost" className="agent-input-resize" aria-label="Изменить высоту поля ввода" title="Потяните вверх, чтобы увеличить поле" tabIndex={-1}
-            onPointerDown={event => {
-              if (!event.isPrimary || event.button !== 0) return;
-              event.preventDefault();
-              resizing.current = { pointer: event.pointerId, y: event.clientY, height: composerInput.current?.getBoundingClientRect().height ?? inputHeight };
-              event.currentTarget.setPointerCapture(event.pointerId);
-            }}
-            onPointerMove={event => {
-              const start = resizing.current;
-              if (start?.pointer === event.pointerId) setInputHeight(Math.max(65, Math.min(180, start.height - (event.clientY - start.y))));
-            }}
-            onPointerUp={event => {
-              if (resizing.current?.pointer !== event.pointerId) return;
-              resizing.current = null;
-              event.currentTarget.releasePointerCapture(event.pointerId);
-            }}
-            onPointerCancel={() => { resizing.current = null; }} onLostPointerCapture={() => { resizing.current = null; }}><ComposerIcon kind="resize" /></Button>
           </div>
           <div className="agent-composer-actions">
           <div className="agent-composer-tools">
@@ -690,12 +686,12 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
 }
 
 /** Сообщения используют безопасный Markdown; тела действий принадлежат отдельному ленивому списку. */
-function Item({ item, context, reads, pending, localImages, imageProgress }: { item: DisplayItem; context: Parameters<typeof MessageImages>[0]["context"]; reads: Parameters<typeof MessageImages>[0]["reads"]; pending?: PendingCorrection["state"]; localImages?: Attachment[]; imageProgress?: Record<string, number> }) {
+function Item({ item, context, reads, pending, localImages, imageProgress, uploadCompletedAt }: { item: DisplayItem; context: Parameters<typeof MessageImages>[0]["context"]; reads: Parameters<typeof MessageImages>[0]["reads"]; pending?: PendingCorrection["state"]; localImages?: Attachment[]; imageProgress?: Record<string, number>; uploadCompletedAt?: number }) {
   const content = <>
     <span className="agent-message-author">{item.type === "userMessage" ? "Вы" : "Brai"}{item.phase && <span className="agent-message-phase">{item.phase === "final_answer" ? "Итог" : item.phase === "commentary" ? "Промежуточное сообщение" : item.phase}</span>}</span>
     {pending && <span className="agent-correction-status" role="status">{pending === "waiting" ? "Отправлено" : "Отправляется…"}</span>}
     <MessageText key={JSON.stringify([item.revision, item.text, item.truncated])} item={item} context={context} reads={reads} />
-    {!!localImages?.length && <ul className="agent-message-thumbnails" aria-label="Изображения сообщения">{localImages.map(image => <li key={image.id} className="agent-attachment-preview"><img src={image.url ?? image.previewUrl} alt={image.name} /><ImageUploadStatus progress={imageProgress?.[image.id]} /></li>)}</ul>}
+    {!!localImages?.length && <ul className="agent-message-thumbnails" aria-label="Изображения сообщения">{localImages.map(image => <li key={image.id} className="agent-attachment-preview"><img src={image.url ?? image.previewUrl} alt={image.name} /><ImageUploadStatus progress={imageProgress?.[image.id]} completedAt={uploadCompletedAt} /></li>)}</ul>}
     {!localImages && !!item.imageCount && <MessageImages item={item} context={context} reads={reads} />}
   </>;
   return <article data-item-id={item.id} className={`agent-item ${item.type === "userMessage" ? "agent-user-message-container" : "agent-assistant-message"}`}>
