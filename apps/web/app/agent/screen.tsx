@@ -245,7 +245,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       const element = conversation.current;
       if (element) scrollAnchor.current = { height: element.scrollHeight, top: element.scrollTop };
       followBottom.current = false;
-      setHistory(previous => [...value.data, ...previous].slice(0, 1000)); setCursor(value.nextCursor);
+      setHistory(previous => mergeTimeline(value.data, previous).slice(0, 1000)); setCursor(value.nextCursor);
     } catch (error) { if (token === selection.current) setMessage(errorText(error)); }
   }
 
@@ -310,19 +310,22 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     try {
       // Чтение подтверждает точный persisted clientId, повторной отправки нет.
       const value = await client.request({ action: "items", projectId: pending.projectId, threadId: pending.threadId });
-      let confirmed = confirmedSubmission(value.data, pending.operationId), cursor = value.nextCursor;
+      let data = value.data, confirmed = confirmedSubmission(data, pending.operationId), cursor = value.nextCursor;
       const cursors = new Set<string>(), deadline = performance.now() + 8000;
       for (let page = 1; !confirmed && cursor && page < 100 && alive.current && performance.now() < deadline; page++) {
         if (cursors.has(cursor)) break;
         cursors.add(cursor);
         const older = await client.request({ action: "items", projectId: pending.projectId, threadId: pending.threadId, cursor });
-        confirmed = confirmedSubmission(older.data, pending.operationId); cursor = older.nextCursor;
+        data = mergeTimeline(older.data, data);
+        confirmed = confirmedSubmission(data, pending.operationId); cursor = older.nextCursor;
       }
       if (!alive.current || !confirmed) return false;
       if (currentChat.current === chatKey) {
-        setHistory(previous => mergeTimeline(previous, value.data).slice(-1000));
+        setHistory(previous => mergeTimeline(previous, data).slice(-1000));
         setHistoryGeneration(value.generation); setMessage("");
       }
+      const saved = cache.current.get(chatKey);
+      if (saved) { saved.history = mergeTimeline(saved.history, data).slice(-1000); saved.generation = value.generation; }
       finishSubmission(operationId);
       return true;
     } catch { return false; }
