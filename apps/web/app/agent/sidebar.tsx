@@ -1,5 +1,5 @@
 "use client";
-// ABOUTME: Показывает компактный список проектов и чатов в shared controls.
+// ABOUTME: Показывает проекты, чаты и лимиты в компактном рейле Brai-Old.
 // ABOUTME: Выбор и раскрытие списка не переносят запросы из экрана.
 import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -20,7 +20,7 @@ type Props = {
 };
 
 /** Группирует уже прочитанные чаты; длинное название доступно полностью через title. */
-export default function Sidebar({ projects, pages, projectId, threadId, open, email, busy, accountLimits, readMessages = {}, select, create, more, refresh, archive, close, logout }: Props) {
+export default function Sidebar({ projects, pages, projectId, threadId, open, busy, accountLimits, readMessages = {}, select, create, more, refresh, archive, close }: Props) {
   const [visible, setVisible] = useState<Record<string, number>>({});
   return <aside id="agent-sidebar" className="agent-sidebar" data-open={open} aria-label="Проекты и чаты" onKeyDown={event => { if (event.key === "Escape" && !event.defaultPrevented) close(); }}>
     <header className="agent-sidebar-header"><h2 className="agent-brand">Проекты</h2><Button type="button" variant="ghost" size="icon-sm" className="agent-sidebar-close" aria-label="Закрыть список чатов" onClick={close}>×</Button></header>
@@ -53,8 +53,7 @@ export default function Sidebar({ projects, pages, projectId, threadId, open, em
         </section>;
       })}
     </nav></ScrollArea>
-    <Separator className="agent-separator" />
-    <footer className="agent-sidebar-footer"><span className="agent-account" title={email}>{email}</span><div><Button type="button" variant="ghost" size="sm" onClick={logout}>Выйти</Button></div><AccountLimits value={accountLimits} /></footer>
+    <footer className="agent-sidebar-footer"><AccountLimits value={accountLimits} /></footer>
   </aside>;
 }
 
