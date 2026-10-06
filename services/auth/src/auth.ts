@@ -21,7 +21,7 @@ export function createAuth(cfg:Config,pool:Pool,send?:(email:string,otp:string)=
    async sendVerificationOTP({email,otp,type}) {
     if(type!=="sign-in")throw new Error("Unsupported OTP purpose");
     if(send){await send(email,otp);return;}
-    const result=await new Resend(cfg.resendKey).emails.send({from:cfg.emailFrom,to:email,...otpEmail(otp)});
+    const result=await new Resend(cfg.resendKey).emails.send({from:cfg.emailFrom,to:email,...otpEmail(otp,cfg.origin)});
     if(result.error)throw new Error("Email delivery rejected");
    }})]});
 }

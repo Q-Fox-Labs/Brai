@@ -1,4 +1,4 @@
-// ABOUTME: Проверяет закрытый transport-контракт и передачу cookies без HTTP-сети.
+// ABOUTME: Проверяет закрытый transport-контракт, cookies и шаблон OTP письма.
 // ABOUTME: Ошибки и чувствительные заголовки остаются внутри заданной границы.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,6 +21,20 @@ test('arbitrary URL/header/body, numeric OTP and missing Origin are rejected bef
 test('native Origin rejection/status preserved',async()=>{
  const result=await bridge('sign-out',{headers:{origin:'https://evil.example'},body:{}},origin,async request=>{assert.equal(request.headers.get('origin'),'https://evil.example');return Response.json({code:'INVALID_ORIGIN'},{status:403});});assert.equal(result.status,403);
 });
-test('mail preserves leading zeros and has no external image',()=>{
- const email=otpEmail('000012');assert.match(email.html,/000012/);assert.match(email.text,/000012/);assert.match(email.text,/5 минут/);assert.doesNotMatch(email.html,/<img|https?:/);assert.throws(()=>otpEmail('12'));
+test('mail matches Brai-old content and keeps its responsive layout and public logo',()=>{
+ const email=otpEmail('000012',origin);
+ assert.equal(email.subject,'Код входа в Brai');
+ assert.equal(email.text,[
+  'Ваш одноразовый код', '', 'Введите этот код в Brai, чтобы завершить вход.', '',
+  '000012', '', 'Код действует 5 минут.',
+  'Если вы не запрашивали код, просто проигнорируйте это письмо.', '', 'Brai · brai.one'
+ ].join('\n'));
+ assert.match(email.html,/class="otp-code"[^>]*>000012<\/div>/);
+ assert.match(email.html,/<img src="https:\/\/test\.example\/brand\/brai-logo-email-white-bg\.png" width="150" height="80" alt="Brai"/);
+ assert.match(email.html,/@media only screen and \(max-width: 620px\)/);
+ assert.match(email.html,/max-width:600px/);
+ assert.match(email.html,/font-size: 40px !important; letter-spacing: 4px !important;/);
+ for(const otp of ['', '12', '12345', '1234567', '12345x', '<1234>', '１２３４５６']) {
+  assert.throws(()=>otpEmail(otp,origin),/Invalid OTP format/);
+ }
 });
