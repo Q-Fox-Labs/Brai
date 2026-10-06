@@ -66,6 +66,10 @@ class ResourceObserverTests(unittest.TestCase):
             observe._parse_stat(_stat_line(42), 41)
         with self.assertRaises(observe.ObserverError):
             observe._parse_stat("41 (broken) S 1 2", 41)
+        with self.assertRaises(observe.ObserverError):
+            observe._parse_stat(_stat_line(41, process_group_id=-1), 41)
+        with self.assertRaises(observe.ObserverError):
+            observe._parse_stat(_stat_line(41, session_id=-1), 41)
 
     def test_module_loads_from_unregistered_importlib_spec(self) -> None:
         """Поддержать controlled wrapper, который загружает файл без sys.modules."""
@@ -84,6 +88,8 @@ class ResourceObserverTests(unittest.TestCase):
             root = Path(directory)
             _write_stat(root, 40, process_group_id=40, session_id=40, rss_pages=7, thread_count=2)
             _write_stat(root, 41, process_group_id=40, session_id=40, rss_pages=11, thread_count=3)
+            _write_stat(root, 2, process_group_id=0, session_id=0, rss_pages=7_000, thread_count=99)
+            _write_stat(root, 3, process_group_id=0, session_id=0, rss_pages=8_000, thread_count=98)
             _write_stat(root, 42, process_group_id=42, session_id=42, rss_pages=900, thread_count=99)
             _write_stat(
                 root, 43, comm="ignored\nтекст", process_group_id=40,
@@ -91,6 +97,7 @@ class ResourceObserverTests(unittest.TestCase):
             )
             group = observe._scan_group(root, 40, 40, time.monotonic_ns() + 1_000_000_000)
             self.assertEqual({identity[0] for identity in group}, {40, 41})
+            self.assertTrue(all(not hasattr(process, "comm") for process in group.values()))
             self.assertEqual(observe._group_sample_stats(group, 4_096), (2, 5, 18 * 4_096))
 
     def test_leader_must_own_a_new_session_and_match_start_ticks(self) -> None:
@@ -104,6 +111,11 @@ class ResourceObserverTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(observe.ObserverError, "identity mismatch"):
             observe._validate_leader_identity(shell_group, 60, 60, 700)
+        zero_group_leader = observe._parse_stat(
+            _stat_line(60, process_group_id=0, session_id=0, start_ticks=700), 60
+        )
+        with self.assertRaisesRegex(observe.ObserverError, "identity mismatch"):
+            observe._validate_leader_identity(zero_group_leader, 60, 60, 700)
         with self.assertRaisesRegex(observe.ObserverError, "identity mismatch"):
             observe._validate_leader_identity(leader, 60, 60, 701)
 

@@ -93,7 +93,7 @@ def _parse_stat(raw: str, expected_pid: int) -> ProcessStat:
         pid = int(raw[:separator], 10)
     except ValueError:
         raise ObserverError("invalid proc stat") from None
-    if pid != expected_pid:
+    if pid <= 0 or pid != expected_pid:
         raise ObserverError("proc pid identity changed")
 
     fields = raw[closing + 1 :].split()
@@ -113,8 +113,8 @@ def _parse_stat(raw: str, expected_pid: int) -> ProcessStat:
     except ValueError:
         raise ObserverError("invalid proc stat fields") from None
     if (
-        values["process_group_id"] <= 0
-        or values["session_id"] <= 0
+        values["process_group_id"] < 0
+        or values["session_id"] < 0
         or values["user_cpu_ticks"] < 0
         or values["system_cpu_ticks"] < 0
         or values["thread_count"] < 1
