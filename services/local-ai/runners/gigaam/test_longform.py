@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import sys
 import json
 import tempfile
@@ -175,6 +176,47 @@ class LongformTests(unittest.TestCase):
                 self.assertIsInstance(get_pipeline("cpu"), VoiceActivityDetection)
                 self.assertEqual(get_pipeline("cpu").parameters, {"min_duration_on": 0.0, "min_duration_off": 0.0})
                 self.assertEqual(get_pipeline("cpu").device, "cpu")
+
+    def test_decorated_inner_consumes_local_pipeline_in_its_own_namespace(self) -> None:
+        """HF-обёртка должна вызывать локальный getter фактической Hydra-модели."""
+        inner = types.ModuleType("fake_hydra_gigaam")
+        exec("""
+def get_pipeline(device):
+    raise AssertionError("Внутренняя модель вызвала сетевой загрузчик")
+def segment_audio_file(path):
+    return get_pipeline("cpu")
+class Inner:
+    def transcribe_longform(self, path):
+        return segment_audio_file(path)
+""", inner.__dict__)
+        decorator = types.ModuleType("fake_torch_context")
+        decorator.wraps = functools.wraps
+        exec("""
+def inference_mode(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        return function(*args, **kwargs)
+    return wrapped
+""", decorator.__dict__)
+        inner.Inner.transcribe_longform = decorator.inference_mode(inner.Inner.transcribe_longform)
+        outer = types.ModuleType("fake_transformers_gigaam")
+        exec("""
+def get_pipeline(device):
+    raise AssertionError("Независимый getter HF-обёртки вызван")
+def segment_audio_file(path):
+    return get_pipeline("cpu")
+class Outer:
+    def transcribe_longform(self, path):
+        return self.model.transcribe_longform(path)
+""", outer.__dict__)
+        model = outer.Outer()
+        model.model = inner.Inner()
+        untouched_outer_getter = outer.get_pipeline
+        local_pipeline = object()
+        namespace = longform._vad_namespace(model)
+        namespace["get_pipeline"] = lambda device: local_pipeline
+        self.assertIs(model.transcribe_longform("fixture.wav"), local_pipeline)
+        self.assertIs(outer.get_pipeline, untouched_outer_getter)
 
     def test_rejects_unpinned_vad_manifest(self) -> None:
         """Отклонить syntactically valid, но не совпадающий с source pin manifest."""
