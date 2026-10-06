@@ -27,7 +27,171 @@ const ARTIFACT = Object.freeze({
 });
 const HISTORY_LIST = 'brai.history.v1.query.list';
 
-function fail(code) { throw new Error(`LOCAL_AI_BUSINESS_${code}`); }
+const BUSINESS_FAILURE = Symbol('local-ai-business-failure');
+const SAFE_BUSINESS_LABELS = new Set([
+  'ACCEPTANCE_NOT_OBSERVED',
+  'ACCEPTANCE_TIMEOUT',
+  'ACTIVE_OR_QUEUED_RUNTIME_UNLOAD',
+  'ACTIVE_REQUEST_FINISHED_BEFORE_PROOF',
+  'ARTIFACT_CLEANUP_NOT_OWNED',
+  'ARTIFACT_CLEANUP_TIMEOUT',
+  'ARTIFACT_DELETE_FAILED',
+  'ARTIFACT_DELETE_READBACK_FAILED',
+  'ARTIFACT_OPERATION_NOT_TRACKED',
+  'ARTIFACT_PREPARE_INVALID',
+  'ARTIFACT_READY_INVALID',
+  'ARTIFACT_REQUEST_FAILED',
+  'ARTIFACT_RESPONSE_INVALID',
+  'ARTIFACT_UPLOAD_BODY_NOT_EMPTY',
+  'ARTIFACT_UPLOAD_FAILED',
+  'ARTIFACT_UPLOAD_REPLY_INVALID',
+  'AUDIO_TERMINAL_NOT_CONFIRMED',
+  'BUSY_CAUSE_OUTBOX_AMBIGUOUS',
+  'BUSY_CAUSE_OUTBOX_UNAVAILABLE',
+  'BUSY_CAUSE_TRANSPORT_AMBIGUOUS',
+  'CLEANUP_RECEIPT_INVALID',
+  'CLEANUP_SETTLEMENT_TIMEOUT',
+  'CLEANUP_TIMEOUT',
+  'COMPLETION_TIMEOUT',
+  'CONFIGURE_RESPONSE_MISMATCH',
+  'CONFIG_ARTIFACT_ORIGIN',
+  'CONFIG_AUDIO_LIMIT',
+  'CONFIG_DEADLINE_MARGIN',
+  'CONFIG_IDLE_ACTIVITY_WINDOW',
+  'CONFIG_IDLE_RELATION',
+  'CONFIG_ISOLATION',
+  'CONFIG_MEDIA_OPERATION',
+  'CONFIG_NATS_GUARD',
+  'CONFIG_OPERATION',
+  'CONFIG_OUTBOX_CAPACITY',
+  'CONFIG_OUTBOX_COUNTS',
+  'CONFIG_OUTBOX_NOT_EMPTY',
+  'CONFIG_OVERLOAD_LIMIT',
+  'CONFIG_OWNER_COLLISION',
+  'CONFIG_PROOF_AUDIO_SECONDS',
+  'CONFIG_PROOF_CONTROLLER_NATS',
+  'CONFIG_PROOF_MISMATCH',
+  'CONFIG_PURPOSE',
+  'CONFIG_QUEUED_LIMIT',
+  'CONFIG_TEXTS',
+  'CONFIG_TIMEOUT_RELATION',
+  'CONFIG_TOLERANCE',
+  'CONFIG_TRANSPORT_HEADROOM',
+  'CONFIG_UNEXPECTED_IDLE_POLICY',
+  'DEPENDENCY_NOT_READY',
+  'DUPLICATE_ACCEPTANCE',
+  'DUPLICATE_TERMINAL',
+  'ERROR_BODY_MISMATCH',
+  'ERROR_HEADERS_MISMATCH',
+  'EXPECTED_RUNTIME_BUSY',
+  'HISTORY_CURSOR_LOOP',
+  'HISTORY_FACT_INVALID',
+  'HISTORY_PAGE_INVALID',
+  'HISTORY_REQUEST_FAILED',
+  'HISTORY_SERVICE_ERROR',
+  'HISTORY_TIMEOUT',
+  'IDLE_BOUNDARY_INVOKE_TIMEOUT',
+  'IDLE_BOUNDARY_NOT_READY',
+  'IDLE_BOUNDARY_REQUEST_NOT_ACTIVE',
+  'IDLE_BOUNDARY_TERMINAL_FAILED',
+  'IDLE_BOUNDARY_WINDOW_MISSED',
+  'IDLE_TIMEOUT',
+  'IDLE_TIMER_UNLOADED_ACTIVE_REQUEST',
+  'IDLE_UNLOAD_NOT_OBSERVED',
+  'IDLE_UNLOAD_TIMEOUT',
+  'INVALID_MEDIA_CLEANUP_UNCONFIRMED',
+  'INVALID_MEDIA_EXPECTATION',
+  'INVALID_MEDIA_HASH',
+  'INVALID_MEDIA_KIND',
+  'INVALID_MEDIA_MIME',
+  'INVALID_MEDIA_REPLY_TIMEOUT',
+  'INVALID_MEDIA_SAFE_ERROR',
+  'INVALID_MEDIA_SIZE',
+  'INVALID_MEDIA_TERMINAL_OUTCOME',
+  'INVALID_REPLY',
+  'INVOKE_TIMEOUT',
+  'LEDGER_DUPLICATE_OR_MISSING',
+  'LEDGER_INVALID',
+  'MEDIA_DURATION',
+  'MEDIA_FIXTURE_DUPLICATE',
+  'MEDIA_HASH',
+  'MEDIA_INVALID_DUPLICATE',
+  'MEDIA_INVALID_MATRIX',
+  'MEDIA_MATRIX',
+  'MEDIA_MIME',
+  'MEDIA_MIME_MATRIX',
+  'MEDIA_OPERATION_MUST_TRANSCRIBE',
+  'MEDIA_REFERENCE',
+  'MEDIA_SIZE',
+  'MODEL_LOAD_RESPONSE',
+  'MODEL_UNLOAD_RESPONSE',
+  'NATS_CONNECT_TIMEOUT',
+  'NATS_DRAIN_TIMEOUT',
+  'NEGATIVE_CASE_SCHEMA',
+  'NEGATIVE_SELECTOR_CHANGED_RUNTIME',
+  'NULL_IDLE_NOT_PROVEN',
+  'NULL_IDLE_OBSERVATION_TIMEOUT',
+  'OUTBOX_DRAIN_TIMEOUT',
+  'OUTBOX_NOT_CLEAN_AT_START',
+  'OUTBOX_PERMANENT_FAILURE',
+  'OUTBOX_PROOF_STALE',
+  'OUTBOX_TIMEOUT',
+  'OVERALL_TIMEOUT',
+  'OVERLOAD_REPLY_TIMEOUT',
+  'OVERLOAD_WINDOW_NOT_ACTIVE',
+  'OVERSIZE_MEDIA_EXPECTATION',
+  'PROOF_REQUEST_TIMEOUT',
+  'QUEUED_WINDOW_NOT_ACTIVE',
+  'QUEUE_ACCEPTED_REQUEST_FAILED',
+  'QUEUE_COMPLETION_TIMEOUT',
+  'QUEUE_OBSERVATION_TIMEOUT',
+  'QUEUE_OVERLOAD_REPLY_TIMEOUT',
+  'QUEUE_TERMINAL_BEFORE_RELEASE',
+  'REJECTED_OPERATION_HAS_HISTORY',
+  'REQUEST_FAILED',
+  'REQUEST_SCHEMA',
+  'RESPONSE_SCHEMA',
+  'STATUS_INVALID',
+  'STATUS_OUTBOX_INVALID',
+  'TERMINAL_NOT_OBSERVED',
+  'TERMINAL_TIMEOUT',
+]);
+const SAFE_CONFIG_FIELDS = new Set([
+  'ROOT', 'NATS', 'PROOF', 'EXPECTED_PROOF', 'PROOF_IMAGE', 'EXPECTED_IMAGE', 'PROOF_CONFIG', 'EXPECTED_CONFIG',
+  'PROOF_CONTROLLER_NATS', 'PROOF_QUEUE', 'OUTBOX_CAPACITY', 'PROOF_TRANSPORT', 'PROOF_REQUEST_TIMEOUT',
+  'PROOF_INPUT_BYTES', 'PROOF_AUDIO_BYTES', 'PROOF_PROVIDER_UPLOAD_BYTES', 'PROOF_AUDIO_SECONDS', 'TIMEOUT',
+  'OVERALL_TIMEOUT', 'CLEANUP_TIMEOUT', 'POLL', 'ACCEPTANCE_TIMEOUT', 'COMPLETION_TIMEOUT', 'OUTBOX_TIMEOUT',
+  'DEADLINE_MARGIN', 'OWNER', 'FOREIGN_OWNER', 'EMBEDDING_MODEL', 'TRANSCRIPTION_MODEL', 'OPERATION',
+  'MEDIA_OPERATION', 'TEXTS', 'PURPOSE', 'TOLERANCE', 'OVERLOAD_LIMIT', 'QUEUED_LIMIT', 'TRANSPORT_HEADROOM',
+  'OUTBOX_COUNTS', 'QUEUE_OBSERVATION', 'POSITIVE_IDLE', 'NULL_OBSERVATION', 'IDLE_POLL', 'IDLE_TIMEOUT',
+  'IDLE_BOUNDARY_LEAD', 'INPUT_BYTES', 'AUDIO_BYTES', 'AUDIO_SECONDS', 'PROVIDER_UPLOAD_BYTES', 'ARTIFACT_ORIGIN',
+  'MEDIA', 'MEDIA_SAMPLE', 'MEDIA_FIXTURE_ID', 'INVALID_MEDIA_SAMPLE', 'INVALID_MEDIA_FIXTURE_ID', 'INFLIGHT_INVOKES',
+]);
+const SAFE_ENDPOINT_CODES = new Set(Object.keys(STATUS_BY_ERROR));
+function isSafeBusinessCode(code) {
+  if (typeof code !== 'string' || code.length > 128) return false;
+  if (SAFE_BUSINESS_LABELS.has(code)) return true;
+  if (code.startsWith('CONFIG_') && SAFE_CONFIG_FIELDS.has(code.slice('CONFIG_'.length))) return true;
+  for (const prefix of ['EXPECTED_', 'SERVICE_', 'ARTIFACT_']) {
+    if (code.startsWith(prefix) && SAFE_ENDPOINT_CODES.has(code.slice(prefix.length))) return true;
+  }
+  return false;
+}
+function businessError(code) {
+  const safeCode = isSafeBusinessCode(code) ? code : 'UNEXPECTED_FAILURE';
+  const error = new Error(`LOCAL_AI_BUSINESS_${safeCode}`);
+  Object.defineProperty(error, BUSINESS_FAILURE, { value: safeCode });
+  return error;
+}
+function safeBusinessFailureCode(error) {
+  try {
+    if (!error || (typeof error !== 'object' && typeof error !== 'function')) return null;
+    const descriptor = Object.getOwnPropertyDescriptor(error, BUSINESS_FAILURE);
+    return descriptor && Object.hasOwn(descriptor, 'value') && isSafeBusinessCode(descriptor.value)
+      ? descriptor.value : null;
+  } catch { return null; }
+}
+function fail(code) { throw businessError(code); }
 function isObject(value) { return Boolean(value && typeof value === 'object' && !Array.isArray(value)); }
 function exactObject(value, keys, field) {
   if (!isObject(value) || Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) fail(`CONFIG_${field}`);
@@ -269,12 +433,24 @@ export async function connectWithinBound(connectNats, options, deadline) {
 
 /** Drains only the owned connection; on a bounded failure, invokes its synchronous close as a last resort. */
 export async function drainOwnedConnection(nc, deadline) {
+  let closeAttempted = false;
+  const closeOwned = () => {
+    if (closeAttempted) return false;
+    closeAttempted = true;
+    try { nc.close(); return true; }
+    catch { return false; }
+  };
+  if (remaining(deadline) < 1) return { drained: false, closeRequested: closeOwned() };
+  let drainPromise;
+  try { drainPromise = Promise.resolve(nc.drain()); }
+  catch { return { drained: false, closeRequested: closeOwned() }; }
+  // Attach a rejection handler before the deadline race, including when the bound expires immediately.
+  drainPromise.catch(() => {});
   try {
-    await bounded(nc.drain(), deadline, 'NATS_DRAIN_TIMEOUT');
+    await bounded(drainPromise, deadline, 'NATS_DRAIN_TIMEOUT');
     return { drained: true, closeRequested: false };
   } catch {
-    try { nc.close(); return { drained: false, closeRequested: true }; }
-    catch { return { drained: false, closeRequested: false }; }
+    return { drained: false, closeRequested: closeOwned() };
   }
 }
 
@@ -285,7 +461,7 @@ function bounded(value, deadline, code) {
   let timer;
   return Promise.race([
     Promise.resolve(value),
-    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`LOCAL_AI_BUSINESS_${code}`)), ms); }),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(businessError(code)), ms); }),
   ]).finally(() => { if (timer) clearTimeout(timer); });
 }
 function decode(reply) {
@@ -409,14 +585,15 @@ export async function runLocalAiBusinessPeer(input, mediaInput = null, dependenc
       catch { fail('REQUEST_FAILED'); }
       const promise = Promise.resolve(replyPromise).then(reply => {
         const decoded = decode(reply);
-        if (decoded.error) throw new Error(`LOCAL_AI_BUSINESS_SERVICE_${decoded.error.code}`);
+        if (decoded.error) throw businessError(`SERVICE_${decoded.error.code}`);
         if (!validateResponse(subject, decoded.value)) fail('RESPONSE_SCHEMA');
         if (op === 'embed') assertEmbeddingResponse(decoded.value, dto, llamaProfile.encoding.dimensions);
         else assertTranscriptionResponse(decoded.value, dto, expectedText);
         return decoded.value;
       });
       let settled = false;
-      const settlement = promise.then(value => ({ value }), error => ({ error: error?.message?.startsWith('LOCAL_AI_BUSINESS_') ? error.message : 'LOCAL_AI_BUSINESS_REQUEST_FAILED' }))
+      const settlement = promise.then(value => ({ value }), error => ({ error: safeBusinessFailureCode(error)
+        ? `LOCAL_AI_BUSINESS_${safeBusinessFailureCode(error)}` : 'LOCAL_AI_BUSINESS_REQUEST_FAILED' }))
         .then(result => { settled = true; return result; });
       const record = { request: dto, subject, promise, settlement, isSettled: () => settled, artifactId, ledger: null };
       operations.set(dto.operationId, record);
@@ -573,8 +750,7 @@ export async function runLocalAiBusinessPeer(input, mediaInput = null, dependenc
     evidence.push('outbox-drained-no-permanent-failure');
     summary = buildSafeSummary(config, evidence, operations, artifacts, finalStatus, cleanupDeferredIds);
   } catch (error) {
-    failureCode = typeof error?.message === 'string' && /^LOCAL_AI_BUSINESS_[A-Z0-9_]+$/.test(error.message)
-      ? error.message.slice('LOCAL_AI_BUSINESS_'.length) : 'UNEXPECTED_FAILURE';
+    failureCode = safeBusinessFailureCode(error) ?? 'UNEXPECTED_FAILURE';
   } finally {
     const cleanupDeadline = Math.min(deadline, Date.now() + config.cleanupTimeoutMs);
     if (nc) {
@@ -605,7 +781,7 @@ export async function runLocalAiBusinessPeer(input, mediaInput = null, dependenc
     }
   }
   if (failureCode) {
-    const failure = new Error(`LOCAL_AI_BUSINESS_${failureCode}`);
+    const failure = businessError(failureCode);
     failure.receipt = buildBusinessCleanupReceipt({ ...(summary ?? buildSafeSummary(config, evidence, operations, artifacts, null, cleanupDeferredIds)),
       connectionCleanup }, cleanupDeferredIds, artifacts);
     throw failure;

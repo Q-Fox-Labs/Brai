@@ -207,3 +207,39 @@ test('hanging NATS connect has an overall bound and returns only safe receipt me
     return true;
   });
 });
+
+
+test('untrusted prefix-shaped failures never enter business errors or receipts', async () => {
+  const value = config('selectors');
+  Object.assign(value, { timeoutMs: 100, overallTimeoutMs: 100, cleanupTimeoutMs: 20,
+    completionTimeoutMs: 10, acceptanceTimeoutMs: 10, outboxDrainTimeoutMs: 10, pollMs: 1 });
+  const canary = 'SYNTHETIC_PRIVATE_CANARY';
+  const hostileMessages = [
+    `LOCAL_AI_BUSINESS_SYNTHETIC_SECRET_${canary}`,
+    `LOCAL_AI_BUSINESS_SERVICE_CANCELLED_${canary}`,
+    `LOCAL_AI_BUSINESS_${'X'.repeat(512)}`,
+  ];
+  for (const message of hostileMessages) {
+    await assert.rejects(runLocalAiBusinessPeer(value, null, {
+      connect: () => Promise.reject(new Error(message)),
+    }), error => {
+      assert.equal(error.message, 'LOCAL_AI_BUSINESS_UNEXPECTED_FAILURE');
+      assert.equal(JSON.stringify(error.receipt).includes(canary), false);
+      assert.equal(error.message.includes(canary), false);
+      return true;
+    });
+  }
+});
+
+
+test('expired drain deadline closes its own connection without starting drain', async () => {
+  let drainCalls = 0;
+  let closeCalls = 0;
+  const connection = {
+    drain: () => { drainCalls += 1; return Promise.reject(new Error('unexpected drain rejection')); },
+    close: () => { closeCalls += 1; },
+  };
+  assert.deepEqual(await drainOwnedConnection(connection, Date.now() - 1), { drained: false, closeRequested: true });
+  assert.equal(drainCalls, 0);
+  assert.equal(closeCalls, 1);
+});
