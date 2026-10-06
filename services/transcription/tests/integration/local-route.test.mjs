@@ -520,4 +520,13 @@ test('guarded real local route: short and long Russian speech, volatile results 
     'explicit new request creates exactly one fresh attempt');
   await tap.flush();
   assert.ok(!observerInvalid, 'observer validates all owner invoke messages');
+  const historySettledBy = Date.now() + 30000;
+  let historyBacklog;
+  do {
+    const counts = await storage.query("SELECT count(*)::integer AS backlog FROM transcription.history_outbox WHERE state <> 'acknowledged'");
+    historyBacklog = counts.rows[0].backlog;
+    if (historyBacklog === 0) break;
+    await pause(100);
+  } while (Date.now() < historySettledBy);
+  assert.equal(historyBacklog, 0, 'all own fixture metadata is delivered before coordinator shutdown and the restart baseline');
 });
