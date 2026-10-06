@@ -7,14 +7,20 @@ import { createApplication } from '../dist/application.js';
 function fixture(t, count = 2) {
   let generation = 'g1', observer, reading = 0, peak = 0;
   const threads = Array.from({ length: count }, (_, index) => ({ id: `t${index}`, name: `Chat ${index}`, preview: '', updatedAt: 99, cwd: '/demo', status: { type: 'idle' } }));
-  const calls = [], settings = { delay: 0, fail: new Set() };
+  const calls = [], settings = { delay: 0, listScanDelay: 0, fail: new Set() };
   const port = {
     status: () => ({ generation, connection: 'connected', authorization: 'ready' }),
     subscribe: fn => { observer = fn; return () => {}; },
     call: async (method, params, options = {}) => {
       calls.push({ method, params, options });
       if (method === 'account/rateLimits/read') return { rateLimits: null };
-      if (method === 'thread/list') return { data: threads, nextCursor: 'next-page' };
+      if (method === 'thread/list') {
+        if (settings.listScanDelay && !params.useStateDbOnly) await new Promise((resolve, reject) => {
+          const scan = setTimeout(() => { clearTimeout(timeout); resolve(); }, settings.listScanDelay);
+          const timeout = setTimeout(() => { clearTimeout(scan); reject(Object.assign(new Error('rollout scan timeout'), { code: 'TIMEOUT' })); }, options.timeoutMs ?? 10000);
+        });
+        return { data: threads, nextCursor: 'next-page' };
+      }
       if (method !== 'thread/items/list') throw new Error(method);
       reading++; peak = Math.max(peak, reading);
       try {
@@ -76,4 +82,15 @@ test('generation change during optional history still rejects the obsolete list'
   const pending = f.list();
   f.rotate();
   await assert.rejects(pending, { code: 'STALE_GENERATION', outcome: 'query' });
+});
+
+
+test('refresh lists registered threads without a slow rollout repair scan and preserves pagination', async t => {
+  const f = fixture(t); f.settings.listScanDelay = 5000;
+  const first = await f.list();
+  assert.equal(first.data.length, 2);
+  assert.equal(first.nextCursor, 'next-page');
+  const next = await f.app.request({ action: 'threads', projectId: 'p', cursor: first.nextCursor });
+  assert.equal(next.data.length, 2);
+  assert.equal(f.calls.filter(call => call.method === 'thread/list')[1].params.cursor, 'next-page');
 });

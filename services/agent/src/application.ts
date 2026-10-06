@@ -348,7 +348,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (r.action === 'threads') {
       const generation = current();
       // AIDEV-NOTE: Список и необязательное чтение metadata должны уместиться в web deadline 10 секунд.
-      const page = await codex.call('thread/list', { cwd: p.cwd, limit: 100, cursor: r.cursor, sortKey: 'updated_at', sortDirection: 'desc' }, { timeoutMs: 4000 });
+      const page = await codex.call('thread/list', { cwd: p.cwd, limit: 100, cursor: r.cursor, sortKey: 'updated_at', sortDirection: 'desc', useStateDbOnly: true }, { timeoutMs: 4000 });
       const deadline = performance.now() + 4000;
       const threads = page.data.filter((t: any) => t.cwd === p.cwd), data = [];
       for (let offset = 0; offset < threads.length; offset += 4) data.push(...await Promise.all(threads.slice(offset, offset + 4).map(async (thread: any) => {
