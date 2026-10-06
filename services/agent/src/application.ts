@@ -347,28 +347,37 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (r.operationId && r.generation !== current()) fail('STALE_GENERATION');
     if (r.action === 'threads') {
       const generation = current();
-      const page = await codex.call('thread/list', { cwd: p.cwd, limit: 100, cursor: r.cursor, sortKey: 'updated_at', sortDirection: 'desc' });
+      // AIDEV-NOTE: Список и необязательное чтение metadata должны уместиться в web deadline 10 секунд.
+      const page = await codex.call('thread/list', { cwd: p.cwd, limit: 100, cursor: r.cursor, sortKey: 'updated_at', sortDirection: 'desc' }, { timeoutMs: 4000 });
+      const deadline = performance.now() + 4000;
       const threads = page.data.filter((t: any) => t.cwd === p.cwd), data = [];
       for (let offset = 0; offset < threads.length; offset += 4) data.push(...await Promise.all(threads.slice(offset, offset + 4).map(async (thread: any) => {
         const live = sessions.get(thread.id)?.view.thread;
         const cached = messageTimes.get(thread.id);
-        let lastMessageAt = cached && cached.updatedAt === thread.updatedAt ? cached.lastMessageAt : undefined;
-        let attention = cached && cached.updatedAt === thread.updatedAt ? { finalMessageId: cached.finalMessageId, awaitingReply: cached.awaitingReply } : { finalMessageId: null as string | null, awaitingReply: false };
-        if (lastMessageAt === undefined) {
-          let cursor: string | undefined;
-          lastMessageAt = 0;
-          for (let index = 0; index < 10; index++) {
-            const items = await codex.call('thread/items/list', { threadId: thread.id, limit: 10, sortDirection: 'desc', ...(cursor ? { cursor } : {}) });
-            const message = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
-            if (message) { attention = messageAttention(display(message.item, message.turnId)); lastMessageAt = message.startedAtMs ?? message.completedAtMs ?? thread.updatedAt * 1000; break; }
-            if (!items.nextCursor) break;
-            cursor = items.nextCursor;
+        let lastMessageAt = cached?.lastMessageAt ?? 0;
+        let attention = { finalMessageId: cached?.finalMessageId ?? null, awaitingReply: cached?.awaitingReply ?? false };
+        if ((!cached || cached.updatedAt !== thread.updatedAt) && performance.now() < deadline) {
+          try {
+            let cursor: string | undefined;
+            let readTime = 0, readAttention = { finalMessageId: null as string | null, awaitingReply: false };
+            for (let index = 0; index < 10; index++) {
+              const remaining = Math.floor(deadline - performance.now());
+              if (remaining <= 0) fail('TIMEOUT', 'query');
+              const items = await codex.call('thread/items/list', { threadId: thread.id, limit: 10, sortDirection: 'desc', ...(cursor ? { cursor } : {}) }, { timeoutMs: Math.min(1000, remaining) });
+              const message = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
+              if (message) { readAttention = messageAttention(display(message.item, message.turnId)); readTime = message.startedAtMs ?? message.completedAtMs ?? thread.updatedAt * 1000; break; }
+              if (!items.nextCursor) break;
+              cursor = items.nextCursor;
+            }
+            if (generation !== current()) fail('STALE_GENERATION', 'query');
+            lastMessageAt = readTime; attention = readAttention;
+            messageTimes.set(thread.id, { updatedAt: thread.updatedAt, lastMessageAt, ...attention });
+            while (messageTimes.size > 1000) messageTimes.delete(messageTimes.keys().next().value!);
+          } catch {
+            // AIDEV-NOTE: Сбой истории одного чата не скрывает список; не кэшируем неудачу как успешное чтение.
           }
-          if (generation !== current()) fail('STALE_GENERATION', 'query');
-          messageTimes.set(thread.id, { updatedAt: thread.updatedAt, lastMessageAt: lastMessageAt!, ...attention });
-          while (messageTimes.size > 1000) messageTimes.delete(messageTimes.keys().next().value!);
         }
-        return { ...metadata(thread), ...attention, awaitingReply: thread.status?.activeFlags?.some((flag: string) => ['waitingOnApproval', 'waitingOnUserInput'].includes(flag)) || (thread.status?.type !== 'active' && attention.awaitingReply), ...(live ? { finalMessageId: live.finalMessageId, awaitingReply: live.awaitingReply } : {}), lastMessageAt: Math.max(lastMessageAt!, live?.lastMessageAt ?? 0), active: live?.active ?? thread.status?.type === 'active' };
+        return { ...metadata(thread), ...attention, awaitingReply: thread.status?.activeFlags?.some((flag: string) => ['waitingOnApproval', 'waitingOnUserInput'].includes(flag)) || (thread.status?.type !== 'active' && attention.awaitingReply), ...(live ? { finalMessageId: live.finalMessageId, awaitingReply: live.awaitingReply } : {}), lastMessageAt: Math.max(lastMessageAt, live?.lastMessageAt ?? 0), active: live?.active ?? thread.status?.type === 'active' };
       })));
       if (generation !== current()) fail('STALE_GENERATION', 'query');
       return { generation, data: data.sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0) || a.id.localeCompare(b.id)), nextCursor: page.nextCursor ?? null };
