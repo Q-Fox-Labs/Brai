@@ -208,7 +208,8 @@ function runtimeConfig(config) {
   };
 }
 
-function supportedProfiles(config) {
+/** Проецирует закреплённые manifest-профили в ModelRecord; не запускает runtime и не придумывает неизвестные limits. */
+export function supportedProfiles(config) {
   const embedding = {
     modelId: llamaProfile.modelId, name: 'Giga Embeddings 480M Q8',
     description: 'Instruction-tuned multilingual text embeddings.', source: llamaProfile.source.repository,

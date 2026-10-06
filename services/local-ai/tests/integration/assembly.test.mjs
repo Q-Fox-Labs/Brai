@@ -2,8 +2,13 @@
 // ABOUTME: Фабрики заменяются только в этом тесте; публичный NATS путь проверяет соседний live peer.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { runLocalAiProcess, startLocalAi, validateLocalAiConfig } from '../../src/main.mjs';
-import { validatePeerConfig } from './local-ai-peer.mjs';
+import { runLocalAiProcess, startLocalAi, supportedProfiles, validateLocalAiConfig } from '../../src/main.mjs';
+import {
+  assertArtifactErrorParity, assertEmbeddingResponse, assertTranscriptionResponse,
+  assertEmbeddingOrder, buildLocalAiAcceptancePlan, parseFileUrl, parseUploadUrl,
+  validatePeerConfig, validatePeerMedia,
+} from './local-ai-peer.mjs';
+import { subjects, validateRequest } from '../../contracts/index.mjs';
 import llamaProfile from '../../profiles/llama_cpp.json' with { type: 'json' };
 import gigaProfile from '../../profiles/gigaam_pytorch.json' with { type: 'json' };
 
@@ -72,21 +77,120 @@ test('configuration rejects omitted or unmeasured runtime limits before resource
   assert.throws(() => validateLocalAiConfig({ ...valid, nats: { ...valid.nats, inboxPrefix: '_INBOX' } }), /nats\.inboxPrefix/);
 });
 
+test('supported profile projection preserves pinned manifest and unknown GigaAM audio limit', () => {
+  const projection = supportedProfiles({ runtime: { gigaam_pytorch: { longformMaximumSeconds: null } } });
+  const embedding = projection.find(profile => profile.profileId === llamaProfile.profileId);
+  const transcription = projection.find(profile => profile.profileId === gigaProfile.profileId);
+  assert.equal(embedding.revision, llamaProfile.source.revision);
+  assert.equal(embedding.record.limits.vectorDimensions, llamaProfile.encoding.dimensions);
+  assert.deepEqual(embedding.files.map(file => [file.path, file.bytes, file.sha256]), llamaProfile.source.files.map(file => [file.path, file.bytes, file.sha256]));
+  assert.equal(transcription.revision, gigaProfile.source.revision);
+  assert.equal(transcription.record.limits.maxAudioSeconds, null);
+  const explicit = supportedProfiles({ runtime: { gigaam_pytorch: { longformMaximumSeconds: 37 } } });
+  assert.equal(explicit.find(profile => profile.profileId === gigaProfile.profileId).record.limits.maxAudioSeconds, 37);
+});
+
 test('public peer requires verified isolated fixture endpoint, role, and reply inbox', () => {
   const peer = {
-    verifiedIsolated: true, servers: ['nats://127.0.0.1:19473'], inboxPrefix: '_INBOX.brai_fixture',
-    user: 'fixture', password: 'fixture-secret', token: null, name: 'local-ai-peer-test', timeoutMs: 5000,
-    ownerId: 'a6c6c83e-1234-4b1a-a1e1-9a4b4c7ef371',
-    embeddingModel: { modelId: 'embed', revision: 'a'.repeat(40), profileId: 'llama_cpp' },
-    transcriptionModel: { modelId: 'transcribe', revision: 'b'.repeat(40), profileId: 'gigaam_pytorch' },
-    audioArtifactId: 'c6c6c83e-1234-4b1a-a1e1-9a4b4c7ef371', embeddingTexts: ['synthetic fixture text'],
-    purpose: 'symmetric', searchQuery: 'synthetic fixture',
+    verifiedIsolated: true, phase: 'baseline', servers: ['nats://127.0.0.1:19473'], inboxPrefix: '_INBOX.brai_fixture',
+    user: 'fixture', password: 'fixture-secret', token: null, name: 'local-ai-peer-test',
+    timeoutMs: 6000, maxRequestMs: 5000, overallTimeoutMs: 20000, cleanupTimeoutMs: 2000,
+    outboxPollMs: 100, outboxDrainTimeoutMs: 3000, acceptancePollMs: 100, acceptanceTimeoutMs: 3000,
+    embeddingComparisonTolerance: 0.000001,
+    artifactUploadOrigin: 'http://172.31.247.1:19470/', artifactFilesOrigin: 'http://172.31.247.1:19474/',
+    ownerId: 'a6c6c83e-1234-4b1a-a1e1-9a4b4c7ef371', foreignOwnerId: 'd0c36c8e-7f56-4f32-a338-150cb6a39ef2',
+    embeddingModel: { modelId: llamaProfile.modelId, revision: llamaProfile.source.revision, profileId: llamaProfile.profileId },
+    transcriptionModel: { modelId: gigaProfile.modelId, revision: gigaProfile.source.revision, profileId: gigaProfile.profileId },
+    embeddingTexts: ['synthetic fixture text', 'second synthetic fixture'], purpose: 'symmetric', searchQuery: 'synthetic fixture',
+    shortTranscript: 'короткая синтетическая фраза', longTranscript: 'длинная синтетическая фраза',
+    maxAudioBytes: 1024, cancelAfterMs: null, deadlineAfterMs: null,
+    idleUnloadSeconds: null, idleDisabledObservationMs: null, idlePollMs: null, idleTimeoutMs: null, restartVerified: false, checkpoint: null,
   };
   assert.equal(validatePeerConfig(peer), peer);
   assert.throws(() => validatePeerConfig({ ...peer, verifiedIsolated: false }), /verifiedIsolated/);
   assert.throws(() => validatePeerConfig({ ...peer, servers: ['nats://10.0.0.4:4222'] }), /servers/);
   assert.throws(() => validatePeerConfig({ ...peer, inboxPrefix: '_INBOX' }), /inboxPrefix/);
   assert.throws(() => validatePeerConfig({ ...peer, user: 'local_ai' }), /authentication/);
+  assert.throws(() => validatePeerConfig({ ...peer, artifactUploadOrigin: 'http://127.0.0.1:19470/' }), /artifactUploadOrigin/);
+  assert.throws(() => validatePeerConfig({ ...peer, overallTimeoutMs: null }), /overallTimeoutMs/);
+  assert.throws(() => validatePeerConfig({ ...peer, phase: 'cancel' }), /cancelAfterMs/);
+});
+
+test('acceptance plan names external restart and no-content evidence as pending', () => {
+  const plan = buildLocalAiAcceptancePlan();
+  assert.deepEqual(plan.map(step => step.phase), ['baseline', 'cancel', 'deadline', 'idle', 'pre_restart', 'post_restart']);
+  assert.ok(plan.find(step => step.phase === 'post_restart').requiredEvidence.includes('external-no-content-audit-pending'));
+  assert.ok(plan.find(step => step.phase === 'pre_restart').requiredEvidence.includes('external-own-container-restart-pending'));
+});
+
+test('artifact URL guards normalize pinned slash origins and reject other hosts or paths', () => {
+  const uploadOrigin = 'http://172.31.247.1:19470/';
+  const filesOrigin = 'http://172.31.247.1:19474/';
+  assert.equal(parseUploadUrl('http://172.31.247.1:19470/upload/capability-token', uploadOrigin).pathname, '/upload/capability-token');
+  assert.equal(parseFileUrl('http://172.31.247.1:19474/files/abc123', filesOrigin).pathname, '/files/abc123');
+  assert.throws(() => parseUploadUrl('http://127.0.0.1:19470/upload/capability-token', uploadOrigin), /UPLOAD_URL_REJECTED/);
+  assert.throws(() => parseUploadUrl('http://172.31.247.1:19470/redirect/capability-token', uploadOrigin), /UPLOAD_URL_REJECTED/);
+  assert.throws(() => parseUploadUrl('http://172.31.247.1:19470/upload/capability-token', 'http://attacker.invalid/'), /UPLOAD_URL_REJECTED/);
+  assert.throws(() => parseFileUrl('http://172.31.247.1:19474/redirect/abc123', filesOrigin), /FILE_URL_REJECTED/);
+});
+
+test('configure contract accepts null and maximum integer while rejecting zero', () => {
+  const base = {
+    modelId: llamaProfile.modelId, revision: llamaProfile.source.revision,
+    profileId: llamaProfile.profileId, ownerId: 'a6c6c83e-1234-4b1a-a1e1-9a4b4c7ef371',
+  };
+  assert.equal(validateRequest(subjects.modelsConfigure, { ...base, idleUnloadSeconds: null }), true);
+  assert.equal(validateRequest(subjects.modelsConfigure, { ...base, idleUnloadSeconds: 2_147_483_647 }), true);
+  assert.equal(validateRequest(subjects.modelsConfigure, { ...base, idleUnloadSeconds: 0 }), false);
+});
+
+test('media validation accepts only explicit byte buffers with supported audio MIME', () => {
+  const peer = {
+    verifiedIsolated: true, phase: 'baseline', servers: ['nats://127.0.0.1:19473'], inboxPrefix: '_INBOX.brai_fixture',
+    user: 'fixture', password: 'fixture-secret', token: null, name: 'local-ai-peer-test',
+    timeoutMs: 6000, maxRequestMs: 5000, overallTimeoutMs: 20000, cleanupTimeoutMs: 2000,
+    outboxPollMs: 100, outboxDrainTimeoutMs: 3000, acceptancePollMs: 100, acceptanceTimeoutMs: 3000,
+    embeddingComparisonTolerance: 0.000001,
+    artifactUploadOrigin: 'http://172.31.247.1:19470/', artifactFilesOrigin: 'http://172.31.247.1:19474/',
+    ownerId: 'a6c6c83e-1234-4b1a-a1e1-9a4b4c7ef371', foreignOwnerId: 'd0c36c8e-7f56-4f32-a338-150cb6a39ef2',
+    embeddingModel: { modelId: llamaProfile.modelId, revision: llamaProfile.source.revision, profileId: llamaProfile.profileId },
+    transcriptionModel: { modelId: gigaProfile.modelId, revision: gigaProfile.source.revision, profileId: gigaProfile.profileId },
+    embeddingTexts: ['synthetic fixture text', 'second synthetic fixture'], purpose: 'symmetric', searchQuery: 'synthetic fixture',
+    shortTranscript: 'короткая синтетическая фраза', longTranscript: 'длинная синтетическая фраза',
+    maxAudioBytes: 8, cancelAfterMs: null, deadlineAfterMs: null,
+    idleUnloadSeconds: null, idleDisabledObservationMs: null, idlePollMs: null, idleTimeoutMs: null, restartVerified: false, checkpoint: null,
+  };
+  const bytes = new Uint8Array([1, 2, 3]);
+  assert.deepEqual(validatePeerMedia({ short: { bytes, mimeType: 'audio/wav' }, long: { bytes, mimeType: 'audio/flac' } }, peer).short.bytes, bytes);
+  assert.throws(() => validatePeerMedia({ short: { bytes, mimeType: 'text/plain' }, long: { bytes, mimeType: 'audio/wav' } }, peer), /media\.short\.mimeType/);
+  assert.throws(() => validatePeerMedia({ short: { bytes: new Uint8Array(9), mimeType: 'audio/wav' }, long: { bytes, mimeType: 'audio/wav' } }, peer), /media\.short\.bytes/);
+});
+
+test('peer assertions cover vector identity, finite normalized values, transcript phrase, and uniform artifact errors', () => {
+  const model = { modelId: 'embed', revision: 'a'.repeat(40), profileId: 'llama_cpp' };
+  const request = { requestId: 'a6c6c83e-1234-4b1a-a1e1-9a4b4c7ef371', operationId: 'd0c36c8e-7f56-4f32-a338-150cb6a39ef2', model, texts: ['first', 'second'] };
+  const vectors = [[1, 0], [0, -1]];
+  assert.equal(assertEmbeddingResponse({ requestId: request.requestId, operationId: request.operationId, model, vectors }, request, 2), true);
+  assert.equal(assertEmbeddingOrder(vectors, [[1, 0], [0, -1]], 0.000001), true);
+  assert.throws(() => assertEmbeddingOrder(vectors, [[0, -1], [1, 0]], 0.000001), /EMBED_ORDER/);
+  assert.throws(() => assertEmbeddingOrder(vectors, [[1, 0], [0, -1]], 1), /EMBED_ORDER_UNDISTINGUISHABLE/);
+  assert.throws(() => assertEmbeddingOrder(vectors, [[1, 0], [1, 0]], 0.000001), /EMBED_ORDER_UNDISTINGUISHABLE/);
+  assert.throws(() => assertEmbeddingResponse({ requestId: request.requestId, operationId: request.operationId, model, vectors: [[2, 0], [0, 1]], }, request, 2), /EMBED_NORM/);
+  const transcribeRequest = { requestId: request.requestId, operationId: request.operationId, model: { modelId: 'transcribe', revision: 'b'.repeat(40), profileId: 'gigaam_pytorch' } };
+  assert.equal(assertTranscriptionResponse({ ...transcribeRequest, text: 'Это короткая синтетическая фраза.', segments: [{ startSeconds: 0, endSeconds: 1, text: 'Это короткая синтетическая фраза.' }] }, transcribeRequest, 'короткая синтетическая фраза'), true);
+  assert.throws(() => assertTranscriptionResponse({ ...transcribeRequest, text: '', segments: null }, transcribeRequest, 'expected'), /TRANSCRIPTION_TEXT/);
+  assert.equal(assertArtifactErrorParity([
+    { name: 'wrong-owner', code: 'ARTIFACT_NOT_AVAILABLE', status: '404', message: 'ARTIFACT_NOT_AVAILABLE', retryable: false },
+    { name: 'missing', code: 'ARTIFACT_NOT_AVAILABLE', status: '404', message: 'ARTIFACT_NOT_AVAILABLE', retryable: false },
+    { name: 'pending', code: 'ARTIFACT_NOT_AVAILABLE', status: '404', message: 'ARTIFACT_NOT_AVAILABLE', retryable: false },
+    { name: 'deleted', code: 'ARTIFACT_NOT_AVAILABLE', status: '404', message: 'ARTIFACT_NOT_AVAILABLE', retryable: false },
+  ]), true);
+  assert.throws(() => assertArtifactErrorParity([
+    { name: 'wrong-owner', code: 'ARTIFACT_NOT_AVAILABLE', status: '404', message: 'ARTIFACT_NOT_AVAILABLE', retryable: false },
+    { name: 'missing', code: 'ARTIFACT_NOT_AVAILABLE', status: '404', message: 'ARTIFACT_NOT_AVAILABLE', retryable: false },
+    { name: 'pending', code: 'DEPENDENCY_UNAVAILABLE', status: '503', message: 'DEPENDENCY_UNAVAILABLE', retryable: true },
+    { name: 'deleted', code: 'ARTIFACT_NOT_AVAILABLE', status: '404', message: 'ARTIFACT_NOT_AVAILABLE', retryable: false },
+  ]), /ARTIFACT_ERROR_PARITY/);
 });
 
 test('startup failure closes the database without echoing connection inputs', async () => {
