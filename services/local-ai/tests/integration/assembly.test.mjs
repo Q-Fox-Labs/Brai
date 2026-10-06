@@ -6,7 +6,7 @@ import { runLocalAiProcess, startLocalAi, supportedProfiles, validateLocalAiConf
 import {
   assertArtifactErrorParity, assertEmbeddingResponse, assertTranscriptionResponse,
   assertEmbeddingOrder, buildLocalAiAcceptancePlan, parseFileUrl, parseUploadUrl,
-  validatePeerConfig, validatePeerMedia,
+  connectOwnedNats, drainOwnedNats, runLocalAiPeer, validatePeerConfig, validatePeerMedia,
 } from './local-ai-peer.mjs';
 import { subjects, validateRequest } from '../../contracts/index.mjs';
 import llamaProfile from '../../profiles/llama_cpp.json' with { type: 'json' };
@@ -90,7 +90,7 @@ test('supported profile projection preserves pinned manifest and unknown GigaAM 
   assert.equal(explicit.find(profile => profile.profileId === gigaProfile.profileId).record.limits.maxAudioSeconds, 37);
 });
 
-test('public peer requires verified isolated fixture endpoint, role, and reply inbox', () => {
+test('public peer requires verified isolated fixture endpoint, role, and reply inbox; bounded connect failure receipt is metadata-only', async () => {
   const peer = {
     verifiedIsolated: true, phase: 'baseline', servers: ['nats://127.0.0.1:19473'], inboxPrefix: '_INBOX.brai_fixture',
     user: 'fixture', password: 'fixture-secret', token: null, name: 'local-ai-peer-test',
@@ -114,6 +114,31 @@ test('public peer requires verified isolated fixture endpoint, role, and reply i
   assert.throws(() => validatePeerConfig({ ...peer, artifactUploadOrigin: 'http://127.0.0.1:19470/' }), /artifactUploadOrigin/);
   assert.throws(() => validatePeerConfig({ ...peer, overallTimeoutMs: null }), /overallTimeoutMs/);
   assert.throws(() => validatePeerConfig({ ...peer, phase: 'cancel' }), /cancelAfterMs/);
+  const boundedPeer = { ...peer, timeoutMs: 20, maxRequestMs: 10, overallTimeoutMs: 50, cleanupTimeoutMs: 10 };
+  const media = { short: { bytes: new Uint8Array([1]), mimeType: 'audio/wav' }, long: { bytes: new Uint8Array([2]), mimeType: 'audio/wav' } };
+  await assert.rejects(runLocalAiPeer(boundedPeer, media, { connect: () => new Promise(() => {}) }), error => {
+    assert.equal(error.message, 'LOCAL_AI_PEER_OVERALL_TIMEOUT');
+    assert.deepEqual(Object.keys(error.receipt).sort(), ['artifactIds', 'cleanup', 'eventIds', 'operationIds', 'ownerId', 'phase', 'requestIds', 'runId']);
+    assert.equal(error.receipt.phase, 'baseline');
+    assert.equal(error.receipt.ownerId, boundedPeer.ownerId);
+    for (const key of ['requestIds', 'operationIds', 'artifactIds', 'eventIds']) assert.deepEqual(error.receipt[key], []);
+    return true;
+  });
+  const canary = 'SYNTHETIC_PRIVATE_CANARY';
+  const hostileMessages = [
+    `LOCAL_AI_PEER_SYNTHETIC_SECRET_${canary}`,
+    `LOCAL_AI_PEER_SERVICE_ERROR:CANCELLED_${canary}`,
+    `LOCAL_AI_PEER_SERVICE_ERROR:${'X'.repeat(8192)}`,
+    'LOCAL_AI_PEER_OVERALL_TIMEOUT',
+  ];
+  for (const message of hostileMessages) {
+    await assert.rejects(runLocalAiPeer(boundedPeer, media, { connect: () => Promise.reject(new Error(message)) }), error => {
+      assert.equal(error.message, 'LOCAL_AI_PEER_OPERATION_FAILED');
+      assert.ok(!error.message.includes(canary));
+      assert.ok(!JSON.stringify(error.receipt).includes(canary));
+      return true;
+    });
+  }
 });
 
 test('acceptance plan names external restart and no-content evidence as pending', () => {
@@ -164,6 +189,31 @@ test('media validation accepts only explicit byte buffers with supported audio M
   assert.deepEqual(validatePeerMedia({ short: { bytes, mimeType: 'audio/wav' }, long: { bytes, mimeType: 'audio/flac' } }, peer).short.bytes, bytes);
   assert.throws(() => validatePeerMedia({ short: { bytes, mimeType: 'text/plain' }, long: { bytes, mimeType: 'audio/wav' } }, peer), /media\.short\.mimeType/);
   assert.throws(() => validatePeerMedia({ short: { bytes: new Uint8Array(9), mimeType: 'audio/wav' }, long: { bytes, mimeType: 'audio/wav' } }, peer), /media\.short\.bytes/);
+});
+
+test('bounded NATS connect preserves a winner and closes a late owned result', async () => {
+  let normalClosed = false;
+  const normal = { close() { normalClosed = true; } };
+  assert.equal(await connectOwnedNats(() => Promise.resolve(normal), {}, Date.now() + 100), normal);
+  assert.equal(normalClosed, false);
+
+  let resolveLate;
+  let lateClosed = false;
+  const late = { close() { lateClosed = true; } };
+  const lateConnect = connectOwnedNats(() => new Promise(resolve => { resolveLate = resolve; }), {}, Date.now() + 10);
+  await assert.rejects(lateConnect, /LOCAL_AI_PEER_OVERALL_TIMEOUT/);
+  resolveLate(late);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(lateClosed, true);
+});
+
+test('drain expiry requests synchronous close even when the deadline has elapsed', async () => {
+  let drainCalls = 0;
+  let closeCalls = 0;
+  const owned = { drain() { drainCalls += 1; return new Promise(() => {}); }, close() { closeCalls += 1; } };
+  assert.deepEqual(await drainOwnedNats(owned, Date.now() - 1), { drainCompleted: false, closeRequested: true });
+  assert.equal(drainCalls, 0);
+  assert.equal(closeCalls, 1);
 });
 
 test('peer assertions cover vector identity, finite normalized values, transcript phrase, and uniform artifact errors', () => {

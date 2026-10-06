@@ -25,6 +25,31 @@ const ERROR_STATUS = Object.freeze({
   ARTIFACT_NOT_AVAILABLE: '404', DEPENDENCY_UNAVAILABLE: '503', INSTALLATION_FAILED: '500',
   REVISION_CONFLICT: '409', NOT_SUPPORTED: '400', INTERNAL: '500',
 });
+const TRUSTED_PEER_FAILURES = new Set([
+  'ACCEPTANCE_EVENT_NOT_OBSERVED', 'ARTIFACT_DELETE_FAILED', 'ARTIFACT_DELETE_READBACK_FAILED', 'ARTIFACT_ERROR_PARITY',
+  'ARTIFACT_NOT_OWNED', 'ARTIFACT_PREPARE_INVALID', 'ARTIFACT_READY_INVALID', 'ARTIFACT_REQUEST_FAILED',
+  'ARTIFACT_RESPONSE_INVALID', 'CANCELLED_INVOKE_RETURNED_SUCCESS', 'CANCEL_NOT_ACCEPTED', 'CATALOG_INVALID',
+  'CATALOG_SEARCH_MISSING_PROFILE', 'CLEANUP_FAILED', 'COLD_RESTART_AUTOLOAD', 'CONFIGURE_MISMATCH',
+  'DEADLINE_INVOKE_RETURNED_SUCCESS', 'DUPLICATE_ACCEPTED_EVENT', 'EMBED_COUNT', 'EMBED_IDENTITY', 'EMBED_NORM',
+  'EMBED_ORDER', 'EMBED_ORDER_UNDISTINGUISHABLE', 'EMBED_VECTOR', 'EXPECTED_ERROR_MISSING', 'FILE_URL_REJECTED',
+  'HISTORY_CURSOR_LOOP', 'HISTORY_METADATA_INVALID', 'HISTORY_QUERY_FAILED', 'HISTORY_REPLY_INVALID',
+  'IDLE_UNLOAD_NOT_OBSERVED', 'INVALID_REPLY', 'INVALID_REQUEST', 'INVALID_RESPONSE', 'MALFORMED_ERROR_BODY',
+  'MALFORMED_ERROR_HEADERS', 'MODEL_DIMENSION_MISMATCH', 'MODEL_MISMATCH', 'MODEL_NOT_INSTALLED', 'NOT_READY',
+  'NULL_IDLE_TIMER_UNEXPECTED_UNLOAD', 'OPERATION_FINISHED_BEFORE_CONTROL', 'OUTBOX_DRAIN_TIMEOUT',
+  'OUTBOX_NOT_EMPTY', 'OUTBOX_PERMANENT_FAILURE', 'OUTBOX_STATUS_INVALID', 'OVERALL_TIMEOUT', 'REQUEST_FAILED',
+  'RESTART_CHECKPOINT_EMPTY', 'RESTART_CHECKPOINT_HISTORY_INVALID', 'RESTART_HISTORY_CHANGED',
+  'RESTART_HISTORY_DUPLICATED_OR_MISSING', 'TRANSCRIBE_IDENTITY', 'TRANSCRIPTION_SEGMENTS', 'TRANSCRIPTION_TEXT',
+  'UPLOAD_BODY_NOT_EMPTY', 'UPLOAD_FAILED', 'UPLOAD_REPLY_INVALID', 'UPLOAD_URL_REJECTED',
+  'ZERO_IDLE_REQUEST_FAILED', 'ZERO_IDLE_SCHEMA_ACCEPTED',
+]);
+const PEER_FAILURE_PREFIX = 'LOCAL_AI_PEER_';
+const SERVICE_ERROR_PREFIX = 'SERVICE_ERROR:';
+const MAX_SERVICE_ERROR_CODE_LENGTH = Math.max(...Object.keys(ERROR_STATUS).map(code => code.length));
+const MAX_PEER_FAILURE_CODE_LENGTH = Math.max(
+  ...[...TRUSTED_PEER_FAILURES].map(code => code.length),
+  SERVICE_ERROR_PREFIX.length + MAX_SERVICE_ERROR_CODE_LENGTH,
+);
+const PEER_FAILURE = Symbol('local-ai-peer-failure');
 const PUBLIC_ARTIFACT_SUBJECTS = Object.freeze({
   prepare: 'brai.artifacts.v1.prepare', get: 'brai.artifacts.v1.get', delete: 'brai.artifacts.v1.delete',
 });
@@ -158,7 +183,31 @@ export function buildLocalAiAcceptancePlan() {
   ]);
 }
 
-function safeFailure(code) { throw new Error(`LOCAL_AI_PEER_${code}`); }
+function peerFailureError(code) {
+  const error = new Error(`LOCAL_AI_PEER_${code}`);
+  Object.defineProperty(error, PEER_FAILURE, { value: true });
+  return error;
+}
+function safeFailure(code) {
+  const error = peerFailureError(code);
+  throw error;
+}
+function normalizedFailureCode(error) {
+  try {
+    const marker = error && Object.getOwnPropertyDescriptor(error, PEER_FAILURE);
+    const message = error && Object.getOwnPropertyDescriptor(error, 'message')?.value;
+    if (marker?.value !== true || typeof message !== 'string') return 'OPERATION_FAILED';
+    if (!message.startsWith(PEER_FAILURE_PREFIX)
+      || message.length > PEER_FAILURE_PREFIX.length + MAX_PEER_FAILURE_CODE_LENGTH) return 'OPERATION_FAILED';
+    const code = message.slice(PEER_FAILURE_PREFIX.length);
+    if (TRUSTED_PEER_FAILURES.has(code)) return code;
+    if (code.startsWith(SERVICE_ERROR_PREFIX)) {
+      const serviceCode = code.slice(SERVICE_ERROR_PREFIX.length);
+      if (/^[A-Z][A-Z0-9_]*$/.test(serviceCode) && Object.hasOwn(ERROR_STATUS, serviceCode)) return `SERVICE_ERROR_${serviceCode}`;
+    }
+    return 'OPERATION_FAILED';
+  } catch { return 'OPERATION_FAILED'; }
+}
 function remaining(deadline) { return Math.max(0, deadline - Date.now()); }
 function assertTime(deadline) { if (remaining(deadline) < 1) safeFailure('OVERALL_TIMEOUT'); }
 function decodeMessage(message) {
@@ -187,9 +236,64 @@ async function bounded(promise, deadline) {
   try {
     return await Promise.race([
       Promise.resolve(promise),
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('LOCAL_AI_PEER_OVERALL_TIMEOUT')), left); }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(peerFailureError('OVERALL_TIMEOUT')), left); }),
     ]);
   } finally { if (timer) clearTimeout(timer); }
+}
+
+/** Ограничивает собственный NATS connect общей work deadline; позднюю owned connection закрывает. */
+export async function connectOwnedNats(connectNats, options, deadline) {
+  const attempt = Promise.resolve().then(() => connectNats(options));
+  let finished = false;
+  let won = false;
+  attempt.then(connection => {
+    if (!finished || won) return;
+    try {
+      const closing = connection.close();
+      if (closing && typeof closing.catch === 'function') void closing.catch(() => {});
+    } catch { /* Late owned connection is abandoned. */ }
+  }).catch(() => {});
+  try {
+    const connection = await bounded(attempt, deadline);
+    won = true;
+    return connection;
+  } finally { finished = true; }
+}
+
+/** На timeout/failure вызывает sync close только у принадлежащего peer соединения. */
+export async function drainOwnedNats(nc, deadline) {
+  if (remaining(deadline) < 1) {
+    if (typeof nc.close !== 'function') return { drainCompleted: false, closeRequested: false };
+    try {
+      const closing = nc.close();
+      if (closing && typeof closing.catch === 'function') void closing.catch(() => {});
+      return { drainCompleted: false, closeRequested: true };
+    } catch { return { drainCompleted: false, closeRequested: false }; }
+  }
+  let draining;
+  try {
+    draining = Promise.resolve(nc.drain());
+  } catch {
+    if (typeof nc.close !== 'function') return { drainCompleted: false, closeRequested: false };
+    try {
+      const closing = nc.close();
+      if (closing && typeof closing.catch === 'function') void closing.catch(() => {});
+      return { drainCompleted: false, closeRequested: true };
+    } catch { return { drainCompleted: false, closeRequested: false }; }
+  }
+  draining.catch(() => {});
+  try {
+    await bounded(draining, deadline);
+    return { drainCompleted: true, closeRequested: false };
+  } catch {
+    if (typeof nc.close !== 'function') return { drainCompleted: false, closeRequested: false };
+    try {
+      const closing = nc.close();
+      if (closing && typeof closing.catch === 'function') void closing.catch(() => {});
+      return { drainCompleted: false, closeRequested: true };
+    }
+    catch { return { drainCompleted: false, closeRequested: false }; }
+  }
 }
 
 function assertSelector(actual, expected) {
@@ -294,6 +398,9 @@ export async function runLocalAiPeer(input, mediaInput, dependencies = {}) {
   const runId = config.checkpoint?.runId ?? randomUUID();
   let nc;
   let runtimeSafeForArtifactCleanup = true;
+  let result;
+  let failureCode;
+  let cleanup = { deferredArtifactIds: [], connection: { acquired: false, drainCompleted: null, closeRequested: false } };
 
   const timeout = () => {
     assertTime(workDeadline);
@@ -304,7 +411,7 @@ export async function runLocalAiPeer(input, mediaInput, dependencies = {}) {
     user: config.user, pass: config.password, maxReconnectAttempts: 0, timeout: timeout(),
   };
   try {
-    nc = await connectNats(connectOptions);
+    nc = await connectOwnedNats(connectNats, connectOptions, workDeadline);
     const call = async (subject, value, expectedError = null, requestTimeout = timeout()) => {
       assertTime(workDeadline);
       if (!validateRequest(subject, value)) safeFailure('INVALID_REQUEST');
@@ -546,6 +653,7 @@ export async function runLocalAiPeer(input, mediaInput, dependencies = {}) {
       await deleteArtifact(longId);
       invalidArtifactErrors.push({ name: 'deleted', ...(await assertArtifactError(longId, config.ownerId)) });
       assertArtifactErrorParity(invalidArtifactErrors);
+      await deleteArtifact(pendingId);
       evidence.push('catalog', 'configure-null', 'embedding', 'short-asr', 'long-asr', 'artifact-error-parity');
     } else if (config.phase === 'cancel' || config.phase === 'deadline') {
       const catalog = await getCards();
@@ -662,7 +770,7 @@ export async function runLocalAiPeer(input, mediaInput, dependencies = {}) {
       evidence.push('restart-event-ids-unchanged');
     }
     evidence.push('empty-outbox');
-    return {
+    result = {
       phase: config.phase, verified: evidence,
       runId, ownerId: config.ownerId, requestIds: [...requestIds], operationIds: [...operationIds],
       artifactIds: [...ownedArtifacts.keys()], eventIds: [...eventIds], checkpoint: {
@@ -676,29 +784,47 @@ export async function runLocalAiPeer(input, mediaInput, dependencies = {}) {
       outboxCounts: { ...health.outboxCounts },
       createdArtifactCount: ownedArtifacts.size,
     };
+  } catch (error) {
+    failureCode = normalizedFailureCode(error);
   } finally {
     let cleanupFailed = false;
     const cleanupDeadline = Math.min(deadline, Date.now() + config.cleanupTimeoutMs);
     if (nc) {
-      if (!runtimeSafeForArtifactCleanup) cleanupFailed = true;
-      for (const [artifactId, entry] of runtimeSafeForArtifactCleanup ? ownedArtifacts : []) {
-        try {
-          if (entry.deleted) continue;
-          if (!entry.uploaded) await uploadAudioForCleanup(nc, artifactId, entry, config, fetchImpl, cleanupDeadline);
-          if (remaining(cleanupDeadline) < 1) throw new Error();
-          await natsArtifactCall(nc, PUBLIC_ARTIFACT_SUBJECTS.delete, { requestId: randomUUID(), artifactId }, config, cleanupDeadline);
-        } catch { cleanupFailed = true; }
-      }
-      try { await bounded(nc.drain(), cleanupDeadline); }
-      catch {
-        cleanupFailed = true;
-        if (typeof nc.close === 'function' && remaining(cleanupDeadline) > 0) {
-          try { await bounded(nc.close(), cleanupDeadline); } catch { cleanupFailed = true; }
+      for (const [artifactId, entry] of ownedArtifacts) {
+        if (entry.deleted) continue;
+        if (!runtimeSafeForArtifactCleanup || !entry.uploaded) {
+          cleanupFailed = true;
+          cleanup.deferredArtifactIds.push(artifactId);
+          continue;
         }
+        try {
+          if (remaining(cleanupDeadline) < 1) throw new Error();
+          const deleted = await natsArtifactCall(nc, PUBLIC_ARTIFACT_SUBJECTS.delete, { requestId: randomUUID(), artifactId }, config, cleanupDeadline);
+          if (deleted.status !== 'deleted') throw new Error();
+          const readback = await natsArtifactCall(nc, PUBLIC_ARTIFACT_SUBJECTS.get, { artifactId }, config, cleanupDeadline);
+          if (readback.status !== 'deleted') throw new Error();
+          entry.deleted = true;
+        } catch { cleanupFailed = true; cleanup.deferredArtifactIds.push(artifactId); }
       }
+      const drained = await drainOwnedNats(nc, cleanupDeadline);
+      cleanup.connection = { acquired: true, ...drained };
+      if (!drained.drainCompleted) cleanupFailed = true;
     }
-    if (cleanupFailed) safeFailure('CLEANUP_FAILED');
+    if (cleanupFailed && !failureCode) failureCode = 'CLEANUP_FAILED';
+    cleanup.deferredArtifactIds = [...new Set(cleanup.deferredArtifactIds)];
+    if (result) result.cleanup = { ...cleanup };
   }
+  if (failureCode) {
+    const error = new Error(`LOCAL_AI_PEER_${failureCode}`);
+    error.receipt = {
+      phase: config.phase, runId, ownerId: config.ownerId,
+      requestIds: [...new Set(requestIds)], operationIds: [...new Set(operationIds)],
+      artifactIds: [...ownedArtifacts.keys()], eventIds: [...new Set(eventIds)],
+      cleanup: { ...cleanup },
+    };
+    throw error;
+  }
+  return result;
 }
 
 async function natsArtifactCall(nc, subject, body, config, deadline) {
@@ -707,20 +833,4 @@ async function natsArtifactCall(nc, subject, body, config, deadline) {
   const decoded = decodeMessage(response);
   if (decoded.error) throw new Error('cleanup service error');
   return decoded.value;
-}
-
-async function uploadAudioForCleanup(nc, artifactId, entry, config, fetchImpl, deadline) {
-  if (remaining(deadline) < 1) throw new Error('cleanup deadline');
-  parseUploadUrl(entry.uploadUrl, config.artifactUploadOrigin);
-  const response = await fetchImpl(entry.uploadUrl, {
-    method: 'PUT', redirect: 'manual',
-    headers: { 'content-type': 'application/octet-stream', 'content-length': String(entry.bytes.byteLength) },
-    body: entry.bytes, signal: AbortSignal.timeout(Math.min(config.cleanupTimeoutMs, remaining(deadline))),
-  });
-  if (response.status !== 201 || response.headers.get('x-artifact-id')?.toLowerCase() !== artifactId.toLowerCase()
-    || response.headers.get('x-artifact-state') !== 'ready' || response.headers.get('x-artifact-size') !== String(entry.bytes.byteLength)
-    || response.headers.get('x-artifact-sha256') !== sha256(entry.bytes)) throw new Error('cleanup upload failed');
-  entry.uploaded = true;
-  const ready = await natsArtifactCall(nc, PUBLIC_ARTIFACT_SUBJECTS.get, { artifactId }, config, deadline);
-  if (ready.status !== 'ready') throw new Error('cleanup artifact unavailable');
 }
