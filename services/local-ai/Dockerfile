@@ -26,7 +26,8 @@ COPY --chown=1000:1000 payload/hf-modules-cache/ /var/lib/brai/local-ai/home/hug
 COPY --chown=0:0 payload/SHA256SUMS /opt/brai/local-ai/payload.SHA256SUMS
 COPY --chown=0:0 services/local-ai/release.json /opt/brai/local-ai/release.json
 
-RUN test -n "$BRAI_SOURCE_REVISION" \
+RUN test "$BRAI_LOCAL_AI_BASE" = "ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4" \
+    && test -n "$BRAI_SOURCE_REVISION" \
     && mkdir -p \
       /var/lib/brai/local-ai/home/huggingface/modules \
       /var/lib/brai/local-ai/models \
