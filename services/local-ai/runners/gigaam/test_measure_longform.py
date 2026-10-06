@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import importlib.util
 import io
+import json
 import sys
 import tempfile
 import time
@@ -17,6 +19,10 @@ from unittest.mock import patch
 
 import measure_longform
 import measure_short
+
+NATURAL_FIXTURE_ROOT = Path(
+    "/srv/projects/admin/tmp/local-ai-runtime/natural-long/7447938d791c4f3e643386ee22c33777004293a5"
+)
 
 
 def _fixture(kind: str = "long-pauses") -> measure_longform.Fixture:
@@ -135,6 +141,237 @@ class LongformMeasurementTests(unittest.TestCase):
             ],
         )
 
+    def test_natural_reference_metrics_never_include_text(self) -> None:
+        """Сравнить обе альтернативные версии, возвращая только счётчики и смещения."""
+        fixture = measure_longform.NaturalFixture(
+            Path("/private/long_example.wav"),
+            [
+                {
+                    "label": "v3_ctc",
+                    "normalizedSha256": "a" * 64,
+                    "wordCount": 2,
+                    "tokens": ("утро", "солнце"),
+                    "segments": [
+                        {"startSeconds": 0.5, "endSeconds": 2.0, "wordCount": 2}
+                    ],
+                },
+                {
+                    "label": "v3_e2e_rnnt",
+                    "normalizedSha256": "b" * 64,
+                    "wordCount": 2,
+                    "tokens": ("утро", "дождь"),
+                    "segments": [
+                        {"startSeconds": 0.5, "endSeconds": 2.0, "wordCount": 2}
+                    ],
+                },
+            ],
+            [],
+        )
+        report = measure_longform._natural_result_metrics(
+            {
+                "text": "утро солнце",
+                "segments": [
+                    {"text": "утро солнце", "start_seconds": 0.75, "end_seconds": 2.25}
+                ],
+            },
+            fixture,
+        )
+        self.assertEqual(report["hypothesisWords"], 2)
+        self.assertEqual(
+            [row["wer"]["rate"] for row in report["referenceComparisons"]],
+            [0.0, 0.5],
+        )
+        self.assertEqual(
+            report["actualSegments"],
+            [{"startSeconds": 0.75, "endSeconds": 2.25, "hypothesisWords": 2}],
+        )
+        serialized = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn("утро", serialized)
+        self.assertNotIn("солнце", serialized)
+        self.assertNotIn("дождь", serialized)
+
+    def test_optional_natural_mode_adds_diagnostic_without_changing_default_receipt(self) -> None:
+        """Добавить natural диагностический блок лишь при явном парном input."""
+        class FakeRpcProcess:
+            """Представить JSON-RPC worker без запуска модели."""
+
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+                self.started_at = time.monotonic()
+
+            def call(self, method: str, params: dict[str, str], _request_id: str) -> dict[str, Any]:
+                if method == "health":
+                    return measure_short.EXPECTED_HEALTH
+                if Path(params["audio_path"]).name == "long_example.wav":
+                    return {
+                        "text": "утро солнце",
+                        "segments": [
+                            {"text": "утро солнце", "start_seconds": 0.75, "end_seconds": 2.25}
+                        ],
+                    }
+                return {
+                    "text": "утро солнце",
+                    "segments": [
+                        {"text": "утро солнце", "start_seconds": 0.75, "end_seconds": 2.25}
+                    ],
+                }
+
+            def stop(self) -> dict[str, Any]:
+                return {
+                    "exit_code": 0,
+                    "graceful": True,
+                    "elapsed_ms": 1.0,
+                    "pid_released": True,
+                    "process_group_released": True,
+                    "parent_peak_rss_bytes": 123_456,
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_audio = root / "long-pauses.wav"
+            source_audio.write_bytes(b"fixture")
+            natural_audio = root / "long_example.wav"
+            natural_audio.write_bytes(b"natural")
+            tts_fixture = measure_longform.Fixture(
+                "long-pauses", source_audio, "c" * 64, 1_200_000, 75.0,
+                ("утро", "солнце"), {},
+            )
+            natural_fixture = measure_longform.NaturalFixture(
+                natural_audio,
+                [
+                    {
+                        "label": "v3_ctc",
+                        "normalizedSha256": "a" * 64,
+                        "wordCount": 2,
+                        "tokens": ("утро", "солнце"),
+                        "segments": [],
+                    },
+                    {
+                        "label": "v3_e2e_rnnt",
+                        "normalizedSha256": "b" * 64,
+                        "wordCount": 2,
+                        "tokens": ("утро", "дождь"),
+                        "segments": [],
+                    },
+                ],
+                [{"path": "gigaam/utils.py", "bytes": 14_044, "sha256": "d" * 64}],
+            )
+            common = {
+                "manifest": root / "tts-manifest.json",
+                "fixture_root": root,
+                "total_timeout_seconds": 300.0,
+                "python": sys.executable,
+                "runner": "/runner.py",
+                "model_path": "/models/gigaam",
+                "vad_model_path": "/models/vad",
+            }
+            with (
+                patch.object(measure_longform, "_fixture_set", return_value=[tts_fixture]),
+                patch.object(measure_longform, "_load_natural_fixture", return_value=natural_fixture),
+                patch.object(measure_short, "_launch_command", return_value=[sys.executable]),
+                patch.object(measure_short, "RpcProcess", FakeRpcProcess),
+            ):
+                default = measure_longform._run(SimpleNamespace(**common))
+                optional = measure_longform._run(
+                    SimpleNamespace(
+                        **common,
+                        natural_manifest=root / "natural-manifest.json",
+                        natural_root=root,
+                    )
+                )
+        self.assertNotIn("naturalLongDiagnostic", default)
+        self.assertEqual(default["fixtureScope"], "pinned-synthetic-tts-diagnostic")
+        self.assertEqual(
+            set(default),
+            {
+                "fixtureScope",
+                "qualityStatus",
+                "fixtureManifestSha256",
+                "modelRevision",
+                "vadRevision",
+                "networkIsolated",
+                "threads",
+                "longformMaximumSeconds",
+                "audioDecodeTimeoutSeconds",
+                "process",
+                "fixtures",
+                "temporaryAudioCleaned",
+                "totalElapsedMs",
+            },
+        )
+        natural_report = optional["naturalLongDiagnostic"]
+        self.assertFalse(natural_report["exactGoldForV3E2eCtc"])
+        self.assertEqual(natural_report["qualityStatus"], "diagnostic-only")
+        self.assertEqual(
+            [item["wer"]["rate"] for item in natural_report["referenceComparisons"]],
+            [0.0, 0.5],
+        )
+        self.assertEqual(optional["process"]["parent_peak_rss_bytes"], 123_456)
+
+    def test_pinned_natural_bundle_verifies_without_model_loading(self) -> None:
+        """Проверить настоящий natural bundle по manifest и source pin read-only."""
+        manifest_path = NATURAL_FIXTURE_ROOT / "manifest.json"
+        if not manifest_path.is_file():
+            self.skipTest("prepared pinned natural fixture is unavailable")
+        fixture = measure_longform._load_natural_fixture(
+            manifest_path, NATURAL_FIXTURE_ROOT
+        )
+        self.assertEqual(len(fixture.sources), 2)
+        self.assertEqual(
+            [(item["label"], item["wordCount"], len(item["segments"])) for item in fixture.references],
+            [("v3_ctc", 124, 5), ("v3_e2e_rnnt", 124, 5)],
+        )
+
+    def test_natural_manifest_rejects_bad_digest_provenance_pcm_source_and_schema(self) -> None:
+        """Отклонить изменённые pins даже при пересчитанном manifest hash."""
+        original_path = NATURAL_FIXTURE_ROOT / "manifest.json"
+        if not original_path.is_file():
+            self.skipTest("prepared pinned natural fixture is unavailable")
+        original = json.loads(original_path.read_text(encoding="utf-8"))
+        mutations = (
+            ("provenance", lambda data: data.update(revision="0" * 40)),
+            (
+                "exact_gold_claim",
+                lambda data: data["references"].update(exactGoldForV3E2eCtc=True),
+            ),
+            ("pcm", lambda data: data["audio"]["pcm"].update(frames=1_139_999)),
+            (
+                "source_pin",
+                lambda data: data["sources"][0].update(sha256="0" * 64),
+            ),
+            (
+                "reference_schema",
+                lambda data: data["references"]["labels"]["v3_ctc"]["segments"][0].pop(
+                    "normalizedText"
+                ),
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "manifest.json"
+            for name, mutate in mutations:
+                with self.subTest(case=name):
+                    manifest = copy.deepcopy(original)
+                    mutate(manifest)
+                    manifest_path.write_text(
+                        json.dumps(manifest, ensure_ascii=False), encoding="utf-8"
+                    )
+                    with patch.object(
+                        measure_longform,
+                        "NATURAL_MANIFEST_SHA256",
+                        measure_short._sha256(manifest_path),
+                    ), self.assertRaises(measure_longform.MeasurementError):
+                        measure_longform._load_natural_fixture(
+                            manifest_path, NATURAL_FIXTURE_ROOT
+                        )
+            manifest_path.write_text(
+                json.dumps(original, ensure_ascii=False), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                measure_longform.MeasurementError, "manifest pin mismatch"
+            ):
+                measure_longform._load_natural_fixture(
+                    manifest_path, NATURAL_FIXTURE_ROOT
+                )
+
     def test_arguments_require_network_isolation_and_cap_total_deadline(self) -> None:
         """Требовать network namespace и ограничивать полный срок эксперимента."""
         base = [
@@ -156,9 +393,23 @@ class LongformMeasurementTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 measure_longform._arguments(None)
         with patch("sys.argv", [*base, "--network-isolation"]):
-            self.assertEqual(
-                measure_longform._arguments(None).total_timeout_seconds, 300.0
-            )
+            default_args = measure_longform._arguments(None)
+        self.assertEqual(default_args.total_timeout_seconds, 300.0)
+        self.assertIsNone(default_args.natural_root)
+        self.assertIsNone(default_args.natural_manifest)
+        with patch(
+            "sys.argv",
+            [
+                *base,
+                "--network-isolation",
+                "--natural-root",
+                "/fixtures/natural",
+                "--natural-manifest",
+                "/fixtures/natural/manifest.json",
+            ],
+        ):
+            natural_args = measure_longform._arguments(None)
+        self.assertEqual(natural_args.natural_root, "/fixtures/natural")
 
     def test_runtime_environment_is_offline_keyless_and_uses_four_threads(self) -> None:
         """Передавать runner только локальные cache paths без токена HF."""
