@@ -28,18 +28,19 @@ const json = value => Buffer.from(JSON.stringify(value));
 const config = input.config;
 const ownerId = randomUUID();
 const deadline = () => new Date(Date.now() + config.transport.maxRequestMs - 1000).toISOString();
-let client, peers, local, server;
+let client, peers, local, server, historyService;
 const fixtureDirectories = [];
 let stage = 'initialize';
 let activeProfileId = null;
-const errorMetadata = error => ({ code: safeCode(error), origin: ['nats-client','service'].includes(error?.origin) ? error.origin : 'harness', status: Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599 ? error.status : null });
-const report = { formatVersion: 2, measurement: 'microservice-forwarding-only', status: 'running', identity: input.identity, samples: [], errors: [],
+const errorMetadata = error => ({ code: safeCode(error), origin: ['nats-client','service'].includes(error?.origin) ? error.origin : 'harness', errorStatus: Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599 ? error.status : null });
+const expectedOperations = input.operation === 'transcribe' ? ['transcribe'] : ['embed','transcribe'];
+const report = { formatVersion: 2, measurement: 'microservice-forwarding-only', status: 'running', identity: input.identity, samples: [], errors: [], expectedOperations, expectedSamples: expectedOperations.length * 5,
   methodology: { ingress: 'endpoint-entry-to-engine-handoff-minus-tokenize-model-wait', egress: 'engine-raw-response-to-message-respond-completion',
     replyCompletion: 'local-NATS-publish-return-not-consumer-receipt', embeddingNativeBoundary: 'undici-request-bodySent-to-request-trailers', asrNativeBoundary: 'stdin-write-to-last-raw-stdout-chunk-before-matching-parse', modelWaitMeasuredAsPerformance: false,
     loading: 'prerequisite-not-measured', shortRequestsPerOperation: 5, percentile: 'nearest-rank-exploratory-max-at-n5',
     excludesBrokerLatencyOutsideService: true, peers: 'fixture-artifacts-http-nats-and-history-nats', productionPeerLatencyIncluded: false,
     deadlineGuardMs: 1000, configRequestLimitMs: config.transport.maxRequestMs } };
-const save = () => writeFile(input.output, JSON.stringify(report, null, 2) + '\n');
+const save = () => writeFile(input.output, JSON.stringify(report, null, 2) + '\n', { flush: true });
 
 // AIDEV-NOTE: Raw timestamp chunk берём до framing/parse; ID сверяем тем же original parse.
 JSON.parse = function (...args) {
@@ -159,6 +160,15 @@ function stats(values) {
     p95Ms: sorted.length ? rounded(sorted[Math.ceil(sorted.length * .95)-1]) : null };
 }
 
+/** Не допустить passed при потерянных/невалидных/ошибочных фазовых samples. */
+function forwardingComplete(report) {
+  return report.errors.length === 0 && report.samples.length === report.expectedSamples
+    && report.expectedOperations.every(operation => {
+      const rows = report.samples.filter(row => row.operation === operation);
+      return rows.length === 5 && new Set(rows.map(row => row.round)).size === 5 && rows.every(row => Number.isInteger(row.round) && row.round >= 0 && row.round < 5);
+    }) && report.samples.every(row => row.status === 'passed' && [row.ingressMs,row.egressMs,row.forwardingMs].every(value => Number.isFinite(value) && value >= 0));
+}
+
 try {
   await save();
   const pool = new pg.Pool({ connectionString: config.postgres.connectionString });
@@ -171,18 +181,18 @@ try {
   fixtureDirectories.push(directory);
   fixture.path = join(directory, 'audio.wav'); await writeFile(fixture.path, bytes); fixture.artifactId = randomUUID();
   const hash = createHash('sha256').update(bytes).digest('hex');
-  server = createServer((req, res) => { if (req.url !== '/file' || req.method !== 'GET') { res.writeHead(404).end(); return; } res.writeHead(200, { 'content-length': bytes.length, 'content-type': 'audio/wav' }); res.end(bytes); });
+  server = createServer((req, res) => { if (req.url !== '/files/' + fixture.artifactId || req.method !== 'GET') { res.writeHead(404).end(); return; } res.writeHead(200, { 'content-length': bytes.length, 'content-type': 'audio/wav' }); res.end(bytes); });
   await new Promise(resolve => server.listen(19080, '127.0.0.1', resolve));
-  peers.subscribe('brai.artifacts.v1.get', { callback: (_error, message) => message.respond(json({ artifactId: fixture.artifactId, ownerId, status: 'ready', mimeType: 'audio/wav', sizeBytes: bytes.length, sha256: hash, internalUrl: 'http://127.0.0.1:19080/file' })) });
+  peers.subscribe('brai.artifacts.v1.get', { callback: (_error, message) => message.respond(json({ artifactId: fixture.artifactId, ownerId, status: 'ready', mimeType: 'audio/wav', sizeBytes: bytes.length, sha256: hash, internalUrl: 'http://127.0.0.1:19080/files/' + fixture.artifactId })) });
   peers.subscribe('brai.history.v1.append.local_ai', { callback: (_error, message) => { const body = JSON.parse(Buffer.from(message.data).toString()); message.respond(json({ event: { ...body, source: 'local_ai', recorded_at: new Date().toISOString() } })); } });
-  await peers.services.add({ name: 'service_history', version: '1.0.0' }); await peers.flush();
+  historyService = await peers.services.add({ name: 'service_history', version: '1.0.0' }); await peers.flush();
   stage = 'startup';
   local = await startLocalAi(config, { factories: {
     startLocalAiNats: (nc, options, handlers) => startLocalAiNats(forwardingConnection(nc), options, handlers),
   } });
   // AIDEV-NOTE: SUB readiness barrier на service connection до request с другой connection.
   await local.nc.flush();
-  const profiles = supportedProfiles(config);
+  const profiles = supportedProfiles(config).filter(profile => input.operation !== 'transcribe' || profile.profileId === 'gigaam_pytorch');
   report.identity.models = profiles.map(profile => ({ modelId: profile.modelId, revision: profile.revision, profileId: profile.profileId, files: profile.record.files }));
   for (const profile of profiles) {
     activeProfileId = profile.profileId;
@@ -210,7 +220,7 @@ try {
       } catch (error) { outcome = { status: 'failed', ...errorMetadata(error), ingressMs: null, egressMs: null, forwardingMs: null }; }
       report.samples.push({ operation, round, ...outcome });
       spans.length = 0; await save(); console.log(JSON.stringify({ stage: 'sample', operation, round, ...outcome }));
-      if (outcome.status === 'failed') throw Object.assign(new Error(), { code: outcome.code });
+      if (outcome.status !== 'passed') throw Object.assign(new Error(), { code: outcome.code, origin: outcome.origin, status: outcome.errorStatus });
     }
     stage = 'unload'; await request('models.unload', { ...model, ownerId, deadlineAt: deadline() });
   }
@@ -219,6 +229,7 @@ try {
 finally {
   stage = 'cleanup';
   try { await local?.close(); } catch (error) { report.errors.push({ stage, profileId: activeProfileId, ...errorMetadata(error) }); report.status = 'failed'; }
+  try { await historyService?.stop(); } catch (error) { report.errors.push({ stage, ...errorMetadata(error) }); report.status = 'failed'; }
   const cleanups = await Promise.allSettled([
     Promise.resolve().then(() => client?.drain()), Promise.resolve().then(() => peers?.drain()), server ? new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())) : undefined,
     ...fixtureDirectories.map(directory => Promise.resolve().then(() => rm(directory, { recursive: true, force: true }))),
@@ -226,10 +237,12 @@ finally {
   for (const result of cleanups) if (result.status === 'rejected') { report.errors.push({ stage, code: safeCode(result.reason) }); report.status = 'failed'; }
   for (const [name, listener] of diagnosticHooks) channel(name).unsubscribe(listener);
   pendingRpc.clear(); JSON.parse = originalParse; childProcess.spawn = originalSpawn; syncBuiltinESMExports();
-  report.summaries = ['embed','transcribe'].map(operation => {
+  if (!forwardingComplete(report)) { report.status = 'failed'; if (!report.errors.length) report.errors.push({ stage: 'metrics', code: 'INCOMPLETE_FORWARDING_SAMPLES' }); }
+  report.summaries = expectedOperations.map(operation => {
     const rows = report.samples.filter(row => row.operation === operation && row.status === 'passed');
     return { operation, ingress: stats(rows.map(row => row.ingressMs)), egress: stats(rows.map(row => row.egressMs)), forwarding: stats(rows.map(row => row.forwardingMs)) };
   });
   await save(); console.log(JSON.stringify({ stage: 'report', status: report.status, errors: report.errors, summaries: report.summaries }));
-  process.exitCode = report.status === 'passed' ? 0 : 2;
+  // AIDEV-NOTE: Own process exit не заменяет Ansible cleanup/verify и product SIGTERM acceptance.
+  process.exit(report.status === 'passed' ? 0 : 2);
 }
