@@ -10,7 +10,7 @@ import json
 import re
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 class LongformUnavailable(RuntimeError):
@@ -168,16 +168,23 @@ def _vad_namespace(model: Any) -> dict[str, Any]:
 
 
 def transcribe_longform(
-    model: Any, audio_path: Path, source_duration: float
+    model: Any,
+    audio_path: Path,
+    source_duration: float,
+    diagnostic_stage: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Распознать upstream VAD-сегменты и вернуть смещения в секундах от начала записи.
 
     HF-модель возвращает записи `{transcription, boundaries}`. В ответе API поля
     `start_seconds` и `end_seconds` содержат исходные границы VAD без пересчёта.
     """
+    if diagnostic_stage is not None:
+        diagnostic_stage("longform_upstream")
     operation = getattr(model, "transcribe_longform", None)
     if not callable(operation):
         raise LongformUnavailable("закреплённая модель не поддерживает longform")
+    if diagnostic_stage is not None:
+        diagnostic_stage("longform_normalize")
     if (
         isinstance(source_duration, bool)
         or not isinstance(source_duration, (int, float))
@@ -186,7 +193,11 @@ def transcribe_longform(
     ):
         raise InvalidLongformResult("длительность аудио некорректна")
 
+    if diagnostic_stage is not None:
+        diagnostic_stage("longform_upstream")
     upstream_segments = operation(str(audio_path))
+    if diagnostic_stage is not None:
+        diagnostic_stage("longform_normalize")
     if not isinstance(upstream_segments, list):
         raise InvalidLongformResult("результат upstream longform некорректен")
 

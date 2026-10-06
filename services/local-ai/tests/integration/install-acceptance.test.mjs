@@ -16,6 +16,7 @@ import {
   assertInstallDatabaseIdentity,
   installAcceptanceCaseDirectories,
   isNativeEnospcWitness,
+  readAcceptanceStoreRows,
   readInstallAcceptanceConfig,
   withNativeEnospcWitness,
 } from './install-acceptance-helper.mjs';
@@ -373,8 +374,7 @@ async function assertPhaseDatabaseState(pool, store, profile, config) {
 }
 
 async function readAcceptanceState(pool, store, profile, ownerId) {
-  const models = await store.transaction(tx => tx.models.list());
-  const installations = await store.transaction(tx => tx.installations.list());
+  const { models, installations } = await readAcceptanceStoreRows(store);
   const operationResult = await pool.query('SELECT operation_id,owner_id,model_id,record FROM local_ai.installation_operations ORDER BY operation_id');
   const settingsResult = await pool.query('SELECT count(*)::bigint AS count FROM local_ai.settings');
   const eventResult = await pool.query('SELECT event FROM local_ai.outbox ORDER BY event_id');

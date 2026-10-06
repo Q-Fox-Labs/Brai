@@ -137,6 +137,48 @@ def copy_tree(source: Path, destination: Path, rows: list[dict[str, object]], *,
     return omitted
 
 
+def preflight_omitted_vendor_assets(site_source: Path) -> list[dict[str, object]]:
+    root = site_source.resolve(strict=True)
+    expected_scipy = {
+        path.removeprefix("scipy/io/tests/data/")
+        for path in OMITTED_VENDOR_ASSETS
+        if path.startswith("scipy/io/tests/data/")
+    }
+    actual_scipy = {path.name for path in (root / "scipy/io/tests/data").glob("*.wav")}
+    if actual_scipy != expected_scipy:
+        raise ValueError("SciPy test audio paths differ from the exact exclusion inventory")
+    records: list[dict[str, object]] = []
+    for relative in sorted(OMITTED_VENDOR_ASSETS):
+        path = root / relative
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"declared omitted Python vendor asset is absent or not regular: {relative}")
+        records.append({
+            "path": f"{SITE_PACKAGES}/{relative}",
+            "bytes": path.stat().st_size,
+            "sha256": sha256(path),
+        })
+    if len({row["path"] for row in records}) != len(OMITTED_VENDOR_ASSETS):
+        raise ValueError("omitted vendor asset inventory contains duplicate paths")
+    return records
+
+
+def verify_omitted_vendor_copy(preflight: list[dict[str, object]], copied: list[dict[str, object]]) -> list[dict[str, object]]:
+    copied_by_relative_path = {row["path"]: row for row in copied}
+    if len(copied_by_relative_path) != len(copied):
+        raise ValueError("copy traversal recorded duplicate omitted vendor paths")
+    normalized = {
+        f"{SITE_PACKAGES}/{relative}": row
+        for relative, row in copied_by_relative_path.items()
+    }
+    if set(normalized) != {row["path"] for row in preflight}:
+        raise ValueError("copy traversal omitted asset paths differ from the preflight inventory")
+    for expected in preflight:
+        copied_row = normalized[expected["path"]]
+        if copied_row["bytes"] != expected["bytes"] or copied_row["sha256"] != expected["sha256"]:
+            raise ValueError(f"omitted vendor asset changed after preflight: {expected['path']}")
+    return preflight
+
+
 def ldd_closure(
     elf_files: list[Path],
     runtime_root: Path,
@@ -318,6 +360,14 @@ def main() -> int:
     python_distributions = verify_python_closure(venv / "bin/python", args.requirements_lock)
     if "2.39" not in run(["/usr/bin/ldd", "--version"]).splitlines()[0]:
         raise ValueError("source host does not expose the required glibc 2.39 ABI")
+    site_source = venv / "lib/python3.12/site-packages"
+    for relative, (expected_size, expected_sha) in VENDOR_DATA.items():
+        vendor_file = site_source / Path(relative).relative_to(SITE_PACKAGES)
+        if not vendor_file.is_file() or vendor_file.is_symlink() or vendor_file.stat().st_size != expected_size or sha256(vendor_file) != expected_sha:
+            raise ValueError(f"allowlisted Python vendor data does not match its exact hash/size pin: {relative}")
+    omitted_preflight = preflight_omitted_vendor_assets(site_source)
+    active_torchcodec_preflight, inactive_torchcodec_preflight = select_torchcodec_elfs(site_source / "torchcodec")
+    vendor_data = [{"path": path, "bytes": size, "sha256": digest} for path, (size, digest) in sorted(VENDOR_DATA.items())]
 
     output_parent = out.parent
     output_parent.mkdir(parents=True, exist_ok=True)
@@ -344,25 +394,14 @@ def main() -> int:
         (py_dest / "pyvenv.cfg").write_text("home = /opt/brai/local-ai/runtime/python/bin\ninclude-system-site-packages = false\nversion = 3.12.3\n", encoding="utf-8")
         (py_dest / "pyvenv.cfg").chmod(0o444)
         rows.append({"source": "generated:pyvenv.cfg", "destination": (py_dest / "pyvenv.cfg").as_posix(), "bytes": (py_dest / "pyvenv.cfg").stat().st_size, "sha256": sha256(py_dest / "pyvenv.cfg"), "mode": "0444"})
-        site_source = venv / "lib/python3.12/site-packages"
-        for relative, (expected_size, expected_sha) in VENDOR_DATA.items():
-            vendor_file = site_source / Path(relative).relative_to(SITE_PACKAGES)
-            if not vendor_file.is_file() or vendor_file.is_symlink() or vendor_file.stat().st_size != expected_size or sha256(vendor_file) != expected_sha:
-                raise ValueError(f"allowlisted Python vendor data does not match its exact hash/size pin: {relative}")
-        omitted_expected = {key.removeprefix("scipy/io/tests/data/") for key in OMITTED_VENDOR_ASSETS if key.startswith("scipy/io/tests/data/")}
-        scipy_wavs = {path.name for path in (site_source / "scipy/io/tests/data").glob("*.wav")}
-        if scipy_wavs != omitted_expected:
-            raise ValueError("SciPy test audio set differs from the exact excluded input list")
-        omitted = copy_tree(
+        omitted_copy = copy_tree(
             site_source,
             py_dest / "lib/python3.12/site-packages",
             rows,
             omit={"__pycache__", ".pytest_cache", "pip", "pip*"},
             omit_exact=set(OMITTED_VENDOR_ASSETS),
         )
-        if {f"{SITE_PACKAGES}/{row['path']}" for row in omitted} != set(OMITTED_VENDOR_ASSETS):
-            raise ValueError("an explicitly excluded Python vendor asset is missing")
-        vendor_data = [{"path": path, "bytes": size, "sha256": digest} for path, (size, digest) in sorted(VENDOR_DATA.items())]
+        omitted = verify_omitted_vendor_copy(omitted_preflight, omitted_copy)
 
         python_lib = runtime / "python/lib/python3.12"
         copy_tree(python_base / "lib/python3.12", python_lib, rows, omit={"__pycache__", "test", "tests"})
@@ -411,6 +450,8 @@ def main() -> int:
         elf_sources: list[Path] = [node_dest, py_dest / "bin/python", args.ffmpeg.resolve(strict=True), args.ffprobe.resolve(strict=True)]
         torchcodec_root = py_dest / "lib/python3.12/site-packages/torchcodec"
         active_torchcodec, inactive_torchcodec = select_torchcodec_elfs(torchcodec_root)
+        if [path.name for path in active_torchcodec] != [path.name for path in active_torchcodec_preflight] or [path.name for path in inactive_torchcodec] != [path.name for path in inactive_torchcodec_preflight]:
+            raise ValueError("TorchCodec ABI files changed between preflight and copy")
         elf_sources.extend(
             path for path in (py_dest / "lib/python3.12/site-packages").rglob("*")
             if path.is_file() and is_elf(path) and not path.is_relative_to(torchcodec_root)

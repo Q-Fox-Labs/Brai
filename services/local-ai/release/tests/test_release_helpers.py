@@ -101,6 +101,24 @@ class ReleaseHelperTests(unittest.TestCase):
         with patch.object(runtime, "run", return_value=installed):
             self.assertEqual(runtime.verify_python_closure(Path("/fixture/python"), lock), locked)
 
+    def test_vendor_exclusion_preflight_and_copy_paths_use_same_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            site_packages = Path(temp)
+            copied = []
+            for relative in sorted(runtime.OMITTED_VENDOR_ASSETS):
+                source = site_packages / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_bytes(relative.encode())
+                copied.append({"path": relative, "bytes": source.stat().st_size, "sha256": sha(source)})
+            preflight = runtime.preflight_omitted_vendor_assets(site_packages)
+            self.assertEqual(len(preflight), 27)
+            checked = runtime.verify_omitted_vendor_copy(preflight, copied)
+            self.assertEqual({row["path"] for row in checked}, {
+                f"{runtime.SITE_PACKAGES}/{path}" for path in runtime.OMITTED_VENDOR_ASSETS
+            })
+            with self.assertRaisesRegex(ValueError, "paths differ"):
+                runtime.verify_omitted_vendor_copy(preflight, copied[:-1])
+
     def test_ldd_closure_copies_external_needed_library_by_soname(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

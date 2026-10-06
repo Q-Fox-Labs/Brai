@@ -58,6 +58,16 @@ export function assertFreshInstallNamespace(counts) {
   }
 }
 
+/** Читает строки каталога через фактический контракт LocalAiTx с обязательными пустыми фильтрами.
+ * @param {{transaction: (run: (tx: {models: {list: (filter: {}) => Promise<unknown[]>}, installations: {list: (filter: {}) => Promise<unknown[]>}}) => Promise<unknown[]>) => Promise<unknown[]>}} store
+ * @returns {Promise<{models: unknown[], installations: unknown[]}>}
+ */
+export async function readAcceptanceStoreRows(store) {
+  const models = await store.transaction(tx => tx.models.list({}));
+  const installations = await store.transaction(tx => tx.installations.list({}));
+  return { models, installations };
+}
+
 /** Проверяет настоящую ошибку ENOSPC, увиденную при FileHandle.writeFile. @param {NativeWriteWitness} witness */
 export function isNativeEnospcWitness(witness) {
   return witness?.code === 'ENOSPC' && Number.isInteger(witness.errno) && witness.syscall === 'write';

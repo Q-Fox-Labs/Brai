@@ -15,6 +15,7 @@ class RpcFault(Exception):
 
     code: int
     message: str
+    data: dict[str, Any] | None = None
 
 
 Method = Callable[[dict[str, Any]], dict[str, Any]]
@@ -27,6 +28,14 @@ def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
         "id": request_id,
         "error": {"code": code, "message": message},
     }
+
+
+def _fault_error(request_id: Any, fault: RpcFault) -> dict[str, Any]:
+    """Собрать RPC-ошибку и включить дополнительные данные только по запросу метода."""
+    response = _error(request_id, fault.code, fault.message)
+    if fault.data is not None:
+        response["error"]["data"] = fault.data
+    return response
 
 
 def _success(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -71,7 +80,7 @@ def _handle_request(value: Any, methods: dict[str, Method]) -> dict[str, Any] | 
         if not isinstance(result, dict):
             raise TypeError("RPC methods must return objects")
     except RpcFault as fault:
-        return None if notification else _error(request_id, fault.code, fault.message)
+        return None if notification else _fault_error(request_id, fault)
     except Exception:
         return None if notification else _error(request_id, -32603, "Internal error")
 

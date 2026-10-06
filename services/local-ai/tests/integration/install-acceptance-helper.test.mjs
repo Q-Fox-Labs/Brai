@@ -12,6 +12,7 @@ import {
   assertInstallDatabaseIdentity,
   installAcceptanceCaseDirectories,
   isNativeEnospcWitness,
+  readAcceptanceStoreRows,
   readInstallAcceptanceConfig,
   withNativeEnospcWitness,
 } from './install-acceptance-helper.mjs';
@@ -49,6 +50,22 @@ test('database identity and empty namespace guards reject before any mutation', 
   assert.throws(() => assertInstallDatabaseIdentity({ database: 'brai', role: 'laa_install_app' }), /identity mismatch/);
   assertFreshInstallNamespace({ models: 0, installations: 0, operations: 0, settings: 0, outbox: 0 });
   assert.throws(() => assertFreshInstallNamespace({ models: 1, installations: 0, operations: 0, settings: 0, outbox: 0 }), /not empty/);
+});
+
+test('acceptance state reader supplies required empty filters to both real-store list methods', async () => {
+  const calls = [];
+  const models = [{ modelId: 'fixture-model' }];
+  const installations = [{ modelId: 'fixture-model', revision: 'a'.repeat(40) }];
+  const store = {
+    async transaction(run) {
+      return run({
+        models: { async list(filter) { assert.deepEqual(filter, {}); calls.push('models'); return models; } },
+        installations: { async list(filter) { assert.deepEqual(filter, {}); calls.push('installations'); return installations; } },
+      });
+    },
+  };
+  assert.deepEqual(await readAcceptanceStoreRows(store), { models, installations });
+  assert.deepEqual(calls, ['models', 'installations']);
 });
 
 test('native write observer forwards an ordinary write and restores fs.promises.open', async t => {

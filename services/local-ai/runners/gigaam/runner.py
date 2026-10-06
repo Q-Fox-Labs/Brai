@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -18,18 +19,29 @@ from typing import Any
 
 from prepare import verify_snapshot
 from rpc import Method, RpcFault, process_line
-from longform import LongformUnavailable, configure_local_vad, transcribe_longform
+from longform import (
+    InvalidLongformResult,
+    LongformUnavailable,
+    configure_local_vad,
+    transcribe_longform,
+)
 
 
 MODEL_ID = "gigaam-v3-e2e-ctc"
 MODEL_REVISION = "cec030b4c4f35d928e4a9044a3bdb29ebd499fac"
 MAX_AUDIO_SECONDS = 25.0
+PINNED_MODEL_SOURCE_SHA256 = "269be43b635b1e510115baa2a843c5cbaa052e8adf0be30dc133a2ba5b5f2d86"
 ALLOWED_AUDIO_FORMATS = "wav,flac,mp3,ogg"
 DECODE_SAMPLE_RATE = 16_000
 DECODE_CHANNELS = 1
 DECODE_SAMPLE_BYTES = 2
 DECODE_HEADER_BYTES = 4096
 REQUIRED_FILES = ("config.json", "modeling_gigaam.py", "pytorch_model.bin", "tokenizer.model")
+_RUNNER_SOURCE = Path(__file__).resolve()
+_LONGFORM_SOURCE = Path(__file__).with_name("longform.py").resolve()
+_DIAGNOSTIC_FRAME_LIMIT = 8
+_DIAGNOSTIC_CAUSE_LIMIT = 3
+_DIAGNOSTIC_LINE_LIMIT = 1_000_000
 
 
 def _arguments(argv: list[str] | None) -> argparse.Namespace:
@@ -40,10 +52,16 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--longform-max-seconds", type=float, required=True)
     parser.add_argument("--audio-decode-timeout-seconds", type=float, required=True)
     parser.add_argument("--threads", type=int, required=True)
+    parser.add_argument("--private-diagnostics", action="store_true")
     parser.add_argument("--help", action="store_true")
     args, unknown = parser.parse_known_args(argv)
     if args.help:
-        print("Usage: runner.py --model-path ABSOLUTE_DIR --vad-model-path ABSOLUTE_DIR --longform-max-seconds N --audio-decode-timeout-seconds N --threads N", file=sys.stderr)
+        print(
+            "Usage: runner.py --model-path ABSOLUTE_DIR --vad-model-path ABSOLUTE_DIR "
+            "--longform-max-seconds N --audio-decode-timeout-seconds N --threads N "
+            "[--private-diagnostics]",
+            file=sys.stderr,
+        )
         raise SystemExit(0)
     if (
         unknown
@@ -95,6 +113,124 @@ def _load_model(model_path: Path, threads: int) -> Any:
     if not callable(getattr(model, "transcribe", None)):
         raise RuntimeError("pinned model has no transcribe operation")
     return model
+
+
+def _pinned_model_source(model: Any) -> Path | None:
+    """Разрешить кадры модели только из файла с хешем закреплённого snapshot."""
+    operation = getattr(model, "transcribe", None)
+    function = getattr(operation, "__func__", operation)
+    code = getattr(function, "__code__", None)
+    if code is None:
+        return None
+    try:
+        source = Path(code.co_filename).resolve(strict=True)
+        if (
+            source.name != "modeling_gigaam.py"
+            or source.is_symlink()
+            or not source.is_file()
+            or source.stat().st_size > 2_000_000
+        ):
+            return None
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    return source if digest == PINNED_MODEL_SOURCE_SHA256 else None
+
+
+def _diagnostic_component(filename: str, model_source: Path | None) -> str | None:
+    """Сопоставить точный источник стека одному из фиксированных имён."""
+    try:
+        source = Path(filename).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if source == _RUNNER_SOURCE:
+        return "runner"
+    if source == _LONGFORM_SOURCE:
+        return "longform"
+    if model_source is not None and source == model_source:
+        return "pinned_model"
+    return None
+
+
+def _diagnostic_class(exception: BaseException) -> str:
+    """Возвратить только один из явно разрешённых классов ошибки."""
+    safe_classes = (
+        (LongformUnavailable, "LongformUnavailable"),
+        (InvalidLongformResult, "InvalidLongformResult"),
+        (AttributeError, "AttributeError"),
+        (KeyError, "KeyError"),
+        (ImportError, "ImportError"),
+        (ValueError, "ValueError"),
+        (TypeError, "TypeError"),
+        (TimeoutError, "TimeoutError"),
+        (subprocess.TimeoutExpired, "TimeoutExpired"),
+        (subprocess.CalledProcessError, "CalledProcessError"),
+        (OSError, "OSError"),
+        (RuntimeError, "RuntimeError"),
+        (RpcFault, "RpcFault"),
+    )
+    for exception_type, label in safe_classes:
+        if isinstance(exception, exception_type):
+            return label
+    return "OtherError"
+
+
+def _diagnostic_data(
+    stage: str, exception: BaseException, model_source: Path | None
+) -> dict[str, Any]:
+    """Собрать ограниченные имена и номера строк без сообщений и локальных данных."""
+    allowed_stages = {
+        "audio_probe",
+        "audio_decode",
+        "short_transcribe",
+        "longform_upstream",
+        "longform_normalize",
+        "result_normalize",
+    }
+    if stage not in allowed_stages:
+        stage = "audio_probe"
+    frames: list[dict[str, int | str]] = []
+    current: BaseException | None = exception
+    for _ in range(_DIAGNOSTIC_CAUSE_LIMIT):
+        if current is None:
+            break
+        traceback = current.__traceback__
+        while traceback is not None and len(frames) < _DIAGNOSTIC_FRAME_LIMIT:
+            component = _diagnostic_component(
+                traceback.tb_frame.f_code.co_filename, model_source
+            )
+            line = traceback.tb_lineno
+            if component is not None and 0 < line <= _DIAGNOSTIC_LINE_LIMIT:
+                frames.append({"component": component, "line": line})
+            traceback = traceback.tb_next
+        next_exception = current.__cause__
+        if next_exception is None and not current.__suppress_context__:
+            next_exception = current.__context__
+        current = next_exception
+    return {
+        "diagnostic": {
+            "stage": stage,
+            "errorClass": _diagnostic_class(exception),
+            "frames": frames,
+        }
+    }
+
+
+def _annotate_fault(
+    fault: RpcFault,
+    exception: BaseException,
+    stage: str,
+    private_diagnostics: bool,
+    model_source: Path | None,
+) -> RpcFault:
+    """Сохранить обычный fault и добавить безопасные данные только в private режиме."""
+    if not private_diagnostics:
+        return fault
+    return RpcFault(
+        fault.code,
+        fault.message,
+        _diagnostic_data(stage, exception, model_source),
+    )
 
 
 def _audio_duration(path: Path, maximum_seconds: float) -> float:
@@ -243,6 +379,8 @@ def _transcribe(
     model: Any,
     longform_max_seconds: float,
     audio_decode_timeout_seconds: float,
+    private_diagnostics: bool = False,
+    model_source: Path | None = None,
 ) -> dict[str, Any]:
     """Распознать запись короткой моделью или VAD longform по её длительности."""
     if set(params) != {"audio_path"} or not isinstance(params["audio_path"], str):
@@ -256,7 +394,19 @@ def _transcribe(
         raise RpcFault(-32001, "Audio file is unavailable or invalid") from exc
     if not path.is_file():
         raise RpcFault(-32001, "Audio file is unavailable or invalid")
-    duration = _audio_duration(path, longform_max_seconds)
+    try:
+        duration = _audio_duration(path, longform_max_seconds)
+    except RpcFault as fault:
+        cause = fault.__cause__ or fault
+        raise _annotate_fault(
+            fault, cause, "audio_probe", private_diagnostics, model_source
+        ) from fault.__cause__
+    stage = "audio_decode"
+
+    def record_stage(value: str) -> None:
+        nonlocal stage
+        stage = value
+
     try:
         with TemporaryDirectory(prefix=".brai-audio-", dir=path.parent) as temp_dir:
             normalized_path = Path(temp_dir) / "audio.wav"
@@ -267,16 +417,63 @@ def _transcribe(
                 audio_decode_timeout_seconds,
             )
             if duration > MAX_AUDIO_SECONDS:
-                return transcribe_longform(model, normalized_path, duration)
+                stage = "longform_upstream"
+                try:
+                    if private_diagnostics:
+                        result = transcribe_longform(
+                            model,
+                            normalized_path,
+                            duration,
+                            diagnostic_stage=record_stage,
+                        )
+                    else:
+                        result = transcribe_longform(model, normalized_path, duration)
+                except LongformUnavailable as exc:
+                    fault = RpcFault(-32603, "Longform is unavailable")
+                    raise _annotate_fault(
+                        fault, exc, stage, private_diagnostics, model_source
+                    ) from exc
+                except InvalidLongformResult as exc:
+                    fault = RpcFault(-32603, "Inference failed")
+                    raise _annotate_fault(
+                        fault,
+                        exc,
+                        "longform_normalize",
+                        private_diagnostics,
+                        model_source,
+                    ) from exc
+                except Exception as exc:
+                    fault = RpcFault(-32603, "Inference failed")
+                    raise _annotate_fault(
+                        fault, exc, stage, private_diagnostics, model_source
+                    ) from exc
+                return result
+            stage = "short_transcribe"
             text = model.transcribe(str(normalized_path))
     except LongformUnavailable as exc:
-        raise RpcFault(-32603, "Longform is unavailable") from exc
-    except RpcFault:
-        raise
+        fault = RpcFault(-32603, "Longform is unavailable")
+        raise _annotate_fault(
+            fault, exc, stage, private_diagnostics, model_source
+        ) from exc
+    except RpcFault as fault:
+        cause = fault.__cause__ or fault
+        raise _annotate_fault(
+            fault, cause, stage, private_diagnostics, model_source
+        ) from fault.__cause__
     except Exception as exc:
-        raise RpcFault(-32603, "Inference failed") from exc
+        fault = RpcFault(-32603, "Inference failed")
+        raise _annotate_fault(
+            fault, exc, stage, private_diagnostics, model_source
+        ) from exc
     if not isinstance(text, str):
-        raise RpcFault(-32603, "Inference failed")
+        fault = RpcFault(-32603, "Inference failed")
+        raise _annotate_fault(
+            fault,
+            TypeError("short transcription result must be text"),
+            "result_normalize",
+            private_diagnostics,
+            model_source,
+        )
     return {"text": text}
 
 
@@ -285,12 +482,19 @@ def _methods(
     vad_revision: str,
     longform_max_seconds: float,
     audio_decode_timeout_seconds: float,
+    private_diagnostics: bool = False,
+    model_source: Path | None = None,
 ) -> dict[str, Method]:
     """Связать RPC-методы с экземпляром модели, принадлежащим процессу."""
     return {
         "health": lambda params: _health(params, vad_revision=vad_revision),
         "transcribe": lambda params: _transcribe(
-            params, model, longform_max_seconds, audio_decode_timeout_seconds
+            params,
+            model,
+            longform_max_seconds,
+            audio_decode_timeout_seconds,
+            private_diagnostics,
+            model_source,
         ),
     }
 
@@ -300,10 +504,17 @@ def _serve(
     vad_revision: str,
     longform_max_seconds: float,
     audio_decode_timeout_seconds: float,
+    private_diagnostics: bool = False,
+    model_source: Path | None = None,
 ) -> int:
     """Читать UTF-8 JSON-документы и писать только ответы JSON-RPC."""
     methods = _methods(
-        model, vad_revision, longform_max_seconds, audio_decode_timeout_seconds
+        model,
+        vad_revision,
+        longform_max_seconds,
+        audio_decode_timeout_seconds,
+        private_diagnostics,
+        model_source,
     )
     rpc_stdout = sys.stdout.buffer
     for line in sys.stdin.buffer:
@@ -346,6 +557,8 @@ def main(argv: list[str] | None = None) -> int:
             vad_revision,
             args.longform_max_seconds,
             args.audio_decode_timeout_seconds,
+            args.private_diagnostics,
+            _pinned_model_source(model) if args.private_diagnostics else None,
         )
     finally:
         del model
