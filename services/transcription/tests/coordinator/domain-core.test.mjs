@@ -183,7 +183,7 @@ test('default model selection pins the full policy selector and snapshot hash', 
     assert.fail(`unexpected helper method ${method}`);
   }, { localCatalog: { list: async () => [
     { selector: alternate, supported: true, installed: true, ready: true },
-    { selector, supported: true, installed: true, ready: true },
+    { selector, supported: true, installed: true, ready: false },
   ] } });
   const core = createCoordinator({ ports, config: config() });
   const result = await core.invoke('request.submit', {
@@ -191,6 +191,102 @@ test('default model selection pins the full policy selector and snapshot hash', 
   }, principal);
   assert.equal(result.request.taskState, 'accepted');
   assert.deepEqual(acceptedRequest.selectedModel, selector);
+});
+
+test('an installed cold model remains not-ready publicly but is eligible for pinned execution', async () => {
+  let current = request({ selectedModel: null });
+  let localCalls = 0;
+  const coldModel = { selector, supported: true, installed: true, ready: false };
+  const settings = { defaultLocalModel: null, allowReplacement: false, policyVersion: 1 };
+  const ports = basePorts(async (method, params) => {
+    if (method === 'request.lookup') return { request: null };
+    if (method === 'settings.get') return { settings, revision: 1 };
+    if (method === 'request.accept') {
+      assert.deepEqual(params.selectedModel, selector);
+      current = request({ ...current, taskState: 'accepted', selectedModel: params.selectedModel });
+      return { created: true, request: current };
+    }
+    if (method === 'request.claim') return { claimToken: ids.claim, fenceGeneration: 1, revision: current.revision, leaseExpiresAt: '2026-10-05T22:00:00Z', request: current };
+    if (method === 'attempt.start') {
+      current = request({ ...current, taskState: 'dispatching', revision: 2, currentAttemptId: params.attemptId, fenceGeneration: 1 });
+      return { created: true, request: current, attempt: attemptRecord('dispatching', { attemptId: params.attemptId }) };
+    }
+    if (method === 'attempt.markRunning') {
+      current = request({ ...current, taskState: 'running', revision: 3, currentAttemptId: params.attemptId, fenceGeneration: 1 });
+      return { request: current, attempt: attemptRecord('running', { attemptId: params.attemptId }) };
+    }
+    if (method === 'attempt.finish') {
+      current = request({ ...current, taskState: params.outcome, resultState: params.resultState, revision: 4,
+        currentAttemptId: params.attemptId, fenceGeneration: params.fenceGeneration,
+        actualModel: params.actualModel, resultExpiresAt: params.resultExpiresAt,
+        bufferOwnerInstanceId: params.bufferOwnerInstanceId, errorCode: params.errorCode });
+      return { request: current, attempt: attemptRecord(params.outcome, { attemptId: params.attemptId, actualModel: params.actualModel, errorCode: params.errorCode }) };
+    }
+    assert.fail(`unexpected helper method ${method}`);
+  }, {
+    localCatalog: { list: async () => [coldModel] },
+    local: { call: async (method, params) => {
+      localCalls += 1;
+      assert.equal(method, 'execute');
+      assert.deepEqual(params.model, selector);
+      return { requestId: params.requestId, operationId: params.operationId, actualModel: selector,
+        text: 'cold model result', segments: null, durationMs: 3, usage: null, cost: null };
+    } },
+  });
+  const core = createCoordinator({ ports, config: config(), uuid: () => ids.attempt });
+  const listed = await core.invoke('models.list', {}, principal);
+  assert.equal(listed.localItems[0].ready, false);
+
+  const accepted = await core.invoke('request.submit', {
+    clientIdempotencyKey: ids.key, audioArtifactId: ids.artifact,
+    requestedModel: { route: 'local', selection: 'required', modelId: selector.modelId }, deadlineAt: null,
+  }, principal);
+  assert.equal(accepted.request.taskState, 'accepted');
+  assert.equal(await core.pumpOnce(), true);
+  assert.equal(current.taskState, 'succeeded');
+  assert.equal(localCalls, 1);
+});
+
+test('unsupported or uninstalled selectors are refused before executor invocation', async () => {
+  for (const catalogItem of [
+    { selector, supported: false, installed: true, ready: false },
+    { selector, supported: true, installed: false, ready: false },
+  ]) {
+    let current = request({ selectedModel: null });
+    let localCalls = 0;
+    const settings = { defaultLocalModel: null, allowReplacement: false, policyVersion: 1 };
+    const ports = basePorts(async (method, params) => {
+      if (method === 'request.lookup') return { request: null };
+      if (method === 'settings.get') return { settings, revision: 1 };
+      if (method === 'request.accept') {
+        assert.equal(params.selectedModel, null);
+        current = request({ ...current, taskState: 'accepted', selectedModel: null });
+        return { created: true, request: current };
+      }
+      if (method === 'request.claim') return { claimToken: ids.claim, fenceGeneration: 1, revision: current.revision, leaseExpiresAt: '2026-10-05T22:00:00Z', request: current };
+      if (method === 'attempt.start') {
+        current = request({ ...current, taskState: 'dispatching', revision: 2, currentAttemptId: params.attemptId, fenceGeneration: 1 });
+        return { created: true, request: current, attempt: attemptRecord('dispatching', { attemptId: params.attemptId }) };
+      }
+      if (method === 'attempt.finish') {
+        assert.equal(params.errorCode, 'MODEL_UNAVAILABLE');
+        current = request({ ...current, taskState: 'failed', resultState: 'not_ready', revision: 3, errorCode: params.errorCode });
+        return { request: current, attempt: attemptRecord('failed', { errorCode: params.errorCode }) };
+      }
+      assert.fail(`unexpected helper method ${method}`);
+    }, {
+      localCatalog: { list: async () => [catalogItem] },
+      local: { call: async () => { localCalls += 1; assert.fail('unavailable selector reached executor'); } },
+    });
+    const core = createCoordinator({ ports, config: config(), uuid: () => ids.attempt });
+    await core.invoke('request.submit', {
+      clientIdempotencyKey: ids.key, audioArtifactId: ids.artifact,
+      requestedModel: { route: 'local', selection: 'required', modelId: selector.modelId }, deadlineAt: null,
+    }, principal);
+    assert.equal(await core.pumpOnce(), true);
+    assert.equal(current.taskState, 'failed');
+    assert.equal(localCalls, 0);
+  }
 });
 
 test('settings mutation requires its separate permission and forwards the current revision', async () => {

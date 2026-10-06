@@ -48,7 +48,9 @@
     "test:integration:transcription:postgres": "npm run test:integration:postgres --workspace=@brai/transcription",
     "test:integration:transcription:helper:rpc": "npm run test:integration:helper:rpc --workspace=@brai/transcription",
     "test:integration:transcription:nats": "npm run test:integration:nats --workspace=@brai/transcription",
-    "test:transcription:metadata": "npm run test:integration:metadata --workspace=@brai/transcription"
+    "test:transcription:metadata": "npm run test:integration:metadata --workspace=@brai/transcription",
+    "test:integration:transcription:asr": "npm run test:integration:asr --workspace=@brai/transcription",
+    "test:integration:transcription:restart": "npm run test:integration:restart --workspace=@brai/transcription"
   },
   "engines": {
     "node": "24.21.0",
