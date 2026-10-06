@@ -265,7 +265,7 @@ export function validateBusinessConfig(input) {
   if (config.phase === 'overload' && proof.maxQueuedOperations !== 1) fail('CONFIG_OVERLOAD_LIMIT');
   if (['queued', 'idle'].includes(config.phase) && proof.maxQueuedOperations !== 2) fail('CONFIG_QUEUED_LIMIT');
   const invokeConcurrency = config.phase === 'queued' || config.phase === 'idle' ? 3 : config.phase === 'overload' ? 2 : 1;
-  if (proof.maxConcurrentRequests < invokeConcurrency + 2) fail('CONFIG_TRANSPORT_HEADROOM');
+  if (proof.maxConcurrentRequests < invokeConcurrency + 1) fail('CONFIG_TRANSPORT_HEADROOM');
   const outboxCounts = exactObject(proof.outboxCounts, ['reserved', 'pending', 'sending', 'permanentlyFailed'], 'OUTBOX_COUNTS');
   const initialRows = Object.values(outboxCounts).reduce((total, count) => {
     if (!Number.isSafeInteger(count) || count < 0) fail('CONFIG_OUTBOX_COUNTS');
@@ -380,7 +380,7 @@ export function validateInvalidBusinessMediaSample(sample, config) {
 /** Разрешает BUSY как runtime-очередь только при запасе transport и durable outbox. */
 export function assertRuntimeBusyCapacity(config, status, concurrentInvokes) {
   positive(concurrentInvokes, 'INFLIGHT_INVOKES');
-  if (config.proof.maxConcurrentRequests < concurrentInvokes + 2) fail('BUSY_CAUSE_TRANSPORT_AMBIGUOUS');
+  if (config.proof.maxConcurrentRequests < concurrentInvokes + 1) fail('BUSY_CAUSE_TRANSPORT_AMBIGUOUS');
   assertBusinessStatus(status);
   const counts = status?.outboxCounts;
   if (!counts || Object.values(counts).some(count => !Number.isSafeInteger(count) || count < 0)
@@ -793,7 +793,7 @@ function validateActivitySample(sample, config) {
   return validateBusinessMediaSample(sample, config);
 }
 
-async function runAdmissionSequence(context) {
+export async function runAdmissionSequence(context) {
   const { config, operation, artifactId, request: start, waitAccepted, historyEvents, proveNoAccepted, getStatus, getCard, workDeadline, acceptedLimit } = context;
   const first = start(operation, 0, artifactId);
   await waitAccepted(first.request.operationId);

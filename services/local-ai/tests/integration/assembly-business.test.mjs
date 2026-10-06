@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
 import {
-  BUSINESS_MEDIA_TYPES, assertBusinessOperationLedger, assertRuntimeBusyCapacity, buildBusinessCleanupReceipt,
+  BUSINESS_MEDIA_TYPES, assertBusinessOperationLedger, assertRuntimeBusyCapacity, buildBusinessCleanupReceipt, runAdmissionSequence,
   buildSelectorNegativeCases, connectWithinBound, drainOwnedConnection, markArtifactOperationTerminal, runLocalAiBusinessPeer,
   validateBusinessConfig, validateBusinessMedia, validateBusinessMediaSample, validateInvalidBusinessMediaSample,
 } from './local-ai-business-peer.mjs';
@@ -17,7 +17,7 @@ function config(phase = 'selectors') {
     sourceRevision: 'a'.repeat(40), imageDigest: `sha256:${'b'.repeat(64)}`, configDigest: `sha256:${'c'.repeat(64)}`,
     controllerServers: ['nats://127.0.0.1:19473'], controllerUser: 'local_ai', controllerInboxPrefix: '_INBOX.brai_local_ai',
     maxQueuedOperations: phase === 'overload' ? 1 : ['queued', 'idle'].includes(phase) ? 2 : 2,
-    outboxCapacity: 8, maxConcurrentRequests: phase === 'queued' || phase === 'idle' ? 5 : phase === 'overload' ? 4 : 3,
+    outboxCapacity: 8, maxConcurrentRequests: phase === 'queued' || phase === 'idle' ? 4 : phase === 'overload' ? 3 : 2,
     maxRequestMs: 5000, maxInputBytes: 10, maxAudioBytes: 15, maxAudioSeconds: 8, providerMaxUploadBytes: 20,
     outboxCounts: { reserved: 0, pending: 0, sending: 0, permanentlyFailed: 0 },
   };
@@ -75,7 +75,8 @@ test('overload and queued policies use actual outstanding-operation semantics', 
   const queued = config('queued');
   assert.equal(validateBusinessConfig(queued), queued);
   assert.throws(() => validateBusinessConfig({ ...queued, proof: { ...queued.proof, maxQueuedOperations: 1 } }), /CONFIG_QUEUED_LIMIT/);
-  assert.throws(() => validateBusinessConfig({ ...queued, proof: { ...queued.proof, maxConcurrentRequests: 4 } }), /CONFIG_TRANSPORT_HEADROOM/);
+  assert.equal(validateBusinessConfig({ ...queued, proof: { ...queued.proof, maxConcurrentRequests: 4 } }).proof.maxConcurrentRequests, 4);
+  assert.throws(() => validateBusinessConfig({ ...queued, proof: { ...queued.proof, maxConcurrentRequests: 3 } }), /CONFIG_TRANSPORT_HEADROOM/);
   assert.throws(() => validateBusinessConfig({ ...queued, proof: { ...queued.proof, outboxCapacity: 7 } }), /CONFIG_OUTBOX_CAPACITY/);
 });
 
@@ -83,11 +84,44 @@ test('runtime BUSY attribution requires transport headroom and two durable slots
   const queued = validateBusinessConfig(config('queued'));
   const status = { state: 'ready', components: Object.fromEntries(['database', 'nats', 'executables', 'weights', 'history', 'outbox'].map(key => [key, { state: 'ready' }])),
     outboxCounts: { reserved: 0, pending: 0, sending: 0, permanentlyFailed: 0 } };
-  assert.deepEqual(assertRuntimeBusyCapacity(queued, status, 3), { transportHeadroom: 2, freeOutboxRows: 8 });
+  assert.deepEqual(assertRuntimeBusyCapacity(queued, status, 3), { transportHeadroom: 1, freeOutboxRows: 8 });
   assert.throws(() => assertRuntimeBusyCapacity(queued, { ...status, outboxCounts: { ...status.outboxCounts, pending: 7 } }, 3), /BUSY_CAUSE_OUTBOX_AMBIGUOUS/);
   assert.throws(() => assertRuntimeBusyCapacity(queued, { ...status, outboxCounts: { ...status.outboxCounts, permanentlyFailed: 1 } }, 3), /BUSY_CAUSE_OUTBOX_UNAVAILABLE/);
-  assert.throws(() => assertRuntimeBusyCapacity({ ...queued, proof: { ...queued.proof, maxConcurrentRequests: 4 } }, status, 3), /BUSY_CAUSE_TRANSPORT_AMBIGUOUS/);
+  assert.throws(() => assertRuntimeBusyCapacity({ ...queued, proof: { ...queued.proof, maxConcurrentRequests: 3 } }, status, 3), /BUSY_CAUSE_TRANSPORT_AMBIGUOUS/);
   assert.throws(() => assertRuntimeBusyCapacity(queued, { ...status, components: { ...status.components, database: { state: 'unavailable' } } }, 3), /DEPENDENCY_NOT_READY/);
+});
+
+test('third queued BUSY settles before the management status request', async () => {
+  const queued = validateBusinessConfig(config('queued'));
+  const order = [];
+  const acceptedIds = [];
+  const status = { state: 'ready', components: Object.fromEntries(['database', 'nats', 'executables', 'weights', 'history', 'outbox'].map(key => [key, { state: 'ready' }])),
+    outboxCounts: { reserved: 0, pending: 0, sending: 0, permanentlyFailed: 0 } };
+  const records = [];
+  const context = {
+    config: { ...queued, queueObservationMs: 1, pollMs: 1 }, operation: 'embed', artifactId: null,
+    workDeadline: Date.now() + 1000, acceptedLimit: 2,
+    request(_operation, index) {
+      const record = {
+        request: { operationId: `op-${index}` },
+        settlement: index === 2
+          ? Promise.resolve().then(() => { order.push('third-busy'); return { error: 'LOCAL_AI_BUSINESS_SERVICE_BUSY' }; })
+          : Promise.resolve({ value: 'accepted-work' }),
+        isSettled: () => false,
+      };
+      records.push(record);
+      return record;
+    },
+    async waitAccepted(operationId) { acceptedIds.push(operationId); },
+    async historyEvents() { return []; },
+    async proveNoAccepted(operationId) { assert.equal(operationId, 'op-2'); },
+    async getStatus() { order.push('status'); assert.deepEqual(order, ['third-busy', 'status']); return status; },
+    async getCard() { return { runtimeState: 'ready' }; },
+  };
+  const admitted = await runAdmissionSequence(context);
+  assert.deepEqual(acceptedIds, ['op-0', 'op-1']);
+  assert.deepEqual(order, ['third-busy', 'status']);
+  assert.deepEqual(admitted, records.slice(0, 2));
 });
 
 test('negative public selector probes stay schema-valid and are limited to the pinned models', () => {
