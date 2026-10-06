@@ -1,8 +1,8 @@
 "use client";
 // ABOUTME: Показывает desktop rail, dock и мобильные панели оболочки Brai.
 // ABOUTME: Поддерживает только действующие маршруты и состояние текущего аккаунта.
-import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import Link, { navigateWorkspace } from "./workspace-link";
+import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent as ReactTouchEvent } from "react";
 import { motion, useMotionValue, useSpring, useTransform, type MotionValue } from "motion/react";
 import { ChevronDown, ChevronUp, Ellipsis, SquareTerminal, Timer, X } from "lucide-react";
@@ -15,7 +15,7 @@ import { useMobileSheetDrag } from "./use-mobile-sheet-drag";
 import { useSoftwareKeyboardOpen } from "./use-software-keyboard-open";
 import { sectionSwipePageStyle, useLeftEdgeMenuSwipe, useSectionSwipeNavigation } from "./use-section-swipe-navigation";
 
-type Route = { href: string; label: string; icon: "agent" | "timer" | "do" };
+type Route = { href: "/" | "/agent" | "/do"; label: string; icon: "agent" | "timer" | "do" };
 type MobilePanel = "profile" | "shortcuts";
 const routes: Route[] = [
   { href: "/agent", label: "Агент", icon: "agent" },
@@ -32,7 +32,6 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
   onLogout: () => void;
 }) {
   const pathname = usePathname();
-  const router = useRouter();
   const [panel, setPanel] = useState<MobilePanel | null>(null);
   const [isMobile, setIsMobile] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -41,7 +40,7 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
   const dock = useRef<HTMLElement>(null);
   const keyboardOpen = useSoftwareKeyboardOpen(isMobile);
   const activeSection = pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : "timer";
-  const selectSection = useCallback((section: "agent" | "timer" | "do") => router.push(section === "timer" ? "/" : `/${section}`), [router]);
+  const selectSection = useCallback((section: "agent" | "timer" | "do") => navigateWorkspace(section === "timer" ? "/" : `/${section}`), []);
   const dockSwipe = useSectionSwipeNavigation(activeSection, selectSection, isMobile && panel === null);
   const currentSwipeStyle = sectionSwipePageStyle(dockSwipe.visual, "current");
   const openPanel = useCallback((next: MobilePanel, source: HTMLElement) => {
@@ -131,13 +130,13 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
       </motion.nav>
     </div>
     {panel && <MobilePanel panel={panel} email={email} onClose={closePanel} onLogout={onLogout}
-      onNavigate={href => router.push(href)} />}
+      onNavigate={navigateWorkspace} />}
   </>;
 }
 
 function MobilePanel({ panel, email, onClose, onLogout, onNavigate }: {
   panel: MobilePanel; email: string; onClose: () => void; onLogout: () => void;
-  onNavigate: (href: string) => void;
+  onNavigate: (href: Route["href"]) => void;
 }) {
   const pathname = usePathname();
   const suppressPop = useRef(false);
@@ -237,7 +236,7 @@ function MobilePanel({ panel, email, onClose, onLogout, onNavigate }: {
   </div>;
 }
 
-function navigateFromPanel(event: MouseEvent<HTMLAnchorElement>, href: string, close: (action?: () => void) => void, navigate: (href: string) => void) {
+function navigateFromPanel(event: MouseEvent<HTMLAnchorElement>, href: Route["href"], close: (action?: () => void) => void, navigate: (href: Route["href"]) => void) {
   if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
   event.preventDefault(); close(() => navigate(href));
 }

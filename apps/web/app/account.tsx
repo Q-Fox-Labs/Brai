@@ -103,13 +103,13 @@ function AccountSession({ timerElapsed, onTimerElapsed }: { timerElapsed: string
 
 /** Сохраняет состояние посещённых экранов; выход или смена пользователя удаляют их. */
 function AccountScreens({ view, user, onLogout, onUnauthorized, accountMessage, onTimerElapsed }: { view: "agent" | "timer" | "do"; user: User; onLogout: () => void; onUnauthorized: () => void; accountMessage: string; onTimerElapsed: (elapsed: string | null) => void }) {
- const [visited, setVisited] = useState({ agent: view === "agent", do: view === "do" });
- useEffect(() => { if (view !== "timer") setVisited(previous => previous[view] ? previous : { ...previous, [view]: true }); }, [view]);
+ const [visitedDo, setVisitedDo] = useState(view === "do");
+ useEffect(() => { if (view === "do") setVisitedDo(true); }, [view]);
  const props = { userId: user.id, email: user.email, onLogout, onUnauthorized, accountMessage };
- // AIDEV-NOTE: Таймер подключён сразу для отсчёта в шапке; hidden сохраняет клиентов при переходах.
+ // AIDEV-NOTE: Базовые состояния Agent и Timer подключены после входа; hidden сохраняет клиентов.
  return <>
-  <div className="workspace-screen" hidden={view !== "agent"}>{(visited.agent || view === "agent") && <AgentScreen {...props} active={view === "agent"} />}</div>
+  <div className="workspace-screen" hidden={view !== "agent"}><AgentScreen {...props} active={view === "agent"} /></div>
   <div className="workspace-screen workspace-timer" hidden={view !== "timer"}><Timer userId={user.id} onUnauthorized={onUnauthorized} accountMessage={accountMessage} onElapsed={onTimerElapsed} /></div>
-  <div className="workspace-screen" hidden={view !== "do"}>{(visited.do || view === "do") && <DoScreen {...props} active={view === "do"} />}</div>
+  <div className="workspace-screen" hidden={view !== "do"}>{(visitedDo || view === "do") && <DoScreen {...props} active={view === "do"} />}</div>
  </>;
 }
