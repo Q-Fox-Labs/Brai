@@ -23,7 +23,7 @@ const pendingRpc = new Map();
 const spans = [];
 const now = () => performance.now();
 const rounded = value => Math.round(value * 1000) / 1000;
-const safeCode = error => typeof error?.code === 'string' && /^[A-Z_0-9]+$/.test(error.code) ? error.code : 'FORWARDING_FAILED';
+const safeCode = error => typeof error?.code === 'string' && /^[A-Z][A-Z_0-9]{0,63}$/.test(error.code) ? error.code : 'FORWARDING_FAILED';
 const json = value => Buffer.from(JSON.stringify(value));
 const config = input.config;
 const ownerId = randomUUID();
@@ -31,6 +31,8 @@ const deadline = () => new Date(Date.now() + config.transport.maxRequestMs - 100
 let client, peers, local, server;
 const fixtureDirectories = [];
 let stage = 'initialize';
+let activeProfileId = null;
+const errorMetadata = error => ({ code: safeCode(error), origin: ['nats-client','service'].includes(error?.origin) ? error.origin : 'harness', status: Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599 ? error.status : null });
 const report = { formatVersion: 2, measurement: 'microservice-forwarding-only', status: 'running', identity: input.identity, samples: [], errors: [],
   methodology: { ingress: 'endpoint-entry-to-engine-handoff-minus-tokenize-model-wait', egress: 'engine-raw-response-to-message-respond-completion',
     replyCompletion: 'local-NATS-publish-return-not-consumer-receipt', embeddingNativeBoundary: 'undici-request-bodySent-to-request-trailers', asrNativeBoundary: 'stdin-write-to-last-raw-stdout-chunk-before-matching-parse', modelWaitMeasuredAsPerformance: false,
@@ -75,6 +77,7 @@ syncBuiltinESMExports();
 const load = relative => import(pathToFileURL(join(app, relative)).href);
 const { startLocalAi, supportedProfiles } = await load('src/main.mjs');
 const { startLocalAiNats } = await load('dist/transport/index.js');
+const { validateError } = await load('contracts/index.mjs');
 
 // AIDEV-NOTE: Built-in undici channels доступны в current Node v24.21.0 runtime.
 // Request WeakMap хранит только correlation metadata; payload не читается/не сохраняется.
@@ -137,9 +140,17 @@ function forwardingConnection(nc) {
 }
 
 async function request(subject, body) {
-  const message = await client.request('brai.local_ai.v1.' + subject, json(body), { timeout: config.transport.maxRequestMs });
-  const code = message.headers?.get('Nats-Service-Error');
-  if (code) throw Object.assign(new Error(), { code });
+  let message;
+  try { message = await client.request('brai.local_ai.v1.' + subject, json(body), { timeout: config.transport.maxRequestMs }); }
+  catch (error) {
+    throw Object.assign(new Error(), { code: error?.code === '503' ? 'NO_RESPONDERS' : safeCode(error), origin: 'nats-client', status: typeof error?.code === 'string' && /^[0-9]{3}$/.test(error.code) ? Number(error.code) : null });
+  }
+  const statusHeader = message.headers?.get('Nats-Service-Error-Code');
+  if (statusHeader) {
+    let errorBody; try { errorBody = originalParse(Buffer.from(message.data).toString()); } catch {}
+    const code = validateError(errorBody) ? safeCode(errorBody) : 'SERVICE_ERROR_BODY_UNAVAILABLE';
+    throw Object.assign(new Error(), { code, origin: 'service', status: /^[0-9]{3}$/.test(statusHeader) ? Number(statusHeader) : null });
+  }
   return JSON.parse(Buffer.from(message.data).toString());
 }
 function stats(values) {
@@ -169,9 +180,12 @@ try {
   local = await startLocalAi(config, { factories: {
     startLocalAiNats: (nc, options, handlers) => startLocalAiNats(forwardingConnection(nc), options, handlers),
   } });
+  // AIDEV-NOTE: SUB readiness barrier на service connection до request с другой connection.
+  await local.nc.flush();
   const profiles = supportedProfiles(config);
   report.identity.models = profiles.map(profile => ({ modelId: profile.modelId, revision: profile.revision, profileId: profile.profileId, files: profile.record.files }));
   for (const profile of profiles) {
+    activeProfileId = profile.profileId;
     const model = { modelId: profile.modelId, revision: profile.revision, profileId: profile.profileId };
     stage = 'load'; await request('models.load', { ...model, ownerId, deadlineAt: deadline() });
     await request('models.configure', { ...model, ownerId, idleUnloadSeconds: null });
@@ -193,7 +207,7 @@ try {
         const ingress = span.t1-span.t0-span.excludedTokenWaitMs;
         const egress = span.t3-span.t2;
         outcome = { status: 'passed', ingressMs: rounded(ingress), egressMs: rounded(egress), forwardingMs: rounded(ingress+egress) };
-      } catch (error) { outcome = { status: 'failed', code: safeCode(error), ingressMs: null, egressMs: null, forwardingMs: null }; }
+      } catch (error) { outcome = { status: 'failed', ...errorMetadata(error), ingressMs: null, egressMs: null, forwardingMs: null }; }
       report.samples.push({ operation, round, ...outcome });
       spans.length = 0; await save(); console.log(JSON.stringify({ stage: 'sample', operation, round, ...outcome }));
       if (outcome.status === 'failed') throw Object.assign(new Error(), { code: outcome.code });
@@ -201,10 +215,10 @@ try {
     stage = 'unload'; await request('models.unload', { ...model, ownerId, deadlineAt: deadline() });
   }
   report.status = 'passed';
-} catch (error) { report.status = 'failed'; report.errors.push({ stage, code: safeCode(error) }); }
+} catch (error) { report.status = 'failed'; report.errors.push({ stage, profileId: activeProfileId, ...errorMetadata(error) }); }
 finally {
   stage = 'cleanup';
-  try { await local?.close(); } catch (error) { report.errors.push({ stage, code: safeCode(error) }); report.status = 'failed'; }
+  try { await local?.close(); } catch (error) { report.errors.push({ stage, profileId: activeProfileId, ...errorMetadata(error) }); report.status = 'failed'; }
   const cleanups = await Promise.allSettled([
     Promise.resolve().then(() => client?.drain()), Promise.resolve().then(() => peers?.drain()), server ? new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())) : undefined,
     ...fixtureDirectories.map(directory => Promise.resolve().then(() => rm(directory, { recursive: true, force: true }))),
