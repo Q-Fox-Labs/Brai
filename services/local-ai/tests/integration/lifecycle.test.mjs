@@ -2,7 +2,7 @@
 // ABOUTME: Проверяет реальные argv/stdin/stdout/HTTP границы без модельных весов и числовой приёмки.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -50,6 +50,8 @@ function common(executable, args) {
 
 test('GigaAM adapter uses newline JSON-RPC, matches IDs, and maps segment field names', async () => {
   const root = await mkdtemp(join(tmpdir(), 'local-ai-gigaam-test-'));
+  const originalTmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = root;
   const source = `const readline=require('node:readline');const r=readline.createInterface({input:process.stdin});r.on('line',l=>{const q=JSON.parse(l);let result=q.method==='health'?{ready:true,model_id:'gigaam-v3-e2e-ctc',revision:'rev-giga',vad_revision:'vad-rev'}:{text:'hello',segments:[{start_seconds:0.25,end_seconds:1.5,text:'hello'}]};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\\n')});`;
   const factory = createProfileRuntimeFactory({ profiles: {
     llama_cpp: { ...common(process.execPath, ['-e', 'process.exit(2)']), host: '127.0.0.1', port: () => 1, dimensions: 1024, contextTokens: 2048, maxBatchTokens: 2048, queryInstruction: 'unused' },
@@ -66,12 +68,132 @@ test('GigaAM adapter uses newline JSON-RPC, matches IDs, and maps segment field 
   } finally {
     await runtime.close();
     await runtime.exited;
+    if (originalTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = originalTmpdir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('GigaAM retains its private TMPDIR through a surviving child and removes it before exited resolves', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'local-ai-giga-private-tmp-'));
+  const originalTmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = root;
+  const source = `const fs=require('node:fs');const path=require('node:path');const {spawn}=require('node:child_process');const readline=require('node:readline');const tmp=process.env.TMPDIR;if(!tmp)process.exit(5);fs.writeFileSync(path.join(tmp,'fixture-env-check'),JSON.stringify([process.env.TMPDIR,process.env.TMP,process.env.TEMP]));fs.writeFileSync(path.join(tmp,'fixture-marker'),'active');const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000);process.send('ready')"],{stdio:['ignore','ignore','ignore','ipc']});const childReady=new Promise(resolve=>child.once('message',resolve));const r=readline.createInterface({input:process.stdin});r.on('line',l=>{const q=JSON.parse(l);const result=q.method==='health'?{ready:true,model_id:'gigaam-v3-e2e-ctc',revision:'rev-giga',vad_revision:'vad-rev'}:{text:q.params.audio_path==='report'?String(child.pid):'parent-exit'};const reply=()=>process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\\n');if(q.method==='health')childReady.then(reply);else reply();if(q.params?.audio_path==='exit-parent')setImmediate(()=>process.exit(0))});`;
+  const factory = createProfileRuntimeFactory({ profiles: {
+    llama_cpp: { ...common(process.execPath, ['-e', 'process.exit(2)']), host: '127.0.0.1', port: () => 1, dimensions: 1024, contextTokens: 2048, maxBatchTokens: 2048, queryInstruction: 'unused' },
+    gigaam_pytorch: { ...common(process.execPath, ['-e', source]), stopGraceMs: 250, env: { TMPDIR: '/unused/profile-tmp', TMP: '/unused/profile-tmp', TEMP: '/unused/profile-tmp' }, vadModelPath: '/local/vad', vadRevision: 'vad-rev', threads: 1, longformMaximumSeconds: 40, audioDecodeTimeoutSeconds: 15 },
+  } });
+  const model = { model: { modelId: 'gigaam-v3-e2e-ctc', revision: 'rev-giga', profileId: 'gigaam_pytorch' }, installation: {
+    modelId: 'gigaam-v3-e2e-ctc', revision: 'rev-giga', profileId: 'gigaam_pytorch', directory: root,
+    files: [{ path: 'config.json', sizeBytes: 5, sha256: '0'.repeat(64) }], installedAt: new Date().toISOString(),
+  } };
+  try {
+    const runtime = await factory.open(model, context());
+    const result = await runtime.transcribe({ model: model.model, audioPath: 'report' }, context());
+    const descendantPid = Number(result.text);
+    assert.ok(Number.isSafeInteger(descendantPid) && descendantPid > 0);
+    const [privateName] = await readdir(root);
+    assert.match(privateName, /^brai-local-ai-giga-/);
+    const privatePath = join(root, privateName);
+    assert.equal((await stat(privatePath)).mode & 0o777, 0o700);
+    assert.deepEqual(JSON.parse(await readFile(join(privatePath, 'fixture-env-check'), 'utf8')), [privatePath, privatePath, privatePath]);
+    assert.equal(await readFile(join(privatePath, 'fixture-marker'), 'utf8'), 'active');
+    assert.doesNotThrow(() => process.kill(descendantPid, 0));
+
+    let exited = false;
+    void runtime.exited.then(() => { exited = true; });
+    const closing = runtime.close();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(exited, false, 'scratch remains owned while the descendant process group is alive');
+    assert.equal(await readFile(join(privatePath, 'fixture-marker'), 'utf8'), 'active');
+
+    await closing;
+    assert.equal(exited, true, 'runtime exit is published only after private scratch cleanup');
+    assert.deepEqual(await readdir(root), []);
+    assert.throws(() => process.kill(descendantPid, 0), error => error.code === 'ESRCH');
+  } finally {
+    if (originalTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = originalTmpdir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('GigaAM cleanup runs after an unexpected confirmed exit and a spawn failure', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'local-ai-giga-start-failure-'));
+  const originalTmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = root;
+  const makeFactory = (executable, args) => createProfileRuntimeFactory({ profiles: {
+    llama_cpp: { ...common(process.execPath, ['-e', 'process.exit(2)']), host: '127.0.0.1', port: () => 1, dimensions: 1024, contextTokens: 2048, maxBatchTokens: 2048, queryInstruction: 'unused' },
+    gigaam_pytorch: { ...common(executable, args), startupTimeoutMs: 1000, env: { TMPDIR: '/unused', TMP: '/unused', TEMP: '/unused' }, vadModelPath: '/local/vad', vadRevision: 'vad-rev', threads: 1, longformMaximumSeconds: 40, audioDecodeTimeoutSeconds: 15 },
+  } });
+  const model = { model: { modelId: 'gigaam-v3-e2e-ctc', revision: 'rev-giga', profileId: 'gigaam_pytorch' }, installation: {
+    modelId: 'gigaam-v3-e2e-ctc', revision: 'rev-giga', profileId: 'gigaam_pytorch', directory: root,
+    files: [{ path: 'config.json', sizeBytes: 5, sha256: '0'.repeat(64) }], installedAt: new Date().toISOString(),
+  } };
+  const exitAfterTranscribeSource = `const readline=require('node:readline');const r=readline.createInterface({input:process.stdin});r.on('line',l=>{const q=JSON.parse(l);const result=q.method==='health'?{ready:true,model_id:'gigaam-v3-e2e-ctc',revision:'rev-giga',vad_revision:'vad-rev'}:{text:'complete'};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\\n');if(q.method==='transcribe')setImmediate(()=>process.exit(0))});`;
+  try {
+    const unexpected = await makeFactory(process.execPath, ['-e', exitAfterTranscribeSource]).open(model, context());
+    await unexpected.transcribe({ model: model.model, audioPath: 'fixture' }, context());
+    await unexpected.exited;
+    assert.deepEqual(await readdir(root), [], 'unexpected confirmed child exit cleans only its private generation directory');
+
+    const missingExecutable = join(root, 'missing-runtime');
+    await assert.rejects(makeFactory(missingExecutable, []).open(model, context()), error => error.code === 'MODEL_LOAD_FAILED');
+    assert.deepEqual(await readdir(root), [], 'a failed spawn does not leave an allocated private generation directory');
+  } finally {
+    if (originalTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = originalTmpdir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('GigaAM holds its slot if the captured temp path is replaced until the original generation is restored', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'local-ai-giga-temp-identity-'));
+  const originalTmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = root;
+  const source = `const fs=require('node:fs');const path=require('node:path');const readline=require('node:readline');fs.writeFileSync(path.join(process.env.TMPDIR,'fixture-marker'),'active');const r=readline.createInterface({input:process.stdin});r.on('line',l=>{const q=JSON.parse(l);const result=q.method==='health'?{ready:true,model_id:'gigaam-v3-e2e-ctc',revision:'rev-giga',vad_revision:'vad-rev'}:{text:'ready'};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\\n')});`;
+  const factory = createProfileRuntimeFactory({ profiles: {
+    llama_cpp: { ...common(process.execPath, ['-e', 'process.exit(2)']), host: '127.0.0.1', port: () => 1, dimensions: 1024, contextTokens: 2048, maxBatchTokens: 2048, queryInstruction: 'unused' },
+    gigaam_pytorch: { ...common(process.execPath, ['-e', source]), stopGraceMs: 100, env: { TMPDIR: '/unused', TMP: '/unused', TEMP: '/unused' }, vadModelPath: '/local/vad', vadRevision: 'vad-rev', threads: 1, longformMaximumSeconds: 40, audioDecodeTimeoutSeconds: 15 },
+  } });
+  const model = { model: { modelId: 'gigaam-v3-e2e-ctc', revision: 'rev-giga', profileId: 'gigaam_pytorch' }, installation: {
+    modelId: 'gigaam-v3-e2e-ctc', revision: 'rev-giga', profileId: 'gigaam_pytorch', directory: root,
+    files: [{ path: 'config.json', sizeBytes: 5, sha256: '0'.repeat(64) }], installedAt: new Date().toISOString(),
+  } };
+  try {
+    const runtime = await factory.open(model, context());
+    const [name] = await readdir(root);
+    const originalPath = join(root, name);
+    const displacedPath = join(root, 'displaced-generation');
+    const replacementPath = join(root, 'replacement-generation');
+    await rename(originalPath, displacedPath);
+    await mkdir(originalPath, { mode: 0o700 });
+    await writeFile(join(originalPath, 'foreign-marker'), 'keep');
+
+    await assert.rejects(runtime.close(), error => error.code === 'ENGINE_UNAVAILABLE');
+    let exited = false;
+    void runtime.exited.then(() => { exited = true; });
+    assert.equal(exited, false, 'a replaced private path cannot satisfy cleanup or release the slot');
+    assert.equal(await readFile(join(originalPath, 'foreign-marker'), 'utf8'), 'keep');
+
+    await rename(originalPath, replacementPath);
+    await rename(displacedPath, originalPath);
+    await runtime.exited;
+    assert.equal(exited, true);
+    assert.deepEqual(await readdir(root), ['replacement-generation']);
+    assert.equal(await readFile(join(replacementPath, 'foreign-marker'), 'utf8'), 'keep');
+    await rm(replacementPath, { recursive: true, force: true });
+  } finally {
+    if (originalTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = originalTmpdir;
     await rm(root, { recursive: true, force: true });
   }
 });
 
 test('runtime close kills surviving descendants and waits for the whole process group', async () => {
   const root = await mkdtemp(join(tmpdir(), 'local-ai-gigaam-group-test-'));
+  const originalTmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = root;
   const source = `const {spawn}=require('node:child_process');const readline=require('node:readline');const child=spawn(process.execPath,['-e',\"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)\"],{stdio:'ignore'});const r=readline.createInterface({input:process.stdin});r.on('line',l=>{const q=JSON.parse(l);const result=q.method==='health'?{ready:true,model_id:'gigaam-v3-e2e-ctc',revision:'rev-giga',vad_revision:'vad-rev'}:{text:String(child.pid)};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\\n')});`;
   const factory = createProfileRuntimeFactory({ profiles: {
     llama_cpp: { ...common(process.execPath, ['-e', 'process.exit(2)']), host: '127.0.0.1', port: () => 1, dimensions: 1024, contextTokens: 2048, maxBatchTokens: 2048, queryInstruction: 'unused' },
@@ -88,11 +210,15 @@ test('runtime close kills surviving descendants and waits for the whole process 
   await runtime.close();
   await runtime.exited;
   assert.throws(() => process.kill(descendantPid, 0), error => error.code === 'ESRCH');
+  if (originalTmpdir === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = originalTmpdir;
   await rm(root, { recursive: true, force: true });
 });
 
 test('exited eventually confirms real process-group cleanup after bounded close rejects', async () => {
   const root = await mkdtemp(join(tmpdir(), 'local-ai-gigaam-late-exit-test-'));
+  const originalTmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = root;
   const source = `const {spawn}=require('node:child_process');const readline=require('node:readline');const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:'ignore'});const r=readline.createInterface({input:process.stdin});r.on('line',l=>{const q=JSON.parse(l);const result=q.method==='health'?{ready:true,model_id:'gigaam-v3-e2e-ctc',revision:'rev-giga',vad_revision:'vad-rev'}:{text:String(child.pid)};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result})+'\\n')});`;
   const factory = createProfileRuntimeFactory({ profiles: {
     llama_cpp: { ...common(process.execPath, ['-e', 'process.exit(2)']), host: '127.0.0.1', port: () => 1, dimensions: 1024, contextTokens: 2048, maxBatchTokens: 2048, queryInstruction: 'unused' },
@@ -115,5 +241,7 @@ test('exited eventually confirms real process-group cleanup after bounded close 
   ]);
   assert.equal(exited, true);
   assert.throws(() => process.kill(descendantPid, 0), error => error.code === 'ESRCH');
+  if (originalTmpdir === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = originalTmpdir;
   await rm(root, { recursive: true, force: true });
 });

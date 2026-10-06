@@ -1,7 +1,8 @@
 // ABOUTME: Запускает два закреплённых local-ai runtime и переводит их протоколы в порты приложения.
 // ABOUTME: Аргументы передаются напрямую; сеть, веса, пути и числовые лимиты поступают из конфигурации.
 import { spawn, type ChildProcess } from 'node:child_process';
-import { join } from 'node:path';
+import { lstat, mkdtemp, rm } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
 import type { RuntimeFactory, RuntimePort } from '../ports.js';
 import { LocalAiError } from '../errors.js';
 import type { EmbedInput, EmbedOutput, OperationContext, ResolvedModel, TranscribeInput, TranscribeOutput } from '../types.js';
@@ -59,6 +60,45 @@ function substitute(args: readonly string[], values: Readonly<Record<string, str
 }
 
 type SpawnedRuntime = { child: ChildProcess; exited: Promise<void>; stop: () => Promise<void> };
+type SpawnRuntimeOptions = {
+  privateTempDirectory?: string;
+  cleanupAfterGroupExit?: () => Promise<void>;
+};
+type PrivateTempDirectory = { path: string; device: number; inode: number };
+
+async function createGigaPrivateTempDirectory(): Promise<PrivateTempDirectory> {
+  const parent = process.env.TMPDIR;
+  if (!parent || !isAbsolute(parent)) throw serviceError('MODEL_LOAD_FAILED', 'TMPDIR_UNAVAILABLE');
+  let path: string | undefined;
+  try {
+    path = await mkdtemp(join(parent, 'brai-local-ai-giga-'));
+    const directory = await lstat(path);
+    if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o7777) !== 0o700) {
+      throw serviceError('MODEL_LOAD_FAILED', 'TMPDIR_UNAVAILABLE');
+    }
+    return { path, device: directory.dev, inode: directory.ino };
+  } catch {
+    if (path) {
+      try { await rm(path, { recursive: true, force: true }); }
+      catch { throw serviceError('DEPENDENCY_UNAVAILABLE', 'TMPDIR_CLEANUP_UNCONFIRMED'); }
+    }
+    throw serviceError('MODEL_LOAD_FAILED', 'TMPDIR_UNAVAILABLE');
+  }
+}
+
+async function removeGigaPrivateTempDirectory(directory: PrivateTempDirectory): Promise<void> {
+  let current;
+  try { current = await lstat(directory.path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw serviceError('ENGINE_UNAVAILABLE', 'PROCESS_GROUP_EXIT_UNCONFIRMED');
+    throw error;
+  }
+  if (!current.isDirectory() || current.isSymbolicLink()
+    || current.dev !== directory.device || current.ino !== directory.inode) {
+    throw serviceError('ENGINE_UNAVAILABLE', 'PROCESS_GROUP_EXIT_UNCONFIRMED');
+  }
+  await rm(directory.path, { recursive: true, force: false });
+}
 
 function groupExists(pid: number): boolean {
   try { process.kill(-pid, 0); return true; }
@@ -86,13 +126,19 @@ function validateProfileConfig(config: ProfileConfig): void {
   }
 }
 
-function spawnRuntime(config: ProfileConfig, args: readonly string[]): SpawnedRuntime {
+function spawnRuntime(config: ProfileConfig, args: readonly string[], options: SpawnRuntimeOptions = {}): SpawnedRuntime {
+  const env = {
+    ...Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'LC_CTYPE'].flatMap(key => process.env[key] === undefined ? [] : [[key, process.env[key]!]])),
+    ...config.env,
+  };
+  if (options.privateTempDirectory) {
+    env.TMPDIR = options.privateTempDirectory;
+    env.TMP = options.privateTempDirectory;
+    env.TEMP = options.privateTempDirectory;
+  }
   const child = spawn(config.executable, [...args], {
     cwd: config.cwd,
-    env: {
-      ...Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'LC_CTYPE'].flatMap(key => process.env[key] === undefined ? [] : [[key, process.env[key]!]])),
-      ...config.env,
-    },
+    env,
     stdio: ['pipe', 'pipe', 'pipe'],
     shell: false,
     detached: true,
@@ -106,29 +152,55 @@ function spawnRuntime(config: ProfileConfig, args: readonly string[]): SpawnedRu
   const pid = child.pid;
   let didCloseParent = false;
   let didConfirmExit = false;
+  let cleanupAfterExit: Promise<void> | undefined;
   let monitorTimer: NodeJS.Timeout | undefined;
   const confirmExit = (): boolean => {
     if (didConfirmExit) return true;
     if (!didCloseParent || pid !== undefined && groupExists(pid)) return false;
-    didConfirmExit = true;
-    if (monitorTimer) clearTimeout(monitorTimer);
-    monitorTimer = undefined;
-    exitResolve();
-    return true;
+    if (!options.cleanupAfterGroupExit) {
+      didConfirmExit = true;
+      if (monitorTimer) clearTimeout(monitorTimer);
+      monitorTimer = undefined;
+      exitResolve();
+      return true;
+    }
+    if (cleanupAfterExit) return false;
+    cleanupAfterExit = Promise.resolve().then(() => options.cleanupAfterGroupExit!()).then(() => {
+      cleanupAfterExit = undefined;
+      if (!didCloseParent || pid !== undefined && groupExists(pid)) { monitorExit(); return; }
+      didConfirmExit = true;
+      if (monitorTimer) clearTimeout(monitorTimer);
+      monitorTimer = undefined;
+      exitResolve();
+    }, () => {
+      cleanupAfterExit = undefined;
+      monitorExit();
+    });
+    return false;
   };
   const monitorExit = (): void => {
-    if (confirmExit() || monitorTimer) return;
+    if (didConfirmExit || monitorTimer) return;
+    if (confirmExit()) return;
     monitorTimer = setTimeout(() => {
       monitorTimer = undefined;
       if (!confirmExit()) monitorExit();
     }, 50);
     monitorTimer.unref();
   };
+  const awaitConfirmedExit = async (): Promise<void> => {
+    if (confirmExit()) return;
+    let timer: NodeJS.Timeout | undefined;
+    const confirmed = await Promise.race([exited.then(() => true), new Promise<false>(resolve => {
+      timer = setTimeout(() => resolve(false), config.stopGraceMs);
+      timer.unref();
+    })]).finally(() => { if (timer) clearTimeout(timer); });
+    if (!confirmed) throw serviceError('ENGINE_UNAVAILABLE', 'PROCESS_GROUP_EXIT_UNCONFIRMED');
+  };
   let stopping: Promise<void> | undefined;
   const stop = (): Promise<void> => {
     if (stopping) return stopping;
     stopping = (async () => {
-      if (!pid) { await parentClosed; confirmExit(); return; }
+      if (!pid) { await parentClosed; await awaitConfirmedExit(); return; }
       signalGroup(pid, 'SIGTERM');
       if (!await waitGroupGone(pid, config.stopGraceMs)) {
         signalGroup(pid, 'SIGKILL');
@@ -140,7 +212,7 @@ function spawnRuntime(config: ProfileConfig, args: readonly string[]): SpawnedRu
         timer.unref();
       })]).finally(() => { if (timer) clearTimeout(timer); });
       if (!closed) throw serviceError('ENGINE_UNAVAILABLE', 'PROCESS_EXIT_UNCONFIRMED');
-      if (!confirmExit()) throw serviceError('ENGINE_UNAVAILABLE', 'PROCESS_GROUP_EXIT_UNCONFIRMED');
+      await awaitConfirmedExit();
     })();
     return stopping;
   };
@@ -488,13 +560,24 @@ export function createProfileRuntimeFactory(config: ProfileRuntimeFactoryConfig)
           longformMaximumSeconds: String(profile.longformMaximumSeconds),
           audioDecodeTimeoutSeconds: String(profile.audioDecodeTimeoutSeconds),
         });
-        const process = spawnRuntime(profile, args);
+        const privateTemp = await createGigaPrivateTempDirectory();
+        let process: SpawnedRuntime;
+        try {
+          process = spawnRuntime(profile, args, {
+            privateTempDirectory: privateTemp.path,
+            cleanupAfterGroupExit: () => removeGigaPrivateTempDirectory(privateTemp),
+          });
+        } catch (error) {
+          await removeGigaPrivateTempDirectory(privateTemp);
+          throw error;
+        }
         const runtime = new ChildRuntime(process.child, process.exited, profile, process.stop);
         try {
           await waitUntilReady(runtime, process.exited, profile.startupTimeoutMs, context, model.model);
           return runtime;
         } catch (error) {
-          await runtime.close();
+          try { await runtime.close(); }
+          catch { await runtime.exited; }
           if (error instanceof LocalAiError) throw error;
           throw serviceError('MODEL_LOAD_FAILED');
         }
