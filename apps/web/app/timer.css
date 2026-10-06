@@ -66,9 +66,6 @@
 }
 @media (max-width: 480px) {
  .timer-focus { border-radius: 14px; }
- .timer-face { border-radius: 15px; }
- .timer-face.is-centered { padding: 20px 12px; }
- .timer-digits { margin: 20px 0; }
  .timer-actions { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
