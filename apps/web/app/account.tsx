@@ -3,6 +3,7 @@
 // ABOUTME: Смена сессии размонтирует клиент и прекращает его очередь, запросы и SSE.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
+import type { AccountSession as InitialSession } from "@/server/account-session";
 import Timer from "./timer";
 import AgentScreen from "./agent/screen";
 import DoScreen from "./do/screen";
@@ -18,32 +19,42 @@ import { BraiBrandIcon } from "@/components/ui/brai-brand-icon";
 import { LoginGalaxy } from "./shell/login-galaxy";
 type User = { id: string; email: string };
 /** Собирает общую оболочку; таймер явно передаёт отсчёт в навигацию текущего аккаунта. */
-export default function Account() {
+export default function Account({ initialSession }: { initialSession: InitialSession }) {
  const [timerElapsed, setTimerElapsed] = useState<string | null>(null);
- return <AccountSession timerElapsed={timerElapsed} onTimerElapsed={setTimerElapsed} />;
+ return <AccountSession initialSession={initialSession} timerElapsed={timerElapsed} onTimerElapsed={setTimerElapsed} />;
 }
 /** Управляет подтверждённой сервером сессией без хранения токена в браузере. */
-function AccountSession({ timerElapsed, onTimerElapsed }: { timerElapsed: string | null; onTimerElapsed: (elapsed: string | null) => void }) {
+function AccountSession({ initialSession, timerElapsed, onTimerElapsed }: { initialSession: InitialSession; timerElapsed: string | null; onTimerElapsed: (elapsed: string | null) => void }) {
  const pathname = usePathname();
  const view = pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : pathname === "/alerts" ? "alerts" : "timer";
- const [user, setUser] = useState<User | null>(null), [ready, setReady] = useState(false), [exiting, setExiting] = useState(false);
+ const [user, setUser] = useState<User | null>(() => initialSession.status === "authenticated" ? initialSession.user : null), [ready, setReady] = useState(initialSession.status !== "unavailable"), [exiting, setExiting] = useState(false);
  const [email, setEmail] = useState(""), [code, setCode] = useState(""), [sent, setSent] = useState(false), [busy, setBusy] = useState(false), [message, setMessage] = useState("");
  const locked = useRef(false), codeInput = useRef<HTMLInputElement>(null);
  const generation = useRef(0);
+ const refreshRequest = useRef<AbortController | null>(null);
  const refresh = useCallback(async () => {
+  if (refreshRequest.current) return;
   const current = generation.current;
+  const request = new AbortController(); refreshRequest.current = request;
   try {
-   const response = await fetch("/api/auth/session", { cache: "no-store" });
+   const response = await fetch("/api/auth/session", { cache: "no-store", signal: request.signal });
    if (current !== generation.current) return;
-   if (response.ok) { const data = await response.json() as { user: User }; setUser(previous => previous?.id === data.user.id ? previous : data.user); }
-   else if (response.status === 401) setUser(null);
+   if (response.ok) { const data = await response.json() as { user: User }; if (current !== generation.current) return; setUser(previous => previous?.id === data.user.id ? previous : data.user); setReady(true); }
+   else if (response.status === 401) { setUser(null); setReady(true); }
   } catch { /* Потеря связи не превращает подтверждённый вход в успешный выход. */ }
-  finally { setReady(true); }
+  finally { if (refreshRequest.current === request) refreshRequest.current = null; }
  }, []);
- useEffect(() => { void refresh(); const timer = setInterval(() => { if (!locked.current) void refresh(); }, 2000); return () => clearInterval(timer); }, [refresh]);
+ useEffect(() => {
+  const revalidate = () => { if (!locked.current && document.visibilityState === "visible") void refresh(); };
+  if (initialSession.status === "unavailable") revalidate();
+  const timer = setInterval(revalidate, 2000);
+  window.addEventListener("focus", revalidate); window.addEventListener("online", revalidate); window.addEventListener("pageshow", revalidate); document.addEventListener("visibilitychange", revalidate);
+  return () => { clearInterval(timer); window.removeEventListener("focus", revalidate); window.removeEventListener("online", revalidate); window.removeEventListener("pageshow", revalidate); document.removeEventListener("visibilitychange", revalidate); generation.current++; refreshRequest.current?.abort(); refreshRequest.current = null; };
+ }, [initialSession.status, refresh]);
  useEffect(() => { if (sent && !busy) codeInput.current?.focus(); }, [sent, busy]);
  const submit = async (operation: "send-code" | "verify-code") => {
   if (locked.current) return; locked.current = true; setBusy(true); setMessage("");
+  if (operation === "verify-code") { generation.current++; refreshRequest.current?.abort(); refreshRequest.current = null; }
   try {
    const response = await fetch(`/api/auth/${operation}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(operation === "send-code" ? { email } : { email, otp: code }) });
    if (!response.ok) {
@@ -57,9 +68,9 @@ function AccountSession({ timerElapsed, onTimerElapsed }: { timerElapsed: string
   } catch { setMessage("Связь прервалась. Проверьте почту или состояние входа перед повтором."); if (operation === "verify-code") await refresh(); }
   finally { locked.current = false; setBusy(false); }
  };
- const unauthorized = useCallback(() => setUser(null), []);
+ const unauthorized = useCallback(() => { generation.current++; refreshRequest.current?.abort(); refreshRequest.current = null; setUser(null); setReady(true); }, []);
  const logout = async () => {
-  if (locked.current) return; locked.current = true; generation.current++; setExiting(true); setMessage("");
+  if (locked.current) return; locked.current = true; generation.current++; refreshRequest.current?.abort(); refreshRequest.current = null; setExiting(true); setMessage("");
   try {
    const response = await fetch("/api/auth/sign-out", { method: "POST" });
    if (!response.ok) { setMessage("Не удалось выйти. Сессия ещё действует; повторите выход."); return; }
@@ -67,7 +78,7 @@ function AccountSession({ timerElapsed, onTimerElapsed }: { timerElapsed: string
   } catch { setMessage("Не удалось подтвердить выход. Проверьте соединение и повторите."); }
   finally { locked.current = false; setExiting(false); }
  };
- if (!ready) return <div className="workspace-shell brai-workspace-shell"><main className="p-8" role="status">Проверяем вход…</main></div>;
+ if (!ready) return <div className="workspace-shell brai-workspace-shell"><main className="p-8"><p role="status">Сервис входа временно недоступен. Повторим подключение автоматически.</p><Button className="mt-4" onClick={() => { void refresh(); }}>Повторить подключение</Button></main></div>;
  if (user && !exiting) return <AlertsProvider key={user.id} userId={user.id} onUnauthorized={unauthorized}><div className="workspace-shell brai-workspace-shell">
   <Navigation key={user.id} timerElapsed={timerElapsed} email={user.email} onLogout={() => { void logout(); }} />
   <div className="workspace-content"><AccountScreens key={user.id} view={view} user={user} onLogout={() => { void logout(); }} onUnauthorized={unauthorized} accountMessage={message} onTimerElapsed={onTimerElapsed} /></div>

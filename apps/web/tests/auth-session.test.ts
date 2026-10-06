@@ -44,6 +44,7 @@ const baseRequire = createRequire(pathToFileURL(resolve(webServer, "gateway.ts")
 const natsStub = { ...baseRequire("nats"), connect: async () => natsConnection };
 const gateway = loadTypeScript(resolve(webServer, "gateway.ts"), { nats: natsStub, "./contracts": contracts });
 const auth = loadTypeScript(resolve(webServer, "auth.ts"), { "./contracts": contracts, "./gateway": gateway });
+const accountSession = loadTypeScript(resolve(webServer, "account-session.ts"), { "./auth": auth, "./gateway": gateway });
 const GatewayError = gateway.GatewayError as unknown as new (...args: never[]) => Error & { status: number; code: string; outcome: string };
 
 after(() => {
@@ -110,3 +111,32 @@ test("requireSession rejects malformed owner envelopes with the actual JSON Sche
 });
 
 function sessionFromReply(value: unknown) { return (value as { body: unknown }).body; }
+
+test("document bootstrap forwards cookie through real auth and returns only public identity", async () => {
+  const load = accountSession.loadAccountSession as (headers: Headers) => Promise<unknown>;
+  const before = calls.length;
+  assert.deepEqual(await load(new Headers()), { status: "anonymous" });
+  assert.equal(calls.length, before, "anonymous document needs no owner lookup");
+  ownerReply = reply(200, { ...session(), token: "never-serialize-token" });
+  const headers = new Headers({ cookie: "session=fake" });
+  assert.deepEqual(await load(headers), { status: "authenticated", user: { id: "user-1", email: "person@example.test" } });
+  assert.equal(calls.length, before + 1);
+  assert.deepEqual(calls.at(-1)?.payload, { headers: { cookie: "session=fake" }, body: {} });
+});
+
+test("new documents distinguish expired or revoked sessions from temporary auth failure", async () => {
+  const load = accountSession.loadAccountSession as (headers: Headers) => Promise<unknown>;
+  const headers = new Headers({ cookie: "session=fake" });
+  for (const status of [401, 403]) {
+    ownerReply = reply(status, null);
+    assert.deepEqual(await load(headers), { status: "anonymous" });
+  }
+  ownerReply = reply(200, session(new Date(Date.now() - 1).toISOString()));
+  assert.deepEqual(await load(headers), { status: "anonymous" });
+  for (const status of [429, 500, 503]) {
+    ownerReply = reply(status, null);
+    assert.deepEqual(await load(headers), { status: "unavailable" });
+  }
+  ownerReply = { status: 200, body: null };
+  assert.deepEqual(await load(headers), { status: "unavailable" });
+});
