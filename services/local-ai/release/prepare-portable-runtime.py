@@ -59,6 +59,28 @@ OMITTED_VENDOR_ASSETS = {
     "torchmetrics/functional/image/lpips_models/vgg.pth": "unused vision metric weights",
     "torchmetrics/functional/image/lpips_models/alex.pth": "unused vision metric weights",
 }
+PYTHON_BASE_OMITTED_LINKS = {
+    "config-3.12-x86_64-linux-gnu/libpython3.12.so": {
+        "target": "../../x86_64-linux-gnu/libpython3.12.so.1",
+        "resolvedPath": "/usr/lib/x86_64-linux-gnu/libpython3.12.so.1.0",
+        "bytes": 9061000,
+        "sha256": "1021f236227334ded6d1bbbc4bb6f5d933f793d8397c969896cfbdf03ce96223",
+        "reason": "development linker alias; the accepted interpreter has no libpython DT_NEEDED entry",
+    },
+    "sitecustomize.py": {
+        "target": "/etc/python3.12/sitecustomize.py",
+        "resolvedPath": "/etc/python3.12/sitecustomize.py",
+        "bytes": 155,
+        "sha256": "43d81125d92376b1a69d53a71126a041cc9a18d8080e92dea0a2ae23be138b1e",
+        "reason": "host apport exception hook is not part of the service runtime",
+    },
+}
+LIBPYTHON_SONAME_LINK = {
+    "target": "libpython3.12.so.1.0",
+    "resolvedPath": "/usr/lib/x86_64-linux-gnu/libpython3.12.so.1.0",
+    "bytes": 9061000,
+    "sha256": "1021f236227334ded6d1bbbc4bb6f5d933f793d8397c969896cfbdf03ce96223",
+}
 
 
 def sha256(path: Path) -> str:
@@ -113,15 +135,82 @@ def select_torchcodec_elfs(root: Path) -> tuple[list[Path], list[Path]]:
     return active, inactive
 
 
+def inventory_tree_symlinks(root: Path, *, allowed_external: dict[str, dict[str, object]] | None = None) -> list[dict[str, object]]:
+    source_root = root.resolve(strict=True)
+    allowed_external = allowed_external or {}
+    records: list[dict[str, object]] = []
+    seen_external: set[str] = set()
+    for path in sorted(source_root.rglob("*")):
+        if not path.is_symlink():
+            continue
+        relative = path.relative_to(source_root).as_posix()
+        target = path.readlink().as_posix()
+        resolved = path.resolve(strict=True)
+        if not resolved.is_file():
+            raise ValueError(f"directory or non-file symlink in runtime input: {path}")
+        if resolved.is_relative_to(source_root):
+            records.append({
+                "path": relative,
+                "target": target,
+                "resolvedPath": resolved.relative_to(source_root).as_posix(),
+                "bytes": resolved.stat().st_size,
+                "sha256": sha256(resolved),
+                "disposition": "materialize",
+            })
+            continue
+        expected = allowed_external.get(relative)
+        if expected is None:
+            raise ValueError(f"escaping symlink in runtime input: {relative} -> {target}")
+        actual = {
+            "target": target,
+            "resolvedPath": str(resolved),
+            "bytes": resolved.stat().st_size,
+            "sha256": sha256(resolved),
+        }
+        if any(actual[key] != expected[key] for key in actual):
+            raise ValueError(f"external runtime symlink differs from its exact pinned metadata: {relative}")
+        records.append({"path": relative, **actual, "disposition": "omit", "reason": expected["reason"]})
+        seen_external.add(relative)
+    if seen_external != set(allowed_external):
+        raise ValueError(f"expected exact external runtime symlink set differs: missing={sorted(set(allowed_external) - seen_external)}")
+    return records
+
+
+def inventory_single_file_symlink(path: Path, *, expected_target: str | None = None) -> dict[str, object] | None:
+    if not path.is_symlink():
+        if not path.is_file():
+            raise ValueError(f"runtime input is not a regular file: {path}")
+        return None
+    target = path.readlink().as_posix()
+    if expected_target is None or target != expected_target:
+        raise ValueError(f"unexpected symlink for a single-file runtime input: {path} -> {target}")
+    resolved = path.resolve(strict=True)
+    if not resolved.is_file():
+        raise ValueError(f"single-file runtime symlink target is not regular: {path}")
+    return {
+        "path": str(path),
+        "target": target,
+        "resolvedPath": str(resolved),
+        "bytes": resolved.stat().st_size,
+        "sha256": sha256(resolved),
+        "disposition": "materialize",
+    }
+
+
 def copy_tree(source: Path, destination: Path, rows: list[dict[str, object]], *, omit: set[str] = frozenset(), omit_exact: set[str] = frozenset()) -> list[dict[str, object]]:
     root = source.resolve(strict=True)
     omitted: list[dict[str, object]] = []
     for item in sorted(root.rglob("*")):
         relative = item.relative_to(root)
         if relative.as_posix() in omit_exact:
-            if item.is_symlink() or not item.is_file():
+            resolved = item.resolve(strict=True) if item.is_symlink() else item
+            if not resolved.is_file():
                 raise ValueError(f"expected omitted vendor asset is not a regular file: {item}")
-            omitted.append({"path": relative.as_posix(), "bytes": item.stat().st_size, "sha256": sha256(item)})
+            omitted_row = {"path": relative.as_posix(), "bytes": resolved.stat().st_size, "sha256": sha256(resolved)}
+            if item.is_symlink():
+                omitted_row["target"] = item.readlink().as_posix()
+                omitted_row["resolvedPath"] = str(resolved)
+            omitted.append(omitted_row)
             continue
         if any(part in omit or ("pip*" in omit and part.startswith("pip-")) for part in relative.parts):
             continue
@@ -177,6 +266,62 @@ def verify_omitted_vendor_copy(preflight: list[dict[str, object]], copied: list[
         if copied_row["bytes"] != expected["bytes"] or copied_row["sha256"] != expected["sha256"]:
             raise ValueError(f"omitted vendor asset changed after preflight: {expected['path']}")
     return preflight
+
+
+def verify_omitted_symlink_copy(preflight: list[dict[str, object]], copied: list[dict[str, object]]) -> None:
+    copied_by_path = {row["path"]: row for row in copied}
+    expected = [row for row in preflight if row["disposition"] == "omit"]
+    if len(copied_by_path) != len(copied) or set(copied_by_path) != {row["path"] for row in expected}:
+        raise ValueError("copied Python base symlink omissions differ from preflight")
+    for row in expected:
+        copied_row = copied_by_path[row["path"]]
+        if any(copied_row.get(key) != row.get(key) for key in ("target", "resolvedPath", "bytes", "sha256")):
+            raise ValueError(f"Python base symlink changed between preflight and copy: {row['path']}")
+
+
+def inventory_node_symlinks(product_root: Path, packages: list[str]) -> list[dict[str, object]]:
+    dependency_root = Path("/srv/projects/brai/node_modules").resolve(strict=True)
+    records: list[dict[str, object]] = []
+    for locator in packages:
+        package_path = product_root / locator
+        resolved_root = package_path.resolve(strict=True)
+        if package_path.is_symlink():
+            if not resolved_root.is_relative_to(dependency_root) or not resolved_root.is_dir():
+                raise ValueError(f"production dependency package symlink escapes the prepared dependency store: {locator}")
+            records.append({
+                "path": locator,
+                "target": package_path.readlink().as_posix(),
+                "resolvedPath": str(resolved_root),
+                "disposition": "materialize-package-tree",
+            })
+        records.extend({"package": locator, **row} for row in inventory_tree_symlinks(resolved_root))
+    return records
+
+
+def preflight_llama_tree(llama_root: Path, manifest_file: Path, manifest: dict[str, object]) -> tuple[set[Path], list[dict[str, object]]]:
+    if manifest_file.is_symlink() or manifest_file != llama_root / "runtime-manifest.json":
+        raise ValueError("llama provenance manifest must be the exact file inside the accepted root")
+    entries = manifest.get("files")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("llama manifest has no pinned file inventory")
+    accepted: set[Path] = set()
+    for entry in entries:
+        source = Path(entry["path"])
+        if not source.is_absolute() or source.is_symlink() or not source.resolve(strict=True).is_relative_to(llama_root):
+            raise ValueError("llama manifest source escaped its accepted regular-file extraction root")
+        if not source.is_file() or sha256(source) != entry["sha256"]:
+            raise ValueError("llama manifest file SHA-256 mismatch")
+        accepted.add(source.resolve(strict=True))
+    regular = {path.resolve() for path in llama_root.rglob("*") if path.is_file() and not path.is_symlink()}
+    if regular != accepted | {manifest_file}:
+        raise ValueError("llama extraction contains unmanifested or missing regular files")
+    symlinks = inventory_tree_symlinks(llama_root)
+    for record in symlinks:
+        target = (llama_root / record["path"]).resolve(strict=True)
+        if target not in accepted:
+            raise ValueError(f"llama alias target is absent from the pinned manifest: {record['path']}")
+        record["disposition"] = "materialize-manifest-alias"
+    return accepted, symlinks
 
 
 def ldd_closure(
@@ -352,6 +497,11 @@ def main() -> int:
     python_binary = python_base / "bin/python3.12"
     if not python_binary.exists():
         python_binary = Path("/usr/bin/python3.12")
+    single_file_symlinks: list[dict[str, object]] = []
+    for input_file in (node_root / "bin/node", python_binary, args.ffmpeg, args.ffprobe):
+        record = inventory_single_file_symlink(input_file)
+        if record:
+            single_file_symlinks.append(record)
     if run([str(python_binary), "--version"]).strip() != "Python 3.12.3":
         raise ValueError("CPython base interpreter is not the accepted 3.12.3 build")
     llama_manifest = json.loads(args.llama_manifest.read_text(encoding="utf-8"))
@@ -368,6 +518,29 @@ def main() -> int:
     omitted_preflight = preflight_omitted_vendor_assets(site_source)
     active_torchcodec_preflight, inactive_torchcodec_preflight = select_torchcodec_elfs(site_source / "torchcodec")
     vendor_data = [{"path": path, "bytes": size, "sha256": digest} for path, (size, digest) in sorted(VENDOR_DATA.items())]
+    python_base_lib = python_base / "lib/python3.12"
+    python_base_symlinks = inventory_tree_symlinks(
+        python_base_lib,
+        allowed_external=PYTHON_BASE_OMITTED_LINKS,
+    )
+    site_package_symlinks = inventory_tree_symlinks(site_source)
+    libpython_sources = sorted(Path("/usr/lib/x86_64-linux-gnu").glob("libpython3.12.so*"))
+    if {path.name for path in libpython_sources} != {"libpython3.12.so.1", "libpython3.12.so.1.0"}:
+        raise ValueError("libpython runtime ABI file set differs from the accepted Ubuntu 24.04 closure")
+    for library in libpython_sources:
+        if library.is_symlink():
+            record = inventory_single_file_symlink(library, expected_target=LIBPYTHON_SONAME_LINK["target"])
+            if not record or any(record[key] != LIBPYTHON_SONAME_LINK[key] for key in ("resolvedPath", "bytes", "sha256")):
+                raise ValueError("libpython SONAME symlink differs from the exact pinned Ubuntu ABI file")
+            single_file_symlinks.append(record)
+        elif not library.is_file():
+            raise ValueError(f"libpython ABI input is not a regular file: {library}")
+    node_packages = node_production_closure(product_root, args.package_lock)
+    node_symlinks = inventory_node_symlinks(product_root, node_packages)
+    llama_manifest_file = args.llama_manifest.resolve(strict=True)
+    accepted_llama_files, llama_symlinks = preflight_llama_tree(llama_root, llama_manifest_file, llama_manifest)
+    llama_manifest_sha = sha256(llama_manifest_file)
+    llama_files = llama_manifest["files"]
 
     output_parent = out.parent
     output_parent.mkdir(parents=True, exist_ok=True)
@@ -377,7 +550,6 @@ def main() -> int:
         runtime = staging / "runtime"
         node_dest = runtime / "node-v24.21.0-linux-x64/bin/node"
         add_file(node_root / "bin/node", node_dest, rows, mode=0o755)
-        node_packages = node_production_closure(product_root, args.package_lock)
         for locator in node_packages:
             relative = Path(locator).relative_to("node_modules")
             copy_tree(
@@ -404,31 +576,26 @@ def main() -> int:
         omitted = verify_omitted_vendor_copy(omitted_preflight, omitted_copy)
 
         python_lib = runtime / "python/lib/python3.12"
-        copy_tree(python_base / "lib/python3.12", python_lib, rows, omit={"__pycache__", "test", "tests"})
-        libpython = sorted(Path("/usr/lib/x86_64-linux-gnu").glob("libpython3.12.so*"))
-        for library in libpython:
+        python_base_omitted = copy_tree(
+            python_base_lib,
+            python_lib,
+            rows,
+            omit={"__pycache__", "test", "tests"},
+            omit_exact=set(PYTHON_BASE_OMITTED_LINKS),
+        )
+        verify_omitted_symlink_copy(python_base_symlinks, python_base_omitted)
+        for library in libpython_sources:
             if library.is_symlink():
                 add_file(library.resolve(strict=True), runtime / "python/lib" / library.name, rows)
             elif library.is_file():
                 add_file(library, runtime / "python/lib" / library.name, rows)
 
-        llama_manifest_file = args.llama_manifest.resolve(strict=True)
-        if args.llama_manifest.is_symlink() or llama_manifest_file != llama_root / "runtime-manifest.json":
-            raise ValueError("llama provenance manifest must be the exact file inside the accepted root")
-        llama_manifest_sha = sha256(llama_manifest_file)
-        llama_files = llama_manifest.get("files")
-        if not isinstance(llama_files, list) or not llama_files:
-            raise ValueError("llama manifest has no pinned file inventory")
-        accepted_llama_files: set[Path] = set()
-        manifest_paths: set[Path] = set()
         for item in llama_files:
             source_file = Path(item["path"])
             if not source_file.is_absolute() or not source_file.resolve(strict=True).is_relative_to(llama_root):
                 raise ValueError("llama manifest source escaped its accepted extraction root")
             if sha256(source_file) != item["sha256"]:
                 raise ValueError("llama manifest file SHA-256 mismatch")
-            accepted_llama_files.add(source_file.resolve(strict=True))
-            manifest_paths.add(source_file.resolve(strict=True))
             relative = source_file.relative_to(llama_root)
             target = runtime / "llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571" / relative
             add_file(source_file, target, rows)
@@ -441,9 +608,8 @@ def main() -> int:
             relative = alias.relative_to(llama_root)
             target = runtime / "llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571" / relative
             add_file(resolved, target, rows)
-        regular_llama_files = {path.resolve() for path in llama_root.rglob("*") if path.is_file() and not path.is_symlink()}
-        if regular_llama_files != manifest_paths | {llama_manifest_file}:
-            raise ValueError("llama extraction contains unmanifested or missing regular files")
+        if not accepted_llama_files:
+            raise ValueError("pinned llama extraction has no accepted binary files")
 
         for source, name in ((args.ffmpeg, "ffmpeg"), (args.ffprobe, "ffprobe")):
             add_file(source.resolve(strict=True), runtime / "ffmpeg/bin" / name, rows, mode=0o755)
@@ -519,6 +685,14 @@ def main() -> int:
                 "destination": Path(str(row["destination"])).relative_to(runtime).as_posix(),
                 "bytes": row["bytes"], "sha256": row["sha256"], "mode": row["mode"],
             } for row in rows],
+            "symlinkInventory": {
+                "pythonBase": python_base_symlinks,
+                "pythonSitePackages": site_package_symlinks,
+                "nodePackages": node_symlinks,
+                "llamaExtraction": llama_symlinks,
+                "singleFileInputs": single_file_symlinks,
+            },
+            "omittedPythonBaseSymlinks": [row for row in python_base_symlinks if row["disposition"] == "omit"],
         }
         (staging / "runtime-manifest.json").write_text(json.dumps(inventory, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         os.replace(runtime, out)

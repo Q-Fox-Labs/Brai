@@ -119,6 +119,58 @@ class ReleaseHelperTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "paths differ"):
                 runtime.verify_omitted_vendor_copy(preflight, copied[:-1])
 
+    def test_symlink_preflight_records_internal_and_exact_external_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "source"
+            root.mkdir()
+            inside = root / "target.py"
+            inside.write_bytes(b"inside target")
+            (root / "alias.py").symlink_to("target.py")
+            external = base / "external.so"
+            external.write_bytes(b"pinned external target")
+            (root / "dev-link.so").symlink_to("../external.so")
+            allowed = {
+                "dev-link.so": {
+                    "target": "../external.so",
+                    "resolvedPath": str(external),
+                    "bytes": external.stat().st_size,
+                    "sha256": sha(external),
+                    "reason": "fixture developer-only link",
+                },
+            }
+            records = runtime.inventory_tree_symlinks(root, allowed_external=allowed)
+            self.assertEqual({row["path"] for row in records}, {"alias.py", "dev-link.so"})
+            self.assertEqual(next(row for row in records if row["path"] == "alias.py")["disposition"], "materialize")
+            self.assertEqual(next(row for row in records if row["path"] == "dev-link.so")["disposition"], "omit")
+            with self.assertRaisesRegex(ValueError, "escaping symlink"):
+                runtime.inventory_tree_symlinks(root)
+
+    def test_copy_tree_omits_only_preflighted_external_developer_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "source"
+            root.mkdir()
+            payload = root / "runtime.py"
+            payload.write_bytes(b"runtime source")
+            external = base / "libpython.so.1"
+            external.write_bytes(b"exact ABI bytes")
+            link = root / "developer-link.so"
+            link.symlink_to("../libpython.so.1")
+            preflight = runtime.inventory_tree_symlinks(root, allowed_external={
+                "developer-link.so": {
+                    "target": "../libpython.so.1",
+                    "resolvedPath": str(external),
+                    "bytes": external.stat().st_size,
+                    "sha256": sha(external),
+                    "reason": "development alias",
+                },
+            })
+            copied = runtime.copy_tree(root, base / "destination", [], omit_exact={"developer-link.so"})
+            runtime.verify_omitted_symlink_copy(preflight, copied)
+            self.assertEqual((base / "destination/runtime.py").read_bytes(), b"runtime source")
+            self.assertFalse((base / "destination/developer-link.so").exists())
+
     def test_ldd_closure_copies_external_needed_library_by_soname(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
