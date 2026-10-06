@@ -233,7 +233,7 @@ test('guarded real local route: short and long Russian speech, volatile results 
       try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(message.data)); }
       catch { observerInvalid = true; continue; }
       if (!localAiRequest(localAiSubjects.invokeTranscribe, value) || value.ownerId !== writer.principal.ownerId ||
-        !artifacts.includes(value.audioArtifactId) || value.requestId !== value.operationId || !selector || JSON.stringify(value.model) !== JSON.stringify(selector)) {
+        !artifacts.includes(value.audioArtifactId) || value.requestId === value.operationId || !selector || JSON.stringify(value.model) !== JSON.stringify(selector)) {
         observerInvalid = true;
         continue;
       }
@@ -271,7 +271,7 @@ test('guarded real local route: short and long Russian speech, volatile results 
     return response.value;
   };
   const settings = await api('settings.get', {});
-  await api('settings.set', { settings: { ...settings.settings, defaultLocalModel: selector }, expectedRevision: settings.revision });
+  await api('settings.set', { settings: { ...settings.settings, defaultLocalModel: selector, policyVersion: settings.settings.policyVersion + 1 }, expectedRevision: settings.revision });
   const catalog = await api('models.list', {});
   assert.ok(catalog.localItems.some(item => JSON.stringify(item.selector) === JSON.stringify(selector) && !item.ready && item.installed && item.supported),
     'coordinator admits the actual installed model while it is unloaded');
@@ -323,7 +323,7 @@ test('guarded real local route: short and long Russian speech, volatile results 
     const invocationEnd = Date.now() + 5000;
     while (!invocations.some(value => value.audioArtifactId === artifactId) && Date.now() < invocationEnd) await pause(20);
     const invocation = invocations.find(value => value.audioArtifactId === artifactId);
-    assert.ok(invocation && invocation.requestId === invocation.operationId && invocation.operationId.length === 36 &&
+    assert.ok(invocation && invocation.requestId === requestId && invocation.operationId !== requestId && invocation.operationId.length === 36 &&
       JSON.stringify(invocation.model) === JSON.stringify(selector), 'local-ai receives attempt ID in both correlation fields and the full selector');
     return { artifactId, requestId, clientIdempotencyKey, result, invocation, durationSeconds: fixture.durationSeconds, emptyTranscript: result.result.text.length === 0 };
   }
@@ -437,7 +437,7 @@ test('guarded real local route: short and long Russian speech, volatile results 
     assert.ok(events.some(event => event.data.phase === 'accepted') && events.some(event => event.data.phase === 'terminal' && event.data.outcome === 'succeeded'),
       'history has accepted and succeeded metadata');
     const terminal = events.find(event => event.data.phase === 'terminal' && event.data.outcome === 'succeeded');
-    assert.ok(terminal.data.attemptId === run.invocation.operationId && run.invocation.requestId === run.invocation.operationId,
+    assert.ok(terminal.data.attemptId === run.invocation.operationId && run.invocation.requestId === run.requestId && run.invocation.operationId !== run.requestId,
       'history terminal attempt matches both local-ai owner correlation IDs');
     for (const event of events) {
       assert.ok(event.source === 'transcription' && event.scope_type === 'user' && event.scope_id === writer.principal.scopeId && validateDto('HistoryFact', event.data));

@@ -252,10 +252,10 @@ test('guarded actual ASR restart phases and immutable real history delivery', { 
       try {
         assert.ok(!error && message.data.length <= 65536, 'bounded actual invoke metadata');
         const command = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(message.data));
-        assert.ok(localRequest(localSubjects.invokeTranscribe, command) && command.requestId === command.operationId && same(command.model, model), 'owner invocation identity and pinned selector');
+        assert.ok(localRequest(localSubjects.invokeTranscribe, command) && command.requestId !== command.operationId && same(command.model, model), 'owner invocation identity and pinned selector');
         assert.ok(command.ownerId === principal.ownerId && artifacts.includes(command.audioArtifactId), 'only own observed invocation');
         assert.ok(seen.size < 32 || seen.has(command.operationId), 'bounded invoke observer');
-        const prior = seen.get(command.operationId); seen.set(command.operationId, { count: (prior?.count ?? 0) + 1, artifactId: command.audioArtifactId });
+        const prior = seen.get(command.operationId); seen.set(command.operationId, { count: (prior?.count ?? 0) + 1, artifactId: command.audioArtifactId, requestId: command.requestId });
         if (armed?.artifactId === command.audioArtifactId) { armed.runtime.pauseNow(); armed = undefined; }
       } catch { observerFault = true; }
     } });
@@ -302,7 +302,7 @@ test('guarded actual ASR restart phases and immutable real history delivery', { 
     }, 'Actual computed phase not captured');
     const durableIdentity = (value) => hash({ requestId: value.requestId, input: value.normalizedInputSha256, selected: value.selectedModel, policy: value.policySnapshot, requested: value.requestedModel, inputMetadata: value.inputMetadata });
     const repeat = async (params, captured) => { const reply = await api('request.submit', params); assert.ok(reply.request.requestId === captured.request.requestId, 'same client key old request'); const now = await summary(reply.request.requestId); assert.ok(durableIdentity(now.request) === durableIdentity(captured.request), 'immutable admitted identity and snapshot'); return now; };
-    const assertOne = async (artifactId, requestId) => { await observer.flush(); ensureObserver(); const value = await summary(requestId); assert.ok(count(artifactId) === 1 && value.attempts.length === 1 && seen.get(value.request.currentAttemptId)?.count === 1, 'one actual invocation and one durable attempt'); return value; };
+    const assertOne = async (artifactId, requestId) => { await observer.flush(); ensureObserver(); const value = await summary(requestId); assert.ok(count(artifactId) === 1 && value.attempts.length === 1 && seen.get(value.request.currentAttemptId)?.count === 1 && seen.get(value.request.currentAttemptId)?.requestId === requestId, 'one actual invocation and one durable attempt'); return value; };
     const unchangedCompute = async (artifactId, before) => { const current = await repeat(before.input, before.value); await pause(300); await observer.flush(); ensureObserver(); assert.ok(count(artifactId) === before.count && same(current.attempts.map((item) => item.attemptId), before.value.attempts.map((item) => item.attemptId)), 'no implicit replacement or invoke'); return current; };
 
     const runPhase = async (name, body) => {

@@ -27,7 +27,7 @@ const ownerStatus = (state = 'ready') => ({
   outboxCounts: { reserved: 0, pending: 0, sending: 0, permanentlyFailed: 0, oldestCreatedAt: null },
 });
 const ownerSuccess = (input, changes = {}) => ({
-  requestId: input.operationId,
+  requestId: input.requestId,
   operationId: input.operationId,
   model: input.model,
   durationMs: 25,
@@ -119,7 +119,7 @@ test('config requires finite RPC limits and explicit isolated local-ai connectio
   assert.throws(() => loadLocalExecutorConfig({ ...baseEnv(), TRANSCRIPTION_RPC_FRAME_BYTES: '0' }), /INVALID_LOCAL_EXECUTOR_CONFIG/);
 });
 
-test('execute maps owner response and sends both wire ids as the attempt id', async () => {
+test('execute preserves distinct service request and attempt operation ids', async () => {
   const input = request();
   let received;
   const client = connection(async (subject, data, options) => {
@@ -129,7 +129,7 @@ test('execute maps owner response and sends both wire ids as the attempt id', as
   const result = await makeExecutor(client).handlers.execute(input);
   assert.equal(received.subject, ownerContracts.subjects.invokeTranscribe);
   assert.deepEqual(received.value, {
-    requestId: input.operationId,
+    requestId: input.requestId,
     operationId: input.operationId,
     model: input.model,
     ownerId: input.ownerId,
@@ -149,10 +149,22 @@ test('execute maps owner response and sends both wire ids as the attempt id', as
   });
 });
 
-test('owner ids must match the attempt; model selector mismatch stays typed', async () => {
+test('colliding request and operation ids are rejected before any owner invocation', async () => {
+  let calls = 0;
   const input = request();
-  const idClient = connection(async (_subject, _data) => reply(ownerSuccess(input, { requestId: input.requestId })));
+  const client = connection(async () => { calls += 1; return reply(ownerSuccess(input)); });
+  await assert.rejects(makeExecutor(client).handlers.execute({ ...input, operationId: input.requestId }),
+    (error) => error.errorCode === 'INVALID_ARGUMENT');
+  assert.equal(calls, 0);
+});
+
+test('owner response ids must match both request and attempt; model selector mismatch stays typed', async () => {
+  const input = request();
+  const idClient = connection(async (_subject, _data) => reply(ownerSuccess(input, { requestId: input.operationId })));
   await assert.rejects(makeExecutor(idClient).handlers.execute(input), (error) => error.errorCode === 'REQUEST_OUTCOME_UNKNOWN');
+
+  const operationClient = connection(async () => reply(ownerSuccess(input, { operationId: input.requestId })));
+  await assert.rejects(makeExecutor(operationClient).handlers.execute(input), (error) => error.errorCode === 'REQUEST_OUTCOME_UNKNOWN');
 
   const modelClient = connection(async (_subject, _data) => reply(ownerSuccess(input, { model: { ...model, revision: 'other' } })));
   await assert.rejects(makeExecutor(modelClient).handlers.execute(input), (error) => error.errorCode === 'MODEL_MISMATCH');

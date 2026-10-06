@@ -124,7 +124,7 @@ export function createLocalExecutor(
     applicationErrorCodes: errorCodes,
     handlers: {
       async execute(value: ExecuteParams) {
-        if (!validateDto('LocalExecuteParams', value)) throw failure('INVALID_ARGUMENT');
+        if (!validateDto('LocalExecuteParams', value) || value.requestId === value.operationId) throw failure('INVALID_ARGUMENT');
         const deadlineMs = Date.parse(value.deadlineAt);
         if (!Number.isFinite(deadlineMs)) throw failure('INVALID_ARGUMENT');
         if (deadlineMs - Date.now() <= 0) throw failure('DEADLINE_EXCEEDED');
@@ -139,7 +139,7 @@ export function createLocalExecutor(
 
         const subject = contracts.subjects.invokeTranscribe;
         const request = {
-          requestId: value.operationId,
+          requestId: value.requestId,
           operationId: value.operationId,
           model: value.model,
           ownerId: value.ownerId,
@@ -156,7 +156,7 @@ export function createLocalExecutor(
         const response = ownerResponse(reply, contracts, responseBytes!);
         if (!contracts.validateResponse(subject, response)) throw failure('REQUEST_OUTCOME_UNKNOWN');
         const transcribed = response as TranscribeResponse;
-        if (transcribed.requestId !== value.operationId || transcribed.operationId !== value.operationId) {
+        if (transcribed.requestId !== value.requestId || transcribed.operationId !== value.operationId) {
           throw failure('REQUEST_OUTCOME_UNKNOWN');
         }
         if (!isDeepStrictEqual(transcribed.model, value.model)) throw failure('MODEL_MISMATCH');

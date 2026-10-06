@@ -38,7 +38,7 @@ const provider = {
         writeSync(4, 'invoke-started\n');
         await released;
         return { data: Buffer.from(JSON.stringify({
-          requestId: request.operationId,
+          requestId: request.requestId,
           operationId: request.operationId,
           model,
           durationMs: 8,
