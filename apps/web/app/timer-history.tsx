@@ -132,7 +132,7 @@ export default function TimerHistory({ items, active, statistics, totalCompleted
       </div>
      </header>
      <CollapsibleContent>
-      <Table className="timer-history-table" variant="card"><TableBody>
+      <Table className="timer-history-table" variant="card"><colgroup className="timer-history-columns"><col className="timer-history-time-column" /><col /><col className="timer-history-kind-column" /><col className="timer-history-actions-column" /></colgroup><TableBody>
        {day.items.map(segment => {
         const item = segment.interval;
         return <Fragment key={segment.rowId}>

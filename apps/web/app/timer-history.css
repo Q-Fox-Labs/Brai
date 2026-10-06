@@ -5,11 +5,13 @@
 .timer-history-global-total strong { color: var(--foreground); font-size: 13px; font-variant-numeric: tabular-nums; }
 .timer-history-v2-empty, .timer-history-v2-note { margin: 0; padding: 18px; color: var(--muted-foreground); font-size: 13px; text-align: center; }
 .timer-history-table { table-layout: fixed; }
-.timer-history-entry td:first-child { width: 55%; }
+.timer-history-time-column { width: 168px; }
+.timer-history-kind-column { width: 34px; }
+.timer-history-actions-column { width: 80px; }
 .timer-history-entry td:nth-child(2) { color: var(--muted-foreground); font-size: 12px; }
 .timer-history-entry-label small { display: block; font-size: 10px; color: var(--muted-foreground); }
-.timer-history-entry td:nth-child(3) { width: 44px; text-align: center; }
-.timer-history-entry-actions { width: 80px; white-space: nowrap; }
+.timer-history-entry td:nth-child(3) { text-align: center; }
+.timer-history-entry-actions { white-space: nowrap; }
 .timer-history-entry-actions button { width: 30px; height: 30px; }
 .timer-history-entry-actions svg { width: 14px; height: 14px; }
 .timer-history-entry-open { display: grid; width: 100%; grid-template-columns: auto minmax(8px, 1fr) auto minmax(8px, 1fr) auto; align-items: center; gap: 7px; border: 0; background: transparent; padding: 3px; color: inherit; text-align: left; cursor: pointer; }
@@ -33,9 +35,8 @@
 .timer-history-v2-more { display: flex; justify-content: center; padding: 14px; }
 @media (max-width: 560px) {
  .timer-history-entry td { padding: 7px 5px; }
- .timer-history-entry td:first-child { width: 58%; }
  .timer-history-entry td:nth-child(2) { overflow: hidden; font-size: 11px; text-overflow: ellipsis; }
- .timer-history-entry-actions { width: 64px; }
+ .timer-history-actions-column { width: 64px; }
  .timer-history-entry-open { gap: 3px; }
  .timer-history-entry-open time, .timer-history-entry-open strong { font-size: 10px; }
  .timer-history-editor-fields { gap: 4px; }
