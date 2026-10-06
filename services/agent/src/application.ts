@@ -562,7 +562,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     }
     if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
     if (r.action === 'start') title(s, r);
-    if (reference) return attachments.result(reference.reference, r);
+    if (reference) return attachments.result(reference.reference, r, turnId);
     return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: r.threadId, turnId, ...(r.requestId ? { requestId: r.requestId } : {}) };
   }
   /** Повтор того же operation ID возвращает исходный результат без native вызова. */

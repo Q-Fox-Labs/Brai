@@ -2,7 +2,7 @@
 // ABOUTME: Авторизует web сессию; не повторяет мутации и не хранит историю агента.
 import { checkOrigin, requireTimerSession, type Session } from "./auth";
 import { GatewayError, natsConnection } from "./gateway";
-import { bytes, limits, subjects, validateCommand, validateEnvelope, validateLimits } from "@brai/agent/contracts";
+import { bytes, limits, rpcTimeouts, subjects, validateCommand, validateEnvelope, validateLimits } from "@brai/agent/contracts";
 import type { AgentLimits, Command, ErrorResponse, EventEnvelope, NativeSnapshot } from "@brai/agent/contracts";
 import { encodeFrame } from "../lib/agent/stream";
 const reads = new Set(["projects", "status", "models", "threads", "open", "turns", "items", "activities", "item", "goalGet"]);
@@ -21,7 +21,7 @@ export async function rpc<T = unknown>(command: Command): Promise<T> {
   const mutation = !reads.has(command.action);
   const nc = await natsConnection().catch(() => { throw fail(503, "UNAVAILABLE", mutation ? "not-sent" : "query"); });
   try {
-    const reply = await nc.request(subjects.rpc, Buffer.from(JSON.stringify(command)), { timeout: 10000 });
+    const reply = await nc.request(subjects.rpc, Buffer.from(JSON.stringify(command)), { timeout: mutation ? rpcTimeouts.mutation : rpcTimeouts.read });
     if (reply.data.byteLength > limits.frame) throw new Error("FRAME_LIMIT");
     const value = JSON.parse(Buffer.from(reply.data).toString("utf8"));
     const code = reply.headers?.get("Nats-Service-Error"), status = reply.headers?.get("Nats-Service-Error-Code");

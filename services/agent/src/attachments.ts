@@ -96,15 +96,16 @@ export function createAttachments(codex: CodexPort, config: ArtifactsConfig | un
     remaining(deadline, generation);
     return output;
   }
-  async function recover(reference: ArtifactReference, deadline = performance.now() + 8000): Promise<ArtifactReference> {
+  async function recover(reference: ArtifactReference, deadline = performance.now() + 8000, acknowledgedTurnId?: string): Promise<ArtifactReference> {
     if (reference.state === 'confirmed' || reference.state === 'not-sent') return reference;
     const generation = codex.status().generation, matches = new Map<string, { turnId: string; itemId: string }>();
     let cursor: string | undefined, complete = false;
-    for (let page = 0; page < 100; page++) {
+    for (let page = 0; page < 1000; page++) {
       if (performance.now() >= deadline) break;
-      const result = await codex.call('thread/items/list', { threadId: reference.scope.threadId, limit: 10, sortDirection: 'desc', ...(cursor ? { cursor } : {}) }, { timeoutMs: Math.max(1, deadline - performance.now()) });
+      // AIDEV-NOTE: ACK задаёт точный turn; старые ходы не расходуют бюджет подтверждения нового ввода.
+      const result = await codex.call('thread/items/list', { threadId: reference.scope.threadId, ...(acknowledgedTurnId ? { turnId: acknowledgedTurnId } : {}), limit: 10, sortDirection: 'desc', ...(cursor ? { cursor } : {}) }, { timeoutMs: Math.max(1, deadline - performance.now()) });
       if (generation !== codex.status().generation) return state(reference, 'unknown', deadline);
-      for (const entry of result.data) if (entry.item.type === 'userMessage' && entry.item.clientId === reference.clientUserMessageId) matches.set(`${entry.turnId}\0${entry.item.id}`, { turnId: entry.turnId, itemId: entry.item.id });
+      for (const entry of result.data) if ((!acknowledgedTurnId || entry.turnId === acknowledgedTurnId) && entry.item.type === 'userMessage' && entry.item.clientId === reference.clientUserMessageId) matches.set(`${entry.turnId}\0${entry.item.id}`, { turnId: entry.turnId, itemId: entry.item.id });
       if (!result.nextCursor) { complete = true; break; }
       if (!result.data.length || result.nextCursor === cursor) break;
       cursor = result.nextCursor;
@@ -116,9 +117,9 @@ export function createAttachments(codex: CodexPort, config: ArtifactsConfig | un
     const match = [...matches.values()][0];
     return (await query(subjects.referenceConfirm, { scope: reference.scope, clientUserMessageId: reference.clientUserMessageId, ...match }, deadline, generation)).reference;
   }
-  async function result(reference: ArtifactReference, r: Command) {
+  async function result(reference: ArtifactReference, r: Command, acknowledgedTurnId?: string) {
     let recovered: ArtifactReference;
-    try { recovered = await recover(reference); } catch { fail('UPSTREAM_UNAVAILABLE', 'unknown'); }
+    try { recovered = await recover(reference, performance.now() + 8000, acknowledgedTurnId); } catch { fail('UPSTREAM_UNAVAILABLE', 'unknown'); }
     if (recovered!.state === 'confirmed') return { generation: codex.status().generation, operationId: r.operationId, outcome: 'accepted', threadId: r.threadId, turnId: recovered!.turnId };
     fail('UPSTREAM_UNAVAILABLE', recovered!.state === 'not-sent' ? 'not-sent' : 'unknown');
   }

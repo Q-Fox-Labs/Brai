@@ -57,7 +57,13 @@ function fixture() {
   const port = { status: () => ({ generation, connection: 'connected', authorization: 'ready' }), subscribe: fn => { observer = fn; return () => {}; }, call: async (method, params) => {
     calls.push({ method, params }); await hook?.(method, params);
     if (method === 'turn/start' || method === 'turn/steer') { assert.ok(native(method === 'turn/start' ? 'TurnStartParams' : 'TurnSteerParams')(params)); if (persist) history.push({ turnId: 'turn', item: { id: `u${history.length}`, type: 'userMessage', clientId: params.clientUserMessageId, content: params.input } }); if (lostNative) throw error('TIMEOUT', 'unknown'); return method === 'turn/start' ? { turn } : { turnId: 'turn' }; }
-    if (method === 'thread/items/list') { let items = history.slice().reverse(); if (params.cursor?.type === 'item') { const index = items.findIndex(entry => entry.item.id === params.cursor.itemId); items = params.sortDirection === 'desc' ? items.slice(index + 1) : history.slice(history.findIndex(entry => entry.item.id === params.cursor.itemId) + 1); } else if (params.sortDirection === 'asc') items = history.slice(); return { data: items.slice(0, params.limit), nextCursor: next }; }
+    if (method === 'thread/items/list') {
+      const visible = history.filter(entry => !params.turnId || entry.turnId === params.turnId);
+      let items = params.sortDirection === 'asc' ? visible.slice() : visible.slice().reverse();
+      if (params.cursor?.type === 'item') items = items.slice(items.findIndex(entry => entry.item.id === params.cursor.itemId) + 1);
+      const offset = typeof params.cursor === 'string' && params.cursor.startsWith('page:') ? Number(params.cursor.slice(5)) : 0;
+      return { data: items.slice(offset, offset + params.limit), nextCursor: next ?? (offset + params.limit < items.length ? `page:${offset + params.limit}` : null) };
+    }
     return { 'account/rateLimits/read': { rateLimits: null }, 'model/list': { data: [{ id: 'vision', model: 'vision', displayName: 'Vision', description: '', hidden: false, isDefault: true, defaultReasoningEffort: 'low', supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }] }] }, 'thread/start': response, 'thread/resume': response, 'thread/read': { thread }, 'thread/goal/get': { goal: null }, 'thread/turns/list': { data: [turn] } }[method] ?? (() => { throw new Error(method); })();
   } };
   const config = { codex: { socketUrl: 'mock' }, projects: [{ projectId: 'p', name: 'P', cwd: '/tmp/p' }], newThread: { model: 'vision' }, allowedModels: ['vision'], artifacts: { baseUrl: 'http://artifacts' } };
@@ -65,6 +71,93 @@ function fixture() {
   const read = (action, extra = {}) => app.request({ action, projectId: 'p', threadId: 't', ownerId: 'owner', ...extra });
   return { get app() { return app; }, port, config, artifactPort, calls, events, refs, artifacts, read, setHistory: value => { history = value; }, history: () => history, observe: (method, params) => observer({ type: 'notification', method, params: { threadId: 't', ...params } }), setHook: value => { hook = value; }, lostReserve: () => { lostReserve = true; }, lostNative: () => { lostNative = true; }, noPersist: () => { persist = false; }, incomplete: () => { next = 'same'; }, restart: () => { app.close(); generation = 'g2'; app = createApplication(port, config, e => events.push(e), artifactPort); return { ...base, generation }; }, create: () => app.request({ action: 'create', projectId: 'p', generation, operationId: 'create' }) };
 }
+test('acknowledged image input confirms its whole exact turn despite thousands of older items', async () => {
+  const f = fixture(); await f.create();
+  f.setHistory(Array.from({ length: 2500 }, (_, i) => ({ turnId: 'old-turn', item: { id: `old-${i}`, type: 'userMessage', clientId: `old-client-${i}`, content: [{ type: 'text', text: 'old' }] } })));
+  const from = f.calls.length;
+  const accepted = await f.app.request(base);
+  assert.equal(accepted.outcome, 'accepted');
+  assert.equal([...f.refs.values()][0].itemId, 'u2500');
+  const correlation = f.calls.slice(from).filter(call => call.method === 'thread/items/list');
+  assert.equal(correlation.length, 1);
+  assert.equal(correlation[0].params.turnId, 'turn');
+  assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+  f.app.close();
+});
+
+test('ACK turn correlation completes pagination and rejects duplicates or an incomplete turn', async () => {
+  for (const mode of ['unique', 'duplicate', 'incomplete']) {
+    const f = fixture(); await f.create();
+    f.setHistory(Array.from({ length: 24 }, (_, i) => ({ turnId: 'turn', item: { id: `earlier-${i}`, type: 'userMessage', clientId: mode === 'duplicate' && i === 0 ? 'brai:agent:v3:o' : `earlier-client-${i}`, content: [] } })));
+    if (mode === 'incomplete') f.incomplete();
+    if (mode === 'unique') {
+      assert.equal((await f.app.request(base)).outcome, 'accepted');
+      assert.equal(f.calls.filter(call => call.method === 'thread/items/list').length, 3);
+    } else {
+      await assert.rejects(f.app.request(base), error => error.outcome === 'unknown');
+      assert.notEqual([...f.refs.values()][0].state, 'confirmed');
+    }
+    assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+    f.app.close();
+  }
+});
+
+test('lost native ACK retains whole-thread uniqueness, including another turn, without resend', async () => {
+  const f = fixture(); await f.create(); f.lostNative();
+  await assert.rejects(f.app.request(base), error => error.outcome === 'unknown');
+  f.setHistory([...f.history(), { turnId: 'another-turn', item: { ...f.history()[0].item, id: 'duplicate-in-another-turn' } }]);
+  const replay = f.restart();
+  await assert.rejects(f.app.request(replay), error => error.outcome === 'unknown');
+  assert.notEqual([...f.refs.values()][0].state, 'confirmed');
+  assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+  f.app.close();
+});
+
+test('a complete acknowledged turn with more than 1000 items still confirms exact input', async () => {
+  const f = fixture(); await f.create();
+  f.setHistory(Array.from({ length: 1205 }, (_, i) => ({ turnId: 'turn', item: { id: `earlier-${i}`, type: 'userMessage', clientId: `earlier-client-${i}`, content: [] } })));
+  assert.equal((await f.app.request(base)).outcome, 'accepted');
+  const pages = f.calls.filter(call => call.method === 'thread/items/list');
+  assert.equal(pages.length, 121);
+  assert.ok(pages.every(call => call.params.turnId === 'turn'));
+  assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+  f.app.close();
+});
+
+test('lost ACK recovery enumerates long history and refuses a distant duplicate or absent exact key', async () => {
+  for (const mode of ['unique', 'duplicate', 'absent']) {
+    const f = fixture(); await f.create(); f.lostNative();
+    await assert.rejects(f.app.request(base), error => error.outcome === 'unknown');
+    const sent = f.history()[0];
+    const old = Array.from({ length: 1205 }, (_, i) => ({ turnId: 'old-turn', item: { id: `old-${i}`, type: 'userMessage', clientId: mode === 'duplicate' && i === 0 ? sent.item.clientId : `old-client-${i}`, content: [] } }));
+    f.setHistory([...old, mode === 'absent' ? { ...sent, item: { ...sent.item, clientId: 'different-key' } } : sent]);
+    const attachments = createAttachments(f.port, f.config.artifacts, f.artifactPort), before = f.calls.length;
+    const recovered = await attachments.recover([...f.refs.values()][0]);
+    assert.equal(recovered.state, mode === 'unique' ? 'confirmed' : 'unknown');
+    const pages = f.calls.slice(before).filter(call => call.method === 'thread/items/list');
+    assert.equal(pages.length, 121);
+    assert.ok(pages.every(call => !call.params.turnId));
+    assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+    f.app.close();
+  }
+});
+
+test('recovery cap and elapsed deadline leave unknown without confirmation or native resend', async () => {
+  const f = fixture(); await f.create(); f.lostNative();
+  await assert.rejects(f.app.request(base), error => error.outcome === 'unknown');
+  f.setHistory([...Array.from({ length: 10005 }, (_, i) => ({ turnId: 'old-turn', item: { id: `old-${i}`, type: 'userMessage', clientId: `old-client-${i}`, content: [] } })), ...f.history()]);
+  const attachments = createAttachments(f.port, f.config.artifacts, f.artifactPort), reference = [...f.refs.values()][0], before = f.calls.length;
+  assert.equal((await attachments.recover(reference)).state, 'unknown');
+  assert.equal(f.calls.slice(before).filter(call => call.method === 'thread/items/list').length, 1000);
+  assert.notEqual(reference.state, 'confirmed');
+  f.setHistory(f.history().slice(-1));
+  f.setHook(async method => { if (method === 'thread/items/list') await new Promise(resolve => setTimeout(resolve, 30)); });
+  await assert.rejects(attachments.recover(reference, performance.now() + 10), error => error.code === 'TIMEOUT');
+  assert.notEqual(reference.state, 'confirmed');
+  assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+  f.app.close();
+});
+
 test('closed v3 DTO and owner schemas reject raw media, invalid UUIDs and excess attachments', () => {
   assert.deepEqual(publicSchema.definitions.Command.oneOf, commandSchema.oneOf);
   const schema = ajv.compile(commandSchema);
