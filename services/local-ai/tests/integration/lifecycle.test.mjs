@@ -346,3 +346,70 @@ test('llama startup cancellation retains loading allocation until a failed bound
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('nonresponding native health is bounded by startup and retains allocation until physical exit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'local-ai-health-startup-'));
+  const marker = join(root, 'health-pid');
+  const ready = join(root, 'ready');
+  const originalTmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = root;
+  const selector = { modelId: 'gigaam-v3-e2e-ctc', revision: 'rev-giga', profileId: 'gigaam_pytorch' };
+  const source = `const fs=require('node:fs');const readline=require('node:readline');process.on('SIGTERM',()=>{});readline.createInterface({input:process.stdin}).on('line',line=>{const q=JSON.parse(line);if(q.method==='health'){fs.writeFileSync(process.argv[1],String(process.pid));if(fs.existsSync(process.argv[2]))process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,result:{ready:true,model_id:'gigaam-v3-e2e-ctc',revision:'rev-giga',vad_revision:'vad-rev'}})+'\\n')}});`;
+  const factory = createProfileRuntimeFactory({ profiles: {
+    llama_cpp: { ...common(process.execPath, ['-e', 'process.exit(2)']), host: '127.0.0.1', port: () => 1, dimensions: 1024, contextTokens: 2048, maxBatchTokens: 2048, queryInstruction: 'unused' },
+    gigaam_pytorch: { ...common(process.execPath, ['-e', source.replaceAll('}', '} '), marker, ready]), startupTimeoutMs: 700, requestTimeoutMs: 5000, stopGraceMs: 20, vadModelPath: '/local/vad', vadRevision: 'vad-rev', threads: 1, longformMaximumSeconds: 40, audioDecodeTimeoutSeconds: 15 },
+  } });
+  const installation = { ...selector, directory: root, files: [{ path: 'config.json', sizeBytes: 5, sha256: '0'.repeat(64) }], installedAt: new Date().toISOString() };
+  const store = { async transaction(run) { return run({
+    models: { get: async () => ({ ...selector, supported: true }) },
+    installations: { get: async () => installation },
+    settings: { get: async () => ({ idleUnloadSeconds: null }) },
+  }); } };
+  const lifecycle = createLifecycleManager({ store, runtimeFactory: factory, artifacts: {}, limits: {
+    maxLoadedModels: 1, maxQueuedOperations: 2, maxInputBytes: 10000, maxEmbeddingItems: 2, maxResultBytes: 10000, loadDeadlineMs: 5000,
+  } });
+  const originalKill = process.kill;
+  let pid;
+  let suppressedStops = 0;
+  let settled = false;
+  let rejected;
+  const waitFor = async check => {
+    const until = Date.now() + 2000;
+    while (!await check()) {
+      assert.ok(Date.now() < until, 'startup bound must stop a real pending health RPC before its request deadline');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+  };
+  try {
+    rejected = assert.rejects(lifecycle.load(selector, context()).finally(() => { settled = true; }), error => error.code === 'MODEL_LOAD_FAILED');
+    await waitFor(async () => { try { pid = Number(await readFile(marker, 'utf8')); return Number.isSafeInteger(pid) && pid > 1; } catch { return false; } });
+    // AIDEV-NOTE: Блокируем только сигналы fixture, чтобы startup failure не подменял physical exit proof.
+    process.kill = (target, signal) => {
+      if (target === -pid && ['SIGTERM', 'SIGKILL'].includes(signal)) { suppressedStops++; return true; }
+      return originalKill(target, signal);
+    };
+    await waitFor(() => suppressedStops >= 2);
+    assert.equal(settled, false);
+    assert.equal(lifecycle.status().loading, 1);
+    assert.doesNotThrow(() => originalKill(-pid, 0));
+    assert.ok((await readdir(root)).some(name => name.startsWith('brai-local-ai-giga-')));
+    await assert.rejects(lifecycle.acquireModelIdleLock(selector.modelId), error => error.code === 'MODEL_IN_USE');
+    process.kill = originalKill;
+    originalKill(-pid, 'SIGKILL');
+    await rejected;
+    assert.equal(lifecycle.status().loading, 0);
+    assert.throws(() => originalKill(-pid, 0), error => error.code === 'ESRCH');
+    assert.equal((await readdir(root)).some(name => name.startsWith('brai-local-ai-giga-')), false);
+    await writeFile(ready, 'ready');
+    await lifecycle.load(selector, context());
+    await lifecycle.unload(selector, context());
+    assert.equal(lifecycle.status().loaded, 0);
+  } finally {
+    process.kill = originalKill;
+    if (pid) { try { originalKill(-pid, 'SIGKILL'); } catch {} }
+    await lifecycle.close();
+    if (rejected) await rejected;
+    if (originalTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = originalTmpdir;
+    await rm(root, { recursive: true, force: true });
+  }
+});

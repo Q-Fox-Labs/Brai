@@ -628,14 +628,24 @@ async function waitUntilReady(
   selector: ResolvedModel['model'],
 ): Promise<void> {
   const deadline = Math.min(Date.now() + timeoutMs, Date.parse(context.deadlineAt));
-  while (Date.now() < deadline) {
-    checkContext(context);
-    const result = await Promise.race([
-      runtime.health(context, selector).then(() => true).catch(() => false),
-      exited.then(() => { throw serviceError('MODEL_LOAD_FAILED'); }),
-    ]);
-    if (result) return;
-    await new Promise(resolve => setTimeout(resolve, Math.min(100, deadline - Date.now())));
+  const startup = new AbortController();
+  const timer = setTimeout(() => startup.abort(), Math.max(1, deadline - Date.now()));
+  timer.unref();
+  const healthContext = { ...context, deadlineAt: new Date(deadline).toISOString(), signal: AbortSignal.any([context.signal, startup.signal]) };
+  try {
+    while (Date.now() < deadline) {
+      checkContext(context);
+      const result = await Promise.race([
+        runtime.health(healthContext, selector).then(() => true).catch(() => false),
+        exited.then(() => { throw serviceError('MODEL_LOAD_FAILED'); }),
+      ]);
+      checkContext(context);
+      if (Date.now() >= deadline) break;
+      if (result) return;
+      await new Promise(resolve => setTimeout(resolve, Math.min(100, deadline - Date.now())));
+    }
+    throw serviceError(Date.parse(context.deadlineAt) <= Date.now() ? 'DEADLINE_EXCEEDED' : 'MODEL_LOAD_FAILED');
+  } finally {
+    clearTimeout(timer);
   }
-  throw serviceError(Date.parse(context.deadlineAt) <= Date.now() ? 'DEADLINE_EXCEEDED' : 'MODEL_LOAD_FAILED');
 }
