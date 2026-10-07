@@ -570,7 +570,8 @@ export function createProfileRuntimeFactory(config: ProfileRuntimeFactoryConfig)
           await waitUntilReady(runtime, process.exited, profile.startupTimeoutMs, context, model.model);
           return runtime;
         } catch (error) {
-          await runtime.close();
+          try { await runtime.close(); }
+          catch { await runtime.exited; }
           if (error instanceof LocalAiError) throw error;
           throw serviceError('MODEL_LOAD_FAILED');
         }
