@@ -1,6 +1,7 @@
 // ABOUTME: Восстанавливает metadata и доставляет резерв истории перед/во время работы coordinator.
 // ABOUTME: Не вызывает executors; стабильные history events повторяются без изменения.
 import { assertDto, methodMap } from '#transcription-contracts';
+import type { IncidentKey } from '../../notifications.js';
 
 type HelperMethod = keyof typeof methodMap.helper;
 type RecoveryConfig = {
@@ -17,6 +18,8 @@ type HelperPort = { call(method: string, params: unknown): Promise<unknown> };
 type HistoryPort = { append(event: unknown): Promise<unknown> };
 type RecoveryStatus = { ready: boolean; recoveryAvailable: boolean; historyAvailable: boolean };
 type ControllerOptions = {
+  observe?: (key: IncidentKey, available: boolean) => void;
+  probe?: () => Promise<void>;
   helper: HelperPort;
   history: HistoryPort;
   clearVolatileResults: () => void;
@@ -100,6 +103,7 @@ export function createRecoveryController(options: ControllerOptions) {
       counts = result;
       if (!hasChanges(counts)) {
         recoveryAvailable = true;
+        options.observe?.('recovery', true);
         return;
       }
       if (batch + 1 >= config.recoveryMaxBatches || performance.now() >= deadline) break;
@@ -119,6 +123,7 @@ export function createRecoveryController(options: ControllerOptions) {
       initialized = true;
     } catch {
       recoveryAvailable = false;
+      options.observe?.('recovery', false);
       initialized = false;
       throw safeError('RECOVERY_UNAVAILABLE');
     }
@@ -134,7 +139,7 @@ export function createRecoveryController(options: ControllerOptions) {
     while (!stopping) {
       await pause(config.recoveryPollIntervalMs);
       if (stopping) break;
-      try { await runRecoveryCycle(); } catch { recoveryAvailable = false; }
+      try { await options.probe?.(); await runRecoveryCycle(); } catch { recoveryAvailable = false; options.observe?.('recovery', false); }
     }
   }
 
@@ -143,14 +148,22 @@ export function createRecoveryController(options: ControllerOptions) {
     for (let index = 0; index < config.historyMaxDeliveries && !stopping; index += 1) {
       const claim = await callHelper<HistoryClaim | null>('history.claim', { workerId: config.workerId });
       if (claim === null) {
-        historyAvailable = !historyRejected;
+        if (options.observe) {
+          const health = await callHelper<{ storageAvailable: boolean; historyRejected?: boolean }>('health', {});
+          if (health.storageAvailable && health.historyRejected !== undefined) historyRejected = health.historyRejected;
+          historyAvailable = historyAvailable && health.storageAvailable && !historyRejected;
+        } else historyAvailable = !historyRejected;
+        if (!historyAvailable) options.observe?.('history', false);
         return delivered;
       }
       try {
         // Повторяет тот же владелец envelope с исходными id/data; адаптер задаёт trusted append subject.
         await history.append(claim.event);
+        historyAvailable = !historyRejected;
+        options.observe?.('history', historyAvailable);
       } catch (error) {
         historyAvailable = false;
+        options.observe?.('history', false);
         const errorCode = deliveryErrorCode(error);
         if (errorCode === 'HISTORY_REJECTED') historyRejected = true;
         try {
@@ -179,7 +192,7 @@ export function createRecoveryController(options: ControllerOptions) {
 
   async function historyDeliveryLoop(): Promise<void> {
     while (!stopping) {
-      try { await drainHistoryCycle(); } catch { historyAvailable = false; }
+      try { await drainHistoryCycle(); } catch { historyAvailable = false; options.observe?.('history', false); }
       if (!stopping) await pause(config.historyPollIntervalMs);
     }
   }

@@ -1209,6 +1209,264 @@
       "x-params-schema": {
         "$ref": "../schemas/messages.schema.json#/definitions/HelperHistoryFailParams"
       }
+    },
+    {
+      "name": "alerts.claim",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "workerId",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsClaimParams/properties/workerId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/messages.schema.json#/definitions/AlertClaimResult"
+        }
+      },
+      "errors": [
+        {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        {
+          "code": -32600,
+          "message": "Invalid Request"
+        },
+        {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        {
+          "code": -32603,
+          "message": "Internal error"
+        },
+        {
+          "code": -32000,
+          "message": "Application error",
+          "data": {
+            "errorCode": "STATE_CONFLICT"
+          },
+          "x-data-schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+          }
+        }
+      ],
+      "x-params-schema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsClaimParams"
+      }
+    },
+    {
+      "name": "alerts.ack",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "deliveryId",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsAckParams/properties/deliveryId"
+          }
+        },
+        {
+          "name": "claimToken",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsAckParams/properties/claimToken"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/messages.schema.json#/definitions/AlertAckResult"
+        }
+      },
+      "errors": [
+        {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        {
+          "code": -32600,
+          "message": "Invalid Request"
+        },
+        {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        {
+          "code": -32603,
+          "message": "Internal error"
+        },
+        {
+          "code": -32000,
+          "message": "Application error",
+          "data": {
+            "errorCode": "STATE_CONFLICT"
+          },
+          "x-data-schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+          }
+        }
+      ],
+      "x-params-schema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsAckParams"
+      }
+    },
+    {
+      "name": "alerts.fail",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "deliveryId",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsFailParams/properties/deliveryId"
+          }
+        },
+        {
+          "name": "claimToken",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsFailParams/properties/claimToken"
+          }
+        },
+        {
+          "name": "retryDelayMs",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsFailParams/properties/retryDelayMs"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/messages.schema.json#/definitions/AlertFailResult"
+        }
+      },
+      "errors": [
+        {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        {
+          "code": -32600,
+          "message": "Invalid Request"
+        },
+        {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        {
+          "code": -32603,
+          "message": "Internal error"
+        },
+        {
+          "code": -32000,
+          "message": "Application error",
+          "data": {
+            "errorCode": "STATE_CONFLICT"
+          },
+          "x-data-schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+          }
+        }
+      ],
+      "x-params-schema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsFailParams"
+      }
+    },
+    {
+      "name": "alerts.observe",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "key",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsObserveParams/properties/key"
+          }
+        },
+        {
+          "name": "available",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsObserveParams/properties/available"
+          }
+        },
+        {
+          "name": "eventId",
+          "required": false,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsObserveParams/properties/eventId"
+          }
+        },
+        {
+          "name": "occurredAt",
+          "required": false,
+          "schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsObserveParams/properties/occurredAt"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/messages.schema.json#/definitions/AlertObserveResult"
+        }
+      },
+      "errors": [
+        {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        {
+          "code": -32600,
+          "message": "Invalid Request"
+        },
+        {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        {
+          "code": -32603,
+          "message": "Internal error"
+        },
+        {
+          "code": -32000,
+          "message": "Application error",
+          "data": {
+            "errorCode": "STATE_CONFLICT"
+          },
+          "x-data-schema": {
+            "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+          }
+        }
+      ],
+      "x-params-schema": {
+        "$ref": "../schemas/messages.schema.json#/definitions/HelperAlertsObserveParams"
+      }
     }
   ]
 }

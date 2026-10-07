@@ -23,6 +23,8 @@ export async function migrate(pool: Pool, ownerRole: string, appRole: string, co
     await client.query(`REVOKE CREATE ON SCHEMA public FROM PUBLIC,${quote(appRole)}`);
     const migration = new URL('../helper/migrations/001.sql', import.meta.resolve('#transcription-contracts'));
     await client.query(readFileSync(migration, 'utf8'));
+    const alertsMigration = new URL('../helper/migrations/002.sql', import.meta.resolve('#transcription-contracts'));
+    if (!(await client.query('SELECT version FROM transcription.migrations WHERE version=2')).rowCount) await client.query(readFileSync(alertsMigration, 'utf8'));
     const schemaOwner = (await client.query("SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname='transcription'")).rows[0]?.owner;
     const otherOwner = (await client.query("SELECT 1 FROM pg_class WHERE relnamespace='transcription'::regnamespace AND relowner<>(SELECT oid FROM pg_roles WHERE rolname=$1)", [ownerRole])).rowCount;
     if (schemaOwner !== ownerRole || otherOwner) throw new Error('MIGRATION_OWNER_MISMATCH');
@@ -32,6 +34,8 @@ export async function migrate(pool: Pool, ownerRole: string, appRole: string, co
     await client.query(`GRANT USAGE ON SCHEMA transcription TO ${quote(appRole)}`);
     await client.query(`GRANT SELECT ON transcription.migrations TO ${quote(appRole)}`);
     await client.query(`GRANT SELECT,INSERT,UPDATE ON transcription.settings,transcription.requests,transcription.attempts,transcription.history_outbox TO ${quote(appRole)}`);
+    await client.query('GRANT SELECT,INSERT,UPDATE,DELETE ON transcription.alerts_outbox TO ' + quote(appRole));
+    await client.query('GRANT SELECT,INSERT,UPDATE ON transcription.alerts_incidents TO ' + quote(appRole));
     await client.query('COMMIT');
   } catch (error) { await client.query('ROLLBACK').catch(() => {}); throw error; }
   finally { client.release(); }

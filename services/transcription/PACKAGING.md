@@ -19,8 +19,8 @@ PostgreSQL, artifacts/history, публичные HTTP/MCP/NATS операции
 Обычный кандидатный запуск — один coordinator. Он запускает helper, local и
 external как дочерние процессы с отдельными allowlist окружения; второй helper
 или executor вручную вместе с ним не поднимать. Отдельные команды нужны для
-диагностики и самостоятельных проверок. External провайдеров и notifications в
-этом выпуске нет.
+диагностики и самостоятельных проверок. External провайдеров в этом выпуске нет. Уведомления проблем доставляются
+в alerts через JetStream; штатная работа проходит молча.
 
 Одновременно работает только один coordinator. `TRANSCRIPTION_INSTANCE_ID`
 обозначает конкретный процесс и должен быть новым при каждом запуске, включая
@@ -61,11 +61,11 @@ npm run build:transcription
 npm run test:transcription
 ```
 
-Ограниченный unit/contract/process набор явно содержит 14 файлов:
+Ограниченный unit/contract/process набор явно содержит 15 файлов:
 
 - `helper/tests/config.test.mjs`, `handlers.test.mjs`, `main-process.test.mjs`, `storage.test.mjs`;
 - `tests/contracts/descriptors.test.mjs`, `executors.test.mjs`, `metadata.test.mjs`;
-- `tests/coordinator/domain-core.test.mjs`, `recovery-controller.test.mjs`, `transport-assembly.test.mjs`, `transport.test.mjs`;
+- `tests/coordinator/domain-core.test.mjs`, `recovery-controller.test.mjs`, `alerts.test.mjs`, `transport-assembly.test.mjs`, `transport.test.mjs`;
 - `tests/executors/external/process.test.mjs`, `tests/local/adapter.test.mjs`, `tests/runtime/stdio-rpc.test.mjs`.
 
 Защищённые fixture-тесты запускаются отдельно и только с их изолированными
@@ -97,7 +97,7 @@ Restart требует отдельную конфигурацию
 `TRANSCRIPTION_TEST_RESTART_MODEL_JSON` и проверенным Ansible-контроллером
 собственной history в `TRANSCRIPTION_TEST_RESTART_HISTORY_CONTROL`. Эти тесты
 проверяют точные адреса и имена изолированного стенда; общие реквизиты сервера
-для них не подходят. Они не входят в обычный набор из 14 файлов.
+для них не подходят. Они не входят в обычный набор из 15 файлов.
 
 ## Runtime asset closure
 
@@ -112,7 +112,8 @@ Restart требует отдельную конфигурацию
   `services/artifacts/schemas/messages.schema.json`;
 - `services/local-ai/contracts/index.mjs`, `schemas/messages.schema.json` и
   `schemas/facts.schema.json`;
-- `services/transcription/helper/migrations/001.sql`.
+- `services/transcription/helper/migrations/001.sql`, `002.sql`;
+- `services/alerts/schemas/messages.schema.json`.
 
 Coordinator и local executor загружают только опубликованные contracts
 providers. При выпуске local-ai с best-effort историей runtime artifact transcription
@@ -128,6 +129,8 @@ validators или SQL в `dist` и не импортировать приват�
 
 ## Настройка coordinator
 
+TRANSCRIPTION_ALERTS_CAPACITY — обязательная ёмкость резервов и очереди уведомлений запросов. Семь общих причин имеют отдельные места; DEV использует 10000. Identity coordinator получает publish на brai.alerts.v1.ingest и собственный inbox для PubAck; прав управления JetStream не требуется.
+
 Все обязательные настройки читаются из окружения coordinator. Числовые лимиты
 должны быть положительными safe integers в десятичной записи; параметры,
 используемые Node timers, не превышают `2147483647`. Нулевые значения и скрытые
@@ -140,7 +143,7 @@ validators или SQL в `dist` и не импортировать приват�
 | HTTP/MCP | `TRANSCRIPTION_HTTP_HOST`, `TRANSCRIPTION_HTTP_PORT`, `TRANSCRIPTION_ALLOWED_HOSTS_JSON`, `TRANSCRIPTION_ALLOWED_ORIGINS_JSON`, `TRANSCRIPTION_HTTP_HEADER_BYTES`, `TRANSCRIPTION_HTTP_REQUEST_BYTES`, `TRANSCRIPTION_HTTP_RESPONSE_BYTES`, `TRANSCRIPTION_HTTP_REQUEST_TIMEOUT_MS`, `TRANSCRIPTION_HTTP_MAX_CONNECTIONS`, `TRANSCRIPTION_HTTP_CONCURRENT_REQUESTS` |
 | Coordinator NATS | `TRANSCRIPTION_NATS_URL`, `TRANSCRIPTION_NATS_INBOX_PREFIX`, и либо пара `TRANSCRIPTION_NATS_USER` + `TRANSCRIPTION_NATS_PASSWORD`, либо `TRANSCRIPTION_NATS_TOKEN`; также `TRANSCRIPTION_NATS_REQUEST_BYTES`, `TRANSCRIPTION_NATS_RESPONSE_BYTES` |
 | Dependency и worker limits | `TRANSCRIPTION_DEPENDENCY_REQUEST_TIMEOUT_MS`, `TRANSCRIPTION_MAX_CATALOG_ITEMS`, `TRANSCRIPTION_CATALOG_PAGE_SIZE`, `TRANSCRIPTION_RPC_FRAME_BYTES`, `TRANSCRIPTION_RPC_BATCH_ITEMS`, `TRANSCRIPTION_RPC_CONCURRENT_REQUESTS`, `TRANSCRIPTION_RPC_CONCURRENT_EXECUTE`, `TRANSCRIPTION_RPC_CONTROL_TIMEOUT_MS`, `TRANSCRIPTION_CHILD_SHUTDOWN_TIMEOUT_MS` |
-| Helper PostgreSQL и storage | `TRANSCRIPTION_HELPER_PGHOST`, `TRANSCRIPTION_HELPER_PGPORT`, `TRANSCRIPTION_HELPER_PGDATABASE`, `TRANSCRIPTION_HELPER_PGUSER`, `TRANSCRIPTION_HELPER_PGPASSWORD`, `TRANSCRIPTION_PG_POOL_MAX`, `TRANSCRIPTION_HISTORY_CAPACITY`, `TRANSCRIPTION_REQUEST_LEASE_MS`, `TRANSCRIPTION_HISTORY_LEASE_MS`, `TRANSCRIPTION_TRANSACTION_TIMEOUT_MS`, `TRANSCRIPTION_RECOVERY_BATCH_SIZE` |
+| Helper PostgreSQL и storage | `TRANSCRIPTION_HELPER_PGHOST`, `TRANSCRIPTION_HELPER_PGPORT`, `TRANSCRIPTION_HELPER_PGDATABASE`, `TRANSCRIPTION_HELPER_PGUSER`, `TRANSCRIPTION_HELPER_PGPASSWORD`, `TRANSCRIPTION_PG_POOL_MAX`, `TRANSCRIPTION_HISTORY_CAPACITY`, `TRANSCRIPTION_ALERTS_CAPACITY`, `TRANSCRIPTION_REQUEST_LEASE_MS`, `TRANSCRIPTION_HISTORY_LEASE_MS`, `TRANSCRIPTION_TRANSACTION_TIMEOUT_MS`, `TRANSCRIPTION_RECOVERY_BATCH_SIZE` |
 | Recovery и history delivery | `TRANSCRIPTION_RECOVERY_MAX_BATCHES`, `TRANSCRIPTION_RECOVERY_CYCLE_TIMEOUT_MS`, `TRANSCRIPTION_RECOVERY_POLL_INTERVAL_MS`, `TRANSCRIPTION_HISTORY_MAX_DELIVERIES`, `TRANSCRIPTION_HISTORY_POLL_INTERVAL_MS`, `TRANSCRIPTION_PUMP_POLL_INTERVAL_MS` |
 
 RPC limits удовлетворяют `CONCURRENT_EXECUTE < CONCURRENT_REQUESTS`, а domain
@@ -174,7 +177,7 @@ ACL coordinator разрешает подписку на шесть metadata sub
 его собственный inbox и стандартные `$SRV.PING`, `$SRV.INFO`, `$SRV.STATS`
 (общие, с именем `brai_transcription` и с ID экземпляра), а также ограниченные
 ответы на принятые запросы. Исходящие запросы — `brai.artifacts.v1.get` и
-`brai.history.v1.append.transcription`. Отдельная local-ai identity разрешает
+`brai.history.v1.append.transcription` и `brai.alerts.v1.ingest`. Отдельная local-ai identity разрешает
 опубликованные owner subjects `models.list`, `invoke.transcribe`, `status`
 и свой inbox; coordinator использует её для каталога, local child — для
 выполнения и health. Публичный клиент имеет собственную identity и inbox,
@@ -262,3 +265,4 @@ Production-развёртывание требует отдельного пор
 После приёмки собственный стенд удалён: unit/cgroups, контейнеры, тома,
 сеть, защищённые входы и синтетические данные. Независимая проверка отсутствия
 прошла 27/27; отдельная штатная Docker-проверка — 19/19. Worktree сохранён.
+\nОтдельная реальная приёмка уведомлений: npm run test:integration:alerts --workspace=@brai/transcription с TRANSCRIPTION_TEST_ALERTS=1 и явными disposable PostgreSQL/alerts/NATS fixture inputs, описанными в tests/integration/alerts.test.mjs. Без opt-in тест пропускается и не подтверждает интеграцию. Runtime closure включает owner schema alerts и migration 002.sql.\n

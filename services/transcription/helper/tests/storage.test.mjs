@@ -2,9 +2,9 @@
 // ABOUTME: Эти локальные проверки не подтверждают SQL транзакции или права рабочих ролей.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { canonicalHash, createPolicySnapshot, createPostgresStore, StorageFault } from '../storage/index.ts';
+import { canonicalHash, createPolicySnapshot, createPostgresStore, StorageFault } from '../../dist/helper/storage/index.js';
 
-const config = { historyCapacity: 10, requestLeaseMs: 10000, historyLeaseMs: 10000, transactionTimeoutMs: 5000, recoveryBatchSize: 10 };
+const config = { alertsCapacity: 100, historyCapacity: 10, requestLeaseMs: 10000, historyLeaseMs: 10000, transactionTimeoutMs: 5000, recoveryBatchSize: 10 };
 test('canonical hash ignores object key order, preserves arrays and exact values', () => {
   assert.equal(canonicalHash({ b: 2, a: { y: 1, x: null } }), canonicalHash({ a: { x: null, y: 1 }, b: 2 }));
   assert.notEqual(canonicalHash([1, 2]), canonicalHash([2, 1]));
@@ -19,7 +19,7 @@ test('canonical hash ignores object key order, preserves arrays and exact values
 test('finite config and invalid DTO are rejected before any database access', async () => {
   let calls = 0;
   const pool = { connect() { calls++; throw new Error('private URL'); }, async end() {} };
-  for (const invalid of [0, -1, Infinity, 0.5]) assert.throws(() => createPostgresStore(pool, { ...config, historyCapacity: invalid }), error => error instanceof StorageFault && error.code === 'INVALID_ARGUMENT');
+  for (const invalid of [0, -1, Infinity, 0.5]) assert.throws(() => createPostgresStore(pool, { ...config, alertsCapacity: 100, historyCapacity: invalid }), error => error instanceof StorageFault && error.code === 'INVALID_ARGUMENT');
   const store = createPostgresStore(pool, config);
   await assert.rejects(store.execute('request.accept', { ownerId: 'client', text: 'private' }), error => error instanceof StorageFault && error.code === 'INVALID_ARGUMENT');
   assert.equal(calls, 0);

@@ -4,6 +4,7 @@ import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
 import historyCommon from '../../history/schemas/common.schema.json' with { type: 'json' };
 import historyMessages from '../../history/schemas/messages.schema.json' with { type: 'json' };
+import alertsMessages from '../../alerts/schemas/messages.schema.json' with { type: 'json' };
 import methods from './methods.json' with { type: 'json' };
 import transcriptionSchemas from '../schemas/messages.schema.json' with { type: 'json' };
 
@@ -14,6 +15,7 @@ const ajv = new Ajv({ allErrors: true, strict: true, validateFormats: true, coer
 addFormats(ajv);
 ajv.addSchema(historyCommon);
 ajv.addSchema(historyMessages);
+ajv.addSchema(alertsMessages);
 ajv.addSchema(transcriptionSchemas);
 const validators = new Map(Object.keys(transcriptionSchemas.definitions).map((name) => {
   const validate = ajv.getSchema(`${transcriptionSchemas.$id}#/definitions/${name}`);

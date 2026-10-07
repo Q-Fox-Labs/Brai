@@ -4,15 +4,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
-import { createPostgresStore, createPolicySnapshot, canonicalHash, StorageFault } from '../storage/index.ts';
-import { migrate } from '../migrate.ts';
+import { createPostgresStore, createPolicySnapshot, canonicalHash, StorageFault } from '../../dist/helper/storage/index.js';
+import { migrate } from '../../dist/helper/migrate.js';
 
 const env = process.env;
 if (env.PGHOST !== '127.0.0.1' || env.PGDATABASE !== 'brai_transcription_acceptance' || !env.PGUSER || !env.PGPASSWORD || !env.TRANSCRIPTION_TEST_APP_PGUSER || !env.TRANSCRIPTION_TEST_APP_PGPASSWORD || !Number.isInteger(Number(env.PGPORT)) || Number(env.PGPORT) <= 0) throw new Error('Explicit isolated transcription PostgreSQL fixture inputs required');
 const owner = new Pool({ connectionTimeoutMillis: 5000, query_timeout: 5000, max: 4 });
 const app = new Pool({ host: env.PGHOST, port: Number(env.PGPORT), database: env.PGDATABASE,
   user: env.TRANSCRIPTION_TEST_APP_PGUSER, password: env.TRANSCRIPTION_TEST_APP_PGPASSWORD, connectionTimeoutMillis: 5000, query_timeout: 5000, max: 8 });
-const config = { historyCapacity: 50, requestLeaseMs: 60000, historyLeaseMs: 60000, transactionTimeoutMs: 5000, recoveryBatchSize: 2 };
+const config = { alertsCapacity: 100, historyCapacity: 50, requestLeaseMs: 60000, historyLeaseMs: 60000, transactionTimeoutMs: 5000, recoveryBatchSize: 2 };
 const store = createPostgresStore(app, config);
 const selector = { modelId: 'synthetic/whisper', revision: 'fixture:1', profileId: 'transcribe/fixture' };
 const settings = { policyVersion: 1, defaultLocalModel: selector, allowReplacement: false };
@@ -26,7 +26,7 @@ const get = requestId => store.execute('request.get', { principal, requestId });
 const fence = (claim, attemptId = randomUUID()) => ({ requestId: claim.request.requestId, attemptId, claimToken: claim.claimToken, fenceGeneration: claim.fenceGeneration, expectedRevision: claim.revision });
 const count = async table => Number((await owner.query(`SELECT count(*) AS n FROM transcription.${table}`)).rows[0].n);
 async function reset() {
-  await owner.query('TRUNCATE transcription.history_outbox,transcription.attempts,transcription.requests');
+  await owner.query('TRUNCATE transcription.alerts_outbox,transcription.alerts_incidents,transcription.history_outbox,transcription.attempts,transcription.requests');
   await owner.query('UPDATE transcription.settings SET settings=$1,revision=1 WHERE singleton', [settings]);
 }
 async function start(params = input(), selectedModel = selector) {
@@ -48,8 +48,8 @@ test('isolated real PostgreSQL metadata storage', async t => {
       await migrate(owner, env.PGUSER, env.TRANSCRIPTION_TEST_APP_PGUSER, { transactionTimeoutMs: 5000 });
       await migrate(owner, env.PGUSER, env.TRANSCRIPTION_TEST_APP_PGUSER, { transactionTimeoutMs: 5000 });
       await store.ready();
-      assert.equal(await count('migrations'), 1);
-      for (const sql of ['CREATE TABLE transcription.forbidden(id integer)', 'CREATE TABLE public.forbidden(id integer)', 'DROP TABLE transcription.requests', 'TRUNCATE transcription.requests', 'INSERT INTO transcription.migrations(version) VALUES(2)']) {
+      assert.equal(await count('migrations'), 2);
+      for (const sql of ['CREATE TABLE transcription.forbidden(id integer)', 'CREATE TABLE public.forbidden(id integer)', 'DROP TABLE transcription.requests', 'TRUNCATE transcription.requests', 'INSERT INTO transcription.migrations(version) VALUES(3)']) {
         await assert.rejects(app.query(sql), error => error.code === '42501');
       }
       const ownership = (await owner.query("SELECT pg_get_userbyid(relowner) AS role FROM pg_class WHERE relnamespace='transcription'::regnamespace AND relkind='r'")).rows;
@@ -70,13 +70,13 @@ test('isolated real PostgreSQL metadata storage', async t => {
       await assert.rejects(store.execute('request.get', { principal: { ...principal, ownerId: 'other' }, requestId: values[0].request.requestId }), fault('NOT_FOUND'));
     });
     await t.test('capacity counts reserves and rolls back admission/settings without partial writes', async () => {
-      await reset(); const small = createPostgresStore(app, { ...config, historyCapacity: 2 });
+      await reset(); const small = createPostgresStore(app, { ...config, alertsCapacity: 100, historyCapacity: 2 });
       await small.execute('request.accept', accepted(input()));
       await assert.rejects(small.execute('request.accept', accepted(input())), fault('OVERLOADED'));
       assert.equal(await count('requests'), 1); assert.equal(await count('history_outbox'), 2);
       await assert.rejects(small.execute('settings.set', { principal, expectedRevision: 1, settings: { ...settings, policyVersion: 2 } }), fault('OVERLOADED'));
       assert.equal((await small.execute('settings.get', { principal })).revision, 1);
-      assert.deepEqual(await small.execute('health', {}), { available: false, storageAvailable: true });
+      assert.deepEqual(await small.execute('health', {}), { available: false, storageAvailable: true, capacityAvailable: false, historyRejected: false });
     });
     await t.test('history insert failure rolls back whole admission and releases key', async () => {
       await reset(); const params = input();
@@ -165,7 +165,7 @@ test('isolated real PostgreSQL metadata storage', async t => {
       assert.equal(next.deliveryId, first.deliveryId); assert.deepEqual(next.event, first.event); assert.notEqual(next.claimToken, first.claimToken);
       await assert.rejects(store.execute('history.ack', { deliveryId: first.deliveryId, claimToken: first.claimToken }), fault('STALE_CLAIM'));
       await store.execute('history.fail', { deliveryId: next.deliveryId, claimToken: next.claimToken, errorCode: 'HISTORY_REJECTED' });
-      assert.deepEqual(await store.execute('health', {}), { available: false, storageAvailable: true });
+      assert.deepEqual(await store.execute('health', {}), { available: false, storageAvailable: true, capacityAvailable: true, historyRejected: true });
       assert.equal((await owner.query("SELECT count(*)::integer AS n FROM transcription.history_outbox WHERE state='failed'")).rows[0].n, 1);
     });
     await t.test('privacy and scope validation reject unsafe payload before persistent change', async () => {

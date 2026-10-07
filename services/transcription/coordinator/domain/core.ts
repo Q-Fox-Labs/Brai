@@ -301,13 +301,14 @@ export function createCoordinator(options: {
     if (state === 'available' || state === 'delivery_unknown') {
       state = request.resultExpiresAt && Date.parse(request.resultExpiresAt) <= currentTime ? 'expired' : 'lost';
       try {
-        await ownerCall(ports.helper, helperMethods, 'result.setState', {
+        const changed = await ownerCall<any>(ports.helper, helperMethods, 'result.setState', {
           requestId: request.requestId,
           expectedRevision: request.revision,
           state,
           resultExpiresAt: null,
           bufferOwnerInstanceId: null,
         });
+        state = changed.request.resultState;
       } catch {
         const refreshed = await ownerCall<any>(ports.helper, helperMethods, 'request.get', { principal, requestId: request.requestId });
         state = refreshed.request.resultState;

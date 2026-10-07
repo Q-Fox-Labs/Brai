@@ -14,13 +14,14 @@
     "start:local": "node dist/executors/local/main.js",
     "start:external": "node dist/executors/external/main.js",
     "migrate": "node dist/helper/migrate.js",
-    "test": "npm run build && node --test helper/tests/config.test.mjs helper/tests/handlers.test.mjs helper/tests/main-process.test.mjs helper/tests/storage.test.mjs tests/contracts/descriptors.test.mjs tests/contracts/executors.test.mjs tests/contracts/metadata.test.mjs tests/coordinator/domain-core.test.mjs tests/coordinator/recovery-controller.test.mjs tests/coordinator/transport-assembly.test.mjs tests/coordinator/transport.test.mjs tests/executors/external/process.test.mjs tests/local/adapter.test.mjs tests/runtime/stdio-rpc.test.mjs",
+    "test": "npm run build && node --test helper/tests/config.test.mjs helper/tests/handlers.test.mjs helper/tests/main-process.test.mjs helper/tests/storage.test.mjs tests/contracts/descriptors.test.mjs tests/contracts/executors.test.mjs tests/contracts/metadata.test.mjs tests/coordinator/domain-core.test.mjs tests/coordinator/recovery-controller.test.mjs tests/coordinator/transport-assembly.test.mjs tests/coordinator/transport.test.mjs tests/executors/external/process.test.mjs tests/local/adapter.test.mjs tests/runtime/stdio-rpc.test.mjs tests/coordinator/alerts.test.mjs",
     "test:integration:postgres": "npm run build && node --test --test-concurrency=1 helper/tests/storage-postgres.test.mjs helper/tests/delivery-postgres.test.mjs",
     "test:integration:helper:rpc": "npm run build && node --test helper/tests/live-rpc-postgres.test.mjs",
     "test:integration:nats": "npm run build && TRANSCRIPTION_TEST_NATS=1 node --test tests/coordinator/transport-nats.test.mjs",
     "test:integration:metadata": "npm run build && TRANSCRIPTION_TEST_METADATA=1 node --test tests/integration/metadata.test.mjs",
     "test:integration:asr": "npm run build && node --test tests/integration/local-route.test.mjs",
-    "test:integration:restart": "npm run build && node --test tests/integration/restart.test.mjs"
+    "test:integration:restart": "npm run build && node --test tests/integration/restart.test.mjs",
+    "test:integration:alerts": "npm run build && node --test tests/integration/alerts.test.mjs"
   },
   "dependencies": {
     "ajv": "8.17.1",

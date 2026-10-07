@@ -820,6 +820,12 @@
         },
         "storageAvailable": {
           "type": "boolean"
+        },
+        "capacityAvailable": {
+          "type": "boolean"
+        },
+        "historyRejected": {
+          "type": "boolean"
         }
       }
     },
@@ -2282,6 +2288,314 @@
           ]
         }
       }
+    },
+    "AlertIncidentKey": {
+      "enum": [
+        "storage",
+        "local_ai",
+        "artifacts",
+        "history",
+        "recovery",
+        "delivery",
+        "capacity"
+      ]
+    },
+    "AlertEvent": {
+      "allOf": [
+        {
+          "$ref": "https://brai.app/schemas/alerts/messages.schema.json#/definitions/ingest"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "service_id": {
+              "const": "transcription"
+            },
+            "type_id": {
+              "enum": [
+                1,
+                2,
+                3
+              ]
+            },
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {},
+                  "required": []
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "reason": {
+                      "$ref": "#/definitions/AlertIncidentKey"
+                    }
+                  },
+                  "required": [
+                    "reason"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "requestId": {
+                      "$ref": "#/definitions/Uuid"
+                    },
+                    "attemptId": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/definitions/Uuid"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "errorCode": {
+                      "anyOf": [
+                        {
+                          "$ref": "#/definitions/ErrorCode"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "requestId",
+                    "attemptId",
+                    "errorCode"
+                  ]
+                }
+              ]
+            }
+          },
+          "required": [
+            "data"
+          ],
+          "if": {
+            "properties": {
+              "scope_type": {
+                "const": "system"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {},
+                    "required": []
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "reason": {
+                        "$ref": "#/definitions/AlertIncidentKey"
+                      }
+                    },
+                    "required": [
+                      "reason"
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "requestId": {
+                    "$ref": "#/definitions/Uuid"
+                  },
+                  "attemptId": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/Uuid"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "errorCode": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/definitions/ErrorCode"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "requestId",
+                  "attemptId",
+                  "errorCode"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "AlertClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deliveryId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "claimToken": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "event": {
+          "$ref": "#/definitions/AlertEvent"
+        }
+      },
+      "required": [
+        "deliveryId",
+        "claimToken",
+        "event"
+      ]
+    },
+    "AlertClaimResult": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/AlertClaim"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "HelperAlertsClaimParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workerId": {
+          "$ref": "#/definitions/BoundedId"
+        }
+      },
+      "required": [
+        "workerId"
+      ]
+    },
+    "HelperAlertsAckParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deliveryId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "claimToken": {
+          "$ref": "#/definitions/Uuid"
+        }
+      },
+      "required": [
+        "deliveryId",
+        "claimToken"
+      ]
+    },
+    "HelperAlertsFailParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "deliveryId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "claimToken": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "retryDelayMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 30000
+        }
+      },
+      "required": [
+        "deliveryId",
+        "claimToken",
+        "retryDelayMs"
+      ]
+    },
+    "AlertAckResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "acknowledged": {
+          "const": true
+        }
+      },
+      "required": [
+        "acknowledged"
+      ]
+    },
+    "AlertFailResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "failed": {
+          "const": true
+        }
+      },
+      "required": [
+        "failed"
+      ]
+    },
+    "HelperAlertsObserveParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "$ref": "#/definitions/AlertIncidentKey"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "eventId": {
+          "$ref": "#/definitions/Uuid"
+        },
+        "occurredAt": {
+          "$ref": "#/definitions/Timestamp"
+        }
+      },
+      "required": [
+        "key",
+        "available"
+      ]
+    },
+    "AlertObserveResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "event": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AlertEvent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "event"
+      ]
     }
   }
 }

@@ -67,6 +67,22 @@
     "history.fail": [
       "HelperHistoryFailParams",
       "HistoryFailResult"
+    ],
+    "alerts.claim": [
+      "HelperAlertsClaimParams",
+      "AlertClaimResult"
+    ],
+    "alerts.ack": [
+      "HelperAlertsAckParams",
+      "AlertAckResult"
+    ],
+    "alerts.fail": [
+      "HelperAlertsFailParams",
+      "AlertFailResult"
+    ],
+    "alerts.observe": [
+      "HelperAlertsObserveParams",
+      "AlertObserveResult"
     ]
   },
   "public": {

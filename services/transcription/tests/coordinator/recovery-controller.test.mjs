@@ -208,3 +208,34 @@ test('invalid helper recovery response cannot enable readiness', async () => {
   assert.equal(controller.ready, false);
   await controller.close();
 });
+
+
+test('an empty claim does not close a history outage; only successful append recovers silently', async () => {
+  let claims=0, allowNext=false, appends=0;
+  const observations=[];
+  const helper=helperPort(method=>{
+    if(method==='recovery.run')return zero;
+    if(method==='health')return {available:true,storageAvailable:true,historyRejected:false};
+    if(method==='history.claim'){
+      claims++;
+      if(claims===1)return claim(ids.token1);
+      if(allowNext){allowNext=false;return claim(ids.token2);}
+      return null;
+    }
+    if(method==='history.fail')return {failed:true};
+    if(method==='history.ack')return {acknowledged:true};
+    assert.fail(method);
+  });
+  const controller=createRecoveryController({helper,history:{append:async()=>{
+    if(++appends===1)throw new Error('synthetic outage');
+  }},observe:(key,available)=>{if(key==='history')observations.push(available);},
+    clearVolatileResults:()=>{},config:config({historyPollIntervalMs:2})});
+  await controller.initialize();controller.start(async()=>false);
+  try{
+    await until(()=>claims>=4);
+    assert.ok(observations.length>0&&observations.every(value=>value===false));
+    assert.equal(controller.status().historyAvailable,false);
+    allowNext=true;await until(()=>observations.includes(true));
+    assert.equal(appends,2);assert.equal(controller.status().historyAvailable,true);
+  }finally{await controller.close();}
+});

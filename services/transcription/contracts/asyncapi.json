@@ -88,6 +88,14 @@
           "$ref": "#/components/messages/ErrorResponse"
         }
       }
+    },
+    "alerts_ingest": {
+      "address": "brai.alerts.v1.ingest",
+      "messages": {
+        "event": {
+          "$ref": "#/components/messages/AlertEvent"
+        }
+      }
     }
   },
   "operations": {
@@ -270,6 +278,18 @@
           "bindingVersion": "0.1.0"
         }
       }
+    },
+    "sendAlert": {
+      "action": "send",
+      "channel": {
+        "$ref": "#/channels/alerts_ingest"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/alerts_ingest/messages/event"
+        }
+      ],
+      "description": "JetStream BRAI_ALERTS_INGEST_V1; immutable retry until PubAck; source outbox survives restart; PubAck is broker storage, not alerts commit."
     }
   },
   "components": {
@@ -348,6 +368,11 @@
         },
         "payload": {
           "$ref": "../schemas/messages.schema.json#/definitions/ErrorResponse"
+        }
+      },
+      "AlertEvent": {
+        "payload": {
+          "$ref": "../schemas/messages.schema.json#/definitions/AlertEvent"
         }
       }
     }

@@ -3,11 +3,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { assertDto, methodMap } from '#transcription-contracts';
+import { createAlertsStore } from './alerts.js';
 
 // AIDEV-NOTE: Форматы wire не дублируются TypeScript интерфейсами; каждый вход/выход проверяет owner registry.
 type Metadata = Record<string, any>;
 /** Конечные пределы транзакционного outbox и двух независимых lease в миллисекундах. */
-export interface StoreConfig { historyCapacity: number; requestLeaseMs: number; historyLeaseMs: number; transactionTimeoutMs: number; recoveryBatchSize: number; }
+export interface StoreConfig { historyCapacity: number; alertsCapacity: number; requestLeaseMs: number; historyLeaseMs: number; transactionTimeoutMs: number; recoveryBatchSize: number; }
 /** Безопасная прикладная ошибка без SQL, DTO, URL соединения или сырого exception. */
 export class StorageFault extends Error {
   readonly code: string;
@@ -41,8 +42,9 @@ const timeSQL = (column: string) => `to_char((${column}) AT TIME ZONE 'UTC','YYY
 /** Создаёт владельца metadata; pool должен иметь конечные connect/query timeout и max connections. Не выполняет DDL. */
 export function createPostgresStore(pool: Pool, config: StoreConfig) {
   for (const value of Object.values(config)) if (!Number.isSafeInteger(value) || value <= 0) fail('INVALID_ARGUMENT');
-  if (!['historyCapacity', 'requestLeaseMs', 'historyLeaseMs', 'transactionTimeoutMs', 'recoveryBatchSize'].every(key => Object.hasOwn(config, key))) fail('INVALID_ARGUMENT');
+  if (!['historyCapacity', 'alertsCapacity', 'requestLeaseMs', 'historyLeaseMs', 'transactionTimeoutMs', 'recoveryBatchSize'].every(key => Object.hasOwn(config, key))) fail('INVALID_ARGUMENT');
   const transactionTimeoutMs = config.transactionTimeoutMs;
+  const alerts = createAlertsStore(config.alertsCapacity, config.historyLeaseMs, fail);
 
   async function tx<T>(run: (client: PoolClient, now: string) => Promise<T>): Promise<T> {
     // AIDEV-NOTE: Внутри lock только короткие SQL metadata операции; никакого ожидания invoke/NATS.
@@ -116,6 +118,8 @@ export function createPostgresStore(pool: Pool, config: StoreConfig) {
   }
 
   async function operation(client: PoolClient, now: string, method: string, params: Metadata): Promise<unknown> {
+    if (method === 'alerts.observe') return alerts.observe(client, params, now);
+    if (method.startsWith('alerts.')) return alerts.execute(client, method, params);
     if (method === 'settings.get') { use(params.principal); return settings(client); }
     if (method === 'settings.set') {
       use(params.principal, 'transcription:settings:write');
@@ -154,6 +158,7 @@ export function createPostgresStore(pool: Pool, config: StoreConfig) {
       if (input.requestedModel?.route === 'external') { if (params.selectedModel !== null) fail('MODEL_MISMATCH'); }
       else if (params.selectedModel !== null && ((input.requestedModel && params.selectedModel.modelId !== input.requestedModel.modelId) || (!input.requestedModel && canonicalHash(params.selectedModel) !== canonicalHash(current.settings.defaultLocalModel)))) fail('MODEL_MISMATCH');
       await capacity(client, 2);
+      if (!await alerts.hasCapacity(client)) fail('OVERLOADED');
       const request: Metadata = { requestId: randomUUID(), scope: { scopeType: principal.scopeType, scopeId: principal.scopeId }, ownerId: principal.ownerId,
         audioArtifactId: input.audioArtifactId, clientIdempotencyKey: input.clientIdempotencyKey, normalizedInputSha256: hash,
         requestedModel: input.requestedModel, selectedModel: params.selectedModel, policySnapshot: params.policySnapshot,
@@ -162,6 +167,7 @@ export function createPostgresStore(pool: Pool, config: StoreConfig) {
         resultExpiresAt: null, bufferOwnerInstanceId: null, actualModel: null, usage: null, cost: null, errorCode: null, createdAt: now, updatedAt: now };
       assertDto('RequestRecord', request);
       await client.query('INSERT INTO transcription.requests(request_id,scope_type,scope_id,owner_id,client_key,input_sha256,revision,task_state,metadata) VALUES($1,$2,$3,$4,$5,$6,1,$7,$8)', [request.requestId, principal.scopeType, principal.scopeId, principal.ownerId, input.clientIdempotencyKey, hash, 'accepted', request]);
+      await alerts.reserve(client, request.requestId);
       const acceptedId = randomUUID();
       await client.query("INSERT INTO transcription.history_outbox(delivery_id,request_id,terminal_slot,state,event) VALUES($1,$2,false,'pending',$3),($4,$2,true,'reserved',NULL)", [acceptedId, request.requestId, event(request, acceptedId, now, 'accepted', null), randomUUID()]);
       return { created: true, request };
@@ -173,6 +179,7 @@ export function createPostgresStore(pool: Pool, config: StoreConfig) {
       if (current.metadata.taskState !== 'accepted') return { accepted: false, stopConfirmed: false, request: current.metadata };
       const request = await save(client, current, { ...current.metadata, taskState: 'cancelled', resultState: 'not_ready', errorCode: null }, now, true);
       await terminalHistory(client, request, now, 1202);
+      await alerts.release(client, request.requestId);
       return { accepted: true, stopConfirmed: true, request };
     }
     if (method === 'request.claim') {
@@ -229,6 +236,7 @@ export function createPostgresStore(pool: Pool, config: StoreConfig) {
         usage: params.usage, cost: params.cost, errorCode: params.errorCode, resultState: params.resultState, resultExpiresAt: params.resultExpiresAt, bufferOwnerInstanceId: params.bufferOwnerInstanceId }, now, true);
       record = { ...record, state: params.outcome, actualModel: params.actualModel, usage: params.usage, cost: params.cost, errorCode: params.errorCode, durationMs: params.durationMs, finishedAt: now };
       await saveAttempt(client, record); await terminalHistory(client, request, now);
+      if (!success) await alerts.problem(client, request, now);
       return { request, attempt: record };
     }
     if (method === 'result.setState') {
@@ -238,7 +246,12 @@ export function createPostgresStore(pool: Pool, config: StoreConfig) {
         if (params.bufferOwnerInstanceId !== current.metadata.bufferOwnerInstanceId || params.resultExpiresAt !== current.metadata.resultExpiresAt) fail('STATE_CONFLICT');
         if ((await client.query('SELECT $1::timestamptz<=clock_timestamp() AS expired', [params.resultExpiresAt])).rows[0].expired) fail('RESULT_UNAVAILABLE');
       } else if (params.resultExpiresAt !== null || params.bufferOwnerInstanceId !== null) fail('STATE_CONFLICT');
-      return { request: await save(client, current, { ...current.metadata, resultState: params.state, resultExpiresAt: params.resultExpiresAt, bufferOwnerInstanceId: params.bufferOwnerInstanceId }, now) };
+      const expired = current.metadata.resultExpiresAt && (await client.query('SELECT $1::timestamptz<=clock_timestamp() AS expired', [current.metadata.resultExpiresAt])).rows[0].expired;
+      const state = params.state === 'lost' && expired ? 'expired' : params.state;
+      const request = await save(client, current, { ...current.metadata, resultState: state, resultExpiresAt: params.resultExpiresAt, bufferOwnerInstanceId: params.bufferOwnerInstanceId }, now);
+      if (state === 'lost') await alerts.problem(client, request, now);
+      if (state === 'expired') await alerts.release(client, request.requestId);
+      return { request };
     }
     if (method === 'recovery.run') {
       const result = { dispatchingExpired: 0, runningExpired: 0, succeededBufferLost: 0, resultsExpired: 0 };
@@ -250,11 +263,13 @@ export function createPostgresStore(pool: Pool, config: StoreConfig) {
           const record = await attempt(client, request.currentAttemptId);
           await saveAttempt(client, { ...record, state: 'outcome_unknown', errorCode: 'REQUEST_OUTCOME_UNKNOWN', finishedAt: now });
           await terminalHistory(client, request, now);
+          await alerts.problem(client, request, now);
         } else if (current.metadata.taskState === 'succeeded' && ['available', 'delivery_unknown'].includes(current.metadata.resultState)) {
           const expired = current.result_expired;
           if (!expired && current.metadata.bufferOwnerInstanceId === params.coordinatorInstanceId) continue;
           if (expired) result.resultsExpired++; else result.succeededBufferLost++;
-          await save(client, current, { ...current.metadata, resultState: expired ? 'expired' : 'lost', resultExpiresAt: null, bufferOwnerInstanceId: null }, now);
+          const request = await save(client, current, { ...current.metadata, resultState: expired ? 'expired' : 'lost', resultExpiresAt: null, bufferOwnerInstanceId: null }, now);
+          if (expired) await alerts.release(client, request.requestId); else await alerts.problem(client, request, now);
         }
       }
       return result;
@@ -288,9 +303,10 @@ export function createPostgresStore(pool: Pool, config: StoreConfig) {
         try {
           await this.ready();
           const backlog = await tx(async client => (await client.query("SELECT count(*) FILTER(WHERE state<>'acknowledged')::integer AS used,count(*) FILTER(WHERE state='failed')::integer AS failed FROM transcription.history_outbox")).rows[0]);
-          return { available: backlog.failed === 0 && backlog.used + 2 <= config.historyCapacity, storageAvailable: true };
+          const capacityAvailable = backlog.used + 2 <= config.historyCapacity && await tx(client => alerts.hasCapacity(client));
+          return { available: backlog.failed === 0 && capacityAvailable, storageAvailable: true, capacityAvailable, historyRejected: backlog.failed > 0 };
         }
-        catch { return { available: false, storageAvailable: false }; }
+        catch { return { available: false, storageAvailable: false, capacityAvailable: false, historyRejected: false }; }
       }
       return tx(async (client, now) => {
         const value = await operation(client, now, method, params);
@@ -300,7 +316,7 @@ export function createPostgresStore(pool: Pool, config: StoreConfig) {
     /** Проверяет наличие owner migration и работоспособность БД; не создаёт таблицы. */
     async ready(): Promise<void> {
       try {
-        const result = await pool.query('SELECT version FROM transcription.migrations WHERE version=1');
+        const result = await pool.query('SELECT version FROM transcription.migrations WHERE version=2');
         if (!result.rowCount) fail('STORAGE_UNAVAILABLE');
       } catch { fail('STORAGE_UNAVAILABLE'); }
     },

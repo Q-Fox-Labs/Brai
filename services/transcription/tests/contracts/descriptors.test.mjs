@@ -47,14 +47,14 @@ test('NATS exposes exactly six metadata operations and safe service errors', () 
   const document = read(filename);
   verifyRefs(document, document, filename);
   const publicMethods = Object.keys(methodMap.public).filter(method => method !== 'result.get');
-  assert.equal(Object.keys(document.operations).length, 6);
-  assert.deepEqual(Object.values(document.channels).map(channel => channel.address).filter(Boolean).sort(), publicMethods.map(method => 'brai.transcription.v1.' + method).sort());
+  assert.equal(Object.keys(document.operations).length, 7);
+  assert.deepEqual(Object.values(document.channels).map(channel => channel.address).filter(address => address && address !== 'brai.alerts.v1.ingest').sort(), publicMethods.map(method => 'brai.transcription.v1.' + method).sort());
   for (const method of publicMethods) {
     const [params, result] = methodMap.public[method];
     assert.equal(document.components.messages[params].payload.$ref, schemaRef(params));
     assert.equal(document.components.messages[result].payload.$ref, schemaRef(result));
   }
-  for (const operation of Object.values(document.operations)) assert.deepEqual(operation.bindings.nats, { queue: 'brai_transcription', bindingVersion: '0.1.0' });
+  for (const operation of Object.values(document.operations).filter(operation => operation.action !== 'send')) assert.deepEqual(operation.bindings.nats, { queue: 'brai_transcription', bindingVersion: '0.1.0' });
   assert.equal(document.components.messages.ErrorResponse.headers.properties['Nats-Service-Error'].$ref, schemaRef('ErrorCode'));
   assert.equal(document.components.messages.PublicResult, undefined);
   assert.equal(document.components.messages.ResultGetResult, undefined);

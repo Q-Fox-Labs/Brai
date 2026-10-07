@@ -104,7 +104,7 @@ export function loadCoordinatorConfig(env: NodeJS.ProcessEnv = process.env): Coo
   const helper = { ...rpc };
   for (const suffix of ['HOST', 'PORT', 'DATABASE', 'USER', 'PASSWORD']) helper[`PG${suffix}`] = required(env, `TRANSCRIPTION_HELPER_PG${suffix}`);
   if (!/^[0-9]+$/.test(helper.PGPORT) || Number(helper.PGPORT) < 1 || Number(helper.PGPORT) > 65535) invalid();
-  for (const suffix of ['PG_POOL_MAX', 'HISTORY_CAPACITY', 'REQUEST_LEASE_MS', 'HISTORY_LEASE_MS', 'TRANSACTION_TIMEOUT_MS', 'RECOVERY_BATCH_SIZE']) {
+  for (const suffix of ['PG_POOL_MAX', 'HISTORY_CAPACITY', 'ALERTS_CAPACITY', 'REQUEST_LEASE_MS', 'HISTORY_LEASE_MS', 'TRANSACTION_TIMEOUT_MS', 'RECOVERY_BATCH_SIZE']) {
     p(suffix, suffix.endsWith('_MS'));
     helper[`TRANSCRIPTION_${suffix}`] = required(env, `TRANSCRIPTION_${suffix}`);
   }

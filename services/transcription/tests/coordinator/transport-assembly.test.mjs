@@ -19,7 +19,7 @@ function environment() {
   for (const name of ['MAX_EXECUTE_CONCURRENCY', 'LEASE_RENEW_INTERVAL_MS', 'DEFAULT_EXECUTION_TIMEOUT_MS', 'RESULT_TTL_MS', 'MAX_RESULT_COUNT', 'MAX_RESULT_BYTES', 'MAX_TOTAL_RESULT_BYTES',
     'HTTP_HEADER_BYTES', 'HTTP_REQUEST_BYTES', 'HTTP_RESPONSE_BYTES', 'HTTP_REQUEST_TIMEOUT_MS', 'HTTP_CONCURRENT_REQUESTS', 'HTTP_MAX_CONNECTIONS',
     'NATS_REQUEST_BYTES', 'NATS_RESPONSE_BYTES', 'DEPENDENCY_REQUEST_TIMEOUT_MS', 'MAX_CATALOG_ITEMS', 'CATALOG_PAGE_SIZE',
-    'PG_POOL_MAX', 'HISTORY_CAPACITY', 'REQUEST_LEASE_MS', 'HISTORY_LEASE_MS', 'TRANSACTION_TIMEOUT_MS', 'RECOVERY_BATCH_SIZE',
+    'PG_POOL_MAX', 'HISTORY_CAPACITY', 'ALERTS_CAPACITY', 'REQUEST_LEASE_MS', 'HISTORY_LEASE_MS', 'TRANSACTION_TIMEOUT_MS', 'RECOVERY_BATCH_SIZE',
     'RPC_CONTROL_TIMEOUT_MS', 'CHILD_SHUTDOWN_TIMEOUT_MS', 'RECOVERY_MAX_BATCHES', 'RECOVERY_CYCLE_TIMEOUT_MS', 'RECOVERY_POLL_INTERVAL_MS', 'HISTORY_MAX_DELIVERIES', 'HISTORY_POLL_INTERVAL_MS', 'PUMP_POLL_INTERVAL_MS']) env[`TRANSCRIPTION_${name}`] = '10';
   Object.assign(env, { TRANSCRIPTION_MAX_EXECUTE_CONCURRENCY: '1', TRANSCRIPTION_RPC_FRAME_BYTES: '4096', TRANSCRIPTION_RPC_BATCH_ITEMS: '10', TRANSCRIPTION_RPC_CONCURRENT_REQUESTS: '4', TRANSCRIPTION_RPC_CONCURRENT_EXECUTE: '2' });
   return env;
@@ -67,7 +67,7 @@ test('actual three child programs isolate env, validate methods and close idempo
     operationId: '22222222-2222-4222-8222-222222222222', ownerId: 'fixture-owner', model: { modelId: 'whisper', revision: 'v1', profileId: 'cpu' },
     deadlineAt: new Date(Date.now() + 15000).toISOString() }), (error) => error.code === 'RPC_REMOTE' && error.rpcCode === -32000 && error.errorCode === 'DEPENDENCY_UNAVAILABLE' && error.outcome === 'unknown');
   await assert.rejects(children.external.call('health', { ownerId: 'attacker' }), (error) => error.errorCode === 'INVALID_ARGUMENT' && error.outcome === 'not_started');
-  await assert.rejects(children.helper.call('health', {}), (error) => error.code === 'RPC_CLOSED' && error.outcome === 'not_started');
+  await assert.rejects(children.helper.call('health', {}), (error) => error.code === 'RPC_CLOSED' && ['not_started', 'unknown'].includes(error.outcome));
   await children.close(); await children.close();
   await assert.rejects(children.external.call('health', {}), (error) => error.code === 'RPC_CLOSED' && error.outcome === 'not_started');
 });

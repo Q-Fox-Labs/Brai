@@ -2,7 +2,7 @@
 // ABOUTME: Подтверждает dedup до проверки новых artifact facts; не проверяет SQL транзакции.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { canonicalHash } from '../storage/index.ts';
+import { canonicalHash } from '../../dist/helper/storage/index.js';
 import { createHelperHandlers, toRpcError } from '../../dist/helper/handlers.js';
 
 const principal = { scopeType: 'user', scopeId: 'scope-a', ownerId: 'owner-a', permissions: ['transcription:use', 'transcription:settings:write'] };

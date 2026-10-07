@@ -44,6 +44,7 @@ export function loadHelperConfig(env: NodeJS.ProcessEnv = process.env): HelperCo
     },
     store: {
       historyCapacity: positiveInteger(env, 'TRANSCRIPTION_HISTORY_CAPACITY'),
+      alertsCapacity: positiveInteger(env, 'TRANSCRIPTION_ALERTS_CAPACITY'),
       requestLeaseMs: positiveInteger(env, 'TRANSCRIPTION_REQUEST_LEASE_MS'),
       historyLeaseMs: positiveInteger(env, 'TRANSCRIPTION_HISTORY_LEASE_MS'),
       transactionTimeoutMs: positiveInteger(env, 'TRANSCRIPTION_TRANSACTION_TIMEOUT_MS'),
