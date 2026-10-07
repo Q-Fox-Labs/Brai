@@ -379,6 +379,7 @@ def ldd_closure(
 ) -> None:
     seen: dict[str, str] = {}
     hashes: dict[Path, tuple[tuple[int, int, int, int, int], str]] = {}
+    searchable: dict[tuple[str, str], bool] = {}
 
     def dependency_hash(path: Path) -> str:
         """Повторно использовать digest только при неизменной идентичности файла в этом вызове."""
@@ -407,13 +408,15 @@ def ldd_closure(
             if soname in SYSTEM_BASE_NEEDED:
                 continue
             content_hash = dependency_hash(resolved)
-            already_searchable = any(
-                Path(str(row["destination"])).name == soname
-                and str(row["sha256"]) == content_hash
-                and Path(str(row["destination"])).parent.relative_to(runtime_root).as_posix() in loader_search_dirs
-                for row in rows
-            )
-            if already_searchable:
+            key = (soname, content_hash)
+            if key not in searchable:
+                searchable[key] = any(
+                    Path(str(row["destination"])).name == soname
+                    and str(row["sha256"]) == content_hash
+                    and Path(str(row["destination"])).parent.relative_to(runtime_root).as_posix() in loader_search_dirs
+                    for row in rows
+                )
+            if searchable[key]:
                 continue
             if soname in seen:
                 if seen[soname] != content_hash:
