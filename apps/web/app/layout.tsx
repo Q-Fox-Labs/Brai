@@ -11,11 +11,11 @@ const themeBootstrap = `(function(){window.__braiStartupStartedAt=performance.no
 
 export const metadata: Metadata = {
   title: "Brai DEV",
-  description: "Приватное приложение Brai DEV",
-  applicationName: "Brai DEV",
+  description: "Приватное приложение Brai",
+  applicationName: "Brai",
   appleWebApp: {
     capable: true,
-    title: "Brai DEV",
+    title: "Brai",
     statusBarStyle: "default",
   },
   icons: {
@@ -24,7 +24,7 @@ export const metadata: Metadata = {
       { url: "/icons/dev/favicon-dark.png", sizes: "64x64", type: "image/png", media: "(prefers-color-scheme: dark)" },
     ],
     shortcut: "/icons/dev/favicon.png",
-    apple: [{ url: "/icons/dev/Icon-192.png", sizes: "192x192", type: "image/png" }],
+    apple: [{ url: "/icons/Icon-192.png", sizes: "192x192", type: "image/png" }],
   },
   manifest: "/manifest.webmanifest",
 };
