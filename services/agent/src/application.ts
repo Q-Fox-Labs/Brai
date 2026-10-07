@@ -5,12 +5,12 @@ import { randomUUID, createHash } from 'node:crypto';
 import { bytes, limits, validateCommand } from '../contracts/index.mjs';
 import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, NativeTurn, ModelCatalog, DisplayItem, GoalProjection, PlanProgress } from '../contracts/index.mjs';
 import type { CodexPort, Observation } from './codex.js';
-import { createAttachments, type ArtifactsConfig, type ArtifactsPort } from './attachments.js';
+import { createAttachments, type ArtifactsConfig, type ArtifactsPort, type NatsConfig } from './attachments.js';
 import { createLimitsMonitor } from './limits.js';
 import { nameThread } from './title.js';
 import { display, messagePage, metadata, text, compact, summary, messageAttention, goal, progress } from './display.js';
 import { asyncQuestionMethod, asyncQuestionRequest, asyncQuestionReply, asyncReplyIds } from './async-questions.js';
-export type Config = { artifacts?: ArtifactsConfig; codex: { socketUrl: string }; nats: { servers: string[]; user?: string; password?: string; inboxPrefix?: string }; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
+export type Config = { artifacts?: ArtifactsConfig; codex: { socketUrl: string }; nats: NatsConfig; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
 type Session = { answering: Set<string>; attention: ReturnType<typeof messageAttention>; view: NativeSnapshot & { goal: GoalProjection; planProgress: PlanProgress }; mutating?: boolean; goalRevision: number; opened: boolean; fresh: boolean; titleNeeded: boolean; titleRequest: string; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
 function pendingRequest(request: PendingRequest) { return request.kind !== 'unsupported' && !request.answered; }
 function projectTurn(turn: any): NativeTurn {
@@ -76,8 +76,9 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     // AIDEV-NOTE: Reply может прийти live раньше чтения исторического исходного вопроса.
     const replied = new Set([...asyncReplyIds(item), ...s.view.items.flatMap(asyncReplyIds)]);
     for (const request of s.view.requests) if (request.kind === 'question' && request.method === asyncQuestionMethod && !request.answered && replied.size) {
-      request.params.questions = request.params.questions.filter((question: any) => !replied.has(question.id));
-      if (!request.params.questions.length) request.answered = true;
+      const remaining = request.params.questions.filter((question: any) => !replied.has(question.id));
+      if (!remaining.length) request.answered = true;
+      else request.params.questions = remaining;
     }
     const value = display(item, turnId), old = s.view.items.find(i => i.id === value.id);
     value.revision = history ? old?.revision ?? 0 : s.view.seq + 1;
@@ -274,7 +275,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       const supported = e.supported === true && !reason;
       if (!supported) {
         const rejection = reason ?? 'unsupported-method';
-        if (e.supported === true && e.id !== undefined) void codex.reject(e.id, rejection).catch(() => {});
+        // AIDEV-NOTE: Другой клиент общего backend может представить запрос и ответить на него.
         if (s.view.requests.length >= limits.pending) {
           const oldestNotice = s.view.requests.findIndex(request => request.kind === 'unsupported');
           if (oldestNotice >= 0) s.view.requests.splice(oldestNotice, 1);
@@ -292,7 +293,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       }
     } else if (e.method === 'serverRequest/resolved') {
       const id = typeof p.requestId + ':' + p.requestId;
-      s.view.requests = s.view.requests.filter(f => f.requestId !== id || f.kind === 'unsupported');
+      s.view.requests = s.view.requests.filter(f => f.requestId !== id);
       s.raw.delete(id);
     } else if (e.method === 'thread/name/updated') {
       s.view.thread.title = text(p.threadName ?? '', 512);
@@ -348,7 +349,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (r.action === 'threads') {
       const generation = current();
       // AIDEV-NOTE: Список и необязательное чтение metadata должны уместиться в web deadline 10 секунд.
-      const page = await codex.call('thread/list', { cwd: p.cwd, limit: 100, cursor: r.cursor, sortKey: 'updated_at', sortDirection: 'desc', useStateDbOnly: true }, { timeoutMs: 4000 });
+      const page = await codex.call('thread/list', { cwd: p.cwd, sourceKinds: ['cli', 'vscode', 'appServer', 'exec', 'unknown'], limit: 100, cursor: r.cursor, sortKey: 'updated_at', sortDirection: 'desc', useStateDbOnly: true }, { timeoutMs: 4000 });
       const deadline = performance.now() + 4000;
       const threads = page.data.filter((t: any) => t.cwd === p.cwd), data = [];
       for (let offset = 0; offset < threads.length; offset += 4) data.push(...await Promise.all(threads.slice(offset, offset + 4).map(async (thread: any) => {
@@ -412,7 +413,11 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     }
     const s = await open(r);
     const buildInput = (images: { type: string; url: string }[]) => ({ threadId: r.threadId, input: [...(r.text?.trim() ? [{ type: 'text', text: r.text }] : []), ...images], clientUserMessageId: attachments.clientId(r), ...(r.action === 'steer' ? { expectedTurnId: r.expectedTurnId } : { ...permissions(r.permissionMode, p.cwd), ...(r.model ? { model: r.model } : {}), ...(r.effort ? { effort: r.effort } : {}), collaborationMode: collaboration(r.agentMode === 'plan' ? 'plan' : 'default', r.model ?? s.view.thread.model ?? config.newThread?.model ?? '', r.effort ?? s.view.thread.reasoningEffort) }) });
-    if (r.attachments?.length) { const existing = await attachments.existing(r, buildInput); if (existing) return existing; }
+    const durableInput = Boolean(config.artifacts && ['start', 'steer'].includes(r.action) && r.agentMode !== 'goal');
+    if (durableInput || r.attachments?.length) {
+      if (!r.ownerId) fail('INVALID_ARGUMENT');
+      const existing = await attachments.existing(r, buildInput); if (existing) return existing;
+    }
     if (r.action === 'open') { const view = structuredClone(s.view); view.items = await attachments.decorate(r, view.items); return view; }
     if (r.action === 'goalGet') { await readGoal(s); publish(s); return { generation: current(), goal: structuredClone(s.view.goal) }; }
     if (r.action === 'activities' || r.action === 'item') {
@@ -508,7 +513,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     }
     let reference: Awaited<ReturnType<typeof attachments.reserve>> | undefined;
     let nativeParams: any;
-    if (r.attachments?.length) {
+    if (durableInput || r.attachments?.length) {
       const deadline = performance.now() + (config.artifacts?.timeoutMs ?? 10000);
       try {
         nativeParams = buildInput(await attachments.modelInput(r, deadline));
@@ -524,8 +529,9 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     let turnId = r.turnId;
     if (r.action === 'answer') {
       const f = s.view.requests.find(f => f.requestId === r.requestId);
-      if (!f || f.answered || s.answering.has(f.requestId)) fail('STALE_REQUEST');
+      if (!f || s.answering.has(f.requestId)) fail('STALE_REQUEST');
       const asynchronous = f.kind === 'question' && f.method === asyncQuestionMethod;
+      if (f.answered && !(asynchronous && config.artifacts)) fail('STALE_REQUEST');
       const asyncReply = asynchronous ? asyncQuestionReply(f, r.answer) : null;
       if (asynchronous ? !asyncReply || s.view.thread.canAcceptDirectInput === false || s.mutating : f.kind === 'unsupported' || !codex.validateAnswer(s.raw.get(f.requestId)!, r.answer) || !validAnswer(f, r.answer)) fail('INVALID_ARGUMENT');
       const claims = s.answering;
@@ -534,10 +540,33 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       try {
         // AIDEV-NOTE: Async вопрос не держит server request: Desktop отвечает обычным user input.
         if (asyncReply) {
-          const params = { threadId: r.threadId, input: [{ type: 'text', text: asyncReply }] };
-          const value = active
+          // AIDEV-NOTE: Оба Brai используют один ключ исходного вопроса; Desktop reserve не использует.
+          const replyCommand = { ...r, operationId: 'async:' + createHash('sha256').update(f.params.itemId).digest('hex') };
+          const params = { threadId: r.threadId, input: [{ type: 'text', text: asyncReply }], clientUserMessageId: attachments.clientId(replyCommand) };
+          if (config.artifacts) {
+            if (!r.ownerId) fail('INVALID_ARGUMENT');
+            const existing = await attachments.existing(replyCommand, () => params);
+            if (existing) { f.answered = true; publish(s); return { ...existing, operationId: r.operationId, requestId: r.requestId }; }
+            if (f.answered) fail('STALE_REQUEST');
+            reference = await attachments.reserve(replyCommand, params);
+            if (!reference!.created) {
+              const recovered = await attachments.result(reference!.reference, replyCommand);
+              f.answered = true; publish(s);
+              return { ...recovered, operationId: r.operationId, requestId: r.requestId };
+            }
+          }
+          if (r.generation !== current() || s.closing || active && (s.view.turn?.status !== 'inProgress' || s.view.turn.id !== previousTurn?.id) || !active && s.view.turn?.status === 'inProgress') {
+            if (reference) await attachments.state(reference.reference, 'not-sent');
+            fail(r.generation !== current() ? 'STALE_GENERATION' : 'OPERATION_CONFLICT');
+          }
+          let value: any;
+          try { value = active
             ? await codex.call('turn/steer', { ...params, expectedTurnId: s.view.turn!.id }, { mutation: true })
-            : await mutation(s, r, call => call('turn/start', params));
+            : await mutation(s, r, call => call('turn/start', params)); }
+          catch (error: any) {
+            if (reference) { try { await attachments.state(reference.reference, error.outcome === 'not-sent' ? 'not-sent' : 'unknown'); } catch { error.outcome = 'unknown'; } }
+            throw error;
+          }
           turnId = value.turn?.id ?? value.turnId;
           if (!active && s.view.turn === previousTurn) { s.view.turn = projectTurn(value.turn); s.view.state = value.turn.status; publish(s); }
           s.fresh = false;
@@ -571,7 +600,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     }
     if (r.generation !== current()) fail('STALE_GENERATION', 'unknown');
     if (r.action === 'start') title(s, r);
-    if (reference) return attachments.result(reference.reference, r, turnId);
+    if (reference) return { ...await attachments.result(reference.reference, r, turnId), ...(r.requestId ? { requestId: r.requestId } : {}) };
     return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: r.threadId, turnId, ...(r.requestId ? { requestId: r.requestId } : {}) };
   }
   /** Повтор того же operation ID возвращает исходный результат без native вызова. */
@@ -584,7 +613,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (operations.size >= limits.operations) fail('CAPACITY_EXHAUSTED');
     const result = Promise.resolve().then(() => execute(r));
     operations.set(r.operationId, { hash, result });
-    if (r.attachments?.length) void result.catch(() => { if (operations.get(r.operationId!)?.result === result) operations.delete(r.operationId!); });
+    if (r.attachments?.length || config.artifacts && (['start', 'steer'].includes(r.action) && r.agentMode !== 'goal' || r.action === 'answer' && r.requestId?.startsWith('async:'))) void result.catch(() => { if (operations.get(r.operationId!)?.result === result) operations.delete(r.operationId!); });
     return result;
   }
   return { request, close() { unsubscribe(); limitMonitor.close(); } };

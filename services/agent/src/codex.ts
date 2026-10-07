@@ -48,21 +48,13 @@ export function createCodex(options: { socketUrl: string }) {
     if (bytes(packet) > 2097152 || ws.bufferedAmount + Buffer.byteLength(encoded) > 2097152) throw fail('CAPACITY_EXHAUSTED');
     await new Promise<void>((resolve, reject) => ws!.send(encoded, error => error ? reject(fail('UPSTREAM_UNAVAILABLE', mutation ? 'unknown' : 'query')) : resolve()));
   }
-  function rejection(reason: ServerRequestRejection) {
-    if (reason === 'unsupported-method') return { code: -32601, message: 'Method not found' };
-    if (reason === 'invalid-params') return { code: -32602, message: 'Invalid params' };
-    if (reason === 'request-too-large') return { code: -32000, message: 'Server request exceeds the Brai request limit' };
-    if (reason === 'too-many-pending') return { code: -32001, message: 'Too many pending server requests' };
-    return { code: -32002, message: 'Brai cannot safely present this server request' };
-  }
-  function rejectUnsupported(id: string | number, method: string, params: any, reason: ServerRequestRejection) {
+  function observeUnsupported(id: string | number, method: string, params: any, reason: ServerRequestRejection) {
     const safeParams = {
       ...(typeof params?.threadId === 'string' ? { threadId: params.threadId } : {}),
       ...(typeof params?.turnId === 'string' ? { turnId: params.turnId } : {}),
     };
-    void send({ id, error: rejection(reason) }, false)
-      .then(() => notify({ type: 'request', id, method, params: safeParams, supported: false, reason }))
-      .catch(() => { if (ws) disconnect(); });
+    // AIDEV-NOTE: Shared backend принимает первый ответ; пассивный клиент не должен отвергать чужой запрос.
+    notify({ type: 'request', id, method, params: safeParams, supported: false, reason });
   }
   /** Проверяет native params/result; тайм-аут мутации означает unknown. */
   async function call(method: string, params: any, options: { mutation?: boolean; timeoutMs?: number } = {}) {
@@ -92,7 +84,7 @@ export function createCodex(options: { socketUrl: string }) {
             : !definition.params(packet.params) ? 'invalid-params'
               : requests.size >= limits.pending && !requests.has(packet.id) ? 'too-many-pending'
                 : undefined;
-        if (reason) { rejectUnsupported(packet.id, packet.method, packet.params, reason); return; }
+        if (reason) { observeUnsupported(packet.id, packet.method, packet.params, reason); return; }
         requests.set(packet.id, definition!.answer);
         notify({ type: 'request', id: packet.id, method: packet.method, params: packet.params, supported: true });
       } else {
@@ -145,11 +137,5 @@ export function createCodex(options: { socketUrl: string }) {
     if (!requests.get(id)?.(answer)) throw fail('INVALID_ARGUMENT');
     await send({ id, result: answer }, true);
   }
-  async function reject(id: string | number, reason: ServerRequestRejection) {
-    if (!requests.has(id)) throw fail('STALE_REQUEST');
-    try { await send({ id, error: rejection(reason) }, false); }
-    catch (error) { if (ws) disconnect(); throw error; }
-    requests.delete(id);
-  }
-  return { call, connect, respond, reject, status, invalidate: disconnect, validateAnswer: (id: string | number, answer: unknown) => Boolean(requests.get(id)?.(answer)), subscribe(listener: (event: Observation) => void) { listeners.add(listener); return () => listeners.delete(listener); }, async close() { closed = true; disconnect(); } };
+  return { call, connect, respond, status, invalidate: disconnect, validateAnswer: (id: string | number, answer: unknown) => Boolean(requests.get(id)?.(answer)), subscribe(listener: (event: Observation) => void) { listeners.add(listener); return () => listeners.delete(listener); }, async close() { closed = true; disconnect(); } };
 }

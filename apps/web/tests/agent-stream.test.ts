@@ -20,9 +20,9 @@ const base: NativeSnapshot = {
   thread: { id: "thread-fixture", title: "Fixture", preview: "Fixture", model: null, canAcceptDirectInput: true, updatedAt: 1 },
   turn: { id: "turn-fixture", status: "inProgress" }, state: "inProgress", items: [], requests: [], truncated: false,
 };
-const session = { user: { id: "user-fixture", email: "sse@example.test" }, session: { id: "session-fixture", userId: "user-fixture" } };
+const session = { user: { id: "user-fixture", email: "sse@example.test", emailVerified: true }, session: { id: "session-fixture", userId: "user-fixture" } };
 
-function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = false) {
+function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = false, mapped = false) {
   let callback: (error: Error | null, message: { data: Uint8Array }) => void;
   let stopped = false, statusFailures = 0, ready = true, allowed = true;
   let accountLimits: AgentLimits = { state: "ready", revision: 1, observedAt: 1, windows: [{ slot: "primary", remainingPercent: 70, windowDurationMins: 10080, resetsAt: null }] };
@@ -58,7 +58,9 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = f
   );
   const abort = new AbortController();
   const originalAllowlist = process.env.BRAI_AGENT_ALLOWED_EMAILS;
+  const originalOwnerEmail = process.env.BRAI_AGENT_OWNER_EMAIL, originalOwnerId = process.env.BRAI_AGENT_OWNER_ID;
   process.env.BRAI_AGENT_ALLOWED_EMAILS = session.user.email;
+  if (mapped) { process.env.BRAI_AGENT_OWNER_EMAIL = session.user.email; process.env.BRAI_AGENT_OWNER_ID = "canonical-fixture"; }
   const response = module.exports.agentGet(new Request(multiplex ? "https://brai.example/api/agent/events?expectedUserId=user-fixture" : "https://brai.example/api/agent/events?projectId=brai&threadId=thread-fixture&expectedUserId=user-fixture", { signal: abort.signal }), { params: Promise.resolve({ path: ["events"] }) });
   return {
     response,
@@ -72,7 +74,12 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = f
     setLimits(value: AgentLimits) { accountLimits = value; },
     async tick() { for (const fn of intervals.values()) await fn(); },
     get stopped() { return stopped; },
-    close() { abort.abort(); if (originalAllowlist === undefined) delete process.env.BRAI_AGENT_ALLOWED_EMAILS; else process.env.BRAI_AGENT_ALLOWED_EMAILS = originalAllowlist; },
+    close() {
+      abort.abort();
+      for (const [key, value] of [["BRAI_AGENT_ALLOWED_EMAILS", originalAllowlist], ["BRAI_AGENT_OWNER_EMAIL", originalOwnerEmail], ["BRAI_AGENT_OWNER_ID", originalOwnerId]]) {
+        if (value === undefined) delete process.env[key!]; else process.env[key!] = value;
+      }
+    },
   };
 }
 
@@ -277,5 +284,28 @@ test("HTTP lazy reads parse bounded JSON itemIds and reject malformed or duplica
     query.set("itemIds", JSON.stringify(["first", "first"])); assert.equal((await f.get("activities", query)).status, 400);
     query.set("itemIds", JSON.stringify(["first"])); query.append("itemIds", JSON.stringify(["second"])); assert.equal((await f.get("activities", query)).status, 400);
     assert.equal(f.commands.length, published);
+  } finally { f.close(); }
+});
+
+test("mapped SSE keeps attachment identity local through snapshots and delta bases", async () => {
+  const artifactId = "11111111-1111-4111-8111-111111111111";
+  const item = { id: "image-item", turnId: "turn-fixture", type: "userMessage", text: "synthetic", imageCount: 1, attachmentsState: "ready" as const, attachments: [{ originalArtifactId: artifactId, modelArtifactId: artifactId, status: "ready" as const, mimeType: "image/png", filename: "image.png", url: `/api/agent/attachments/${artifactId}?projectId=brai&threadId=thread-fixture&expectedUserId=canonical-fixture&itemId=image-item&turnId=turn-fixture` }] };
+  const snapshot: NativeSnapshot = { ...base, items: [item] }, f = fixture(snapshot, false, true, true);
+  try {
+    const reader = (await f.response).body!.getReader();
+    assert.equal((await next(reader)).type, "event: ready");
+    f.push(snapshot);
+    const first = (await next(reader)).data;
+    const decoded = decodeFrame(first);
+    assert.ok(decoded);
+    assert.match(decoded.items[0].attachments![0].url!, /expectedUserId=user-fixture/);
+    f.push({ ...snapshot, seq: 1, items: [{ ...item, text: "updated" }] });
+    const delta = (await next(reader)).data;
+    const updated = decodeFrame(delta, decoded);
+    assert.ok(updated);
+    assert.equal(updated.items[0].text, "updated");
+    assert.match(updated.items[0].attachments![0].url!, /expectedUserId=user-fixture/);
+    assert.match(snapshot.items[0].attachments![0].url!, /expectedUserId=canonical-fixture/);
+    await reader.cancel();
   } finally { f.close(); }
 });

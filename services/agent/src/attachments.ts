@@ -9,7 +9,8 @@ import type { Artifact, ArtifactReference, ReferenceScope, ReferenceAttachment }
 import type { Command, DisplayAttachment, DisplayItem } from '../contracts/index.mjs';
 import { limits } from '../contracts/index.mjs';
 import type { CodexPort } from './codex.js';
-export type ArtifactsConfig = { baseUrl: string; timeoutMs?: number };
+export type NatsConfig = { servers: string[]; user?: string; password?: string; inboxPrefix?: string };
+export type ArtifactsConfig = { baseUrl: string; timeoutMs?: number; nats?: NatsConfig };
 export type ArtifactsPort = { request(subject: string, value: unknown, options?: { timeoutMs: number }): Promise<any>; fetch: typeof fetch };
 const prefix = 'brai:agent:v3:';
 const fail = (code: string, outcome = 'not-sent'): never => { throw Object.assign(new Error(code), { code, outcome }); };
@@ -61,7 +62,7 @@ export function createAttachments(codex: CodexPort, config: ArtifactsConfig | un
     return (await query(subjects.referenceUpdateState, { scope: reference.scope, state: value }, deadline)).reference as ArtifactReference;
   }
   function matching(reference: ArtifactReference, r: Command) {
-    if (Object.entries(scope(r)).some(([key, value]) => reference.scope[key as keyof ReferenceScope] !== value) || reference.clientUserMessageId !== clientId(r) || reference.attachments.length !== r.attachments?.length || reference.attachments.some((pair, i) => pair.originalArtifactId !== r.attachments![i].originalArtifactId || pair.modelArtifactId !== r.attachments![i].modelArtifactId)) fail('OPERATION_CONFLICT');
+    if (Object.entries(scope(r)).some(([key, value]) => reference.scope[key as keyof ReferenceScope] !== value) || reference.clientUserMessageId !== clientId(r) || reference.attachments.length !== (r.attachments ?? []).length || reference.attachments.some((pair, i) => pair.originalArtifactId !== r.attachments![i].originalArtifactId || pair.modelArtifactId !== r.attachments![i].modelArtifactId)) fail('OPERATION_CONFLICT');
   }
   function scoped(artifact: Artifact, r: Command) {
     if (artifact.ownerId !== r.ownerId || artifact.source !== 'agent' || artifact.details?.projectId !== r.projectId || artifact.details?.threadId !== r.threadId) fail('INVALID_ARGUMENT');
@@ -137,7 +138,7 @@ export function createAttachments(codex: CodexPort, config: ArtifactsConfig | un
   async function reserve(r: Command, payload: any) {
     const deadline = performance.now() + budget;
     try {
-      const value = await query(subjects.referenceReserve, { scope: scope(r), clientUserMessageId: clientId(r), commandHash: nativeHash(payload), attachments: r.attachments }, deadline);
+      const value = await query(subjects.referenceReserve, { scope: scope(r), clientUserMessageId: clientId(r), commandHash: nativeHash(payload), attachments: r.attachments ?? [] }, deadline);
       matching(value.reference, r);
       if (value.reference.commandHash !== nativeHash(payload)) fail('OPERATION_CONFLICT');
       if (!value.created) return { reference: value.reference as ArtifactReference, created: false };

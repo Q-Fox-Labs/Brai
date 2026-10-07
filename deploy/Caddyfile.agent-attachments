@@ -1,6 +1,17 @@
 # ABOUTME: Проверяет browser session до выдачи готового artifact файла.
 # ABOUTME: Заменяет клиентские identity headers и задаёт безопасные response headers.
 (artifact-attachment) {
+	@agent_upload path_regexp agent_upload ^/api/agent/uploads/([A-Za-z0-9_-]{16,512})$
+	handle @agent_upload {
+		route {
+			@unsupported not method PUT
+			respond @unsupported 405
+			request_header -Cookie
+			request_header -Authorization
+			rewrite * /upload/{re.agent_upload.1}
+			reverse_proxy {$BRAI_AGENT_ARTIFACTS_UPLOAD_UPSTREAM}
+		}
+	}
 	@attachment path_regexp artifact_attachment ^/api/agent/attachments/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$
 	handle @attachment {
 		route {
@@ -28,7 +39,7 @@
 				>X-Frame-Options SAMEORIGIN
 			}
 			rewrite * /files/{re.artifact_attachment.1}
-			reverse_proxy {$BRAI_ARTIFACTS_FILE_SERVER}
+			reverse_proxy {$BRAI_AGENT_ARTIFACTS_FILE_SERVER}
 		}
 	}
 }

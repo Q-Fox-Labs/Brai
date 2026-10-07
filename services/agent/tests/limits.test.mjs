@@ -245,13 +245,13 @@ test('native Codex boundary validates the new rate-limit request, result, and sp
       const received = requestEvent(packet.id);
       peer.send(JSON.stringify(packet));
       const event = await received;
-      for (let attempt = 0; attempt < 20 && !wireReplies.some(reply => reply.id === packet.id); attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+      await codex.call('account/read', { refreshToken: false });
       return { event, reply: wireReplies.find(reply => reply.id === packet.id) };
     };
     const unknown = await sendServerRequest({ id: 'unknown-method', method: 'item/future/request', params: { threadId: 't', turnId: 't1' } });
     assert.equal(unknown.event.reason, 'unsupported-method');
     assert.deepEqual(unknown.event.params, { threadId: 't', turnId: 't1' });
-    assert.equal(unknown.reply.error.code, -32601);
+    assert.equal(unknown.reply, undefined);
     assert.equal(codex.validateAnswer('unknown-method', {}), false);
     const toolEvents = [], stopTools = codex.subscribe(event => { if (event.method === 'item/tool/call') toolEvents.push(event); });
     for (const [id, namespace, tool] of [['worktree', 'codex_app', 'create_worktree'], ['artifacts', 'codex_app', 'list_artifacts'], ['foreign', 'other_client', 'echo'], ['malformed-tool', 'x'.repeat(65), '<script>private-input</script>']]) {
@@ -265,10 +265,10 @@ test('native Codex boundary validates the new rate-limit request, result, and sp
     stopTools();
     const invalid = await sendServerRequest({ id: 'invalid-params', method: 'item/tool/requestUserInput', params: { threadId: 't', turnId: 't1' } });
     assert.equal(invalid.event.reason, 'invalid-params');
-    assert.equal(invalid.reply.error.code, -32602);
+    assert.equal(invalid.reply, undefined);
     const oversized = await sendServerRequest({ id: 'oversized', method: 'item/tool/requestUserInput', params: { threadId: 't', turnId: 't1', payload: 'x'.repeat(33000) } });
     assert.equal(oversized.event.reason, 'request-too-large');
-    assert.equal(oversized.reply.error.code, -32000);
+    assert.equal(oversized.reply, undefined);
     assert.deepEqual(oversized.event.params, { threadId: 't', turnId: 't1' });
     assert.equal(JSON.stringify(oversized.event).includes('x'.repeat(128)), false);
   } finally {

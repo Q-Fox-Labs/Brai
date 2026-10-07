@@ -64,7 +64,7 @@ test('a live async question steers the current turn; no settings or collaboratio
     await f.answer([['Custom'], ['Details']]);
     assert.equal(f.calls[0].method, 'turn/steer');
     assert.equal(f.calls[0].params.expectedTurnId, 'turn');
-    assert.deepEqual(Object.keys(f.calls[0].params).sort(), ['expectedTurnId', 'input', 'threadId']);
+    assert.deepEqual(Object.keys(f.calls[0].params).sort(), ['clientUserMessageId', 'expectedTurnId', 'input', 'threadId']);
   } finally { f.app.close(); }
 });
 test('a reply from another client resolves only matching questions, including after hydration', async () => {

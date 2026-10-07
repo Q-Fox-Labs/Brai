@@ -3,7 +3,7 @@
 import { isIP } from "node:net";
 import { valid } from "./contracts";
 import { GatewayError, natsConnection } from "./gateway";
-export type Session = { session: { id: string; userId: string; expiresAt: string }; user: { id: string; email: string } };
+export type Session = { session: { id: string; userId: string; expiresAt: string }; user: { id: string; email: string; emailVerified?: boolean } };
 type AuthReply = { status: number; body: unknown; setCookies: string[] };
 /** Проверяет Origin до мутации; TLS-прокси передаёт явный WEB_ORIGIN. */
 export function checkOrigin(request: Request): void {

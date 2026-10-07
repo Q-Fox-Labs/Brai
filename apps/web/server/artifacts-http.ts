@@ -4,8 +4,9 @@ import { validateRequest, validateResponse, subjects as artifactSubjects } from 
 import type { Artifact, ArtifactReference } from "../../../services/artifacts/contracts/index.mjs";
 type Metadata = Pick<Artifact, "title" | "filename" | "extension" | "mimeType" | "source" | "details">;
 import { checkOrigin, requireSession, type Session } from "./auth";
-import { GatewayError, natsConnection } from "./gateway";
-import { permittedAgent, rpc as agentRpc } from "./agent-http";
+import { GatewayError } from "./gateway";
+import { agentArtifactsConnection } from "./agent-artifacts";
+import { agentOwnerId, permittedAgent, rpc as agentRpc } from "./agent-http";
 import { readBoundedJson, RequestBodyFailure } from "./request-body";
 
 class ArtifactFailure extends Error {
@@ -41,7 +42,7 @@ async function artifactCall<T>(subject: string, request: unknown): Promise<T> {
   if (!validateRequest(subject, request)) throw failure(400, "INVALID_ARGUMENT");
   let reply;
   try {
-    const nc = await natsConnection();
+    const nc = await agentArtifactsConnection();
     reply = await nc.request(subject, Buffer.from(JSON.stringify(request)), { timeout: 10000 });
   } catch { throw failure(503, "UNAVAILABLE"); }
   const code = reply.headers?.get("Nats-Service-Error-Code");
@@ -70,15 +71,16 @@ function extension(mimeType: string): string {
   return mimeType === "image/png" ? "png" : mimeType === "image/jpeg" ? "jpg" : "webp";
 }
 
-function uploadUrl(value: string): string {
-  const baseText = process.env.ARTIFACTS_UPLOAD_BASE_URL;
+function uploadUrl(value: string, request: Request): string {
+  const baseText = process.env.AGENT_ARTIFACTS_UPLOAD_BASE_URL ?? process.env.ARTIFACTS_UPLOAD_BASE_URL;
   if (!baseText) throw failure(503, "UPLOAD_NOT_CONFIGURED");
   try {
     const base = new URL(baseText), url = new URL(value);
     if (!/^https?:$/.test(base.protocol) || base.username || base.password || base.pathname !== "/" || base.search || base.hash
       || url.origin !== base.origin || url.username || url.password || url.search || url.hash
       || !/^\/upload\/[A-Za-z0-9_-]{16,512}$/.test(url.pathname)) throw new Error("BAD_UPLOAD_URL");
-    return url.toString();
+    // AIDEV-NOTE: Native upload origin может относиться к другому контуру; browser PUT всегда идёт через свой Caddy.
+    return new URL(`/api/agent/uploads/${url.pathname.slice("/upload/".length)}`, request.url).toString();
   } catch { throw failure(502, "BAD_UPLOAD_URL"); }
 }
 
@@ -110,14 +112,14 @@ export async function prepareAttachment(request: Request): Promise<Response> {
   try {
     if (request.method !== "POST") throw failure(405, "METHOD_NOT_ALLOWED");
     checkOrigin(request);
-    const session = await requireAgentSession(request), input = parsePrepare(await readSmallJson(request));
+    const session = await requireAgentSession(request), ownerId = agentOwnerId(session), input = parsePrepare(await readSmallJson(request));
     await requireProject(input.projectId);
     if (request.signal.aborted) throw failure(408, "REQUEST_TIMEOUT");
     const value = await artifactCall<Prepared>(artifactSubjects.prepare, {
-      requestId: input.requestId, ownerId: session.user.id, kind: input.kind, metadata: metadataFor(input),
+      requestId: input.requestId, ownerId, kind: input.kind, metadata: metadataFor(input),
     });
-    if (!preparedMatches(value.artifact, session.user.id, input)) throw failure(409, "PREPARE_CONFLICT");
-    return Response.json({ artifact: { artifactId: value.artifact.artifactId, status: value.artifact.status }, uploadUrl: uploadUrl(value.uploadUrl) }, { headers: noStore });
+    if (!preparedMatches(value.artifact, ownerId, input)) throw failure(409, "PREPARE_CONFLICT");
+    return Response.json({ artifact: { artifactId: value.artifact.artifactId, status: value.artifact.status }, uploadUrl: uploadUrl(value.uploadUrl, request) }, { headers: noStore });
   } catch (error) { return errorResponse(error); }
 }
 
@@ -144,12 +146,12 @@ export async function finalizeAttachment(request: Request): Promise<Response> {
   try {
     if (request.method !== "POST") throw failure(405, "METHOD_NOT_ALLOWED");
     checkOrigin(request);
-    const session = await requireAgentSession(request), input = parsePair(await readSmallJson(request));
+    const session = await requireAgentSession(request), ownerId = agentOwnerId(session), input = parsePair(await readSmallJson(request));
     await requireProject(input.projectId);
-    const original = await preparedArtifact(input.pair.originalArtifactId, "original", session.user.id, input.projectId, input.threadId);
+    const original = await preparedArtifact(input.pair.originalArtifactId, "original", ownerId, input.projectId, input.threadId);
     const model = input.pair.modelArtifactId === input.pair.originalArtifactId
       ? original
-      : await preparedArtifact(input.pair.modelArtifactId, "copy", session.user.id, input.projectId, input.threadId);
+      : await preparedArtifact(input.pair.modelArtifactId, "copy", ownerId, input.projectId, input.threadId);
     if (!imageTypes.has(model.mimeType)) throw failure(415, "UNSUPPORTED_MEDIA_TYPE");
     if (model.artifactId !== original.artifactId) {
       await artifactCall(artifactSubjects.relationAdd, {
@@ -219,16 +221,17 @@ export async function artifactReadAuth(request: Request): Promise<Response> {
     if (!validateRequest(artifactSubjects.get, { artifactId })) throw failure(404, "NOT_FOUND");
     const query = exactQuery(url), projectId = query.get("projectId")!, threadId = query.get("threadId")!;
     if (query.get("expectedUserId") !== session.user.id) throw failure(401, "ACCOUNT_CHANGED");
+    const ownerId = agentOwnerId(session);
     await requireProject(projectId);
     const itemId = query.get("itemId"), turnId = query.get("turnId");
     let artifact: Artifact;
     if (itemId && turnId) {
-      if (!await confirmedReference(session.user.id, projectId, threadId, itemId, turnId, artifactId)) throw failure(404, "NOT_FOUND");
+      if (!await confirmedReference(ownerId, projectId, threadId, itemId, turnId, artifactId)) throw failure(404, "NOT_FOUND");
       artifact = await artifactCall<Artifact>(artifactSubjects.get, { artifactId });
-      if (artifact.ownerId !== session.user.id || artifact.status !== "ready") throw failure(404, "NOT_FOUND");
+      if (artifact.ownerId !== ownerId || artifact.status !== "ready") throw failure(404, "NOT_FOUND");
     } else {
       artifact = await artifactCall<Artifact>(artifactSubjects.get, { artifactId });
-      if (artifact.ownerId !== session.user.id || artifact.status !== "ready" || artifact.source !== "agent"
+      if (artifact.ownerId !== ownerId || artifact.status !== "ready" || artifact.source !== "agent"
         || artifact.details?.projectId !== projectId || artifact.details?.threadId !== threadId) throw failure(404, "NOT_FOUND");
     }
     return new Response(null, { status: 200, headers: authHeaders(artifact) });

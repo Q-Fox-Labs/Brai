@@ -6,6 +6,7 @@ import type { DisplayItem, NativeSnapshot, ModelCatalog, PermissionMode, ThreadM
 import type { AgentLimits } from "@brai/agent/contracts";
 import { createAgentClient, AgentError } from "../../lib/agent/client";
 import { mergeThreadMetadata } from "../../lib/agent/thread";
+import { readThreadRange, startCatalogPolling } from "../../lib/agent/catalog";
 import ModelSettings, { AgentModeButton, ComposerIcon } from "./settings";
 import NativeForm from "./request";
 import QuestionCard from "./questions";
@@ -48,6 +49,8 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const [accountLimits, setAccountLimits] = useState<AgentLimits>({ state: "loading", revision: 0, observedAt: null, windows: [] });
   const [readMessages, setReadMessages] = useState<Record<string, string>>({});
   const [pages, setPages] = useState<Record<string, ThreadPage>>({});
+  const pagesRef = useRef(pages); pagesRef.current = pages;
+  const catalogPending = useRef(false), catalogVisible = useRef(visible); catalogVisible.current = visible;
   const [projectId, setProjectId] = useState(""), [threadId, setThreadId] = useState("");
   const [snapshot, setSnapshot] = useState<NativeSnapshot | null>(null), [connected, setConnected] = useState(false);
   const conversation = useRef<HTMLDivElement>(null), followBottom = useRef(true);
@@ -96,24 +99,38 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const archived = useRef(new Set<string>());
   const pageRequests = useRef(new Map<string, symbol>());
 
-  const loadThreads = useCallback(async (id: string, nextCursor?: string) => {
+  const loadThreads = useCallback(async (id: string, nextCursor?: string, quiet = false) => {
+    if (pageRequests.current.has(id)) return;
     const token = Symbol(), observed = metadataVersion.current;
     pageRequests.current.set(id, token);
-    setPages(previous => ({ ...previous, [id]: { data: previous[id]?.data ?? [], nextCursor: previous[id]?.nextCursor ?? null, loading: true, error: "" } }));
+    if (!quiet) setPages(previous => ({ ...previous, [id]: { data: previous[id]?.data ?? [], nextCursor: previous[id]?.nextCursor ?? null, loading: true, error: "" } }));
     try {
-      const value = await client.request({ action: "threads", projectId: id, ...(nextCursor ? { cursor: nextCursor } : {}) });
+      const read = (cursor?: string) => client.request({ action: "threads", projectId: id, ...(cursor ? { cursor } : {}) });
+      const value = nextCursor ? await read(nextCursor) : await readThreadRange(read, pagesRef.current[id]?.data.length ?? 0);
       if (pageRequests.current.get(id) !== token) return;
       setPages(previous => {
         const data = [...new Map([...(nextCursor ? previous[id]?.data ?? [] : []), ...value.data.filter(thread => !archived.current.has(`${id}:${thread.id}`)).map(thread => { const live = liveMetadata.current.get(`${id}:${thread.id}`); return live && live.generation === value.generation && live.observed > observed ? mergeThreadMetadata(thread, live.thread) : thread; })].map(thread => [thread.id, thread])).values()].slice(0, 1000);
         return { ...previous, [id]: { data, nextCursor: data.length < 1000 ? value.nextCursor : null, loading: false, error: "" } };
       });
     } catch (error) {
-      if (pageRequests.current.get(id) === token) setPages(previous => ({ ...previous, [id]: { ...previous[id], loading: false, error: errorText(error) } }));
-    }
+      if (pageRequests.current.get(id) === token) setPages(previous => ({ ...previous, [id]: { data: previous[id]?.data ?? [], nextCursor: previous[id]?.nextCursor ?? null, loading: false, error: errorText(error) } }));
+    } finally { if (pageRequests.current.get(id) === token) pageRequests.current.delete(id); }
   }, [client]);
 
+  const refreshCatalog = useCallback(async (quiet = false) => {
+    if (catalogPending.current) return;
+    catalogPending.current = true;
+    try {
+      const value = await client.request({ action: "projects" });
+      if (!alive.current) return;
+      setProjects(value.projects);
+      setProjectId(previous => previous || value.projects.find(project => project.available)?.projectId || "");
+      await Promise.all(value.projects.filter(project => project.available).map(project => loadThreads(project.projectId, undefined, quiet)));
+    } catch (error) { if (alive.current) setMessage(errorText(error)); }
+    finally { catalogPending.current = false; if (alive.current) setProjectsSettled(true); }
+  }, [client, loadThreads]);
+
   useEffect(() => {
-    let active = true;
     const requests = pageRequests.current;
     const stopMetadata = client.subscribeThreads(value => {
       const key = `${value.projectId}:${value.threadId}`;
@@ -125,15 +142,11 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       setPages(pages => updateThreadPage(pages, value.projectId, value.thread));
     });
     const stopLimits = client.subscribeLimits(setAccountLimits);
-    void client.request({ action: "projects" }).then(value => {
-      if (!active) return;
-      setProjects(value.projects);
-      setProjectId(value.projects.find(project => project.available)?.projectId ?? "");
-      for (const project of value.projects) if (project.available) void loadThreads(project.projectId);
-    }).catch(error => { if (active) setMessage(errorText(error)); }).finally(() => { if (active) setProjectsSettled(true); });
     alive.current = true;
+    void refreshCatalog();
+    const stopCatalog = startCatalogPolling(() => refreshCatalog(true), () => catalogVisible.current);
     return () => {
-      active = false; alive.current = false; attachmentUpload.current?.abort(); attachmentUpload.current = null;
+      alive.current = false; stopCatalog(); attachmentUpload.current?.abort(); attachmentUpload.current = null;
       ++preparationVersion.current; queue.current = [];
       const previews = new Map<string, Attachment>();
       for (const image of composerRef.current.images) previews.set(image.id, image);
@@ -144,7 +157,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       for (const image of previews.values()) releaseAttachmentPreview(image);
       cache.current.clear(); pendingSubmissions.current.clear(); composerRef.current = emptyDraft(); requests.clear(); stopMetadata(); stopLimits(); liveMetadata.current.clear(); client.dispose();
     };
-  }, [client, loadThreads]);
+  }, [client, refreshCatalog]);
 
   useEffect(() => {
     ++selection.current;

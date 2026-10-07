@@ -28,7 +28,8 @@ ajv.addSchema(nativeSchema, 'native'); ajv.addSchema(publicSchema, 'public');
 ajv.addSchema(artifactSchemas, '../../artifacts/schemas/messages.schema.json');
 const native = name => ajv.compile({ $ref: `native#/definitions/${name}` });
 function fixture() {
-  const calls = [], events = [], refs = new Map(), artifacts = new Map(); let history = [], observer, hook, generation = 'g', lostReserve = false, lostNative = false, persist = true, next = null;
+  const calls = [], events = [], refs = new Map(), artifacts = new Map(); let history = [], hook, generation = 'g', lostReserve = false, lostNative = false, persist = true, next = null;
+  const observers = new Set();
   const artifact = id => ({ artifactId: id, ownerId: 'owner', requestId: id, kind: id === uuid ? 'original' : 'copy', status: 'ready', title: 'picture', filename: 'private.png', extension: 'png', mimeType: 'image/png', source: 'agent', details: { projectId: 'p', threadId: 't' }, sizeBytes: data.length, sha256: createHash('sha256').update(data).digest('hex'), internalUrl: `http://artifacts/files/${id}`, createdAt: '2026-10-05T00:00:00Z', updatedAt: '2026-10-05T00:00:00Z' });
   artifacts.set(uuid, artifact(uuid)); artifacts.set(copy, artifact(copy));
   const key = scope => [scope.ownerId, scope.projectId, scope.threadId, scope.operationId].join('\0');
@@ -54,7 +55,7 @@ function fixture() {
   const thread = { id: 't', cliVersion: 'test', createdAt: 1, cwd: '/tmp/p', ephemeral: false, model: 'vision', modelProvider: 'openai', preview: '', projectId: null, sessionId: 's', source: 'appServer', status: { type: 'active', activeFlags: [] }, turns: [], updatedAt: 1 };
   const response = { thread, model: 'vision', modelProvider: 'openai', cwd: '/tmp/p', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', sandbox: { type: 'workspaceWrite' } };
   const turn = { id: 'turn', status: 'inProgress', items: [] };
-  const port = { status: () => ({ generation, connection: 'connected', authorization: 'ready' }), subscribe: fn => { observer = fn; return () => {}; }, call: async (method, params) => {
+  const port = { status: () => ({ generation, connection: 'connected', authorization: 'ready' }), subscribe: fn => { observers.add(fn); return () => observers.delete(fn); }, call: async (method, params) => {
     calls.push({ method, params }); await hook?.(method, params);
     if (method === 'turn/start' || method === 'turn/steer') { assert.ok(native(method === 'turn/start' ? 'TurnStartParams' : 'TurnSteerParams')(params)); if (persist) history.push({ turnId: 'turn', item: { id: `u${history.length}`, type: 'userMessage', clientId: params.clientUserMessageId, content: params.input } }); if (lostNative) throw error('TIMEOUT', 'unknown'); return method === 'turn/start' ? { turn } : { turnId: 'turn' }; }
     if (method === 'thread/items/list') {
@@ -69,7 +70,7 @@ function fixture() {
   const config = { codex: { socketUrl: 'mock' }, projects: [{ projectId: 'p', name: 'P', cwd: '/tmp/p' }], newThread: { model: 'vision' }, allowedModels: ['vision'], artifacts: { baseUrl: 'http://artifacts' } };
   let app = createApplication(port, config, e => events.push(e), artifactPort);
   const read = (action, extra = {}) => app.request({ action, projectId: 'p', threadId: 't', ownerId: 'owner', ...extra });
-  return { get app() { return app; }, port, config, artifactPort, calls, events, refs, artifacts, read, setHistory: value => { history = value; }, history: () => history, observe: (method, params) => observer({ type: 'notification', method, params: { threadId: 't', ...params } }), setHook: value => { hook = value; }, lostReserve: () => { lostReserve = true; }, lostNative: () => { lostNative = true; }, noPersist: () => { persist = false; }, incomplete: () => { next = 'same'; }, restart: () => { app.close(); generation = 'g2'; app = createApplication(port, config, e => events.push(e), artifactPort); return { ...base, generation }; }, create: () => app.request({ action: 'create', projectId: 'p', generation, operationId: 'create' }) };
+  return { get app() { return app; }, port, config, artifactPort, calls, events, refs, artifacts, read, setHistory: value => { history = value; }, history: () => history, observe: (method, params) => [...observers].forEach(observer => observer({ type: 'notification', method, params: { threadId: 't', ...params } })), setHook: value => { hook = value; }, lostReserve: () => { lostReserve = true; }, lostNative: () => { lostNative = true; }, noPersist: () => { persist = false; }, incomplete: () => { next = 'same'; }, restart: () => { app.close(); generation = 'g2'; app = createApplication(port, config, e => events.push(e), artifactPort); return { ...base, generation }; }, create: () => app.request({ action: 'create', projectId: 'p', generation, operationId: 'create' }) };
 }
 test('acknowledged image input confirms its whole exact turn despite thousands of older items', async () => {
   const f = fixture(); await f.create();
@@ -297,4 +298,91 @@ test('real local WebSocket validates image-only native input without daemon or i
   const codex = createCodex({ socketUrl: `ws+unix:${socketPath}:/` }), app = createApplication(codex, f.config, () => {}, f.artifactPort);
   try { await codex.connect(); const generation = codex.status().generation; await app.request({ action: 'create', projectId: 'p', generation, operationId: 'create' }); await app.request({ ...base, generation }); await app.request({ ...base, generation, action: 'steer', expectedTurnId: 'turn', operationId: 'steer' }); assert.equal((await app.request({ action: 'items', ownerId: 'owner', projectId: 'p', threadId: 't' })).data.length, 2); }
   finally { app.close(); f.app.close(); await codex.close(); await new Promise(resolve => wss.close(resolve)); await new Promise(resolve => server.close(resolve)); rmSync(dir, { recursive: true }); }
+});
+
+test('two agents share durable text start/steer, conflict detection and recovery after lost ACK', async () => {
+  const f = fixture(); await f.create();
+  const command = { ...base, attachments: undefined, text: 'Shared text' };
+  const second = createApplication(f.port, f.config, () => {}, f.artifactPort);
+  try {
+    const attempts = await Promise.allSettled([f.app.request(command), second.request(command)]);
+    assert.ok(attempts.some(result => result.status === 'fulfilled'));
+    assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+    assert.deepEqual([...f.refs.values()][0].attachments, []);
+    assert.equal((await second.request(command)).outcome, 'accepted');
+    await assert.rejects(second.request({ ...command, text: 'Conflicting text' }), error => error.code === 'OPERATION_CONFLICT');
+    f.lostNative();
+    const steer = { ...command, action: 'steer', expectedTurnId: 'turn', operationId: 'text-steer' };
+    await assert.rejects(f.app.request(steer), error => error.outcome === 'unknown');
+    assert.equal((await second.request(steer)).outcome, 'accepted');
+    assert.equal(f.calls.filter(call => call.method === 'turn/steer').length, 1);
+    const reopened = f.restart();
+    assert.equal((await f.app.request({ ...command, generation: reopened.generation })).outcome, 'accepted');
+    assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 1);
+  } finally { f.app.close(); second.close(); }
+});
+
+test('shared text fails safe on reserve ACK loss and artifacts unavailable', async () => {
+  for (const unavailable of [false, true]) {
+    const f = fixture(); await f.create();
+    const command = { ...base, attachments: undefined, text: 'Safe text' };
+    if (unavailable) f.artifactPort.request = async () => { throw new Error('artifacts offline'); };
+    else f.lostReserve();
+    try {
+      await assert.rejects(f.app.request(command), error => error.outcome === 'unknown');
+      const second = createApplication(f.port, f.config, () => {}, f.artifactPort);
+      try { await assert.rejects(second.request(command), error => error.outcome === 'unknown'); }
+      finally { second.close(); }
+      assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 0);
+    } finally { f.app.close(); }
+  }
+});
+
+test('two agents reserve the async item once across different caller IDs and active to idle transition', async () => {
+  const f = fixture(); await f.create();
+  const question = { id: 'shared-question', type: 'agentMessage', delivery: 'async', questions: [{ title: 'Choose?', options: ['Yes', 'No'] }], text: 'Choose' };
+  f.setHistory([{ turnId: 'turn', item: question }]);
+  f.observe('item/completed', { turnId: 'turn', item: question });
+  const second = createApplication(f.port, f.config, () => {}, f.artifactPort);
+  await second.request({ action: 'open', ownerId: 'owner', projectId: 'p', threadId: 't' });
+  const questionId = JSON.stringify(['request_user_input_async', question.id, 0]);
+  const answer = operationId => ({ action: 'answer', ownerId: 'owner', projectId: 'p', threadId: 't', generation: 'g', operationId, requestId: 'async:' + question.id, answer: { answers: { [questionId]: { answers: ['Yes'] } } } });
+  try {
+    f.lostNative();
+    await assert.rejects(f.app.request(answer('first-ui')), error => error.outcome === 'unknown');
+    f.observe('turn/completed', { turn: { id: 'turn', status: 'completed' } });
+    const recovered = await second.request(answer('second-ui'));
+    assert.equal(recovered.outcome, 'accepted');
+    assert.equal(recovered.operationId, 'second-ui');
+    assert.equal((await f.app.request(answer('retry-ui'))).outcome, 'accepted');
+    await assert.rejects(second.request({ ...answer('different-ui'), answer: { answers: { [questionId]: { answers: ['No'] } } } }), error => error.code === 'OPERATION_CONFLICT');
+    assert.equal(f.calls.filter(call => call.method === 'turn/start' || call.method === 'turn/steer').length, 1);
+    assert.match(f.history().at(-1).item.clientId, /^brai:agent:v3:async:[a-f0-9]{64}$/);
+    assert.equal(f.refs.size, 1);
+  } finally { f.app.close(); second.close(); }
+});
+
+test('configured artifacts does not evict an unknown create operation from the native ledger', async () => {
+  const f = fixture();
+  f.setHook(method => { if (method === 'thread/start') throw Object.assign(new Error('lost create ACK'), { code: 'TIMEOUT', outcome: 'unknown' }); });
+  try {
+    await assert.rejects(f.create(), error => error.outcome === 'unknown');
+    await assert.rejects(f.create(), error => error.outcome === 'unknown');
+    assert.equal(f.calls.filter(call => call.method === 'thread/start').length, 1);
+  } finally { f.app.close(); }
+});
+
+test('two live agents racing different UI operations send only one async native input', async () => {
+  const f = fixture(); await f.create();
+  const question = { id: 'racing-question', type: 'agentMessage', delivery: 'async', questions: [{ title: 'Continue?' }], text: 'Continue?' };
+  f.setHistory([{ turnId: 'turn', item: question }]); f.observe('item/completed', { turnId: 'turn', item: question });
+  const second = createApplication(f.port, f.config, () => {}, f.artifactPort);
+  await second.request({ action: 'open', ownerId: 'owner', projectId: 'p', threadId: 't' });
+  const answer = operationId => ({ action: 'answer', ownerId: 'owner', projectId: 'p', threadId: 't', generation: 'g', operationId, requestId: 'async:' + question.id, answer: { answers: { [JSON.stringify(['request_user_input_async', question.id, 0])]: { answers: ['Yes'] } } } });
+  try {
+    const result = await Promise.allSettled([f.app.request(answer('ui-a')), second.request(answer('ui-b'))]);
+    assert.ok(result.some(value => value.status === 'fulfilled'));
+    assert.equal(f.calls.filter(call => ['turn/start', 'turn/steer'].includes(call.method)).length, 1);
+    assert.equal(f.refs.size, 1);
+  } finally { f.app.close(); second.close(); }
 });

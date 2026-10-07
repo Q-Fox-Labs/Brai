@@ -93,4 +93,7 @@ test('refresh lists registered threads without a slow rollout repair scan and pr
   const next = await f.app.request({ action: 'threads', projectId: 'p', cursor: first.nextCursor });
   assert.equal(next.data.length, 2);
   assert.equal(f.calls.filter(call => call.method === 'thread/list')[1].params.cursor, 'next-page');
+  assert.deepEqual(f.calls.find(call => call.method === 'thread/list').params.sourceKinds, ['cli', 'vscode', 'appServer', 'exec', 'unknown']);
+  assert.deepEqual(first.data.map(thread => thread.id), f.threads.map(thread => thread.id));
+  assert.equal(f.calls.find(call => call.method === 'thread/list').params.cwd, '/demo');
 });

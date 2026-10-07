@@ -2,8 +2,8 @@
 // ABOUTME: Читает явную JSON конфигурацию, закрывает только свои подключения.
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { connect, headers, ServiceErrorHeader, ServiceErrorCodeHeader } from 'nats';
-import { createArtifactsPort } from './attachments.js';
+import { connect, headers, ServiceErrorHeader, ServiceErrorCodeHeader, type NatsConnection } from 'nats';
+import { createArtifactsPort, type ArtifactsPort } from './attachments.js';
 import { createCodex } from './codex.js';
 import { createApplication, type Config } from './application.js';
 import { subjects, bytes, limits } from '../contracts/index.mjs';
@@ -12,6 +12,7 @@ import type { Command, EventEnvelope } from '../contracts/index.mjs';
 export async function startAgent(config: Config) {
   if (!config.codex?.socketUrl || !config.nats?.servers?.length || !config.projects?.length || config.projects.some(p => !p.projectId || !p.cwd.startsWith('/')) || new Set(config.projects.map(p => p.projectId)).size !== config.projects.length) throw new Error('INVALID_AGENT_CONFIG');
   if (config.artifacts) {
+    if (config.artifacts.nats && (!config.artifacts.nats.servers?.length || config.artifacts.nats.servers.some(server => typeof server !== 'string' || !server))) throw new Error('INVALID_AGENT_CONFIG');
     const base = new URL(config.artifacts.baseUrl);
     if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash || config.artifacts.timeoutMs !== undefined && (!Number.isSafeInteger(config.artifacts.timeoutMs) || config.artifacts.timeoutMs < 1 || config.artifacts.timeoutMs > 10000)) throw new Error('INVALID_AGENT_CONFIG');
   }
@@ -19,6 +20,34 @@ export async function startAgent(config: Config) {
   const nc = await connect({ ...config.nats, pass: config.nats.password, inboxPrefix: config.nats.inboxPrefix ?? '_INBOX.brai_agent', maxReconnectAttempts: -1 });
   const service = await nc.services.add({ name: 'brai_agent', version: '3.0.0', queue: 'brai_agent' });
   let closed = false, brokerConnected = true, sending = false, activeRequests = 0;
+  let artifactsNc: NatsConnection | undefined, artifactsConnecting: Promise<void> | undefined;
+  let artifactsConnected = false;
+  async function connectArtifacts() {
+    if (!config.artifacts?.nats || artifactsNc && !artifactsNc.isClosed() || closed) return;
+    if (artifactsConnecting) return artifactsConnecting;
+    artifactsConnecting = (async () => {
+      try {
+        const settings = config.artifacts!.nats!;
+        const connection = await connect({ ...settings, pass: settings.password, inboxPrefix: settings.inboxPrefix ?? '_INBOX.brai_agent_artifacts', timeout: 1000, maxReconnectAttempts: -1 });
+        if (closed) await connection.close(); else {
+          artifactsNc = connection; artifactsConnected = true;
+          void (async () => { for await (const event of connection.status()) {
+            if (event.type === 'disconnect') artifactsConnected = false;
+            if (event.type === 'reconnect') artifactsConnected = true;
+          } })();
+        }
+      } catch { /* Резервирование запрещает send, пока отдельный broker недоступен. */ }
+    })().finally(() => { artifactsConnecting = undefined; });
+    return artifactsConnecting;
+  }
+  await connectArtifacts();
+  const artifactsPort: ArtifactsPort = config.artifacts?.nats ? {
+    fetch: globalThis.fetch,
+    async request(subject, value, options) {
+      if (!artifactsNc || artifactsNc.isClosed() || !artifactsConnected) throw Object.assign(new Error('UPSTREAM_UNAVAILABLE'), { code: 'UPSTREAM_UNAVAILABLE', outcome: 'not-sent' });
+      return createArtifactsPort(artifactsNc, config.artifacts?.timeoutMs).request(subject, value, options);
+    },
+  } : createArtifactsPort(nc, config.artifacts?.timeoutMs);
   const queue = new Map<string, EventEnvelope>();
   async function drain() {
     if (sending) return;
@@ -48,7 +77,7 @@ export async function startAgent(config: Config) {
     }
     queue.set(key, event);
     void drain();
-  }, createArtifactsPort(nc, config.artifacts?.timeoutMs));
+  }, artifactsPort);
   const codes: Record<string, number> = { INVALID_ARGUMENT: 400, REQUEST_TOO_LARGE: 413, ITEM_TOO_LARGE: 413, STALE_GENERATION: 409, STALE_ITEM: 409, STALE_REQUEST: 409, OPERATION_CONFLICT: 409, CAPACITY_EXHAUSTED: 503, UPSTREAM_UNAVAILABLE: 503, TIMEOUT: 504, NOT_FOUND: 404, UNSUPPORTED: 501 };
   service.addEndpoint('rpc', { subject: subjects.rpc, handler: (_error, message) => {
     void (async () => {
@@ -70,10 +99,17 @@ export async function startAgent(config: Config) {
       } finally { if (admitted) activeRequests--; }
     })();
   } });
-  const timer = setInterval(() => { if (!closed) { void codex.connect().catch(() => {}); void drain(); } }, 1000);
+  const timer = setInterval(() => { if (!closed) { void codex.connect().catch(() => {}); void connectArtifacts(); void drain(); } }, 1000);
   void (async () => { for await (const event of nc.status()) { if (event.type === 'disconnect') { brokerConnected = false; queue.clear(); } if (event.type === 'reconnect') brokerConnected = true; } })();
   await codex.connect().catch(() => {});
-  return { status: () => codex.status(), async close() { closed = true; clearInterval(timer); app.close(); await service.stop(); await codex.close(); await nc.close(); } };
+  return { status: () => codex.status(), async close() {
+    if (closed) return;
+    closed = true; clearInterval(timer); app.close();
+    const results = await Promise.allSettled([service.stop(), codex.close(), artifactsNc?.close(), artifactsConnecting]);
+    await nc.close();
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
+  } };
 }
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   if (!process.env.BRAI_AGENT_CONFIG?.startsWith('/')) throw new Error('BRAI_AGENT_CONFIG_REQUIRED');

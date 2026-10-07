@@ -9,7 +9,8 @@
 .agent-separator { flex: none; }
 .agent-projects { min-height: 0; flex: 1; overflow: hidden; }
 /* AIDEV-NOTE: Radix использует display:table; длинный чат не должен расширять рейл. Эти ограничения взяты из BraiThreadRail. */
-.agent-projects [data-slot="scroll-area-viewport"] { padding-right: 0; }
+/* AIDEV-NOTE: Обновление каталога сохраняет scrollTop; browser anchoring не двигает список вслед за новым чатом. */
+.agent-projects [data-slot="scroll-area-viewport"] { padding-right: 0; overflow-anchor: none; }
 .agent-projects [data-slot="scroll-area-viewport"] > div { display: block !important; min-width: 0 !important; width: 100%; }
 .agent-project-list { padding: .5rem; }
 .agent-project + .agent-project { margin-top: .5rem; }

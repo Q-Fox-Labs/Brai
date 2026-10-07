@@ -109,7 +109,7 @@ test('message timestamps stay fixed across delta; activity follows turn lifecycl
   f.observe({ method: 'turn/completed', params: { threadId: 't', turn: { id: 'live', status: 'completed' } } });
   assert.equal(f.events.at(-1).event.snapshot.thread.active, false);
 });
-test('turn failures stay visible and rejected server requests never wait for a user answer', async t => {
+test('turn failures stay visible and passive unsupported notices never reject another client request', async t => {
   const f = fixture(); t.after(() => f.app.close());
   await f.read('open');
   f.observe({ type: 'request', id: 41, method: 'item/new/request', params: { threadId: 't', turnId: 'turn', privatePayload: 'discard' }, supported: false, reason: 'invalid-params' });
@@ -120,13 +120,15 @@ test('turn failures stay visible and rejected server requests never wait for a u
 
   f.observe({ type: 'request', id: 42, method: 'item/new/client-ui', params: { threadId: 't', turnId: 'turn' }, supported: true });
   await new Promise(resolve => setImmediate(resolve));
-  assert.ok(f.calls.some(call => call.method === 'reject' && call.id === 42 && call.reason === 'unsupported-method'));
+  assert.equal(f.calls.some(call => call.method === 'reject'), false);
 
   f.observe({ method: 'turn/completed', params: { threadId: 't', turn: { id: 'failed-turn', status: 'failed', error: { message: 'Selected model is at capacity. Please try a different model.', codexErrorInfo: 'serverOverloaded', additionalDetails: 'private upstream data' } } } });
   snapshot = f.events.at(-1).event.snapshot;
   assert.deepEqual(snapshot.turn, { id: 'failed-turn', status: 'failed', error: { message: 'Selected model is at capacity. Please try a different model.', code: 'serverOverloaded' } });
   assert.equal(snapshot.thread.awaitingReply, false);
   assert.equal(snapshot.requests.length, 2);
+  f.observe({ method: 'serverRequest/resolved', params: { threadId: 't', requestId: 41 } });
+  assert.equal(f.events.at(-1).event.snapshot.requests.some(request => request.requestId === 'number:41'), false);
   assert.equal(JSON.stringify(snapshot).includes('private upstream data'), false);
   const snapshotAjv = new Ajv({ strict: false, validateFormats: false, schemas: [artifactSchemas] });
   snapshotAjv.addSchema(schema, 'https://brai.local/schemas/messages.schema.json');

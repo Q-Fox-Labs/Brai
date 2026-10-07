@@ -16,6 +16,33 @@ class Failure extends Error {
 }
 export const permittedAgent = (session: Session) => (process.env.BRAI_AGENT_ALLOWED_EMAILS ?? "").split(",").map(email => email.trim().toLowerCase()).filter(Boolean).includes(session.user.email.trim().toLowerCase());
 const fail = (status: number, code: string, outcome: ErrorResponse["outcome"]) => new Failure(status, { code, outcome });
+/** Берёт owner только из проверенной сессии и доверенной пары; неполная настройка закрывает доступ. */
+export function agentOwnerId(session: Session): string {
+  const email = process.env.BRAI_AGENT_OWNER_EMAIL?.trim().toLowerCase(), ownerId = process.env.BRAI_AGENT_OWNER_ID?.trim();
+  if (!email && !ownerId) return session.user.id;
+  if (!email || !ownerId || ownerId.length > 128 || !/\S/.test(ownerId)) throw new GatewayError(503, "AGENT_OWNER_NOT_CONFIGURED");
+  if (session.user.email.trim().toLowerCase() !== email) throw new GatewayError(403, "AGENT_ACCESS_DENIED");
+  if (session.user.emailVerified !== true) throw new GatewayError(403, "AGENT_OWNER_EMAIL_UNVERIFIED");
+  return ownerId;
+}
+
+/** Заменяет только URL вложений владельца на локальную browser identity, не меняя текст и wire владельца. */
+export function agentBrowserResult<T>(value: T, ownerId: string, userId: string): T {
+  if (ownerId === userId || !value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(item => agentBrowserResult(item, ownerId, userId)) as T;
+  const copy = { ...value } as Record<string, unknown>;
+  for (const [key, item] of Object.entries(copy)) {
+    if (key === "attachments" && Array.isArray(item)) copy[key] = item.map(attachment => {
+      if (!attachment || typeof attachment !== "object" || typeof attachment.url !== "string" || !attachment.url.startsWith("/api/agent/attachments/")) return attachment;
+      const url = new URL(attachment.url, "https://agent.invalid");
+      if (url.origin !== "https://agent.invalid" || url.searchParams.getAll("expectedUserId").length !== 1 || url.searchParams.get("expectedUserId") !== ownerId) return attachment;
+      url.searchParams.set("expectedUserId", userId);
+      return { ...attachment, url: url.pathname + url.search + url.hash };
+    });
+    else if (item && typeof item === "object") copy[key] = agentBrowserResult(item, ownerId, userId);
+  }
+  return copy as T;
+}
 /** Делает один request-reply; любой транспортный сбой после отправки мутации имеет неизвестный исход. */
 export async function rpc<T = unknown>(command: Command): Promise<T> {
   const mutation = !reads.has(command.action);
@@ -40,6 +67,7 @@ export function invalidateAgentSession(sessionId: string): void {
   for (const [close, id] of streams) if (id === sessionId) close();
 }
 async function events(request: Request, session: Session, command?: Command): Promise<Response> {
+  const ownerId = agentOwnerId(session);
   const nc = await natsConnection();
   if (streams.size >= limits.clients) throw fail(429, "CAPACITY_EXHAUSTED", "query");
   if (!watched.has(nc)) {
@@ -115,7 +143,7 @@ async function events(request: Request, session: Session, command?: Command): Pr
         if (previous && previous.generation === value.generation && previous.epoch === value.epoch && value.seq <= previous.seq) return;
         if (command && previous && previous.epoch !== value.epoch) return close();
         if (!buffered.has(key) && buffered.size >= limits.threads) return close();
-        buffered.set(key, value); schedule();
+        buffered.set(key, agentBrowserResult(value, ownerId, session.user.id)); schedule();
       };
       const subscription = nc.subscribe(subjects.event, { callback(error, message) {
         if (closed) return;
@@ -134,14 +162,15 @@ async function events(request: Request, session: Session, command?: Command): Pr
         checking = true;
         const checkedGeneration = generation;
         const current = await requireTimerSession(request, true).catch(() => null);
-        const status = !closed && current && permittedAgent(current) && checkedGeneration ? await rpc<{ generation: string; ready: boolean; limits?: unknown }>({ action: "status" }).catch(() => null) : null;
+        const authorized = current && permittedAgent(current) && (() => { try { return agentOwnerId(current) === ownerId; } catch { return false; } })();
+        const status = !closed && authorized && checkedGeneration ? await rpc<{ generation: string; ready: boolean; limits?: unknown }>({ action: "status" }).catch(() => null) : null;
         checking = false;
         if (closed || generation !== checkedGeneration) return;
         if (generation) {
           missedStatus = status ? 0 : missedStatus + 1;
           if ((status && (!status.ready || status.generation !== generation)) || missedStatus >= 3) close();
         }
-        if (!current || !permittedAgent(current) || current.session.id !== session.session.id || current.user.id !== session.user.id) close();
+        if (!current || !authorized || current.session.id !== session.session.id || current.user.id !== session.user.id) close();
         if (!command && status && status.generation === checkedGeneration && status.ready) {
           const next = validateLimits(status.limits) ? status.limits : unavailableLimits();
           publishLimits(next);
@@ -184,6 +213,7 @@ async function handle(request: Request, context: { params: Promise<{ path: strin
     if (request.method === "POST") checkOrigin(request);
     const session = await requireTimerSession(request, eventStream);
     if (!permittedAgent(session)) throw fail(403, "AGENT_ACCESS_DENIED", outcome);
+    const ownerId = agentOwnerId(session);
     if (path.length !== 1 || (eventStream && request.method !== "GET")) throw fail(404, "NOT_FOUND", outcome);
     if (url.searchParams.getAll("expectedUserId").length > 1 || (!eventStream && url.searchParams.has("expectedUserId"))) throw fail(400, "INVALID_ARGUMENT", outcome);
     const query = [...url.searchParams].filter(([key]) => key !== "expectedUserId");
@@ -202,13 +232,13 @@ async function handle(request: Request, context: { params: Promise<{ path: strin
     if (eventStream && !query.length) return await events(request, session);
     const command = { action: eventStream ? "open" : path[0], ...(value ? JSON.parse(value) : Object.fromEntries(query)) };
     if (Object.hasOwn(command, "ownerId")) throw fail(400, "INVALID_ARGUMENT", outcome);
-    if (typeof command.threadId === "string") command.ownerId = session.user.id;
+    if (typeof command.threadId === "string") command.ownerId = ownerId;
     if (typeof command.itemIds === "string") command.itemIds = JSON.parse(command.itemIds);
     if (command.action !== (eventStream ? "open" : path[0])) throw fail(400, "INVALID_ARGUMENT", outcome);
     if (!validateCommand(command) || (!eventStream && reads.has(command.action) !== (request.method === "GET"))) throw fail(400, "INVALID_ARGUMENT", outcome);
     if (eventStream) return await events(request, session, command);
     outcome = request.method === "POST" ? "unknown" : "query";
-    return Response.json(await rpc(command), { status: request.method === "POST" ? 202 : 200, headers: { "Cache-Control": "no-store" } });
+    return Response.json(agentBrowserResult(await rpc(command), ownerId, session.user.id), { status: request.method === "POST" ? 202 : 200, headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     if (error instanceof GatewayError) return Response.json({ code: error.code }, { status: error.status });
     const known = error instanceof Failure ? error : fail(400, "INVALID_ARGUMENT", outcome);

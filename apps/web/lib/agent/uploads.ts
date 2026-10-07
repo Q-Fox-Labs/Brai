@@ -69,7 +69,7 @@ async function uploadOne(scope: UploadScope, input: UploadFileInput, signal: Abo
     let upload: Response | undefined;
     try {
       const target = new URL(prepared.uploadUrl, location.href);
-      if (target.origin !== location.origin || !/^\/upload\/[A-Za-z0-9_-]{16,512}$/.test(target.pathname) || target.search || target.hash) throw new Error("BAD_UPLOAD_URL");
+      if (target.origin !== location.origin || target.username || target.password || !/^\/api\/agent\/uploads\/[A-Za-z0-9_-]{16,512}$/.test(target.pathname) || target.search || target.hash) throw new Error("BAD_UPLOAD_URL");
       upload = fetcher === fetch && typeof XMLHttpRequest !== "undefined"
         ? await uploadBytes(target.toString(), input.file, signal, progress)
         : await fetcher(target.toString(), { method: "PUT", body: input.file, signal, cache: "no-store", credentials: "omit", redirect: "error", headers: { "Content-Type": input.file.type } });

@@ -25,8 +25,8 @@ test("small original reuses its ID and a valid 201 avoids an extra prepare round
   const calls: { url: string; init?: RequestInit }[] = [], restore = fixture();
   const fetcher: typeof fetch = async (input, init) => {
     const url = String(input); calls.push({ url, init });
-    if (url === "/api/agent/attachments/prepare") return json({ artifact: { artifactId: "original-id", status: "pending" }, uploadUrl: "https://app.test/upload/abcdefghijklmnop" });
-    if (url.startsWith("https://app.test/upload/")) return uploaded("original-id", png.length);
+    if (url === "/api/agent/attachments/prepare") return json({ artifact: { artifactId: "original-id", status: "pending" }, uploadUrl: "https://app.test/api/agent/uploads/abcdefghijklmnop" });
+    if (url.startsWith("https://app.test/api/agent/uploads/")) return uploaded("original-id", png.length);
     if (url === "/api/agent/attachments/finalize") return json({ status: "ready" });
     throw new Error(`Unexpected URL ${url}`);
   };
@@ -34,7 +34,7 @@ test("small original reuses its ID and a valid 201 avoids an extra prepare round
     const image = makeAttachment(false), ready = await uploadAttachment(image, scope, new AbortController().signal, fetcher);
     assert.deepEqual(ready, { originalArtifactId: "original-id", modelArtifactId: "original-id", url: "/api/agent/attachments/original-id?projectId=project-a&threadId=thread-a&expectedUserId=user-a" });
     assert.equal(calls.filter(call => call.url === "/api/agent/attachments/prepare").length, 1);
-    assert.equal(calls.filter(call => call.url.startsWith("https://app.test/upload/")).length, 1);
+    assert.equal(calls.filter(call => call.url.startsWith("https://app.test/api/agent/uploads/")).length, 1);
     const prepareBody = JSON.parse(String(calls[0].init?.body));
     assert.equal(prepareBody.requestId, image.originalRequestId);
     assert.equal(Object.hasOwn(prepareBody, "ownerId"), false);
@@ -50,9 +50,9 @@ test("reduced copy uploads separately and finalization binds its ID to the origi
     const url = String(input); calls.push({ url, init });
     if (url === "/api/agent/attachments/prepare") {
       const body = JSON.parse(String(init?.body));
-      return json({ artifact: { artifactId: states.get(body.requestId), status: "pending" }, uploadUrl: `https://app.test/upload/${body.kind === "original" ? "abcdefghijklmnop" : "qrstuvwxyzABCDEF"}` });
+      return json({ artifact: { artifactId: states.get(body.requestId), status: "pending" }, uploadUrl: `https://app.test/api/agent/uploads/${body.kind === "original" ? "abcdefghijklmnop" : "qrstuvwxyzABCDEF"}` });
     }
-    if (url.startsWith("https://app.test/upload/")) {
+    if (url.startsWith("https://app.test/api/agent/uploads/")) {
       const body = calls.filter(call => call.url === "/api/agent/attachments/prepare").map(call => JSON.parse(String(call.init?.body))).at(-1);
       return uploaded(body.kind === "original" ? "original-id" : "copy-id", (init?.body as Blob).size);
     }
@@ -64,7 +64,7 @@ test("reduced copy uploads separately and finalization binds its ID to the origi
     const image = makeAttachment(true), ready = await uploadAttachment(image, scope, new AbortController().signal, fetcher, value => progress.push(value));
     assert.deepEqual(progress, [0, image.original.size / (image.original.size + image.model.size), 1]);
     assert.equal(ready.originalArtifactId, "original-id"); assert.equal(ready.modelArtifactId, "copy-id");
-    assert.equal(calls.filter(call => call.url.startsWith("https://app.test/upload/")).length, 2);
+    assert.equal(calls.filter(call => call.url.startsWith("https://app.test/api/agent/uploads/")).length, 2);
     assert.deepEqual(JSON.parse(String(calls.at(-1)?.init?.body)), { projectId: scope.projectId, threadId: scope.threadId, requestId: image.relationRequestId, originalArtifactId: "original-id", modelArtifactId: "copy-id" });
   } finally { restore(); }
 });
@@ -75,9 +75,9 @@ test("lost PUT response reconciles with the same prepare ID; aborted old scope n
     const url = String(input);
     if (url === "/api/agent/attachments/prepare") {
       prepareCalls++;
-      return json({ artifact: { artifactId: "original-id", status: prepareCalls === 1 ? "pending" : "ready" }, uploadUrl: "https://app.test/upload/abcdefghijklmnop" });
+      return json({ artifact: { artifactId: "original-id", status: prepareCalls === 1 ? "pending" : "ready" }, uploadUrl: "https://app.test/api/agent/uploads/abcdefghijklmnop" });
     }
-    if (url.startsWith("https://app.test/upload/")) { putCalls++; throw new TypeError("connection dropped"); }
+    if (url.startsWith("https://app.test/api/agent/uploads/")) { putCalls++; throw new TypeError("connection dropped"); }
     if (url === "/api/agent/attachments/finalize") return json({ status: "ready" });
     throw new Error(`Unexpected URL ${url}`);
   };
@@ -86,8 +86,8 @@ test("lost PUT response reconciles with the same prepare ID; aborted old scope n
     assert.equal(ready.originalArtifactId, "original-id"); assert.equal(prepareCalls, 2); assert.equal(putCalls, 1);
     let abortedPrepareCalls = 0; const controller = new AbortController();
     const abortingFetcher: typeof fetch = async (input) => {
-      if (String(input) === "/api/agent/attachments/prepare") { abortedPrepareCalls++; return json({ artifact: { artifactId: "old-id", status: "pending" }, uploadUrl: "https://app.test/upload/abcdefghijklmnop" }); }
-      if (String(input).startsWith("https://app.test/upload/")) { controller.abort(); throw new DOMException("Aborted", "AbortError"); }
+      if (String(input) === "/api/agent/attachments/prepare") { abortedPrepareCalls++; return json({ artifact: { artifactId: "old-id", status: "pending" }, uploadUrl: "https://app.test/api/agent/uploads/abcdefghijklmnop" }); }
+      if (String(input).startsWith("https://app.test/api/agent/uploads/")) { controller.abort(); throw new DOMException("Aborted", "AbortError"); }
       throw new Error("No finalize expected");
     };
     await assert.rejects(uploadAttachment(makeAttachment(false), scope, controller.signal, abortingFetcher), /отменена/);
@@ -106,7 +106,7 @@ test("completed byte transfer does not show success before finalization", async 
   const restore = fixture(), progress: number[] = [];
   try {
     await assert.rejects(uploadAttachment(makeAttachment(false), scope, new AbortController().signal, async input => {
-      if (String(input).endsWith("/prepare")) return json({ artifact: { artifactId: "original-id", status: "ready" }, uploadUrl: "https://app.test/upload/abcdefghijklmnop" });
+      if (String(input).endsWith("/prepare")) return json({ artifact: { artifactId: "original-id", status: "ready" }, uploadUrl: "https://app.test/api/agent/uploads/abcdefghijklmnop" });
       assert.equal(progress.at(-1), .99);
       return json({ code: "UNAVAILABLE" }, 503);
     }, value => progress.push(value)), /Не удалось связать/);
