@@ -28,13 +28,14 @@ const json = value => Buffer.from(JSON.stringify(value));
 const config = input.config;
 const ownerId = randomUUID();
 const deadline = () => new Date(Date.now() + config.transport.maxRequestMs - 1000).toISOString();
-let client, peers, local, server, historyService;
+let client, peers, local, server;
 const fixtureDirectories = [];
 let stage = 'initialize';
 let activeProfileId = null;
 const errorMetadata = error => ({ code: safeCode(error), origin: ['nats-client','service'].includes(error?.origin) ? error.origin : 'harness', errorStatus: Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599 ? error.status : null });
-const expectedOperations = input.operation === 'transcribe' ? ['transcribe'] : ['embed','transcribe'];
+const expectedOperations = ['embed','transcribe'];
 const report = { formatVersion: 2, measurement: 'microservice-forwarding-only', status: 'running', identity: input.identity, samples: [], errors: [], expectedOperations, expectedSamples: expectedOperations.length * 5,
+  acceptance: { limitMs: 50, criterion: 'each-operation-empirical-p95-max-at-n5', populationGuarantee: false },
   methodology: { ingress: 'endpoint-entry-to-engine-handoff-minus-tokenize-model-wait', egress: 'engine-raw-response-to-message-respond-completion',
     replyCompletion: 'local-NATS-publish-return-not-consumer-receipt', embeddingNativeBoundary: 'undici-request-bodySent-to-request-trailers', asrNativeBoundary: 'stdin-write-to-last-raw-stdout-chunk-before-matching-parse', modelWaitMeasuredAsPerformance: false,
     loading: 'prerequisite-not-measured', shortRequestsPerOperation: 5, percentile: 'nearest-rank-exploratory-max-at-n5',
@@ -166,7 +167,8 @@ function forwardingComplete(report) {
     && report.expectedOperations.every(operation => {
       const rows = report.samples.filter(row => row.operation === operation);
       return rows.length === 5 && new Set(rows.map(row => row.round)).size === 5 && rows.every(row => Number.isInteger(row.round) && row.round >= 0 && row.round < 5);
-    }) && report.samples.every(row => row.status === 'passed' && [row.ingressMs,row.egressMs,row.forwardingMs].every(value => Number.isFinite(value) && value >= 0));
+    }) && report.samples.every(row => row.status === 'passed' && [row.ingressMs,row.egressMs,row.forwardingMs].every(value => Number.isFinite(value) && value >= 0)
+      && row.forwardingMs <= report.acceptance.limitMs);
 }
 
 try {
@@ -184,15 +186,16 @@ try {
   server = createServer((req, res) => { if (req.url !== '/files/' + fixture.artifactId || req.method !== 'GET') { res.writeHead(404).end(); return; } res.writeHead(200, { 'content-length': bytes.length, 'content-type': 'audio/wav' }); res.end(bytes); });
   await new Promise(resolve => server.listen(19080, '127.0.0.1', resolve));
   peers.subscribe('brai.artifacts.v1.get', { callback: (_error, message) => message.respond(json({ artifactId: fixture.artifactId, ownerId, status: 'ready', mimeType: 'audio/wav', sizeBytes: bytes.length, sha256: hash, internalUrl: 'http://127.0.0.1:19080/files/' + fixture.artifactId })) });
-  peers.subscribe('brai.history.v1.append.local_ai', { callback: (_error, message) => { const body = JSON.parse(Buffer.from(message.data).toString()); message.respond(json({ event: { ...body, source: 'local_ai', recorded_at: new Date().toISOString() } })); } });
-  historyService = await peers.services.add({ name: 'service_history', version: '1.0.0' }); await peers.flush();
+  // AIDEV-NOTE: Новый publish не ждёт history; fixture только принимает факт без reply.
+  peers.subscribe('brai.history.v1.append.local_ai', { callback: () => {} });
+  await peers.flush();
   stage = 'startup';
   local = await startLocalAi(config, { factories: {
     startLocalAiNats: (nc, options, handlers) => startLocalAiNats(forwardingConnection(nc), options, handlers),
   } });
   // AIDEV-NOTE: SUB readiness barrier на service connection до request с другой connection.
   await local.nc.flush();
-  const profiles = supportedProfiles(config).filter(profile => input.operation !== 'transcribe' || profile.profileId === 'gigaam_pytorch');
+  const profiles = supportedProfiles(config);
   report.identity.models = profiles.map(profile => ({ modelId: profile.modelId, revision: profile.revision, profileId: profile.profileId, files: profile.record.files }));
   for (const profile of profiles) {
     activeProfileId = profile.profileId;
@@ -216,7 +219,8 @@ try {
         if (!valid) throw Object.assign(new Error(), { code: 'FORWARDING_MEASUREMENT_UNAVAILABLE' });
         const ingress = span.t1-span.t0-span.excludedTokenWaitMs;
         const egress = span.t3-span.t2;
-        outcome = { status: 'passed', ingressMs: rounded(ingress), egressMs: rounded(egress), forwardingMs: rounded(ingress+egress) };
+        // AIDEV-NOTE: Порог сравнивается с точной суммой одного вызова до округления отчёта.
+        outcome = { status: 'passed', ingressMs: rounded(ingress), egressMs: rounded(egress), forwardingMs: ingress+egress };
       } catch (error) { outcome = { status: 'failed', ...errorMetadata(error), ingressMs: null, egressMs: null, forwardingMs: null }; }
       report.samples.push({ operation, round, ...outcome });
       spans.length = 0; await save(); console.log(JSON.stringify({ stage: 'sample', operation, round, ...outcome }));
@@ -229,7 +233,6 @@ try {
 finally {
   stage = 'cleanup';
   try { await local?.close(); } catch (error) { report.errors.push({ stage, profileId: activeProfileId, ...errorMetadata(error) }); report.status = 'failed'; }
-  try { await historyService?.stop(); } catch (error) { report.errors.push({ stage, ...errorMetadata(error) }); report.status = 'failed'; }
   const cleanups = await Promise.allSettled([
     Promise.resolve().then(() => client?.drain()), Promise.resolve().then(() => peers?.drain()), server ? new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())) : undefined,
     ...fixtureDirectories.map(directory => Promise.resolve().then(() => rm(directory, { recursive: true, force: true }))),
@@ -237,7 +240,10 @@ finally {
   for (const result of cleanups) if (result.status === 'rejected') { report.errors.push({ stage, code: safeCode(result.reason) }); report.status = 'failed'; }
   for (const [name, listener] of diagnosticHooks) channel(name).unsubscribe(listener);
   pendingRpc.clear(); JSON.parse = originalParse; childProcess.spawn = originalSpawn; syncBuiltinESMExports();
-  if (!forwardingComplete(report)) { report.status = 'failed'; if (!report.errors.length) report.errors.push({ stage: 'metrics', code: 'INCOMPLETE_FORWARDING_SAMPLES' }); }
+  if (!forwardingComplete(report)) {
+    report.status = 'failed';
+    if (!report.errors.length) report.errors.push({ stage: 'metrics', code: report.samples.some(row => row.forwardingMs > report.acceptance.limitMs) ? 'FORWARDING_BUDGET_EXCEEDED' : 'INCOMPLETE_FORWARDING_SAMPLES' });
+  }
   report.summaries = expectedOperations.map(operation => {
     const rows = report.samples.filter(row => row.operation === operation && row.status === 'passed');
     return { operation, ingress: stats(rows.map(row => row.ingressMs)), egress: stats(rows.map(row => row.egressMs)), forwarding: stats(rows.map(row => row.forwardingMs)) };
