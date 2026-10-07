@@ -196,7 +196,7 @@ test('protected real installer acceptance uses only isolated fixture resources',
       receipt.verifiedBytes = totalBytes;
       receipt.progressSnapshots = progress.values.length;
       receipt.publicDownloads = downloads.count;
-      receipt.terminalEventStable = true;
+      receipt.terminalOperationStable = true;
       receipt.retryRequestId = phaseRequestId(config.runId, 'public');
     } else if (config.phase === 'inspect') {
       const state = await readAcceptanceState(pool, store, profile, config.runId);
@@ -264,7 +264,7 @@ function realPublicFetch(input, init = {}) {
 function createPublicInstallFetch(counter, onFirstFileRequest = null) {
   let resolveEntered;
   let release;
-  let reservationId = null;
+  let operationId = null;
   const gate = new Promise(resolve => { release = resolve; });
   const entered = new Promise(resolve => { resolveEntered = resolve; });
   let held = false;
@@ -276,14 +276,14 @@ function createPublicInstallFetch(counter, onFirstFileRequest = null) {
     if (url.pathname.startsWith(`/${REPOSITORY}/resolve/${REVISION}/`)) {
       if (!held && onFirstFileRequest) {
         held = true;
-        reservationId = await onFirstFileRequest();
-        resolveEntered(reservationId);
+        operationId = await onFirstFileRequest();
+        resolveEntered(operationId);
         await gate;
       }
     }
     return globalThis.fetch(input, init);
   };
-  return { fetch: fetchFn, entered, release: () => release(), get reservationId() { return reservationId; } };
+  return { fetch: fetchFn, entered, release: () => release() };
 }
 
 function installRequest(profile, ownerId, requestId, maxOperationMs) {
@@ -495,28 +495,27 @@ function safeCode(error) {
     'HASH_MISMATCH_REJECTED', 'HASH_REJECTION_NO_DB_CHANGE', 'HASH_REJECTION_NOT_READY',
     'ENOSPC_TMPFS_SIZE', 'ENOSPC_MOUNT_TARGET', 'ENOSPC_MOUNT_TYPE', 'ENOSPC_MOUNT_FLAGS', 'ENOSPC_MOUNT_OWNER',
     'ENOSPC_PHASE_BASELINE', 'NATIVE_ENOSPC_WRITE_OBSERVED', 'INSTALLER_TERMINATED_WITH_SAFE_STATUS',
-    'ENOSPC_TERMINAL_FAILED', 'ENOSPC_NO_INSTALLATION', 'ENOSPC_TERMINAL_RESERVATION_CLOSED',
+    'ENOSPC_TERMINAL_FAILED', 'ENOSPC_NO_INSTALLATION',
     'ENOSPC_NO_FINAL_OR_STAGING', 'PUBLIC_FILESYSTEM_CAPACITY', 'PUBLIC_FILESYSTEM_OWNER',
     'PUBLIC_PHASE_REQUIRES_OWN_ENOSPC_RETRY', 'PUBLIC_SEARCH_SCHEMA_VALID', 'PUBLIC_SEARCH_HAS_UNSUPPORTED_RESULT',
     'PUBLIC_SEARCH_REMOTE_ID_PRESENT', 'UNSUPPORTED_REJECTIONS_NO_DB_CHANGE', 'RUNNING_REPEAT_IDEMPOTENT',
     'PUBLIC_INSTALL_TERMINAL_SUCCESS', 'PUBLIC_PROGRESS_MONOTONIC', 'PUBLIC_PROGRESS_INTERMEDIATE',
     'PUBLIC_INSTALL_COMPLETED', 'PUBLIC_FETCH_ONCE_PER_PINNED_FILE', 'PUBLISHED_TREE_EXACT', 'PUBLISHED_FILE_HASH',
-    'COMPLETED_REPEAT_NO_REFETCH', 'INSTALL_OPERATION_OWNER_SCOPE', 'PUBLIC_INSTALLATION_AND_TERMINAL_FACT',
-    'OWN_OUTBOX_FACT_COUNT', 'OUTBOX_METADATA_SCHEMA_ONLY', 'OUTBOX_ONLY_PINNED_MODEL', 'OUTBOX_OWNER_SCOPE',
+    'COMPLETED_REPEAT_NO_REFETCH', 'INSTALL_OPERATION_OWNER_SCOPE',
     'INSTALL_OPERATION_BOUNDED_TIMEOUT', 'PUBLIC_INSTALL_BOUNDED_TIMEOUT', 'EXPECTED_NOT_SUPPORTED',
     'EXPECTED_INVALID_ARGUMENT', 'OWN_PROFILE_REGISTERED', 'NO_EXISTING_INSTALLATION_BEFORE_RETRY',
-    'TEST_TIMEOUT_MATCHES_WATCHDOG', 'COMPLETED_REPEAT_NO_NEW_EVENT', 'INSPECT_OWN_FINAL_INSTALLATION',
+    'TEST_TIMEOUT_MATCHES_WATCHDOG', 'INSPECT_OWN_FINAL_INSTALLATION',
     'NEW_PROCESS_REPEAT_READS_SAVED_OPERATION', 'PUBLIC_FINAL_DIRECTORY_ABSENT_BEFORE_PUBLICATION',
     'PUBLIC_INSTALLATION_CANONICAL_DIRECTORY', 'PUBLIC_NOT_READY_BEFORE_PUBLICATION',
-    'PUBLIC_OPERATION_NOT_READY_WHILE_BLOCKED', 'PUBLIC_TERMINAL_EVENT_ID_STABLE',
-    'PUBLIC_TERMINAL_EVENT_SUCCEEDED', 'PUBLIC_TERMINAL_RESERVATION_EXISTS', 'NO_SETTINGS_ROWS',
+    'PUBLIC_OPERATION_NOT_READY_WHILE_BLOCKED',
+    'NO_SETTINGS_ROWS',
     'PUBLIC_CASE_EMPTY_BEFORE_UNSUPPORTED', 'UNSUPPORTED_REJECTIONS_NO_FETCH',
     'UNSUPPORTED_REJECTIONS_NO_FILESYSTEM_CHANGE', 'NEW_PROCESS_REPEAT_READS_FAILED_OPERATION',
     'NEW_PROCESS_REPEATS_NO_DATABASE_CHANGE',
     'HASH_NAMESPACE_INVALID', 'HASH_CANDIDATE_MISMATCH_NOT_EXPECTED',
     'HASH_PROFILE_REGISTRATION_VALID', 'HASH_RESUME_REGISTRATION_COUNTS_UNCHANGED',
     'HASH_RESUME_REGISTRATION_FACTS_UNCHANGED',
-    'PUBLIC_RETRY_REQUIRES_PRIOR_ENOSPC_FAILURE', 'INSTALL_OPERATION_SCHEMA', 'METADATA_EVENT_SCHEMA',
+    'PUBLIC_RETRY_REQUIRES_PRIOR_ENOSPC_FAILURE', 'INSTALL_OPERATION_SCHEMA',
     'INSPECT_OWN_OPERATION_HISTORY', 'INSPECT_OWN_FINAL_STATE', 'CASE_DIRECTORY_NOT_LINK', 'CASE_DIRECTORY_REALPATH',
     'CASE_DIRECTORY_OWNER_MODE', 'CASE_TREE_HAS_NO_LINKS', 'CASE_TREE_HAS_ONLY_FILES', 'HASH_CANDIDATE_EXACT_FILE_COUNT',
     'HASH_CANDIDATE_FILE_SHAPE', 'HASH_CANDIDATE_SINGLE_PINNED_FILE_MISMATCH', 'ACCEPTED_PROFILE_FILE_MANIFEST',
