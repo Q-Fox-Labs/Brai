@@ -378,6 +378,22 @@ def ldd_closure(
     loader_search_dirs: set[str],
 ) -> None:
     seen: dict[str, str] = {}
+    hashes: dict[Path, tuple[tuple[int, int, int, int, int], str]] = {}
+
+    def dependency_hash(path: Path) -> str:
+        """Повторно использовать digest только при неизменной идентичности файла в этом вызове."""
+        before = path.stat()
+        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        cached = hashes.get(path)
+        if cached is not None and cached[0] == identity:
+            return cached[1]
+        digest = sha256(path)
+        after = path.stat()
+        if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            raise ValueError("ELF dependency changed while calculating its SHA-256")
+        hashes[path] = (identity, digest)
+        return digest
+
     for binary in elf_files:
         output = run(["/usr/bin/ldd", str(binary)], env=env)
         for line in output.splitlines():
@@ -390,7 +406,7 @@ def ldd_closure(
             resolved = Path(resolved_name).resolve(strict=True)
             if soname in SYSTEM_BASE_NEEDED:
                 continue
-            content_hash = sha256(resolved)
+            content_hash = dependency_hash(resolved)
             already_searchable = any(
                 Path(str(row["destination"])).name == soname
                 and str(row["sha256"]) == content_hash
