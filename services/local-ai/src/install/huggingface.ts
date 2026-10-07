@@ -86,6 +86,8 @@ export type ModelInstallerOptions = {
   store: LocalAiStore;
   history?: HistoryFactPort;
   installed?(modelId: string): Promise<void>;
+  /** Согласует установку с invoke/load/remove; освобождение происходит после terminal update и cleanup. */
+  acquireModelIdleLock?(modelId: string): Promise<() => void>;
   profiles: readonly SupportedProfile[];
   rootDirectory: string;
   fetchImpl?: typeof fetch;
@@ -213,11 +215,15 @@ export function createModelInstaller(options: ModelInstallerOptions): ModelInsta
         throw new LocalAiError('BUSY', 'INSTALLER_BUSY', true);
       }
       activeTargets.add(targetKey);
-      const pending = admit(request, profile);
+      let releaseModel: (() => void) | undefined;
+      const pending = (async () => {
+        releaseModel = await options.acquireModelIdleLock?.(profile.modelId);
+        return admit(request, profile);
+      })();
       admissions.set(key, pending);
       try {
         const operation = await pending;
-        if (operation.status !== 'accepted') { activeTargets.delete(targetKey); return operation; }
+        if (operation.status !== 'accepted') { activeTargets.delete(targetKey); releaseModel?.(); return operation; }
         const controller = new AbortController();
         let deadlineExceeded = false;
         const effectiveMs = Math.min(remaining, limits.maxOperationMs);
@@ -232,11 +238,13 @@ export function createModelInstaller(options: ModelInstallerOptions): ModelInsta
           active.delete(key);
           activeTasks.delete(key);
           activeTargets.delete(targetKey);
+          releaseModel?.();
         });
         activeTasks.set(key, task);
         return operation;
       } catch (error) {
         activeTargets.delete(targetKey);
+        releaseModel?.();
         throw error;
       } finally {
         admissions.delete(key);
@@ -260,7 +268,9 @@ export function createModelInstaller(options: ModelInstallerOptions): ModelInsta
       const targetKey = selectorKey(profile.modelId, profile.revision, profile.profileId);
       if (activeTargets.has(targetKey) || activeTargets.size >= limits.maxParallel) throw new LocalAiError('BUSY', 'INSTALLER_BUSY', true);
       activeTargets.add(targetKey);
+      let releaseModel: (() => void) | undefined;
       try {
+        releaseModel = await options.acquireModelIdleLock?.(profile.modelId);
         if (input.revision !== profile.revision || !path.isAbsolute(input.directory)) {
           throw new LocalAiError('REVISION_CONFLICT', 'MODEL_SELECTOR_MISMATCH');
         }
@@ -291,6 +301,7 @@ export function createModelInstaller(options: ModelInstallerOptions): ModelInsta
         return verified;
       } finally {
         activeTargets.delete(targetKey);
+        releaseModel?.();
       }
     },
 

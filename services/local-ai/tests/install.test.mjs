@@ -7,6 +7,8 @@ import { createServer } from 'node:http';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createLifecycleManager } from '../dist/lifecycle/index.js';
+import { createCatalog } from '../dist/catalog/index.js';
 import {
   createHuggingFaceCatalog,
   createModelInstaller,
@@ -37,6 +39,54 @@ const profile = {
   files: [{ path: 'weights.bin', bytes: bytes.length, sha256 }],
   record: record(),
 };
+
+test('installer, invoke, load and remove share a fence through publication and deletion cleanup', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'local-ai-management-fence-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = fakeStore(); await registerSupportedProfiles(store, [profile]);
+  let releaseDownload; const download = new Promise(resolve => { releaseDownload = resolve; });
+  let downloaded; const downloading = new Promise(resolve => { downloaded = resolve; });
+  let exit;
+  const lifecycle = createLifecycleManager({ store, runtimeFactory: { async open() {
+    const exited = new Promise(resolve => { exit = resolve; });
+    return { exited, async close() { exit(); }, async embed() { return { vectors: [[1]] }; }, async transcribe() { throw new Error('unused'); } };
+  } }, artifacts: { async withReadyAudio() { throw new Error('unused'); } }, limits: {
+    maxLoadedModels: 2, maxQueuedOperations: 2, maxInputBytes: 1000, maxEmbeddingItems: 2, maxResultBytes: 1000, loadDeadlineMs: 5000,
+  } });
+  t.after(() => lifecycle.close());
+  const installer = createModelInstaller({ store, profiles: [profile], rootDirectory: root,
+    acquireModelIdleLock: lifecycle.acquireModelIdleLock, installed: lifecycle.refreshModel,
+    fetchImpl: async () => { downloaded(); await download; return new Response(bytes); },
+  });
+  t.after(() => installer.close());
+  const select = { modelId, revision, profileId };
+  const request = { ...select, requestId: randomUUID(), ownerId: 'fixture-owner', deadlineAt: new Date(Date.now() + 5000).toISOString() };
+  const context = { ownerId: request.ownerId, operationId: randomUUID(), deadlineAt: request.deadlineAt, signal: new AbortController().signal };
+  const invocation = { ...context, requestId: randomUUID(), model: select, operation: 'embed', texts: ['private'], purpose: 'query' }; delete invocation.signal;
+  let releaseCleanup; const cleanup = new Promise(resolve => { releaseCleanup = resolve; });
+  let cleanupEntered; const entered = new Promise(resolve => { cleanupEntered = resolve; });
+  const catalog = createCatalog(store, { ...lifecycle, async cleanupPublished(installation) {
+    cleanupEntered(); await cleanup; await installer.cleanupPublished(installation);
+  } });
+  await installer.start(request); await downloading;
+  await assert.rejects(lifecycle.invoke(invocation, context), error => error.code === 'MODEL_IN_USE');
+  await assert.rejects(lifecycle.load(select, context), error => error.code === 'MODEL_IN_USE');
+  await assert.rejects(catalog.remove(modelId, revision, profileId, context), error => error.code === 'MODEL_IN_USE');
+  releaseDownload();
+  assert.equal((await waitFor(installer, request.requestId, request.ownerId)).status, 'completed');
+  await installer.close();
+  await lifecycle.invoke(invocation, context);
+  const removing = catalog.remove(modelId, revision, profileId, context); await entered;
+  const secondInstaller = createModelInstaller({ store, profiles: [profile], rootDirectory: root, acquireModelIdleLock: lifecycle.acquireModelIdleLock });
+  t.after(() => secondInstaller.close());
+  const replacement = { ...request, requestId: randomUUID() };
+  await assert.rejects(secondInstaller.start(replacement), error => error.code === 'MODEL_IN_USE');
+  assert.equal(store.operations.size, 1, 'blocked install must not create durable admission');
+  await assert.rejects(lifecycle.load(select, context), error => error.code === 'MODEL_IN_USE');
+  releaseCleanup(); await removing;
+  await assert.rejects(lifecycle.invoke(invocation, context), error => error.code === 'MODEL_NOT_INSTALLED');
+  assert.equal(store.installations.size, 0);
+});
 
 function fakeStore() {
   const models = new Map();

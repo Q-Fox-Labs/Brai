@@ -74,7 +74,42 @@ test('GigaAM adapter uses newline JSON-RPC, matches IDs, and maps segment field 
   }
 });
 
-test('GigaAM retains its private TMPDIR through a surviving child and removes it before exited resolves', async () => {
+test('native diagnostics preserve a safe runner stage and exclude sentinel payload and stderr', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'local-ai-diagnostics-'));
+  const originalTmpdir = process.env.TMPDIR;
+  process.env.TMPDIR = root;
+  const sentinel = 'PRIVATE_SENTINEL_AUDIO_TEXT_VECTOR_SECRET';
+  const source = `const readline=require('node:readline');process.stderr.write('${sentinel}');const r=readline.createInterface({input:process.stdin});r.on('line',l=>{const q=JSON.parse(l);const reply=q.method==='health'?{result:{ready:true,model_id:'gigaam-v3-e2e-ctc',revision:'rev-giga',vad_revision:'vad-rev'}}:{error:{code:-32001,message:'${sentinel}',data:{diagnostic:{stage:'audio_decode',errorClass:'${sentinel}',frames:[{component:'${sentinel}',line:1}],text:'${sentinel}'}}}};process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:q.id,...reply})+'\\n')});`;
+  const factory = createProfileRuntimeFactory({ profiles: {
+    llama_cpp: { ...common(process.execPath, ['-e', 'process.exit(2)']), host: '127.0.0.1', port: () => 1, dimensions: 1024, contextTokens: 2048, maxBatchTokens: 2048, queryInstruction: 'unused' },
+    gigaam_pytorch: { ...common(process.execPath, ['-e', source.replaceAll('}', '} ')]), vadModelPath: '/local/vad', vadRevision: 'vad-rev', threads: 1, longformMaximumSeconds: 40, audioDecodeTimeoutSeconds: 15 },
+  } });
+  const model = { model: { modelId: 'gigaam-v3-e2e-ctc', revision: 'rev-giga', profileId: 'gigaam_pytorch' }, installation: {
+    modelId: 'gigaam-v3-e2e-ctc', revision: 'rev-giga', profileId: 'gigaam_pytorch', directory: root,
+    files: [{ path: 'config.json', sizeBytes: 5, sha256: '0'.repeat(64) }], installedAt: new Date().toISOString(),
+  } };
+  const output = [];
+  const write = process.stderr.write;
+  process.stderr.write = value => { output.push(String(value)); return true; };
+  let runtime;
+  try {
+    runtime = await factory.open(model, context());
+    await assert.rejects(runtime.transcribe({ model: model.model, audioPath: sentinel }, context()), error => error.code === 'INVALID_ARGUMENT' && !error.message.includes(sentinel));
+    await runtime.close(); await runtime.exited;
+    assert.equal(output.join('').includes(sentinel), false);
+    const rows = output.flatMap(line => line.trim().split('\n').filter(Boolean).map(value => JSON.parse(value)));
+    assert.ok(rows.some(row => row.stage === 'audio_decode' && row.code === 'INVALID_ARGUMENT'));
+    assert.ok(rows.some(row => row.stage === 'group_exit' && row.code === 'EXIT_CONFIRMED'));
+    assert.ok(rows.every(row => Object.keys(row).every(key => ['operation', 'stage', 'executor', 'code', 'durationMs', 'exitCode', 'signal'].includes(key))));
+  } finally {
+    process.stderr.write = write;
+    if (runtime) await runtime.close();
+    if (originalTmpdir === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = originalTmpdir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('GigaAM retains its private TMPDIR through a surviving child and removes it before close completes', async () => {
   const root = await mkdtemp(join(tmpdir(), 'local-ai-giga-private-tmp-'));
   const originalTmpdir = process.env.TMPDIR;
   process.env.TMPDIR = root;
@@ -108,7 +143,7 @@ test('GigaAM retains its private TMPDIR through a surviving child and removes it
     assert.equal(await readFile(join(privatePath, 'fixture-marker'), 'utf8'), 'active');
 
     await closing;
-    assert.equal(exited, true, 'runtime exit is published only after private scratch cleanup');
+    assert.equal(exited, true, 'runtime close confirms physical group exit and separately completes scratch cleanup');
     assert.deepEqual(await readdir(root), []);
     assert.throws(() => process.kill(descendantPid, 0), error => error.code === 'ESRCH');
   } finally {
@@ -135,6 +170,7 @@ test('GigaAM cleanup runs after an unexpected confirmed exit and a spawn failure
     const unexpected = await makeFactory(process.execPath, ['-e', exitAfterTranscribeSource]).open(model, context());
     await unexpected.transcribe({ model: model.model, audioPath: 'fixture' }, context());
     await unexpected.exited;
+    await unexpected.close();
     assert.deepEqual(await readdir(root), [], 'unexpected confirmed child exit cleans only its private generation directory');
 
     const missingExecutable = join(root, 'missing-runtime');
@@ -147,7 +183,7 @@ test('GigaAM cleanup runs after an unexpected confirmed exit and a spawn failure
   }
 });
 
-test('GigaAM holds its slot if the captured temp path is replaced until the original generation is restored', async () => {
+test('GigaAM confirms physical exit independently of bounded cleanup and never removes a replacement directory', async () => {
   const root = await mkdtemp(join(tmpdir(), 'local-ai-giga-temp-identity-'));
   const originalTmpdir = process.env.TMPDIR;
   process.env.TMPDIR = root;
@@ -170,17 +206,19 @@ test('GigaAM holds its slot if the captured temp path is replaced until the orig
     await mkdir(originalPath, { mode: 0o700 });
     await writeFile(join(originalPath, 'foreign-marker'), 'keep');
 
-    await assert.rejects(runtime.close(), error => error.code === 'ENGINE_UNAVAILABLE');
+    await assert.rejects(runtime.close(), error => error.code === 'DEPENDENCY_UNAVAILABLE' && error.message === 'TMPDIR_CLEANUP_UNCONFIRMED');
     let exited = false;
     void runtime.exited.then(() => { exited = true; });
-    assert.equal(exited, false, 'a replaced private path cannot satisfy cleanup or release the slot');
+    await runtime.exited;
+    assert.equal(exited, true, 'cleanup failure must not turn physical exit into an infinite wait');
     assert.equal(await readFile(join(originalPath, 'foreign-marker'), 'utf8'), 'keep');
 
     await rename(originalPath, replacementPath);
     await rename(displacedPath, originalPath);
     await runtime.exited;
     assert.equal(exited, true);
-    assert.deepEqual(await readdir(root), ['replacement-generation']);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.deepEqual((await readdir(root)).sort(), [name, 'replacement-generation'].sort(), 'cleanup is bounded and never retries silently');
     assert.equal(await readFile(join(replacementPath, 'foreign-marker'), 'utf8'), 'keep');
     await rm(replacementPath, { recursive: true, force: true });
   } finally {

@@ -39,6 +39,8 @@ export type LifecycleStatus = {
   active: number; queued: number; models: Readonly<Record<string, RuntimeState>>;
 };
 export type LifecycleManager = ModelIdleGuard & ModelSettingsChangedPort & {
+  /** Удерживает модель без новых invoke/load/remove до явного освобождения после установки. */
+  acquireModelIdleLock(modelId: string): Promise<() => void>;
   refreshModel(modelId: string): Promise<void>;
   invoke(input: Invocation, context: OperationContext): Promise<InvocationResult>;
   cancel(ownerId: string, operationId: string): Promise<'cancellation_requested' | 'already_terminal' | 'not_found'>;
@@ -284,7 +286,8 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
     const runtime = job.runtime;
     if (!runtime) return;
     try { await closeSlot(slot, runtime); }
-    catch { /* slot remains occupied until runtime.exited resolves */ }
+    catch { /* Ошибка stop не подтверждает физический выход. */ }
+    await runtime.exited;
   }
   async function closeSlot(slot: Slot, runtime = slot.runtime): Promise<void> {
     if (!runtime) return;
@@ -404,9 +407,10 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       const beforeLoad = contextOutcome(job);
       if (beforeLoad) throw beforeLoad;
       const runtime = await ensureRuntime(slot);
-      job.runtime = runtime;
       const interrupted = contextOutcome(job);
       if (interrupted) throw interrupted;
+      // AIDEV-NOTE: Отменённый waiter не владеет общей загрузкой и не останавливает чужой runtime.
+      job.runtime = runtime;
       const callContext = operationContext(job);
       if (job.input.operation === 'embed') {
         const output: EmbedOutput = await runtime.embed({ model: job.input.model, texts: job.input.texts, purpose: job.input.purpose }, callContext);
@@ -434,7 +438,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
     } catch (error) {
       failure = contextOutcome(job) ?? errorFrom(error);
     } finally {
-      if (job.controller.signal.aborted && job.runtime && slot.runtime === job.runtime) {
+      if (job.runtime && slot.runtime === job.runtime && (job.controller.signal.aborted || failure?.code === 'ENGINE_UNAVAILABLE')) {
         // Aborting a client request does not prove inference stopped; terminate and await the real child exit.
         await stopForCancellation(slot, job);
       }
@@ -565,6 +569,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       if (!accepting) fail('BUSY');
       if (context.signal.aborted) fail('CANCELLED');
       if (Date.parse(context.deadlineAt) <= now()) fail('DEADLINE_EXCEEDED');
+      if (lockedModels.has(selector.modelId)) fail('MODEL_IN_USE');
       const prepared = await prepare(selector);
       if (lockedModels.has(selector.modelId)) fail('MODEL_IN_USE');
       const slot = slotFor(selector);
@@ -595,6 +600,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       if (!accepting) fail('BUSY');
       if (context.signal.aborted) fail('CANCELLED');
       if (Date.parse(context.deadlineAt) <= now()) fail('DEADLINE_EXCEEDED');
+      if (lockedModels.has(selector.modelId)) fail('MODEL_IN_USE');
       const prepared = await prepare(selector);
       if (lockedModels.has(selector.modelId)) fail('MODEL_IN_USE');
       const slot = slotFor(selector);
@@ -628,7 +634,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       clearTimer(slot);
       armIdle(slot);
     },
-    async withModelIdleLock(modelId, callback) {
+    async acquireModelIdleLock(modelId) {
       if (lockedModels.has(modelId)) fail('MODEL_IN_USE');
       const slot = slots.get(modelId);
       if ((pendingAdmissions.get(modelId) ?? 0) > 0) fail('MODEL_IN_USE');
@@ -636,8 +642,12 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       lockedModels.add(modelId);
       try {
         if (slot?.runtime) await closeSlot(slot);
-        return await callback();
-      } finally { lockedModels.delete(modelId); }
+        return () => { lockedModels.delete(modelId); };
+      } catch (error) { lockedModels.delete(modelId); throw error; }
+    },
+    async withModelIdleLock(modelId, callback) {
+      const release = await manager.acquireModelIdleLock(modelId);
+      try { return await callback(); } finally { release(); }
     },
     status() {
       const models: Record<string, RuntimeState> = {};

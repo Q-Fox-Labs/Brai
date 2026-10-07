@@ -190,7 +190,7 @@ function runtimeConfig(config) {
         queryInstruction: llama.queryInstruction,
       },
       gigaam_pytorch: {
-        executable: giga.executable, cwd: giga.cwd, args: giga.args, env: giga.env,
+        executable: giga.executable, cwd: giga.cwd, args: giga.args.includes('--private-diagnostics') ? giga.args : [...giga.args, '--private-diagnostics'], env: giga.env,
         startupTimeoutMs: giga.startupTimeoutMs, requestTimeoutMs: giga.requestTimeoutMs,
         stopGraceMs: giga.stopGraceMs, maxLineBytes: giga.maxLineBytes,
         vadModelPath: giga.vadModelPath, vadRevision: giga.vadRevision, threads: giga.threads,
@@ -332,6 +332,7 @@ export async function startLocalAi(input, dependencies = {}) {
     await (factories.registerSupportedProfiles ?? registerSupportedProfiles)(store, profiles);
     history = makeHistory(nc);
     installer = makeInstaller({
+      acquireModelIdleLock: modelId => lifecycle?.acquireModelIdleLock(modelId),
       history, installed: async modelId => {
         // AIDEV-NOTE: Установка уже зафиксирована; ошибка обновления сбрасывает snapshot, но не меняет итог установки.
         if (lifecycle) await lifecycle.refreshModel(modelId).catch(() => undefined);
@@ -481,7 +482,7 @@ export async function runLocalAiProcess(start, registerSignalHandlers = callback
   };
   registerSignalHandlers(() => {
     void stop().catch(() => {
-      console.error('local-ai shutdown failed');
+      console.error(JSON.stringify({ operation: 'shutdown', stage: 'service', executor: 'local_ai', code: 'LOCAL_AI_SHUTDOWN_FAILED' }));
       process.exitCode = 1;
     });
   });
@@ -502,7 +503,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   try {
     await runLocalAiProcess(() => startLocalAi(readConfig()));
   } catch {
-    console.error('local-ai process failed');
+    console.error(JSON.stringify({ operation: 'process', stage: 'service', executor: 'local_ai', code: 'LOCAL_AI_PROCESS_FAILED' }));
     process.exitCode = 1;
   }
 }

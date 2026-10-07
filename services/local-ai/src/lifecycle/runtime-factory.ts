@@ -61,10 +61,19 @@ function substitute(args: readonly string[], values: Readonly<Record<string, str
 
 type SpawnedRuntime = { child: ChildProcess; exited: Promise<void>; stop: () => Promise<void> };
 type SpawnRuntimeOptions = {
+  executor: 'llama_cpp' | 'gigaam_pytorch';
   privateTempDirectory?: string;
   cleanupAfterGroupExit?: () => Promise<void>;
 };
 type PrivateTempDirectory = { path: string; device: number; inode: number };
+
+function diagnostic(operation: string, stage: string, executor: string, code: string, durationMs: number, child?: ChildProcess): void {
+  try {
+    process.stderr.write(JSON.stringify({ operation, stage, executor, code, durationMs: Math.max(0, Math.floor(durationMs)),
+      ...(child ? { exitCode: child.exitCode, signal: child.signalCode } : {}),
+    }) + '\n');
+  } catch { /* Диагностика не меняет владение процессом. */ }
+}
 
 async function createGigaPrivateTempDirectory(): Promise<PrivateTempDirectory> {
   const parent = process.env.TMPDIR;
@@ -126,7 +135,8 @@ function validateProfileConfig(config: ProfileConfig): void {
   }
 }
 
-function spawnRuntime(config: ProfileConfig, args: readonly string[], options: SpawnRuntimeOptions = {}): SpawnedRuntime {
+function spawnRuntime(config: ProfileConfig, args: readonly string[], options: SpawnRuntimeOptions): SpawnedRuntime {
+  const startedAt = Date.now();
   const env = {
     ...Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'LC_CTYPE'].flatMap(key => process.env[key] === undefined ? [] : [[key, process.env[key]!]])),
     ...config.env,
@@ -157,26 +167,13 @@ function spawnRuntime(config: ProfileConfig, args: readonly string[], options: S
   const confirmExit = (): boolean => {
     if (didConfirmExit) return true;
     if (!didCloseParent || pid !== undefined && groupExists(pid)) return false;
-    if (!options.cleanupAfterGroupExit) {
-      didConfirmExit = true;
-      if (monitorTimer) clearTimeout(monitorTimer);
-      monitorTimer = undefined;
-      exitResolve();
-      return true;
-    }
-    if (cleanupAfterExit) return false;
-    cleanupAfterExit = Promise.resolve().then(() => options.cleanupAfterGroupExit!()).then(() => {
-      cleanupAfterExit = undefined;
-      if (!didCloseParent || pid !== undefined && groupExists(pid)) { monitorExit(); return; }
-      didConfirmExit = true;
-      if (monitorTimer) clearTimeout(monitorTimer);
-      monitorTimer = undefined;
-      exitResolve();
-    }, () => {
-      cleanupAfterExit = undefined;
-      monitorExit();
-    });
-    return false;
+    // AIDEV-NOTE: Физический выход и результат очистки независимы; ошибка файлов не удерживает exited.
+    didConfirmExit = true;
+    if (monitorTimer) clearTimeout(monitorTimer);
+    monitorTimer = undefined;
+    exitResolve();
+    diagnostic('runtime', 'group_exit', options.executor, 'EXIT_CONFIRMED', Date.now() - startedAt, child);
+    return true;
   };
   const monitorExit = (): void => {
     if (didConfirmExit || monitorTimer) return;
@@ -185,7 +182,7 @@ function spawnRuntime(config: ProfileConfig, args: readonly string[], options: S
       monitorTimer = undefined;
       if (!confirmExit()) monitorExit();
     }, 50);
-    monitorTimer.unref();
+    // AIDEV-NOTE: После выхода parent оставшиеся descendants удерживают процесс сервиса до group proof.
   };
   const awaitConfirmedExit = async (): Promise<void> => {
     if (confirmExit()) return;
@@ -197,10 +194,29 @@ function spawnRuntime(config: ProfileConfig, args: readonly string[], options: S
     if (!confirmed) throw serviceError('ENGINE_UNAVAILABLE', 'PROCESS_GROUP_EXIT_UNCONFIRMED');
   };
   let stopping: Promise<void> | undefined;
+  const cleanup = (): Promise<void> => {
+    if (cleanupAfterExit) return cleanupAfterExit;
+    cleanupAfterExit = (async () => {
+      if (!options.cleanupAfterGroupExit) return;
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          Promise.resolve().then(options.cleanupAfterGroupExit),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(serviceError('DEPENDENCY_UNAVAILABLE', 'TMPDIR_CLEANUP_TIMEOUT')), Math.max(1, config.stopGraceMs));
+          }),
+        ]);
+      } catch {
+        diagnostic('cleanup', 'temporary_directory', options.executor, 'TMPDIR_CLEANUP_UNCONFIRMED', Date.now() - startedAt, child);
+        throw serviceError('DEPENDENCY_UNAVAILABLE', 'TMPDIR_CLEANUP_UNCONFIRMED');
+      } finally { if (timer) clearTimeout(timer); }
+    })();
+    return cleanupAfterExit;
+  };
   const stop = (): Promise<void> => {
     if (stopping) return stopping;
     stopping = (async () => {
-      if (!pid) { await parentClosed; await awaitConfirmedExit(); return; }
+      if (!pid) { await parentClosed; await awaitConfirmedExit(); await cleanup(); return; }
       signalGroup(pid, 'SIGTERM');
       if (!await waitGroupGone(pid, config.stopGraceMs)) {
         signalGroup(pid, 'SIGKILL');
@@ -213,7 +229,11 @@ function spawnRuntime(config: ProfileConfig, args: readonly string[], options: S
       })]).finally(() => { if (timer) clearTimeout(timer); });
       if (!closed) throw serviceError('ENGINE_UNAVAILABLE', 'PROCESS_EXIT_UNCONFIRMED');
       await awaitConfirmedExit();
-    })();
+      await cleanup();
+    })().catch(error => {
+      diagnostic('stop', 'process_group', options.executor, error instanceof LocalAiError ? error.message : 'ENGINE_UNAVAILABLE', Date.now() - startedAt, child);
+      throw error;
+    });
     return stopping;
   };
   child.once('close', () => {
@@ -222,7 +242,11 @@ function spawnRuntime(config: ProfileConfig, args: readonly string[], options: S
     monitorExit();
     if (!stopping) void stop().catch(() => undefined);
   });
-  child.once('error', () => { /* close remains the authoritative parent-exit signal */ });
+  child.once('error', error => {
+    const errno = (error as NodeJS.ErrnoException).code;
+    diagnostic('start', 'spawn', options.executor, errno && ['ENOENT', 'EACCES', 'ENOMEM', 'EAGAIN'].includes(errno) ? errno : 'SPAWN_FAILED', Date.now() - startedAt, child);
+    // close остаётся единственным подтверждением завершения parent.
+  });
   return { child, exited, stop };
 }
 
@@ -281,7 +305,7 @@ class ChildRuntime implements RuntimePort {
     this.#stdoutBuffer = Buffer.concat([this.#stdoutBuffer, chunk]);
     if (this.#stdoutBuffer.length > this.#config.maxLineBytes && this.#stdoutBuffer.indexOf(0x0a) < 0) {
       this.#rejectWaiters(serviceError('ENGINE_UNAVAILABLE'));
-      void this.close();
+      void this.close().catch(() => undefined);
       return;
     }
     let boundary = this.#stdoutBuffer.indexOf(0x0a);
@@ -290,12 +314,12 @@ class ChildRuntime implements RuntimePort {
       this.#stdoutBuffer = this.#stdoutBuffer.subarray(boundary + 1);
       if (line.length > this.#config.maxLineBytes) {
         this.#rejectWaiters(serviceError('ENGINE_UNAVAILABLE'));
-        void this.close();
+        void this.close().catch(() => undefined);
         return;
       }
       let decoded: string;
       try { decoded = new TextDecoder('utf-8', { fatal: true }).decode(line); }
-      catch { this.#rejectWaiters(serviceError('ENGINE_UNAVAILABLE')); void this.close(); return; }
+      catch { this.#rejectWaiters(serviceError('ENGINE_UNAVAILABLE')); void this.close().catch(() => undefined); return; }
       this.#onLine(decoded);
       boundary = this.#stdoutBuffer.indexOf(0x0a);
     }
@@ -304,32 +328,38 @@ class ChildRuntime implements RuntimePort {
   #onLine(line: string): void {
     if (Buffer.byteLength(line, 'utf8') > this.#config.maxLineBytes) {
       this.#rejectWaiters(serviceError('ENGINE_UNAVAILABLE'));
-      void this.close();
+      void this.close().catch(() => undefined);
       return;
     }
     let reply: unknown;
     try { reply = JSON.parse(line); } catch {
       this.#rejectWaiters(serviceError('ENGINE_UNAVAILABLE'));
-      void this.close();
+      void this.close().catch(() => undefined);
       return;
     }
     if (!assertRecord(reply) || reply.jsonrpc !== '2.0' || typeof reply.id !== 'string') {
       this.#rejectWaiters(serviceError('ENGINE_UNAVAILABLE'));
-      void this.close();
+      void this.close().catch(() => undefined);
       return;
     }
     const waiter = this.#waiters.get(reply.id);
     if (!waiter) {
       if (this.#waiters.size) {
         this.#rejectWaiters(serviceError('ENGINE_UNAVAILABLE'));
-        void this.close();
+        void this.close().catch(() => undefined);
       }
       return;
     }
     this.#waiters.delete(reply.id);
     clearTimeout(waiter.timer);
     waiter.signal.removeEventListener('abort', waiter.abort);
-    if (assertRecord(reply.error)) waiter.reject(reply.error.code === -32001 ? serviceError('INVALID_ARGUMENT', 'AUDIO_INVALID_OR_TOO_LARGE') : serviceError('ENGINE_UNAVAILABLE'));
+    if (assertRecord(reply.error)) {
+      const privateData = assertRecord(reply.error.data) && assertRecord(reply.error.data.diagnostic) ? reply.error.data.diagnostic : undefined;
+      const stage = privateData && ['audio_probe', 'audio_decode', 'short_transcribe', 'longform_upstream', 'longform_normalize'].includes(String(privateData.stage)) ? String(privateData.stage) : 'runner_reply';
+      const error = reply.error.code === -32001 ? serviceError('INVALID_ARGUMENT', 'AUDIO_INVALID_OR_TOO_LARGE') : serviceError('ENGINE_UNAVAILABLE');
+      diagnostic('transcribe', stage, 'gigaam_pytorch', error.code, 0);
+      waiter.reject(error);
+    }
     else if (Object.hasOwn(reply, 'result')) waiter.resolve(reply.result);
     else waiter.reject(serviceError('ENGINE_UNAVAILABLE'));
   }
@@ -533,7 +563,7 @@ export function createProfileRuntimeFactory(config: ProfileRuntimeFactoryConfig)
         const port = profile.port();
         if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw serviceError('MODEL_LOAD_FAILED');
         const args = substitute(profile.args, { modelPath: join(model.installation.directory, gguf.path), port: String(port) });
-        const process = spawnRuntime(profile, args);
+        const process = spawnRuntime(profile, args, { executor: 'llama_cpp' });
         const runtime = new LlamaRuntime(process.child, process.exited, profile, port, fetcher, process.stop);
         try {
           await waitUntilReady(runtime, process.exited, profile.startupTimeoutMs, context, model.model);
@@ -564,6 +594,7 @@ export function createProfileRuntimeFactory(config: ProfileRuntimeFactoryConfig)
         let process: SpawnedRuntime;
         try {
           process = spawnRuntime(profile, args, {
+            executor: 'gigaam_pytorch',
             privateTempDirectory: privateTemp.path,
             cleanupAfterGroupExit: () => removeGigaPrivateTempDirectory(privateTemp),
           });

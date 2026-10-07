@@ -54,7 +54,6 @@
       "nats",
       "transport",
       "artifacts",
-      "history",
       "installer",
       "lifecycle",
       "runtime"
@@ -162,8 +161,8 @@
   "readiness": {
     "dockerHealthcheck": false,
     "natsSubject": "brai.local_ai.v1.status",
-    "readinessRule": "state is ready and all six component states are ready",
-    "components": ["database", "nats", "executables", "weights", "history", "outbox"],
+    "readinessRule": "state is ready and all four component states are ready",
+    "components": ["database", "nats", "executables", "weights"],
     "processPingIsReadiness": false,
     "loadedModelsRequired": false,
     "measuredAsrLimits": "not included; pending runtime acceptance"

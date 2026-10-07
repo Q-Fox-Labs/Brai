@@ -206,6 +206,70 @@ test('idle guard rejects occupied models and waits for physical exit before remo
   await lifecycle.close();
 });
 
+test('cancelled invoke waiting for a shared load never owns or closes the surviving runtime', async () => {
+  const opening = deferred();
+  const entered = deferred();
+  const runtime = new FakeRuntime();
+  let opens = 0;
+  const lifecycle = manager(makeStore(), { async open(_model, context) {
+    opens++; entered.resolve(); await opening.promise;
+    assert.equal(context.signal.aborted, false);
+    return runtime;
+  } });
+  const cancelled = embedRequest('shared-cancelled');
+  const first = lifecycle.invoke(cancelled, invocationContext(cancelled));
+  await entered.promise;
+  const surviving = embedRequest('shared-survivor');
+  const second = lifecycle.invoke(surviving, invocationContext(surviving));
+  await waitFor(() => lifecycle.status().queued === 1);
+  await lifecycle.cancel(cancelled.ownerId, cancelled.operationId);
+  await assert.rejects(first, error => error.code === 'CANCELLED');
+  opening.resolve();
+  await second;
+  assert.equal(opens, 1);
+  assert.equal(runtime.closeCalls, 0);
+  assert.equal(lifecycle.status().ready, 1);
+  await lifecycle.close();
+});
+
+test('failed native stop retains active capacity and audio until a later physical exit', async () => {
+  const root = await import('node:fs/promises').then(fs => fs.mkdtemp('/tmp/local-ai-audio-ownership-'));
+  const fs = await import('node:fs/promises');
+  const audioPath = root + '/audio.wav';
+  await fs.writeFile(audioPath, 'fixture');
+  const started = deferred(); const exit = deferred();
+  let audioRemoved = false;
+  const runtime = {
+    exited: exit.promise,
+    async embed() { assert.fail('unused'); },
+    async transcribe(_input, context) {
+      started.resolve();
+      return new Promise((_resolve, reject) => context.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+    },
+    async close() { throw new Error('unconfirmed stop'); },
+  };
+  const lifecycle = createLifecycleManager({ store: makeStore(), runtimeFactory: { async open() { return runtime; } },
+    limits: { ...limits, maxQueuedOperations: 1 }, artifacts: { async withReadyAudio(_input, _context, use) {
+      try { return await use({ localPath: audioPath }); }
+      finally { await fs.rm(root, { recursive: true }); audioRemoved = true; }
+    } } });
+  const input = { ...embedRequest('failed-stop-audio'), operation: 'transcribe', audioArtifactId: 'fixture' };
+  delete input.texts; delete input.purpose;
+  const call = lifecycle.invoke(input, invocationContext(input));
+  await started.promise;
+  await lifecycle.cancel(input.ownerId, input.operationId);
+  await assert.rejects(call, error => error.code === 'CANCELLED');
+  await delay(20);
+  assert.equal(lifecycle.status().active, 1);
+  assert.equal(audioRemoved, false);
+  assert.equal(await fs.readFile(audioPath, 'utf8'), 'fixture');
+  const excess = embedRequest('failed-stop-excess');
+  await assert.rejects(lifecycle.invoke(excess, invocationContext(excess)), error => error.code === 'BUSY');
+  exit.resolve();
+  await waitFor(() => audioRemoved && lifecycle.status().active === 0);
+  await lifecycle.close();
+});
+
 test('explicit load after cancel or deadline gets a fresh full idle window before unload and reload', async () => {
   for (const terminalMode of ['cancel', 'deadline']) {
     const value = selector();
