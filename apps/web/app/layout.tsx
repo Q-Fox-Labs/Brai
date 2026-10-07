@@ -8,9 +8,12 @@ import { AppStartupBoundary } from "./shell/app-startup-boundary";
 import "./globals.css";
 
 const themeBootstrap = `(function(){window.__braiStartupStartedAt=performance.now();var root=document.documentElement;var mode="system";try{var savedMode=localStorage.getItem("brai_theme_mode");if(savedMode==="light"||savedMode==="dark")mode=savedMode;}catch(error){}var dark=mode==="dark"||(mode==="system"&&window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches);root.dataset.theme=dark?"dark":"light";root.dataset.themeMode=mode;root.classList.toggle("dark",dark);})();`;
+// AIDEV-NOTE: Ветка исходников не определяет контур; один release должен сохранять PROD metadata по умолчанию.
+const developmentVariant = process.env.BRAI_WEB_VARIANT === "dev";
+const iconRoot = developmentVariant ? "/icons/dev" : "";
 
 export const metadata: Metadata = {
-  title: "Brai DEV",
+  title: developmentVariant ? "Brai DEV" : "Brai",
   description: "Приватное приложение Brai",
   applicationName: "Brai",
   appleWebApp: {
@@ -20,10 +23,11 @@ export const metadata: Metadata = {
   },
   icons: {
     icon: [
-      { url: "/icons/dev/favicon.png", sizes: "64x64", type: "image/png", media: "(prefers-color-scheme: light)" },
-      { url: "/icons/dev/favicon-dark.png", sizes: "64x64", type: "image/png", media: "(prefers-color-scheme: dark)" },
+      { url: `${iconRoot}/favicon.png`, sizes: "64x64", type: "image/png", media: "(prefers-color-scheme: light)" },
+      { url: `${iconRoot}/favicon-dark.png`, sizes: "64x64", type: "image/png", media: "(prefers-color-scheme: dark)" },
+      ...(developmentVariant ? [] : [{ url: "/favicon.ico", sizes: "any" }]),
     ],
-    shortcut: "/icons/dev/favicon.png",
+    ...(developmentVariant ? { shortcut: "/icons/dev/favicon.png" } : {}),
     apple: [{ url: "/icons/Icon-192.png", sizes: "192x192", type: "image/png" }],
   },
   manifest: "/manifest.webmanifest",
