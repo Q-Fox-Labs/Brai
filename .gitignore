@@ -18,3 +18,6 @@ npm-debug.log*
 
 # Next.js generates workspace type declarations during build.
 apps/web/next-env.d.ts
+
+# DEV immutable releases and local runtime tooling.
+.runtime/
