@@ -10,21 +10,21 @@ import "./globals.css";
 const themeBootstrap = `(function(){window.__braiStartupStartedAt=performance.now();var root=document.documentElement;var mode="system";try{var savedMode=localStorage.getItem("brai_theme_mode");if(savedMode==="light"||savedMode==="dark")mode=savedMode;}catch(error){}var dark=mode==="dark"||(mode==="system"&&window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)").matches);root.dataset.theme=dark?"dark":"light";root.dataset.themeMode=mode;root.classList.toggle("dark",dark);})();`;
 
 export const metadata: Metadata = {
-  title: "Brai",
-  description: "Приватное приложение Brai",
-  applicationName: "Brai",
+  title: "Brai DEV",
+  description: "Приватное приложение Brai DEV",
+  applicationName: "Brai DEV",
   appleWebApp: {
     capable: true,
-    title: "Brai",
+    title: "Brai DEV",
     statusBarStyle: "default",
   },
   icons: {
     icon: [
-      { url: "/favicon.png", sizes: "64x64", type: "image/png", media: "(prefers-color-scheme: light)" },
-      { url: "/favicon-dark.png", sizes: "64x64", type: "image/png", media: "(prefers-color-scheme: dark)" },
-      { url: "/favicon.ico", sizes: "any" },
+      { url: "/icons/dev/favicon.png", sizes: "64x64", type: "image/png", media: "(prefers-color-scheme: light)" },
+      { url: "/icons/dev/favicon-dark.png", sizes: "64x64", type: "image/png", media: "(prefers-color-scheme: dark)" },
     ],
-    apple: [{ url: "/icons/Icon-192.png", sizes: "192x192", type: "image/png" }],
+    shortcut: "/icons/dev/favicon.png",
+    apple: [{ url: "/icons/dev/Icon-192.png", sizes: "192x192", type: "image/png" }],
   },
   manifest: "/manifest.webmanifest",
 };

@@ -1,4 +1,4 @@
-// ABOUTME: Переносит чёрную заставку с логотипом и бликом из Brai-old.
+// ABOUTME: Показывает DEV знак Brai-Old в чёрной заставке с прежним бликом.
 // ABOUTME: Отображается в корневой границе до готовности первого клиентского кадра.
 import { GlareHover } from "@/components/ui/glare-hover";
 
@@ -19,15 +19,15 @@ const startupCss = `
 }
 `;
 
-/** Показывает исходную заставку, пока корневая граница готовит страницу. */
+/** Показывает DEV заставку, пока корневая граница готовит страницу. */
 export function AppStartupSplash() {
   return <>
     <style>{startupCss}</style>
-    <div className="fixed inset-0 z-[9999] grid place-items-center bg-black" style={{ position: "fixed", inset: 0, zIndex: 9999, display: "grid", placeItems: "center", background: "#000" }} data-startup-splash role="status" aria-label="Brai">
+    <div className="fixed inset-0 z-[9999] grid place-items-center bg-black" style={{ position: "fixed", inset: 0, zIndex: 9999, display: "grid", placeItems: "center", background: "#000" }} data-startup-splash role="status" aria-label="Brai DEV">
       <div data-startup-logo style={{ width: "min(20rem, calc(100vw - 3rem))", aspectRatio: "779 / 368", animation: "brai-startup-logo-fade 1000ms linear both" }}>
-        <GlareHover width="100%" height="100%" background="transparent" borderColor="transparent" borderRadius="0" glareAngle={18} glareOpacity={1} glareSize={64} glareMaskImage="/brand/brai-logo-transparent.svg" transitionDuration={1000} interactive={false} playOnce className="brai-startup-glare border-0">
-          {/* Нативное изображение сохраняет геометрию и декодирование исходной заставки. */}
-          <img className="block h-full w-full select-none object-contain" src="/brand/brai-logo-transparent.svg" alt="Brai" width="779" height="368" decoding="sync" fetchPriority="high" draggable={false} />
+        <GlareHover width="100%" height="100%" background="transparent" borderColor="transparent" borderRadius="0" glareAngle={18} glareOpacity={1} glareSize={64} glareMaskImage="/icons/dev/Icon-512.png" transitionDuration={1000} interactive={false} playOnce className="brai-startup-glare border-0">
+          {/* Готовый DEV PNG сохраняет декодирование и размещение прежней заставки. */}
+          <img className="block h-full w-full select-none object-contain" src="/icons/dev/Icon-512.png" alt="Brai DEV" width="512" height="512" decoding="sync" fetchPriority="high" draggable={false} />
         </GlareHover>
       </div>
     </div>
