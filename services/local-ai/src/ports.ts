@@ -1,7 +1,7 @@
 // ABOUTME: Задаёт порты приложения local-ai к runtime, artifacts и хранилищу.
 // ABOUTME: Контракты не раскрывают transport, SQL и устройство соседних сервисов.
 import type {
-  ClaimedOutboxEvent, DeliveryErrorCode, EmbedInput, EmbedOutput,
+  EmbedInput, EmbedOutput, LocalAiHistoryMetadataEvent,
   LocalAiTx, OperationContext, ResolvedModel, TranscribeInput, TranscribeOutput,
 } from './types.js';
 
@@ -37,28 +37,13 @@ export interface ArtifactPort {
   ): Promise<T>;
 }
 
-/** Объединяет изменение состояния и добавление разрешённого metadata event одной транзакцией. */
+/** Фиксирует каталог, настройки и операции установки независимо от истории. */
 export interface LocalAiStore {
   transaction<T>(run: (tx: LocalAiTx) => Promise<T>): Promise<T>;
   recoverInterrupted(): Promise<number>;
 }
 
-/** Доставляет сохранённые facts с lease fencing; permanent failure остаётся учтённым. */
-export interface OutboxDeliveryPort {
-  claimBatch(limit: number, leaseMs: number): Promise<readonly ClaimedOutboxEvent[]>;
-  acknowledge(eventId: string, claimToken: string): Promise<void>;
-  fail(
-    eventId: string,
-    claimToken: string,
-    retryAt: string | null,
-    errorCode: DeliveryErrorCode,
-  ): Promise<void>;
-  status(): Promise<{
-    reserved: number;
-    pending: number;
-    sending: number;
-    permanentlyFailed: number;
-    oldestCreatedAt: string | null;
-    lastErrorCode: DeliveryErrorCode | null;
-  }>;
+/** Публикует один короткий факт без ожидания, подтверждения и повторов. */
+export interface HistoryFactPort {
+  publish(event: LocalAiHistoryMetadataEvent): void;
 }

@@ -78,17 +78,14 @@ function assertActive(context: OperationContext): void {
 /** Останавливает ожидание по отмене или deadline, оставляя NATS timeout ограниченным сроком операции. */
 async function waitForOperation<T>(promise: Promise<T>, context: OperationContext): Promise<T> {
   assertActive(context);
-  let timer: ReturnType<typeof setTimeout> | undefined;
   let abortListener: (() => void) | undefined;
   const interrupted = new Promise<never>((_resolve, reject) => {
     abortListener = () => reject(new LocalAiError(cancellationCode(context) ?? 'CANCELLED', cancellationCode(context) ?? 'CANCELLED'));
     context.signal.addEventListener('abort', abortListener, { once: true });
-    timer = setTimeout(() => reject(new LocalAiError('DEADLINE_EXCEEDED', 'DEADLINE_EXCEEDED')), deadlineMs(context));
   });
   try {
     return await Promise.race([promise, interrupted]);
   } finally {
-    if (timer) clearTimeout(timer);
     if (abortListener) context.signal.removeEventListener('abort', abortListener);
   }
 }
@@ -181,13 +178,6 @@ function trustedFileUrl(value: string, base: URL): URL {
   return url;
 }
 
-function downloadSignal(context: OperationContext): { signal: AbortSignal; close: () => void } {
-  assertActive(context);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), deadlineMs(context));
-  return { signal: AbortSignal.any([context.signal, controller.signal]), close: () => clearTimeout(timer) };
-}
-
 async function writeAll(
   file: Awaited<ReturnType<typeof open>>,
   chunk: Buffer,
@@ -209,7 +199,7 @@ async function download(
   config: ArtifactsAdapterConfig,
   context: OperationContext,
 ): Promise<{ directory: string; localPath: string }> {
-  const timed = downloadSignal(context);
+  assertActive(context);
   let directory: string | undefined;
   let localPath: string | undefined;
   let file: Awaited<ReturnType<typeof open>> | undefined;
@@ -220,7 +210,7 @@ async function download(
     localPath = join(directory, 'audio');
     file = await open(localPath, 'wx', 0o600);
     try {
-      response = await fetch(url, { method: 'GET', redirect: 'manual', signal: timed.signal });
+      response = await fetch(url, { method: 'GET', redirect: 'manual', signal: context.signal });
     } catch {
       const cancellation = cancellationCode(context);
       if (cancellation) fail(cancellation);
@@ -271,7 +261,6 @@ async function download(
     if (cancellation) throw new LocalAiError(cancellation, cancellation);
     throw new LocalAiError('DEPENDENCY_UNAVAILABLE', 'DEPENDENCY_UNAVAILABLE', true);
   } finally {
-    timed.close();
     if (response?.body && !response.bodyUsed) await response.body.cancel().catch(() => undefined);
     await file?.close().catch(() => undefined);
     // Удаляется только каталог, который вернул этот вызов mkdtemp.

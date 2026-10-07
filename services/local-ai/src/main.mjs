@@ -3,13 +3,13 @@
 import { access, constants } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { connect, RequestStrategy, ServiceResponseType } from 'nats';
+import { connect } from 'nats';
 import pg from 'pg';
 import llamaProfile from '../profiles/llama_cpp.json' with { type: 'json' };
 import gigaProfile from '../profiles/gigaam_pytorch.json' with { type: 'json' };
 import { subjects } from '../contracts/index.mjs';
 import { createArtifactsAdapter } from '../dist/adapters/artifacts/index.js';
-import { createHistoryDeliveryWorker } from '../dist/adapters/history/index.js';
+import { createHistoryFactPublisher } from '../dist/adapters/history/index.js';
 import { createCatalog } from '../dist/catalog/index.js';
 import { LocalAiError } from '../dist/errors.js';
 import {
@@ -22,7 +22,7 @@ import { startLocalAiNats } from '../dist/transport/index.js';
 
 const { Pool } = pg;
 const CONFIG_KEYS = [
-  'postgres', 'nats', 'transport', 'artifacts', 'history', 'installer', 'lifecycle', 'runtime',
+  'postgres', 'nats', 'transport', 'artifacts', 'installer', 'lifecycle', 'runtime',
 ];
 const ALLOWED_CHILD_ENV = new Set([
   'PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'LC_CTYPE',
@@ -68,13 +68,12 @@ function env(value, field) {
 export function validateLocalAiConfig(input) {
   const config = object(input, 'root', CONFIG_KEYS);
   const postgres = object(config.postgres, 'postgres', [
-    'connectionString', 'maxConnections', 'connectionTimeoutMs', 'statementTimeoutMs', 'outboxCapacity', 'queryTimeoutMs',
+    'connectionString', 'maxConnections', 'connectionTimeoutMs', 'statementTimeoutMs', 'queryTimeoutMs',
   ]);
   string(postgres.connectionString, 'postgres.connectionString');
   positive(postgres.maxConnections, 'postgres.maxConnections');
   positive(postgres.connectionTimeoutMs, 'postgres.connectionTimeoutMs');
   positive(postgres.statementTimeoutMs, 'postgres.statementTimeoutMs', 2_147_483_647);
-  if (positive(postgres.outboxCapacity, 'postgres.outboxCapacity') < 2) invalid('postgres.outboxCapacity');
   positive(postgres.queryTimeoutMs, 'postgres.queryTimeoutMs', 2_147_483_647);
 
   const nats = object(config.nats, 'nats', ['servers', 'user', 'password', 'token', 'name', 'inboxPrefix']);
@@ -115,12 +114,6 @@ export function validateLocalAiConfig(input) {
   string(artifacts.tempRoot, 'artifacts.tempRoot');
   if (!path.isAbsolute(artifacts.tempRoot)) invalid('artifacts.tempRoot');
   positive(artifacts.maxAudioBytes, 'artifacts.maxAudioBytes');
-
-  const history = object(config.history, 'history', [
-    'batchSize', 'leaseMs', 'retryDelayMs', 'pollIntervalMs', 'requestTimeoutMs',
-  ]);
-  for (const key of Object.keys(history)) positive(history[key], `history.${key}`, 2_147_483_647);
-  if (!Number.isSafeInteger(history.batchSize * history.requestTimeoutMs) || history.leaseMs <= history.batchSize * history.requestTimeoutMs) invalid('history.leaseMs');
 
   const installer = object(config.installer, 'installer', [
     'rootDirectory', 'seedDirectories', 'maxDownloadBytes', 'maxFiles', 'maxParallel', 'maxOperationMs', 'hubRequestTimeoutMs', 'maxQueryLength', 'maxPageSize',
@@ -268,21 +261,6 @@ function combineStatus(components) {
   return 'ready';
 }
 
-async function historyReachable(nc, timeoutMs) {
-  try {
-    const responses = await nc.services.client({ strategy: RequestStrategy.Count, maxWait: timeoutMs, maxMessages: 1 }).ping('service_history');
-    let found = false;
-    for await (const identity of responses) {
-      if (identity?.type === ServiceResponseType.PING && identity.name === 'service_history'
-        && typeof identity.id === 'string' && identity.id.length > 0
-        && typeof identity.version === 'string' && identity.version.length > 0) found = true;
-    }
-    return found;
-  } catch {
-    return false;
-  }
-}
-
 /** Запускает все local-ai ресурсы; возвращённый close ждёт остановки процессов и закрытия собственных соединений. */
 export async function startLocalAi(input, dependencies = {}) {
   const config = validateLocalAiConfig(input);
@@ -297,7 +275,7 @@ export async function startLocalAi(input, dependencies = {}) {
   let nc;
   let installer;
   let lifecycle;
-  let historyWorker;
+  let history;
   let transport;
   let shutdownPromise;
   const close = () => {
@@ -318,8 +296,6 @@ export async function startLocalAi(input, dependencies = {}) {
         try { await waitBounded(transport.drainHandlers(), remaining(), 'HANDLER_DRAIN_TIMEOUT'); }
         catch { failed = true; }
       }
-      try { if (historyWorker) await waitBounded(historyWorker.stop(), remaining(), 'HISTORY_STOP_TIMEOUT'); }
-      catch { failed = true; }
       try { if (nc) await waitBounded(nc.drain(), remaining(), 'NATS_DRAIN_TIMEOUT'); }
       catch { failed = true; }
       try { await waitBounded(pool.end(), remaining(), 'DATABASE_CLOSE_TIMEOUT'); }
@@ -346,16 +322,20 @@ export async function startLocalAi(input, dependencies = {}) {
     const makeLifecycle = factories.createLifecycleManager ?? createLifecycleManager;
     const makeCatalog = factories.createCatalog ?? createCatalog;
     const makeHubCatalog = factories.createHuggingFaceCatalog ?? createHuggingFaceCatalog;
-    const makeHistoryWorker = factories.createHistoryDeliveryWorker ?? createHistoryDeliveryWorker;
+    const makeHistory = factories.createHistoryFactPublisher ?? createHistoryFactPublisher;
     const makeTransport = factories.startLocalAiNats ?? startLocalAiNats;
     const store = makeStore(pool, {
-      outboxCapacity: config.postgres.outboxCapacity,
       queryTimeoutMs: config.postgres.queryTimeoutMs,
     });
     await (recover ? recover(store) : store.recoverInterrupted());
     const profiles = supportedProfiles(config);
     await (factories.registerSupportedProfiles ?? registerSupportedProfiles)(store, profiles);
+    history = makeHistory(nc);
     installer = makeInstaller({
+      history, installed: async modelId => {
+        // AIDEV-NOTE: Установка уже зафиксирована; ошибка обновления сбрасывает snapshot, но не меняет итог установки.
+        if (lifecycle) await lifecycle.refreshModel(modelId).catch(() => undefined);
+      },
       store, profiles, rootDirectory: config.installer.rootDirectory,
       limits: {
         maxDownloadBytes: config.installer.maxDownloadBytes,
@@ -380,19 +360,17 @@ export async function startLocalAi(input, dependencies = {}) {
       tempRoot: config.artifacts.tempRoot, maxAudioBytes: config.artifacts.maxAudioBytes,
       allowedMimeTypes: AUDIO_MIME_TYPES,
     });
-    lifecycle = makeLifecycle({ store, runtimeFactory, artifacts, limits: config.lifecycle });
-    const catalog = makeCatalog(store, lifecycle);
+    lifecycle = makeLifecycle({ store, history, runtimeFactory, artifacts, limits: config.lifecycle });
+    for (const profile of profiles) await lifecycle.refreshModel(profile.modelId);
+    const catalog = makeCatalog(store, {
+      withModelIdleLock: lifecycle.withModelIdleLock, readRuntimeState: lifecycle.readRuntimeState,
+      settingsChanged: lifecycle.settingsChanged, refreshModel: lifecycle.refreshModel,
+      cleanupPublished: record => installer.cleanupPublished(record), history,
+    });
     const hugCatalog = makeHubCatalog({
       profiles, requestTimeoutMs: config.installer.hubRequestTimeoutMs,
       maxQueryLength: config.installer.maxQueryLength, maxPageSize: config.installer.maxPageSize,
     });
-    const outbox = makeHistoryWorker({
-      nats: nc, outbox: store, batchSize: config.history.batchSize,
-      leaseMs: config.history.leaseMs, retryDelayMs: config.history.retryDelayMs,
-      pollIntervalMs: config.history.pollIntervalMs, requestTimeoutMs: config.history.requestTimeoutMs,
-    });
-    historyWorker = outbox;
-    historyWorker.start();
     const handlers = {
       [subjects.modelsList]: async request => {
         const filter = request.filter ?? {};
@@ -420,7 +398,6 @@ export async function startLocalAi(input, dependencies = {}) {
       },
       [subjects.modelsRemove]: async (request, context) => {
         const removed = await catalog.remove(request.modelId, request.revision, request.profileId, context);
-        await installer.cleanupPublished(removed);
         return { modelId: removed.modelId, revision: removed.revision, profileId: removed.profileId, state: 'removed' };
       },
       [subjects.invokeEmbed]: async (request, context) => {
@@ -452,12 +429,10 @@ export async function startLocalAi(input, dependencies = {}) {
         }
         const executables = status(executablesReady ? 'ready' : 'unavailable', executablesReady ? null : 'ENGINE_UNAVAILABLE');
         let installed = [];
-        let delivery = { reserved: 0, pending: 0, sending: 0, permanentlyFailed: 0, oldestCreatedAt: null, lastErrorCode: null };
         let storageReadable = database.state === 'ready';
         if (storageReadable) {
           try {
             installed = await store.transaction(async tx => Promise.all(profiles.map(profile => tx.installations.get(profile.modelId, profile.revision))));
-            delivery = await store.status();
           } catch { storageReadable = false; }
         }
         let weightsReady = storageReadable && installed.every(Boolean);
@@ -470,23 +445,8 @@ export async function startLocalAi(input, dependencies = {}) {
         }
         const weights = status(weightsReady ? 'ready' : storageReadable ? 'degraded' : 'unknown',
           weightsReady ? null : storageReadable ? 'MODEL_NOT_INSTALLED' : 'DEPENDENCY_UNAVAILABLE');
-        const historyAvailable = await historyReachable(nc, Math.min(config.history.requestTimeoutMs, config.transport.maxRequestMs));
-        const historyError = delivery.lastErrorCode === 'HISTORY_REJECTED' ? 'INTERNAL'
-          : delivery.lastErrorCode ? 'DEPENDENCY_UNAVAILABLE' : null;
-        const history = status(historyError ? 'degraded' : historyAvailable ? 'ready' : 'unavailable',
-          historyError ?? (historyAvailable ? null : 'DEPENDENCY_UNAVAILABLE'));
-        const outboxFull = delivery.reserved + delivery.pending + delivery.sending >= config.postgres.outboxCapacity;
-        const outboxFailed = delivery.permanentlyFailed > 0;
-        const outbox = status(outboxFailed || outboxFull ? 'degraded' : storageReadable ? 'ready' : 'unknown',
-          outboxFailed ? 'INTERNAL' : outboxFull ? 'BUSY' : storageReadable ? null : 'DEPENDENCY_UNAVAILABLE');
-        const components = { database, nats: natsStatus, executables, weights, history, outbox };
-        return {
-          state: combineStatus(components), components,
-          outboxCounts: {
-            reserved: delivery.reserved, pending: delivery.pending, sending: delivery.sending,
-            permanentlyFailed: delivery.permanentlyFailed, oldestCreatedAt: delivery.oldestCreatedAt,
-          },
-        };
+        const components = { database, nats: natsStatus, executables, weights };
+        return { state: combineStatus(components), components };
       },
     };
     transport = await makeTransport(nc, {
@@ -496,7 +456,7 @@ export async function startLocalAi(input, dependencies = {}) {
       maxRequestMs: config.transport.maxRequestMs,
       serviceInfo: { version: config.transport.serviceVersion, description: config.transport.serviceDescription },
     }, handlers);
-    return { pool, nc, store, installer, lifecycle, transport, historyWorker, close };
+    return { pool, nc, store, installer, lifecycle, transport, history, close };
   } catch {
     await close().catch(() => undefined);
     throw new Error('LOCAL_AI_STARTUP_FAILED');

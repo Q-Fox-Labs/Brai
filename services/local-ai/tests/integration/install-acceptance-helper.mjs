@@ -5,7 +5,6 @@ import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import { syncBuiltinESMExports } from 'node:module';
 import { isDeepStrictEqual } from 'node:util';
-import { validateMetadataEvent } from '../../contracts/index.mjs';
 
 const REQUIRED_ENV = 'BRAI_LOCAL_AI_INSTALL_ACCEPTANCE_REQUIRED';
 const BASE_DIRECTORY = '/var/lib/brai-local-ai-installation-acceptance';
@@ -53,9 +52,9 @@ export function assertInstallDatabaseIdentity(identity) {
   }
 }
 
-/** Отказывается продолжать, если в выделенном acceptance namespace уже есть записи. @param {{models: number, installations: number, operations: number, settings: number, outbox: number}} counts */
+/** Отказывается продолжать, если в выделенном acceptance namespace уже есть записи. @param {{models: number, installations: number, operations: number, settings: number}} counts */
 export function assertFreshInstallNamespace(counts) {
-  if (!counts || !['models', 'installations', 'operations', 'settings', 'outbox'].every(key => counts[key] === 0)) {
+  if (!counts || !['models', 'installations', 'operations', 'settings'].every(key => counts[key] === 0)) {
     throw new Error('protected install acceptance namespace is not empty; inspect only and do not reset it');
   }
 }
@@ -71,37 +70,14 @@ export async function readAcceptanceStoreRows(store) {
 }
 
 /** Принимает только пустой hash namespace или неизменённую регистрацию закреплённого профиля.
- * @param {{models: unknown[], installations: unknown[], operations: unknown[], settings: number, events: Array<{event_id: string, state: string, event: Record<string, unknown>}>, status: {reserved: number, pending: number, sending: number, permanentlyFailed: number}}} state
+ * @param {{models: unknown[], installations: unknown[], operations: unknown[], settings: number}} state
  * @param {{modelId: string, revision: string, profileId: string, record: Record<string, unknown>}} profile
  * @returns {'empty'|'registered'}
  */
 export function classifyHashNamespaceState(state, profile) {
-  const status = state?.status;
-  const empty = state?.models?.length === 0 && state?.installations?.length === 0
-    && state?.operations?.length === 0 && state?.settings === 0 && state?.events?.length === 0
-    && status?.reserved === 0 && status?.pending === 0 && status?.sending === 0 && status?.permanentlyFailed === 0
-    && status?.oldestCreatedAt === null && status?.lastErrorCode === null;
-  if (empty) return 'empty';
-
-  const model = state?.models?.[0];
-  const row = state?.events?.[0];
-  const event = row?.event;
-  const data = event?.data;
-  const eventDataKeys = ['modelId', 'operation', 'operationId', 'outcome', 'phase', 'profileId', 'revision'];
-  const exactEventData = data && isDeepStrictEqual(Object.keys(data).sort(), eventDataKeys);
-  const registered = state?.models?.length === 1 && isDeepStrictEqual(model, profile.record)
-    && state?.installations?.length === 0 && state?.operations?.length === 0 && state?.settings === 0
-    && state?.events?.length === 1 && row?.state === 'pending'
-    && isUuid(row?.event_id) && event?.id === row?.event_id && event?.type_id === 1301
-    && validateMetadataEvent(event)
-    && event?.actor_id === null && event?.scope_type === 'system' && event?.scope_id === 'local_ai'
-    && event?.object_type === 'model' && event?.object_id === profile.modelId && exactEventData
-    && data?.operation === 'configure' && data?.modelId === profile.modelId
-    && data?.revision === profile.revision && data?.profileId === profile.profileId
-    && isUuid(data?.operationId) && data?.outcome === 'succeeded' && data?.phase === 'configure'
-    && status?.reserved === 0 && status?.pending === 1 && status?.sending === 0 && status?.permanentlyFailed === 0
-    && status?.oldestCreatedAt !== null && status?.lastErrorCode === null;
-  if (registered) return 'registered';
+  const clean = state?.installations?.length === 0 && state?.operations?.length === 0 && state?.settings === 0;
+  if (clean && state?.models?.length === 0) return 'empty';
+  if (clean && state?.models?.length === 1 && isDeepStrictEqual(state.models[0], profile.record)) return 'registered';
   throw Object.assign(new Error('protected hash namespace is neither empty nor the pinned registration'), { safeCode: 'HASH_NAMESPACE_INVALID' });
 }
 

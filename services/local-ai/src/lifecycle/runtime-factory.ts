@@ -353,7 +353,7 @@ class ChildRuntime implements RuntimePort {
         this.#waiters.delete(id);
         context.signal.removeEventListener('abort', abort);
         reject(serviceError(Date.parse(context.deadlineAt) <= Date.now() ? 'DEADLINE_EXCEEDED' : 'ENGINE_UNAVAILABLE'));
-      }, Math.min(this.#config.requestTimeoutMs, remaining(context)));
+      }, this.#config.requestTimeoutMs);
       const waiter = { resolve, reject, timer, signal: context.signal, abort };
       this.#waiters.set(id, waiter);
       context.signal.addEventListener('abort', abort, { once: true });
@@ -456,7 +456,7 @@ class LlamaRuntime implements RuntimePort {
     try {
       return await this.#fetch(new URL(path, this.#base), {
         ...init,
-        signal: AbortSignal.any([context.signal, AbortSignal.timeout(Math.min(this.#config.requestTimeoutMs, remaining(context)))]),
+        signal: AbortSignal.any([context.signal, AbortSignal.timeout(this.#config.requestTimeoutMs)]),
       });
     } catch {
       if (context.signal.aborted || Date.parse(context.deadlineAt) <= Date.now()) throw serviceError(remainingCode(context));

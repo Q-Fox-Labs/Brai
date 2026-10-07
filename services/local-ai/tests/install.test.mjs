@@ -43,7 +43,6 @@ function fakeStore() {
   const installations = new Map();
   const operations = new Map();
   const events = [];
-  const reservations = new Map();
   const tx = {
     models: {
       async get(id) { return models.get(id) ?? null; },
@@ -69,15 +68,7 @@ function fakeStore() {
       },
     },
     settings: { async get() { return null; }, async put() {} },
-    outbox: {
-      async append(event) { events.push(structuredClone(event)); },
-      async appendAdmission(event, reservation) { events.push(structuredClone(event)); reservations.set(reservation.operationId, reservation.terminalEventId); },
-      async appendCompletion(id, event) {
-        assert.equal(reservations.get(id), event.id);
-        events.push(structuredClone(event));
-        reservations.delete(id);
-      },
-    },
+
   };
   return {
     events, models, installations, operations,
@@ -166,7 +157,7 @@ test('pinned installer verifies bytes and hash before atomic publication; retry 
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = fakeStore();
   await registerSupportedProfiles(store, [profile]);
-  const installer = createModelInstaller({
+  const installer = createModelInstaller({ history: { publish: event => store.events.push(event) },
     store, profiles: [profile], rootDirectory: root, fetchImpl: mappedFetch(fixture.origin),
     limits: { maxDownloadBytes: 1024, maxFiles: 4, maxParallel: 1, maxOperationMs: 5000 },
   });
@@ -187,7 +178,6 @@ test('pinned installer verifies bytes and hash before atomic publication; retry 
   await assert.rejects(installer.get(requestId, 'other-owner'), error => error?.code === 'MODEL_NOT_FOUND');
   assert.deepEqual(await readdir(path.join(root, modelId, revision)), [profileId]);
   assert.equal(store.events.at(-1).data.outcome, 'succeeded');
-  assert.equal(store.events.at(-1).data.phase, 'publish');
 });
 
 test('wrong content hash fails closed and leaves no ready metadata or staging directory', async t => {
@@ -202,7 +192,7 @@ test('wrong content hash fails closed and leaves no ready metadata or staging di
     record: record({ files: [{ path: 'weights.bin', sizeBytes: bytes.length, sha256: '0'.repeat(64) }] }),
   };
   await registerSupportedProfiles(store, [wrongProfile]);
-  const installer = createModelInstaller({ store, profiles: [wrongProfile], rootDirectory: root, fetchImpl: mappedFetch(fixture.origin) });
+  const installer = createModelInstaller({ history: { publish: event => store.events.push(event) }, store, profiles: [wrongProfile], rootDirectory: root, fetchImpl: mappedFetch(fixture.origin) });
   const requestId = randomUUID();
   await installer.start({ modelId, revision, profileId, requestId, ownerId: 'owner-1', deadlineAt: new Date(Date.now() + 5_000).toISOString() });
   const failed = await waitFor(installer, requestId, 'owner-1');
@@ -219,7 +209,7 @@ test('explicit release import accepts only a verified immutable directory at its
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = fakeStore();
   await registerSupportedProfiles(store, [profile]);
-  const installer = createModelInstaller({ store, profiles: [profile], rootDirectory: root });
+  const installer = createModelInstaller({ history: { publish: event => store.events.push(event) }, store, profiles: [profile], rootDirectory: root });
   const parent = path.join(root, modelId, revision);
   const staging = path.join(parent, '.staging-' + randomUUID());
   const { mkdir: makeParent, writeFile: writeStaging } = await import('node:fs/promises');
@@ -234,8 +224,7 @@ test('explicit release import accepts only a verified immutable directory at its
   const imported = await installer.importVerified({ modelId, revision, profileId, directory });
   assert.equal(imported.directory, directory);
   assert.equal(store.installations.size, 1);
-  assert.equal(store.events.at(-1).data.operation, 'install');
-  assert.equal(store.events.at(-1).data.outcome, 'succeeded');
+  assert.equal(store.events.length, 0, 'startup import is not a client operation');
   await assert.rejects(installer.cleanupPublished(imported), error => error?.code === 'MODEL_IN_USE');
   store.installations.delete(modelId + ':' + revision);
   await installer.cleanupPublished(imported);
@@ -260,7 +249,7 @@ test('cancel stops the transfer, removes its staging directory, and commits term
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = fakeStore();
   await registerSupportedProfiles(store, [profile]);
-  const installer = createModelInstaller({ store, profiles: [profile], rootDirectory: root, fetchImpl: mappedFetch(fixture.origin) });
+  const installer = createModelInstaller({ history: { publish: event => store.events.push(event) }, store, profiles: [profile], rootDirectory: root, fetchImpl: mappedFetch(fixture.origin) });
   const requestId = randomUUID();
   const ownerId = 'owner-1';
   await installer.start({ modelId, revision, profileId, requestId, ownerId, deadlineAt: new Date(Date.now() + 5_000).toISOString() });

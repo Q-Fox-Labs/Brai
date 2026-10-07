@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { createLifecycleManager } from '../dist/lifecycle/index.js';
+import { createCatalog } from '../dist/catalog/index.js';
 
 const selector = (modelId = 'giga-embeddings-480m-q8', profileId = 'llama_cpp') => ({ modelId, revision: 'rev-1', profileId });
 const limits = { maxLoadedModels: 2, maxQueuedOperations: 8, maxInputBytes: 1_000_000, maxEmbeddingItems: 8, maxResultBytes: 1_000_000, loadDeadlineMs: 2000 };
@@ -21,22 +22,14 @@ function makeStore(records = [embeddingRecord()], settings = null) {
     modelId: value.modelId, revision: value.revision, profileId: value.profileId, directory: '/models/' + value.modelId, files: [], installedAt: '2026-01-01T00:00:00Z',
   }]));
   const events = [];
-  let admissionGate;
-  let rejectNextAdmission = false;
   const store = {
     events,
-    rejectNextAdmission() { rejectNextAdmission = true; },
-    blockAdmission() { admissionGate = new Promise(resolve => { store.releaseAdmission = resolve; }); store.admissionWaiting = deferred(); },
     async transaction(run) {
       const tx = {
         models: { get: async id => models.get(id) ?? null, list: async () => [...models.values()], put: async value => models.set(value.modelId, value), remove: async id => models.delete(id) },
         installations: { get: async (id, revision) => { const row = installations.get(id); return row?.revision === revision ? row : null; }, list: async () => [...installations.values()], put: async row => installations.set(row.modelId, row), remove: async id => installations.delete(id) },
-        settings: { get: async () => settings, put: async () => undefined },
-        outbox: {
-          append: async event => { events.push(event); },
-          appendAdmission: async (event, reservation) => { if (admissionGate) { store.admissionWaiting.resolve(); await admissionGate; } if (rejectNextAdmission) { rejectNextAdmission = false; throw new Error('OUTBOX_FULL'); } events.push({ event, reservation }); },
-          appendCompletion: async (operationId, event) => { events.push({ operationId, event }); },
-        },
+        settings: { get: async () => settings, put: async (_id, value) => { settings = value; } },
+
       };
       return run(tx);
     },
@@ -351,20 +344,6 @@ test('settingsChanged null cancels an armed timer and re-enabling uses current i
   await lifecycle.close();
 });
 
-test('idle removal guard blocks a durable admission in flight', async () => {
-  const store = makeStore();
-  store.blockAdmission();
-  const { factory } = factoryFor(async () => new FakeRuntime());
-  const lifecycle = manager(store, factory);
-  const pendingRequest = embedRequest('pending');
-  const pending = lifecycle.invoke(pendingRequest, invocationContext(pendingRequest));
-  await store.admissionWaiting.promise;
-  await assert.rejects(lifecycle.withModelIdleLock(selector().modelId, async () => undefined), error => error.code === 'MODEL_IN_USE');
-  store.releaseAdmission();
-  await pending;
-  await lifecycle.close();
-});
-
 test('new work is rejected during explicit unload and opens a fresh generation afterward', async () => {
   const old = new FakeRuntime({ holdExit: true });
   const next = new FakeRuntime();
@@ -386,64 +365,6 @@ test('new work is rejected during explicit unload and opens a fresh generation a
   assert.equal(opens, 2);
   assert.equal(lifecycle.readRuntimeState(value.modelId, value.revision), 'ready');
   await lifecycle.close();
-});
-
-test('explicit unload locks admission before its outbox reservation and through actual process exit', async () => {
-  const store = makeStore();
-  const old = new FakeRuntime({ holdExit: true });
-  const next = new FakeRuntime();
-  let opens = 0;
-  const lifecycle = manager(store, { async open() { opens++; return opens === 1 ? old : next; } });
-  const value = selector();
-  await lifecycle.load(value, localContext('unload-gate-load'));
-  store.blockAdmission();
-  const unloading = lifecycle.unload(value, localContext('unload-gate'));
-  await store.admissionWaiting.promise;
-  const duringReservation = embedRequest('invoke-during-unload-reservation');
-  await assert.rejects(lifecycle.invoke(duringReservation, invocationContext(duringReservation)), error => error.code === 'MODEL_IN_USE');
-  store.releaseAdmission();
-  await waitFor(() => old.closeCalls === 1);
-  const duringExit = embedRequest('invoke-during-unload-exit');
-  await assert.rejects(lifecycle.invoke(duringExit, invocationContext(duringExit)), error => error.code === 'MODEL_IN_USE');
-  old.finishExit();
-  await unloading;
-  const afterUnload = embedRequest('invoke-after-unload');
-  await lifecycle.invoke(afterUnload, invocationContext(afterUnload));
-  assert.equal(opens, 2);
-  await lifecycle.close();
-});
-
-test('close joins a pending invocation admission and writes its reserved terminal event without loading', async () => {
-  const store = makeStore();
-  store.blockAdmission();
-  let opens = 0;
-  const lifecycle = manager(store, { async open() { opens++; return new FakeRuntime(); } });
-  const request = embedRequest('admission-close-race');
-  const invoking = lifecycle.invoke(request, invocationContext(request));
-  await store.admissionWaiting.promise;
-  const closing = lifecycle.close();
-  store.releaseAdmission();
-  await assert.rejects(invoking, error => error.code === 'CANCELLED');
-  await closing;
-  assert.equal(opens, 0);
-  assert.ok(store.events.some(entry => entry.operationId === request.operationId && entry.event.data.outcome === 'cancelled'));
-});
-
-test('close joins pending management admission and finalizes it without starting a runtime', async () => {
-  const store = makeStore();
-  store.blockAdmission();
-  let opens = 0;
-  const lifecycle = manager(store, { async open() { opens++; return new FakeRuntime(); } });
-  const loading = lifecycle.load(selector(), localContext('load-close-race'));
-  await store.admissionWaiting.promise;
-  const closing = lifecycle.close();
-  store.releaseAdmission();
-  await assert.rejects(loading, error => error.code === 'CANCELLED');
-  await closing;
-  assert.equal(opens, 0);
-  const accepted = store.events.find(entry => entry.event?.data.operation === 'load')?.event;
-  assert.ok(accepted);
-  assert.ok(store.events.some(entry => entry.operationId === accepted.data.operationId && entry.event.data.outcome === 'cancelled'));
 });
 
 test('expired queued call is removed without loading or retrying its model', async () => {
@@ -520,37 +441,93 @@ test('unconfirmed close keeps model unavailable until exited later proves cleanu
   await lifecycle.close();
 });
 
-test('management reserves bounded history capacity before load or unload effects', async () => {
-  const store = makeStore();
-  let opens = 0;
-  let closes = 0;
-  const runtime = new FakeRuntime();
-  const lifecycle = createLifecycleManager({ store, artifacts: { withReadyAudio: async () => { throw new Error('unused'); } }, runtimeFactory: { open: async () => { opens++; return runtime; } }, limits });
-  store.rejectNextAdmission();
-  await assert.rejects(lifecycle.load(selector(), localContext('load-full')));
-  assert.equal(opens, 0);
 
-  await lifecycle.load(selector(), localContext('load-admitted'));
-  const originalClose = runtime.close.bind(runtime);
-  runtime.close = async () => { closes++; await originalClose(); };
-  store.rejectNextAdmission();
-  await assert.rejects(lifecycle.unload(selector(), localContext('unload-full')));
-  assert.equal(closes, 0);
-  assert.equal(lifecycle.status().ready, 1);
-  await lifecycle.unload(selector(), localContext('unload-admitted'));
-  assert.equal(closes, 1);
+test('warm invoke and reload use cached verified metadata while all store transactions throw', async () => {
+  const store = makeStore(); const { factory, runtimes } = factoryFor(async () => new FakeRuntime());
+  const facts = [];
+  const lifecycle = createLifecycleManager({ store, runtimeFactory: factory, artifacts: noArtifacts, limits,
+    history: { publish(event) { facts.push(event); throw new Error('history failure'); } } });
+  await lifecycle.refreshModel(selector().modelId);
+  store.transaction = async () => { throw new Error('SQL on warm invocation'); };
+  const a = embedRequest('warm-one'); await lifecycle.invoke(a, invocationContext(a));
+  const b = embedRequest('warm-two'); await lifecycle.invoke(b, invocationContext(b));
+  await lifecycle.unload(selector(), localContext('warm-unload'));
+  const c = embedRequest('warm-reload'); await lifecycle.invoke(c, invocationContext(c));
+  assert.equal(runtimes.length, 2);
+  assert.equal(facts.filter(fact => fact.data.operation === 'invoke').length, 3);
+  assert.ok(facts.every(fact => !('inputBytes' in fact.data) && !('resultBytes' in fact.data)));
   await lifecycle.close();
 });
 
-test('idle removal guard rejects while management admission is pending', async () => {
-  const store = makeStore();
-  store.blockAdmission();
-  const runtime = new FakeRuntime();
-  const lifecycle = createLifecycleManager({ store, artifacts: { withReadyAudio: async () => { throw new Error('unused'); } }, runtimeFactory: { open: async () => runtime }, limits });
-  const loading = lifecycle.load(selector(), localContext('load-admission-pending'));
-  await store.admissionWaiting.promise;
+test('audio acquisition is registered and bounded before preparation and cancellation reaches its shared signal', async () => {
+  const entered = deferred(); const release = deferred();
+  let cleaned = false; let downloads = 0;
+  const artifacts = { async withReadyAudio(_input, context) {
+    downloads++; entered.resolve();
+    await new Promise((_resolve, reject) => context.signal.addEventListener('abort', () => reject(new Error('aborted preparation')), { once: true }));
+    cleaned = true;
+  } };
+  // Очистка остаётся в finally и при ошибке подготовки.
+  const original = artifacts.withReadyAudio;
+  artifacts.withReadyAudio = async (...args) => { try { return await original(...args); } finally { await release.promise; cleaned = true; } };
+  const lifecycle = createLifecycleManager({ store: makeStore(), runtimeFactory: { async open() { assert.fail('cancelled preparation must not load'); } }, artifacts,
+    limits: { ...limits, maxQueuedOperations: 1 } });
+  const input = { ...embedRequest('prep'), operation: 'transcribe', audioArtifactId: 'fixture' }; delete input.texts; delete input.purpose;
+  const call = lifecycle.invoke(input, invocationContext(input)); await entered.promise;
+  const excess = embedRequest('excess'); await assert.rejects(lifecycle.invoke(excess, invocationContext(excess)), error => error.code === 'BUSY');
   await assert.rejects(lifecycle.withModelIdleLock(selector().modelId, async () => undefined), error => error.code === 'MODEL_IN_USE');
-  store.releaseAdmission();
-  await loading;
+  assert.equal(await lifecycle.cancel(input.ownerId, input.operationId), 'cancellation_requested');
+  await assert.rejects(call, error => error.code === 'CANCELLED'); assert.equal(downloads, 1); assert.equal(cleaned, false);
+  release.resolve(); await lifecycle.close(); assert.equal(cleaned, true);
+});
+
+test('late old metadata refresh cannot republish an installation after a newer removal refresh', async () => {
+  const value = selector(); const record = embeddingRecord(value); const gate = deferred(); const oldRead = deferred();
+  let reads = 0;
+  const store = { async transaction(run) {
+    const read = ++reads;
+    const old = { modelId: value.modelId, revision: value.revision, profileId: value.profileId, directory: '/old', files: [], installedAt: '2026-01-01T00:00:00Z' };
+    return run({ models: { get: async () => record }, installations: { get: async () => { if (read === 1) { oldRead.resolve(); await gate.promise; return old; } return null; } }, settings: { get: async () => null } });
+  } };
+  const lifecycle = manager(store, { async open() { assert.fail('removed metadata must not start runtime'); } });
+  const old = lifecycle.refreshModel(value.modelId); await oldRead.promise;
+  await lifecycle.refreshModel(value.modelId); gate.resolve(); await old;
+  const input = embedRequest('after-remove'); await assert.rejects(lifecycle.invoke(input, invocationContext(input)), error => error.code === 'MODEL_NOT_INSTALLED');
+  await lifecycle.close();
+});
+
+test('a rejected revision cannot poison the model slot for the correct selector', async () => {
+  const { factory } = factoryFor(async () => new FakeRuntime()); const lifecycle = manager(makeStore(), factory);
+  const invalid = embedRequest('wrong-revision', { ...selector(), revision: 'wrong' });
+  await assert.rejects(lifecycle.invoke(invalid, invocationContext(invalid)), error => error.code === 'REVISION_CONFLICT');
+  const valid = embedRequest('correct-revision'); await lifecycle.invoke(valid, invocationContext(valid)); await lifecycle.close();
+});
+
+test('deadline during audio preparation aborts the operation before loading and retains capacity until cleanup', async () => {
+  const entered = deferred(); const release = deferred();
+  const artifacts = { async withReadyAudio(_input, context) {
+    entered.resolve();
+    try { await new Promise((_resolve, reject) => context.signal.addEventListener('abort', () => reject(new Error('deadline preparation')), { once: true })); }
+    finally { await release.promise; }
+  } };
+  const lifecycle = createLifecycleManager({ store: makeStore(), runtimeFactory: { async open() { assert.fail('expired prep must not load'); } }, artifacts, limits: { ...limits, maxQueuedOperations: 1 } });
+  const input = { ...embedRequest('prep-deadline', selector(), { deadlineMs: 60 }), operation: 'transcribe', audioArtifactId: 'fixture' }; delete input.texts; delete input.purpose;
+  const call = lifecycle.invoke(input, invocationContext(input)); await entered.promise;
+  await assert.rejects(call, error => error.code === 'DEADLINE_EXCEEDED');
+  const excess = embedRequest('prep-retained'); await assert.rejects(lifecycle.invoke(excess, invocationContext(excess)), error => error.code === 'BUSY');
+  release.resolve(); await lifecycle.close();
+});
+
+test('successful durable configure updates cached metadata and failed configure leaves its verified snapshot usable', async () => {
+  const store = makeStore(); const { factory, runtimes } = factoryFor(async () => new FakeRuntime());
+  const lifecycle = manager(store, factory); await lifecycle.refreshModel(selector().modelId);
+  const catalog = createCatalog(store, lifecycle);
+  await catalog.configure({ ...selector(), idleUnloadSeconds: null }, localContext('configure-cache'));
+  const original = store.transaction;
+  store.transaction = run => original(tx => run({ ...tx, settings: { ...tx.settings, put: async () => { throw new Error('durable write failed'); } } }));
+  await assert.rejects(catalog.configure({ ...selector(), idleUnloadSeconds: 1 }, localContext('configure-failed')), /durable write failed/);
+  store.transaction = async () => { assert.fail('configure must refresh the actual warm cache before returning'); };
+  const request = embedRequest('configured-warm'); await lifecycle.invoke(request, invocationContext(request));
+  await delay(1100); assert.equal(runtimes[0].closeCalls, 0, 'failed durable mutation must not arm an idle timer');
   await lifecycle.close();
 });

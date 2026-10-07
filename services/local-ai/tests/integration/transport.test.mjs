@@ -113,9 +113,8 @@ test('real NATS service validates DTOs, bounds work, and drains without closing 
   });
   const statusResponse = {
     state: 'ready',
-    components: Object.fromEntries(['database', 'nats', 'executables', 'weights', 'history', 'outbox']
+    components: Object.fromEntries(['database', 'nats', 'executables', 'weights']
       .map(name => [name, { state: 'ready', errorCode: null }])),
-    outboxCounts: { reserved: 0, pending: 0, sending: 0, permanentlyFailed: 0, oldestCreatedAt: null },
   };
   transport = await startLocalAiNats(serviceNc, {
     maxConcurrentRequests: 1,
@@ -202,6 +201,7 @@ test('real NATS service validates DTOs, bounds work, and drains without closing 
 
   const busy = await clientNc.request(subjects.modelsLoad, encode(request('fast')), { timeout: 3000 });
   assert.equal(busy.headers.get('Nats-Service-Error'), 'BUSY');
+  assert.deepEqual(decode(await clientNc.request(subjects.status, encode({}), { timeout: 3000 })), statusResponse, 'status has reserved capacity while compute admission is full');
   const draining = transport.drainHandlers();
   assert.equal(await Promise.race([draining.then(() => true), delay(25).then(() => false)]), false);
   releaseSlow();

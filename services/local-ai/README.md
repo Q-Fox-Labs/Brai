@@ -20,7 +20,7 @@
 
 ## Конфигурация и запуск
 
-Процесс запускается как UID/GID `1000:1000` из `/opt/brai/local-ai/app/services/local-ai`. Он требует `LOCAL_AI_CONFIG_JSON` со всеми закрытыми разделами, которые проверяет `src/main.mjs`: `postgres`, `nats`, `transport`, `artifacts`, `history`, `installer`, `lifecycle`, `runtime`. Все поля обязательны по контракту конфигурации; неизвестные поля и неверные типы завершают запуск. Конкретные адреса, секреты и числовые лимиты задаёт защищённая конфигурация экземпляра после измерений. Образ не содержит её и не задаёт значения по умолчанию.
+Процесс запускается как UID/GID `1000:1000` из `/opt/brai/local-ai/app/services/local-ai`. Он требует `LOCAL_AI_CONFIG_JSON` со всеми закрытыми разделами, которые проверяет `src/main.mjs`: `postgres`, `nats`, `transport`, `artifacts`, `installer`, `lifecycle`, `runtime`. Все поля обязательны по контракту конфигурации; неизвестные поля и неверные типы завершают запуск. Конкретные адреса, секреты и числовые лимиты задаёт защищённая конфигурация экземпляра после измерений. Образ не содержит её и не задаёт значения по умолчанию.
 
 `runtime.llama_cpp` должен ссылаться на `/opt/brai/local-ai/runtime/llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/app/llama-server`. `runtime.gigaam_pytorch` использует `/opt/brai/local-ai/runtime/gigaam_pytorch/.venv/bin/python` и runner из `/opt/brai/local-ai/app/services/local-ai/runners/gigaam/runner.py`. Runtime factory передаёт дочернему процессу только `PATH`, `HOME`, `TMPDIR`, `TEMP`, `TMP`, `LANG`, `LC_ALL` и `LC_CTYPE`, а остальные переменные берёт из profile config. Поэтому `runtime.*.env` явно задаёт `LD_LIBRARY_PATH`, `HF_HOME` и `HF_MODULES_CACHE`; `PATH` включает payload FFmpeg. В image `LD_LIBRARY_PATH` включает каталоги `app` и `system` закреплённого llama.cpp payload, а также подготовленные Python/torch/system library каталоги. Список допустимых переменных ограничен кодом сервиса.
 
@@ -36,7 +36,7 @@
 
 ## Готовность и остановка
 
-Docker HTTP healthcheck не объявлен: у сервиса нет HTTP health endpoint. NATS Services PING подтверждает ответ процесса, но не готовность зависимостей. Проверяйте `brai.local_ai.v1.status`: сервис готов только при общем `state: "ready"` и состояниях `ready` у `database`, `nats`, `executables`, `weights`, `history`, `outbox`. Загруженная модель для готовности не обязательна; idle/unloaded — нормальное состояние.
+Docker HTTP healthcheck не объявлен: у сервиса нет HTTP health endpoint. NATS Services PING подтверждает ответ процесса, но не готовность зависимостей. Проверяйте `brai.local_ai.v1.status`: сервис готов только при общем `state: "ready"` и состояниях `ready` у `database`, `nats`, `executables`, `weights`. Загруженная модель для готовности не обязательна; idle/unloaded — нормальное состояние.
 
 SIGTERM и SIGINT обрабатывает управляющий процесс. Он прекращает приём запросов, закрывает installer и lifecycle, ждёт дочерние процессы и закрывает NATS/PostgreSQL в заданный конфигурацией срок. Числовые сроки и измеренные ASR пределы не задаются этим документом.
 
@@ -45,3 +45,5 @@ SIGTERM и SIGINT обрабатывает управляющий процесс
 В образ не включают веса, пользовательские данные или секреты. Подготовленные seed revisions, размеры, пути и GGUF hash перечислены в `release.json`. Служебный segmentation VAD находится отдельно от четырёх файлов модели GigaAM.
 
 Текущие короткоформатные и длинноформатные ASR пределы не являются принятыми параметрами выпуска. Не указывайте их в рабочей конфигурации до отдельной runtime-приёмки. Offline inference, ffmpeg ABI, образ и весь цикл остановки процессов также требуют проверки на точном собранном image.
+
+История отправляется одним Core NATS publish без reply и повторов. `config.history` и `postgres.outboxCapacity` удалены. Пропуски при разрыве или заполнении SDK буфера учитываются в `runtime.history.diagnostics()`; history не участвует в readiness. Прежняя таблица outbox остаётся неиспользуемой для отката.

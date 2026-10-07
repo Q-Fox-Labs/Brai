@@ -62,6 +62,8 @@ NATS Service имеет имя service_history, предметную верси�
 | brai.history.v1.query.list | listRequest | listResponse | Читает ограниченную пользовательскую страницу. |
 | brai.history.v1.query.get | getRequest | getResponse | Читает событие по (source,id) в пользовательской области. |
 
+Endpoint `brai.history.v1.append.<source>` также принимает Core NATS publish без reply: проверяет и сохраняет тот же `appendRequest`, но отправитель не получает результата и не может считать публикацию подтверждением сохранения. Отсутствие reply не отклоняет запрос и не меняет проверки источника или данных. Режим применим к фактам, для которых источник допускает потерю и не обещает доставку.
+
 Вход и успешный ответ — UTF-8 JSON без JSON-RPC envelope. Ответ направляется на нативный reply subject запроса; клиент не задаёт replyTo в теле. Ошибки передаются стандартными заголовками Nats-Service-Error (код ошибки) и Nats-Service-Error-Code (числовой HTTP-подобный статус); клиент проверяет их до чтения тела. Тело ошибки соответствует common.schema.json#/definitions/error и содержит code, безопасное message и retryable.
 
 | Код | Статус | Значение |

@@ -115,7 +115,13 @@ Restart требует отдельную конфигурацию
 - `services/transcription/helper/migrations/001.sql`.
 
 Coordinator и local executor загружают только опубликованные contracts
-providers. Транскрипционный валидатор загружает history schemas. SQL migration
+providers. При выпуске local-ai с best-effort историей runtime artifact transcription
+должен включать новую owner `StatusResponse`: `state`, `components.database`,
+`components.nats`, `components.executables`, `components.weights`. Поля
+`components.history`, `components.outbox` и `outboxCounts` удалены. Owner
+contracts и обе owner schemas local-ai обновляют одновременно; старый runtime
+artifact не совместим с этим ответом. In-flight cancellation local executor
+остаётся `supported: false`, `guaranteed: false`. Транскрипционный валидатор загружает history schemas. SQL migration
 разрешается относительно `#transcription-contracts`; compiled и source helper
 используют один canonical SQL. Не копировать owner схемы, descriptors,
 validators или SQL в `dist` и не импортировать приватный код соседних сервисов.

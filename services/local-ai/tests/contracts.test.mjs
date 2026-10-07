@@ -38,7 +38,7 @@ test('metadata facts reject invocation content and unknown envelope properties',
     id: 'd6bbdb48-8c60-47ac-9252-3ab3d846c182', type_id: 1201,
     occurred_at: '2026-10-05T20:00:00Z', actor_id: null, scope_type: 'user', scope_id: 'user-1',
     object_type: 'operation', object_id: 'd6bbdb48-8c60-47ac-9252-3ab3d846c182',
-    data: { operation: 'invoke', modelId: 'giga-embeddings-480m-q8', outcome: 'succeeded', durationMs: 42, inputBytes: 15 },
+    data: { operation: 'invoke', modelId: 'giga-embeddings-480m-q8', outcome: 'succeeded', durationMs: 42 },
   };
   assert.equal(validateMetadataEvent(event), true);
   assert.equal(validateMetadataEvent({ ...event, data: { ...event.data, text: 'секретный текст' } }), false);

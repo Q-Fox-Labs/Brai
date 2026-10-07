@@ -3,10 +3,10 @@
 import { randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 import { LocalAiError } from '../errors.js';
-import type { ArtifactPort, LocalAiStore, ModelIdleGuard, ModelSettingsChangedPort, RuntimeFactory, RuntimePort } from '../ports.js';
+import type { ArtifactPort, HistoryFactPort, LocalAiStore, ModelIdleGuard, ModelSettingsChangedPort, RuntimeFactory, RuntimePort } from '../ports.js';
 import type {
-  EmbedInput, EmbedOutput, InstallationRecord, LocalAiHistoryMetadataEvent, ModelRecord, ModelSelector,
-  ModelSettings, OperationContext, ResolvedModel, RuntimeState, ServiceErrorCode, TranscribeOutput,
+  EmbedOutput, InstallationRecord, LocalAiHistoryMetadataEvent, ModelRecord, ModelSelector,
+  ModelSettings, OperationContext, RuntimeState, ServiceErrorCode, TranscribeOutput,
 } from '../types.js';
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -28,6 +28,7 @@ export type LifecycleLimits = {
 };
 export type LifecycleManagerOptions = {
   store: LocalAiStore;
+  history?: HistoryFactPort;
   runtimeFactory: RuntimeFactory;
   artifacts: ArtifactPort;
   limits: LifecycleLimits;
@@ -38,6 +39,7 @@ export type LifecycleStatus = {
   active: number; queued: number; models: Readonly<Record<string, RuntimeState>>;
 };
 export type LifecycleManager = ModelIdleGuard & ModelSettingsChangedPort & {
+  refreshModel(modelId: string): Promise<void>;
   invoke(input: Invocation, context: OperationContext): Promise<InvocationResult>;
   cancel(ownerId: string, operationId: string): Promise<'cancellation_requested' | 'already_terminal' | 'not_found'>;
   load(selector: ModelSelector, context: OperationContext): Promise<void>;
@@ -49,8 +51,8 @@ export type LifecycleManager = ModelIdleGuard & ModelSettingsChangedPort & {
 
 type Job = {
   input: Invocation; context: OperationContext; controller: AbortController; done: Promise<InvocationResult>;
-  resolve: (value: InvocationResult) => void; reject: (error: unknown) => void; state: 'queued' | 'active' | 'settled';
-  acceptedAt: number; admission: LocalAiHistoryMetadataEvent; terminalEventId: string; inputBytes: number; record: ModelRecord;
+  resolve: (value: InvocationResult) => void; reject: (error: unknown) => void; state: 'preparing' | 'queued' | 'active' | 'settled';
+  acceptedAt: number; inputBytes: number; record?: ModelRecord;
   runtime?: RuntimePort; audioPath?: string; abortListener: () => void; deadlineTimer?: NodeJS.Timeout; failure?: LocalAiError;
 };
 type Slot = {
@@ -64,7 +66,6 @@ type Prepared = { record: ModelRecord; installation: InstallationRecord; setting
 function fail(code: ServiceErrorCode, message: string = code): never {
   throw new LocalAiError(code, message, code === 'BUSY' || code === 'DEPENDENCY_UNAVAILABLE' || code === 'ENGINE_UNAVAILABLE');
 }
-function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === 'object' && !Array.isArray(value); }
 function selectorKey(selector: ModelSelector): string { return `${selector.modelId}\u0000${selector.revision}\u0000${selector.profileId}`; }
 function validateContext(input: Invocation, context: OperationContext): void {
   if (input.ownerId !== context.ownerId || input.operationId !== context.operationId || input.deadlineAt !== context.deadlineAt) fail('INVALID_ARGUMENT');
@@ -73,7 +74,7 @@ function validateContext(input: Invocation, context: OperationContext): void {
   if (deadline <= Date.now()) fail('DEADLINE_EXCEEDED');
 }
 function event(input: Invocation, outcome: LocalAiHistoryMetadataEvent['data']['outcome'], options: {
-  id: string; now: string; durationMs?: number; inputBytes?: number; resultBytes?: number; vectorDimensions?: number; errorCode?: ServiceErrorCode;
+  id: string; now: string; durationMs?: number; errorCode?: ServiceErrorCode;
 }): LocalAiHistoryMetadataEvent {
   return {
     id: options.id, type_id: 1201, occurred_at: options.now, actor_id: input.ownerId,
@@ -81,21 +82,17 @@ function event(input: Invocation, outcome: LocalAiHistoryMetadataEvent['data']['
     data: {
       operation: 'invoke', modelId: input.model.modelId, outcome, revision: input.model.revision,
       profileId: input.model.profileId, operationId: input.operationId, requestId: input.requestId,
-      phase: outcome === 'accepted' ? 'accepted' : 'execute',
       ...(options.durationMs !== undefined ? { durationMs: options.durationMs } : {}),
-      ...(options.inputBytes !== undefined ? { inputBytes: options.inputBytes } : {}),
-      ...(options.resultBytes !== undefined ? { resultBytes: options.resultBytes } : {}),
-      ...(options.vectorDimensions !== undefined ? { vectorDimensions: options.vectorDimensions } : {}),
       ...(options.errorCode ? { errorCode: options.errorCode } : {}),
     },
   };
 }
-function managementEvent(selector: ModelSelector, operation: 'load' | 'unload', actorId: string, operationId: string, outcome: 'accepted' | 'succeeded' | 'failed' | 'cancelled' = 'accepted', errorCode?: ServiceErrorCode, id: string = randomUUID()): LocalAiHistoryMetadataEvent {
+function managementEvent(selector: ModelSelector, operation: 'load' | 'unload', actorId: string, operationId: string, outcome: 'succeeded' | 'failed' | 'cancelled', errorCode?: ServiceErrorCode, id: string = randomUUID()): LocalAiHistoryMetadataEvent {
   return {
     id, type_id: operation === 'load' ? 203 : 204, occurred_at: new Date().toISOString(),
     actor_id: actorId, scope_type: 'system', scope_id: 'local_ai', object_type: 'model', object_id: selector.modelId,
     data: { operation, modelId: selector.modelId, outcome, revision: selector.revision, profileId: selector.profileId,
-      operationId, phase: operation === 'load' ? 'load' : 'unload', ...(errorCode ? { errorCode } : {}) },
+      operationId, ...(errorCode ? { errorCode } : {}) },
   };
 }
 function errorFrom(error: unknown): LocalAiError {
@@ -114,20 +111,13 @@ function finiteLimit(value: number, name: string): void {
 /** Создаёт lifecycle manager с явными конечными пределами и зависимостями к хранилищу/исполнителям. */
 export function createLifecycleManager(options: LifecycleManagerOptions): LifecycleManager {
   const { store, runtimeFactory, artifacts, limits } = options;
-  async function reserveManagement(selector: ModelSelector, operation: 'load' | 'unload', actorId: string): Promise<{ operationId: string; accepted: LocalAiHistoryMetadataEvent; terminalId: string }> {
-    const operationId = randomUUID();
-    const accepted = managementEvent(selector, operation, actorId, operationId);
-    const terminalId = randomUUID();
-    await store.transaction(tx => tx.outbox.appendAdmission(accepted, { operationId, terminalEventId: terminalId }));
-    return { operationId, accepted, terminalId };
+  function publish(fact: LocalAiHistoryMetadataEvent): void {
+    try { options.history?.publish(fact); } catch { /* История не меняет итог операции. */ }
   }
-  async function finishManagement(reservation: { operationId: string; accepted: LocalAiHistoryMetadataEvent; terminalId: string }, outcome: 'succeeded' | 'failed' | 'cancelled', errorCode?: ServiceErrorCode): Promise<void> {
-    const seed = reservation.accepted;
-    const terminal = managementEvent(
-      { modelId: seed.data.modelId, revision: seed.data.revision!, profileId: seed.data.profileId! },
-      seed.data.operation as 'load' | 'unload', seed.actor_id!, reservation.operationId, outcome, errorCode, reservation.terminalId,
-    );
-    await store.transaction(tx => tx.outbox.appendCompletion(reservation.operationId, terminal));
+  function finishManagement(selector: ModelSelector, operation: 'load' | 'unload', context: OperationContext, outcome: 'succeeded' | 'failed' | 'cancelled', startedAt: number, errorCode?: ServiceErrorCode): void {
+    const fact = managementEvent(selector, operation, context.ownerId, context.operationId, outcome, errorCode);
+    fact.data.durationMs = Math.max(0, Math.floor(now() - startedAt));
+    publish(fact);
   }
   for (const [name, value] of Object.entries(limits)) finiteLimit(value, name);
   const now = options.now ?? Date.now;
@@ -137,8 +127,10 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
   let accepting = true;
   let outstanding = 0;
   let allocationTail: Promise<void> = Promise.resolve();
-  const admittingOperations = new Set<string>();
   const pendingAdmissions = new Map<string, number>();
+  const metadata = new Map<string, Prepared>();
+  const configuredSettings = new Map<string, ModelSettings>();
+  const refreshing = new Map<string, Promise<void>>();
   const pendingLifecycleTasks = new Set<Promise<void>>();
   let active = 0;
   let queued = 0;
@@ -183,19 +175,45 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
     slots.set(key, slot);
     return slot;
   }
+  async function refreshModel(modelId: string): Promise<void> {
+    // AIDEV-NOTE: Сначала сбрасываем snapshot: ошибка обновления не должна выдавать старую установку.
+    metadata.delete(modelId);
+    const update = store.transaction(async tx => {
+      const record = await tx.models.get(modelId);
+      if (!record) return undefined;
+      const installation = await tx.installations.get(record.modelId, record.revision);
+      if (!installation) return undefined;
+      return { record, installation, settings: await tx.settings.get(modelId) ?? { idleUnloadSeconds: 600 } };
+    }).then(value => { if (refreshing.get(modelId) === update && value) {
+      const snapshot = structuredClone(value);
+      snapshot.settings = configuredSettings.get(modelId) ?? snapshot.settings;
+      metadata.set(modelId, snapshot);
+    } });
+    refreshing.set(modelId, update);
+    try { await update; } finally { if (refreshing.get(modelId) === update) refreshing.delete(modelId); }
+  }
   async function prepare(selector: ModelSelector, operation?: 'embed' | 'transcribe'): Promise<Prepared> {
     validateSelector(selector);
-    return store.transaction(async tx => {
-      const model = await tx.models.get(selector.modelId);
+    if (refreshing.has(selector.modelId)) await refreshing.get(selector.modelId);
+    if (!metadata.has(selector.modelId)) {
+      const existing = refreshing.get(selector.modelId);
+      if (existing) await existing; else await refreshModel(selector.modelId);
+    }
+    const prepared = metadata.get(selector.modelId);
+    if (!prepared) {
+      // AIDEV-NOTE: Отсутствие snapshot относится к подготовке модели; прогретый путь сюда не попадает.
+      const model = await store.transaction(tx => tx.models.get(selector.modelId));
       if (!model) fail('MODEL_NOT_FOUND');
-      if (!model.supported || model.profileId === null) fail('NOT_SUPPORTED');
+      if (!model.supported || !model.profileId) fail('NOT_SUPPORTED');
       if (model.revision !== selector.revision || model.profileId !== selector.profileId) fail('REVISION_CONFLICT');
-      if (operation && !model.operations.includes(operation)) fail('UNSUPPORTED_OPERATION');
-      const installation = await tx.installations.get(model.modelId, model.revision);
-      if (!installation) fail('MODEL_NOT_INSTALLED');
-      if (installation.profileId !== model.profileId || installation.modelId !== model.modelId || installation.revision !== model.revision) fail('REVISION_CONFLICT');
-      return { record: model, installation, settings: await tx.settings.get(model.modelId) ?? { idleUnloadSeconds: 600 } };
-    });
+      fail('MODEL_NOT_INSTALLED');
+    }
+    const { record: model, installation } = prepared;
+    if (!model.supported || model.profileId === null) fail('NOT_SUPPORTED');
+    if (model.revision !== selector.revision || model.profileId !== selector.profileId) fail('REVISION_CONFLICT');
+    if (operation && !model.operations.includes(operation)) fail('UNSUPPORTED_OPERATION');
+    if (installation.profileId !== model.profileId || installation.modelId !== model.modelId || installation.revision !== model.revision) fail('REVISION_CONFLICT');
+    return prepared;
   }
   function assertInput(input: Invocation, model: ModelRecord, bytes: number): void {
     if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > limits.maxInputBytes || model.limits.maxInputBytes !== null && bytes > model.limits.maxInputBytes) fail('INPUT_TOO_LARGE');
@@ -208,50 +226,41 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       if (dimensions !== null && input.texts.length * dimensions * 8 > limits.maxResultBytes) fail('RESULT_TOO_LARGE');
     }
   }
-  function createJob(input: Invocation, context: OperationContext, admission: LocalAiHistoryMetadataEvent, inputBytes: number, record: ModelRecord, audioPath?: string): Job {
+  function createJob(input: Invocation, context: OperationContext): Job {
     let resolve!: (value: InvocationResult) => void;
     let reject!: (error: unknown) => void;
     const done = new Promise<InvocationResult>((yes, no) => { resolve = yes; reject = no; });
-    const job: Job = { input, context, controller: new AbortController(), done, resolve, reject, state: 'queued', acceptedAt: now(), admission,
-      terminalEventId: randomUUID(), inputBytes, record, audioPath, abortListener: () => undefined };
+    const job: Job = { input, context, controller: new AbortController(), done, resolve, reject, state: 'preparing', acceptedAt: now(), inputBytes: 0, abortListener: () => undefined };
     job.abortListener = () => {
-      if (!job.controller.signal.aborted) job.controller.abort();
+      if (!job.controller.signal.aborted) job.controller.abort(context.signal.reason);
       const slot = slots.get(input.model.modelId);
+      if (job.state === 'queued' && slot) {
+        const index = slot.queue.indexOf(job);
+        if (index >= 0) { slot.queue.splice(index, 1); queued--; }
+        void complete(job, 'cancelled', undefined, contextOutcome(job) ?? new LocalAiError('CANCELLED', 'CANCELLED'));
+      }
       if (slot?.activeJob === job && job.runtime) void stopForCancellation(slot, job);
       else if (slot?.opening && !slotHasWaiter(slot, job)) slot.loadController?.abort();
     };
+    operations.set(input.operationId, job);
     if (context.signal.aborted) job.abortListener();
     else context.signal.addEventListener('abort', job.abortListener, { once: true });
-    operations.set(input.operationId, job);
     return job;
   }
   function operationContext(job: Job): OperationContext {
     return { ownerId: job.input.ownerId, operationId: job.input.operationId, deadlineAt: job.input.deadlineAt, signal: job.controller.signal };
   }
-  function startDeadline(job: Job, slot: Slot): void {
+  function startDeadline(job: Job): void {
     const tick = () => {
       const left = Date.parse(job.input.deadlineAt) - now();
       if (left <= 0) {
         job.failure = new LocalAiError('DEADLINE_EXCEEDED', 'DEADLINE_EXCEEDED');
-        job.controller.abort();
-        if (job.state === 'active' && job.runtime) void stopForCancellation(slot, job);
-        else if (slot.opening && !slotHasWaiter(slot, job)) slot.loadController?.abort();
+        job.abortListener();
         return;
       }
       job.deadlineTimer = setTimeout(tick, Math.min(left, MAX_TIMEOUT_MS));
     };
     tick();
-  }
-  async function appendTerminal(job: Job, outcome: 'succeeded' | 'failed' | 'cancelled', result?: InvocationResult, error?: LocalAiError): Promise<void> {
-    const elapsed = Math.max(0, Math.floor(now() - job.acceptedAt));
-    const terminal = event(job.input, outcome, {
-      id: job.terminalEventId, now: new Date(now()).toISOString(), durationMs: elapsed,
-      inputBytes: job.inputBytes,
-      ...(result?.operation === 'embed' ? { resultBytes: resultBytes(result.vectors), vectorDimensions: result.vectors[0]?.length } : {}),
-      ...(result?.operation === 'transcribe' ? { resultBytes: resultBytes({ text: result.text, segments: result.segments }) } : {}),
-      ...(error ? { errorCode: error.code } : {}),
-    });
-    await store.transaction(tx => tx.outbox.appendCompletion(job.input.operationId, terminal));
   }
   async function complete(job: Job, outcome: 'succeeded' | 'failed' | 'cancelled', result?: InvocationResult, error?: LocalAiError): Promise<void> {
     if (job.state === 'settled') return;
@@ -260,10 +269,9 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
     job.context.signal.removeEventListener('abort', job.abortListener);
     operations.delete(job.input.operationId);
     outstanding--;
-    let terminalError = error;
-    try { await appendTerminal(job, outcome, result, error); }
-    catch (storeError) { terminalError = errorFrom(storeError); }
-    if (terminalError) job.reject(terminalError);
+    publish(event(job.input, outcome, { id: randomUUID(), now: new Date(now()).toISOString(),
+      durationMs: Math.max(0, Math.floor(now() - job.acceptedAt)), ...(error ? { errorCode: error.code } : {}) }));
+    if (error) job.reject(error);
     else job.resolve(result!);
   }
   function contextOutcome(job: Job): LocalAiError | undefined {
@@ -402,11 +410,10 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       const callContext = operationContext(job);
       if (job.input.operation === 'embed') {
         const output: EmbedOutput = await runtime.embed({ model: job.input.model, texts: job.input.texts, purpose: job.input.purpose }, callContext);
-        const dimensions = job.record.limits.vectorDimensions;
+        const dimensions = job.record!.limits.vectorDimensions;
         if (!Array.isArray(output.vectors) || output.vectors.length !== job.input.texts.length
           || output.vectors.some(vector => !Array.isArray(vector) || dimensions !== null && vector.length !== dimensions
-            || !vector.every(value => typeof value === 'number' && Number.isFinite(value))
-            || Math.abs(Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) - 1) > 0.001)) fail('ENGINE_UNAVAILABLE');
+            || !vector.every(value => typeof value === 'number' && Number.isFinite(value)))) fail('ENGINE_UNAVAILABLE');
         result = { operation: 'embed', model: job.input.model, vectors: output.vectors, durationMs: Math.max(0, Math.floor(now() - job.acceptedAt)) };
       } else {
         const audioPath = job.audioPath;
@@ -421,7 +428,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       }
       const payload = result.operation === 'embed' ? result.vectors : { text: result.text, segments: result.segments };
       const size = resultBytes(payload);
-      if (size > limits.maxResultBytes || result.operation === 'embed' && result.vectors.some(vector => vector.length * 8 > limits.maxResultBytes)) fail('RESULT_TOO_LARGE');
+      if (size > limits.maxResultBytes || job.record!.limits.maxResultBytes != null && size > job.record!.limits.maxResultBytes || result.operation === 'embed' && result.vectors.some(vector => vector.length * 8 > limits.maxResultBytes)) fail('RESULT_TOO_LARGE');
       const end = contextOutcome(job);
       if (end) throw end;
     } catch (error) {
@@ -445,7 +452,6 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
     job.state = 'active';
     slot.activeJob = job;
     wakeIdle(slot);
-    startDeadline(job, slot);
     void runJob(slot, job).finally(() => {
       if (slot.activeJob === job) slot.activeJob = undefined;
       active--;
@@ -464,116 +470,84 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       void complete(job, job.failure.code === 'CANCELLED' || job.failure.code === 'DEADLINE_EXCEEDED' ? 'cancelled' : 'failed', undefined, job.failure);
     }
   }
-  async function accept(input: Invocation, context: OperationContext, prepared: Prepared, inputBytes: number, audioPath?: string): Promise<Job> {
-    const donePendingTask = beginPendingTask();
-    try {
+  function accept(input: Invocation, context: OperationContext): Job {
     validateContext(input, context);
     if (!accepting) fail('BUSY');
     if (lockedModels.has(input.model.modelId)) fail('MODEL_IN_USE');
     if (outstanding >= limits.maxQueuedOperations) fail('BUSY');
-    if (operations.has(input.operationId) || admittingOperations.has(input.operationId)) fail('REVISION_CONFLICT');
-    const slot = slotFor(input.model);
-    if (slot.queue.length + Number(Boolean(slot.activeJob)) >= limits.maxQueuedOperations) fail('BUSY');
+    if (operations.has(input.operationId)) fail('REVISION_CONFLICT');
+    validateSelector(input.model);
     outstanding++;
-    admittingOperations.add(input.operationId);
     pendingAdmissions.set(input.model.modelId, (pendingAdmissions.get(input.model.modelId) ?? 0) + 1);
-    const acceptedEvent = event(input, 'accepted', { id: randomUUID(), now: new Date(now()).toISOString(), inputBytes });
-    const terminalEventId = randomUUID();
-    try {
-      await store.transaction(tx => tx.outbox.appendAdmission(acceptedEvent, { operationId: input.operationId, terminalEventId }));
-    } catch (error) {
-      outstanding--; admittingOperations.delete(input.operationId);
-      const count = (pendingAdmissions.get(input.model.modelId) ?? 1) - 1;
-      if (count) pendingAdmissions.set(input.model.modelId, count); else pendingAdmissions.delete(input.model.modelId);
-      throw errorFrom(error);
-    }
-    if (!accepting) {
-      const stopped = new LocalAiError('CANCELLED', 'CANCELLED');
-      const terminal = event(input, 'cancelled', { id: terminalEventId, now: new Date(now()).toISOString(), inputBytes, errorCode: stopped.code });
-      try { await store.transaction(tx => tx.outbox.appendCompletion(input.operationId, terminal)); }
-      finally {
-        outstanding--; admittingOperations.delete(input.operationId);
-        const count = (pendingAdmissions.get(input.model.modelId) ?? 1) - 1;
-        if (count) pendingAdmissions.set(input.model.modelId, count); else pendingAdmissions.delete(input.model.modelId);
-      }
-      throw stopped;
-    }
-    const job = createJob(input, context, acceptedEvent, inputBytes, prepared.record, audioPath);
-    job.terminalEventId = terminalEventId;
-    admittingOperations.delete(input.operationId);
-    const count = (pendingAdmissions.get(input.model.modelId) ?? 1) - 1;
-    if (count) pendingAdmissions.set(input.model.modelId, count); else pendingAdmissions.delete(input.model.modelId);
-    slot.settings = prepared.settings;
-    slot.queue.push(job);
-    queued++;
-    drain(slot);
+    const job = createJob(input, context);
+    if (!context.deadlineManaged) startDeadline(job);
     return job;
-    } finally { donePendingTask(); }
   }
-  function resultForCaller(job: Job, slot: Slot): Promise<InvocationResult> {
-    const timerController = new AbortController();
-    let timer: NodeJS.Timeout | undefined;
-    let abortListener: (() => void) | undefined;
-    const deadline = Date.parse(job.input.deadlineAt);
-    const expired = new Promise<never>((_resolve, reject) => {
-      const tick = () => {
-        const left = deadline - now();
-        if (left <= 0) {
-          job.failure = new LocalAiError('DEADLINE_EXCEEDED', 'DEADLINE_EXCEEDED');
-          if (job.state === 'queued') {
-            const index = slot.queue.indexOf(job);
-            if (index >= 0) { slot.queue.splice(index, 1); queued--; }
-            void complete(job, 'cancelled', undefined, job.failure).then(() => { if (slot.queue.length) drain(slot); });
-          } else { job.controller.abort(); }
-          reject(job.failure);
-          return;
-        }
-        timer = setTimeout(tick, Math.min(left, MAX_TIMEOUT_MS));
-      };
-      tick();
-      abortListener = () => {
-        const error = contextOutcome(job) ?? new LocalAiError('CANCELLED', 'CANCELLED');
-        reject(error);
-      };
-      job.controller.signal.addEventListener('abort', abortListener, { once: true });
+  function resultForCaller(job: Job): Promise<InvocationResult> {
+    if (job.controller.signal.aborted) return Promise.reject(contextOutcome(job));
+    let abort!: () => void;
+    const interrupted = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(contextOutcome(job) ?? new LocalAiError('CANCELLED', 'CANCELLED'));
+      job.controller.signal.addEventListener('abort', abort, { once: true });
     });
-    return Promise.race([job.done, expired]).finally(() => {
-      if (timer) clearTimeout(timer);
-      if (abortListener) job.controller.signal.removeEventListener('abort', abortListener);
-      timerController.abort();
-    });
+    return Promise.race([job.done, interrupted]).finally(() => job.controller.signal.removeEventListener('abort', abort));
   }
 
   const manager: LifecycleManager = {
+    refreshModel,
     async invoke(input, context) {
-      validateContext(input, context);
-      const prepared = await prepare(input.model, input.operation);
-      let bytes: number;
-      if (input.operation === 'embed') {
-        if (!Array.isArray(input.texts) || !input.texts.every(text => typeof text === 'string')) fail('INVALID_ARGUMENT');
-        bytes = Buffer.byteLength(JSON.stringify(input.texts), 'utf8');
-      } else bytes = 0;
-      assertInput(input, prepared.record, bytes);
-      if (input.operation === 'embed') {
-        const job = await accept(input, context, prepared, bytes);
-        return resultForCaller(job, slots.get(input.model.modelId)!);
-      }
-      return artifacts.withReadyAudio({ artifactId: input.audioArtifactId, ownerId: input.ownerId, operationId: input.operationId }, context, async audio => {
-        let audioBytes: number;
-        try { audioBytes = (await stat(audio.localPath)).size; } catch { fail('ARTIFACT_NOT_AVAILABLE'); }
-        assertInput(input, prepared.record, audioBytes!);
-        const job = await accept(input, context, prepared, audioBytes!, audio.localPath);
-        try { return await resultForCaller(job, slots.get(input.model.modelId)!); }
-        finally { await job.done.then(() => undefined, () => undefined); }
-      });
+      const job = accept(input, context);
+      const caller = resultForCaller(job);
+      void job.done.catch(() => undefined);
+      const task = (async () => {
+        let queuedJob = false;
+        try {
+          const prepared = await prepare(input.model, input.operation);
+          job.record = prepared.record;
+          job.inputBytes = input.operation === 'embed' ? Buffer.byteLength(JSON.stringify(input.texts), 'utf8') : 0;
+          assertInput(input, prepared.record, job.inputBytes);
+          const enqueue = async (audioPath?: string) => {
+            const interrupted = contextOutcome(job);
+            if (interrupted) throw interrupted;
+            if (!accepting) fail('CANCELLED');
+            const slot = slotFor(input.model);
+            job.audioPath = audioPath;
+            slot.settings = prepared.settings;
+            job.state = 'queued';
+            queuedJob = true;
+            slot.queue.push(job);
+            queued++;
+            drain(slot);
+            return job.done;
+          };
+          if (input.operation === 'embed') await enqueue();
+          else await artifacts.withReadyAudio({ artifactId: input.audioArtifactId, ownerId: input.ownerId, operationId: input.operationId }, operationContext(job), async audio => {
+            try { job.inputBytes = (await stat(audio.localPath)).size; } catch { fail('ARTIFACT_NOT_AVAILABLE'); }
+            assertInput(input, prepared.record, job.inputBytes);
+            return enqueue(audio.localPath);
+          });
+        } catch (error) {
+          if (!queuedJob) {
+            const failure = contextOutcome(job) ?? errorFrom(error);
+            await complete(job, failure.code === 'CANCELLED' || failure.code === 'DEADLINE_EXCEEDED' ? 'cancelled' : 'failed', undefined, failure);
+          }
+        } finally {
+          const count = (pendingAdmissions.get(input.model.modelId) ?? 1) - 1;
+          if (count) pendingAdmissions.set(input.model.modelId, count); else pendingAdmissions.delete(input.model.modelId);
+        }
+      })();
+      pendingLifecycleTasks.add(task);
+      void task.finally(() => pendingLifecycleTasks.delete(task));
+      return caller;
     },
     async cancel(ownerId, operationId) {
       const job = operations.get(operationId);
       if (!job || job.input.ownerId !== ownerId) return 'not_found';
       if (job.state === 'settled') return 'already_terminal';
       job.failure = new LocalAiError('CANCELLED', 'CANCELLED');
-      job.controller.abort();
-      const slot = slots.get(job.input.model.modelId)!;
+      job.abortListener();
+      const slot = slots.get(job.input.model.modelId);
+      if (!slot) return 'cancellation_requested';
       if (job.state === 'queued') {
         const index = slot.queue.indexOf(job);
         if (index >= 0) { slot.queue.splice(index, 1); queued--; }
@@ -584,6 +558,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       return 'cancellation_requested';
     },
     async load(selector, context) {
+      const startedAt = now();
       const donePendingTask = beginPendingTask();
       try {
       validateSelector(selector);
@@ -595,17 +570,15 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       const slot = slotFor(selector);
       slot.settings = prepared.settings;
       slot.managementWaiters++;
-      let reservation: Awaited<ReturnType<typeof reserveManagement>> | undefined;
       try {
-        reservation = await reserveManagement(selector, 'load', context.ownerId);
         if (!accepting) fail('CANCELLED');
-        const runtime = await Promise.race([ensureRuntime(slot), waitContext(context)]);
+        const runtime = await waitWithContext(ensureRuntime(slot), context);
         if (slot.runtime !== runtime) fail('MODEL_LOAD_FAILED');
         slot.idleSince = now();
-        await finishManagement(reservation, 'succeeded');
+        finishManagement(selector, 'load', context, 'succeeded', startedAt);
       } catch (error) {
         const local = errorFrom(error);
-        if (reservation) await finishManagement(reservation, local.code === 'CANCELLED' ? 'cancelled' : 'failed', local.code).catch(() => undefined);
+        finishManagement(selector, 'load', context, local.code === 'CANCELLED' ? 'cancelled' : 'failed', startedAt, local.code);
         throw local;
       } finally {
         slot.managementWaiters--;
@@ -615,6 +588,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       } finally { donePendingTask(); }
     },
     async unload(selector, context) {
+      const startedAt = now();
       const donePendingTask = beginPendingTask();
       try {
       validateSelector(selector);
@@ -629,15 +603,13 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       if ((pendingAdmissions.get(selector.modelId) ?? 0) > 0 || slot.activeJob || slot.queue.length || slot.opening || slot.closing || slot.managementWaiters) fail('MODEL_IN_USE');
       lockedModels.add(selector.modelId);
       slot.managementWaiters++;
-      let reservation: Awaited<ReturnType<typeof reserveManagement>> | undefined;
       try {
-        reservation = await reserveManagement(selector, 'unload', context.ownerId);
         if (!accepting) fail('CANCELLED');
         if (slot.runtime) await closeSlot(slot);
-        await finishManagement(reservation, 'succeeded');
+        finishManagement(selector, 'unload', context, 'succeeded', startedAt);
       } catch (error) {
         const local = errorFrom(error);
-        if (reservation) await finishManagement(reservation, local.code === 'CANCELLED' ? 'cancelled' : 'failed', local.code).catch(() => undefined);
+        finishManagement(selector, 'unload', context, local.code === 'CANCELLED' ? 'cancelled' : 'failed', startedAt, local.code);
         throw local;
       } finally { slot.managementWaiters--; lockedModels.delete(selector.modelId); }
       } finally { donePendingTask(); }
@@ -647,6 +619,9 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       return slot?.selector.revision === revision ? stateOf(slot) : null;
     },
     settingsChanged(modelId, settings) {
+      configuredSettings.set(modelId, { ...settings });
+      const prepared = metadata.get(modelId);
+      if (prepared) prepared.settings = { ...settings };
       const slot = slots.get(modelId);
       if (!slot) return;
       slot.settings = { idleUnloadSeconds: settings.idleUnloadSeconds };
@@ -687,8 +662,9 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
             else if (slot.opening) slot.loadController?.abort();
           }
         }
+        for (const job of operations.values()) { job.failure = new LocalAiError('CANCELLED', 'CANCELLED'); job.abortListener(); }
         await Promise.all([...pendingLifecycleTasks]);
-        // Admissions that committed just before shutdown are now visible in operations/queues.
+        // AIDEV-NOTE: После подготовки все зарегистрированные операции видны очередям и остановке.
         for (const slot of slots.values()) {
           failQueue(slot);
           if (slot.opening) slot.loadController?.abort();
@@ -707,15 +683,18 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
     },
   };
 
-  async function waitContext(context: OperationContext): Promise<never> {
+  async function waitWithContext<T>(work: Promise<T>, context: OperationContext): Promise<T> {
     const remainingMs = Date.parse(context.deadlineAt) - now();
     if (remainingMs <= 0 || context.signal.aborted) fail(context.signal.aborted ? 'CANCELLED' : 'DEADLINE_EXCEEDED');
-    return new Promise((_resolve, reject) => {
-      let timer: NodeJS.Timeout;
-      const abort = () => { clearTimeout(timer); context.signal.removeEventListener('abort', abort); reject(new LocalAiError('CANCELLED', 'CANCELLED')); };
-      timer = setTimeout(() => { context.signal.removeEventListener('abort', abort); reject(new LocalAiError('DEADLINE_EXCEEDED', 'DEADLINE_EXCEEDED')); }, Math.min(remainingMs, MAX_TIMEOUT_MS));
+    let timer: NodeJS.Timeout | undefined;
+    let abort!: () => void;
+    const interrupted = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(new LocalAiError(Date.parse(context.deadlineAt) <= now() ? 'DEADLINE_EXCEEDED' : 'CANCELLED', Date.parse(context.deadlineAt) <= now() ? 'DEADLINE_EXCEEDED' : 'CANCELLED'));
+      if (!context.deadlineManaged) timer = setTimeout(() => reject(new LocalAiError('DEADLINE_EXCEEDED', 'DEADLINE_EXCEEDED')), Math.min(remainingMs, MAX_TIMEOUT_MS));
       context.signal.addEventListener('abort', abort, { once: true });
     });
+    try { return await Promise.race([work, interrupted]); }
+    finally { if (timer) clearTimeout(timer); context.signal.removeEventListener('abort', abort); }
   }
 
   return manager;

@@ -10,8 +10,7 @@ const model = { modelId: 'whisper/local:large-v3', revision: 'sha256:0123456789a
 const component = { state: 'ready', errorCode: null };
 const status = {
   state: 'ready',
-  components: { database: component, nats: component, executables: component, weights: component, history: component, outbox: component },
-  outboxCounts: { reserved: 0, pending: 0, sending: 0, permanentlyFailed: 0, oldestCreatedAt: null },
+  components: { database: component, nats: component, executables: component, weights: component },
 };
 let release;
 const released = new Promise((resolve) => { release = resolve; });

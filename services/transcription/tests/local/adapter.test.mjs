@@ -23,8 +23,7 @@ const request = (changes = {}) => ({
 const component = { state: 'ready', errorCode: null };
 const ownerStatus = (state = 'ready') => ({
   state,
-  components: { database: component, nats: component, executables: component, weights: component, history: component, outbox: component },
-  outboxCounts: { reserved: 0, pending: 0, sending: 0, permanentlyFailed: 0, oldestCreatedAt: null },
+  components: { database: component, nats: component, executables: component, weights: component },
 });
 const ownerSuccess = (input, changes = {}) => ({
   requestId: input.requestId,

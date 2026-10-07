@@ -1,13 +1,16 @@
 // ABOUTME: Реализует прикладные операции каталога, настроек и снятия установки.
-// ABOUTME: Runtime readiness читается из памяти, а изменения метаданных фиксируются с history fact.
+// ABOUTME: Runtime readiness читается из памяти, а изменения метаданных фиксируются независимо от истории.
 import { randomUUID } from 'node:crypto';
 import { LocalAiError } from '../errors.js';
-import type { LocalAiStore, ModelIdleGuard, ModelSettingsChangedPort } from '../ports.js';
+import type { LocalAiStore, ModelIdleGuard, ModelSettingsChangedPort, HistoryFactPort } from '../ports.js';
 import type { InstallationRecord, LocalAiHistoryMetadataEvent, LocalAiTx, ModelCard, ModelFilter, ModelRecord, ModelSettings, OperationContext, RuntimeState } from '../types.js';
 
 export type CatalogDependencies = ModelIdleGuard & ModelSettingsChangedPort & {
   readRuntimeState(modelId: string, revision: string): RuntimeState | null;
   now?: () => string;
+  history?: HistoryFactPort;
+  refreshModel?(modelId: string): Promise<void>;
+  cleanupPublished?(record: InstallationRecord): Promise<void>;
 };
 
 export type LocalAiCatalog = {
@@ -19,7 +22,7 @@ export type LocalAiCatalog = {
 };
 
 function catalogEvent(
-  input: { operation: 'configure' | 'remove'; record: ModelRecord; actorId: string; operationId: string; revision?: string; profileId?: string; now: string },
+  input: { operation: 'configure' | 'remove'; record: ModelRecord; actorId: string; operationId: string; revision?: string; profileId?: string; now: string; durationMs: number },
 ): LocalAiHistoryMetadataEvent {
   const remove = input.operation === 'remove';
   return {
@@ -30,7 +33,7 @@ function catalogEvent(
       operation: input.operation, modelId: input.record.modelId, outcome: 'succeeded',
       revision: input.revision ?? input.record.revision,
       ...((input.profileId ?? input.record.profileId) !== null ? { profileId: input.profileId ?? input.record.profileId } : {}),
-      operationId: input.operationId, phase: remove ? 'remove' : 'configure',
+      operationId: input.operationId, durationMs: input.durationMs,
     },
   };
 }
@@ -71,9 +74,11 @@ export function createCatalog(store: LocalAiStore, dependencies: CatalogDependen
       });
     },
     async configure(input, context) {
+      const startedAt = Date.now();
       if (input.idleUnloadSeconds !== null && (!Number.isSafeInteger(input.idleUnloadSeconds) || input.idleUnloadSeconds < 1 || input.idleUnloadSeconds > 2_147_483_647)) {
         throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_SETTINGS');
       }
+      let fact: LocalAiHistoryMetadataEvent | undefined;
       const configured = await store.transaction(async tx => {
         const model = await tx.models.get(input.modelId);
         if (!model) throw new LocalAiError('MODEL_NOT_FOUND', 'MODEL_NOT_FOUND');
@@ -81,25 +86,34 @@ export function createCatalog(store: LocalAiStore, dependencies: CatalogDependen
         if (model.revision !== input.revision || model.profileId !== input.profileId) throw new LocalAiError('REVISION_CONFLICT', 'MODEL_SELECTOR_MISMATCH');
         const value: ModelSettings = { idleUnloadSeconds: input.idleUnloadSeconds };
         await tx.settings.put(input.modelId, value);
-        await tx.outbox.append(catalogEvent({ operation: 'configure', record: model, revision: input.revision, profileId: input.profileId, actorId: context.ownerId, operationId: context.operationId, now: now() }));
+        fact = catalogEvent({ operation: 'configure', record: model, revision: input.revision, profileId: input.profileId, actorId: context.ownerId, operationId: context.operationId, now: now(), durationMs: Math.max(0, Date.now() - startedAt) });
         return { modelId: model.modelId, revision: input.revision, profileId: input.profileId, idleUnloadSeconds: value.idleUnloadSeconds };
       });
       dependencies.settingsChanged(configured.modelId, { idleUnloadSeconds: configured.idleUnloadSeconds });
+      try { if (fact) dependencies.history?.publish(fact); } catch { /* Потеря истории не меняет итог управления. */ }
       return configured;
     },
     async remove(modelId, revision, profileId, context) {
-      return dependencies.withModelIdleLock(modelId, async () => store.transaction(async tx => {
-        const model = await tx.models.get(modelId);
-        if (!model) throw new LocalAiError('MODEL_NOT_FOUND', 'MODEL_NOT_FOUND');
-        if (!model.supported || model.profileId === null) throw new LocalAiError('NOT_SUPPORTED', 'MODEL_PROFILE_UNAVAILABLE');
-        if (model.revision !== revision || model.profileId !== profileId) throw new LocalAiError('REVISION_CONFLICT', 'MODEL_SELECTOR_MISMATCH');
-        const installation = await tx.installations.get(modelId, revision);
-        if (!installation) throw new LocalAiError('MODEL_NOT_INSTALLED', 'MODEL_NOT_INSTALLED');
-        if (installation.profileId !== profileId) throw new LocalAiError('REVISION_CONFLICT', 'INSTALLATION_PROFILE_MISMATCH');
-        await tx.installations.remove(modelId, revision);
-        await tx.outbox.append(catalogEvent({ operation: 'remove', record: model, revision, profileId: installation.profileId, actorId: context.ownerId, operationId: context.operationId, now: now() }));
-        return installation;
-      }));
+      const startedAt = Date.now();
+      return dependencies.withModelIdleLock(modelId, async () => {
+        let fact: LocalAiHistoryMetadataEvent | undefined;
+        const removed = await store.transaction(async tx => {
+          const model = await tx.models.get(modelId);
+          if (!model) throw new LocalAiError('MODEL_NOT_FOUND', 'MODEL_NOT_FOUND');
+          if (!model.supported || model.profileId === null) throw new LocalAiError('NOT_SUPPORTED', 'MODEL_PROFILE_UNAVAILABLE');
+          if (model.revision !== revision || model.profileId !== profileId) throw new LocalAiError('REVISION_CONFLICT', 'MODEL_SELECTOR_MISMATCH');
+          const installation = await tx.installations.get(modelId, revision);
+          if (!installation) throw new LocalAiError('MODEL_NOT_INSTALLED', 'MODEL_NOT_INSTALLED');
+          if (installation.profileId !== profileId) throw new LocalAiError('REVISION_CONFLICT', 'INSTALLATION_PROFILE_MISMATCH');
+          await tx.installations.remove(modelId, revision);
+          fact = catalogEvent({ operation: 'remove', record: model, revision, profileId: installation.profileId, actorId: context.ownerId, operationId: context.operationId, now: now(), durationMs: Math.max(0, Date.now() - startedAt) });
+          return installation;
+        });
+        await dependencies.refreshModel?.(modelId);
+        await dependencies.cleanupPublished?.(removed);
+        try { if (fact) dependencies.history?.publish(fact); } catch { /* Потеря истории не меняет итог управления. */ }
+        return removed;
+      });
     },
   };
 }

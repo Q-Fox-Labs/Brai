@@ -1,22 +1,19 @@
 // ABOUTME: Реализует транзакционное хранилище каталога local-ai в PostgreSQL.
-// ABOUTME: Runtime делает только DML; каталог и ограниченный history outbox фиксируются атомарно.
+// ABOUTME: Runtime делает только DML; каталог и установки сохраняются независимо от истории.
 import type { Pool, PoolClient } from 'pg';
 import { LocalAiError } from '../errors.js';
-import { validateMetadataEvent, validateSchema } from '../../contracts/index.mjs';
-import type { LocalAiStore, OutboxDeliveryPort } from '../ports.js';
+import { validateSchema } from '../../contracts/index.mjs';
+import type { LocalAiStore } from '../ports.js';
 import type {
-  CatalogFilter, ClaimedOutboxEvent, DeliveryErrorCode, InstallationOperation, InstallationRecord,
-  LocalAiHistoryMetadataEvent, LocalAiTx, ModelRecord, ModelSettings,
+  CatalogFilter, InstallationOperation, InstallationRecord,
+  LocalAiTx, ModelRecord, ModelSettings,
 } from '../types.js';
 
-export type PostgresStoreOptions = { outboxCapacity: number; queryTimeoutMs: number };
-export type PostgresLocalAiStore = LocalAiStore & OutboxDeliveryPort;
+export type PostgresStoreOptions = { queryTimeoutMs: number };
+export type PostgresLocalAiStore = LocalAiStore;
 
-const advisoryLock = 126100011;
 const settingKeys = ['idleUnloadSeconds'];
-const deliveryErrors = new Set<DeliveryErrorCode>(['HISTORY_UNAVAILABLE', 'HISTORY_REJECTED', 'DELIVERY_INTERNAL']);
 const json = (value: unknown): string => JSON.stringify(value);
-const isUuid = (value: unknown): value is string => typeof value === 'string' && /^[\da-f]{8}-[\da-f]{4}-[1-8][\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i.test(value);
 const hasExactKeys = (value: Record<string, unknown>, required: string[], optional: string[] = []): boolean => {
   const keys = Object.keys(value);
   return required.every(key => Object.hasOwn(value, key)) && keys.every(key => required.includes(key) || optional.includes(key));
@@ -63,10 +60,6 @@ function validateInstallation(value: InstallationRecord): void {
 function validateOperation(value: InstallationOperation): void {
   if (!validateSchema('InstallOperation', value)) throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_INSTALLATION_OPERATION');
 }
-function validateEvent(value: LocalAiHistoryMetadataEvent): void {
-  if (!validateMetadataEvent(value)) throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_HISTORY_METADATA');
-  if (Buffer.byteLength(json(value), 'utf8') > 65536) throw new LocalAiError('INVALID_ARGUMENT', 'HISTORY_METADATA_TOO_LARGE');
-}
 function safeError(error: unknown): LocalAiError {
   if (error instanceof LocalAiError) return error;
   const code = (error as { code?: string } | null)?.code ?? '';
@@ -82,22 +75,8 @@ function localTime(date: Date): string { return date.toISOString(); }
 function checkPositiveInteger(value: number, max = Number.MAX_SAFE_INTEGER): void {
   if (!Number.isSafeInteger(value) || value < 1 || value > max) throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_STORAGE_LIMIT');
 }
-function terminalFromSeed(eventId: string, seed: LocalAiHistoryMetadataEvent): LocalAiHistoryMetadataEvent {
-  const data: LocalAiHistoryMetadataEvent['data'] = {
-    operation: seed.data.operation, modelId: seed.data.modelId, outcome: 'unknown',
-    ...(seed.data.revision !== undefined ? { revision: seed.data.revision } : {}),
-    ...(seed.data.profileId !== undefined ? { profileId: seed.data.profileId } : {}),
-    ...(seed.data.operationId !== undefined ? { operationId: seed.data.operationId } : {}),
-    ...(seed.data.phase !== undefined ? { phase: seed.data.phase } : {}),
-    errorCode: 'INTERNAL',
-  };
-  return { ...seed, id: eventId, occurred_at: localTime(new Date()), data };
-}
-
 /** Подключает готовый пул; вызывающий код владеет его созданием и закрытием. */
 export function createPostgresStore(pool: Pool, options: PostgresStoreOptions): PostgresLocalAiStore {
-  checkPositiveInteger(options.outboxCapacity);
-  if (options.outboxCapacity < 2) throw new LocalAiError('INVALID_ARGUMENT', 'OUTBOX_CAPACITY_TOO_SMALL');
   checkPositiveInteger(options.queryTimeoutMs, 2_147_483_647);
 
   async function withClient<T>(run: (client: PoolClient, discard: () => void) => Promise<T>): Promise<T> {
@@ -140,16 +119,7 @@ export function createPostgresStore(pool: Pool, options: PostgresStoreOptions): 
     });
   }
 
-  async function lockOutbox(query: (sql: string, values?: unknown[]) => Promise<any>): Promise<void> {
-    await query('SELECT pg_advisory_xact_lock($1)', [advisoryLock]);
-  }
-
   function makeTx(query: (sql: string, values?: unknown[]) => Promise<any>): LocalAiTx {
-    async function capacity(needed: number): Promise<void> {
-      await lockOutbox(query);
-      const { rows } = await query('SELECT count(*)::bigint AS used FROM local_ai.outbox');
-      if (Number(rows[0].used) + needed > options.outboxCapacity) throw new LocalAiError('BUSY', 'HISTORY_OUTBOX_FULL', true);
-    }
     return {
       models: {
         async list(filter: CatalogFilter): Promise<ModelRecord[]> {
@@ -257,32 +227,7 @@ export function createPostgresStore(pool: Pool, options: PostgresStoreOptions): 
           [modelId, settings.idleUnloadSeconds]);
         },
       },
-      outbox: {
-        async append(event) {
-          validateEvent(event);
-          await capacity(1);
-          await query("INSERT INTO local_ai.outbox(event_id,state,event) VALUES($1,'pending',$2::jsonb)", [event.id, json(event)]);
-        },
-        async appendAdmission(event, reservation) {
-          validateEvent(event);
-          const r = record(reservation, ['operationId', 'terminalEventId']);
-          if (!text(r.operationId) || !isUuid(r.terminalEventId)
-            || event.data.operationId !== r.operationId || event.id === r.terminalEventId || !['accepted', 'started'].includes(event.data.outcome)) {
-            throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_OUTBOX_RESERVATION');
-          }
-          await capacity(2);
-          await query("INSERT INTO local_ai.outbox(event_id,state,event) VALUES($1,'pending',$2::jsonb)", [event.id, json(event)]);
-          await query(`INSERT INTO local_ai.outbox(event_id,state,reservation_operation_id,recovery_seed)
-            VALUES($1,'reserved',$2,$3::jsonb)`, [r.terminalEventId, r.operationId, json(event)]);
-        },
-        async appendCompletion(operationId, event) {
-          validateEvent(event);
-          if (!text(operationId) || event.data.operationId !== operationId || ['accepted', 'started'].includes(event.data.outcome)) throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_OUTBOX_COMPLETION');
-          const result = await query(`UPDATE local_ai.outbox SET state='pending',event=$3::jsonb,reservation_operation_id=NULL,recovery_seed=NULL
-            WHERE state='reserved' AND reservation_operation_id=$1 AND event_id=$2::uuid`, [operationId, event.id, json(event)]);
-          if (!result.rowCount) throw new LocalAiError('INVALID_ARGUMENT', 'OUTBOX_RESERVATION_NOT_FOUND');
-        },
-      },
+
     };
   }
 
@@ -290,75 +235,14 @@ export function createPostgresStore(pool: Pool, options: PostgresStoreOptions): 
     transaction: run => transaction(async tx => run(tx)),
     async recoverInterrupted() {
       return transaction(async (_tx, query) => {
-        await lockOutbox(query);
-        const { rows } = await query("SELECT event_id::text,reservation_operation_id,recovery_seed FROM local_ai.outbox WHERE state='reserved' ORDER BY created_at FOR UPDATE");
+        const { rows } = await query("SELECT record FROM local_ai.installation_operations WHERE record->>'status' IN ('accepted','running') FOR UPDATE");
         for (const row of rows) {
-          const seed = row.recovery_seed as LocalAiHistoryMetadataEvent;
-          validateEvent(seed);
-          const event = terminalFromSeed(row.event_id, seed);
-          validateEvent(event);
-          await query("UPDATE local_ai.outbox SET state='pending',event=$2::jsonb,reservation_operation_id=NULL,recovery_seed=NULL WHERE event_id=$1::uuid AND state='reserved'", [row.event_id, json(event)]);
-          if (seed.data.operation === 'install' && seed.data.operationId && seed.actor_id) {
-            const saved = await query(`SELECT record FROM local_ai.installation_operations
-              WHERE operation_id=$1 AND owner_id=$2 FOR UPDATE`, [seed.data.operationId, seed.actor_id]);
-            const operation = saved.rows[0]?.record as InstallationOperation | undefined;
-            if (operation && (operation.status === 'accepted' || operation.status === 'running')) {
-              const recovered: InstallationOperation = { ...operation, status: 'unknown', phase: 'failed', errorCode: 'INTERNAL', updatedAt: localTime(new Date()) };
-              await query(`UPDATE local_ai.installation_operations SET record=$3::jsonb,updated_at=$4::timestamptz
-                WHERE operation_id=$1 AND owner_id=$2`, [operation.operationId, operation.ownerId, json(recovered), recovered.updatedAt]);
-            }
-          }
+          const operation = row.record as InstallationOperation;
+          const recovered: InstallationOperation = { ...operation, status: 'unknown', phase: 'failed', errorCode: 'INTERNAL', updatedAt: localTime(new Date()) };
+          await query(`UPDATE local_ai.installation_operations SET record=$3::jsonb,updated_at=$4::timestamptz
+            WHERE operation_id=$1 AND owner_id=$2`, [operation.operationId, operation.ownerId, json(recovered), recovered.updatedAt]);
         }
         return rows.length;
-      });
-    },
-    async claimBatch(limit, leaseMs): Promise<readonly ClaimedOutboxEvent[]> {
-      checkPositiveInteger(limit, 1000);
-      checkPositiveInteger(leaseMs, 2_147_483_647);
-      return withClient(async client => {
-        const { rows } = await client.query(`WITH picked AS (
-            SELECT event_id FROM local_ai.outbox
-            WHERE state='pending' OR (state='sending' AND lease_until<=clock_timestamp())
-              OR (state='failed' AND retry_at IS NOT NULL AND retry_at<=clock_timestamp())
-            ORDER BY created_at,event_id LIMIT $1 FOR UPDATE SKIP LOCKED
-          )
-          UPDATE local_ai.outbox o SET state='sending',claim_token=gen_random_uuid(),lease_until=clock_timestamp()+($2::bigint * interval '1 millisecond'),
-            retry_at=NULL,attempts=o.attempts+1
-          FROM picked WHERE o.event_id=picked.event_id
-          RETURNING o.event,o.claim_token::text`, [limit, leaseMs]);
-        for (const row of rows) validateEvent(row.event as LocalAiHistoryMetadataEvent);
-        return rows.map((row: { event: LocalAiHistoryMetadataEvent; claim_token: string }) => ({ event: row.event, claimToken: row.claim_token }));
-      });
-    },
-    async acknowledge(eventId, claimToken): Promise<void> {
-      await withClient(async client => {
-        await client.query("DELETE FROM local_ai.outbox WHERE event_id=$1::uuid AND state='sending' AND claim_token=$2::uuid", [eventId, claimToken]);
-      });
-    },
-    async fail(eventId, claimToken, retryAt, errorCode): Promise<void> {
-      if (!deliveryErrors.has(errorCode)) throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_DELIVERY_ERROR');
-      if (retryAt !== null && !timestamp(retryAt)) throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_RETRY_TIME');
-      await withClient(async client => {
-        await client.query(`UPDATE local_ai.outbox SET state='failed',retry_at=$3::timestamptz,claim_token=NULL,lease_until=NULL,last_error_code=$4,last_error_at=clock_timestamp()
-          WHERE event_id=$1::uuid AND state='sending' AND claim_token=$2::uuid`, [eventId, claimToken, retryAt, errorCode]);
-      });
-    },
-    async status() {
-      return withClient(async client => {
-        const { rows } = await client.query(`SELECT
-          count(*) FILTER (WHERE state='reserved')::bigint AS reserved,
-          count(*) FILTER (WHERE state='pending' OR state='failed' AND retry_at IS NOT NULL)::bigint AS pending,
-          count(*) FILTER (WHERE state='sending')::bigint AS sending,
-          count(*) FILTER (WHERE state='failed' AND retry_at IS NULL)::bigint AS permanently_failed,
-          min(created_at) FILTER (WHERE state IN ('reserved','pending','sending') OR state='failed' AND retry_at IS NOT NULL) AS oldest_created_at,
-          (SELECT last_error_code FROM local_ai.outbox WHERE last_error_code IS NOT NULL ORDER BY last_error_at DESC LIMIT 1) AS last_error_code
-          FROM local_ai.outbox`);
-        const row = rows[0];
-        return {
-          reserved: Number(row.reserved), pending: Number(row.pending), sending: Number(row.sending), permanentlyFailed: Number(row.permanently_failed),
-          oldestCreatedAt: row.oldest_created_at ? localTime(new Date(row.oldest_created_at)) : null,
-          lastErrorCode: row.last_error_code && deliveryErrors.has(row.last_error_code) ? row.last_error_code : null,
-        };
       });
     },
   };

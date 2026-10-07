@@ -25,12 +25,8 @@
         "profileId": { "anyOf": [{ "$ref": "#/definitions/HistoryId" }, { "type": "null" }] },
         "operationId": { "$ref": "messages.schema.json#/definitions/Uuid" },
         "requestId": { "$ref": "messages.schema.json#/definitions/Uuid" },
-        "outcome": { "type": "string", "enum": ["accepted", "started", "succeeded", "failed", "cancelled", "interrupted", "unknown"] },
-        "phase": { "type": "string", "enum": ["accepted", "download", "verify", "publish", "load", "execute", "unload", "remove", "configure"] },
+        "outcome": { "type": "string", "enum": ["succeeded", "failed", "cancelled"] },
         "durationMs": { "type": "integer", "minimum": 0 },
-        "inputBytes": { "type": "integer", "minimum": 0 },
-        "resultBytes": { "type": "integer", "minimum": 0 },
-        "vectorDimensions": { "type": "integer", "minimum": 1 },
         "errorCode": { "type": "string", "enum": ["INVALID_ARGUMENT", "MODEL_NOT_FOUND", "MODEL_NOT_INSTALLED", "UNSUPPORTED_OPERATION", "MODEL_IN_USE", "INPUT_TOO_LARGE", "RESULT_TOO_LARGE", "BUSY", "MODEL_LOAD_FAILED", "ENGINE_UNAVAILABLE", "DEADLINE_EXCEEDED", "CANCELLED", "ARTIFACT_NOT_AVAILABLE", "DEPENDENCY_UNAVAILABLE", "INSTALLATION_FAILED", "REVISION_CONFLICT", "NOT_SUPPORTED", "INTERNAL"] }
       }
     }

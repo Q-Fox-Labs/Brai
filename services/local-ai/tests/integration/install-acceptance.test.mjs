@@ -7,7 +7,7 @@ import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import pg from 'pg';
-import { validateMetadataEvent, validateSchema } from '../../contracts/index.mjs';
+import { validateSchema } from '../../contracts/index.mjs';
 import { supportedProfiles } from '../../src/main.mjs';
 import { createHuggingFaceCatalog, createModelInstaller, registerSupportedProfiles } from '../../dist/install/huggingface.js';
 import { createPostgresStore } from '../../dist/storage/postgres.js';
@@ -63,7 +63,7 @@ test('protected real installer acceptance uses only isolated fixture resources',
     await assertRunDirectory(directories.hashCandidateDirectory);
     await assertRunDirectory(directories.enospcDirectory);
 
-    const store = createPostgresStore(pool, { outboxCapacity: 8, queryTimeoutMs: 5_000 });
+    const store = createPostgresStore(pool, { queryTimeoutMs: 5_000 });
     const phaseState = await assertPhaseDatabaseState(pool, store, profile, config);
     if (config.phase === 'hash') {
       await registerSupportedProfiles(store, [profile]);
@@ -71,8 +71,7 @@ test('protected real installer acceptance uses only isolated fixture resources',
       check(classifyHashNamespaceState(registered, profile) === 'registered', 'HASH_PROFILE_REGISTRATION_VALID');
       if (phaseState.hashNamespace === 'registered') {
         check(sameAcceptanceCounts(phaseState.state, registered), 'HASH_RESUME_REGISTRATION_COUNTS_UNCHANGED');
-        check(isDeepStrictEqual(phaseState.state.models, registered.models)
-          && isDeepStrictEqual(phaseState.state.events, registered.events), 'HASH_RESUME_REGISTRATION_FACTS_UNCHANGED');
+        check(isDeepStrictEqual(phaseState.state.models, registered.models), 'HASH_RESUME_REGISTRATION_UNCHANGED');
       }
       phaseState.state = registered;
     }
@@ -113,11 +112,9 @@ test('protected real installer acceptance uses only isolated fixture resources',
       check(operation?.status === 'failed' && operation.errorCode === 'INSTALLATION_FAILED', 'ENOSPC_TERMINAL_FAILED');
       const after = await readAcceptanceState(pool, store, profile, config.runId);
       check(after.installations.length === 0, 'ENOSPC_NO_INSTALLATION');
-      check(after.status.reserved === 0, 'ENOSPC_TERMINAL_RESERVATION_CLOSED');
       await assertNoFinalOrStagingDirectory(directories.enospcDirectory, profile, operation.operationId);
       receipt.failedOperation = true;
       receipt.installationsAfterEnospc = after.installations.length;
-      receipt.reservedAfterEnospc = after.status.reserved;
       receipt.failedOperationStatus = operation.status;
     } else if (config.phase === 'public') {
       await assertPublicFilesystem(directories.publicDirectory, totalBytes + config.publicReserveBytes);
@@ -151,16 +148,16 @@ test('protected real installer acceptance uses only isolated fixture resources',
       const request = installRequest(profile, config.runId, phaseRequestId(config.runId, 'public'), config.maxOperationMs);
       const downloads = { count: 0 };
       const barrier = createPublicInstallFetch(downloads, async () => {
-        const rows = await pool.query("SELECT event_id FROM local_ai.outbox WHERE state='reserved' AND reservation_operation_id=$1::text", [request.requestId]);
-        check(rows.rows.length === 1 && rows.rows[0].event_id !== request.requestId, 'PUBLIC_TERMINAL_RESERVATION_EXISTS');
-        return rows.rows[0].event_id;
+        const saved = await store.transaction(tx => tx.installationOperations.get(request.requestId, request.ownerId));
+        check(saved?.status === 'running', 'PUBLIC_DURABLE_OPERATION_BEFORE_DOWNLOAD');
+        return saved.operationId;
       });
       releaseFetchBarrier = barrier.release;
       installer = createInstaller(store, profile, directories.publicDirectory, config.maxOperationMs, files, barrier.fetch);
       const accepted = await installer.start(request);
       const repeatedWhileRunning = await installer.start(request);
       check(accepted.operationId === repeatedWhileRunning.operationId && repeatedWhileRunning.modelId === profile.modelId, 'RUNNING_REPEAT_IDEMPOTENT');
-      const terminalEventId = await waitWithBound(barrier.entered, 15_000, 'PUBLIC_DOWNLOAD_BARRIER_TIMEOUT');
+      const admittedOperationId = await waitWithBound(barrier.entered, 15_000, 'PUBLIC_DOWNLOAD_BARRIER_TIMEOUT');
       const running = await installer.get(request.requestId, request.ownerId);
       check(['accepted', 'running'].includes(running.status), 'PUBLIC_OPERATION_NOT_READY_WHILE_BLOCKED');
       const readyBeforePublish = await store.transaction(tx => tx.installations.get(profile.modelId, profile.revision));
@@ -179,15 +176,13 @@ test('protected real installer acceptance uses only isolated fixture resources',
       const installation = await store.transaction(tx => tx.installations.get(profile.modelId, profile.revision));
       check(installation?.directory === finalDirectory, 'PUBLIC_INSTALLATION_CANONICAL_DIRECTORY');
       await verifyPublishedTree(installation.directory, profile);
-      const terminalRows = await pool.query("SELECT event_id,state,event FROM local_ai.outbox WHERE event_id=$1::uuid", [terminalEventId]);
-      check(terminalRows.rows.length === 1 && terminalRows.rows[0].state === 'pending', 'PUBLIC_TERMINAL_EVENT_ID_STABLE');
-      check(terminalRows.rows[0].event?.data?.outcome === 'succeeded' && terminalRows.rows[0].event?.data?.phase === 'publish', 'PUBLIC_TERMINAL_EVENT_SUCCEEDED');
+      check(admittedOperationId === progress.terminal.operationId, 'PUBLIC_OPERATION_ID_STABLE');
       await installer.close();
       installer = createInstaller(store, profile, directories.publicDirectory, config.maxOperationMs, files, barrier.fetch);
       const repeatedAfterClose = await installer.start(request);
       check(repeatedAfterClose.operationId === progress.terminal.operationId && downloads.count === files.length, 'COMPLETED_REPEAT_NO_REFETCH');
       const afterRepeat = await readAcceptanceState(pool, store, profile, config.runId);
-      check(afterRepeat.events.length === 5, 'COMPLETED_REPEAT_NO_NEW_EVENT');
+      check(afterRepeat.operations.length === 2, 'COMPLETED_REPEAT_NO_NEW_OPERATION');
       await installer.close();
       installer = null;
       const ownerProbe = createInstaller(store, profile, directories.publicDirectory, config.maxOperationMs, files, createPublicInstallFetch(downloads).fetch);
@@ -195,21 +190,20 @@ test('protected real installer acceptance uses only isolated fixture resources',
       await ownerProbe.close();
       check(ownerOnly === 'MODEL_NOT_FOUND', 'INSTALL_OPERATION_OWNER_SCOPE');
       const after = await readAcceptanceState(pool, store, profile, config.runId);
-      check(after.installations.length === 1 && after.status.reserved === 0, 'PUBLIC_INSTALLATION_AND_TERMINAL_FACT');
+      check(after.installations.length === 1, 'PUBLIC_INSTALLATION_AND_TERMINAL_OPERATION');
       await assertMetadataOnly(after, profile, config.runId);
       receipt.installedFiles = files.length;
       receipt.verifiedBytes = totalBytes;
       receipt.progressSnapshots = progress.values.length;
       receipt.publicDownloads = downloads.count;
       receipt.terminalEventStable = true;
-      receipt.metadataFacts = after.events.length;
       receipt.retryRequestId = phaseRequestId(config.runId, 'public');
     } else if (config.phase === 'inspect') {
       const state = await readAcceptanceState(pool, store, profile, config.runId);
       const failed = await store.transaction(tx => tx.installationOperations.get(phaseRequestId(config.runId, 'enospc'), config.runId));
       const completed = await store.transaction(tx => tx.installationOperations.get(phaseRequestId(config.runId, 'public'), config.runId));
       check(failed?.status === 'failed' && completed?.status === 'completed', 'INSPECT_OWN_OPERATION_HISTORY');
-      check(state.installations.length === 1 && state.status.reserved === 0, 'INSPECT_OWN_FINAL_STATE');
+      check(state.installations.length === 1, 'INSPECT_OWN_FINAL_STATE');
       await assertMetadataOnly(state, profile, config.runId);
       const downloads = { count: 0 };
       installer = createInstaller(store, profile, directories.publicDirectory, config.maxOperationMs, files, createPublicInstallFetch(downloads).fetch);
@@ -221,7 +215,6 @@ test('protected real installer acceptance uses only isolated fixture resources',
       check(sameAcceptanceCounts(state, afterRepeats), 'NEW_PROCESS_REPEATS_NO_DATABASE_CHANGE');
       receipt.savedOperationRead = true;
       receipt.failedOperationRead = true;
-      receipt.metadataFacts = state.events.length;
     }
   } catch (error) {
     errorCode = safeCode(error);
@@ -366,7 +359,6 @@ async function assertPhaseDatabaseState(pool, store, profile, config) {
   }
   check(state.models.length === 1 && isDeepStrictEqual(state.models[0], profile.record), 'OWN_PROFILE_REGISTERED');
   check(state.operations.every(row => row.owner_id === config.runId && row.model_id === profile.modelId), 'ONLY_OWN_INSTALL_OPERATIONS');
-  check(state.events.every(row => row.event.actor_id === null || row.event.actor_id === config.runId), 'ONLY_OWN_METADATA_EVENTS');
   const failed = state.operations.find(row => row.operation_id === phaseRequestId(config.runId, 'enospc'));
   if (config.phase === 'enospc') {
     check(state.installations.length === 0, 'NO_EXISTING_INSTALLATION_BEFORE_RETRY');
@@ -385,26 +377,19 @@ async function readAcceptanceState(pool, store, profile, ownerId) {
   const { models, installations } = await readAcceptanceStoreRows(store);
   const operationResult = await pool.query('SELECT operation_id,owner_id,model_id,record FROM local_ai.installation_operations ORDER BY operation_id');
   const settingsResult = await pool.query('SELECT count(*)::bigint AS count FROM local_ai.settings');
-  const eventResult = await pool.query('SELECT event_id,state,event FROM local_ai.outbox ORDER BY event_id');
-  const status = await store.status();
   check(Number(settingsResult.rows[0].count) === 0, 'NO_SETTINGS_ROWS');
   for (const row of operationResult.rows) check(validateSchema('InstallOperation', row.record), 'INSTALL_OPERATION_SCHEMA');
-  for (const row of eventResult.rows) check(validateMetadataEvent(row.event), 'METADATA_EVENT_SCHEMA');
   check(models.length <= 1 && models.every(model => model.modelId === profile.modelId), 'ONLY_PINNED_MODEL_ROW');
   check(installations.length <= 1 && installations.every(item => item.modelId === profile.modelId && item.revision === profile.revision), 'ONLY_PINNED_INSTALLATION_ROW');
   check(operationResult.rows.every(row => row.owner_id === ownerId && row.model_id === profile.modelId), 'ONLY_RUN_OPERATION_ROWS');
-  check(status.reserved <= 1 && status.sending === 0 && status.permanentlyFailed === 0, 'BOUNDED_UNDELIVERED_OUTBOX');
-  return { models, installations, operations: operationResult.rows, settings: Number(settingsResult.rows[0].count), events: eventResult.rows, status };
+  return { models, installations, operations: operationResult.rows, settings: Number(settingsResult.rows[0].count) };
 }
 
 function sameAcceptanceCounts(left, right) {
   return left.models.length === right.models.length
     && left.installations.length === right.installations.length
     && left.operations.length === right.operations.length
-    && left.settings === right.settings
-    && left.events.length === right.events.length
-    && left.status.reserved === right.status.reserved
-    && left.status.pending === right.status.pending;
+    && left.settings === right.settings;
 }
 
 async function assertHashCandidate(rootDirectory, profile) {
@@ -485,10 +470,7 @@ async function assertNoFinalOrStagingDirectory(rootDirectory, profile, operation
 }
 
 async function assertMetadataOnly(state, profile, ownerId) {
-  check(state.events.length === 5 && state.status.pending === 5 && state.status.reserved === 0, 'OWN_OUTBOX_FACT_COUNT');
-  check(state.events.every(row => validateMetadataEvent(row.event)), 'OUTBOX_METADATA_SCHEMA_ONLY');
-  check(state.events.every(row => row.event.data.modelId === profile.modelId), 'OUTBOX_ONLY_PINNED_MODEL');
-  check(state.operations.every(row => row.owner_id === ownerId), 'OUTBOX_OWNER_SCOPE');
+  check(state.operations.every(row => row.owner_id === ownerId && row.model_id === profile.modelId && validateSchema('InstallOperation', row.record)), 'ONLY_PINNED_OWNER_OPERATION_METADATA');
 }
 
 function decodeMountPath(value) {
@@ -523,7 +505,6 @@ function safeCode(error) {
     'OWN_OUTBOX_FACT_COUNT', 'OUTBOX_METADATA_SCHEMA_ONLY', 'OUTBOX_ONLY_PINNED_MODEL', 'OUTBOX_OWNER_SCOPE',
     'INSTALL_OPERATION_BOUNDED_TIMEOUT', 'PUBLIC_INSTALL_BOUNDED_TIMEOUT', 'EXPECTED_NOT_SUPPORTED',
     'EXPECTED_INVALID_ARGUMENT', 'OWN_PROFILE_REGISTERED', 'NO_EXISTING_INSTALLATION_BEFORE_RETRY',
-    'ONLY_OWN_INSTALL_OPERATIONS', 'ONLY_OWN_METADATA_EVENTS', 'ENOSPC_PHASE_HAS_NO_PRIOR_OPERATION',
     'TEST_TIMEOUT_MATCHES_WATCHDOG', 'COMPLETED_REPEAT_NO_NEW_EVENT', 'INSPECT_OWN_FINAL_INSTALLATION',
     'NEW_PROCESS_REPEAT_READS_SAVED_OPERATION', 'PUBLIC_FINAL_DIRECTORY_ABSENT_BEFORE_PUBLICATION',
     'PUBLIC_INSTALLATION_CANONICAL_DIRECTORY', 'PUBLIC_NOT_READY_BEFORE_PUBLICATION',
@@ -536,7 +517,6 @@ function safeCode(error) {
     'HASH_PROFILE_REGISTRATION_VALID', 'HASH_RESUME_REGISTRATION_COUNTS_UNCHANGED',
     'HASH_RESUME_REGISTRATION_FACTS_UNCHANGED',
     'PUBLIC_RETRY_REQUIRES_PRIOR_ENOSPC_FAILURE', 'INSTALL_OPERATION_SCHEMA', 'METADATA_EVENT_SCHEMA',
-    'ONLY_PINNED_MODEL_ROW', 'ONLY_PINNED_INSTALLATION_ROW', 'ONLY_RUN_OPERATION_ROWS', 'BOUNDED_UNDELIVERED_OUTBOX',
     'INSPECT_OWN_OPERATION_HISTORY', 'INSPECT_OWN_FINAL_STATE', 'CASE_DIRECTORY_NOT_LINK', 'CASE_DIRECTORY_REALPATH',
     'CASE_DIRECTORY_OWNER_MODE', 'CASE_TREE_HAS_NO_LINKS', 'CASE_TREE_HAS_ONLY_FILES', 'HASH_CANDIDATE_EXACT_FILE_COUNT',
     'HASH_CANDIDATE_FILE_SHAPE', 'HASH_CANDIDATE_SINGLE_PINNED_FILE_MISMATCH', 'ACCEPTED_PROFILE_FILE_MANIFEST',

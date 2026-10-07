@@ -112,7 +112,7 @@ function requestContext(
       deadlineAt: suppliedDeadline === Number.POSITIVE_INFINITY
         ? new Date(deadlineMs).toISOString()
         : value.deadlineAt as string,
-      signal,
+      signal, deadlineManaged: true,
     },
     timeoutMs: Math.max(1, deadlineMs - now),
   };
@@ -147,6 +147,8 @@ export async function startLocalAiNats(
   if (installed.length === 0) throw new TypeError('At least one local-ai service handler is required');
 
   const active = new Set<Promise<void>>();
+  const controls = new Set<Promise<void>>();
+  const controlCapacity = 4;
   let rejectedRequests = 0;
   let timedOutRequests = 0;
   let failedRequests = 0;
@@ -164,6 +166,7 @@ export async function startLocalAiNats(
     queue: 'brai_local_ai',
     statsHandler: async () => ({
       activeRequests: active.size,
+      activeControlRequests: controls.size,
       maxConcurrentRequests: config.maxConcurrentRequests,
       rejectedRequests,
       timedOutRequests,
@@ -193,7 +196,9 @@ export async function startLocalAiNats(
           sendError(message, new LocalAiError('DEPENDENCY_UNAVAILABLE', 'DEPENDENCY_UNAVAILABLE', true));
           return;
         }
-        if (active.size >= config.maxConcurrentRequests) {
+        const control = subject === subjects.cancel || subject === subjects.status;
+        const admission = control ? controls : active;
+        if (admission.size >= (control ? controlCapacity : config.maxConcurrentRequests)) {
           rejectedRequests++;
           failedRequests++;
           sendError(message, new LocalAiError('BUSY', 'BUSY', true));
@@ -209,10 +214,10 @@ export async function startLocalAiNats(
             const { context, timeoutMs } = requestContext(request, config.maxRequestMs, abortController.signal, subject);
             const execution = Promise.resolve().then(() => handler(request, context));
             const tracked = execution.then(() => undefined, () => undefined);
-            active.add(tracked);
+            admission.add(tracked);
             void tracked.finally(() => {
               settledHandlers++;
-              active.delete(tracked);
+              admission.delete(tracked);
             });
 
             const deadline = new Promise<never>((_resolve, reject) => {
@@ -291,8 +296,11 @@ export async function startLocalAiNats(
   }
 
   async function drainHandlers(): Promise<void> {
-    await Promise.all([...active]);
+    await Promise.all([...active, ...controls]);
   }
+
+  try { await nc.flush(); }
+  catch { await stopAdmission(); throw new LocalAiError('DEPENDENCY_UNAVAILABLE', 'DEPENDENCY_UNAVAILABLE', true); }
 
   return {
     service,

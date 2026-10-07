@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, mkdir, open, readdir, realpath, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
-import type { LocalAiStore } from '../ports.js';
+import type { HistoryFactPort, LocalAiStore } from '../ports.js';
 import { LocalAiError } from '../errors.js';
 import type {
   InstallationOperation, InstallationRecord, LocalAiHistoryMetadataEvent, ModelFile, ModelRecord,
@@ -84,6 +84,8 @@ export type ModelInstaller = {
 
 export type ModelInstallerOptions = {
   store: LocalAiStore;
+  history?: HistoryFactPort;
+  installed?(modelId: string): Promise<void>;
   profiles: readonly SupportedProfile[];
   rootDirectory: string;
   fetchImpl?: typeof fetch;
@@ -140,7 +142,7 @@ export function createHuggingFaceCatalog(options: HuggingFaceCatalogOptions): Hu
   };
 }
 
-/** Проверяет профильные записи и добавляет отсутствующие записи; совпадающие факты не перезаписывает. */
+/** Проверяет профильные записи и добавляет отсутствующие записи; совпадающие записи не перезаписывает. */
 export async function registerSupportedProfiles(
   store: LocalAiStore,
   profiles: readonly SupportedProfile[],
@@ -151,14 +153,6 @@ export async function registerSupportedProfiles(
       const existing = await tx.models.get(profile.modelId);
       if (existing === null) {
         await tx.models.put(profile.record);
-        const occurredAt = new Date().toISOString();
-        const operationId = randomUUID();
-        await tx.outbox.append({
-          id: randomUUID(), type_id: 1301, occurred_at: occurredAt, actor_id: null,
-          scope_type: 'system', scope_id: 'local_ai', object_type: 'model', object_id: profile.modelId,
-          data: { operation: 'configure', modelId: profile.modelId, revision: profile.revision,
-            profileId: profile.profileId, operationId, outcome: 'succeeded', phase: 'configure' },
-        });
       } else if (!samePreparedRecord(existing, profile.record)) {
         throw new LocalAiError('REVISION_CONFLICT', 'SUPPORTED_PROFILE_CATALOG_CONFLICT');
       }
@@ -282,7 +276,7 @@ export function createModelInstaller(options: ModelInstallerOptions): ModelInsta
           modelId: profile.modelId, revision: profile.revision, profileId: profile.profileId,
           directory: realSource, files: publicFiles(profile.files), installedAt: now(),
         };
-        return await options.store.transaction(async tx => {
+        const verified = await options.store.transaction(async tx => {
           const record = await tx.installations.get(profile.modelId, profile.revision);
           if (record) {
             if (!sameInstallation(record, install)) throw new LocalAiError('REVISION_CONFLICT', 'INSTALLATION_REVISION_CONFLICT');
@@ -291,9 +285,10 @@ export function createModelInstaller(options: ModelInstallerOptions): ModelInsta
           const model = await tx.models.get(profile.modelId);
           if (!model || !samePreparedRecord(model, profile.record)) throw new LocalAiError('MODEL_NOT_FOUND', 'SUPPORTED_PROFILE_NOT_REGISTERED');
           await tx.installations.put(install);
-          await tx.outbox.append(installEvent(install, randomUUID(), null, 'succeeded', 'publish', now()));
           return install;
         });
+        await options.installed?.(profile.modelId);
+        return verified;
       } finally {
         activeTargets.delete(targetKey);
       }
@@ -377,11 +372,6 @@ export function createModelInstaller(options: ModelInstallerOptions): ModelInsta
       }
       const created = operationRecord(request, 'accepted', 'queued', null, null, now(), now());
       await tx.installationOperations.put(created);
-      const accepted = installEvent(
-        { modelId: profile.modelId, revision: profile.revision, profileId: profile.profileId, directory: installationDirectory(rootDirectory, profile), files: publicFiles(profile.files), installedAt: created.createdAt },
-        operationId, request.ownerId, 'accepted', 'accepted', now(),
-      );
-      await tx.outbox.appendAdmission(accepted, { operationId, terminalEventId: installTerminalEventId(operationId) });
       return created;
     });
     return current;
@@ -485,21 +475,24 @@ export function createModelInstaller(options: ModelInstallerOptions): ModelInsta
       if (!model || !samePreparedRecord(model, profile.record)) throw new LocalAiError('MODEL_NOT_FOUND', 'SUPPORTED_PROFILE_NOT_REGISTERED');
       await tx.installations.put(install);
       await tx.installationOperations.put(completed);
-      await tx.outbox.appendCompletion(operation.operationId, { ...installEvent(install, operation.operationId, operation.ownerId, 'succeeded', 'publish', now()), id: installTerminalEventId(operation.operationId) });
     });
+    await options.installed?.(profile.modelId);
+    const fact = installEvent(install, operation.operationId, operation.ownerId, 'succeeded', now());
+    fact.data.durationMs = Math.max(0, Date.parse(completed.updatedAt) - Date.parse(operation.createdAt));
+    publish(fact);
   }
 
+  function publish(fact: LocalAiHistoryMetadataEvent): void {
+    try { options.history?.publish(fact); } catch { /* История не меняет зафиксированный исход. */ }
+  }
   async function terminal(operation: InstallationOperation, profile: SupportedProfile, outcome: 'failed' | 'cancelled'): Promise<void> {
-    await options.store.transaction(async tx => {
-      await tx.installationOperations.put(operation);
-      await tx.outbox.appendCompletion(operation.operationId, {
-        ...installEvent(
-          { modelId: profile.modelId, revision: profile.revision, profileId: profile.profileId, directory: installationDirectory(rootDirectory, profile), files: publicFiles(profile.files), installedAt: operation.createdAt },
-          operation.operationId, operation.ownerId, outcome, eventPhase(operation.phase), now(), operation.errorCode ?? undefined,
-        ),
-        id: installTerminalEventId(operation.operationId),
-      });
-    });
+    await options.store.transaction(tx => tx.installationOperations.put(operation));
+    const fact = installEvent(
+      { modelId: profile.modelId, revision: profile.revision, profileId: profile.profileId, directory: installationDirectory(rootDirectory, profile), files: publicFiles(profile.files), installedAt: operation.createdAt },
+      operation.operationId, operation.ownerId, outcome, now(), operation.errorCode ?? undefined,
+    );
+    fact.data.durationMs = Math.max(0, Date.parse(operation.updatedAt) - Date.parse(operation.createdAt));
+    publish(fact);
   }
 
   async function saveOperation(operation: InstallationOperation): Promise<void> {
@@ -833,20 +826,11 @@ function operationRecord(
 }
 
 
-function installTerminalEventId(operationId: string): string {
-  const hex = createHash('sha256').update('brai-local-ai-install-terminal:' + operationId).digest('hex').slice(0, 32).split('');
-  hex[12] = '5';
-  hex[16] = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
-  const value = hex.join('');
-  return value.slice(0, 8) + '-' + value.slice(8, 12) + '-' + value.slice(12, 16) + '-' + value.slice(16, 20) + '-' + value.slice(20);
-}
-
 function installEvent(
   install: InstallationRecord,
   operationId: string,
   actorId: string | null,
   outcome: LocalAiHistoryMetadataEvent['data']['outcome'],
-  phase: NonNullable<LocalAiHistoryMetadataEvent['data']['phase']>,
   occurredAt: string,
   errorCode?: LocalAiHistoryMetadataEvent['data']['errorCode'],
 ): LocalAiHistoryMetadataEvent {
@@ -856,17 +840,10 @@ function installEvent(
     object_id: install.modelId,
     data: {
       operation: 'install', modelId: install.modelId, revision: install.revision,
-      profileId: install.profileId, operationId, outcome, phase,
+      profileId: install.profileId, operationId, outcome,
       ...(errorCode ? { errorCode } : {}),
     },
   };
-}
-
-function eventPhase(phase: InstallationOperation['phase']): NonNullable<LocalAiHistoryMetadataEvent['data']['phase']> {
-  if (phase === 'verifying') return 'verify';
-  if (phase === 'publishing' || phase === 'completed') return 'publish';
-  if (phase === 'cancelled') return 'download';
-  return 'download';
 }
 
 function validateInstallRequest(request: InstallRequest): void {

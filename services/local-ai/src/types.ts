@@ -9,7 +9,7 @@ export type ServiceErrorCode =
   | 'MODEL_IN_USE' | 'INPUT_TOO_LARGE' | 'RESULT_TOO_LARGE' | 'BUSY' | 'MODEL_LOAD_FAILED'
   | 'ENGINE_UNAVAILABLE' | 'DEADLINE_EXCEEDED' | 'CANCELLED' | 'ARTIFACT_NOT_AVAILABLE'
   | 'DEPENDENCY_UNAVAILABLE' | 'INSTALLATION_FAILED' | 'REVISION_CONFLICT' | 'NOT_SUPPORTED' | 'INTERNAL';
-export type OperationContext = { ownerId: string; operationId: string; deadlineAt: string; signal: AbortSignal };
+export type OperationContext = { ownerId: string; operationId: string; deadlineAt: string; signal: AbortSignal; deadlineManaged?: true };
 export type ModelSelector = { modelId: string; revision: string; profileId: string };
 export type ModelFile = { path: string; sizeBytes: number; sha256: string };
 export type RuntimeState = 'unloaded' | 'loading' | 'ready' | 'unloading' | 'error';
@@ -52,16 +52,12 @@ export type LocalAiHistoryMetadataEvent = {
   object_type: 'model' | 'installation' | 'operation'; object_id: string;
   data: {
     operation: 'invoke' | 'install' | 'configure' | 'load' | 'unload' | 'remove';
-    modelId: string; outcome: 'accepted' | 'started' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted' | 'unknown';
+    modelId: string; outcome: 'succeeded' | 'failed' | 'cancelled';
     revision?: string | null; profileId?: string | null; operationId?: string; requestId?: string;
-    phase?: 'accepted' | 'download' | 'verify' | 'publish' | 'load' | 'execute' | 'unload' | 'remove' | 'configure';
-    durationMs?: number; inputBytes?: number; resultBytes?: number; vectorDimensions?: number;
+    durationMs?: number;
     errorCode?: ServiceErrorCode;
   };
 };
-export type OutboxEntryState = 'reserved' | 'pending' | 'sending' | 'failed';
-export type ClaimedOutboxEvent = { event: LocalAiHistoryMetadataEvent; claimToken: string };
-export type DeliveryErrorCode = 'HISTORY_UNAVAILABLE' | 'HISTORY_REJECTED' | 'DELIVERY_INTERNAL';
 export interface LocalAiTx {
   models: {
     list(filter: CatalogFilter): Promise<ModelRecord[]>;
@@ -83,13 +79,7 @@ export interface LocalAiTx {
     get(modelId: string): Promise<ModelSettings | null>;
     put(modelId: string, value: ModelSettings): Promise<void>;
   };
-  outbox: {
-    append(event: LocalAiHistoryMetadataEvent): Promise<void>;
-    /** Атомарно записывает принятие и резервирует ID терминального факта. */
-    appendAdmission(event: LocalAiHistoryMetadataEvent, reservation: { operationId: string; terminalEventId: string }): Promise<void>;
-    /** Заменяет резерв терминальным событием с тем же заранее выделенным ID. */
-    appendCompletion(operationId: string, event: LocalAiHistoryMetadataEvent): Promise<void>;
-  };
+
 }
 export type ResolvedModel = { model: ModelSelector; installation: Readonly<InstallationRecord> };
 export type EmbedInput = { model: ModelSelector; texts: readonly string[]; purpose: InvocationPurpose };
