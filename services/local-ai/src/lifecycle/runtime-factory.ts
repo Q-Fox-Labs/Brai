@@ -26,7 +26,7 @@ export type ProfileRuntimeFactoryConfig = {
 };
 
 type RpcReply = { jsonrpc: '2.0'; id: string; result?: unknown; error?: { code: number; message: string } };
-type RpcWaiter = { resolve: (value: unknown) => void; reject: (error: unknown) => void; timer: NodeJS.Timeout; signal: AbortSignal; abort: () => void };
+type RpcWaiter = { resolve: (value: unknown) => void; reject: (error: unknown) => void; timer: NodeJS.Timeout; signal: AbortSignal; abort: () => void; method: string; startedAt: number };
 
 function serviceError(code: ConstructorParameters<typeof LocalAiError>[0], message: string = code): LocalAiError {
   return new LocalAiError(code, message, code === 'ENGINE_UNAVAILABLE' || code === 'DEPENDENCY_UNAVAILABLE');
@@ -231,7 +231,8 @@ function spawnRuntime(config: ProfileConfig, args: readonly string[], options: S
       await awaitConfirmedExit();
       await cleanup();
     })().catch(error => {
-      diagnostic('stop', 'process_group', options.executor, error instanceof LocalAiError ? error.message : 'ENGINE_UNAVAILABLE', Date.now() - startedAt, child);
+      const safeCodes = ['PROCESS_GROUP_EXIT_UNCONFIRMED', 'PROCESS_EXIT_UNCONFIRMED', 'TMPDIR_CLEANUP_UNCONFIRMED'];
+      diagnostic('stop', 'process_group', options.executor, error instanceof LocalAiError && safeCodes.includes(error.message) ? error.message : 'ENGINE_UNAVAILABLE', Date.now() - startedAt, child);
       throw error;
     });
     return stopping;
@@ -357,7 +358,7 @@ class ChildRuntime implements RuntimePort {
       const privateData = assertRecord(reply.error.data) && assertRecord(reply.error.data.diagnostic) ? reply.error.data.diagnostic : undefined;
       const stage = privateData && ['audio_probe', 'audio_decode', 'short_transcribe', 'longform_upstream', 'longform_normalize'].includes(String(privateData.stage)) ? String(privateData.stage) : 'runner_reply';
       const error = reply.error.code === -32001 ? serviceError('INVALID_ARGUMENT', 'AUDIO_INVALID_OR_TOO_LARGE') : serviceError('ENGINE_UNAVAILABLE');
-      diagnostic('transcribe', stage, 'gigaam_pytorch', error.code, 0);
+      diagnostic(waiter.method, stage, 'gigaam_pytorch', error.code, Date.now() - waiter.startedAt);
       waiter.reject(error);
     }
     else if (Object.hasOwn(reply, 'result')) waiter.resolve(reply.result);
@@ -384,7 +385,7 @@ class ChildRuntime implements RuntimePort {
         context.signal.removeEventListener('abort', abort);
         reject(serviceError(Date.parse(context.deadlineAt) <= Date.now() ? 'DEADLINE_EXCEEDED' : 'ENGINE_UNAVAILABLE'));
       }, this.#config.requestTimeoutMs);
-      const waiter = { resolve, reject, timer, signal: context.signal, abort };
+      const waiter = { resolve, reject, timer, signal: context.signal, abort, method, startedAt: Date.now() };
       this.#waiters.set(id, waiter);
       context.signal.addEventListener('abort', abort, { once: true });
       const ok = this.#child.stdin!.write(line);

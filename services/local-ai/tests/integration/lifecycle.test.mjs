@@ -98,7 +98,7 @@ test('native diagnostics preserve a safe runner stage and exclude sentinel paylo
     await runtime.close(); await runtime.exited;
     assert.equal(output.join('').includes(sentinel), false);
     const rows = output.flatMap(line => line.trim().split('\n').filter(Boolean).map(value => JSON.parse(value)));
-    assert.ok(rows.some(row => row.stage === 'audio_decode' && row.code === 'INVALID_ARGUMENT'));
+    assert.ok(rows.some(row => row.operation === 'transcribe' && row.stage === 'audio_decode' && row.code === 'INVALID_ARGUMENT' && Number.isInteger(row.durationMs) && row.durationMs >= 0));
     assert.ok(rows.some(row => row.stage === 'group_exit' && row.code === 'EXIT_CONFIRMED'));
     assert.ok(rows.every(row => Object.keys(row).every(key => ['operation', 'stage', 'executor', 'code', 'durationMs', 'exitCode', 'signal'].includes(key))));
   } finally {
