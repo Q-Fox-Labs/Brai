@@ -23,15 +23,19 @@ import { collectMaterials, goalBlocksNewTask, emptyMaterialView, executionText, 
 import { acceptedDraft, restoredDraft, confirmedSubmission, imageModel, prepareImage, releaseAttachmentPreview, type Attachment, type ComposerDraft } from "../../lib/agent/images";
 import { uploadAttachment } from "../../lib/agent/uploads";
 import ImageUploadStatus from "./image-upload-status";
+import QueuePanel from "./queue-panel";
+import { createQueueStore } from "../../lib/agent/queue-storage";
+import { createQueueController, createBrowserQueueCoordination, type QueueViewState, type QueueDispatch } from "../../lib/agent/queue-controller";
+import { releaseQueueEntries, type QueueEntry, type QueueAttempt } from "../../lib/agent/queue";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import "./agent.css";
+import "./queue-panel.css";
 import { useStartupReady } from "../shell/app-startup-boundary";
 
 type CachedChat = { snapshot: NativeSnapshot | null; history: DisplayItem[]; generation: string; cursor: string | null; draft: ComposerDraft; model: string; effort: string; permissionMode: PermissionMode; agentMode: AgentMode; materials: MaterialView; ready: boolean; uncertain: boolean };
-type QueuedMessage = { id: string; chat: string; generation: string; draft: ComposerDraft; model: string; effort: string; permissionMode: PermissionMode; agentMode: AgentMode; state: "waiting" | "sending" | "failed" | "unknown" };
 const emptyDraft = (): ComposerDraft => ({ text: "", revision: 0, images: [] });
 const defaultModelId = "gpt-6.1-sol", defaultEffort = "medium";
 type Props = { active: boolean; userId: string; email: string; onLogout: () => void; onUnauthorized: () => void; accountMessage: string };
@@ -58,9 +62,13 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const [historyGeneration, setHistoryGeneration] = useState(""), [history, setHistory] = useState<DisplayItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null), [sidebarOpen, setSidebarOpen] = useState(false);
   const [composer, setComposer] = useState<ComposerDraft>(emptyDraft), [message, setMessage] = useState(""), [busy, setBusy] = useState(false), [uploading, setUploading] = useState(false);
+  const [archiveError, setArchiveError] = useState("");
   const [corrections, setCorrections] = useState<PendingCorrection[]>([]);
-  const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([]), queuedMessagesRef = useRef<QueuedMessage[]>([]);
-  queuedMessagesRef.current = queuedMessages;
+  const [queueState, setQueueState] = useState<QueueViewState>({ scope: null, revision: 0, entries: [], paused: true, available: false, loading: false, error: "" });
+  const queueController = useRef<ReturnType<typeof createQueueController> | null>(null);
+  const account = useRef(userId); account.current = userId;
+  const enqueuePending = useRef(false);
+  const queueDispatchPending = useRef(false);
   const [awaitingTurn, setAwaitingTurn] = useState<{ chat: string; generation: string; turnId: string | null; seq: number; agentMode: AgentMode }[]>([]);
   const draft = composer.text, attachments = composer.images;
   const newDraft = useRef<ComposerDraft>(emptyDraft()), newDraftUncertain = useRef(false);
@@ -70,7 +78,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const queue = useRef<{ file: File; version: number; context: string; duplicate: string; limit: number }[]>([]), preparing = useRef(false);
   const [preparationCount, setPreparationCount] = useState(0);
   const [imageProgress, setImageProgress] = useState<Record<string, number>>({});
-  const pendingSubmissions = useRef(new Map<string, { operationId: string; chat: string; unknown: boolean; confirmed?: boolean; completedAt?: number; settleTimer?: ReturnType<typeof setTimeout>; sent: ComposerDraft; queued?: ComposerDraft; projectId: string; threadId: string; newChat?: boolean; draftAccepted?: boolean }>());
+  const pendingSubmissions = useRef(new Map<string, { operationId: string; chat: string; unknown: boolean; confirmed?: boolean; completedAt?: number; settleTimer?: ReturnType<typeof setTimeout>; sent: ComposerDraft; queued?: ComposerDraft; managed?: boolean; projectId: string; threadId: string; newChat?: boolean; draftAccepted?: boolean }>());
   const checkingSubmission = useRef(false);
   const [failedChats, setFailedChats] = useState<Set<string>>(() => new Set());
   const attachmentContext = useRef("");
@@ -97,6 +105,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const [materialView, setMaterialView] = useState<MaterialView>(emptyMaterialView);
   const composerInput = useRef<HTMLTextAreaElement>(null);
   const archived = useRef(new Set<string>());
+  const archiveRequest = useRef<AbortController | null>(null);
   const pageRequests = useRef(new Map<string, symbol>());
 
   const loadThreads = useCallback(async (id: string, nextCursor?: string, quiet = false) => {
@@ -147,13 +156,13 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     const stopCatalog = startCatalogPolling(() => refreshCatalog(true), () => catalogVisible.current);
     return () => {
       alive.current = false; stopCatalog(); attachmentUpload.current?.abort(); attachmentUpload.current = null;
+      archiveRequest.current?.abort(); archiveRequest.current = null;
       ++preparationVersion.current; queue.current = [];
       const previews = new Map<string, Attachment>();
       for (const image of composerRef.current.images) previews.set(image.id, image);
       for (const image of newDraft.current.images) previews.set(image.id, image);
       for (const chat of cache.current.values()) for (const image of chat.draft.images) previews.set(image.id, image);
-      for (const queued of queuedMessagesRef.current) for (const image of queued.draft.images) previews.set(image.id, image);
-      for (const pending of pendingSubmissions.current.values()) { clearTimeout(pending.settleTimer); for (const image of pending.sent.images) previews.set(image.id, image); }
+      for (const pending of pendingSubmissions.current.values()) { clearTimeout(pending.settleTimer); for (const image of pending.sent.images) previews.set(image.previewUrl, image); }
       for (const image of previews.values()) releaseAttachmentPreview(image);
       cache.current.clear(); pendingSubmissions.current.clear(); composerRef.current = emptyDraft(); requests.clear(); stopMetadata(); stopLimits(); liveMetadata.current.clear(); client.dispose();
     };
@@ -196,6 +205,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   }, [client, projectId, threadId]);
 
   function selectChat(id: string, chatId = "") {
+    setArchiveError("");
     if (id === projectId && chatId === threadId) { setSidebarOpen(false); return; }
     ++selection.current;
     attachmentUpload.current?.abort(); attachmentUpload.current = null;
@@ -230,16 +240,29 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
 
   async function archiveChat(id: string, chatId: string) {
     if (locked.current || uncertain.current) return;
-    locked.current = true; setBusy(true); setMessage("");
-    const key = `${id}:${chatId}`, operationId = crypto.randomUUID();
+    locked.current = true; setBusy(true); setMessage(""); setArchiveError("");
+    const key = `${id}:${chatId}`, operationId = crypto.randomUUID(), token = selection.current;
+    const coordination = createBrowserQueueCoordination(), store = createQueueStore(), controller = new AbortController();
+    archiveRequest.current = controller;
+    const current = () => alive.current && account.current === userId && token === selection.current && !controller.signal.aborted;
     try {
-      const { generation } = await client.request({ action: "status" });
-      const reply = await client.request({ action: "archive", projectId: id, threadId: chatId, generation, operationId });
-      if (reply.outcome !== "accepted" || reply.generation !== generation || reply.operationId !== operationId || reply.threadId !== chatId) throw new AgentError("BAD_REPLY", "unknown");
-      if (!alive.current) return;
+      if (!coordination.available) throw new Error("Архивирование недоступно: нужны IndexedDB, Web Locks и BroadcastChannel для проверки очереди.");
+      // AIDEV-NOTE: Та же блокировка, что у enqueue/send, закрывает окно между проверкой очереди и архивированием.
+      const accepted = await coordination.runExclusive(userId, async () => {
+        if (!current()) return false;
+        const queued = await store.load({ userId, projectId: id, threadId: chatId });
+        try { if (queued.entries.length) throw new Error("Удалите сообщения из очереди перед архивированием"); }
+        finally { releaseQueueEntries(queued.entries); }
+        if (!current()) return false;
+        const { generation } = await client.request({ action: "status" });
+        if (!current()) return false;
+        const reply = await client.request({ action: "archive", projectId: id, threadId: chatId, generation, operationId });
+        if (reply.outcome !== "accepted" || reply.generation !== generation || reply.operationId !== operationId || reply.threadId !== chatId) throw new AgentError("BAD_REPLY", "unknown");
+        return true;
+      }, controller.signal);
+      if (!accepted || !alive.current || account.current !== userId) return;
       archived.current.add(key);
       setCorrections(previous => previous.filter(value => value.chat !== key));
-      setQueuedMessages(previous => previous.filter(value => value.chat !== key));
       setAwaitingTurn(previous => previous.filter(value => value.chat !== key));
       liveMetadata.current.delete(key);
       setPages(previous => {
@@ -251,8 +274,13 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       if (removed) for (const image of removed.draft.images) releaseAttachmentPreview(image);
       cache.current.delete(key);
     } catch (error) {
-      if (alive.current) setMessage(errorText(error));
-    } finally { locked.current = false; if (alive.current) setBusy(false); }
+      if (current()) setArchiveError(errorText(error));
+    } finally {
+      store.close(); coordination.close();
+      if (archiveRequest.current === controller) archiveRequest.current = null;
+      if (account.current === userId) locked.current = false;
+      if (alive.current && account.current === userId) setBusy(false);
+    }
   }
 
   async function moreHistory() {
@@ -269,16 +297,16 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     } catch (error) { if (token === selection.current) setMessage(errorText(error)); }
   }
 
-  function beginSubmission(sent: ComposerDraft, chat: string, queued?: ComposerDraft, selected = snapshot!, newChat = false): string {
-    const operationId = crypto.randomUUID();
-    pendingSubmissions.current.set(operationId, { operationId, chat, unknown: false, sent, queued, projectId: selected.projectId, threadId: selected.threadId, newChat });
+  function beginSubmission(sent: ComposerDraft, chat: string, queued?: ComposerDraft, selected = snapshot!, newChat = false, persistedOperationId?: string): string {
+    const operationId = persistedOperationId ?? crypto.randomUUID(), managed = !!persistedOperationId;
+    pendingSubmissions.current.set(operationId, { operationId, chat, unknown: false, sent, queued, managed, projectId: selected.projectId, threadId: selected.threadId, newChat });
     setFailedChats(previous => new Set([...previous].filter(value => value !== chat && (!newChat || value !== `${selected.projectId}:`))));
     followBottom.current = true;
     setCorrections(previous => [...previous, { chat, generation: selected.generation,
       knownIds: mergeTimeline(newChat ? [] : history, selected.items).map(item => item.id), state: "sending", draft: sent,
       item: { id: operationId, turnId: selected.turn?.id ?? "", type: "userMessage", text: sent.text } }]);
     // AIDEV-NOTE: Новый черновик сохраняется до принятия; существующий чат показывает отправку в истории.
-    if (!queued && !newChat) changeDraft(acceptedDraft(composerRef.current, sent), false);
+    if (!queued && !newChat && !managed) changeDraft(acceptedDraft(composerRef.current, sent), false);
     return operationId;
   }
 
@@ -301,7 +329,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     if (pending.sent.images.length && remaining > 0) {
       pending.confirmed = true; pending.unknown = false;
       const saved = cache.current.get(chat);
-      const unresolved = [...pendingSubmissions.current.values()].some(value => value.chat === chat && value.unknown);
+      const unresolved = [...pendingSubmissions.current.values()].some(value => value.chat === chat && value.unknown && !value.managed);
       if (saved) saved.uncertain = unresolved;
       if (currentChat.current === chat) uncertain.current = unresolved;
       setCorrections(previous => previous.filter(value => value.item.id !== operationId));
@@ -312,11 +340,10 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     setImageProgress(previous => Object.fromEntries(Object.entries(previous).filter(([id]) => !pending.sent.images.some(image => image.id === id))));
     for (const image of pending.sent.images) releaseAttachmentPreview(image);
     const saved = cache.current.get(chat);
-    const unresolved = [...pendingSubmissions.current.values()].some(value => value.chat === chat && value.unknown);
+    const unresolved = [...pendingSubmissions.current.values()].some(value => value.chat === chat && value.unknown && !value.managed);
     if (saved) saved.uncertain = unresolved;
     if (currentChat.current === chat) uncertain.current = unresolved;
     setCorrections(previous => previous.filter(value => value.item.id !== pending.operationId));
-    if (pending.queued) setQueuedMessages(previous => previous.filter(value => value.draft !== pending.queued));
   }
 
   function rejectSubmission(operationId: string) {
@@ -324,12 +351,17 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     if (!pending) return;
     const chat = pending.chat;
     pendingSubmissions.current.delete(operationId);
+    if (pending.managed) {
+      for (const image of pending.sent.images) releaseAttachmentPreview(image);
+      setImageProgress(previous => Object.fromEntries(Object.entries(previous).filter(([id]) => !pending.sent.images.some(image => image.id === id))));
+      setCorrections(previous => previous.filter(value => value.item.id !== operationId));
+      return;
+    }
     const saved = cache.current.get(chat);
     if (pending.newChat) newDraftUncertain.current = false;
     if (saved) { if (!pending.newChat) saved.draft = restoredDraft(saved.draft, pending.sent); saved.uncertain = false; }
     if (currentChat.current === chat) { if (!pending.newChat) changeDraft(restoredDraft(composerRef.current, pending.sent), false); uncertain.current = false; }
     setCorrections(previous => previous.filter(value => value.item.id !== pending.operationId));
-    if (pending.queued) setQueuedMessages(previous => previous.filter(value => value.draft !== pending.queued));
     setFailedChats(previous => new Set([...previous, pending.newChat ? `${pending.projectId}:` : chat]));
   }
 
@@ -516,7 +548,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     let stopped = false;
     const timer = setInterval(() => {
       if (stopped || checkingSubmission.current) return;
-      const pending = corrections.find(value => value.state === "unknown" && pendingSubmissions.current.has(value.item.id));
+      const pending = corrections.find(value => value.state === "unknown" && pendingSubmissions.current.has(value.item.id) && !pendingSubmissions.current.get(value.item.id)?.managed);
       if (pending) void checkSubmission(pending.item.id);
     }, 3000);
     return () => { stopped = true; clearInterval(timer); };
@@ -574,20 +606,35 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const submit = () => {
     if (sendDisabled) return;
     if (creating) void sendNewDraft();
-    else if (action === "goalClear") void mutate("goalClear");
-    else if (action === "interrupt") void mutate("interrupt", { turnId: view!.turn!.id });
+    else if (action === "goalClear") { queueController.current?.pause(); void mutate("goalClear"); }
+    else if (action === "interrupt") { queueController.current?.pause(); void mutate("interrupt", { turnId: view!.turn!.id }); }
     else void sendDraft(action, composerRef.current, projectId, threadId, action === "steer" ? { expectedTurnId: view!.turn!.id } : selectedModel ? { model: selectedModel.model, effort: selectedEffort, permissionMode, agentMode } : {});
   };
 
-  function enqueueMessage() {
+  async function enqueueMessage() {
     if (creating) { submit(); return; }
     if (agentMode === "goal" && composerRef.current.images.length) { setMessage("В режиме «Цель» сообщение в очереди должно содержать описание задачи без изображений. Вложения и текст сохранены."); return; }
-    if (disabled || preparationCount || imageError || !catalogFresh || !selectedModel || (!draft.trim() && !attachments.length)) return;
-    if (queuedMessages.length >= 16) { setMessage("Очередь заполнена. Дождитесь отправки или удалите сообщение."); return; }
-    const sent = composerRef.current;
-    setQueuedMessages(previous => [...previous, { id: crypto.randomUUID(), chat: currentChat.current, generation: view!.generation, draft: sent, model: selectedModel.model, effort: selectedEffort, permissionMode, agentMode, state: "waiting" }]);
-    changeDraft(acceptedDraft(sent, sent), false);
-    setMessage("Сообщение поставлено в очередь.");
+    if (disabled || preparationCount || imageError || !catalogFresh || !selectedModel || (!draft.trim() && !attachments.length) || enqueuePending.current) return;
+    const controller = queueController.current;
+    if (!controller || !queueState.available || queueState.loading) { setMessage("Хранилище очереди недоступно. Текст и изображения сохранены."); return; }
+    const sent = composerRef.current, chat = currentChat.current;
+    enqueuePending.current = true;
+    try {
+      const saved = await controller.enqueue(sent, { model: selectedModel.model, effort: selectedEffort, permissionMode, agentMode }, view!.generation);
+      if (!alive.current || account.current !== userId) return;
+      if (!saved) { setMessage(controller.state().error || "Не удалось сохранить очередь. Текст и изображения сохранены."); return; }
+      // AIDEV-NOTE: Commit IndexedDB предшествует очистке; во время сохранения пользователь может сменить чат или дописать текст.
+      if (currentChat.current === chat) changeDraft(acceptedDraft(composerRef.current, sent));
+      else {
+        const savedChat = cache.current.get(chat);
+        if (savedChat) {
+          const next = acceptedDraft(savedChat.draft, sent), kept = new Set(next.images.map(image => image.previewUrl));
+          for (const image of savedChat.draft.images) if (!kept.has(image.previewUrl)) releaseAttachmentPreview(image);
+          savedChat.draft = next;
+        }
+      }
+      if (currentChat.current === chat) setMessage("Сообщение сохранено в очереди.");
+    } finally { enqueuePending.current = false; }
   }
 
   useEffect(() => {
@@ -597,21 +644,162 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       setAwaitingTurn(previous => previous.filter(value => value !== awaiting));
       return;
     }
-    const next = queuedMessages.find(value => value.chat === currentChat.current);
-    if (!next || next.state !== "waiting" || awaiting || disabled || locked.current || active || goalUnfinished || view.requests.some(request => request.kind !== "unsupported" && !request.answered) || !catalogFresh || view.thread.canAcceptDirectInput === false) return;
-    const choice = models!.data.find(value => value.model === next.model);
-    if (next.generation !== view.generation || !choice || !choice.efforts.includes(next.effort) || (next.draft.images.length && (next.agentMode === "goal" || !choice.inputModalities.includes("image") || next.draft.images.length > choice.imageLimit))) {
-      setQueuedMessages(previous => previous.map(value => value.id === next.id ? { ...value, state: "failed" } : value));
-      setMessage("Настройки сообщения в очереди устарели. Удалите его и отправьте заново.");
-      return;
-    }
-    setQueuedMessages(previous => previous.map(value => value.id === next.id ? { ...value, state: "sending" } : value));
-    // AIDEV-NOTE: Следующее сообщение ждёт нового native turn ID, а не только HTTP accepted со старым idle snapshot.
-    void sendDraft("start", next.draft, projectId, threadId, { model: next.model, effort: next.effort, permissionMode: next.permissionMode, agentMode: next.agentMode }, next.draft).then(accepted => {
-      if (!alive.current) return;
-      setQueuedMessages(previous => accepted ? previous.filter(value => value.id !== next.id) : previous.map(value => value.id === next.id && value.state === "sending" ? { ...value, state: "failed" } : value));
-    });
+    if (awaiting || disabled || uploading || preparationCount || active || goalUnfinished || !catalogFresh || queueState.paused || !queueState.available || queueState.loading || queueState.entries[0]?.state !== "waiting" || queueDispatchPending.current) return;
+    const controller = queueController.current;
+    if (!controller) return;
+    queueDispatchPending.current = true;
+    void controller.dispatch().finally(() => { queueDispatchPending.current = false; });
   });
+
+  const queueSelected = useRef<NativeSnapshot | null>(null);
+  const queueMatches = (entry: QueueEntry, signal: AbortSignal) => !signal.aborted && alive.current && account.current === userId && entry.scope.userId === userId && currentChat.current === `${entry.scope.projectId}:${entry.scope.threadId}`;
+  async function canEnqueueQueue(entry: QueueEntry, signal: AbortSignal): Promise<boolean> {
+    if (!queueMatches(entry, signal)) return false;
+    const unavailable = "Чат архивирован или недоступен. Сообщение не сохранено в очереди; текст и изображения остались в черновике.";
+    const key = `${entry.scope.projectId}:${entry.scope.threadId}`;
+    if (archived.current.has(key)) throw new Error(unavailable);
+    try {
+      let cursor: string | undefined, generation: string | undefined, count = 0;
+      const seen = new Set<string>();
+      // AIDEV-NOTE: Читаем живой каталог под account lock; архивирование в другой вкладке не оставляет очередь у удалённого треда.
+      for (let page = 0; page < 1000 && count < 1000; page++) {
+        if (!queueMatches(entry, signal)) return false;
+        const value = await client.request({ action: "threads", projectId: entry.scope.projectId, ...(cursor ? { cursor } : {}) });
+        if (!queueMatches(entry, signal)) return false;
+        if (generation && value.generation !== generation) throw new Error("Каталог обновился во время проверки.");
+        generation = value.generation;
+        if (value.data.slice(0, 1000 - count).some(thread => thread.id === entry.scope.threadId) && !archived.current.has(key)) return true;
+        count += value.data.length;
+        if (!value.nextCursor || seen.has(value.nextCursor)) break;
+        cursor = value.nextCursor; seen.add(cursor);
+      }
+    } catch {
+      if (!queueMatches(entry, signal)) return false;
+      throw new Error("Не удалось проверить доступность чата. Сообщение не сохранено в очереди; текст и изображения остались в черновике.");
+    }
+    if (!queueMatches(entry, signal)) return false;
+    throw new Error(unavailable);
+  }
+  async function canDispatchQueue(entry: QueueEntry, immediate: boolean, signal: AbortSignal, ownSend = false): Promise<QueueDispatch | null> {
+    if (!queueMatches(entry, signal) || (!ownSend && (locked.current || attachmentUpload.current)) || uncertain.current || !client.current(entry.scope.projectId, entry.scope.threadId)) return null;
+    let fresh: NativeSnapshot, catalog: ModelCatalog;
+    try {
+      [fresh, catalog] = await Promise.all([
+        client.request({ action: "open", projectId: entry.scope.projectId, threadId: entry.scope.threadId }),
+        client.request({ action: "models" }),
+      ]);
+    } catch { return null; }
+    if (!queueMatches(entry, signal)) return null;
+    if (fresh.projectId !== entry.scope.projectId || fresh.threadId !== entry.scope.threadId || catalog.generation !== fresh.generation) throw new Error("Каталог моделей устарел. Проверьте настройки сообщения и сохраните его снова.");
+    const live = client.current(entry.scope.projectId, entry.scope.threadId);
+    if (!live || live.generation !== fresh.generation || fresh.state === "connection-lost" || fresh.state === "executor-unavailable") return null;
+    const inProgress = fresh.turn?.status === "inProgress";
+    if (inProgress && !immediate) return null;
+    if (fresh.requests.some(request => request.kind !== "unsupported" && !request.answered) || fresh.thread.canAcceptDirectInput === false || (!inProgress && (goalBlocksNewTask(fresh) || awaitingTurn.some(value => value.chat === currentChat.current)))) return null;
+    const settings = inProgress ? { ...entry.settings, model: fresh.thread.model ?? "", effort: fresh.thread.reasoningEffort ?? "" } : entry.settings;
+    const choice = catalog.data.find(value => value.model === settings.model);
+    if (!inProgress && (!choice || !choice.efforts.includes(settings.effort))) throw new Error("Модель или рассуждение сообщения недоступны. Измените настройки очереди.");
+    if ((!entry.draft.text.trim() && !entry.draft.images.length) || (entry.draft.images.length && ((!inProgress && settings.agentMode === "goal") || !choice?.inputModalities.includes("image") || entry.draft.images.length > Math.min(limits.images, choice?.imageLimit ?? 0) || entry.draft.images.reduce((sum, image) => sum + image.bytes, 0) > limits.imageBytes))) throw new Error("Изображения или текст не подходят для текущей модели и режима. Измените сообщение в очереди.");
+    queueSelected.current = fresh;
+    return { action: inProgress ? "steer" : "start", generation: fresh.generation, ...(inProgress ? { expectedTurnId: fresh.turn!.id } : {}), settings };
+  }
+
+  async function sendQueue(entry: QueueEntry, attempt: QueueAttempt, signal: AbortSignal): Promise<"accepted" | "not-sent" | "unknown"> {
+    if (!queueMatches(entry, signal) || locked.current || attachmentUpload.current || !queueSelected.current) return "not-sent";
+    // AIDEV-NOTE: После ACK контроллер удаляет snapshot и его URLs; pendingCorrection использует отдельные previews до появления истории.
+    const sent: ComposerDraft = { ...entry.draft, images: [] };
+    try {
+      for (const image of entry.draft.images) sent.images.push({ ...image, previewUrl: URL.createObjectURL(image.model), previewObjectUrl: true, url: undefined });
+    } catch {
+      for (const image of sent.images) releaseAttachmentPreview(image);
+      return "not-sent";
+    }
+    const chat = `${entry.scope.projectId}:${entry.scope.threadId}`, selected = queueSelected.current;
+    const operationId = beginSubmission(sent, chat, undefined, selected, false, attempt.operationId);
+    const upload = new AbortController(), abort = () => upload.abort();
+    signal.addEventListener("abort", abort, { once: true });
+    attachmentUpload.current = upload; setUploading(!!sent.images.length); setBusy(true);
+    let mutationStarted = false;
+    try {
+      const attachments = [];
+      for (const image of sent.images) {
+        const ready = await uploadAttachment(image, entry.scope, upload.signal, fetch, progress => {
+          if (queueMatches(entry, signal)) {
+            if (progress === 1) { const pending = pendingSubmissions.current.get(operationId); if (pending) pending.completedAt = performance.now(); }
+            setImageProgress(previous => ({ ...previous, [image.id]: progress }));
+          }
+        });
+        attachments.push({ originalArtifactId: ready.originalArtifactId, modelArtifactId: ready.modelArtifactId });
+      }
+      const dispatch = await canDispatchQueue(entry, attempt.action === "steer", signal, true);
+      if (!dispatch || dispatch.action !== attempt.action || dispatch.generation !== attempt.generation || dispatch.expectedTurnId !== attempt.expectedTurnId || !queueMatches(entry, signal)) { rejectSubmission(operationId); return "not-sent"; }
+      const settings = attempt.action === "steer" ? { expectedTurnId: attempt.expectedTurnId } : dispatch.settings;
+      locked.current = true; mutationStarted = true;
+      const reply = await client.request({ action: attempt.action, projectId: entry.scope.projectId, threadId: entry.scope.threadId, generation: attempt.generation, operationId, text: sent.text, ...(attachments.length ? { attachments } : {}), ...settings });
+      if (reply.outcome !== "accepted" || reply.generation !== attempt.generation || reply.threadId !== entry.scope.threadId || reply.operationId !== operationId) throw new AgentError("BAD_REPLY", "unknown");
+      if (alive.current && account.current === userId) {
+        setCorrections(previous => previous.map(value => value.item.id === operationId ? { ...value, state: "waiting", item: { ...value.item, turnId: reply.turnId ?? value.item.turnId } } : value));
+        if (attempt.action === "start") {
+          setAwaitingTurn(previous => [...previous.filter(value => value.chat !== chat), { chat, generation: attempt.generation, turnId: queueSelected.current!.turn?.id ?? null, seq: queueSelected.current!.seq, agentMode: dispatch.settings.agentMode }]);
+          void loadThreads(entry.scope.projectId);
+          if (dispatch.settings.agentMode === "goal") finishSubmission(operationId);
+        }
+      }
+      return "accepted";
+    } catch (error) {
+      const unknown = mutationStarted && (!(error instanceof AgentError) || error.outcome === "unknown");
+      if (alive.current && account.current === userId) {
+        if (unknown) {
+          const pending = pendingSubmissions.current.get(operationId);
+          if (pending?.confirmed || !pending) return "accepted";
+          pending.unknown = true;
+          setCorrections(previous => previous.map(value => value.item.id === operationId ? { ...value, state: "unknown" } : value));
+        } else rejectSubmission(operationId);
+      }
+      return unknown ? "unknown" : "not-sent";
+    } finally {
+      signal.removeEventListener("abort", abort);
+      if (attachmentUpload.current === upload) attachmentUpload.current = null;
+      if (account.current === userId) locked.current = false;
+      if (alive.current && account.current === userId) { setUploading(false); setBusy(false); }
+    }
+  }
+
+  async function checkQueue(entry: QueueEntry, signal: AbortSignal): Promise<boolean> {
+    if (!entry.attempt || !queueMatches(entry, signal)) return false;
+    let cursor: string | undefined, data: DisplayItem[] = [];
+    const seen = new Set<string>(), deadline = performance.now() + 8000;
+    for (let page = 0; page < 100 && performance.now() < deadline; page++) {
+      const value = await client.request({ action: "items", projectId: entry.scope.projectId, threadId: entry.scope.threadId, ...(cursor ? { cursor } : {}) });
+      if (!queueMatches(entry, signal)) return false;
+      data = mergeTimeline(value.data, data);
+      if (confirmedSubmission(data, entry.attempt.operationId)) {
+        setHistory(previous => mergeTimeline(previous, data).slice(-1000)); setHistoryGeneration(value.generation);
+        finishSubmission(entry.attempt.operationId);
+        return true;
+      }
+      if (!value.nextCursor || seen.has(value.nextCursor)) return false;
+      cursor = value.nextCursor; seen.add(cursor);
+    }
+    return false;
+  }
+  const queuePorts = useRef({ canEnqueue: canEnqueueQueue, canDispatch: canDispatchQueue, send: sendQueue, check: checkQueue });
+  queuePorts.current = { canEnqueue: canEnqueueQueue, canDispatch: canDispatchQueue, send: sendQueue, check: checkQueue };
+  useEffect(() => {
+    const controller = createQueueController(userId, {
+      store: createQueueStore(),
+      canEnqueue: (entry, signal) => queuePorts.current.canEnqueue(entry, signal),
+      canDispatch: (entry, immediate, signal) => queuePorts.current.canDispatch(entry, immediate, signal),
+      send: (entry, attempt, signal) => queuePorts.current.send(entry, attempt, signal),
+      check: (entry, signal) => queuePorts.current.check(entry, signal),
+    });
+    queueController.current = controller; setQueueState(controller.state());
+    const unsubscribe = controller.subscribe(() => setQueueState(controller.state()));
+    return () => { unsubscribe(); controller.dispose(); if (queueController.current === controller) queueController.current = null; };
+  }, [userId, client]);
+  useEffect(() => {
+    void queueController.current?.open({ userId, projectId, threadId });
+  }, [userId, client, projectId, threadId]);
 
   async function processFiles() {
     if (preparing.current) return;
@@ -709,16 +897,27 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
           {timeline.map(entry => entry.kind === "message" ? entry.item.type === "plan" ? <Button key={entry.item.id} type="button" variant="outline" className="agent-material-card" onClick={() => chooseMaterial(`plan:${entry.item.id}`)}>Предложенный план <span>{materialView.updated.includes(`plan:${entry.item.id}`) ? "Обновлено · " : ""}Открыть →</span></Button> : <Item key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.item.id}`} item={entry.item} context={activityContext} reads={lazyReads} localImages={pendingSubmissions.current.get(entry.item.operationId ?? "")?.sent.images} imageProgress={imageProgress} uploadCompletedAt={pendingSubmissions.current.get(entry.item.operationId ?? "")?.completedAt} /> : <Activities key={`${activityContext.generation}:${activityContext.epoch}:${projectId}:${threadId}:${entry.id}`} items={entry.items} context={activityContext} reads={lazyReads} />)}
           {materials.filter(value => value.kind !== "plan").map(value => <Button key={value.id} type="button" variant="outline" className="agent-material-card" onClick={() => chooseMaterial(value.id)}>{value.title}<span>{materialView.updated.includes(value.id) ? "Обновлено · " : ""}Открыть →</span></Button>)}
           {pendingCorrections.map(value => <Item key={value.item.id} item={value.item} context={activityContext} reads={lazyReads} pending={value.state} localImages={value.draft?.images} imageProgress={imageProgress} uploadCompletedAt={pendingSubmissions.current.get(value.item.id)?.completedAt} />)}
-        {queuedMessages.some(value => value.chat === currentChat.current) && <ul className="agent-message-queue" aria-label="Очередь сообщений">{queuedMessages.filter(value => value.chat === currentChat.current).map(value => <li key={value.id}>
-          <span>{value.draft.text || "Изображения"}{!!value.draft.images.length && ` · Изображений: ${value.draft.images.length}`} · {value.agentMode === "plan" ? "Планирование" : value.agentMode === "goal" ? "Цель" : "Обычный"} · {value.state === "sending" ? "Отправляется" : value.state === "unknown" ? "Результат неизвестен — проверьте чат" : value.state === "failed" ? "Не отправлено — очередь остановлена" : "В очереди"}</span>
-          <button type="button" disabled={value.state === "sending"} onClick={() => { const removed = queuedMessages.find(item => item.id === value.id); if (removed) for (const image of removed.draft.images) releaseAttachmentPreview(image); setQueuedMessages(previous => previous.filter(item => item.id !== value.id)); }} aria-label="Удалить сообщение из очереди">×</button>
-        </li>)}</ul>}
           {view?.turn?.error && <TurnErrorNotice error={view.turn.error} />}
           {view?.requests.filter(request => request.kind !== "question").map(request => (connected || request.kind === "unsupported") && <NativeForm key={view.generation + ":" + view.epoch + ":" + request.requestId} request={request} disabled={disabled} send={answer => mutate("answer", { requestId: request.requestId, answer })} />)}
         </div>
       </div>
-      {(projectId || message || accountMessage) && <footer className="agent-composer-area">
+      {(projectId || message || accountMessage || archiveError) && <footer className="agent-composer-area">
+        {archiveError && <p role="alert" className="mx-auto mb-2 w-full max-w-[50.5rem] text-sm text-destructive">{archiveError}</p>}
         {questionRequest && <QuestionCard key={`${projectId}:${threadId}:${view!.generation}:${view!.epoch}:${questionRequest.requestId}`} request={questionRequest} disabled={disabled} send={answer => mutate("answer", { requestId: questionRequest.requestId, answer })} />}
+        {threadId && queueState.scope?.userId === userId && queueState.scope.projectId === projectId && queueState.scope.threadId === threadId && <QueuePanel key={`${userId}:${projectId}:${threadId}`} state={queueState} models={models?.data ?? []} actions={{
+          edit: (id, draft, settings) => queueController.current?.edit(id, draft, settings) ?? Promise.resolve(false),
+          move: (id, direction) => queueController.current?.move(id, direction) ?? Promise.resolve(false),
+          remove: async id => {
+            const entry = queueState.entries.find(value => value.id === id);
+            const removed = await queueController.current?.remove(id) ?? false;
+            if (removed && entry?.attempt && pendingSubmissions.current.get(entry.attempt.operationId)?.managed) rejectSubmission(entry.attempt.operationId);
+            return removed;
+          },
+          dispatch: (id, immediate) => queueController.current?.dispatch(id, immediate) ?? Promise.resolve(false),
+          reconcile: id => queueController.current?.reconcile(id) ?? Promise.resolve(false),
+          pause: () => queueController.current?.pause(),
+          resume: () => queueController.current?.resume() ?? Promise.resolve(false),
+        }} />}
         {projectId && <Card className="agent-composer-card"><form className="agent-composer" onSubmit={event => { event.preventDefault(); submit(); }}>
           <label className="sr-only" htmlFor="agent-draft">{active ? "Дополнить текущий ход" : "Сообщение"}</label>
           {!!attachments.length && <ul className="agent-attachments" aria-label="Прикреплённые изображения">{attachments.map(image => <li key={image.id}><div className="agent-attachment-preview"><img src={image.url ?? image.previewUrl} alt={image.name} /><ImageUploadStatus progress={imageProgress[image.id]} /></div><span className="agent-attachment-name" title={image.name}>{image.name}</span>{image.reduced && <span className="agent-image-reduced">Уменьшено</span>}<button type="button" className="agent-attachment-remove" aria-label={`Удалить ${image.name}`} onClick={() => { attachmentUpload.current?.abort(); attachmentUpload.current = null; changeDraft({ ...composerRef.current, images: composerRef.current.images.filter(value => value.id !== image.id) }); }}>×</button></li>)}</ul>}
@@ -731,7 +930,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
             if (event.key !== "Enter" || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229 || event.altKey || event.shiftKey) return;
             event.preventDefault();
             if (event.repeat) return;
-            if (event.ctrlKey || event.metaKey) enqueueMessage();
+            if (event.ctrlKey || event.metaKey) void enqueueMessage();
             else if (draft.trim() || attachments.length) event.currentTarget.form?.requestSubmit();
           }} />
           </div>
@@ -748,7 +947,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         </form></Card>}
       </footer>}
     </section>
-    {materialView.open && <Materials focus={materialView.focus} materials={materials} selected={materialView.selected} choose={chooseMaterial} close={() => setMaterialView(previous => ({ ...previous, open: false }))} disabled={disabled || !catalogFresh || awaitingTurn.some(value => value.chat === currentChat.current)} active={!!active || goalUnfinished} connected={connected} execute={item => { void executePlan(item); }} revise={revisePlan} goal={action => { void mutate(action === "stop" ? "goalClear" : "goalSet", action === "stop" ? {} : { status: action === "pause" ? "paused" : "active" }); }} />}
+    {materialView.open && <Materials focus={materialView.focus} materials={materials} selected={materialView.selected} choose={chooseMaterial} close={() => setMaterialView(previous => ({ ...previous, open: false }))} disabled={disabled || !catalogFresh || awaitingTurn.some(value => value.chat === currentChat.current)} active={!!active || goalUnfinished} connected={connected} execute={item => { void executePlan(item); }} revise={revisePlan} goal={action => { if (action === "stop") queueController.current?.pause(); void mutate(action === "stop" ? "goalClear" : "goalSet", action === "stop" ? {} : { status: action === "pause" ? "paused" : "active" }); }} />}
   </main>;
 }
 

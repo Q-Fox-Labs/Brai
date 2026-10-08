@@ -35,6 +35,8 @@ export function display(item: any, turnId: string, history = false): DisplayItem
   if (typeof item.aggregatedOutput === 'string') value.output = text(item.aggregatedOutput, 32768);
   if (item.type === 'fileChange') value.diff = text((item.changes ?? []).map((change: any) => `${change.path}\n${change.diff}`).join('\n'), 32768);
   if (typeof item.status === 'string') value.status = item.status;
+  // AIDEV-NOTE: Native инструменты могут завершиться с completed и отдельным признаком ошибки.
+  if (item.error != null || item.success === false || typeof item.exitCode === 'number' && item.exitCode !== 0) value.status = 'failed';
   if (Object.hasOwn(item, 'exitCode')) value.exitCode = item.exitCode;
   if (Object.hasOwn(item, 'phase')) value.phase = item.phase;
   while (item.type === 'plan' ? bytes(value) > 49152 : history && bytes(value) > 4096) {

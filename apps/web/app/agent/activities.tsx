@@ -1,15 +1,15 @@
-// ABOUTME: Показывает native действия в общих карточках и читает детали по раскрытию.
+// ABOUTME: Показывает native действия компактными строками и читает детали по раскрытию.
 // ABOUTME: Пустые группы скрыты; закрытые группы не читают содержимое; рассуждения используют Markdown.
 import { useEffect, useState } from "react";
 import { Card } from "@/components/ui/card";
 import type { DisplayItem } from "@brai/agent/contracts";
 import type { LazyReads } from "../../lib/agent/lazy";
 import Markdown from "./markdown";
+import { activityPresentation } from "../../lib/agent/activity";
 import "./activities.css";
 type Context = { generation: string; epoch: string; projectId: string; threadId: string };
 type Props = { items: DisplayItem[]; context: Context; reads: LazyReads };
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Не удалось загрузить действие.";
-const label = (item: DisplayItem) => ({ commandExecution: "Команда", fileChange: "Изменения файлов", reasoning: "Рассуждение", plan: "План", mcpToolCall: "Инструмент", dynamicToolCall: "Инструмент", collabAgentToolCall: "Совместная работа" } as Record<string, string>)[item.type] ?? "Действие агента";
 
 /** До первого раскрытия получает только компактные идентификаторы из history/live. */
 export default function Activities({ items, context, reads }: Props) {
@@ -39,10 +39,16 @@ export default function Activities({ items, context, reads }: Props) {
 }
 function Activity({ item, context, reads }: { item: DisplayItem; context: Context; reads: LazyReads }) {
   const [open, setOpen] = useState(false);
-  return <article data-item-id={item.id} className="agent-item"><Card className="agent-tool-item"><details onToggle={event => setOpen(event.currentTarget.open)}>
-    <summary><span>{label(item)}</span>{item.type === "reasoning" ? <div className="agent-activity-title agent-reasoning-title"><Markdown text={item.summary ?? ""} /></div> : <span className="agent-activity-title">{item.summary}</span>}<span className="agent-note">{item.status === "inProgress" ? "Выполняется" : item.status === "failed" ? "Ошибка" : item.status === "completed" ? "Готово" : ""}{item.exitCode !== undefined && ` · код ${item.exitCode}`}</span></summary>
+  const presentation = activityPresentation(item);
+  return <article data-item-id={item.id} className="agent-item agent-activity-row" data-state={presentation.state}><details onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary className="agent-activity-heading">
+      <svg className="agent-activity-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={presentation.icon} /></svg>
+      {item.type === "reasoning" ? <div className="agent-activity-title agent-reasoning-title"><Markdown text={item.summary ?? ""} /></div> : <span className="agent-activity-title">{presentation.title}</span>}
+      {presentation.status && <span className="agent-activity-status">{presentation.status}</span>}
+      <span className="agent-activity-chevron" aria-hidden="true">›</span>
+    </summary>
     {open && <ActivityDetail key={`${context.generation}:${context.epoch}:${item.revision ?? 0}`} item={item} context={context} reads={reads} />}
-  </details></Card></article>;
+  </details></article>;
 }
 function ActivityDetail({ item, context, reads }: { item: DisplayItem; context: Context; reads: LazyReads }) {
   const [data, setData] = useState<DisplayItem | null>(null), [error, setError] = useState(""), [retry, setRetry] = useState(0);

@@ -1,0 +1,20 @@
+/* ABOUTME: Оформляет очередь над composer и её отдельную форму редактирования. */
+/* ABOUTME: Стили ограничены agent-queue и сохраняют управление на узком экране. */
+.agent-queue { width: min(100%, 50.5rem); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; margin: 0 auto 10px; max-height: 42vh; overflow: auto; font-size: 13px; background: var(--background); }
+.agent-queue-heading { display: flex; align-items: center; gap: 10px; }
+.agent-queue-heading strong { margin-right: auto; }
+.agent-queue-heading > span, .agent-queue-hint, .agent-queue-summary > span { color: var(--muted-foreground); font-size: 12px; }
+.agent-queue-hint { margin: 8px 0; }
+.agent-queue-list { list-style: decimal; margin: 8px 0 0; padding-left: 24px; }
+.agent-queue-entry { border-top: 1px solid var(--border); padding: 8px 0; }
+.agent-queue-summary p { margin: 0 0 4px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 5em; overflow: auto; }
+.agent-queue-actions { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 6px; }
+.agent-queue-images { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 6px 0; padding: 0; }
+.agent-queue-images li { display: flex; align-items: center; }
+.agent-queue-images img { width: 48px; height: 48px; object-fit: cover; border-radius: 6px; }
+.agent-queue-editor { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 8px; }
+.agent-queue-editor label { display: grid; gap: 5px; margin-bottom: 8px; min-width: 0; }
+.agent-queue-editor-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.agent-queue-editor select { width: 100%; min-width: 0; padding: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); }
+.agent-queue [role="alert"] { color: var(--destructive); margin: 6px 0; }
+@media (max-width: 480px) { .agent-queue-editor-settings { grid-template-columns: 1fr; } .agent-queue-heading { gap: 6px; } }

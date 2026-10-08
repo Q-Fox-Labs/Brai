@@ -1,5 +1,6 @@
 // ABOUTME: Проверяет Agent-компоненты, группировку, composer и ленивые чтения.
 // ABOUTME: Shared UI в SSR harness загружается из реальных исходников без браузера.
+import { activityPresentation } from "../lib/agent/activity.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -94,7 +95,7 @@ function component(name: string) {
   const source = readFileSync(new URL(`../app/agent/${name}.tsx`, import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const module = { exports: {} as { default: ComponentType<Record<string, unknown>> } };
-  new Function("require", "module", "exports", compiled)((dependency: string) => dependency.endsWith(".css") ? {} : dependency.startsWith("./") ? { default: component(dependency.slice(2)) } : dependency.startsWith("@/components/ui/") ? ui(dependency) : dependency === "../../lib/agent/limits" ? { formatLimitReset, limitCountdown } : require(dependency), module, module.exports);
+  new Function("require", "module", "exports", compiled)((dependency: string) => dependency.endsWith(".css") ? {} : dependency.startsWith("./") ? { default: component(dependency.slice(2)) } : dependency.startsWith("@/components/ui/") ? ui(dependency) : dependency === "../../lib/agent/activity" ? { activityPresentation } : dependency === "../../lib/agent/limits" ? { formatLimitReset, limitCountdown } : require(dependency), module, module.exports);
   return module.exports.default;
 }
 
