@@ -123,7 +123,6 @@ export function createRecoveryController(options: ControllerOptions) {
       initialized = true;
     } catch {
       recoveryAvailable = false;
-      options.observe?.('recovery', false);
       initialized = false;
       throw safeError('RECOVERY_UNAVAILABLE');
     }
@@ -139,7 +138,7 @@ export function createRecoveryController(options: ControllerOptions) {
     while (!stopping) {
       await pause(config.recoveryPollIntervalMs);
       if (stopping) break;
-      try { await options.probe?.(); await runRecoveryCycle(); } catch { recoveryAvailable = false; options.observe?.('recovery', false); }
+      try { await options.probe?.(); await runRecoveryCycle(); } catch { recoveryAvailable = false; }
     }
   }
 
@@ -153,7 +152,7 @@ export function createRecoveryController(options: ControllerOptions) {
           if (health.storageAvailable && health.historyRejected !== undefined) historyRejected = health.historyRejected;
           historyAvailable = historyAvailable && health.storageAvailable && !historyRejected;
         } else historyAvailable = !historyRejected;
-        if (!historyAvailable) options.observe?.('history', false);
+        if (historyAvailable) options.observe?.('history', true);
         return delivered;
       }
       try {
@@ -192,7 +191,7 @@ export function createRecoveryController(options: ControllerOptions) {
 
   async function historyDeliveryLoop(): Promise<void> {
     while (!stopping) {
-      try { await drainHistoryCycle(); } catch { historyAvailable = false; options.observe?.('history', false); }
+      try { await drainHistoryCycle(); } catch { historyAvailable = false; }
       if (!stopping) await pause(config.historyPollIntervalMs);
     }
   }

@@ -58,7 +58,8 @@ export function createAlertsController(options: Options) {
           }
         } else if (states.get(key) === state) state.dirty = false;
       } catch {
-        observe('storage', false);
+        // Только сохранение события реальной работы может породить уведомление об отказе helper.
+        if (state.event) observe('storage', false);
         // AIDEV-NOTE: Только при отказе helper допускается memory fallback с последующим сохранением того же ID.
         if (state.event && !state.recorded && !state.sent && Date.now() >= fallbackNextAttemptAt) {
           try {
@@ -76,7 +77,7 @@ export function createAlertsController(options: Options) {
     await flushIncidents();
     let claim: any;
     try { claim = assertDto('AlertClaimResult', await call('alerts.claim', { workerId: options.workerId })); }
-    catch { observe('storage', false); return; }
+    catch { return; }
     if (!claim) return;
     try {
       await options.publish(claim.event);

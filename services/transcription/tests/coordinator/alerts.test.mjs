@@ -106,3 +106,15 @@ test('fallback publication failures respect retry delay and do not grow recursiv
   for(let i=0;i<10;i++)await c.tick();
   assert.equal(publishes,1);await c.close();assert.equal(publishes,1);
 });
+
+
+test('idle alert polling with unavailable storage does not create fallback notifications', async () => {
+  const events = [];
+  const controller = createAlertsController({ helper: { call: async () => { throw new Error('storage down'); } },
+    publish: async event => events.push(event), workerId: 'idle-test', pollIntervalMs: 10 });
+  controller.observe('local_ai', true);
+  controller.observe('storage', true);
+  for (let i = 0; i < 3; i++) await controller.tick();
+  await controller.close();
+  assert.deepEqual(events, []);
+});

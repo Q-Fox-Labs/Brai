@@ -239,3 +239,52 @@ test('an empty claim does not close a history outage; only successful append rec
     assert.equal(appends,2);assert.equal(controller.status().historyAvailable,true);
   }finally{await controller.close();}
 });
+
+
+test('startup and idle recovery failures affect readiness without outage observations', async () => {
+  const observations = [];
+  let down = false;
+  let polls = 0;
+  const controller = createRecoveryController({
+    helper: helperPort(method => {
+      if (down) { polls++; throw new Error('storage down'); }
+      if (method === 'recovery.run') return zero;
+      if (method === 'history.claim') return null;
+      if (method === 'health') return { storageAvailable: true, historyRejected: false };
+      assert.fail(`unexpected method ${method}`);
+    }), history: { append: async () => assert.fail('no history work') },
+    observe: (key, available) => observations.push({ key, available }),
+    clearVolatileResults: () => {}, config: config({ recoveryPollIntervalMs: 2, historyPollIntervalMs: 2 }),
+  });
+  await controller.initialize();
+  down = true;
+  controller.start(async () => false);
+  try {
+    await until(() => polls >= 3);
+    assert.equal(controller.status().ready, false);
+    assert.deepEqual(observations.filter(o => !o.available), []);
+  } finally { await controller.close(); }
+  const startup = createRecoveryController({ helper: helperPort(() => { throw new Error('startup unavailable'); }),
+    history: { append: async () => {} }, observe: (key, available) => observations.push({ key, available }),
+    clearVolatileResults: () => {}, config: config() });
+  await assert.rejects(startup.initialize());
+  await startup.close();
+  assert.deepEqual(observations.filter(o => !o.available), []);
+});
+
+
+test('delivery failure for an existing request history event still opens an incident', async () => {
+  const observations = [];
+  const controller = createRecoveryController({ helper: helperPort(method => {
+    if (method === 'recovery.run') return zero;
+    if (method === 'history.claim') return claim(ids.token1);
+    if (method === 'history.fail') return { failed: true };
+    assert.fail(`unexpected method ${method}`);
+  }), history: { append: async () => { throw new Error('history unavailable'); } },
+    observe: (key, available) => observations.push({ key, available }), clearVolatileResults: () => {}, config: config() });
+  await controller.initialize();
+  controller.start(async () => false);
+  try { await until(() => observations.some(o => o.key === 'history' && !o.available)); }
+  finally { await controller.close(); }
+  assert.deepEqual(observations.filter(o => !o.available), [{ key: 'history', available: false }]);
+});

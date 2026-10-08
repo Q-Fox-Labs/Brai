@@ -2,6 +2,7 @@
 // ABOUTME: Все внешние операции передаются портами; текст живёт только в ограниченной памяти процесса.
 import { createHash, randomUUID } from 'node:crypto';
 import { assertDto, methodMap } from '#transcription-contracts';
+import type { IncidentKey } from '../../notifications.js';
 
 const publicMethods = methodMap.public;
 const helperMethods = methodMap.helper;
@@ -131,6 +132,7 @@ function errorCode(error: unknown): string | null {
 
 /**
  * Создаёт прикладное ядро координатора.
+ * observe получает исходы реальных операций; чтение каталога и пустой polling не открывают инциденты.
  * Результат распознавания остаётся в памяти процесса и никогда не передаётся helper.
  */
 export function createCoordinator(options: {
@@ -138,8 +140,27 @@ export function createCoordinator(options: {
   config: CoordinatorConfig;
   now?: () => number;
   uuid?: () => string;
+  observe?: (key: IncidentKey, available: boolean) => void;
 }) {
-  const { ports, config } = options;
+  const { config } = options;
+  const unavailable = new Set(['STORAGE_UNAVAILABLE', 'DEPENDENCY_UNAVAILABLE', 'MODEL_CATALOG_UNAVAILABLE', 'INTERNAL']);
+  async function observed<T>(key: IncidentKey, operation: () => Promise<T>): Promise<T> {
+    try { const result = await operation(); options.observe?.(key, true); return result; }
+    catch (error) {
+      const code = error && typeof error === 'object' ? (error as any).errorCode ?? (error as any).code : undefined;
+      if (code === 'OVERLOADED') options.observe?.('capacity', false);
+      else if (!code || unavailable.has(code)) options.observe?.(key, false);
+      throw error;
+    }
+  }
+  // AIDEV-NOTE: Только порты реальной операции открывают эпизод; пустой polling очереди не является работой.
+  const ports: CoordinatorPorts = { ...options.ports,
+    helper: { call: (method, params) => method === 'request.claim'
+      ? options.ports.helper.call(method, params)
+      : observed('storage', () => options.ports.helper.call(method, params)) },
+    local: { call: (method, params) => observed('local_ai', () => options.ports.local.call(method, params)) },
+    artifacts: { get: params => observed('artifacts', () => options.ports.artifacts.get(params)) },
+  };
   const now = options.now ?? Date.now;
   const uuid = options.uuid ?? randomUUID;
   const results = new Map<string, { value: any; bytes: number; expiresAt: number; timer: ReturnType<typeof setTimeout> }>();
@@ -169,15 +190,19 @@ export function createCoordinator(options: {
     return ownerCall(ports.helper, helperMethods, 'settings.set', { principal, expectedRevision: params.expectedRevision, settings: params.settings });
   }
 
-  async function localCatalog() {
-    const listed = await ports.localCatalog.list();
-    const items = Array.isArray(listed) ? listed : (listed as any)?.items;
-    const state = Array.isArray(listed) ? 'available' : (listed as any)?.state ?? 'available';
-    if (!Array.isArray(items) || !['available', 'unverified'].includes(state)) {
-      const code = (listed as any)?.errorCode;
-      throw new CoordinatorFault(code === 'DEPENDENCY_UNAVAILABLE' ? code : 'MODEL_CATALOG_UNAVAILABLE');
-    }
-    return { state, items: items.map((item) => validate('ModelSummary', item)) };
+  async function localCatalog(forRequest = false) {
+    const read = async () => {
+      const listed = await ports.localCatalog.list();
+      const items = Array.isArray(listed) ? listed : (listed as any)?.items;
+      const state = Array.isArray(listed) ? 'available' : (listed as any)?.state ?? 'available';
+      if (!Array.isArray(items) || !['available', 'unverified'].includes(state)) {
+        const code = (listed as any)?.errorCode;
+        throw new CoordinatorFault(code === 'DEPENDENCY_UNAVAILABLE' ? code : 'MODEL_CATALOG_UNAVAILABLE');
+      }
+      return { state, items: items.map((item) => validate('ModelSummary', item)) };
+    };
+    // Чтение каталога используется readiness-клиентами и само не создаёт уведомлений.
+    return forRequest ? observed('local_ai', read) : read();
   }
 
   async function modelsList(principal: any) {
@@ -204,7 +229,7 @@ export function createCoordinator(options: {
     if (input.requestedModel?.route === 'external') return null;
     const requestedId = input.requestedModel?.modelId ?? settings.defaultLocalModel?.modelId;
     if (!requestedId) return null;
-    const { items } = await localCatalog();
+    const { items } = await localCatalog(true);
     const candidates = items.filter((candidate: any) => candidate.selector.modelId === requestedId && candidate.supported && candidate.installed);
     if (input.requestedModel === null && settings.defaultLocalModel) {
       return candidates.find((candidate: any) => sameSelector(candidate.selector, settings.defaultLocalModel))?.selector ?? null;

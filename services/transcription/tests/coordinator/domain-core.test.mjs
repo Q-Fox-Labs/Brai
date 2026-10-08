@@ -618,3 +618,70 @@ test('an expired request closes the reserved attempt without contacting an execu
   assert.equal(await core.pumpOnce(), true);
   assert.deepEqual(seen, ['request.claim', 'attempt.start', 'attempt.finish']);
 });
+
+
+test('idle queue failures and readiness catalog reads do not open incidents', async () => {
+  const observations = [];
+  let down = false;
+  const core = createCoordinator({ config: config(), observe: (key, available) => observations.push({ key, available }),
+    ports: basePorts(async method => {
+      assert.equal(method, 'request.claim');
+      if (down) throw Object.assign(new Error('storage unavailable'), { errorCode: 'STORAGE_UNAVAILABLE' });
+      return null;
+    }, { localCatalog: { list: async () => ({ state: 'unavailable', errorCode: 'DEPENDENCY_UNAVAILABLE' }) } }),
+  });
+  assert.equal(await core.pumpOnce(), false);
+  down = true;
+  await assert.rejects(core.pumpOnce());
+  for (let i = 0; i < 3; i++) {
+    const catalog = await core.invoke('models.list', {}, principal);
+    assert.equal(catalog.localCatalogState, 'unavailable');
+    assert.equal(catalog.catalogErrorCode, 'DEPENDENCY_UNAVAILABLE');
+  }
+  assert.deepEqual(observations, []);
+});
+
+test('unavailable catalog opens an incident only when submitting real work', async () => {
+  const observations = [];
+  const core = createCoordinator({ config: config(), observe: (key, available) => observations.push({ key, available }),
+    ports: basePorts(async method => {
+      if (method === 'request.lookup') return { request: null };
+      if (method === 'settings.get') return { settings: { defaultLocalModel: selector, allowReplacement: false, policyVersion: 1 }, revision: 1 };
+      assert.fail(`unexpected method ${method}`);
+    }, { localCatalog: { list: async () => ({ state: 'unavailable', errorCode: 'DEPENDENCY_UNAVAILABLE' }) } }),
+  });
+  await assert.rejects(core.invoke('request.submit', {
+    clientIdempotencyKey: ids.key, audioArtifactId: ids.artifact,
+    requestedModel: { route: 'local', selection: 'required', modelId: selector.modelId }, deadlineAt: null,
+  }, principal), error => error.errorCode === 'DEPENDENCY_UNAVAILABLE');
+  assert.deepEqual(observations.filter(o => !o.available), [{ key: 'local_ai', available: false }]);
+});
+
+test('real execution reports dependency failure and retains terminal request metadata', async () => {
+  const observations = [];
+  let current = request();
+  const core = createCoordinator({ config: config(), uuid: () => ids.attempt,
+    observe: (key, available) => observations.push({ key, available }),
+    ports: basePorts(async (method, params) => {
+      if (method === 'request.claim') return { request: current, claimToken: ids.claim, fenceGeneration: 1,
+        revision: current.revision, leaseExpiresAt: '2026-10-05T22:00:00Z' };
+      if (method === 'attempt.start') {
+        current = request({ taskState: 'dispatching', revision: 2, currentAttemptId: ids.attempt, fenceGeneration: 1 });
+        return { created: true, request: current, attempt: attemptRecord('dispatching') };
+      }
+      if (method === 'attempt.markRunning') {
+        current = request({ ...current, taskState: 'running', revision: 3 });
+        return { request: current, attempt: attemptRecord('running') };
+      }
+      if (method === 'attempt.finish') {
+        current = request({ ...current, taskState: params.outcome, revision: 4, errorCode: params.errorCode });
+        return { request: current, attempt: attemptRecord(params.outcome, { errorCode: params.errorCode }) };
+      }
+      assert.fail(`unexpected method ${method}`);
+    }, { local: { call: async () => { throw Object.assign(new Error('not connected'), { errorCode: 'DEPENDENCY_UNAVAILABLE', outcome: 'failed' }); } } }),
+  });
+  assert.equal(await core.pumpOnce(), true);
+  assert.equal(current.taskState, 'failed');
+  assert.equal(current.errorCode, 'DEPENDENCY_UNAVAILABLE');
+  assert.deepEqual(observations.filter(o => !o.available), [{ key: 'local_ai', available: false }]);
+});

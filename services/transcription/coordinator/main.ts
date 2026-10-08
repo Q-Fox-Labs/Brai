@@ -13,7 +13,6 @@ import { startHttpTransport } from './transport/http.js';
 import { startNatsTransport } from './transport/nats.js';
 import { createAlertsPublisher } from './transport/alerts.js';
 import { createAlertsController } from './recovery/alerts.js';
-import type { IncidentKey } from '../notifications.js';
 
 function connection(settings: NatsSettings, timeout: number): Promise<NatsConnection> {
   return connect({ ...settings, timeout, reconnect: false });
@@ -25,18 +24,7 @@ export async function startCoordinator(config: CoordinatorRuntimeConfig) {
   const publisher = createAlertsPublisher(config.nats, config.dependencyTimeoutMs);
   const alerts = createAlertsController({ helper: children.helper, publish: publisher.publish,
     workerId: config.domain.workerId, pollIntervalMs: config.recovery.historyPollIntervalMs });
-  const unavailable = new Set(['STORAGE_UNAVAILABLE', 'DEPENDENCY_UNAVAILABLE', 'MODEL_CATALOG_UNAVAILABLE', 'INTERNAL']);
-  async function observed<T>(key: IncidentKey, operation: () => Promise<T>): Promise<T> {
-    try { const result = await operation(); alerts.observe(key, true); return result; }
-    catch (error) {
-      const code = error && typeof error === 'object' ? (error as any).errorCode ?? (error as any).code : undefined;
-      if (code === 'OVERLOADED') alerts.observe('capacity', false);
-      else if (!code || unavailable.has(code)) alerts.observe(key, false);
-      throw error;
-    }
-  }
-  const helper = { call: (method: string, params: unknown) => observed('storage', () => children.helper.call(method, params)) };
-  const local = { call: (method: string, params: unknown) => observed('local_ai', () => children.local.call(method, params)) };
+  const helper = children.helper;
   alerts.start();
   let nc: NatsConnection | undefined;
   let localAi: NatsConnection | undefined;
@@ -57,30 +45,31 @@ export async function startCoordinator(config: CoordinatorRuntimeConfig) {
   })();
   try {
     const health = await helper.call('health', {}) as { available: boolean; storageAvailable: boolean };
-    if (!health.storageAvailable) { alerts.observe('storage', false); throw new Error('Storage unavailable'); }
-    if ('capacityAvailable' in health) alerts.observe('capacity', Boolean(health.capacityAvailable));
+    if (!health.storageAvailable) throw new Error('Storage unavailable');
+    if ('capacityAvailable' in health && health.capacityAvailable) alerts.observe('capacity', true);
     try { nc = await connection(config.nats, config.dependencyTimeoutMs); }
-    catch { alerts.observe('delivery', false); throw new Error('NATS unavailable'); }
+    catch { throw new Error('NATS unavailable'); }
     if (config.localAi) {
       // Недоступность local-ai допускает metadata/readiness, но не превращается в успешный пустой каталог.
-      try { localAi = await connection(config.localAi, config.dependencyTimeoutMs); } catch { localAi = undefined; alerts.observe('local_ai', false); }
+      try { localAi = await connection(config.localAi, config.dependencyTimeoutMs); } catch { localAi = undefined; }
     }
     const dependencies = await createDependencyPorts(nc, localAi, config);
-    core = createCoordinator({ ports: { helper, local, external: children.external,
-      artifacts: { get: params => observed('artifacts', () => dependencies.artifacts.get(params)) },
-      localCatalog: { list: () => observed('local_ai', () => dependencies.localCatalog.list()) } }, config: config.domain });
+    core = createCoordinator({ ports: { helper, local: children.local, external: children.external,
+      artifacts: dependencies.artifacts, localCatalog: dependencies.localCatalog },
+      config: config.domain, observe: alerts.observe });
     recovery = createRecoveryController({ helper, history: dependencies.history, observe: alerts.observe,
+      // AIDEV-NOTE: Фоновые проверки могут закрыть эпизод, но только реальная операция открывает его.
       probe: async () => {
         const storage = await helper.call('health', {}) as { storageAvailable: boolean; capacityAvailable?: boolean };
-        alerts.observe('storage', storage.storageAvailable);
-        if (storage.storageAvailable && storage.capacityAvailable !== undefined) alerts.observe('capacity', storage.capacityAvailable);
+        if (storage.storageAvailable) alerts.observe('storage', true);
+        if (storage.storageAvailable && storage.capacityAvailable) alerts.observe('capacity', true);
         const executor = await children.local.call('health', {}).catch(() => ({ available: false })) as { available: boolean };
-        alerts.observe('local_ai', executor.available);
+        if (executor.available) alerts.observe('local_ai', true);
       },
       clearVolatileResults: core.clearVolatileResults, config: config.recovery });
     await recovery.initialize();
     const localHealth = await children.local.call('health', {}).catch(() => ({ available: false })) as { available: boolean };
-    alerts.observe('local_ai', localHealth.available);
+    if (localHealth.available) alerts.observe('local_ai', true);
     const gateway = createPublicGateway({ invoke: core.invoke, bindings: config.bindings, maxConcurrent: config.maxPublicConcurrent });
     http = await startHttpTransport(config.http, gateway);
     nats = await startNatsTransport(nc, gateway, { requestBytes: config.natsRequestBytes, responseBytes: config.natsResponseBytes });
@@ -98,7 +87,6 @@ export async function startCoordinator(config: CoordinatorRuntimeConfig) {
       },
     };
   } catch {
-    alerts.observe('recovery', false);
     await close();
     throw new Error('Transcription coordinator startup failed');
   }
