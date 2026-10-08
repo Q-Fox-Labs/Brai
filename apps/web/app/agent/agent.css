@@ -13,9 +13,14 @@
 .agent-projects [data-slot="scroll-area-viewport"] { padding-right: 0; overflow-anchor: none; }
 .agent-projects [data-slot="scroll-area-viewport"] > div { display: block !important; min-width: 0 !important; width: 100%; }
 .agent-project-list { padding: .5rem; }
+.agent-project { position: relative; }
+.agent-project.is-dragging { opacity: .35; }
+.agent-project[data-drop-position]::before { content: ""; position: absolute; left: .25rem; right: .25rem; height: 2px; border-radius: 2px; background: var(--primary); z-index: 1; }
+.agent-project[data-drop-position="before"]::before { top: -2px; }
+.agent-project[data-drop-position="after"]::before { bottom: -2px; }
 .agent-project + .agent-project { margin-top: .5rem; }
 .agent-project-heading { display: flex; align-items: center; gap: .25rem; margin-bottom: .25rem; }
-.agent-project-select { display: flex; height: 2rem; align-items: center; gap: .5rem; flex: 1; min-width: 0; justify-content: flex-start; padding: .375rem .5rem; color: var(--muted-foreground); font-size: .75rem; font-weight: 500; text-align: left; }
+.agent-project-select { cursor: grab; display: flex; height: 2rem; align-items: center; gap: .5rem; flex: 1; min-width: 0; justify-content: flex-start; padding: .375rem .5rem; color: var(--muted-foreground); font-size: .75rem; font-weight: 500; text-align: left; }
 .agent-project-select > span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-project-icon { width: 1rem; height: 1rem; flex: none; }
 .agent-project-color-0 { color: var(--primary); }
@@ -24,6 +29,7 @@
 .agent-project-dot { width: .375rem; height: .375rem; flex: none; margin-left: auto; border-radius: 9999px; background: var(--muted-foreground); }
 .agent-project-dot.is-available { background: var(--primary); }
 .agent-icon-button { width: 2rem; height: 2rem; padding: 0; color: var(--muted-foreground); }
+.agent-thread-list[hidden] { display: none; }
 .agent-thread-list { display: flex; flex-direction: column; gap: .125rem; }
 .agent-thread { position: relative; display: flex; align-items: center; min-height: 2rem; border-radius: var(--radius-md); }
 .agent-thread:hover, .agent-thread:focus-within { background: var(--accent); }

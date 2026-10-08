@@ -1,6 +1,6 @@
 "use client";
 // ABOUTME: Показывает проекты, чаты и лимиты в компактном рейле Brai-Old.
-// ABOUTME: Выбор и раскрытие списка не переносят запросы из экрана.
+// ABOUTME: Сворачивание и порядок сохраняются для пользователя; запросами владеет экран.
 import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -19,25 +19,68 @@ type Props = {
   close: () => void; logout: () => void;
 };
 
-/** Группирует уже прочитанные чаты; длинное название доступно полностью через title. */
-export default function Sidebar({ projects, pages, projectId, threadId, open, busy, accountLimits, readMessages = {}, select, create, more, refresh, archive, close }: Props) {
+/** Группирует чаты; заголовки сворачивают группы и переносят их без смены открытого чата. */
+export default function Sidebar({ projects, pages, projectId, threadId, open, email, busy, accountLimits, readMessages = {}, select, create, more, refresh, archive, close }: Props) {
   const [visible, setVisible] = useState<Record<string, number>>({});
+  const [preferences, setPreferences] = useState<{ order: string[]; collapsed: string[] }>({ order: [], collapsed: [] });
+  const [dragged, setDragged] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ id: string; after: boolean } | null>(null);
+  const suppressClickUntil = useRef(0);
+  const storageKey = `brai.agent.projects:${email}`;
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) ?? "null");
+      const validIds = (value: unknown): value is string[] => Array.isArray(value) && value.every(id => typeof id === "string");
+      setPreferences(saved && validIds(saved.order) && validIds(saved.collapsed) ? saved : { order: [], collapsed: [] });
+    } catch { setPreferences({ order: [], collapsed: [] }); }
+  }, [storageKey]);
+  const save = (next: typeof preferences) => {
+    setPreferences(next);
+    try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* Настройки остаются в памяти без доступа к хранилищу. */ }
+  };
+  const orderedProjects = [...projects].sort((a, b) => {
+    const rank = (id: string) => { const index = preferences.order.indexOf(id); return index < 0 ? preferences.order.length : index; };
+    return rank(a.projectId) - rank(b.projectId);
+  });
+  const finishDragging = () => { setDragged(null); setDropTarget(null); suppressClickUntil.current = Date.now() + 150; };
   return <aside id="agent-sidebar" className="agent-sidebar" data-open={open} aria-label="Проекты и чаты" onKeyDown={event => { if (event.key === "Escape" && !event.defaultPrevented) close(); }}>
     <header className="agent-sidebar-header"><h2 className="agent-brand">Проекты</h2><Button type="button" variant="ghost" size="icon-sm" className="agent-sidebar-close" aria-label="Закрыть список чатов" onClick={close}>×</Button></header>
     <Separator className="agent-separator" />
     <ScrollArea className="agent-projects" contentInset="none"><nav className="agent-project-list" aria-label="Проекты и чаты">
       {!projects.length && <p className="agent-sidebar-note">Загружаем проекты…</p>}
-      {projects.map((project, index) => {
+      {orderedProjects.map(project => {
+        const index = projects.indexOf(project), collapsed = preferences.collapsed.includes(project.projectId);
         const page = pages[project.projectId], count = visible[project.projectId] ?? 5;
-        return <section className="agent-project" key={project.projectId} aria-label={project.name}>
+        return <section className={`agent-project ${dragged === project.projectId ? "is-dragging" : ""}`} key={project.projectId} aria-label={project.name} data-project-id={project.projectId} data-drop-position={dropTarget?.id === project.projectId ? (dropTarget.after ? "after" : "before") : undefined}
+          onDragOver={event => {
+            if (!dragged || dragged === project.projectId) return;
+            event.preventDefault(); event.dataTransfer.dropEffect = "move";
+            const bounds = event.currentTarget.querySelector(".agent-project-heading")!.getBoundingClientRect();
+            setDropTarget({ id: project.projectId, after: event.clientY >= bounds.top + bounds.height / 2 });
+          }}
+          onDragLeave={event => {
+            if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+            setDropTarget(current => current?.id === project.projectId ? null : current);
+          }}
+          onDrop={event => {
+            if (!dragged || dragged === project.projectId) return;
+            event.preventDefault(); event.stopPropagation();
+            const bounds = event.currentTarget.querySelector(".agent-project-heading")!.getBoundingClientRect();
+            const order = orderedProjects.map(value => value.projectId).filter(id => id !== dragged);
+            order.splice(order.indexOf(project.projectId) + Number(event.clientY >= bounds.top + bounds.height / 2), 0, dragged);
+            save({ ...preferences, order }); finishDragging();
+          }}>
           <div className="agent-project-heading">
-            <Button type="button" variant="ghost" className="agent-project-select" aria-label={`Проект ${project.name}`} aria-pressed={projectId === project.projectId} disabled={!project.available} onClick={() => select(project.projectId)}>
+            <Button type="button" variant="ghost" className="agent-project-select" aria-label={`Проект ${project.name}`} aria-expanded={!collapsed} aria-controls={`agent-project-chats-${project.projectId}`} draggable
+              onDragStart={event => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("application/x-brai-agent-project", project.projectId); setDragged(project.projectId); setDropTarget(null); suppressClickUntil.current = Infinity; }}
+              onDragEnd={finishDragging}
+              onClick={() => { if (Date.now() < suppressClickUntil.current) return; save({ ...preferences, collapsed: collapsed ? preferences.collapsed.filter(id => id !== project.projectId) : [...preferences.collapsed, project.projectId] }); }}>
               <svg className={`agent-project-icon agent-project-color-${index % 3}`} width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /><path d="m8 12 3 2-3 2m6 0h3" /></svg>
               <span>{project.name}</span><span className={`agent-project-dot ${project.available ? "is-available" : ""}`} title={project.available ? "Проект доступен" : "Проект недоступен"} />
             </Button>
-            <Button type="button" variant="ghost" size="icon-sm" className="agent-icon-button" aria-label={`Новый чат в ${project.name}`} title="Новый чат" onClick={() => create(project.projectId)}>+</Button>
+            <Button type="button" variant="ghost" size="icon-sm" className="agent-icon-button" aria-label={`Новый чат в ${project.name}`} title="Новый чат" onClick={() => { if (collapsed) save({ ...preferences, collapsed: preferences.collapsed.filter(id => id !== project.projectId) }); create(project.projectId); }}>+</Button>
           </div>
-          <div className="agent-thread-list">
+          <div id={`agent-project-chats-${project.projectId}`} className="agent-thread-list" hidden={collapsed}>
             {sortThreads(page?.data ?? []).slice(0, count).map(thread => {
               const title = thread.title || thread.preview || "Новый чат", selected = projectId === project.projectId && threadId === thread.id;
               return <div key={thread.id} data-thread-id={thread.id} className={`agent-thread ${selected ? "is-selected" : ""}`}>
