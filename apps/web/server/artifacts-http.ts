@@ -71,7 +71,7 @@ function extension(mimeType: string): string {
   return mimeType === "image/png" ? "png" : mimeType === "image/jpeg" ? "jpg" : "webp";
 }
 
-function uploadUrl(value: string, request: Request): string {
+function uploadUrl(value: string): string {
   const baseText = process.env.AGENT_ARTIFACTS_UPLOAD_BASE_URL ?? process.env.ARTIFACTS_UPLOAD_BASE_URL;
   if (!baseText) throw failure(503, "UPLOAD_NOT_CONFIGURED");
   try {
@@ -79,8 +79,8 @@ function uploadUrl(value: string, request: Request): string {
     if (!/^https?:$/.test(base.protocol) || base.username || base.password || base.pathname !== "/" || base.search || base.hash
       || url.origin !== base.origin || url.username || url.password || url.search || url.hash
       || !/^\/upload\/[A-Za-z0-9_-]{16,512}$/.test(url.pathname)) throw new Error("BAD_UPLOAD_URL");
-    // AIDEV-NOTE: Native upload origin может относиться к другому контуру; browser PUT всегда идёт через свой Caddy.
-    return new URL(`/api/agent/uploads/${url.pathname.slice("/upload/".length)}`, request.url).toString();
+    // AIDEV-NOTE: Request.url за standalone proxy может иметь внутренний origin; относительный путь разрешает browser через свой Caddy.
+    return `/api/agent/uploads/${url.pathname.slice("/upload/".length)}`;
   } catch { throw failure(502, "BAD_UPLOAD_URL"); }
 }
 
@@ -119,7 +119,7 @@ export async function prepareAttachment(request: Request): Promise<Response> {
       requestId: input.requestId, ownerId, kind: input.kind, metadata: metadataFor(input),
     });
     if (!preparedMatches(value.artifact, ownerId, input)) throw failure(409, "PREPARE_CONFLICT");
-    return Response.json({ artifact: { artifactId: value.artifact.artifactId, status: value.artifact.status }, uploadUrl: uploadUrl(value.uploadUrl, request) }, { headers: noStore });
+    return Response.json({ artifact: { artifactId: value.artifact.artifactId, status: value.artifact.status }, uploadUrl: uploadUrl(value.uploadUrl) }, { headers: noStore });
   } catch (error) { return errorResponse(error); }
 }
 

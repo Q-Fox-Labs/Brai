@@ -21,11 +21,11 @@ function fixture() {
 function json(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } }); }
 function uploaded(id: string, size: number) { return new Response(null, { status: 201, headers: { "X-Artifact-Id": id, "X-Artifact-State": "ready", "X-Artifact-Size": String(size), "X-Artifact-SHA256": "a".repeat(64), Location: "https://artifacts.internal/files/abc" } }); }
 
-test("small original reuses its ID and a valid 201 avoids an extra prepare round trip", async () => {
+test("relative upload URL makes one public HTTPS PUT and valid 201 avoids extra prepare", async () => {
   const calls: { url: string; init?: RequestInit }[] = [], restore = fixture();
   const fetcher: typeof fetch = async (input, init) => {
     const url = String(input); calls.push({ url, init });
-    if (url === "/api/agent/attachments/prepare") return json({ artifact: { artifactId: "original-id", status: "pending" }, uploadUrl: "https://app.test/api/agent/uploads/abcdefghijklmnop" });
+    if (url === "/api/agent/attachments/prepare") return json({ artifact: { artifactId: "original-id", status: "pending" }, uploadUrl: "/api/agent/uploads/abcdefghijklmnop" });
     if (url.startsWith("https://app.test/api/agent/uploads/")) return uploaded("original-id", png.length);
     if (url === "/api/agent/attachments/finalize") return json({ status: "ready" });
     throw new Error(`Unexpected URL ${url}`);
@@ -35,6 +35,9 @@ test("small original reuses its ID and a valid 201 avoids an extra prepare round
     assert.deepEqual(ready, { originalArtifactId: "original-id", modelArtifactId: "original-id", url: "/api/agent/attachments/original-id?projectId=project-a&threadId=thread-a&expectedUserId=user-a" });
     assert.equal(calls.filter(call => call.url === "/api/agent/attachments/prepare").length, 1);
     assert.equal(calls.filter(call => call.url.startsWith("https://app.test/api/agent/uploads/")).length, 1);
+    const puts = calls.filter(call => call.init?.method === "PUT");
+    assert.equal(puts.length, 1);
+    assert.equal(puts[0].url, "https://app.test/api/agent/uploads/abcdefghijklmnop");
     const prepareBody = JSON.parse(String(calls[0].init?.body));
     assert.equal(prepareBody.requestId, image.originalRequestId);
     assert.equal(Object.hasOwn(prepareBody, "ownerId"), false);

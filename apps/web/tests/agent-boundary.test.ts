@@ -89,17 +89,31 @@ test("prepare verifies native upload origin and returns same-origin token route;
   try {
     const response = await f.artifacts.prepareAttachment(f.request("attachments/prepare", prepare));
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).uploadUrl, "https://dev.test/api/agent/uploads/abcdefghijklmnop");
+    assert.equal((await response.json()).uploadUrl, "/api/agent/uploads/abcdefghijklmnop");
     assert.equal(f.calls.find(call => call.subject === "brai.artifacts.v1.prepare")?.payload.ownerId, "canonical-owner");
     assert.ok(f.calls.filter(call => call.subject.startsWith("brai.artifacts")).every(call => call.broker === "nats://shared.test:4222"));
     assert.ok(f.calls.filter(call => !call.subject.startsWith("brai.artifacts")).every(call => call.broker === "nats://local.test:4222"));
     assert.deepEqual(f.connections.find(value => value.servers === "nats://shared.test:4222"), { servers: "nats://shared.test:4222", user: "attachment-fixture", pass: "synthetic", inboxPrefix: "_INBOX.test.attachments", name: "brai_web_agent_artifacts", timeout: 2000, maxReconnectAttempts: -1 });
-    for (const url of ["https://evil.test/upload/abcdefghijklmnop", "https://native-upload.test/upload/abcdefghijklmnop?token=x", "https://name:password@native-upload.test/upload/abcdefghijklmnop", "https://native-upload.test/files/abcdefghijklmnop", "https://native-upload.test/upload/short"]) {
+    for (const url of ["https://evil.test/upload/abcdefghijklmnop", "https://native-upload.test/upload/abcdefghijklmnop?token=x", "https://native-upload.test/upload/abcdefghijklmnop#fragment", "https://name:password@native-upload.test/upload/abcdefghijklmnop", "https://native-upload.test/files/abcdefghijklmnop", "https://native-upload.test/upload/short"]) {
       f.setUpload(url); assert.equal((await f.artifacts.prepareAttachment(f.request("attachments/prepare", prepare))).status, 502);
     }
     delete process.env.AGENT_ARTIFACTS_NATS_URL;
     await f.transport.agentArtifactsConnection();
     assert.equal(f.connections.length, 2, "legacy fallback reuses local connection");
+  } finally { f.close(); }
+});
+
+test("prepare behind HTTP or HTTPS standalone proxy never exposes the internal request origin", async () => {
+  const f = fixture();
+  try {
+    for (const origin of ["http://localhost:3000", "https://localhost:3000"]) {
+      const request = new Request(`${origin}/api/agent/attachments/prepare`, { method: "POST", headers: { origin: "https://dev.test", "x-brai-user": "local-user", "content-type": "application/json", "x-forwarded-proto": "https", "x-forwarded-host": "dev.test" }, body: JSON.stringify(prepare) });
+      const response = await f.artifacts.prepareAttachment(request);
+      assert.equal(response.status, 200);
+      const { uploadUrl } = await response.json();
+      assert.equal(uploadUrl, "/api/agent/uploads/abcdefghijklmnop");
+      assert.equal(new URL(uploadUrl, "https://dev.test/agent").href, "https://dev.test/api/agent/uploads/abcdefghijklmnop");
+    }
   } finally { f.close(); }
 });
 
