@@ -2,11 +2,11 @@
 // ABOUTME: Показывает дневные сегменты истории и позволяет править исходную сессию целиком.
 // ABOUTME: Статистика дня приходит полностью от сервиса; история страницы её не подменяет.
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { Check, ChevronDown, Crown, Minus, Pencil, Plus, Timer, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, Crown, Timer, Trash2, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Input } from "@/components/ui/input";
+import { TimeEditor } from "./timer-history-time-editor";
 import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
 import { formatDuration } from "../lib/model";
 import type { Active, Interval, Statistics } from "../lib/types";
@@ -16,10 +16,19 @@ import "./timer-history.css";
 const russianDayFormatter = new Intl.DateTimeFormat("ru-RU", { weekday: "long", day: "numeric", month: "long" });
 
 const fields: { key: EditField; label: string }[] = [
- { key: "start", label: "Начало" },
- { key: "duration", label: "Длительность" },
- { key: "end", label: "Конец" },
+ { key: "start", label: "Старт" },
+ { key: "duration", label: "Итого" },
+ { key: "end", label: "Финиш" },
 ];
+
+function formatCompactSessionDuration(seconds: number) {
+  const safe = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  if (hours <= 0) return `${minutes}м`;
+  if (minutes <= 0) return `${hours}ч`;
+  return `${hours}ч ${minutes}м`;
+}
 
 function formatPanelDayTotal(ms: number): string {
  const minutes = Math.floor(Math.round(Math.max(0, ms) / 1000) / 60);
@@ -71,6 +80,8 @@ export default function TimerHistory({ items, active, statistics, totalCompleted
 
  function closeEditor() { setDraft(null); setActiveRowId(null); setEditingField(null); setInputValue(""); setEditorError(""); }
  function openEditor(segment: IntervalSegment) {
+  if (activeRowId === segment.rowId) return;
+  if (draft && !save()) return;
   const next = createEditDraft(segment.interval);
   if (!next) { setEditorError("Не удалось открыть запись с некорректным диапазоном."); return; }
   setDraft(next); setActiveRowId(segment.rowId); setEditingField(null); setInputValue(""); setEditorError(""); setDeleteId(null);
@@ -101,16 +112,17 @@ export default function TimerHistory({ items, active, statistics, totalCompleted
   const current = editingField ? commitInput() : draft;
   if (current) update(applyEditStep(current, field, direction));
  }
- function save() {
+ function save(): boolean {
   const current = editingField ? commitInput() : draft;
-  if (!current) return;
-  if (!draftChanged(current)) { closeEditor(); return; }
+  if (!current) return false;
+  if (!draftChanged(current)) { closeEditor(); return true; }
   const error = editRangeError(current, items, active);
-  if (error) { setEditorError(error); return; }
+  if (error) { setEditorError(error); return false; }
   const range = draftRange(current);
   const commandId = onEdit(current.timerId, range.startedAt, range.stoppedAt);
-  if (!commandId) { setEditorError("Изменение не поставлено в очередь. Повторите сохранение."); return; }
+  if (!commandId) { setEditorError("Изменение не поставлено в очередь. Повторите сохранение."); return false; }
   closeEditor();
+  return true;
  }
  function deleteInterval(timerId: string) {
   const commandId = onDelete(timerId);
@@ -138,48 +150,48 @@ export default function TimerHistory({ items, active, statistics, totalCompleted
       </div>
      </header>
      <CollapsibleContent>
-      <Table className="timer-history-table" variant="card"><colgroup className="timer-history-columns"><col className="timer-history-time-column" /><col /><col className="timer-history-kind-column" /><col className="timer-history-actions-column" /></colgroup><TableBody>
+      <Table className="timer-history-table" variant="card"><colgroup className="timer-history-columns"><col className="timer-history-time-column" /><col /><col className="timer-history-kind-column" /></colgroup><TableBody>
        {day.items.map(segment => {
         const item = segment.interval;
         return <Fragment key={segment.rowId}>
-        <TableRow className="timer-history-entry" data-timer-id={item.timerId} data-segment-id={segment.rowId} data-state={activeRowId === segment.rowId ? "selected" : undefined}>
-         <TableCell>
-          <button className="timer-history-entry-open" type="button" onClick={() => openEditor(segment)} aria-label={`Редактировать: ${formatIntervalEdge(segment.startedAt, day.date)} — ${formatHistoryDuration(segment.durationMs)} — ${formatIntervalEdge(segment.stoppedAt)}`}>
-           <time dateTime={segment.startedAt} title={`Начало: ${new Date(segment.startedAt).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}`}>{formatIntervalEdge(segment.startedAt, day.date)}</time>
-           <span className="timer-history-entry-rule" aria-hidden="true" />
-           <strong title={`${segment.durationMs} мс`}>{formatHistoryDuration(segment.durationMs)}</strong>
-           <span className="timer-history-entry-rule" aria-hidden="true" />
-           <time dateTime={segment.stoppedAt} title={`Финиш: ${new Date(segment.stoppedAt).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}`}>{formatIntervalEdge(segment.stoppedAt)}</time>
+        <TableRow className="timer-history-entry h-12 cursor-pointer overflow-hidden transition-colors" onClick={() => openEditor(segment)} data-timer-id={item.timerId} data-segment-id={segment.rowId} data-state={activeRowId === segment.rowId ? "selected" : undefined}>
+         <TableCell className="h-12 px-1.5 py-0">
+          <button className="grid h-12 w-full grid-cols-[auto_minmax(3rem,1fr)_auto] items-center gap-2 text-left font-normal tabular-nums outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50" type="button" onClick={event => { event.stopPropagation(); openEditor(segment); }} aria-label={`Редактировать: ${formatIntervalEdge(segment.startedAt, day.date)} — ${formatHistoryDuration(segment.durationMs)} — ${formatIntervalEdge(segment.stoppedAt)}`}>
+           <time className="justify-self-start" dateTime={segment.startedAt} title={`Начало: ${new Date(segment.startedAt).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}`}>{formatIntervalEdge(segment.startedAt, day.date)}</time>
+           <div className="grid min-w-0 grid-cols-[1fr_auto_1fr] items-center gap-1.5 text-center text-muted-foreground before:border-muted-foreground before:border-t before:border-dashed before:opacity-55 after:border-muted-foreground after:border-t after:border-dashed after:opacity-55"><span className="shrink-0 font-medium text-primary" title={formatHistoryDuration(segment.durationMs)}>{formatCompactSessionDuration(segment.durationMs / 1000)}</span></div>
+           <time className="justify-self-end text-right" dateTime={segment.stoppedAt} title={`Финиш: ${new Date(segment.stoppedAt).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}`}>{formatIntervalEdge(segment.stoppedAt)}</time>
           </button>
          </TableCell>
-         <TableCell className="timer-history-entry-label">В фокусе{segment.split ? <small title="Редактирование и удаление применяются ко всей сессии">Часть сессии</small> : null}</TableCell>
-         <TableCell><Badge aria-label="Фокус" title="Фокус" variant="outline"><Timer aria-hidden="true" /></Badge></TableCell>
-         <TableCell className="timer-history-entry-actions">
-          <Button aria-label="Редактировать интервал" onClick={() => openEditor(segment)} size="icon-sm" type="button" variant="ghost"><Pencil aria-hidden="true" /></Button>
-          <Button aria-label={deleteId === segment.rowId ? "Подтвердить удаление интервала" : "Удалить интервал"} onClick={() => { setDeleteError(""); setDeleteId(current => current === segment.rowId ? null : segment.rowId); closeEditor(); }} size="icon-sm" type="button" variant="ghost"><Trash2 aria-hidden="true" /></Button>
-         </TableCell>
+         <TableCell className="timer-history-entry-label h-12 min-w-0 px-1.5 py-0"><span className="block truncate font-medium">В фокусе</span>{segment.split ? <small title="Редактирование и удаление применяются ко всей сессии">Часть сессии</small> : null}</TableCell>
+         <TableCell className="h-12 px-0.5 py-0 text-center"><Badge aria-label="Фокус" title="Фокус" className="h-7 min-w-7 px-0 font-normal tabular-nums" variant="outline"><Timer aria-hidden="true" /></Badge></TableCell>
         </TableRow>
-        {draft && activeRowId === segment.rowId ? <TableRow className="timer-history-editor"><TableCell colSpan={4}>
-         <div className="timer-history-editor-heading"><strong>Изменить интервал</strong><span>Московское время · шаг 5 минут</span></div>
-         {segment.split ? <p className="timer-history-editor-note">Эта сессия показана в нескольких днях. Изменения применятся ко всей сессии.</p> : null}
-         <div className="timer-history-editor-fields">{fields.map(({ key, label }) => {
-          const changed = key === "start" ? draft.startMs !== draft.originalStartMs : key === "end" ? draft.endMs !== draft.originalEndMs : draft.endMs - draft.startMs !== draft.originalEndMs - draft.originalStartMs;
-          const invalid = editingField === key && normalizeEditValue(key, inputValue) === null;
-          return <fieldset className={changed ? "is-changed" : ""} key={key}><legend>{label}</legend>
-           <div className="timer-history-editor-control">
-            <Button aria-label={editingField === key ? `Отменить ввод: ${label}` : `${label}: уменьшить на 5 минут`} title={editingField === key ? "Отменить ввод" : "−5 минут"} onClick={() => editingField === key ? setEditingField(null) : step(key, -1)} size="icon-sm" type="button" variant="outline">{editingField === key ? <X /> : <Minus />}</Button>
-            {editingField === key ? <Input autoFocus aria-invalid={invalid} aria-label={label} inputMode="text" placeholder="ЧЧ:ММ" onFocus={event => event.currentTarget.select()} onChange={event => setInputValue(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); commitInput(); } if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setEditingField(null); setEditorError(""); } }} value={inputValue} /> : <button aria-label={`${label}: ${formatEditValue(key, draft.startMs, draft.endMs)}. Ввести время`} className="timer-history-editor-value" onClick={() => beginInput(key)} type="button">{formatEditValue(key, draft.startMs, draft.endMs)}<Pencil aria-hidden="true" /></button>}
-            <Button aria-label={editingField === key ? `Применить ввод: ${label}` : `${label}: увеличить на 5 минут`} title={editingField === key ? "Применить ввод" : "+5 минут"} disabled={invalid} onClick={() => editingField === key ? commitInput() : step(key, 1)} size="icon-sm" type="button" variant="outline">{editingField === key ? <Check /> : <Plus />}</Button>
-           </div>
-           <span className="timer-history-editor-field-note">{key === "duration" ? "Часы : минуты" : new Date(key === "start" ? draft.startMs : draft.endMs).toLocaleDateString("ru-RU", { timeZone: "Europe/Moscow" })}</span>
-          </fieldset>;
-         })}</div>
-         <p className="timer-history-editor-note">Начало сдвигает весь интервал. Длительность и конец меняют время окончания.</p>
-         <p className="timer-history-editor-range"><span>{new Date(draft.startMs).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}</span><span aria-hidden="true"> → </span><span>{new Date(draft.endMs).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}</span></p>
+        {draft && activeRowId === segment.rowId ? <TableRow className="timer-history-editor"><TableCell className="!p-0 !ps-0 !pe-0" colSpan={3}>
+         <div className="timer-history-editor-bar grid h-14 w-full grid-cols-[minmax(0,1fr)_5rem] items-center gap-2 px-2 py-1.5" data-nav-swipe-exclusion>
+          <div className="grid min-w-0 grid-cols-3 gap-1.5">{fields.map(({ key, label }) => <TimeEditor
+           key={key}
+           changed={key === "start" ? draft.startMs !== draft.originalStartMs : key === "end" ? draft.endMs !== draft.originalEndMs : draft.endMs - draft.startMs !== draft.originalEndMs - draft.originalStartMs}
+           editing={editingField === key}
+           featured={key === "duration"}
+           field={key}
+           label={label}
+           inputValue={inputValue}
+           onBeginInput={beginInput}
+           onCancelInput={() => { setEditingField(null); setEditorError(""); }}
+           onCommitInput={commitInput}
+           onInput={setInputValue}
+           onStep={direction => step(key, direction)}
+           value={formatEditValue(key, draft.startMs, draft.endMs)}
+          />)}</div>
+          <div className="timer-history-editor-actions flex h-10 items-center justify-end gap-0.5 border-l pl-1">
+           <Button aria-label="Отменить редактирование фокуса" title="Отмена" className="size-6 text-muted-foreground" onClick={closeEditor} size="icon-sm" type="button" variant="ghost"><X className="size-3.5" aria-hidden="true" /></Button>
+           <Button aria-label="Удалить запись фокуса" title="Удалить" className="size-6 text-destructive" onClick={() => { setDeleteId(segment.rowId); setDeleteError(""); closeEditor(); }} size="icon-sm" type="button" variant="ghost"><Trash2 className="size-3.5" aria-hidden="true" /></Button>
+           <Button aria-label="Закрыть редактирование фокуса" title="Сохранить" className="size-6 text-foreground" onClick={save} size="icon-sm" type="button" variant="ghost"><Check className="size-3.5" aria-hidden="true" /></Button>
+          </div>
+         </div>
+         {segment.split ? <p className="timer-history-editor-note">Изменения применятся ко всей сессии, включая части в других днях.</p> : null}
          {editorError ? <p className="timer-history-editor-error" role="alert">{editorError}</p> : null}
-         <div className="timer-history-editor-actions"><Button onClick={closeEditor} type="button" variant="outline">Отмена</Button><Button disabled={!draftChanged(draft) && !editingField} onClick={save} type="button">Сохранить</Button></div>
         </TableCell></TableRow> : null}
-        {deleteId === segment.rowId ? <TableRow className="timer-history-delete"><TableCell colSpan={4}>
+        {deleteId === segment.rowId ? <TableRow className="timer-history-delete"><TableCell colSpan={3}>
          <span>{segment.split ? "Удалить всю сессию, включая части в других днях?" : "Удалить всю сессию из истории?"}</span>{deleteError ? <span className="timer-history-editor-error" role="alert">{deleteError}</span> : null}<div><Button onClick={() => { setDeleteId(null); setDeleteError(""); }} type="button" variant="outline">Отмена</Button><Button onClick={() => deleteInterval(item.timerId)} type="button" variant="destructive">Удалить</Button></div>
         </TableCell></TableRow> : null}
        </Fragment>;

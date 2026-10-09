@@ -7,48 +7,25 @@
 .timer-history-table { table-layout: fixed; }
 .timer-history-time-column { width: 168px; }
 .timer-history-kind-column { width: 34px; }
-.timer-history-actions-column { width: 80px; }
-.timer-history-entry td:nth-child(2) { color: var(--muted-foreground); font-size: 12px; }
 .timer-history-entry-label small { display: block; font-size: 10px; color: var(--muted-foreground); }
-.timer-history-entry td:nth-child(3) { text-align: center; }
-.timer-history-entry-actions { white-space: nowrap; }
-.timer-history-entry-actions button { width: 30px; height: 30px; }
-.timer-history-entry-actions svg { width: 14px; height: 14px; }
-.timer-history-entry-open { display: grid; width: 100%; grid-template-columns: auto minmax(8px, 1fr) auto minmax(8px, 1fr) auto; align-items: center; gap: 7px; border: 0; background: transparent; padding: 3px; color: inherit; text-align: left; cursor: pointer; }
-.timer-history-entry-open time { font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.timer-history-entry-open strong { color: var(--primary); font-size: 12px; font-variant-numeric: tabular-nums; }
-.timer-history-entry-rule { border-top: 1px dashed var(--muted-foreground); opacity: .5; }
-.timer-history-editor td, .timer-history-delete td { background: color-mix(in srgb, var(--primary) 5%, var(--card)); white-space: normal; }
-.timer-history-editor td { padding: 16px; line-height: 1.45; }
-.timer-history-editor-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin-bottom: 16px; }
-.timer-history-editor-heading strong { font-size: 14px; }
-.timer-history-editor-heading span, .timer-history-editor-note { color: var(--muted-foreground); font-size: 12px; }
-.timer-history-editor-note { margin: 12px 0; }
-.timer-history-editor-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 12px; }
-.timer-history-editor-fields fieldset { min-width: 0; margin: 0; border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
-.timer-history-editor-fields fieldset.is-changed { border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); background: color-mix(in srgb, var(--primary) 7%, transparent); }
-.timer-history-editor-fields legend { padding: 0 5px; color: var(--foreground); font-size: 12px; font-weight: 500; }
-.timer-history-editor-control { display: grid; grid-template-columns: 36px minmax(0, 1fr) 36px; align-items: center; gap: 6px; }
-.timer-history-editor-control > button:not(.timer-history-editor-value) { width: 36px; height: 40px; }
-.timer-history-editor-control svg { width: 16px; height: 16px; }
-.timer-history-editor-control input, .timer-history-editor-value { width: 100%; height: 40px; min-width: 0; padding: 0 4px; text-align: center; font-size: 18px; font-variant-numeric: tabular-nums; }
-.timer-history-editor-value { display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 6px; background: transparent; color: var(--foreground); font-weight: 600; white-space: nowrap; cursor: pointer; }
-.timer-history-editor-value svg { width: 12px; height: 12px; color: var(--muted-foreground); }
-.timer-history-editor-value:hover { background: var(--accent); }
-.timer-history-editor-value:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-.timer-history-editor-field-note { display: block; margin-top: 6px; color: var(--muted-foreground); font-size: 11px; text-align: center; }
-.timer-history-editor-range { display: flex; flex-wrap: wrap; gap: 2px 6px; margin: 12px 0 0; color: var(--foreground); font-size: 12px; font-variant-numeric: tabular-nums; }
-.timer-history-editor-error { display: block; margin: 7px 0 0; color: var(--destructive); font-size: 12px; }
-.timer-history-editor-actions > button { min-height: 40px; padding-inline: 16px; }
-.timer-history-editor-actions, .timer-history-delete td > div { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.timer-history-content { container-type: inline-size; }
+.timer-history-entry { cursor: pointer; }
+.timer-history-editor td, .timer-history-delete td { white-space: normal; }
+.timer-history-editor-note, .timer-history-editor-error { margin: 0; padding: 0 8px 8px; font-size: 12px; line-height: 1.4; }
+.timer-history-editor-note { color: var(--muted-foreground); }
+.timer-history-editor-error { color: var(--destructive); }
+.timer-history-delete td > div { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+/* AIDEV-NOTE: В мобильной панели действия переносятся вниз; поля Brai-old сохраняют минимальную ширину. */
+@container (max-width: 420px) {
+ .timer-history-editor-bar { height: auto; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+ .timer-history-editor-actions { height: 28px; border-left: 0; padding-left: 0; }
+}
+@container (max-width: 320px) {
+ .timer-history-editor-bar > div:first-child > div { padding-inline: 2px; }
+ .timer-history-editor-bar > div:first-child > div > div { grid-template-columns: 15px minmax(0, 1fr) 15px; gap: 0; }
+ .timer-history-editor-bar > div:first-child > div > div > button:first-child,
+ .timer-history-editor-bar > div:first-child > div > div > button:last-child { width: 15px; }
+}
 .timer-history-delete td > span { font-size: 13px; }
 .timer-history-delete td > span + .timer-history-editor-error { margin-top: 5px; }
 .timer-history-v2-more { display: flex; justify-content: center; padding: 14px; }
-@media (max-width: 560px) {
- .timer-history-entry td { padding: 7px 5px; }
- .timer-history-entry td:nth-child(2) { overflow: hidden; font-size: 11px; text-overflow: ellipsis; }
- .timer-history-actions-column { width: 64px; }
- .timer-history-entry-open { gap: 3px; }
- .timer-history-entry-open time, .timer-history-entry-open strong { font-size: 10px; }
- .timer-history-editor td { padding: 12px; }
-}
