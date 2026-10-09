@@ -16,9 +16,9 @@ import "./timer-history.css";
 const russianDayFormatter = new Intl.DateTimeFormat("ru-RU", { weekday: "long", day: "numeric", month: "long" });
 
 const fields: { key: EditField; label: string }[] = [
- { key: "start", label: "Старт" },
- { key: "duration", label: "Итого" },
- { key: "end", label: "Финиш" },
+ { key: "start", label: "Начало" },
+ { key: "duration", label: "Длительность" },
+ { key: "end", label: "Конец" },
 ];
 
 function formatPanelDayTotal(ms: number): string {
@@ -83,7 +83,9 @@ export default function TimerHistory({ items, active, statistics, totalCompleted
  }
  function beginInput(field: EditField) {
   if (!draft) return;
-  setEditingField(field); setInputValue(formatEditValue(field, draft.startMs, draft.endMs)); setEditorError("");
+  const current = editingField ? commitInput() : draft;
+  if (!current) return;
+  setEditingField(field); setInputValue(formatEditValue(field, current.startMs, current.endMs)); setEditorError("");
  }
  function commitInput(): EditDraft | null {
   if (!draft || !editingField) return draft;
@@ -94,6 +96,10 @@ export default function TimerHistory({ items, active, statistics, totalCompleted
   if (error) { setEditorError(error); return null; }
   setDraft(next); setEditingField(null); setInputValue(normalized ?? ""); setEditorError("");
   return next;
+ }
+ function step(field: EditField, direction: -1 | 1) {
+  const current = editingField ? commitInput() : draft;
+  if (current) update(applyEditStep(current, field, direction));
  }
  function save() {
   const current = editingField ? commitInput() : draft;
@@ -154,16 +160,22 @@ export default function TimerHistory({ items, active, statistics, totalCompleted
          </TableCell>
         </TableRow>
         {draft && activeRowId === segment.rowId ? <TableRow className="timer-history-editor"><TableCell colSpan={4}>
-         <p className="timer-history-editor-range">{segment.split ? "Эта сессия показана в нескольких днях. Правка применяется ко всей сессии." : "Редактирование всей сессии."}</p>
+         <div className="timer-history-editor-heading"><strong>Изменить интервал</strong><span>Московское время · шаг 5 минут</span></div>
+         {segment.split ? <p className="timer-history-editor-note">Эта сессия показана в нескольких днях. Изменения применятся ко всей сессии.</p> : null}
          <div className="timer-history-editor-fields">{fields.map(({ key, label }) => {
           const changed = key === "start" ? draft.startMs !== draft.originalStartMs : key === "end" ? draft.endMs !== draft.originalEndMs : draft.endMs - draft.startMs !== draft.originalEndMs - draft.originalStartMs;
           const invalid = editingField === key && normalizeEditValue(key, inputValue) === null;
-          return <fieldset className={changed ? "is-changed" : ""} key={key}><legend>{label}</legend><Button aria-label={editingField === key ? "Отменить ввод" : "Уменьшить на 5 минут"} onClick={() => editingField === key ? setEditingField(null) : update(applyEditStep(draft, key, -1))} size="icon-xs" type="button" variant="ghost">{editingField === key ? <X /> : <Minus />}</Button>
-           {editingField === key ? <Input aria-invalid={invalid} aria-label={label} inputMode="numeric" onChange={event => setInputValue(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); commitInput(); } if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setEditingField(null); } }} value={inputValue} /> : <button className="timer-history-editor-value" onClick={() => beginInput(key)} type="button">{formatEditValue(key, draft.startMs, draft.endMs)}</button>}
-           <Button aria-label={editingField === key ? "Применить ввод" : "Увеличить на 5 минут"} disabled={invalid} onClick={() => editingField === key ? commitInput() : update(applyEditStep(draft, key, 1))} size="icon-xs" type="button" variant="ghost">{editingField === key ? <Check /> : <Plus />}</Button>
+          return <fieldset className={changed ? "is-changed" : ""} key={key}><legend>{label}</legend>
+           <div className="timer-history-editor-control">
+            <Button aria-label={editingField === key ? `Отменить ввод: ${label}` : `${label}: уменьшить на 5 минут`} title={editingField === key ? "Отменить ввод" : "−5 минут"} onClick={() => editingField === key ? setEditingField(null) : step(key, -1)} size="icon-sm" type="button" variant="outline">{editingField === key ? <X /> : <Minus />}</Button>
+            {editingField === key ? <Input autoFocus aria-invalid={invalid} aria-label={label} inputMode="text" placeholder="ЧЧ:ММ" onFocus={event => event.currentTarget.select()} onChange={event => setInputValue(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); commitInput(); } if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setEditingField(null); setEditorError(""); } }} value={inputValue} /> : <button aria-label={`${label}: ${formatEditValue(key, draft.startMs, draft.endMs)}. Ввести время`} className="timer-history-editor-value" onClick={() => beginInput(key)} type="button">{formatEditValue(key, draft.startMs, draft.endMs)}<Pencil aria-hidden="true" /></button>}
+            <Button aria-label={editingField === key ? `Применить ввод: ${label}` : `${label}: увеличить на 5 минут`} title={editingField === key ? "Применить ввод" : "+5 минут"} disabled={invalid} onClick={() => editingField === key ? commitInput() : step(key, 1)} size="icon-sm" type="button" variant="outline">{editingField === key ? <Check /> : <Plus />}</Button>
+           </div>
+           <span className="timer-history-editor-field-note">{key === "duration" ? "Часы : минуты" : new Date(key === "start" ? draft.startMs : draft.endMs).toLocaleDateString("ru-RU", { timeZone: "Europe/Moscow" })}</span>
           </fieldset>;
          })}</div>
-         <p className="timer-history-editor-range">{new Date(draft.startMs).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })} — {new Date(draft.endMs).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}</p>
+         <p className="timer-history-editor-note">Начало сдвигает весь интервал. Длительность и конец меняют время окончания.</p>
+         <p className="timer-history-editor-range"><span>{new Date(draft.startMs).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}</span><span aria-hidden="true"> → </span><span>{new Date(draft.endMs).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" })}</span></p>
          {editorError ? <p className="timer-history-editor-error" role="alert">{editorError}</p> : null}
          <div className="timer-history-editor-actions"><Button onClick={closeEditor} type="button" variant="outline">Отмена</Button><Button disabled={!draftChanged(draft) && !editingField} onClick={save} type="button">Сохранить</Button></div>
         </TableCell></TableRow> : null}

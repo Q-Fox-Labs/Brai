@@ -19,16 +19,27 @@
 .timer-history-entry-open strong { color: var(--primary); font-size: 12px; font-variant-numeric: tabular-nums; }
 .timer-history-entry-rule { border-top: 1px dashed var(--muted-foreground); opacity: .5; }
 .timer-history-editor td, .timer-history-delete td { background: color-mix(in srgb, var(--primary) 5%, var(--card)); white-space: normal; }
-.timer-history-editor-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-.timer-history-editor-fields fieldset { display: grid; min-width: 0; grid-template-columns: 24px minmax(0, 1fr) 24px; align-items: center; gap: 3px; border: 1px solid var(--border); border-radius: 8px; padding: 4px; }
-.timer-history-editor-fields fieldset.is-changed { border-color: color-mix(in srgb, var(--primary) 48%, var(--border)); background: color-mix(in srgb, var(--primary) 7%, transparent); }
-.timer-history-editor-fields legend { margin-inline: auto; padding: 0 4px; color: var(--muted-foreground); font-size: 10px; }
-.timer-history-editor-fields fieldset button { width: 24px; height: 24px; }
-.timer-history-editor-fields fieldset svg { width: 12px; height: 12px; }
-.timer-history-editor-fields input, .timer-history-editor-value { height: 28px; min-width: 0; padding: 0 2px; text-align: center; font-size: 13px; font-variant-numeric: tabular-nums; }
-.timer-history-editor-value { overflow: hidden; border: 0; background: transparent; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
-.timer-history-editor-range { margin: 8px 0 0; color: var(--muted-foreground); font-size: 11px; text-align: center; }
+.timer-history-editor td { padding: 16px; line-height: 1.45; }
+.timer-history-editor-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; margin-bottom: 16px; }
+.timer-history-editor-heading strong { font-size: 14px; }
+.timer-history-editor-heading span, .timer-history-editor-note { color: var(--muted-foreground); font-size: 12px; }
+.timer-history-editor-note { margin: 12px 0; }
+.timer-history-editor-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 12px; }
+.timer-history-editor-fields fieldset { min-width: 0; margin: 0; border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+.timer-history-editor-fields fieldset.is-changed { border-color: color-mix(in srgb, var(--primary) 60%, var(--border)); background: color-mix(in srgb, var(--primary) 7%, transparent); }
+.timer-history-editor-fields legend { padding: 0 5px; color: var(--foreground); font-size: 12px; font-weight: 500; }
+.timer-history-editor-control { display: grid; grid-template-columns: 36px minmax(0, 1fr) 36px; align-items: center; gap: 6px; }
+.timer-history-editor-control > button:not(.timer-history-editor-value) { width: 36px; height: 40px; }
+.timer-history-editor-control svg { width: 16px; height: 16px; }
+.timer-history-editor-control input, .timer-history-editor-value { width: 100%; height: 40px; min-width: 0; padding: 0 4px; text-align: center; font-size: 18px; font-variant-numeric: tabular-nums; }
+.timer-history-editor-value { display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 6px; background: transparent; color: var(--foreground); font-weight: 600; white-space: nowrap; cursor: pointer; }
+.timer-history-editor-value svg { width: 12px; height: 12px; color: var(--muted-foreground); }
+.timer-history-editor-value:hover { background: var(--accent); }
+.timer-history-editor-value:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.timer-history-editor-field-note { display: block; margin-top: 6px; color: var(--muted-foreground); font-size: 11px; text-align: center; }
+.timer-history-editor-range { display: flex; flex-wrap: wrap; gap: 2px 6px; margin: 12px 0 0; color: var(--foreground); font-size: 12px; font-variant-numeric: tabular-nums; }
 .timer-history-editor-error { display: block; margin: 7px 0 0; color: var(--destructive); font-size: 12px; }
+.timer-history-editor-actions > button { min-height: 40px; padding-inline: 16px; }
 .timer-history-editor-actions, .timer-history-delete td > div { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .timer-history-delete td > span { font-size: 13px; }
 .timer-history-delete td > span + .timer-history-editor-error { margin-top: 5px; }
@@ -39,8 +50,5 @@
  .timer-history-actions-column { width: 64px; }
  .timer-history-entry-open { gap: 3px; }
  .timer-history-entry-open time, .timer-history-entry-open strong { font-size: 10px; }
- .timer-history-editor-fields { gap: 4px; }
- .timer-history-editor-fields fieldset { grid-template-columns: 20px minmax(0, 1fr) 20px; gap: 1px; padding: 3px 1px; }
- .timer-history-editor-fields fieldset button { width: 20px; height: 22px; }
- .timer-history-editor-fields input, .timer-history-editor-value { font-size: 12px; }
+ .timer-history-editor td { padding: 12px; }
 }
