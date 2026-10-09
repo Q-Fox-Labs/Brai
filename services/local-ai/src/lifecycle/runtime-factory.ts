@@ -1,7 +1,7 @@
-// ABOUTME: Запускает два закреплённых local-ai runtime и переводит их протоколы в порты приложения.
+// ABOUTME: Запускает закреплённые per-model local-ai runtime и переводит их протоколы в порты приложения.
 // ABOUTME: Аргументы передаются напрямую; сеть, веса, пути и числовые лимиты поступают из конфигурации.
 import { spawn, type ChildProcess } from 'node:child_process';
-import { lstat, mkdtemp, rm } from 'node:fs/promises';
+import { lstat, mkdtemp, rm, readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import type { RuntimeFactory, RuntimePort } from '../ports.js';
 import { LocalAiError } from '../errors.js';
@@ -17,9 +17,11 @@ type ProfileConfig = {
   stopGraceMs: number;
   maxLineBytes: number;
 };
+type LlamaProfileConfig = ProfileConfig & { host: string; port: () => number; dimensions: number; contextTokens: number; maxBatchTokens: number; queryInstruction: string; documentInstruction?: string; symmetricInstruction?: string };
 export type ProfileRuntimeFactoryConfig = {
   profiles: {
-    llama_cpp: ProfileConfig & { host: string; port: () => number; dimensions: number; contextTokens: number; maxBatchTokens: number; queryInstruction: string };
+    llama_cpp: LlamaProfileConfig;
+    embeddinggemma2_llama_cpp?: LlamaProfileConfig;
     gigaam_pytorch: ProfileConfig & { vadModelPath: string; vadRevision: string; threads: number; longformMaximumSeconds: number; audioDecodeTimeoutSeconds: number };
   };
   fetch?: typeof fetch;
@@ -459,13 +461,13 @@ function remainingCode(context: OperationContext): 'CANCELLED' | 'DEADLINE_EXCEE
 class LlamaRuntime implements RuntimePort {
   readonly exited: Promise<void>;
   #child: ChildProcess;
-  #config: ProfileRuntimeFactoryConfig['profiles']['llama_cpp'];
+  #config: LlamaProfileConfig;
   #base: URL;
   #fetch: typeof fetch;
   #closePromise?: Promise<void>;
   #stop: () => Promise<void>;
 
-  constructor(child: ChildProcess, exited: Promise<void>, config: ProfileRuntimeFactoryConfig['profiles']['llama_cpp'], port: number, fetcher: typeof fetch, stop: () => Promise<void>) {
+  constructor(child: ChildProcess, exited: Promise<void>, config: LlamaProfileConfig, port: number, fetcher: typeof fetch, stop: () => Promise<void>) {
     this.#child = child;
     this.exited = exited;
     this.#config = config;
@@ -496,10 +498,28 @@ class LlamaRuntime implements RuntimePort {
   }
 
   async embed(input: EmbedInput, context: OperationContext): Promise<EmbedOutput> {
-    const prepared = input.texts.map(text => input.purpose === 'query'
-      ? `Instruct: ${this.#config.queryInstruction}\nQuery: ${text}` : text);
+    const items = input.inputs ?? input.texts!.map(text => ({ type: 'text' as const, text }));
+    const prepareText = (text: string) => this.#config.documentInstruction !== undefined
+      ? (input.purpose === 'query' ? this.#config.queryInstruction : input.purpose === 'symmetric' ? this.#config.symmetricInstruction! : this.#config.documentInstruction) + text
+      : input.purpose === 'query' ? `Instruct: ${this.#config.queryInstruction}
+Query: ${text}` : text;
+    const prepared: (string | { content: Record<string, unknown>[] })[] = [];
+    for (const item of items) {
+      checkContext(context);
+      if (item.type === 'text') prepared.push(prepareText(item.text));
+      else {
+        if (this.#config.documentInstruction === undefined) throw serviceError('UNSUPPORTED_OPERATION');
+        const data = (await readFile(item.localPath)).toString('base64');
+        const content = item.type === 'image_artifact'
+          ? { type: 'image_url', image_url: { url: `data:${item.mimeType};base64,${data}` } }
+          : item.type === 'audio_artifact' ? { type: 'input_audio', input_audio: { data } }
+          : { type: 'input_video', input_video: { data } };
+        prepared.push({ content: [content] });
+      }
+    }
     let batchTokens = 0;
     for (const content of prepared) {
+      if (typeof content !== 'string') continue;
       const tokenResponse = await this.#request('/tokenize', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ content, add_special: true }),
@@ -532,7 +552,7 @@ class LlamaRuntime implements RuntimePort {
     }
     let body: unknown;
     try { body = JSON.parse(await readResponse(response, this.#config.maxLineBytes)); } catch { throw serviceError('ENGINE_UNAVAILABLE'); }
-    return assertVectors(body, input.texts.length, this.#config.dimensions);
+    return assertVectors(body, items.length, this.#config.dimensions);
   }
 
   async transcribe(_input: TranscribeInput, _context: OperationContext): Promise<TranscribeOutput> {
@@ -554,16 +574,17 @@ export function createProfileRuntimeFactory(config: ProfileRuntimeFactoryConfig)
   const fetcher = config.fetch ?? fetch;
   return {
     async open(model, context): Promise<RuntimePort> {
-      if (model.model.profileId === 'llama_cpp') {
-        const profile = config.profiles.llama_cpp;
+      if (model.model.profileId === 'llama_cpp' || model.model.profileId === 'embeddinggemma2_llama_cpp') {
+        const profile = config.profiles[model.model.profileId];
+        if (!profile) throw serviceError('NOT_SUPPORTED');
         validateProfileConfig(profile);
-        const gguf = model.installation.files.find(file => file.path.endsWith('.gguf'));
+        const gguf = model.installation.files.find(file => file.path.endsWith('.gguf') && !file.path.startsWith('mmproj-'));
         if (!gguf || model.installation.modelId !== model.model.modelId || model.installation.revision !== model.model.revision) {
           throw serviceError('MODEL_NOT_INSTALLED');
         }
         const port = profile.port();
         if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw serviceError('MODEL_LOAD_FAILED');
-        const args = substitute(profile.args, { modelPath: join(model.installation.directory, gguf.path), port: String(port) });
+        const args = substitute(profile.args, { modelPath: join(model.installation.directory, gguf.path), port: String(port), ...(model.model.profileId === 'embeddinggemma2_llama_cpp' ? { mmprojPath: modelPath(model, 'mmproj-embeddinggemma-2-Q8_0.gguf') } : {}) });
         const process = spawnRuntime(profile, args, { executor: 'llama_cpp' });
         const runtime = new LlamaRuntime(process.child, process.exited, profile, port, fetcher, process.stop);
         try {

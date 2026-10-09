@@ -6,7 +6,7 @@ import { createPostgresStore } from '../dist/storage/postgres.js';
 import { createLifecycleManager } from '../dist/lifecycle/index.js';
 
 const selector = { modelId: 'm', revision: 'r', profileId: 'p' };
-const model = { ...selector, supported: true, operations: ['embed'], limits: { maxInputBytes: null, maxItems: null, vectorDimensions: 1 } };
+const model = { ...selector, supported: true, operations: ['embed'], inputKinds: ['text'], limits: { maxInputBytes: null, maxItems: null, vectorDimensions: 1 } };
 function poolFixture() {
   const queries = []; let forbidden = false;
   const operation = { operationId: 'install', ownerId: 'u', modelId: 'm', revision: 'r', profileId: 'p', status: 'running', phase: 'downloading', progressPercent: 0, errorCode: null, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' };

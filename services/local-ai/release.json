@@ -71,7 +71,10 @@
       "path": "payload/runtime/llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/app/",
       "sourceImage": "ghcr.io/ggml-org/llama.cpp@sha256:7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571",
       "executable": "llama-server",
-      "include": ["executable", "required system libraries"],
+      "include": [
+        "executable",
+        "required system libraries"
+      ],
       "systemLibrariesPath": "payload/runtime/llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/system/"
     },
     "gigaam": {
@@ -79,7 +82,10 @@
       "pythonExecutable": "bin/python",
       "interpreterAndStdlib": "payload/runtime/python/",
       "ffmpegDirectory": "payload/runtime/ffmpeg/bin/",
-      "requiredExecutables": ["ffmpeg", "ffprobe"],
+      "requiredExecutables": [
+        "ffmpeg",
+        "ffprobe"
+      ],
       "requiredSystemLibraries": "payload/runtime/system-libs/",
       "lock": {
         "productPath": "services/local-ai/runners/gigaam/requirements.lock",
@@ -127,6 +133,25 @@
         "file": "giga-embeddings-0826-480m-q8_0.gguf",
         "bytes": 520209824,
         "sha256": "aefcdd69f5b5e6f27188d27fe471eba90df2168ec7653ddde8b2d16de35f69ae"
+      },
+      {
+        "profileId": "embeddinggemma2_llama_cpp",
+        "modelId": "embeddinggemma-2-q8",
+        "revision": "bfcd298762cc34d0357ece5ebdd31791a3a374d8",
+        "directory": "embeddinggemma-2-q8/bfcd298762cc34d0357ece5ebdd31791a3a374d8/embeddinggemma2_llama_cpp",
+        "files": [
+          {
+            "path": "embeddinggemma-2-Q8_0.gguf",
+            "bytes": 309855456,
+            "sha256": "2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135"
+          },
+          {
+            "path": "mmproj-embeddinggemma-2-Q8_0.gguf",
+            "bytes": 554821024,
+            "sha256": "c4a8a52691ecef40618438928bdf9e68379b854e24166f292592353db0aab64f"
+          }
+        ],
+        "includedInImage": false
       }
     ],
     "auxiliaryVad": {
@@ -162,7 +187,12 @@
     "dockerHealthcheck": false,
     "natsSubject": "brai.local_ai.v1.status",
     "readinessRule": "state is ready and all four component states are ready",
-    "components": ["database", "nats", "executables", "weights"],
+    "components": [
+      "database",
+      "nats",
+      "executables",
+      "weights"
+    ],
     "processPingIsReadiness": false,
     "loadedModelsRequired": false,
     "measuredAsrLimits": "not included; pending runtime acceptance"
@@ -173,5 +203,20 @@
     "complete built source snapshot and exact payload inventory verification",
     "built image inspection and offline runtime acceptance",
     "measured GigaAM limits and profile acceptance"
-  ]
+  ],
+  "externalRuntimeData": {
+    "embeddinggemma2_llama_cpp": {
+      "sourceImage": "ghcr.io/ggml-org/llama.cpp@sha256:5ec15705b9563b306df98dfcb30bd6b29b060484c2a4ceb4199e251a4137c0a1",
+      "sourceRevision": "3d65c90d04d337e88f2b1f7f0061f40a5324e662",
+      "executable": "app/llama-server",
+      "requiredClosure": [
+        "app",
+        "ldd system libraries"
+      ],
+      "inventory": "runtime-manifest.json",
+      "mountReadOnly": true,
+      "lifecycleOwner": "local-ai",
+      "includedInBasePayload": false
+    }
+  }
 }

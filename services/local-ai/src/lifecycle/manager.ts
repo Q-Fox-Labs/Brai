@@ -5,14 +5,14 @@ import { stat } from 'node:fs/promises';
 import { LocalAiError } from '../errors.js';
 import type { ArtifactPort, HistoryFactPort, LocalAiStore, ModelIdleGuard, ModelSettingsChangedPort, RuntimeFactory, RuntimePort } from '../ports.js';
 import type {
-  EmbedOutput, InstallationRecord, LocalAiHistoryMetadataEvent, ModelRecord, ModelSelector,
+  EmbeddingItem, RuntimeEmbeddingItem, EmbedOutput, InstallationRecord, LocalAiHistoryMetadataEvent, ModelRecord, ModelSelector,
   ModelSettings, OperationContext, RuntimeState, ServiceErrorCode, TranscribeOutput,
 } from '../types.js';
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 type CommonInvocation = { requestId: string; operationId: string; model: ModelSelector; ownerId: string; deadlineAt: string };
-export type EmbedInvocation = CommonInvocation & { operation: 'embed'; texts: readonly string[]; purpose: 'query' | 'document' | 'symmetric' };
+export type EmbedInvocation = CommonInvocation & { operation: 'embed'; texts?: readonly string[]; inputs?: readonly EmbeddingItem[]; purpose: 'query' | 'document' | 'symmetric' };
 export type TranscribeInvocation = CommonInvocation & { operation: 'transcribe'; audioArtifactId: string };
 export type Invocation = EmbedInvocation | TranscribeInvocation;
 export type InvocationResult =
@@ -55,7 +55,7 @@ type Job = {
   input: Invocation; context: OperationContext; controller: AbortController; done: Promise<InvocationResult>;
   resolve: (value: InvocationResult) => void; reject: (error: unknown) => void; state: 'preparing' | 'queued' | 'active' | 'settled';
   acceptedAt: number; inputBytes: number; record?: ModelRecord;
-  runtime?: RuntimePort; audioPath?: string; abortListener: () => void; deadlineTimer?: NodeJS.Timeout; failure?: LocalAiError;
+  runtime?: RuntimePort; audioPath?: string; embeddingInputs?: RuntimeEmbeddingItem[]; abortListener: () => void; deadlineTimer?: NodeJS.Timeout; failure?: LocalAiError;
 };
 type Slot = {
   selector: ModelSelector; state: RuntimeState; runtime?: RuntimePort; generation: number; opening?: Promise<RuntimePort>;
@@ -220,12 +220,17 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
   function assertInput(input: Invocation, model: ModelRecord, bytes: number): void {
     if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > limits.maxInputBytes || model.limits.maxInputBytes !== null && bytes > model.limits.maxInputBytes) fail('INPUT_TOO_LARGE');
     if (input.operation === 'embed') {
-      if (!Array.isArray(input.texts) || input.texts.length < 1 || input.texts.length > limits.maxEmbeddingItems
-        || model.limits.maxItems !== null && input.texts.length > model.limits.maxItems
-        || !input.texts.every(value => typeof value === 'string')) fail('INVALID_ARGUMENT');
+      if ((input.texts === undefined) === (input.inputs === undefined)) fail('INVALID_ARGUMENT');
+      const items = input.inputs ?? input.texts?.map(text => ({ type: 'text' as const, text })) ?? [];
+      if (!Array.isArray(items) || items.length < 1 || items.length > limits.maxEmbeddingItems
+        || model.limits.maxItems !== null && items.length > model.limits.maxItems) fail('INVALID_ARGUMENT');
+      for (const item of items) {
+        if (!item || !model.inputKinds.includes(item.type)) fail('UNSUPPORTED_OPERATION');
+        if (item.type === 'text' ? typeof item.text !== 'string' : typeof item.artifactId !== 'string') fail('INVALID_ARGUMENT');
+      }
       if (!['query', 'document', 'symmetric'].includes(input.purpose)) fail('INVALID_ARGUMENT');
       const dimensions = model.limits.vectorDimensions;
-      if (dimensions !== null && input.texts.length * dimensions * 8 > limits.maxResultBytes) fail('RESULT_TOO_LARGE');
+      if (dimensions !== null && (input.inputs?.length ?? input.texts!.length) * dimensions * 8 > limits.maxResultBytes) fail('RESULT_TOO_LARGE');
     }
   }
   function createJob(input: Invocation, context: OperationContext): Job {
@@ -413,9 +418,9 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
       job.runtime = runtime;
       const callContext = operationContext(job);
       if (job.input.operation === 'embed') {
-        const output: EmbedOutput = await runtime.embed({ model: job.input.model, texts: job.input.texts, purpose: job.input.purpose }, callContext);
+        const output: EmbedOutput = await runtime.embed({ model: job.input.model, ...(job.input.inputs ? { inputs: job.embeddingInputs! } : { texts: job.input.texts! }), purpose: job.input.purpose }, callContext);
         const dimensions = job.record!.limits.vectorDimensions;
-        if (!Array.isArray(output.vectors) || output.vectors.length !== job.input.texts.length
+        if (!Array.isArray(output.vectors) || output.vectors.length !== (job.input.inputs?.length ?? job.input.texts!.length)
           || output.vectors.some(vector => !Array.isArray(vector) || dimensions !== null && vector.length !== dimensions
             || !vector.every(value => typeof value === 'number' && Number.isFinite(value)))) fail('ENGINE_UNAVAILABLE');
         result = { operation: 'embed', model: job.input.model, vectors: output.vectors, durationMs: Math.max(0, Math.floor(now() - job.acceptedAt)) };
@@ -508,7 +513,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
         try {
           const prepared = await prepare(input.model, input.operation);
           job.record = prepared.record;
-          job.inputBytes = input.operation === 'embed' ? Buffer.byteLength(JSON.stringify(input.texts), 'utf8') : 0;
+          job.inputBytes = input.operation === 'embed' ? Buffer.byteLength(JSON.stringify(input.inputs ?? input.texts), 'utf8') : 0;
           assertInput(input, prepared.record, job.inputBytes);
           const enqueue = async (audioPath?: string) => {
             const interrupted = contextOutcome(job);
@@ -524,7 +529,27 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
             drain(slot);
             return job.done;
           };
-          if (input.operation === 'embed') await enqueue();
+          if (input.operation === 'embed') {
+            const items = input.inputs ?? [];
+            job.embeddingInputs = [];
+            // AIDEV-NOTE: Вложенные callbacks удерживают все файлы до job.done и физического выхода runtime.
+            const prepareItems = async (index: number): Promise<InvocationResult> => {
+              if (index === items.length) return enqueue();
+              const item = items[index]!;
+              if (item.type === 'text') {
+                job.embeddingInputs!.push(item);
+                return prepareItems(index + 1);
+              }
+              if (!artifacts.withReadyMedia) fail('ARTIFACT_NOT_AVAILABLE');
+              return artifacts.withReadyMedia({ artifactId: item.artifactId, ownerId: input.ownerId, operationId: input.operationId, kind: item.type }, operationContext(job), async media => {
+                job.inputBytes += (await stat(media.localPath)).size;
+                assertInput(input, prepared.record, job.inputBytes);
+                job.embeddingInputs!.push({ type: item.type, localPath: media.localPath, mimeType: media.mimeType });
+                return prepareItems(index + 1);
+              });
+            };
+            await prepareItems(0);
+          }
           else await artifacts.withReadyAudio({ artifactId: input.audioArtifactId, ownerId: input.ownerId, operationId: input.operationId }, operationContext(job), async audio => {
             try { job.inputBytes = (await stat(audio.localPath)).size; } catch { fail('ARTIFACT_NOT_AVAILABLE'); }
             assertInput(input, prepared.record, job.inputBytes);

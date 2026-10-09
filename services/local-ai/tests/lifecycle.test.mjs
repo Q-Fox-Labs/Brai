@@ -595,3 +595,47 @@ test('successful durable configure updates cached metadata and failed configure 
   await delay(1100); assert.equal(runtimes[0].closeCalls, 0, 'failed durable mutation must not arm an idle timer');
   await lifecycle.close();
 });
+
+
+test('multimodal cancellation retains artifact ownership until physical runtime exit', async () => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const root = await mkdtemp('/tmp/local-ai-media-lifecycle-');
+  const file = root + '/image';
+  await writeFile(file, 'synthetic');
+  const selected = selector('gemma', 'embeddinggemma2_llama_cpp');
+  const record = { ...embeddingRecord(selected), inputKinds: ['text','image_artifact'] };
+  const called = deferred();
+  const runtime = new FakeRuntime({ holdExit: true, embed: async () => { called.resolve(); await runtime.exited; throw new Error('stopped'); } });
+  let held = false;
+  const lifecycle = createLifecycleManager({ store: makeStore([record]), runtimeFactory: factoryFor(() => runtime).factory, limits, artifacts: {
+    async withReadyAudio() { assert.fail('unused'); },
+    async withReadyMedia(input, context, use) { assert.equal(input.ownerId, context.ownerId); held = true; try { return await use({ localPath: file, mimeType: 'image/png' }); } finally { held = false; } },
+  } });
+  try {
+    const input = { ...embedRequest('media-cancel', selected), inputs: [{ type: 'image_artifact', artifactId: 'f2d85bb3-9a74-48ca-ae1f-1fb140d2cb7f' }] };
+    delete input.texts;
+    const result = lifecycle.invoke(input, invocationContext(input));
+    await called.promise;
+    await lifecycle.cancel(input.ownerId, input.operationId);
+    await assert.rejects(result, error => error.code === 'CANCELLED');
+    assert.equal(held, true);
+    assert.equal(lifecycle.status().active, 1);
+    runtime.finishExit();
+    await waitFor(() => !held && lifecycle.status().active === 0);
+  } finally { runtime.finishExit(); await lifecycle.close(); await rm(root, { recursive: true }); }
+});
+
+test('text-only Giga rejects media before artifact acquisition or runtime load', async () => {
+  const selected = selector();
+  const record = { ...embeddingRecord(selected), inputKinds: ['text'] };
+  const lifecycle = createLifecycleManager({ store: makeStore([record]), limits, runtimeFactory: {
+    async open() { assert.fail('unsupported media must not load Giga'); },
+  }, artifacts: {
+    async withReadyAudio() { assert.fail('unused'); },
+    async withReadyMedia() { assert.fail('unsupported media must not read artifacts'); },
+  } });
+  const input = { ...embedRequest('giga-media', selected), inputs: [{ type: 'image_artifact', artifactId: 'f2d85bb3-9a74-48ca-ae1f-1fb140d2cb7f' }] };
+  delete input.texts;
+  try { await assert.rejects(lifecycle.invoke(input, invocationContext(input)), error => error.code === 'UNSUPPORTED_OPERATION'); }
+  finally { await lifecycle.close(); }
+});

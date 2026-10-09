@@ -1,4 +1,4 @@
-// ABOUTME: Получает готовое аудио из публичного artifacts API во временный файл.
+// ABOUTME: Получает готовое аудио, изображение и видео из публичного artifacts API во временный файл.
 // ABOUTME: Проверяет владельца и байты до передачи пути модели; удаляет только свои temp-файлы.
 import { createHash } from 'node:crypto';
 import { open, mkdtemp, rm } from 'node:fs/promises';
@@ -292,8 +292,10 @@ export function createArtifactsAdapter(config: ArtifactsAdapterConfig): Artifact
   }
   const allowedMimeTypes = new Set(config.allowedMimeTypes);
 
-  return {
-    async withReadyAudio(input, context, use) {
+  async function withReady<T>(
+    input: { artifactId: string; ownerId: string; operationId: string }, context: OperationContext,
+    allowed: ReadonlySet<string>, use: (media: { localPath: string; mimeType: string }) => Promise<T>,
+  ): Promise<T> {
       if (!UUID.test(input.artifactId)
         || input.ownerId !== context.ownerId
         || typeof input.operationId !== 'string'
@@ -310,7 +312,7 @@ export function createArtifactsAdapter(config: ArtifactsAdapterConfig): Artifact
         || artifact.status !== 'ready') {
         fail('ARTIFACT_NOT_AVAILABLE');
       }
-      if (typeof artifact.mimeType !== 'string' || !allowedMimeTypes.has(artifact.mimeType)) {
+      if (typeof artifact.mimeType !== 'string' || !allowed.has(artifact.mimeType)) {
         fail('ARTIFACT_NOT_AVAILABLE');
       }
       assertReadyFields(artifact);
@@ -320,10 +322,18 @@ export function createArtifactsAdapter(config: ArtifactsAdapterConfig): Artifact
       const temp = await download(url, artifact, config, context);
       try {
         assertActive(context);
-        return await use({ localPath: temp.localPath });
+        return await use({ localPath: temp.localPath, mimeType: artifact.mimeType });
       } finally {
         await cleanupOwned(temp.directory);
       }
-    },
+  }
+  const mediaTypes = {
+    image_artifact: new Set(['image/png', 'image/jpeg']),
+    audio_artifact: allowedMimeTypes,
+    video_artifact: new Set(['video/mp4']),
+  };
+  return {
+    withReadyAudio: (input, context, use) => withReady(input, context, allowedMimeTypes, use),
+    withReadyMedia: (input, context, use) => withReady(input, context, mediaTypes[input.kind], use),
   };
 }

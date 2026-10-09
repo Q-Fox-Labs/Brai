@@ -1,0 +1,90 @@
+{
+  "profileId": "embeddinggemma2_llama_cpp",
+  "modelId": "embeddinggemma-2-q8",
+  "operation": "embed",
+  "source": {
+    "model": "google/embeddinggemma-2",
+    "sourceRevision": "914f7f89142e33e77833254d9c9b90c3cef7303b",
+    "repository": "ggml-org/embeddinggemma-2-GGUF",
+    "revision": "bfcd298762cc34d0357ece5ebdd31791a3a374d8",
+    "quantization": "Q8_0",
+    "files": [
+      {
+        "path": "embeddinggemma-2-Q8_0.gguf",
+        "bytes": 309855456,
+        "sha256": "2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135"
+      },
+      {
+        "path": "mmproj-embeddinggemma-2-Q8_0.gguf",
+        "bytes": 554821024,
+        "sha256": "c4a8a52691ecef40618438928bdf9e68379b854e24166f292592353db0aab64f"
+      }
+    ]
+  },
+  "engine": {
+    "image": "ghcr.io/ggml-org/llama.cpp@sha256:5ec15705b9563b306df98dfcb30bd6b29b060484c2a4ceb4199e251a4137c0a1",
+    "executable": "llama-server",
+    "args": [
+      "--model",
+      "{{modelPath}}",
+      "--alias",
+      "embeddinggemma-2-q8",
+      "--embedding",
+      "--pooling",
+      "mean",
+      "--embd-normalize",
+      "2",
+      "--ctx-size",
+      "2048",
+      "--batch-size",
+      "2048",
+      "--ubatch-size",
+      "2048",
+      "--parallel",
+      "1",
+      "--threads",
+      "4",
+      "--threads-batch",
+      "4",
+      "--n-gpu-layers",
+      "0",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "{{port}}",
+      "--no-webui",
+      "--mmproj",
+      "{{mmprojPath}}",
+      "--no-mmproj-offload",
+      "--video-fps",
+      "1"
+    ],
+    "revision": "3d65c90d04d337e88f2b1f7f0061f40a5324e662"
+  },
+  "api": {
+    "healthPath": "/health",
+    "invokePath": "/v1/embeddings",
+    "request": {
+      "model": "embeddinggemma-2-q8",
+      "input": "string[] or content[] media objects"
+    }
+  },
+  "encoding": {
+    "dimensions": 768,
+    "pooling": "mean",
+    "normalization": "L2",
+    "queryInstruction": "task: search result | query: ",
+    "documentInstruction": "title: none | text: ",
+    "symmetricInstruction": "task: sentence similarity | query: "
+  },
+  "limits": {
+    "contextTokens": 2048,
+    "batchTokens": 2048,
+    "ubatchTokens": 2048,
+    "parallel": 1,
+    "threads": 4,
+    "threadsBatch": 4,
+    "gpuLayers": 0,
+    "nativeContextTokens": 8192
+  }
+}

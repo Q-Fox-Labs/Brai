@@ -30,6 +30,12 @@ export interface ModelSettingsChangedPort {
 
 /** Предоставляет временный путь только внутри callback и очищает рабочую копию после его завершения. */
 export interface ArtifactPort {
+  /** Проверяет владельца media-артефакта и удерживает файл до окончания callback. */
+  withReadyMedia?<T>(
+    input: { artifactId: string; ownerId: string; operationId: string; kind: 'image_artifact' | 'audio_artifact' | 'video_artifact' },
+    context: OperationContext,
+    use: (media: { localPath: string; mimeType: string }) => Promise<T>,
+  ): Promise<T>;
   withReadyAudio<T>(
     input: { artifactId: string; ownerId: string; operationId: string },
     context: OperationContext,

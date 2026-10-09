@@ -307,3 +307,22 @@ test('requires exact HTTP 200 and operation context identity', async () => {
     await cleanup(identity);
   }
 });
+
+
+test('media acquisition checks requested kind, owner and hash before exposing its private file', async () => {
+  for (const [kind, mimeType] of [['image_artifact','image/png'],['audio_artifact','audio/wav'],['video_artifact','video/mp4']]) {
+    const fixture = await setup({ artifact: { mimeType } });
+    try {
+      await fixture.adapter.withReadyMedia({ artifactId, ownerId, operationId: 'operation-test', kind }, fixture.context(), async media => {
+        assert.equal(media.mimeType, mimeType);
+        assert.deepEqual(await readFile(media.localPath), bytes);
+      });
+      assert.deepEqual(await readdir(fixture.tempRoot), []);
+    } finally { await cleanup(fixture); }
+  }
+  const foreign = await setup({ artifact: { mimeType: 'image/png', ownerId: 'foreign' } });
+  try {
+    await assert.rejects(foreign.adapter.withReadyMedia({ artifactId, ownerId, operationId: 'operation-test', kind: 'image_artifact' }, foreign.context(), () => assert.fail('foreign file exposed')), error => error.code === 'ARTIFACT_NOT_AVAILABLE');
+    assert.equal(foreign.httpRequests, 0);
+  } finally { await cleanup(foreign); }
+});

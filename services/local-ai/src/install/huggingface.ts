@@ -32,7 +32,7 @@ export type SupportedProfile = Readonly<{
 
 type PublicSearchInput = {
   query: string;
-  filter?: { operation?: 'embed' | 'transcribe'; inputKind?: 'text' | 'audio_artifact'; outputKind?: 'vector' | 'transcription'; language?: string };
+  filter?: { operation?: 'embed' | 'transcribe'; inputKind?: 'text' | 'image_artifact' | 'audio_artifact' | 'video_artifact'; outputKind?: 'vector' | 'transcription'; language?: string };
   page?: { cursor?: string; limit?: number };
 };
 
@@ -721,7 +721,7 @@ function validateSearch(input: PublicSearchInput, maxQueryLength: number, maxPag
     const allowed = new Set(['operation', 'inputKind', 'outputKind', 'language']);
     if (!filter || typeof filter !== 'object' || Object.keys(filter).some(key => !allowed.has(key))
       || filter.operation !== undefined && !['embed', 'transcribe'].includes(filter.operation)
-      || filter.inputKind !== undefined && !['text', 'audio_artifact'].includes(filter.inputKind)
+      || filter.inputKind !== undefined && !['text', 'image_artifact', 'audio_artifact', 'video_artifact'].includes(filter.inputKind)
       || filter.outputKind !== undefined && !['vector', 'transcription'].includes(filter.outputKind)
       || filter.language !== undefined && (typeof filter.language !== 'string' || filter.language.length < 1 || filter.language.length > 128)) {
       throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_CATALOG_SEARCH_FILTER');

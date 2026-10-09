@@ -1,7 +1,7 @@
 // ABOUTME: Определяет DTO и внутренние записи ядра local-ai.
 // ABOUTME: Локальные пути принадлежат установке и никогда не попадают в wire DTO.
 export type OperationKind = 'embed' | 'transcribe';
-export type InputKind = 'text' | 'audio_artifact';
+export type InputKind = 'text' | 'image_artifact' | 'audio_artifact' | 'video_artifact';
 export type OutputKind = 'vector' | 'transcription';
 export type InvocationPurpose = 'query' | 'document' | 'symmetric';
 export type ServiceErrorCode =
@@ -82,7 +82,9 @@ export interface LocalAiTx {
 
 }
 export type ResolvedModel = { model: ModelSelector; installation: Readonly<InstallationRecord> };
-export type EmbedInput = { model: ModelSelector; texts: readonly string[]; purpose: InvocationPurpose };
+export type EmbeddingItem = { type: 'text'; text: string } | { type: 'image_artifact' | 'audio_artifact' | 'video_artifact'; artifactId: string };
+export type RuntimeEmbeddingItem = { type: 'text'; text: string } | { type: 'image_artifact' | 'audio_artifact' | 'video_artifact'; localPath: string; mimeType: string };
+export type EmbedInput = { model: ModelSelector; texts?: readonly string[]; inputs?: readonly RuntimeEmbeddingItem[]; purpose: InvocationPurpose };
 export type EmbedOutput = { vectors: readonly (readonly number[])[] };
 export type TranscribeInput = { model: ModelSelector; audioPath: string };
 export type TranscribeOutput = { text: string; segments?: readonly { startSeconds: number; endSeconds: number; text: string }[] };

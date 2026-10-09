@@ -61,3 +61,16 @@ test('known unsupported models can be returned without local paths', () => {
   assert.equal(validateResponse(subjects.modelsGet, model), true);
   assert.equal(validateResponse(subjects.modelsGet, { ...model, localPath: '/srv/private/weights' }), false);
 });
+
+
+test('multimodal embed accepts closed artifact references and preserves texts compatibility', () => {
+  const request = { requestId: 'f2d85bb3-9a74-48ca-ae1f-1fb140d2cb7f', operationId: 'f2d85bb3-9a74-48ca-ae1f-1fb140d2cb7f', ownerId: 'owner', deadlineAt: '2099-01-01T00:00:00Z',
+    model: { modelId: 'embeddinggemma-2-q8', revision: 'rev', profileId: 'embeddinggemma2_llama_cpp' }, purpose: 'document' };
+  const media = { type: 'image_artifact', artifactId: request.requestId };
+  assert.equal(validateRequest(subjects.invokeEmbed, { ...request, inputs: [media, { type: 'text', text: 'caption' }] }), true);
+  for (const input of [{ ...media, url: 'http://untrusted' }, { type: 'image_artifact', data: 'bytes' }, { type: 'image_artifact', localPath: '/private' }]) {
+    assert.equal(validateRequest(subjects.invokeEmbed, { ...request, inputs: [input] }), false);
+  }
+  assert.equal(validateRequest(subjects.invokeEmbed, { ...request, inputs: [media], texts: ['ambiguous'] }), false);
+  assert.equal(validateRequest(subjects.invokeEmbed, request), false);
+});
