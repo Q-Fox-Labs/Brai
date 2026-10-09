@@ -1,4 +1,4 @@
-# ABOUTME: Запускает отдельный CPU-сервис эмбеддингов llama.cpp.
+# ABOUTME: Запускает отдельный мультимодальный CPU-сервис EmbeddingGemma 2.
 # ABOUTME: Модель и сеть готовятся извне; приложение и индексы не изменяются.
 name: brai-embeddings
 services:
@@ -18,20 +18,25 @@ services:
     tmpfs: ["/tmp:size=64m,mode=1777"]
     command:
       - --model
-      - /models/giga-embeddings-0826-480m-q8_0.gguf
+      - /models/embeddinggemma-2-BF16.gguf
+      - --mmproj
+      - /models/mmproj-embeddinggemma-2-BF16.gguf
+      - --no-mmproj-offload
+      - --video-fps
+      - "1"
       - --alias
-      - giga-embeddings-480m-q8
+      - embeddinggemma-2
       - --embedding
       - --pooling
       - mean
       - --embd-normalize
       - "2"
       - --ctx-size
-      - "2048"
+      - "8192"
       - --batch-size
-      - "2048"
+      - "8192"
       - --ubatch-size
-      - "2048"
+      - "8192"
       - --parallel
       - "1"
       - --threads
