@@ -18,3 +18,14 @@ test('runtime preserves configured response budget and rejects invalid roots and
   for(const value of ['file:///tmp','http://name:secret@host','http://host/path','http://host/?token=x'])assert.throws(()=>loadArtifactsConfig({...env,ARTIFACTS_INTERNAL_BASE_URL:value}),/ARTIFACTS_INTERNAL_BASE_URL/);
   for(const value of ['0','-1','1.5','Infinity'])assert.throws(()=>loadArtifactsConfig({...env,ARTIFACTS_QUERY_TIMEOUT_MS:value}),/ARTIFACTS_QUERY_TIMEOUT_MS/);
 });
+
+test('upload has an independent thirty minute deadline and a hard two GiB ceiling',()=>{
+  const config=loadArtifactsConfig(env);
+  assert.equal(config.maxUploadBytes,2147483648);assert.equal(config.uploadTimeoutMs,1800000);assert.equal(config.maxConcurrentUploads,4);
+  assert.throws(()=>loadArtifactsConfig({...env,ARTIFACTS_MAX_CONCURRENT_UPLOADS:'5'}),/ARTIFACTS_MAX_CONCURRENT_UPLOADS/);
+  assert.equal(config.requestTimeoutMs,15000);assert.equal(config.receiveTimeoutMs,30000);
+  assert.equal(loadArtifactsConfig({...env,ARTIFACTS_MAX_UPLOAD_BYTES:'2147483648'}).maxUploadBytes,2147483648);
+  assert.equal(loadArtifactsConfig({...env,ARTIFACTS_MAX_UPLOAD_BYTES:'1024'}).maxUploadBytes,1024);
+  assert.throws(()=>loadArtifactsConfig({...env,ARTIFACTS_MAX_UPLOAD_BYTES:'2147483649'}),/ARTIFACTS_MAX_UPLOAD_BYTES/);
+  assert.throws(()=>loadArtifactsConfig({...env,ARTIFACTS_UPLOAD_TIMEOUT_MS:'2147483648'}),/ARTIFACTS_UPLOAD_TIMEOUT_MS/);
+});

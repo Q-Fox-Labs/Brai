@@ -2,7 +2,7 @@
 // ABOUTME: Runtime выполняет только DML и удерживает межпроцессные advisory locks.
 import type {Pool,PoolClient} from "pg";
 import type {ArtifactsStore,StoreSession,ArtifactRecord,LinkRecord,ListInput,Relation,Stats} from "./ports.js";
-import type {ArtifactReference,ReferenceScope,ReferenceQueryScope} from "../contracts/index.mjs";
+import type {ArtifactReference,ReferenceScope,ReferenceQueryScope,ArtifactOutputBinding} from "../contracts/index.mjs";
 import {ArtifactError,storageError} from "./errors.js";
 export type PostgresOptions={lockTimeoutMs?:number;queryTimeoutMs?:number};
 const scopeValues=(s:ReferenceScope|ReferenceQueryScope)=>[s.ownerId,s.projectId,s.threadId,...("operationId" in s?[s.operationId]:[])];
@@ -69,6 +69,9 @@ function session(client:PoolClient,timeout:number,onFailure:()=>void):StoreSessi
       else {const result=await query("UPDATE artifacts.artifact_references SET document=$5 WHERE owner_id=$1 AND project_id=$2 AND thread_id=$3 AND operation_id=$4",params);if(!result.rowCount)throw new ArtifactError("NOT_FOUND");}
     },
     async references(s,ids,limit){if(!ids.length)return [];return cursor("SELECT document FROM artifacts.artifact_references WHERE owner_id=$1 AND project_id=$2 AND thread_id=$3 AND document->>'itemId'=ANY($4::text[]) ORDER BY operation_id LIMIT $5",[...scopeValues(s),ids,limit??null],document=>document as ArtifactReference);},
+    output:(s,itemId)=>one<ArtifactOutputBinding>("SELECT document FROM artifacts.artifact_output_bindings WHERE owner_id=$1 AND project_id=$2 AND thread_id=$3 AND item_id=$4",[s.ownerId,s.projectId,s.threadId,itemId]),
+    async saveOutput(binding){await query("INSERT INTO artifacts.artifact_output_bindings(owner_id,project_id,thread_id,item_id,document) VALUES($1,$2,$3,$4,$5)",[binding.ownerId,binding.projectId,binding.threadId,binding.itemId,binding]);},
+    async outputs(s,ids){if(!ids.length)return [];return cursor("SELECT document FROM artifacts.artifact_output_bindings WHERE owner_id=$1 AND project_id=$2 AND thread_id=$3 AND item_id=ANY($4::text[]) ORDER BY array_position($4::text[],item_id)",[s.ownerId,s.projectId,s.threadId,ids],document=>document as ArtifactOutputBinding);},
     link:id=>one<LinkRecord>("SELECT document FROM artifacts.artifact_links WHERE link_id=$1",[id]),
     requestedLink:requestId=>one<LinkRecord>("SELECT document FROM artifacts.artifact_links WHERE request_id=$1",[requestId]),
     shared:token=>one<LinkRecord>("SELECT document FROM artifacts.artifact_links WHERE token=$1",[token]),

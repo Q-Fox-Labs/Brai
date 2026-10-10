@@ -10,7 +10,7 @@ import type { Command, DisplayAttachment, DisplayItem } from '../contracts/index
 import { limits } from '../contracts/index.mjs';
 import type { CodexPort } from './codex.js';
 export type NatsConfig = { servers: string[]; user?: string; password?: string; inboxPrefix?: string };
-export type ArtifactsConfig = { baseUrl: string; timeoutMs?: number; nats?: NatsConfig };
+export type ArtifactsConfig = { baseUrl: string; timeoutMs?: number; nats?: NatsConfig; resultRoot?: string; resultsNats?: NatsConfig; resultsBaseUrl?: string };
 export type ArtifactsPort = { request(subject: string, value: unknown, options?: { timeoutMs: number }): Promise<any>; fetch: typeof fetch };
 const prefix = 'brai:agent:v3:';
 const fail = (code: string, outcome = 'not-sent'): never => { throw Object.assign(new Error(code), { code, outcome }); };

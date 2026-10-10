@@ -6,11 +6,12 @@ import { bytes, limits, validateCommand } from '../contracts/index.mjs';
 import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, NativeTurn, ModelCatalog, DisplayItem, GoalProjection, PlanProgress } from '../contracts/index.mjs';
 import type { CodexPort, Observation } from './codex.js';
 import { createAttachments, type ArtifactsConfig, type ArtifactsPort, type NatsConfig } from './attachments.js';
+import { createResults } from './results.js';
 import { createLimitsMonitor } from './limits.js';
 import { nameThread } from './title.js';
 import { display, messagePage, metadata, text, compact, summary, messageAttention, goal, progress } from './display.js';
 import { asyncQuestionMethod, asyncQuestionRequest, asyncQuestionReply, asyncReplyIds } from './async-questions.js';
-export type Config = { artifacts?: ArtifactsConfig; codex: { socketUrl: string }; nats: NatsConfig; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
+export type Config = { ownerId?: string; artifacts?: ArtifactsConfig; codex: { socketUrl: string }; nats: NatsConfig; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
 type Session = { answering: Set<string>; attention: ReturnType<typeof messageAttention>; view: NativeSnapshot & { goal: GoalProjection; planProgress: PlanProgress }; mutating?: boolean; goalRevision: number; opened: boolean; fresh: boolean; titleNeeded: boolean; titleRequest: string; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
 function pendingRequest(request: PendingRequest) { return request.kind !== 'unsupported' && !request.answered; }
 function projectTurn(turn: any): NativeTurn {
@@ -20,8 +21,10 @@ function projectTurn(turn: any): NativeTurn {
   return { id: turn.id, status: turn.status, ...(message ? { error: { message, ...(code ? { code } : {}) } } : {}) };
 }
 /** Собирает команды и единственного владельца live items/pending. */
-export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void, artifactsPort?: ArtifactsPort) {
+export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void, artifactsPort?: ArtifactsPort, resultsPort: ArtifactsPort | undefined = artifactsPort) {
   const attachments = createAttachments(codex, config.artifacts, artifactsPort);
+  const results = createResults(codex, config.artifacts, config.ownerId, resultsPort);
+  const decorate = async (r: Command, items: DisplayItem[]) => results.decorate(r, await attachments.decorate(r, items));
   const sessions = new Map<string, Session>();
   const messageTimes = new Map<string, { updatedAt: number; lastMessageAt: number; finalMessageId: string | null; awaitingReply: boolean }>();
   let creating = 0, admission = Promise.resolve();
@@ -80,7 +83,9 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       if (!remaining.length) request.answered = true;
       else request.params.questions = remaining;
     }
+    const resultCount = results.count(item);
     const value = display(item, turnId), old = s.view.items.find(i => i.id === value.id);
+    if (resultCount) value.resultCount = resultCount;
     value.revision = history ? old?.revision ?? 0 : s.view.seq + 1;
     if (value.type === 'userMessage' || value.type === 'agentMessage') {
       value.timestamp = history ? timestamp ?? old?.timestamp ?? s.view.thread.updatedAt * 1000 : old?.timestamp ?? timestamp ?? Date.now();
@@ -106,17 +111,20 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     if (generation !== current()) fail('STALE_GENERATION', 'query');
     const entry = page.data.find((e: any) => e.item.id === itemId && e.turnId === turnId);
     if (!entry) fail('NOT_FOUND', 'query');
+    results.trackItems({ action: 'item', projectId: s.view.projectId, threadId: s.view.threadId }, [entry]);
     const newer = s.details.get(itemId);
     if (newer?.turnId === turnId && !newer.imageCount && !cursor && !(fullMessage && newer.truncated && ['userMessage', 'agentMessage'].includes(newer.type)) && (s.revisions.get(itemId) ?? 0) > cut) return { item: structuredClone(newer) };
     await attachments.recoverItems({ action: 'item', projectId: s.view.projectId, threadId: s.view.threadId, ownerId }, [entry]);
     const native = historyItem(entry, s.view.turn), revision = s.view.items.find(i => i.id === itemId)?.revision ?? 0;
     if (fullMessage && ['userMessage', 'agentMessage'].includes(native.type)) {
       const page = messagePage(native, turnId, cursor);
+      const resultCount = results.count(native); if (resultCount) page.item.resultCount = resultCount;
       page.item.revision = revision;
       return page;
     }
     if (cursor) fail('INVALID_ARGUMENT', 'query');
-    return { item: { ...display(native, turnId), revision } };
+    const resultCount = results.count(native);
+    return { item: { ...display(native, turnId), revision, ...(resultCount ? { resultCount } : {}) } };
   }
   async function admit(projectId: string, thread: any, fresh = false): Promise<Session> {
     const previous = admission;
@@ -168,6 +176,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
         // AIDEV-NOTE: Десять действий после async вопроса не должны скрыть карточку при восстановлении.
       } while (items.nextCursor && messages < 10 && items.data.length < 1000 && bytes(items) < limits.state);
       if (before !== current()) fail('STALE_GENERATION', 'query');
+      results.trackItems(r, items.data);
       s.view.thread = { ...metadata(resumed.thread), lastMessageAt: s.view.thread.lastMessageAt, model: resumed.model, reasoningEffort: resumed.reasoningEffort ?? null };
       const latestMessage = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
       if (latestMessage) s.view.thread.lastMessageAt = Math.max(s.view.thread.lastMessageAt ?? 0, latestMessage.startedAtMs ?? latestMessage.completedAtMs ?? s.view.thread.updatedAt * 1000);
@@ -315,7 +324,10 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       if (e.method === 'turn/started') s.fresh = false;
       if (e.method === 'turn/started' && s.view.planProgress.turnId !== p.turn.id) s.view.planProgress = { state: 'unavailable', turnId: p.turn.id, explanation: null, steps: [], truncated: false };
       if (p.turn.status !== 'inProgress') { s.activeModel = undefined; s.view.requests = s.view.requests.filter(request => request.kind === 'unsupported' || request.method === asyncQuestionMethod); s.raw.clear(); }
-    } else if (e.method === 'item/started' || e.method === 'item/completed') put(s, p.item.type === 'plan' ? { ...p.item, status: e.method === 'item/completed' ? 'completed' : 'inProgress' } : p.item, p.turnId);
+    } else if (e.method === 'item/started' || e.method === 'item/completed') {
+      if (e.method === 'item/completed' && p.item.type === 'agentMessage') void results.recoverItems({ action: 'items', projectId: s.view.projectId, threadId: s.view.threadId }, [{ item: p.item, turnId: p.turnId, completedAtMs: Date.now() }]);
+      put(s, p.item.type === 'plan' ? { ...p.item, status: e.method === 'item/completed' ? 'completed' : 'inProgress' } : p.item, p.turnId);
+    }
     else if (e.method?.endsWith('/delta') || e.method?.endsWith('/outputDelta')) {
       const item = s.details.get(p.itemId);
       if (!item) { s.opened = false; s.view.state = 'connection-lost'; }
@@ -418,7 +430,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       if (!r.ownerId) fail('INVALID_ARGUMENT');
       const existing = await attachments.existing(r, buildInput); if (existing) return existing;
     }
-    if (r.action === 'open') { const view = structuredClone(s.view); view.items = await attachments.decorate(r, view.items); return view; }
+    if (r.action === 'open') { const view = structuredClone(s.view); view.items = await decorate(r, view.items); return view; }
     if (r.action === 'goalGet') { await readGoal(s); publish(s); return { generation: current(), goal: structuredClone(s.view.goal) }; }
     if (r.action === 'activities' || r.action === 'item') {
       const generation = current();
@@ -426,7 +438,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       const ids = r.action === 'item' ? [r.itemId!] : r.itemIds!;
       for (let offset = 0; offset < ids.length; offset += 4) pages.push(...await Promise.all(ids.slice(offset, offset + 4).map(id => detail(s, r.turnId!, id, r.action === 'item', r.cursor, r.ownerId))));
       if (generation !== current()) fail('STALE_GENERATION', 'query');
-      const decorated = await attachments.decorate(r, pages.map(page => page.item));
+      const decorated = await decorate(r, pages.map(page => page.item));
       return r.action === 'item' ? { generation, ...pages[0], item: decorated[0] } : { generation, data: decorated.map(item => ({ ...summary(item), ...(item.attachments ? { attachments: item.attachments, attachmentsState: item.attachmentsState } : {}), ...(item.imageCount ? { imageCount: item.imageCount, ...(item.attachmentsState ? { attachmentsState: item.attachmentsState } : {}) } : {}) })) };
     }
     if (r.action === 'items' || r.action === 'turns') {
@@ -439,16 +451,17 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
         const part = await codex.call(r.action === 'items' ? 'thread/items/list' : 'thread/turns/list', { threadId: r.threadId, limit: r.action === 'items' ? Math.min(10 - messages, 1000 - page.data.length, Math.max(1, Math.floor((limits.state - bytes(page) - 2048) / 49152))) : 100, cursor: page.nextCursor, sortDirection: 'desc', ...(r.action === 'items' ? { turnId: r.turnId } : { itemsView: 'notLoaded' }) });
         if (generation !== current()) fail('STALE_GENERATION', 'query');
         if (part.nextCursor && (!part.data.length || part.nextCursor === page.nextCursor)) fail('UPSTREAM_UNAVAILABLE', 'query');
-        if (r.action === 'items') await attachments.recoverItems(r, part.data);
+        if (r.action === 'items') { results.trackItems(r, part.data); await attachments.recoverItems(r, part.data); }
         messages += part.data.filter((e: any) => e.item?.type === 'userMessage' || e.item?.type === 'agentMessage').length;
         page.data.push(...(r.action === 'items' ? part.data.map((e: any) => {
           const revision = s.view.items.find(i => i.id === e.item.id)?.revision ?? 0;
           if (e.item.type !== 'userMessage' && e.item.type !== 'agentMessage' && e.item.type !== 'plan') return { id: e.item.id, turnId: e.turnId, type: e.item.type, text: '', revision, ...(e.item.type === 'reasoning' ? { hasContent: (e.item.summary ?? []).some((part: string) => Boolean(part.trim())) } : {}), ...(typeof e.item.status === 'string' ? { status: e.item.status } : {}), ...(Object.hasOwn(e.item, 'exitCode') ? { exitCode: e.item.exitCode } : {}) };
-          return { ...display(historyItem(e, s.view.turn), e.turnId, true), revision, timestamp: e.startedAtMs ?? e.completedAtMs ?? s.view.thread.updatedAt * 1000 };
+          const resultCount = results.count(e.item);
+          return { ...display(historyItem(e, s.view.turn), e.turnId, true), revision, timestamp: e.startedAtMs ?? e.completedAtMs ?? s.view.thread.updatedAt * 1000, ...(resultCount ? { resultCount } : {}) };
         }) : part.data.map((t: any) => ({ id: t.id, status: t.status }))));
         page.nextCursor = part.nextCursor ?? null;
       } while (r.action === 'items' && page.nextCursor && messages < 10 && page.data.length < 1000 && bytes(page) < limits.state - 51200);
-      return { generation, data: r.action === 'items' ? await attachments.decorate(r, page.data.reverse()) : page.data, nextCursor: page.nextCursor };
+      return { generation, data: r.action === 'items' ? await decorate(r, page.data.reverse()) : page.data, nextCursor: page.nextCursor };
     }
     if (r.generation !== current()) fail('STALE_GENERATION');
     if (s.closing) fail('CAPACITY_EXHAUSTED');

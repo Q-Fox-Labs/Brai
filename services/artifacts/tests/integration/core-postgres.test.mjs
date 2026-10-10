@@ -180,3 +180,37 @@ test("fixture lifecycle reports unexpected idle PostgreSQL failures",async()=>{
   const failure=new Promise(resolve=>pool.once("error",resolve));await admin.query("SELECT pg_terminate_backend($1)",[pid]);assert.equal((await failure).code,"57P01");
   await assert.rejects(closeFixturePool(pool),/unexpected PostgreSQL idle errors/);
 });
+
+test('output bindings are durable, immutable, isolated and serializable with delete',async()=>{
+  const ownerId=randomUUID(),first=await upload('original',ownerId),second=await upload('original',ownerId);
+  const input={ownerId,projectId:'output-project',threadId:'output-thread',turnId:'turn',itemId:'item',artifactIds:[second.artifactId,first.artifactId]};
+  const replies=await Promise.all(Array.from({length:6},()=>worker('outputBind',input)));
+  const binding=replies[0].result.binding;for(const reply of replies)assert.deepEqual(reply.result,{binding});
+  assert.equal((await worker('outputBind',{...input,artifactIds:[first.artifactId,second.artifactId]})).error,'CONFLICT');
+  assert.equal((await worker('outputBind',{...input,turnId:'other'})).error,'CONFLICT');
+  const query={ownerId,projectId:input.projectId,threadId:input.threadId,itemIds:['missing','item','item']};
+  assert.deepEqual((await worker('outputList',query)).result,{bindings:[binding]});
+  for(const patch of [{ownerId:'another'},{projectId:'another'},{threadId:'another'}])assert.deepEqual(await core.execute('outputList',{...query,...patch}),{bindings:[]});
+  assert.equal((await owner.query('SELECT count(*) FROM artifacts.artifact_references WHERE owner_id=$1',[ownerId])).rows[0].count,'0');
+  await assert.rejects(app.query('UPDATE artifacts.artifact_output_bindings SET document=document'),e=>e.code==='42501');
+  await assert.rejects(app.query('DELETE FROM artifacts.artifact_output_bindings'),e=>e.code==='42501');
+  await core.execute('delete',{requestId:randomUUID(),artifactId:first.artifactId});
+  assert.deepEqual((await worker('outputBind',input)).result,{binding});
+  assert.deepEqual((await worker('outputList',query)).result,{bindings:[binding]});
+  const third=await upload('original',ownerId),candidate={...input,itemId:'race',artifactIds:[third.artifactId]};
+  const raced=await Promise.all([worker('outputBind',candidate),worker('delete',{requestId:randomUUID(),artifactId:third.artifactId})]);
+  assert.equal(raced[1].result.status,'deleted');assert.ok(raced[0].result?.binding||raced[0].error==='CONFLICT');
+  assert.equal((await worker('outputBind',{...candidate,itemId:'deleted-first'})).error,'CONFLICT');
+});
+
+test('migration upgrades version one without modifying incoming reference ledger',async()=>{
+  const incomingBefore=(await owner.query('SELECT document FROM artifacts.artifact_references ORDER BY owner_id,project_id,thread_id,operation_id')).rows;
+  const before=(await owner.query('SELECT document FROM artifacts.artifact_output_bindings ORDER BY owner_id,project_id,thread_id,item_id')).rows;
+  // AIDEV-NOTE: Own fixture возвращается к v1 только для проверки пути upgrade; product history остаётся нетронутой.
+  await owner.query('DROP TABLE artifacts.artifact_output_bindings');await owner.query('DELETE FROM artifacts.migrations WHERE version=2');
+  await migrate(owner,ownerRole,appRole);await migrate(owner,ownerRole,appRole);
+  assert.deepEqual((await owner.query('SELECT document FROM artifacts.artifact_references ORDER BY owner_id,project_id,thread_id,operation_id')).rows,incomingBefore);
+  assert.deepEqual((await owner.query('SELECT version FROM artifacts.migrations ORDER BY version')).rows,[{version:1},{version:2}]);
+  for(const row of before){const b=row.document;await app.query('INSERT INTO artifacts.artifact_output_bindings(owner_id,project_id,thread_id,item_id,document) VALUES($1,$2,$3,$4,$5)',[b.ownerId,b.projectId,b.threadId,b.itemId,b]);}
+  await assert.rejects(app.query('UPDATE artifacts.artifact_output_bindings SET document=document'),e=>e.code==='42501');
+});

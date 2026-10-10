@@ -907,6 +907,23 @@
             "ready",
             "unavailable"
           ]
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Result"
+          }
+        },
+        "resultsState": {
+          "enum": [
+            "ready",
+            "unavailable"
+          ]
+        },
+        "resultCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
         }
       },
       "required": [
@@ -1916,6 +1933,56 @@
           "type": "string",
           "maxLength": 2048,
           "pattern": "^/api/agent/attachments/"
+        }
+      }
+    },
+    "Result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "target",
+        "state",
+        "filename",
+        "mimeType",
+        "sizeBytes"
+      ],
+      "properties": {
+        "artifactId": {
+          "$ref": "https://brai.invalid/services/artifacts/schemas/messages.schema.json#/definitions/Uuid"
+        },
+        "target": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "ready",
+            "deleted",
+            "unavailable"
+          ]
+        },
+        "filename": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "mimeType": {
+          "type": "string",
+          "maxLength": 255
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "previewUrl": {
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^/api/agent/results/"
+        },
+        "downloadUrl": {
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^/api/agent/results/"
         }
       }
     }

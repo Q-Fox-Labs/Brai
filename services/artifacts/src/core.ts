@@ -1,7 +1,7 @@
 // ABOUTME: Реализует жизненный цикл artifacts через явные порты хранения.
 // ABOUTME: Не зависит от PostgreSQL, файловой системы и транспорта.
 import {randomUUID,randomBytes} from "node:crypto";
-import type {Artifact, ArtifactReference, ReferenceScope, ReferenceQueryScope, ReferenceAttachment} from "../contracts/index.mjs";
+import type {Artifact, ArtifactReference, ReferenceScope, ReferenceQueryScope, ReferenceAttachment, ArtifactOutputBinding, OutputBindRequest, OutputQueryScope} from "../contracts/index.mjs";
 import type {ArtifactsStore,ArtifactFiles,StoreSession,ArtifactRecord,Metadata,ListInput,LinkRecord,StoreItems} from "./ports.js";
 import {ArtifactError,storageError} from "./errors.js";
 export type CoreConfig={uploadBaseURL:string;internalBaseURL:string;externalBaseURL?:string;maxUploadBytes:number;staleTempAgeMs:number;maxResultBytes?:number;maxPageSize?:number;maxReferenceItems?:number;maxReferenceAttachments?:number;maxRelations?:number;reconcileBatchSize?:number};
@@ -39,6 +39,8 @@ function localInput(operation:string,value:unknown,limits:{page?:number;items?:n
     case "stats":str(input.ownerId,128);break;
     case "relationAdd":case "relationRemove":uuid(input.modelArtifactId);uuid(input.originalArtifactId);break;
     case "referenceReserve":scope(input.scope);str(input.clientUserMessageId);if(typeof input.commandHash!=="string"||!/^[0-9a-f]{64}$/.test(input.commandHash))fail();if(!Array.isArray(input.attachments))fail();if(limits.attachments!==undefined&&input.attachments.length>limits.attachments)throw new ArtifactError("PAYLOAD_TOO_LARGE");for(const a of input.attachments){object(a);uuid(a.originalArtifactId);uuid(a.modelArtifactId);}break;
+    case "outputBind":scope(input,false);str(input.turnId);str(input.itemId);if(!Array.isArray(input.artifactIds)||!input.artifactIds.length)fail();for(const id of input.artifactIds)uuid(id);if(new Set(input.artifactIds.map((id:string)=>id.toLowerCase())).size!==input.artifactIds.length)fail();break;
+    case "outputList":scope(input,false);if(!Array.isArray(input.itemIds))fail();for(const id of input.itemIds)str(id);break;
     case "referenceGet":scope(input.scope);break;
     case "referenceConfirm":scope(input.scope);str(input.clientUserMessageId);str(input.turnId);str(input.itemId);break;
     case "referenceUpdateState":scope(input.scope);if(!["unknown","not-sent"].includes(input.state))fail();break;
@@ -51,13 +53,13 @@ function localInput(operation:string,value:unknown,limits:{page?:number;items?:n
 }
 /** Собирает прикладные операции; config уже проверена процессом сборки. */
 export function createArtifactsCore({store,files,config,now=Date.now}:CoreOptions) {
-  if(!Number.isSafeInteger(config.maxUploadBytes)||config.maxUploadBytes<0||!Number.isFinite(config.staleTempAgeMs)||config.staleTempAgeMs<0)throw new ArtifactError("INVALID_ARGUMENT");
+  if(!Number.isSafeInteger(config.maxUploadBytes)||config.maxUploadBytes<0||config.maxUploadBytes>2*1024*1024*1024||!Number.isFinite(config.staleTempAgeMs)||config.staleTempAgeMs<0)throw new ArtifactError("INVALID_ARGUMENT");
   const limits={page:config.maxPageSize,items:config.maxReferenceItems,attachments:config.maxReferenceAttachments,relations:config.maxRelations,batch:config.reconcileBatchSize??100};
   const maxResultBytes=config.maxResultBytes??1048576;
   if([...Object.values(limits),maxResultBytes].some(v=>v!==undefined&&(!Number.isSafeInteger(v)||v<1)))throw new ArtifactError("INVALID_ARGUMENT");
   const resultBytes=(value:unknown)=>Buffer.byteLength(JSON.stringify(value));
-  async function collect<T,U>(source:StoreItems<T>,map:(value:T)=>U,envelope:Record<string,unknown>,maxItems?:number):Promise<U[]> {
-    const items:U[]=[];let bytes=resultBytes({...envelope,items:[]});
+  async function collect<T,U>(source:StoreItems<T>,map:(value:T)=>U,envelope:Record<string,unknown>,maxItems?:number,field="items"):Promise<U[]> {
+    const items:U[]=[];let bytes=resultBytes({...envelope,[field]:[]});
     // AIDEV-NOTE: Бюджет проверяется по каждому DTO; return iterator закрывает PG cursor при переполнении.
     for await(const value of source){const item=map(value);bytes+=resultBytes(item)+(items.length?1:0);if(bytes>maxResultBytes||maxItems!==undefined&&items.length>=maxItems)throw new ArtifactError("PAYLOAD_TOO_LARGE");items.push(item);}
     return items;
@@ -142,6 +144,17 @@ export function createArtifactsCore({store,files,config,now=Date.now}:CoreOption
       reference.updatedAt=date();await session.saveReference(reference);return {reference};
     });
   }
+  async function bindOutput(input:OutputBindRequest) {
+    const normalized={ownerId:input.ownerId,projectId:input.projectId,threadId:input.threadId,turnId:input.turnId,itemId:input.itemId,artifactIds:input.artifactIds.map(id=>id.toLowerCase())};
+    const bindingKey=`output:${JSON.stringify([input.ownerId,input.projectId,input.threadId,input.itemId])}`;
+    return locked([bindingKey,...normalized.artifactIds.map(key)],async session=>{
+      const existing=await session.output(normalized,input.itemId);
+      // AIDEV-NOTE: Точный повтор не проверяет ready снова: история сохраняется после удаления байтов.
+      if(existing){if(existing.turnId!==input.turnId||canonical(existing.artifactIds)!==canonical(normalized.artifactIds))throw conflict();return {binding:existing};}
+      for(const id of normalized.artifactIds)await ready(session,id,input.ownerId);
+      const binding:ArtifactOutputBinding={...normalized,createdAt:date()};await session.saveOutput(binding);return {binding};
+    });
+  }
   async function linkCreate(input:{requestId:string;artifactId:string;expiresAt?:string}) {
     if(!config.externalBaseURL)throw new ArtifactError("SHARING_NOT_CONFIGURED");
     return locked([`link-request:${input.requestId}`,key(input.artifactId)],async session=>{
@@ -173,6 +186,8 @@ export function createArtifactsCore({store,files,config,now=Date.now}:CoreOption
       case "referenceGet":result=await locked([],async session=>{const reference=await session.reference(input.scope);if(!reference)throw new ArtifactError("NOT_FOUND");return {reference};});break;
       case "referenceConfirm":case "referenceUpdateState":result=await referenceMutation(input);break;
       case "referenceList":result=await locked([],async session=>({items:await collect(await session.references(input.scope as ReferenceQueryScope,input.nativeItemIds),item=>item,{},limits.items)}));break;
+      case "outputBind":result=await bindOutput(input);break;
+      case "outputList":result=await locked([],async session=>({bindings:await collect(await session.outputs(input as OutputQueryScope,input.itemIds),item=>item,{},undefined,"bindings")}));break;
       case "linkCreate":result=await linkCreate(input);break;
       case "linkRevoke":result=await locked([`link:${input.linkId}`],async session=>{const record=await session.link(input.linkId);if(!record)throw new ArtifactError("NOT_FOUND");record.link.revokedAt??=date();await session.saveLink(record);return {link:record.link};});break;
       default:throw new ArtifactError("INVALID_ARGUMENT");

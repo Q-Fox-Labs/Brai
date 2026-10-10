@@ -23,7 +23,7 @@ export function startArtifactsHttp(cfg:Config,core:ArtifactsCore,pool:Pool,nc:Na
    if(activeUploads>=cfg.maxConcurrentUploads){rejectBody(req,res,429,'OVERLOADED');return;}
    const declared=req.headers['content-length'];if(declared!==undefined&&(!/^\d+$/.test(declared)||Number(declared)>cfg.maxUploadBytes)){rejectBody(req,res,413,'PAYLOAD_TOO_LARGE');return;}
    activeUploads++;const started=Date.now();const abort=new AbortController();uploads.add(abort);let complete=false;
-   const cancel=()=>{if(!complete)abort.abort();};const deadline=setTimeout(cancel,cfg.requestTimeoutMs);deadline.unref();req.once('aborted',cancel);req.setTimeout(cfg.receiveTimeoutMs,cancel);res.once('close',()=>{if(!res.writableEnded)cancel();});
+   const cancel=()=>{if(!complete)abort.abort();};const deadline=setTimeout(cancel,cfg.uploadTimeoutMs);deadline.unref();req.once('aborted',cancel);req.setTimeout(cfg.receiveTimeoutMs,cancel);res.once('close',()=>{if(!res.writableEnded)cancel();});
    try{const artifact=await core.upload(match[2],streamBody(req),abort.signal);complete=true;
     if(res.destroyed)return;
     res.writeHead(201,{'X-Artifact-Id':artifact.artifactId,'X-Artifact-State':'ready','X-Artifact-Size':String(artifact.sizeBytes),'X-Artifact-SHA256':artifact.sha256!,'Location':artifact.internalUrl!,'Content-Length':'0','Cache-Control':'no-store'});res.end();
@@ -50,5 +50,7 @@ export function startArtifactsHttp(cfg:Config,core:ArtifactsCore,pool:Pool,nc:Na
    return;
   }
  }
+ // AIDEV-NOTE: Node по умолчанию обрывает body через 5 минут; upload имеет собственный абсолютный deadline.
+ server.requestTimeout=Math.max(cfg.uploadTimeoutMs,cfg.requestTimeoutMs);
  return new Promise((resolveServer,reject)=>{server.once('error',reject);server.listen(cfg.httpPort,cfg.httpHost,()=>{server.removeListener('error',reject);resolveServer({stop:async()=>{for(const upload of uploads)upload.abort();await new Promise<void>(resolve=>{const deadline=setTimeout(()=>{server.closeAllConnections();for(const socket of sockets)socket.destroy();},cfg.requestTimeoutMs+1000);deadline.unref();server.close(()=>{clearTimeout(deadline);resolve();});});}});});});
 }

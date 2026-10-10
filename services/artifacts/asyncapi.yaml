@@ -25,6 +25,9 @@ defaultContentType: application/json
 x-http-upload:
   method: PUT
   path: /upload/{token}
+  maxBytes: 2147483648
+  timeoutMs: 1800000
+  maxConcurrent: 4
   successStatus: 201
   successBody: absent
   responseHeaders:
@@ -110,6 +113,16 @@ channels:
     messages:
       request:
         $ref: "#/components/messages/LinkRevokeRequest"
+  outputBind:
+    address: brai.artifacts.v1.output.bind
+    messages:
+      request:
+        $ref: "#/components/messages/OutputBindRequest"
+  outputList:
+    address: brai.artifacts.v1.output.list
+    messages:
+      request:
+        $ref: "#/components/messages/OutputListRequest"
   replies:
     address: null
     description: Transient reply inbox from the NATS requester.
@@ -137,9 +150,37 @@ channels:
         $ref: "#/components/messages/LinkCreateResponse"
       LinkRevokeResponse:
         $ref: "#/components/messages/LinkRevokeResponse"
+      OutputBindResponse:
+        $ref: "#/components/messages/OutputBindResponse"
+      OutputListResponse:
+        $ref: "#/components/messages/OutputListResponse"
       ServiceError:
         $ref: "#/components/messages/ServiceError"
 operations:
+  outputBind:
+    description: Immutable owner/project/thread/item binding; exact turn and ordered artifact IDs retry safely after deletion or lost ACK.
+    action: receive
+    channel: { $ref: "#/channels/outputBind" }
+    messages: [{ $ref: "#/channels/outputBind/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/OutputBindResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
+  outputList:
+    description: Exact scoped item lookup in request order; missing records omitted and duplicate item IDs returned once.
+    action: receive
+    channel: { $ref: "#/channels/outputList" }
+    messages: [{ $ref: "#/channels/outputList/messages/request" }]
+    reply:
+      channel: { $ref: "#/channels/replies" }
+      messages: [{ $ref: "#/channels/replies/messages/OutputListResponse" }, { $ref: "#/channels/replies/messages/ServiceError" }]
+    bindings:
+      nats:
+        queue: brai_artifacts
+        bindingVersion: "0.1.0"
   prepare:
     action: receive
     channel: { $ref: "#/channels/prepare" }
@@ -318,6 +359,22 @@ operations:
         bindingVersion: "0.1.0"
 components:
   messages:
+    OutputBindRequest:
+      name: OutputBindRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/OutputBindRequest"
+    OutputBindResponse:
+      name: OutputBindResponse
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/OutputBindResponse"
+    OutputListRequest:
+      name: OutputListRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/OutputListRequest"
+    OutputListResponse:
+      name: OutputListResponse
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/OutputListResponse"
     Artifact:
       name: Artifact
       payload:

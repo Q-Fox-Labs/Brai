@@ -8,7 +8,7 @@ import {validateResponse,subjects} from "../contracts/index.mjs";
 const metadata={title:"Материал",filename:"../../source.bin",extension:"bin",mimeType:"application/octet-stream",source:"test"};
 const clone=value=>value===undefined?undefined:structuredClone(value);
 function fixture(overrides={}) {
-  const artifacts=new Map(),references=new Map(),relations=new Map(),links=new Map(),bytes=new Map(),temps=new Map();
+  const artifacts=new Map(),outputs=new Map(),references=new Map(),relations=new Map(),links=new Map(),bytes=new Map(),temps=new Map();
   const sk=s=>JSON.stringify([s.ownerId,s.projectId,s.threadId,s.operationId]);
   const session={
     artifact:async id=>clone(artifacts.get(id.toLowerCase())),prepared:async requestId=>clone([...artifacts.values()].find(r=>r.artifact.requestId===requestId)),uploading:async token=>clone([...artifacts.values()].find(r=>r.uploadToken===token)),
@@ -17,6 +17,7 @@ function fixture(overrides={}) {
     relation:async (m,o)=>clone(relations.get(m+o)),saveRelation:async r=>{relations.set(r.modelArtifactId+r.originalArtifactId,clone(r));},removeRelation:async(m,o)=>{relations.delete(m+o);},relations:async(id,limit=relations.size)=>clone([...relations.values()].filter(r=>[r.modelArtifactId,r.originalArtifactId].includes(id)).slice(0,limit)),
     reference:async s=>clone(references.get(sk(s))),saveReference:async r=>{references.set(sk(r.scope),clone(r));},references:async(s,ids,limit=references.size)=>clone([...references.values()].filter(r=>r.scope.ownerId===s.ownerId&&r.scope.projectId===s.projectId&&r.scope.threadId===s.threadId&&ids.includes(r.itemId)).slice(0,limit)),
     list:async input=>{const items=clone([...artifacts.values()].map(r=>r.artifact).filter(a=>a.ownerId===input.filter.ownerId));return {total:items.length,items:items.slice(input.offset,input.offset+input.limit)};},
+    output:async(s,id)=>clone(outputs.get(JSON.stringify([s.ownerId,s.projectId,s.threadId,id]))),saveOutput:async b=>{outputs.set(JSON.stringify([b.ownerId,b.projectId,b.threadId,b.itemId]),clone(b));},outputs:async(s,ids)=>clone([...new Set(ids)].map(id=>outputs.get(JSON.stringify([s.ownerId,s.projectId,s.threadId,id]))).filter(Boolean)),
     link:async id=>clone(links.get(id)),requestedLink:async requestId=>clone([...links.values()].find(r=>r.requestId===requestId)),shared:async token=>clone([...links.values()].find(r=>r.token===token)),saveLink:async r=>{links.set(r.link.linkId,clone(r));},
     stats:async ownerId=>{const all=[...artifacts.values()].map(r=>r.artifact).filter(a=>a.ownerId===ownerId&&a.status==="ready");const originals=all.filter(a=>a.kind==="original"),copies=all.filter(a=>a.kind==="copy");return {originalCount:originals.length,copyCount:copies.length,totalCount:all.length,originalBytes:originals.reduce((n,a)=>n+a.sizeBytes,0),copyBytes:copies.reduce((n,a)=>n+a.sizeBytes,0),totalBytes:all.reduce((n,a)=>n+a.sizeBytes,0)};}
   };
@@ -144,4 +145,31 @@ test("recovery preserves mismatched published bytes and closes invalid durable i
   const f=fixture(),prepared=await f.prepare(),id=prepared.artifact.artifactId,record=f.artifacts.get(id);
   record.publication={tempName:id,sizeBytes:6,sha256:createHash("sha256").update("wanted").digest("hex")};f.temps.set(id,Buffer.from("wanted"));f.bytes.set(id,Buffer.from("unknown"));
   assert.equal((await f.core.reconcile()).failed,1);assert.equal(f.temps.size,0);assert.deepEqual(f.bytes.get(id),Buffer.from("unknown"));assert.equal((await f.core.execute("get",{artifactId:id})).status,"failed");
+});
+
+test('output bindings preserve ordered results, exact retries, ownership and deleted history',async()=>{
+  const f=fixture(),first=await f.uploaded(),second=await f.uploaded(),foreign=await f.uploaded('original','foreign'),pending=await f.prepare();
+  const input={ownerId:'owner',projectId:'p',threadId:'t',turnId:'turn',itemId:'item',artifactIds:[second.artifactId.toUpperCase(),first.artifactId]};
+  const saved=await f.core.execute('outputBind',input);
+  assert.deepEqual(saved.binding.artifactIds,[second.artifactId,first.artifactId]);assert.equal(validateResponse(subjects.outputBind,saved),true);
+  assert.deepEqual(await f.core.execute('outputBind',{...input,artifactIds:saved.binding.artifactIds}),saved);
+  for(const patch of [{turnId:'other'},{artifactIds:[first.artifactId,second.artifactId]}])await assert.rejects(f.core.execute('outputBind',{...input,...patch}),code('CONFLICT'));
+  for(const artifactId of [foreign.artifactId,pending.artifact.artifactId])await assert.rejects(f.core.execute('outputBind',{...input,itemId:'new',artifactIds:[artifactId]}),code('CONFLICT'));
+  await assert.rejects(f.core.execute('outputBind',{...input,itemId:'new',artifactIds:[randomUUID()]}),code('NOT_FOUND'));
+  for(const artifactIds of [[],[first.artifactId,first.artifactId.toUpperCase()]])await assert.rejects(f.core.execute('outputBind',{...input,artifactIds}),code('INVALID_ARGUMENT'));
+  const next=await f.core.execute('outputBind',{...input,itemId:'second',artifactIds:[first.artifactId]});
+  const query={ownerId:'owner',projectId:'p',threadId:'t',itemIds:['second','missing','item','second']};
+  assert.deepEqual(await f.core.execute('outputList',query),{bindings:[next.binding,saved.binding]});
+  for(const patch of [{ownerId:'foreign'},{projectId:'other'},{threadId:'other'},{itemIds:[]}])assert.deepEqual(await f.core.execute('outputList',{...query,...patch}),{bindings:[]});
+  assert.deepEqual(await f.core.execute('referenceList',{scope:{ownerId:'owner',projectId:'p',threadId:'t'},nativeItemIds:['item']}),{items:[]});
+  await f.core.execute('delete',{requestId:'delete-output',artifactId:first.artifactId});
+  assert.deepEqual(await f.core.execute('outputBind',input),saved);
+  assert.deepEqual(await f.core.execute('outputList',query),{bindings:[next.binding,saved.binding]});
+});
+
+test('output response overflow closes its bounded source without truncation',async()=>{
+  const f=fixture({maxResultBytes:1024});let closed=false;
+  f.session.outputs=async()=>((async function*(){try{for(let n=0;n<10;n++)yield {itemId:String(n),padding:'x'.repeat(500)};}finally{closed=true;}})());
+  await assert.rejects(f.core.execute('outputList',{ownerId:'owner',projectId:'p',threadId:'t',itemIds:['i']}),code('PAYLOAD_TOO_LARGE'));assert.equal(closed,true);
+  assert.throws(()=>fixture({maxUploadBytes:2147483649}),code('INVALID_ARGUMENT'));
 });

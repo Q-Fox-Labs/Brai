@@ -33,6 +33,8 @@ const tools: Tool[] = [
   { name: 'reference_confirm', subject: subjects.referenceConfirm, request: 'ReferenceConfirmRequest', description: 'Привязывает reference к подтверждённому native item.' },
   { name: 'reference_list', subject: subjects.referenceList, request: 'ReferenceListRequest', description: 'Ищет references для точных native item IDs.' },
   { name: 'reference_update_state', subject: subjects.referenceUpdateState, request: 'ReferenceUpdateStateRequest', description: 'Явно отмечает reference как unknown или not-sent.' },
+  { name: 'output_bind', subject: subjects.outputBind, request: 'OutputBindRequest', description: 'Сохраняет неизменяемую связь результатов с native сообщением.' },
+  { name: 'output_list', subject: subjects.outputList, request: 'OutputListRequest', description: 'Ищет результаты точных native item IDs в области владельца.' },
   { name: 'link_create', subject: subjects.linkCreate, request: 'LinkCreateRequest', description: 'Создаёт внешнюю ссылку по явному запросу.' },
   { name: 'link_revoke', subject: subjects.linkRevoke, request: 'LinkRevokeRequest', description: 'Отзывает внешнюю ссылку.' },
 ];

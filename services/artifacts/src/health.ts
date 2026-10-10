@@ -7,7 +7,7 @@ import {pathToFileURL} from 'node:url';
 import {loadArtifactsConfig} from './config.js';
 /** Возвращает готовность runtime после короткой проверки собственных зависимостей. */
 export async function artifactsReadiness(pool:Pool,nc:NatsConnection,dataDir:string){
- try{const checks=[pool.query('SELECT 1 FROM artifacts.artifacts LIMIT 0').then(()=>undefined),...['files','tmp'].map(async name=>{const path=`${dataDir}/${name}`;if(!(await stat(path)).isDirectory())throw new Error();await access(path,constants.R_OK|constants.W_OK|constants.X_OK);}),new Promise<void>((resolve,reject)=>{if(nc.isClosed()||nc.isDraining()){reject(new Error('nats-unavailable'));return;}let timer:NodeJS.Timeout|undefined;timer=setTimeout(()=>reject(new Error('nats-flush-timeout')),1000);timer.unref();void nc.flush().then(resolve,reject).finally(()=>{if(timer)clearTimeout(timer);});})];await Promise.all(checks);return {status:'ready' as const};}
+ try{const checks=[pool.query('SELECT 1 FROM artifacts.artifacts,artifacts.artifact_output_bindings LIMIT 0').then(()=>undefined),...['files','tmp'].map(async name=>{const path=`${dataDir}/${name}`;if(!(await stat(path)).isDirectory())throw new Error();await access(path,constants.R_OK|constants.W_OK|constants.X_OK);}),new Promise<void>((resolve,reject)=>{if(nc.isClosed()||nc.isDraining()){reject(new Error('nats-unavailable'));return;}let timer:NodeJS.Timeout|undefined;timer=setTimeout(()=>reject(new Error('nats-flush-timeout')),1000);timer.unref();void nc.flush().then(resolve,reject).finally(()=>{if(timer)clearTimeout(timer);});})];await Promise.all(checks);return {status:'ready' as const};}
  catch{return {status:'not-ready' as const};}
 }
 

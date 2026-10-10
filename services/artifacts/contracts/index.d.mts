@@ -16,6 +16,12 @@ export type ArtifactReference = {
   scope: ReferenceScope; clientUserMessageId: string; commandHash: string; attachments: ReferenceAttachment[];
   state: ReferenceState; turnId?: string; itemId?: string; createdAt: string; updatedAt: string;
 };
+export type OutputQueryScope = { ownerId: string; projectId: string; threadId: string };
+export type OutputBindRequest = OutputQueryScope & { turnId: string; itemId: string; artifactIds: string[] };
+export type ArtifactOutputBinding = OutputBindRequest & { createdAt: string };
+export type OutputBindResponse = { binding: ArtifactOutputBinding };
+export type OutputListRequest = OutputQueryScope & { itemIds: string[] };
+export type OutputListResponse = { bindings: ArtifactOutputBinding[] };
 export type UploadResponseHeaders = {
   "X-Artifact-Id": string; "X-Artifact-State": "ready"; "X-Artifact-Size": string;
   "X-Artifact-SHA256": string; Location: string; [header: string]: string;
@@ -31,6 +37,7 @@ export declare const subjects: {
   readonly relationList: "brai.artifacts.v1.relation.list"; readonly referenceReserve: "brai.artifacts.v1.reference.reserve";
   readonly referenceGet: "brai.artifacts.v1.reference.get"; readonly referenceConfirm: "brai.artifacts.v1.reference.confirm";
   readonly referenceList: "brai.artifacts.v1.reference.list"; readonly referenceUpdateState: "brai.artifacts.v1.reference.update-state";
+  readonly outputBind: "brai.artifacts.v1.output.bind"; readonly outputList: "brai.artifacts.v1.output.list";
   readonly linkCreate: "brai.artifacts.v1.link.create"; readonly linkRevoke: "brai.artifacts.v1.link.revoke";
 };
 export declare const schemas: { $schema: string; $id: string; title: string; type: string; definitions: Record<string, SchemaDefinition> };

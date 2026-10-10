@@ -264,14 +264,16 @@ test("context ring uses the native window, caps its percent and distinguishes un
 
 test("long message details concatenate all pages and cache only the complete text", async () => {
   const message = { ...item("message"), type: "agentMessage", text: "preview", truncated: true };
+  const results = [{ artifactId: "11111111-1111-4111-8111-111111111111", target: "/tmp/report.txt", state: "ready" as const, filename: "report.txt", mimeType: "text/plain", sizeBytes: 8 }];
   const chunks = ['я'.repeat(9000), '\n| Поле | Значение |\n', 'Последняя строка 😀'], calls: Command[] = [];
   const reads = createLazyReads(async command => {
     calls.push(command);
     const index = command.cursor ? Number(command.cursor) : 0;
-    return { generation: "gen", item: { ...message, text: chunks[index], truncated: index < 2 }, nextCursor: index < 2 ? String(index + 1) : null };
+    return { generation: "gen", item: { ...message, text: chunks[index], truncated: index < 2, ...(index === 0 ? { results, resultsState: "ready" as const, resultCount: 1 } : {}) }, nextCursor: index < 2 ? String(index + 1) : null };
   });
   const value = await reads.detail(context, message);
   assert.equal(value.text, chunks.join("")); assert.equal(value.truncated, false); assert.equal(calls.length, 3);
+  assert.deepEqual(value.results, results); assert.equal(value.resultsState, "ready"); assert.equal(value.resultCount, 1);
   assert.equal((await reads.detail(context, message)).text, value.text); assert.equal(calls.length, 3);
 });
 

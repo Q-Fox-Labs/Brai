@@ -89,3 +89,14 @@ test('list uses stable sort keys; writes and direct successful payloads match su
   assert.equal(validateResponse(subjects.prepare, { artifact, uploadUrl: 'http://artifacts/upload/opaque' }), true);
   assert.equal(validateResponse(subjects.prepare, { result: { artifact, uploadUrl: 'http://artifacts/upload/opaque' } }), false);
 });
+
+test('output payloads keep native scope separate from incoming ledger',()=>{
+  const binding={ownerId:'owner-1',projectId:'p',threadId:'t',turnId:'turn',itemId:'item',artifactIds:[id],createdAt:timestamp};
+  const {createdAt,...input}=binding;
+  assert.equal(validateRequest(subjects.outputBind,input),true);
+  for(const patch of [{artifactIds:[]},{artifactIds:[id,id]},{artifactIds:['path/to/file']},{ownerId:undefined},{operationId:'incoming'}])assert.equal(validateRequest(subjects.outputBind,{...input,...patch}),false);
+  assert.equal(validateRequest(subjects.outputList,{ownerId:'owner-1',projectId:'p',threadId:'t',itemIds:[]}),true);
+  assert.equal(validateResponse(subjects.outputBind,{binding}),true);
+  assert.equal(validateResponse(subjects.outputList,{bindings:[binding]}),true);
+  assert.equal(validateResponse(subjects.outputList,{items:[binding]}),false);
+});

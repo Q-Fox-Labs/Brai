@@ -1,8 +1,24 @@
-// ABOUTME: Подключает только Agent artifacts к отдельно настроенному NATS.
+// ABOUTME: Подключает входящие вложения и исходящие результаты к настроенным NATS.
 // ABOUTME: Без отдельного URL использует прежнее соединение, не меняя Auth, timer и history.
 import { connect, type NatsConnection } from "nats";
 import { GatewayError, natsConnection } from "./gateway";
 let connection: Promise<NatsConnection> | undefined;
+let resultsConnection: Promise<NatsConnection> | undefined;
+
+/** Подключает исходящие результаты к изолированному хранилищу либо прежнему artifacts transport. */
+export async function agentResultsConnection(): Promise<NatsConnection> {
+  if (!process.env.AGENT_RESULTS_NATS_URL) return agentArtifactsConnection();
+  if (!resultsConnection) {
+    resultsConnection = connect({ servers: process.env.AGENT_RESULTS_NATS_URL,
+      user: process.env.AGENT_RESULTS_NATS_USER, pass: process.env.AGENT_RESULTS_NATS_PASSWORD,
+      inboxPrefix: process.env.AGENT_RESULTS_NATS_INBOX_PREFIX || "_INBOX.brai_web_agent_results",
+      name: "brai_web_agent_results", timeout: 2000, maxReconnectAttempts: -1 });
+    void resultsConnection.catch(() => { resultsConnection = undefined; });
+  }
+  const nc = await resultsConnection;
+  if (nc.isClosed()) { resultsConnection = undefined; throw new GatewayError(503, "UNAVAILABLE"); }
+  return nc;
+}
 
 /** Возвращает отдельное соединение artifacts либо локальный legacy transport; не повторяет RPC. */
 export async function agentArtifactsConnection(): Promise<NatsConnection> {

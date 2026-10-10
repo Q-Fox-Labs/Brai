@@ -1,11 +1,11 @@
-// ABOUTME: Авторизует загрузку браузерных вложений и выдачу закрытых миниатюр.
+// ABOUTME: Авторизует браузерные вложения и закрытую выдачу результатов агента.
 // ABOUTME: Контроль идёт через NATS, а байты передаются только между браузером и artifacts/Caddy.
 import { validateRequest, validateResponse, subjects as artifactSubjects } from "../../../services/artifacts/contracts/index.mjs";
-import type { Artifact, ArtifactReference } from "../../../services/artifacts/contracts/index.mjs";
+import type { Artifact, ArtifactReference, OutputListResponse } from "../../../services/artifacts/contracts/index.mjs";
 type Metadata = Pick<Artifact, "title" | "filename" | "extension" | "mimeType" | "source" | "details">;
 import { checkOrigin, requireSession, type Session } from "./auth";
 import { GatewayError } from "./gateway";
-import { agentArtifactsConnection } from "./agent-artifacts";
+import { agentArtifactsConnection, agentResultsConnection } from "./agent-artifacts";
 import { agentOwnerId, permittedAgent, rpc as agentRpc } from "./agent-http";
 import { readBoundedJson, RequestBodyFailure } from "./request-body";
 
@@ -38,11 +38,11 @@ async function requireProject(projectId: string): Promise<void> {
 }
 
 /** Выполняет один проверенный NATS Services вызов владельца artifacts. */
-async function artifactCall<T>(subject: string, request: unknown): Promise<T> {
+async function artifactCall<T>(subject: string, request: unknown, output = false): Promise<T> {
   if (!validateRequest(subject, request)) throw failure(400, "INVALID_ARGUMENT");
   let reply;
   try {
-    const nc = await agentArtifactsConnection();
+    const nc = await (output ? agentResultsConnection() : agentArtifactsConnection());
     reply = await nc.request(subject, Buffer.from(JSON.stringify(request)), { timeout: 10000 });
   } catch { throw failure(503, "UNAVAILABLE"); }
   const code = reply.headers?.get("Nats-Service-Error-Code");
@@ -169,14 +169,15 @@ function parseOriginalUri(value: string | null, base: string): URL {
   return url;
 }
 
-function exactQuery(url: URL): Map<string, string> {
-  const allowed = new Set(["projectId", "threadId", "expectedUserId", "itemId", "turnId"]), values = new Map<string, string>();
+function exactQuery(url: URL, output = false): Map<string, string> {
+  const allowed = new Set(["projectId", "threadId", "expectedUserId", "itemId", "turnId", ...(output ? ["download"] : [])]), values = new Map<string, string>();
   for (const [key, value] of url.searchParams) {
     if (!allowed.has(key) || values.has(key) || !opaque(value)) throw failure(400, "INVALID_ARGUMENT");
     values.set(key, value);
   }
   if (!["projectId", "threadId", "expectedUserId"].every(key => values.has(key))) throw failure(400, "INVALID_ARGUMENT");
   if (values.has("itemId") !== values.has("turnId")) throw failure(400, "INVALID_ARGUMENT");
+  if (output && (!values.has("itemId") || !values.has("turnId") || (values.has("download") && values.get("download") !== "1"))) throw failure(400, "INVALID_ARGUMENT");
   return values;
 }
 
@@ -190,18 +191,20 @@ async function confirmedReference(ownerId: string, projectId: string, threadId: 
     && reference.attachments?.some((pair: Pair) => pair.originalArtifactId === artifactId || pair.modelArtifactId === artifactId));
 }
 
-function authHeaders(artifact: Artifact): Headers {
+function authHeaders(artifact: Artifact, output = false, download = false): Headers {
   const headers = new Headers({
     ...noStore,
     "Cross-Origin-Resource-Policy": "same-origin",
     "X-Frame-Options": "DENY",
   });
-  if (imageTypes.has(artifact.mimeType)) {
+  const inlineTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif", "video/mp4", "video/webm"]);
+  if (!download && (output ? inlineTypes : imageTypes).has(artifact.mimeType)) {
     headers.set("Content-Type", artifact.mimeType);
     headers.set("Content-Disposition", "inline");
   } else {
     headers.set("Content-Type", "application/octet-stream");
-    headers.set("Content-Disposition", "attachment; filename=\"attachment\"");
+    const encoded = encodeURIComponent(artifact.filename).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+    headers.set("Content-Disposition", output ? `attachment; filename="download"; filename*=UTF-8''${encoded}` : "attachment; filename=\"attachment\"");
   }
   return headers;
 }
@@ -215,17 +218,24 @@ export async function artifactReadAuth(request: Request): Promise<Response> {
     const session = await requireSession(request);
     if (!permittedAgent(session)) throw failure(403, "AGENT_ACCESS_DENIED");
     const url = parseOriginalUri(request.headers.get("x-forwarded-uri"), request.url);
-    const prefix = "/api/agent/attachments/";
+    const output = url.pathname.startsWith("/api/agent/results/");
+    const prefix = output ? "/api/agent/results/" : "/api/agent/attachments/";
     if (!url.pathname.startsWith(prefix) || url.pathname.slice(prefix.length).includes("/")) throw failure(404, "NOT_FOUND");
     const artifactId = url.pathname.slice(prefix.length);
     if (!validateRequest(artifactSubjects.get, { artifactId })) throw failure(404, "NOT_FOUND");
-    const query = exactQuery(url), projectId = query.get("projectId")!, threadId = query.get("threadId")!;
+    const query = exactQuery(url, output), projectId = query.get("projectId")!, threadId = query.get("threadId")!;
     if (query.get("expectedUserId") !== session.user.id) throw failure(401, "ACCOUNT_CHANGED");
     const ownerId = agentOwnerId(session);
     await requireProject(projectId);
     const itemId = query.get("itemId"), turnId = query.get("turnId");
     let artifact: Artifact;
-    if (itemId && turnId) {
+    if (output && itemId && turnId) {
+      const result = await artifactCall<OutputListResponse>(artifactSubjects.outputList, { ownerId, projectId, threadId, itemIds: [itemId] }, true);
+      if (!result.bindings.some(binding => binding.ownerId === ownerId && binding.projectId === projectId && binding.threadId === threadId
+        && binding.itemId === itemId && binding.turnId === turnId && binding.artifactIds.includes(artifactId))) throw failure(404, "NOT_FOUND");
+      artifact = await artifactCall<Artifact>(artifactSubjects.get, { artifactId }, true);
+      if (artifact.ownerId !== ownerId || artifact.status !== "ready") throw failure(404, "NOT_FOUND");
+    } else if (itemId && turnId) {
       if (!await confirmedReference(ownerId, projectId, threadId, itemId, turnId, artifactId)) throw failure(404, "NOT_FOUND");
       artifact = await artifactCall<Artifact>(artifactSubjects.get, { artifactId });
       if (artifact.ownerId !== ownerId || artifact.status !== "ready") throw failure(404, "NOT_FOUND");
@@ -234,7 +244,7 @@ export async function artifactReadAuth(request: Request): Promise<Response> {
       if (artifact.ownerId !== ownerId || artifact.status !== "ready" || artifact.source !== "agent"
         || artifact.details?.projectId !== projectId || artifact.details?.threadId !== threadId) throw failure(404, "NOT_FOUND");
     }
-    return new Response(null, { status: 200, headers: authHeaders(artifact) });
+    return new Response(null, { status: 200, headers: authHeaders(artifact, output, query.get("download") === "1") });
   } catch (error) { return errorResponse(error); }
 }
 

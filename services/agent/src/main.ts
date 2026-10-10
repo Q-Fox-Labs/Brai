@@ -12,6 +12,11 @@ import type { Command, EventEnvelope } from '../contracts/index.mjs';
 export async function startAgent(config: Config) {
   if (!config.codex?.socketUrl || !config.nats?.servers?.length || !config.projects?.length || config.projects.some(p => !p.projectId || !p.cwd.startsWith('/')) || new Set(config.projects.map(p => p.projectId)).size !== config.projects.length) throw new Error('INVALID_AGENT_CONFIG');
   if (config.artifacts) {
+    if (config.artifacts.resultsNats && (!config.artifacts.resultsNats.servers?.length || config.artifacts.resultsNats.servers.some(server => typeof server !== 'string' || !server))) throw new Error('INVALID_AGENT_CONFIG');
+    if (config.artifacts.resultsBaseUrl) {
+      const resultsBase = new URL(config.artifacts.resultsBaseUrl);
+      if (!['http:', 'https:'].includes(resultsBase.protocol) || resultsBase.username || resultsBase.password || resultsBase.search || resultsBase.hash) throw new Error('INVALID_AGENT_CONFIG');
+    }
     if (config.artifacts.nats && (!config.artifacts.nats.servers?.length || config.artifacts.nats.servers.some(server => typeof server !== 'string' || !server))) throw new Error('INVALID_AGENT_CONFIG');
     const base = new URL(config.artifacts.baseUrl);
     if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash || config.artifacts.timeoutMs !== undefined && (!Number.isSafeInteger(config.artifacts.timeoutMs) || config.artifacts.timeoutMs < 1 || config.artifacts.timeoutMs > 10000)) throw new Error('INVALID_AGENT_CONFIG');
@@ -21,7 +26,27 @@ export async function startAgent(config: Config) {
   const service = await nc.services.add({ name: 'brai_agent', version: '3.0.0', queue: 'brai_agent' });
   let closed = false, brokerConnected = true, sending = false, activeRequests = 0;
   let artifactsNc: NatsConnection | undefined, artifactsConnecting: Promise<void> | undefined;
+  let resultsNc: NatsConnection | undefined, resultsConnecting: Promise<void> | undefined;
   let artifactsConnected = false;
+  let resultsConnected = false;
+  async function connectResults() {
+    if (!config.artifacts?.resultsNats || resultsNc && !resultsNc.isClosed() || closed) return;
+    if (resultsConnecting) return resultsConnecting;
+    resultsConnecting = (async () => {
+      try {
+        const settings = config.artifacts!.resultsNats!;
+        const connection = await connect({ ...settings, pass: settings.password, inboxPrefix: settings.inboxPrefix ?? '_INBOX.brai_agent_results', timeout: 1000, maxReconnectAttempts: -1 });
+        if (closed) await connection.close(); else {
+          resultsNc = connection; resultsConnected = true;
+          void (async () => { for await (const event of connection.status()) {
+            if (event.type === 'disconnect') resultsConnected = false;
+            if (event.type === 'reconnect') resultsConnected = true;
+          } })();
+        }
+      } catch { /* Outgoing metadata недоступна; incoming transport остаётся независимым. */ }
+    })().finally(() => { resultsConnecting = undefined; });
+    return resultsConnecting;
+  }
   async function connectArtifacts() {
     if (!config.artifacts?.nats || artifactsNc && !artifactsNc.isClosed() || closed) return;
     if (artifactsConnecting) return artifactsConnecting;
@@ -41,6 +66,7 @@ export async function startAgent(config: Config) {
     return artifactsConnecting;
   }
   await connectArtifacts();
+  await connectResults();
   const artifactsPort: ArtifactsPort = config.artifacts?.nats ? {
     fetch: globalThis.fetch,
     async request(subject, value, options) {
@@ -48,6 +74,13 @@ export async function startAgent(config: Config) {
       return createArtifactsPort(artifactsNc, config.artifacts?.timeoutMs).request(subject, value, options);
     },
   } : createArtifactsPort(nc, config.artifacts?.timeoutMs);
+  const resultsPort: ArtifactsPort = config.artifacts?.resultsNats ? {
+    fetch: globalThis.fetch,
+    async request(subject, value, options) {
+      if (!resultsNc || resultsNc.isClosed() || !resultsConnected) throw Object.assign(new Error('UPSTREAM_UNAVAILABLE'), { code: 'UPSTREAM_UNAVAILABLE', outcome: 'query' });
+      return createArtifactsPort(resultsNc, config.artifacts?.timeoutMs).request(subject, value, options);
+    },
+  } : artifactsPort;
   const queue = new Map<string, EventEnvelope>();
   async function drain() {
     if (sending) return;
@@ -77,7 +110,7 @@ export async function startAgent(config: Config) {
     }
     queue.set(key, event);
     void drain();
-  }, artifactsPort);
+  }, artifactsPort, resultsPort);
   const codes: Record<string, number> = { INVALID_ARGUMENT: 400, REQUEST_TOO_LARGE: 413, ITEM_TOO_LARGE: 413, STALE_GENERATION: 409, STALE_ITEM: 409, STALE_REQUEST: 409, OPERATION_CONFLICT: 409, CAPACITY_EXHAUSTED: 503, UPSTREAM_UNAVAILABLE: 503, TIMEOUT: 504, NOT_FOUND: 404, UNSUPPORTED: 501 };
   service.addEndpoint('rpc', { subject: subjects.rpc, handler: (_error, message) => {
     void (async () => {
@@ -99,13 +132,13 @@ export async function startAgent(config: Config) {
       } finally { if (admitted) activeRequests--; }
     })();
   } });
-  const timer = setInterval(() => { if (!closed) { void codex.connect().catch(() => {}); void connectArtifacts(); void drain(); } }, 1000);
+  const timer = setInterval(() => { if (!closed) { void codex.connect().catch(() => {}); void connectArtifacts(); void connectResults(); void drain(); } }, 1000);
   void (async () => { for await (const event of nc.status()) { if (event.type === 'disconnect') { brokerConnected = false; queue.clear(); } if (event.type === 'reconnect') brokerConnected = true; } })();
   await codex.connect().catch(() => {});
   return { status: () => codex.status(), async close() {
     if (closed) return;
     closed = true; clearInterval(timer); app.close();
-    const results = await Promise.allSettled([service.stop(), codex.close(), artifactsNc?.close(), artifactsConnecting]);
+    const results = await Promise.allSettled([service.stop(), codex.close(), artifactsNc?.close(), artifactsConnecting, resultsNc?.close(), resultsConnecting]);
     await nc.close();
     const failed = results.find(result => result.status === 'rejected');
     if (failed?.status === 'rejected') throw failed.reason;

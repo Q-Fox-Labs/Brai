@@ -99,6 +99,18 @@ Snapshot содержит optional `contextUsage:{usedTokens,contextWindow}|null
 
 Для общей artifacts-службы `artifacts.nats` принимает ту же форму, что `nats`: `servers`, `user`, `password`, `inboxPrefix`. Это отдельное подключение с собственным reconnect; без поля используется локальный брокер. Пока настроенные artifacts недоступны, user input не отправляется. Остановка Agent закрывает оба своих подключения и не перезапускает Codex.
 
+## Результаты сообщений
+
+Необязательное `artifacts.resultRoot` включает разбор исходящих результатов. Это абсолютный нормализованный каталог без завершающего `/`; при его настройке обязателен `ownerId` из доверенного профиля. Владелец — точный непробельный идентификатор длиной 1–128 символов, а не значение модели или native уведомления. Для отдельного контура результатов можно задать `artifacts.resultsNats` и `artifacts.resultsBaseUrl`. Первое открывает отдельное NATS подключение; без него исходящие операции используют обычный artifacts transport. Входящие reserve и attachments сохраняют прежнее подключение. Agent не читает байты исходящих результатов по HTTP.
+
+Только завершённый native `agentMessage` создаёт привязку. До сокращения display Agent разбирает полный текст и принимает стандартные inline Markdown ссылки и изображения с точным target `<resultRoot>/<UUID>/<filename>`, включая angle paths с пробелами. Код, экранированные ссылки, reference links, URL, вложенные пути и traversal не создают привязок. Filename должен совпадать с metadata; artifact должен быть ready и принадлежать настроенному владельцу. Native текст, savedPath и media не переписываются; dynamicTools не объявляются.
+
+Владелец artifacts хранит output binding `ownerId/projectId/threadId/turnId/itemId → artifactIds`. Повтор того же binding идемпотентен; recovery выполняется по завершённой native истории при `open/items/item`, включая чаты, начатые в Desktop. Started и streaming text не подтверждают публикацию. Удаление файла сохраняет binding и descriptor со `state=deleted` без доступных URL.
+
+`DisplayItem.resultCount` сообщает число результатов. Только RPC с `ownerId`, точно равным настроенному владельцу, получает `results[]` и `resultsState=ready|unavailable`. Result содержит `artifactId`, исходный `target`, `state=ready|deleted|unavailable`, `filename`, `mimeType`, `sizeBytes` и для ready — `previewUrl/downloadUrl`. URL включает project/thread/turn/item и canonical `expectedUserId`; скачивание добавляет `download=1`. Shared live snapshots не содержат descriptors. Длинные сообщения сохраняют все descriptors на каждой странице `item`; native text cursor не меняется.
+
+Outgoing recovery и decoration имеют один общий `artifacts.timeoutMs` (по умолчанию 10 секунд). Первый сбой доступности прекращает оставшиеся metadata reads, поколение защищает от запоздалого ответа. Неизвестное состояние отображается как unavailable. Число результатов не ограничено произвольной сотней: действуют byte budgets artifacts и Agent. Превышение response budget даёт явный отказ вместо скрытого сокращения descriptors. Сбой результатов не изменяет incoming ledger и не повторяет native input.
+
 Async-ответ использует внутренний operationId `async:<SHA-256 native itemId>` и persisted native clientUserMessageId. Два Brai Agent с одним owner/project/thread резервируют ответ один раз; разные ответы для того же вопроса конфликтуют. Hash не зависит от смены активного хода на завершённый. После потери ACK подтверждение ищет точный native clientId без повторной отправки. Codex Desktop reserve не использует, поэтому эта гарантия относится к двум Brai Agent.
 
 Список чатов явно включает native sourceKinds `cli`, `vscode`, `appServer`, `exec`, `unknown` сохраняет исходные threadId и проверяет native cwd по реестру проектов.

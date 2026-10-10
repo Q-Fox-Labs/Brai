@@ -45,3 +45,31 @@ test("sharing HEAD deadline covers delayed file open and releases the late descr
   release();for(let n=0;n<50&&!closed;n++)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(closed,true,"late open must be closed even after the HTTP response");
  }finally{release?.();mock.restoreAll();syncBuiltinESMExports();await http?.stop();await rm(dataDir,{recursive:true,force:true});}
 });
+
+test('upload outlives metadata deadline and enforces exact declared two GiB ceiling',async()=>{
+ const {cfg,dataDir}=await fixture();cfg.uploadTimeoutMs=2000;cfg.receiveTimeoutMs=1000;let http,calls=0;
+ const id='11111111-1111-4111-8111-111111111111';
+ try{
+  http=await startArtifactsHttp(cfg,{upload:async(_token,source)=>{calls++;for await(const _ of source){}return {artifactId:id,sizeBytes:1,sha256:'a'.repeat(64),internalUrl:'http://internal/files/'+id};}},{},{});
+  const {request}=await import('node:http');
+  const sendSlow=()=>new Promise((resolve,reject)=>{const req=request(`http://127.0.0.1:${cfg.httpPort}/upload/${'a'.repeat(32)}`,{method:'PUT',headers:{'transfer-encoding':'chunked'}},res=>{res.resume();resolve(res.statusCode);});req.on('error',reject);req.write('a');setTimeout(()=>req.end('b'),250);});
+  assert.equal(await sendSlow(),201,'upload must not use short metadata request timeout');
+  const declared=bytes=>new Promise((resolve,reject)=>{const req=request(`http://127.0.0.1:${cfg.httpPort}/upload/${'a'.repeat(32)}`,{method:'PUT',headers:{'content-length':String(bytes)}},res=>{res.resume();resolve(res.statusCode);});req.on('error',reject);req.flushHeaders();if(bytes===2147483648)setTimeout(()=>req.destroy(),100);});
+  // Проверяем, что ровно 2 GiB доходит до upload-порта без materialization тела.
+  const accepted=declared(2147483648).catch(()=>undefined);await new Promise(resolve=>setTimeout(resolve,150));assert.equal(calls,2);await accepted;
+  assert.equal(await declared(2147483649),413);assert.equal(calls,2);
+ }finally{await http?.stop();await rm(dataDir,{recursive:true,force:true});}
+});
+
+test('absolute upload deadline cancels a continuously active stream and cleans its temp',async()=>{
+ const {cfg,dataDir}=await fixture();cfg.uploadTimeoutMs=150;cfg.receiveTimeoutMs=1000;
+ const {createFileStore}=await import('../dist/files.js'),files=await createFileStore(dataDir);
+ const {request}=await import('node:http'),{readdir}=await import('node:fs/promises');
+ let http,req,timer;
+ try{
+  http=await startArtifactsHttp(cfg,{upload:async(_token,source,signal)=>files.write('11111111-1111-4111-8111-111111111111',source,cfg.maxUploadBytes,signal)},{},{});
+  const started=Date.now(),response=new Promise((resolve,reject)=>{req=request(`http://127.0.0.1:${cfg.httpPort}/upload/${'a'.repeat(32)}`,{method:'PUT',headers:{'transfer-encoding':'chunked'}},res=>{res.resume();resolve(res.statusCode);});req.on('error',reject);req.write('start');timer=setInterval(()=>req.write('active'),25);});
+  assert.equal(await response,503);assert.ok(Date.now()-started<800,'active body must still hit the absolute deadline');
+  clearInterval(timer);assert.deepEqual(await readdir(join(dataDir,'tmp')),[]);assert.deepEqual(await readdir(join(dataDir,'files')),[]);
+ }finally{clearInterval(timer);req?.destroy();await http?.stop();await rm(dataDir,{recursive:true,force:true});}
+});

@@ -21,11 +21,12 @@ export async function migrate(pool:Pool,ownerRole:string,appRole:string) {
     const exists=(await client.query("SELECT to_regclass('artifacts.migrations') AS table_name")).rows[0].table_name;
     if(!exists)await client.query(readFileSync(new URL("../migrations/001.sql",import.meta.url),"utf8"));
     else if(!(await client.query("SELECT 1 FROM artifacts.migrations WHERE version=1")).rowCount)throw new Error("UNKNOWN_MIGRATION_STATE");
+    if(!(await client.query("SELECT 1 FROM artifacts.migrations WHERE version=2")).rowCount)await client.query(readFileSync(new URL("../migrations/002.sql",import.meta.url),"utf8"));
     await client.query(`REVOKE ALL ON SCHEMA artifacts FROM PUBLIC,${quote(appRole)}`);
     await client.query(`REVOKE ALL ON ALL TABLES IN SCHEMA artifacts FROM PUBLIC,${quote(appRole)}`);
     await client.query(`GRANT CONNECT ON DATABASE ${quote(identity.db)} TO ${quote(appRole)}`);
     await client.query(`GRANT USAGE ON SCHEMA artifacts TO ${quote(appRole)}`);
-    const tables="artifacts.artifacts,artifacts.artifact_links,artifacts.artifact_relations,artifacts.artifact_references";
+    const tables="artifacts.artifacts,artifacts.artifact_links,artifacts.artifact_relations,artifacts.artifact_references,artifacts.artifact_output_bindings";
     await client.query(`GRANT SELECT,INSERT ON ${tables} TO ${quote(appRole)}`);
     await client.query(`GRANT UPDATE(status,source,size_bytes,document) ON artifacts.artifacts TO ${quote(appRole)}`);
     await client.query(`GRANT UPDATE(document) ON artifacts.artifact_links,artifacts.artifact_references TO ${quote(appRole)}`);

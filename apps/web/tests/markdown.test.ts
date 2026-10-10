@@ -4,16 +4,17 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { test } from "node:test";
+import type { DisplayItem } from "@brai/agent/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const require = createRequire(import.meta.url);
 const ts = require("typescript") as typeof import("typescript");
 const source = readFileSync(new URL("../app/agent/markdown.tsx", import.meta.url), "utf8");
 const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-const module = { exports: {} as { default: (props: { text: string }) => unknown } };
+const module = { exports: {} as { default: (props: { text: string; results?: DisplayItem["results"] }) => unknown } };
 new Function("require", "module", "exports", output)((name: string) => name === "./markdown.css" ? {} : require(name), module, module.exports);
 const Markdown = module.exports.default;
-const render = (text: string) => renderToStaticMarkup(Markdown({ text }) as Parameters<typeof renderToStaticMarkup>[0]);
+const render = (text: string, results?: DisplayItem["results"]) => renderToStaticMarkup(Markdown({ text, results }) as Parameters<typeof renderToStaticMarkup>[0]);
 
 test("renders Russian paragraphs, inline formatting, links, escaped punctuation and code", () => {
   const html = render("Обычный русский текст\nна нескольких строках. **Жирный** текст, *курсив*, ~~зачёркнутый~~ и `main`.\n\nСсылка [Новый интерфейс уже доступен](https://the.brai.one/agent), скобки [путь](/path_(name)).\nЭкранировано: \\*звёздочки\\*, \\`backtick\\`, \\[квадратные скобки\\]. word_with_under.");
@@ -78,4 +79,66 @@ test("keeps Mermaid identity when source lines or following text change", () => 
   const updated = diagram("```mermaid\nflowchart TB\nA --> B\nB --> C\n```\n\nПродолжение ответа");
   assert.equal(first.key, updated.key);
   assert.equal(first.type, updated.type);
+});
+
+const resultId = "11111111-1111-4111-8111-111111111111";
+const nativeTarget = `/tmp/artifacts/${resultId}/Рисунок (1).png`;
+const previewUrl = `/api/agent/results/${resultId}?projectId=project&threadId=thread&turnId=turn&itemId=item&expectedUserId=user`;
+const media = { artifactId: resultId, target: nativeTarget, state: "ready" as const, filename: "Рисунок (1).png", mimeType: "image/png", sizeBytes: 2048, previewUrl, downloadUrl: previewUrl + "&download=1" };
+
+test("verified native Markdown image is positioned between prose with expansion and original download", () => {
+  const html = render(`До ![Подпись](<${nativeTarget}>) после.`, [media]);
+  assert.match(html, /<p>До <\/p><figure class="markdown-result">/);
+  assert.match(html, /src="\/api\/agent\/results\//);
+  assert.match(html, /aria-label="Развернуть Рисунок/);
+  assert.match(html, /alt="Подпись"/);
+  assert.match(html, /2048|2 048/);
+  assert.match(html, /download="Рисунок/);
+  assert.match(html, /<\/figure><p> после\.<\/p>/);
+  assert.doesNotMatch(html, /href="\/tmp|src="\/tmp/);
+});
+
+test("figures remain valid flow content in lists, quotes, tables, headings and emphasis", () => {
+  const output = `![x](<${nativeTarget}>)`;
+  const html = render(`- До ${output} после\n\n> ${output}\n\n| Файл |\n| --- | --- |\n| ${output} | x |\n\n## До ${output} после\n\n**До ${output} после**`, [media]);
+  assert.ok((html.match(/<figure /g) ?? []).length >= 5);
+  assert.doesNotMatch(html, /<(?:p|h[1-6]|strong|em)>[^<]*<figure/);
+  assert.match(html, /<li><p>До <\/p><figure/);
+  assert.match(html, /<blockquote><figure/);
+  assert.match(html, /<td><figure/);
+});
+
+test("videos have controls without autoplay; active MIME and other files are download cards", () => {
+  for (const mimeType of ["video/mp4", "video/webm"]) {
+    const html = render(`[Видео](<${nativeTarget}>)`, [{ ...media, mimeType }]);
+    assert.match(html, /<video[^>]*controls=""/); assert.match(html, /preload="metadata"/);
+    assert.doesNotMatch(html, /autoplay|<img/);
+    assert.match(html, /Скачать оригинал/);
+  }
+  for (const mimeType of ["image/svg+xml", "text/html", "text/plain", "application/pdf"]) {
+    const html = render(`[Файл](<${nativeTarget}>)`, [{ ...media, mimeType }]);
+    assert.doesNotMatch(html, /<img|<video|<iframe|<object/); assert.match(html, /Скачать оригинал/);
+  }
+});
+
+test("deleted, unavailable and unverified native outputs never request browser media", () => {
+  for (const state of ["deleted", "unavailable"] as const) {
+    const html = render(`![x](<${nativeTarget}>)`, [{ ...media, state }]);
+    assert.doesNotMatch(html, /<img|<video|href=/);
+    assert.match(html, state === "deleted" ? /файл удалён/ : /результат недоступен/);
+  }
+  for (const url of ["/tmp/file.png", "https://evil.test/file.png", previewUrl + "&expectedUserId=other", previewUrl + "#hash", previewUrl.replace(resultId, "other")]) {
+    const html = render(`![x](<${nativeTarget}>)`, [{ ...media, previewUrl: url, downloadUrl: url + "&download=1" }]);
+    assert.doesNotMatch(html, /<img|<video|href=/);
+  }
+  assert.match(render("![x](/tmp/missing.png)"), /результат недоступен/);
+  assert.doesNotMatch(render("![x](/tmp/missing.png)"), /<img|href=/);
+});
+
+test("native media markup inside code or escaped markup remains text", () => {
+  const source = `![x](<${nativeTarget}>)`;
+  for (const text of ["`" + source + "`", "```\n" + source + "\n```", "\\" + source, "!\\" + source.slice(1)]) {
+    const html = render(text, [media]);
+    assert.doesNotMatch(html, /<figure|<img|<video|href=/);
+  }
 });

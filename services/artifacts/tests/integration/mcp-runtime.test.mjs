@@ -85,7 +85,7 @@ test('official MCP client lists and invokes all artifacts operations over NATS',
   await client.connect(transport);
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map(tool => tool.name).sort(), [
-    'delete', 'get', 'link_create', 'link_revoke', 'list', 'prepare', 'reference_confirm', 'reference_get',
+    'delete', 'get', 'link_create', 'link_revoke', 'list', 'output_bind', 'output_list', 'prepare', 'reference_confirm', 'reference_get',
     'reference_list', 'reference_reserve', 'reference_update_state', 'relation_add', 'relation_list', 'relation_remove', 'stats', 'update',
   ].sort());
   assert.equal(listed.tools.find(tool => tool.name === 'prepare').inputSchema.additionalProperties, false);
@@ -180,6 +180,10 @@ test('official MCP client lists and invokes all artifacts operations over NATS',
   assert.equal((await result('reference_update_state', { scope, state: 'unknown' })).structuredContent.reference.state, 'unknown');
   assert.equal((await result('reference_confirm', { scope, clientUserMessageId: 'native-1', turnId: 'turn-1', itemId: 'item-1' })).structuredContent.reference.state, 'confirmed');
   assert.equal((await result('reference_list', { scope: { ownerId, projectId: 'project', threadId: 'thread' }, nativeItemIds: ['item-1'] })).structuredContent.items.length, 1);
+
+  const outputInput={ownerId,projectId:'project',threadId:'thread',turnId:'agent-turn',itemId:'agent-result',artifactIds:[original.artifactId,model.artifactId]};
+  const output=(await result('output_bind',outputInput)).structuredContent;assert.ok(output.binding);
+  assert.deepEqual((await result('output_list',{ownerId,projectId:'project',threadId:'thread',itemIds:['agent-result']})).structuredContent,{bindings:[output.binding]});
 
   const grant = await result('link_create', { requestId: randomUUID(), artifactId: original.artifactId });
   assert.equal(typeof grant.structuredContent.link.url, 'string');

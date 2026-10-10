@@ -108,5 +108,17 @@
     "webRpcMutation": 90000,
     "attachmentRecovery": 8000
   },
-  "x-retry-policy": "Attachment confirmation enumerates the complete acknowledged turn, or complete thread without an ACK, with unique exact persisted clientId; at most 1000 pages of 10 within 8000ms. Never automatically retry mutations; operation IDs bind a request hash and its original result within a generation. Whole STATE_SNAPSHOT events may be coalesced; accept monotonically greater seq within the same generation/epoch. Read native history after generation/epoch change. activities/item are read-only scoped queries; generation rotation rejects a late result. Initial open/items/events omit non-message bodies. Summaries up to 100 IDs are fetched only on group expansion; full display on item expansion. Goal pause/clear additionally interrupt the confirmed active turn. Accepted earlier stages followed by any failure yield unknown; read open/goalGet before a new explicit operation. Native goals own automatic continuation. Plans carry native text/status; planProgress is transient and cannot be restored from history."
+  "x-retry-policy": "Attachment confirmation enumerates the complete acknowledged turn, or complete thread without an ACK, with unique exact persisted clientId; at most 1000 pages of 10 within 8000ms. Never automatically retry mutations; operation IDs bind a request hash and its original result within a generation. Whole STATE_SNAPSHOT events may be coalesced; accept monotonically greater seq within the same generation/epoch. Read native history after generation/epoch change. activities/item are read-only scoped queries; generation rotation rejects a late result. Initial open/items/events omit non-message bodies. Summaries up to 100 IDs are fetched only on group expansion; full display on item expansion. Goal pause/clear additionally interrupt the confirmed active turn. Accepted earlier stages followed by any failure yield unknown; read open/goalGet before a new explicit operation. Native goals own automatic continuation. Plans carry native text/status; planProgress is transient and cannot be restored from history.",
+  "x-agent-results": {
+    "authority": "Only configured ownerId receives Result descriptors in open/items/item RPC replies. Shared live snapshots contain resultCount only.",
+    "completion": "Completed native agentMessage full Markdown is parsed before display truncation; started and streamed messages never bind. Native text and native media are never rewritten.",
+    "recovery": "Completed native history restores the same owner/project/thread/turn/item binding through artifacts output.list/output.bind. Identical repeated bindings are idempotent; deleted results retain descriptors.",
+    "metadata": "Recovery and decoration share artifacts.timeoutMs for outgoing metadata. First availability failure stops remaining metadata reads; unavailable state remains explicit. Descriptors repeat on every native message text page; response budget exhaustion fails explicitly.",
+    "subjects": {
+      "$ref": "../artifacts/asyncapi.json"
+    },
+    "result": {
+      "$ref": "./schemas/messages.schema.json#/definitions/Result"
+    }
+  }
 }

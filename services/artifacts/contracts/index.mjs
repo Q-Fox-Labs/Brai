@@ -11,11 +11,13 @@ export const subjects = Object.freeze({
   referenceReserve: 'brai.artifacts.v1.reference.reserve', referenceGet: 'brai.artifacts.v1.reference.get',
   referenceConfirm: 'brai.artifacts.v1.reference.confirm', referenceList: 'brai.artifacts.v1.reference.list',
   referenceUpdateState: 'brai.artifacts.v1.reference.update-state',
+  outputBind: 'brai.artifacts.v1.output.bind', outputList: 'brai.artifacts.v1.output.list',
   linkCreate: 'brai.artifacts.v1.link.create', linkRevoke: 'brai.artifacts.v1.link.revoke',
 });
 export const schemas = artifactSchemas;
 
 const requestNames = {
+  [subjects.outputBind]: 'OutputBindRequest', [subjects.outputList]: 'OutputListRequest',
   [subjects.prepare]: 'PrepareRequest', [subjects.get]: 'GetRequest', [subjects.update]: 'UpdateRequest',
   [subjects.list]: 'ListRequest', [subjects.stats]: 'StatsRequest', [subjects.delete]: 'DeleteRequest',
   [subjects.relationAdd]: 'RelationMutationRequest', [subjects.relationRemove]: 'RelationMutationRequest', [subjects.relationList]: 'RelationListRequest',
@@ -24,6 +26,7 @@ const requestNames = {
   [subjects.referenceUpdateState]: 'ReferenceUpdateStateRequest', [subjects.linkCreate]: 'LinkCreateRequest', [subjects.linkRevoke]: 'LinkRevokeRequest',
 };
 const responseNames = {
+  [subjects.outputBind]: 'OutputBindResponse', [subjects.outputList]: 'OutputListResponse',
   [subjects.prepare]: 'PrepareResponse', [subjects.get]: 'Artifact', [subjects.update]: 'Artifact', [subjects.list]: 'ListResponse',
   [subjects.stats]: 'StatsResponse', [subjects.delete]: 'Artifact', [subjects.relationAdd]: 'RelationResponse',
   [subjects.relationRemove]: 'RelationResponse', [subjects.relationList]: 'RelationListResponse',

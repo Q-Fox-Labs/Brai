@@ -1109,6 +1109,158 @@
       "additionalProperties": {
         "type": "string"
       }
+    },
+    "OutputQueryScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId",
+        "projectId",
+        "threadId"
+      ],
+      "properties": {
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        },
+        "projectId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "threadId": {
+          "$ref": "#/definitions/OpaqueId"
+        }
+      }
+    },
+    "OutputBindRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId",
+        "projectId",
+        "threadId",
+        "turnId",
+        "itemId",
+        "artifactIds"
+      ],
+      "properties": {
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        },
+        "projectId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "threadId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "turnId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "itemId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "artifactIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/Uuid"
+          }
+        }
+      }
+    },
+    "ArtifactOutputBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId",
+        "projectId",
+        "threadId",
+        "turnId",
+        "itemId",
+        "artifactIds",
+        "createdAt"
+      ],
+      "properties": {
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        },
+        "projectId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "threadId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "turnId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "itemId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "artifactIds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/Uuid"
+          }
+        },
+        "createdAt": {
+          "$ref": "#/definitions/Timestamp"
+        }
+      }
+    },
+    "OutputBindResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding"
+      ],
+      "properties": {
+        "binding": {
+          "$ref": "#/definitions/ArtifactOutputBinding"
+        }
+      }
+    },
+    "OutputListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId",
+        "projectId",
+        "threadId",
+        "itemIds"
+      ],
+      "properties": {
+        "ownerId": {
+          "$ref": "#/definitions/OwnerId"
+        },
+        "projectId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "threadId": {
+          "$ref": "#/definitions/OpaqueId"
+        },
+        "itemIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/OpaqueId"
+          }
+        }
+      }
+    },
+    "OutputListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bindings"
+      ],
+      "properties": {
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ArtifactOutputBinding"
+          }
+        }
+      }
     }
   }
 }

@@ -26,9 +26,9 @@ export function agentOwnerId(session: Session): string {
   return ownerId;
 }
 
-/** Заменяет только URL вложений владельца на локальную browser identity, не меняя текст и wire владельца. */
+/** Переводит URL вложений и результатов в browser identity; непроверенные URL результатов удаляет. */
 export function agentBrowserResult<T>(value: T, ownerId: string, userId: string): T {
-  if (ownerId === userId || !value || typeof value !== "object") return value;
+  if (!value || typeof value !== "object") return value;
   if (Array.isArray(value)) return value.map(item => agentBrowserResult(item, ownerId, userId)) as T;
   const copy = { ...value } as Record<string, unknown>;
   for (const [key, item] of Object.entries(copy)) {
@@ -38,6 +38,29 @@ export function agentBrowserResult<T>(value: T, ownerId: string, userId: string)
       if (url.origin !== "https://agent.invalid" || url.searchParams.getAll("expectedUserId").length !== 1 || url.searchParams.get("expectedUserId") !== ownerId) return attachment;
       url.searchParams.set("expectedUserId", userId);
       return { ...attachment, url: url.pathname + url.search + url.hash };
+    });
+    else if (key === "results" && Array.isArray(item)) copy[key] = item.map(result => {
+      if (!result || typeof result !== "object") return result;
+      const browser = { ...result };
+      for (const key of ["previewUrl", "downloadUrl"]) {
+        const raw = browser[key];
+        if (typeof raw !== "string") continue;
+        let valid = false;
+        try {
+          const url = new URL(raw, "https://agent.invalid");
+          const required = ["projectId", "threadId", "turnId", "itemId", "expectedUserId"];
+          const allowed = new Set([...required, ...(key === "downloadUrl" ? ["download"] : [])]);
+          valid = raw.startsWith("/api/agent/results/") && !raw.includes("\\") && !url.hash
+            && url.origin === "https://agent.invalid" && url.pathname === `/api/agent/results/${result.artifactId}`
+            && required.every(name => url.searchParams.getAll(name).length === 1 && !!url.searchParams.get(name))
+            && [...url.searchParams.keys()].every(name => allowed.has(name))
+            && url.searchParams.get("expectedUserId") === ownerId
+            && (key !== "downloadUrl" || (url.searchParams.getAll("download").length === 1 && url.searchParams.get("download") === "1"));
+          if (valid) { url.searchParams.set("expectedUserId", userId); browser[key] = url.pathname + url.search; }
+        } catch { /* Ошибочный wire URL не становится ссылкой браузера. */ }
+        if (!valid) delete browser[key];
+      }
+      return browser;
     });
     else if (item && typeof item === "object") copy[key] = agentBrowserResult(item, ownerId, userId);
   }

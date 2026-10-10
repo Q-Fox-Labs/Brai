@@ -4,5 +4,7 @@
 
 История, контекст и инструменты принадлежат внешнему Codex app server. Между локальными модулями обычные вызовы и подписка наблюдений. Web импортирует только публичный контракт. Нет message/tool lifecycle engine, второй истории, собственного исполнителя или межмодульного RPC.
 
+`results` извлекает ссылки завершённого полного native Markdown до сокращения, восстанавливает устойчивые output bindings через публичный контракт artifacts и добавляет descriptors только в RPC настроенного владельца. Кеш ссылок ограничен 128 items и общим state budget; native история и artifacts владеют долговременными данными. Incoming reserve и outgoing binding используют разные операции и могут иметь разные NATS подключения. Отказ outgoing metadata не меняет отправку, native историю или incoming ledger. Shared live projection содержит только `resultCount`; filename, MIME, target и HTTP URLs принадлежат авторизованному RPC.
+
 
 Режимы используют native collaboration settings. Goal/set владеет продолжениями и счётчиками цели; application только задаёт settings, goal и interrupt в явном сценарии с unknown после частичного эффекта. Native история хранит предложенные plan items. Turn/plan/updated остаётся ограниченной живой проекцией, отдельной от документа; отсутствие восстановления шагов обозначается явно. Новых процессов, хранилищ или циклов исполнения целей нет.

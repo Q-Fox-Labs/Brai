@@ -1,7 +1,9 @@
 // ABOUTME: Отображает ответы агента как ограниченный безопасный Markdown.
 // ABOUTME: Разбирает разметку локально и никогда не вставляет сырой HTML в DOM.
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, isValidElement, type ReactNode } from "react";
+import type { DisplayItem } from "@brai/agent/contracts";
 import "./markdown.css";
+type Results = NonNullable<DisplayItem["results"]>;
 
 type InlinePart = string | ReactNode;
 
@@ -131,6 +133,59 @@ function MermaidDiagram({ source }: { source: string }) {
   </figure>;
 }
 
+// AIDEV-NOTE: Native пути не становятся URL браузера; выдачу разрешают только проверенные HTTP descriptors.
+function resultUrl(raw: string | undefined, artifactId: string, download: boolean): string | undefined {
+  if (!raw || !raw.startsWith("/api/agent/results/") || raw.includes("\\")) return;
+  try {
+    const url = new URL(raw, "https://agent.invalid");
+    const keys = ["projectId", "threadId", "turnId", "itemId", "expectedUserId"];
+    if (url.origin !== "https://agent.invalid" || url.hash || url.pathname !== `/api/agent/results/${artifactId}`
+      || !keys.every(key => url.searchParams.getAll(key).length === 1 && !!url.searchParams.get(key))
+      || [...url.searchParams.keys()].some(key => !keys.includes(key) && !(download && key === "download"))
+      || (download && (url.searchParams.getAll("download").length !== 1 || url.searchParams.get("download") !== "1"))) return;
+    return url.pathname + url.search;
+  } catch { return; }
+}
+
+function ResultOutput({ result, label }: { result?: Results[number]; label: string }) {
+  const [failed, setFailed] = useState(false), [attempt, setAttempt] = useState(0), [expanded, setExpanded] = useState(false);
+  const dialog = useRef<HTMLDialogElement>(null);
+  const videoElement = useRef<HTMLVideoElement>(null);
+  const preview = result?.state === "ready" ? resultUrl(result.previewUrl, result.artifactId, false) : undefined;
+  const download = result?.state === "ready" ? resultUrl(result.downloadUrl, result.artifactId, true) : undefined;
+  const image = !!result && ["image/png", "image/jpeg", "image/webp", "image/gif"].includes(result.mimeType);
+  const video = !!result && ["video/mp4", "video/webm"].includes(result.mimeType);
+  // AIDEV-NOTE: Ошибка preload может возникнуть до гидратации, когда onError ещё не подключён.
+  useEffect(() => { if (videoElement.current?.error) setFailed(true); }, [preview, attempt]);
+  useEffect(() => {
+    if (!expanded || !dialog.current) return;
+    const element = dialog.current;
+    element.showModal();
+    return () => element.close();
+  }, [expanded]);
+  return <figure className="markdown-result">
+    {result?.state === "deleted" ? <figcaption>{result.filename} — файл удалён.</figcaption>
+      : !result || !download ? <figcaption>{result?.filename ?? label} — результат недоступен.</figcaption>
+        : <>
+          {preview && !failed && image && <button className="markdown-result-image-button" type="button" aria-label={`Развернуть ${result.filename}`} onClick={() => setExpanded(true)}><img key={attempt} src={preview} alt={label || result.filename} loading="lazy" onError={() => setFailed(true)} /></button>}
+          {preview && !failed && video && <video ref={videoElement} key={attempt} src={preview} controls preload="metadata" playsInline onError={() => setFailed(true)}>Ваш браузер не поддерживает это видео.</video>}
+          {failed && <div role="status">{video ? "Не удалось воспроизвести видео. Скачайте оригинал." : "Не удалось загрузить изображение."} <button type="button" onClick={() => { setFailed(false); setAttempt(value => value + 1); }}>Повторить</button></div>}
+          <figcaption><span>{result.filename}{typeof result.sizeBytes === "number" ? ` · ${new Intl.NumberFormat("ru").format(result.sizeBytes)} байт` : ""}</span> <a href={download} download={result.filename}>Скачать оригинал</a></figcaption>
+          {image && preview && <dialog ref={dialog} className="markdown-result-dialog" aria-label={result.filename} onClose={() => setExpanded(false)}><button type="button" aria-label="Закрыть изображение" onClick={() => dialog.current?.close()}>×</button>{expanded && <img src={preview} alt={label || result.filename} />}<a href={download} download={result.filename}>Скачать оригинал</a></dialog>}
+        </>}
+  </figure>;
+}
+
+function outputPart(part: InlinePart): boolean { return isValidElement(part) && part.type === ResultOutput; }
+
+// AIDEV-NOTE: Разделение содержимого исключает figure внутри p, заголовков и строчного форматирования.
+function wrapInline(parts: InlinePart[], wrap: (children: InlinePart[], key: string) => ReactNode): ReactNode[] {
+  const result: ReactNode[] = [], text: InlinePart[] = [];
+  const flush = () => { if (text.length) { result.push(wrap([...text], String(result.length))); text.length = 0; } };
+  for (const part of parts) { if (outputPart(part)) { flush(); result.push(part); } else text.push(part); }
+  flush(); return result;
+}
+
 function safeHref(input: string): string | null {
   const href = input.trim();
   const compact = href.replace(/[\u0000-\u0020\u007f]/g, "");
@@ -163,12 +218,13 @@ function linkEnd(text: string, start: number): number {
   return -1;
 }
 
-function inline(text: string, key = "i"): InlinePart[] {
+function inline(text: string, key = "i", results: Results = []): InlinePart[] {
   const result: InlinePart[] = [];
   let plain = "";
   const flush = () => { if (plain) result.push(plain); plain = ""; };
   for (let i = 0; i < text.length;) {
     if (text[i] === "\\" && i + 1 < text.length && punctuation.test(text[i + 1])) {
+      if (text[i + 1] === "!" && text[i + 2] === "[") { plain += "!["; i += 3; continue; }
       plain += text[i + 1]; i += 2; continue;
     }
     if (text[i] === "`") {
@@ -182,14 +238,22 @@ function inline(text: string, key = "i"): InlinePart[] {
         i = end + count; continue;
       }
     }
-    if (text[i] === "[") {
-      const labelEnd = text.indexOf("](", i + 1);
+    if (text[i] === "[" || (text[i] === "!" && text[i + 1] === "[")) {
+      const image = text[i] === "!", labelStart = i + (image ? 2 : 1);
+      const labelEnd = text.indexOf("](", labelStart);
       if (labelEnd !== -1) {
         const end = linkEnd(text, labelEnd + 2);
         if (end !== -1) {
-          const rawTarget = text.slice(labelEnd + 2, end).trim().replace(/^<|>$/g, "").replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, "$1").split(/\s+["']/, 1)[0];
+          const targetText = text.slice(labelEnd + 2, end).trim();
+          const rawTarget = (targetText.startsWith("<") ? targetText.slice(1, targetText.indexOf(">", 1)) : targetText.split(/\s+["']/, 1)[0]).replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, "$1");
           flush();
-          const label = inline(text.slice(i + 1, labelEnd), `${key}-${i}`);
+          const labelText = text.slice(labelStart, labelEnd);
+          const descriptor = results.find(result => result.target === rawTarget);
+          if (descriptor || (image && /^(?:\/|sandbox:|file:)/.test(rawTarget)) || /^(?:\/(?:srv|tmp|home|mnt|var|private|Users)\/|sandbox:|file:)/.test(rawTarget)) {
+            result.push(<ResultOutput key={`${key}-${i}`} result={descriptor} label={labelText} />);
+            i = end + 1; continue;
+          }
+          const label = inline(labelText, `${key}-${i}`, []);
           const href = safeHref(rawTarget);
           result.push(href ? <a key={`${key}-${i}`} href={href} rel="noreferrer">{label}</a> : <span key={`${key}-${i}`}>{label}</span>);
           i = end + 1; continue;
@@ -204,11 +268,11 @@ function inline(text: string, key = "i"): InlinePart[] {
       const end = closingDelimiter(text, delimiter, i + delimiter.length);
       if (end !== -1 && end > i + delimiter.length) {
         flush();
-        const child = inline(text.slice(i + delimiter.length, end), `${key}-${i}`);
-        const part = delimiter === "~~" ? <del key={`${key}-${i}`}>{child}</del>
-          : delimiter.length === 2 ? <strong key={`${key}-${i}`}>{child}</strong>
-            : <em key={`${key}-${i}`}>{child}</em>;
-        result.push(part); i = end + delimiter.length; continue;
+        const child = inline(text.slice(i + delimiter.length, end), `${key}-${i}`, results);
+        const parts = wrapInline(child, (children, childKey) => delimiter === "~~" ? <del key={`${key}-${i}-${childKey}`}>{children}</del>
+          : delimiter.length === 2 ? <strong key={`${key}-${i}-${childKey}`}>{children}</strong>
+            : <em key={`${key}-${i}-${childKey}`}>{children}</em>);
+        result.push(...parts); i = end + delimiter.length; continue;
       }
     }
     plain += text[i++];
@@ -231,7 +295,7 @@ function splitCells(row: string): string[] {
   return cells;
 }
 
-function parseBlocks(lines: string[], key = "b"): ReactNode[] {
+function parseBlocks(lines: string[], key = "b", results: Results = []): ReactNode[] {
   const blocks: ReactNode[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -258,9 +322,9 @@ function parseBlocks(lines: string[], key = "b"): ReactNode[] {
     }
     const title = line.match(heading);
     if (title) {
-      const level = title[1].length, children = inline(title[2], `${key}-${i}`);
+      const level = title[1].length, children = inline(title[2], `${key}-${i}`, results);
       const className = "markdown-heading", blockKey = `${key}-${i}`;
-      blocks.push(level === 1 ? <h1 className={className} key={blockKey}>{children}</h1> : level === 2 ? <h2 className={className} key={blockKey}>{children}</h2> : level === 3 ? <h3 className={className} key={blockKey}>{children}</h3> : level === 4 ? <h4 className={className} key={blockKey}>{children}</h4> : level === 5 ? <h5 className={className} key={blockKey}>{children}</h5> : <h6 className={className} key={blockKey}>{children}</h6>);
+      blocks.push(...wrapInline(children, (children, childKey) => level === 1 ? <h1 className={className} key={`${blockKey}-${childKey}`}>{children}</h1> : level === 2 ? <h2 className={className} key={`${blockKey}-${childKey}`}>{children}</h2> : level === 3 ? <h3 className={className} key={`${blockKey}-${childKey}`}>{children}</h3> : level === 4 ? <h4 className={className} key={`${blockKey}-${childKey}`}>{children}</h4> : level === 5 ? <h5 className={className} key={`${blockKey}-${childKey}`}>{children}</h5> : <h6 className={className} key={`${blockKey}-${childKey}`}>{children}</h6>));
       i++; continue;
     }
     if (/^ {0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/.test(line)) {
@@ -269,13 +333,13 @@ function parseBlocks(lines: string[], key = "b"): ReactNode[] {
     if (/^ {0,3}>/.test(line)) {
       const quote: string[] = [];
       while (i < lines.length && /^ {0,3}>/.test(lines[i])) quote.push(lines[i++].replace(/^ {0,3}> ?/, ""));
-      blocks.push(<blockquote key={`${key}-${i}`}>{parseBlocks(quote, `${key}-q${i}`)}</blockquote>); continue;
+      blocks.push(<blockquote key={`${key}-${i}`}>{parseBlocks(quote, `${key}-q${i}`, results)}</blockquote>); continue;
     }
     if (i + 1 < lines.length && line.includes("|") && tableRule.test(lines[i + 1])) {
       const headers = splitCells(line), rows: string[][] = [];
       i += 2;
       while (i < lines.length && lines[i].trim() && lines[i].includes("|")) rows.push(splitCells(lines[i++]));
-      blocks.push(<div className="markdown-table-wrap" key={`${key}-${i}`}><table><thead><tr>{headers.map((cell, col) => <th key={col}>{inline(cell, `${key}-th${col}`)}</th>)}</tr></thead><tbody>{rows.map((row, ri) => <tr key={ri}>{headers.map((_cell, col) => <td key={col}>{inline(row[col] ?? "", `${key}-td${ri}-${col}`)}</td>)}</tr>)}</tbody></table></div>); continue;
+      blocks.push(<div className="markdown-table-wrap" key={`${key}-${i}`}><table><thead><tr>{headers.map((cell, col) => <th key={col}>{inline(cell, `${key}-th${col}`, results)}</th>)}</tr></thead><tbody>{rows.map((row, ri) => <tr key={ri}>{headers.map((_cell, col) => <td key={col}>{inline(row[col] ?? "", `${key}-td${ri}-${col}`, results)}</td>)}</tr>)}</tbody></table></div>); continue;
     }
     const marker = line.match(listMarker);
     if (marker) {
@@ -299,18 +363,18 @@ function parseBlocks(lines: string[], key = "b"): ReactNode[] {
         }
         break;
       }
-      const children = items.map((item, itemIndex) => <li key={`${key}-${i}-${itemIndex}`}>{parseBlocks(item.content, `${key}-li${i}-${itemIndex}`)}</li>);
+      const children = items.map((item, itemIndex) => <li key={`${key}-${i}-${itemIndex}`}>{parseBlocks(item.content, `${key}-li${i}-${itemIndex}`, results)}</li>);
       blocks.push(ordered ? <ol key={`${key}-${i}`} start={items[0]?.number}>{children}</ol> : <ul key={`${key}-${i}`}>{children}</ul>);
       continue;
     }
     const paragraph = [line.trim()]; i++;
     while (i < lines.length && lines[i].trim() && !heading.test(lines[i]) && !fence.test(lines[i]) && !/^ {0,3}>/.test(lines[i]) && !listMarker.test(lines[i]) && !/^ {0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/.test(lines[i]) && !(i + 1 < lines.length && lines[i].includes("|") && tableRule.test(lines[i + 1]))) paragraph.push(lines[i++].trim());
-    blocks.push(<p key={`${key}-${i}`}>{inline(paragraph.join("\n"), `${key}-${i}`)}</p>);
+    blocks.push(...wrapInline(inline(paragraph.join("\n"), `${key}-${i}`, results), (children, childKey) => <p key={`${key}-${i}-${childKey}`}>{children}</p>));
   }
   return blocks;
 }
 
 /** Отображает Markdown как React-элементы; сырой HTML остаётся обычным текстом. */
-export default function Markdown({ text }: { text: string }) {
-  return <div className="agent-markdown">{parseBlocks(text.replace(/\r\n?/g, "\n").split("\n"))}</div>;
+export default function Markdown({ text, results = [] }: { text: string; results?: Results }) {
+  return <div className="agent-markdown">{parseBlocks(text.replace(/\r\n?/g, "\n").split("\n"), "b", results)}</div>;
 }

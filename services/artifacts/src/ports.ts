@@ -1,6 +1,6 @@
 // ABOUTME: Определяет внешние операции независимого ядра artifacts.
 // ABOUTME: Порты не импортируют PostgreSQL, FS, NATS или HTTP.
-import type {Artifact, ArtifactReference, ReferenceScope, ReferenceQueryScope} from "../contracts/index.mjs";
+import type {Artifact, ArtifactReference, ReferenceScope, ReferenceQueryScope, ArtifactOutputBinding, OutputQueryScope} from "../contracts/index.mjs";
 export type Metadata = Pick<Artifact,"title"|"filename"|"extension"|"mimeType"|"source"|"geotag"|"materialCreatedAt"|"details">;
 export type Publication = {tempName:string; sizeBytes:number; sha256:string};
 export type ArtifactRecord = {artifact:Artifact; prepareInput:{ownerId:string;kind:Artifact["kind"];metadata:Metadata}; uploadToken:string; publication?:Publication};
@@ -27,6 +27,12 @@ export interface StoreSession {
   reference(scope:ReferenceScope):Promise<ArtifactReference|undefined>;
   saveReference(reference:ArtifactReference,insert?:boolean):Promise<void>;
   references(scope:ReferenceQueryScope,nativeItemIds:string[],limit?:number):Promise<StoreItems<ArtifactReference>>;
+  /** Читает единственную связь точного native item в области владельца. */
+  output(scope:OutputQueryScope,itemId:string):Promise<ArtifactOutputBinding|undefined>;
+  /** Вставляет неизменяемую связь; вызывается под блокировками item и артефактов. */
+  saveOutput(binding:ArtifactOutputBinding):Promise<void>;
+  /** Выдаёт существующие связи по первому порядку itemIds, включая ссылки на удалённые файлы. */
+  outputs(scope:OutputQueryScope,itemIds:string[]):Promise<StoreItems<ArtifactOutputBinding>>;
   link(id:string):Promise<LinkRecord|undefined>;
   requestedLink(requestId:string):Promise<LinkRecord|undefined>;
   shared(token:string):Promise<LinkRecord|undefined>;

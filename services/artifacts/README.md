@@ -16,7 +16,7 @@ const core = createArtifactsCore({store, files, config});
 
 | Метод | Вход и результат |
 | --- | --- |
-| `execute(operation, request)` | Локальные имена `prepare`, `get`, `update`, `list`, `stats`, `delete`, `relationAdd`, `relationRemove`, `relationList`, `referenceReserve`, `referenceGet`, `referenceConfirm`, `referenceList`, `referenceUpdateState`, `linkCreate`, `linkRevoke`; запросы и ответы из внешнего контракта |
+| `execute(operation, request)` | Локальные имена `prepare`, `get`, `update`, `list`, `stats`, `delete`, `relationAdd`, `relationRemove`, `relationList`, `referenceReserve`, `referenceGet`, `referenceConfirm`, `referenceList`, `referenceUpdateState`, `outputBind`, `outputList`, `linkCreate`, `linkRevoke`; запросы и ответы из внешнего контракта |
 | `upload(token, source, signal?)` | `AsyncIterable<Uint8Array>`; после сохранения возвращает ready `Artifact` |
 | `downloadable(artifactId)` | Проверяет готовность, возвращает `Artifact`; содержимое читает входной адаптер |
 | `shared(token)` | Проверяет разрешение, срок, отзыв и готовность; возвращает `Artifact` |
@@ -34,7 +34,7 @@ const core = createArtifactsCore({store, files, config});
 | `maxPageSize`, `maxReferenceItems`, `maxReferenceAttachments`, `maxRelations` | отсутствуют; необязательные ограничения локального caller |
 | `reconcileBatchSize` | 100 |
 
-Runtime передаёт `ARTIFACTS_MAX_NATS_RESPONSE_BYTES` как `maxResultBytes`. Ядро считает сериализованные UTF-8 байты каждого выходного DTO и итогового ответа; переполнение даёт `PAYLOAD_TOO_LARGE` без скрытого усечения. PostgreSQL отдаёт list, relations и references через cursor пачками по 16 записей; память ограничена бюджетом ответа и одной пачкой, а прекращение чтения закрывает cursor и транзакцию. List сохраняет единый repeatable-read snapshot для total и страницы. Большой requested limit на пустой или малой странице допустим. Входные attachments и nativeItemIds ограничены wire bytes; явные локальные count limits сохраняют прежнюю проверку до обращения к портам. Сверка читает незавершённые записи страницами по ID и обходит temp последовательно. Сборка процесса запускает сверку при старте и периодически; само ядро не создаёт фоновых таймеров.
+Runtime передаёт `ARTIFACTS_MAX_NATS_RESPONSE_BYTES` как `maxResultBytes`. Ядро считает сериализованные UTF-8 байты каждого выходного DTO и итогового ответа; переполнение даёт `PAYLOAD_TOO_LARGE` без скрытого усечения. PostgreSQL отдаёт list, relations, references и output bindings через cursor пачками по 16 записей; память ограничена бюджетом ответа и одной пачкой, а прекращение чтения закрывает cursor и транзакцию. List сохраняет единый repeatable-read snapshot для total и страницы. Большой requested limit на пустой или малой странице допустим. Входные attachments, nativeItemIds, output artifactIds и itemIds ограничены wire bytes; явные локальные count limits сохраняют прежнюю проверку до обращения к портам. Сверка читает незавершённые записи страницами по ID и обходит temp последовательно. Сборка процесса запускает сверку при старте и периодически; само ядро не создаёт фоновых таймеров.
 
 Ограничения длины строк считают Unicode code points, как JSON Schema. PostgreSQL не поддерживает NUL и непарные UTF-16 surrogates в текстовых/JSON значениях и ключах; такие входы дают `INVALID_ARGUMENT`, а не ошибку доступности хранения. Иные ошибки драйвера не переклассифицируются в ошибку клиента.
 
@@ -48,7 +48,9 @@ Runtime передаёт `ARTIFACTS_MAX_NATS_RESPONSE_BYTES` как `maxResultBy
 
 Сверка завершает намерение, если опубликованные байты совпадают с размером и SHA-256. Если файл отсутствует или не совпадает, запись становится `failed`; неизвестные опубликованные байты не удаляются автоматически. Готовые файлы и посторонние имена также не очищаются. Просроченные temp удаляются под той же межпроцессной блокировкой, поэтому активный поток защищён от очистки.
 
-Удаление фиксирует `deleting`, закрывая внешние разрешения, затем unlink и fsync, затем `deleted`. После перезапуска сверка продолжает `deleting`. Размер, SHA-256, связи и references остаются. Успех удаления означает отсутствие байтов и сохранённый `deleted`; связанный оригинал или копия автоматически не удаляется. Внутренний Caddy до unlink может отдавать файл, как указано в контракте.
+Удаление фиксирует `deleting`, закрывая внешние разрешения, затем unlink и fsync, затем `deleted`. После перезапуска сверка продолжает `deleting`. Размер, SHA-256, связи, references и output bindings остаются. Успех удаления означает отсутствие байтов и сохранённый `deleted`; связанный оригинал или копия автоматически не удаляется. Внутренний Caddy до unlink может отдавать файл, как указано в контракте.
+
+Output bindings хранятся отдельно от входящих references. `outputBind` проверяет owner и ready только при первой записи, сериализуется с удалением и повторяется безопасно после lost ACK. `outputList` отдаёт прежние связи даже после удаления байтов; внешний доступ всё равно проверяет состояние Artifact. Миграция 002 добавляет эту таблицу к существующей версии 001 без изменений incoming ledger.
 
 ## Мигратор
 
@@ -63,7 +65,7 @@ npm run migrate --workspace @brai/artifacts
 
 Роли и отдельную БД заранее создаёт оператор. Мигратор требует, чтобы текущая роль была владельцем текущей БД. Роли должны различаться, не иметь повышенных атрибутов или членства в других ролях. Проверки идут до DDL; миграция и права применяются одной транзакцией. Повтор безопасен.
 
-Схема `artifacts` владеет таблицами `artifacts`, `artifact_links`, `artifact_relations`, `artifact_references` и таблицей версий. Runtime получает CONNECT, USAGE, SELECT и INSERT на четыре прикладные таблицы, UPDATE только изменяемых колонок и DELETE только для relations. Он не получает DDL, доступ к версии миграций, изменение владельца или удаление истории. Runtime мигратор не импортирует.
+Схема `artifacts` владеет таблицами `artifacts`, `artifact_links`, `artifact_relations`, `artifact_references`, `artifact_output_bindings` и таблицей версий. Runtime получает CONNECT, USAGE, SELECT и INSERT на пять прикладных таблиц. Output bindings доступны только для SELECT/INSERT; UPDATE выдан только на изменяемые колонки остальных таблиц, DELETE — только для relations. Он не получает DDL, доступ к версии миграций, изменение владельца или удаление истории. Runtime мигратор не импортирует.
 
 ## Проверки
 
@@ -88,17 +90,17 @@ npm run migrate --workspace @brai/artifacts
 
 NATS credentials необязательны: `NATS_USER`, `NATS_PASSWORD`; `NATS_INBOX_PREFIX` по умолчанию `_INBOX.brai_artifacts`. Sharing включается только с явно заданным `ARTIFACTS_EXTERNAL_BASE_URL`. Внешний URL никогда не используется вместо внутреннего.
 
-`ARTIFACTS_HTTP_HOST` по умолчанию `127.0.0.1`, `ARTIFACTS_HTTP_PORT` — `3004`. Конечные положительные пределы настраиваются через `ARTIFACTS_MAX_UPLOAD_BYTES` (50 MiB), `ARTIFACTS_MAX_CONCURRENT_UPLOADS` (4), `ARTIFACTS_MAX_CONCURRENT_NATS` (32), `ARTIFACTS_MAX_NATS_REQUEST_BYTES` (128 KiB), `ARTIFACTS_MAX_NATS_RESPONSE_BYTES` (1 MiB), `ARTIFACTS_RECEIVE_TIMEOUT_MS` (30 s), `ARTIFACTS_REQUEST_TIMEOUT_MS` (15 s), `ARTIFACTS_LOCK_TIMEOUT_MS` (5 s), `ARTIFACTS_QUERY_TIMEOUT_MS` (10 s), `ARTIFACTS_RECONCILE_INTERVAL_MS` (60 s) и `ARTIFACTS_STALE_TEMP_AGE_MS` (1 h). PostgreSQL pool ограничен 8 подключениями с 5-секундным connect timeout. Upload limit сервиса независим от ограничений клиента/модели.
+`ARTIFACTS_HTTP_HOST` по умолчанию `127.0.0.1`, `ARTIFACTS_HTTP_PORT` — `3004`. Конечные положительные пределы настраиваются через `ARTIFACTS_MAX_UPLOAD_BYTES` (2 GiB, больший предел запрещён), `ARTIFACTS_MAX_CONCURRENT_UPLOADS` (4, допустимы 1–4), `ARTIFACTS_MAX_CONCURRENT_NATS` (32), `ARTIFACTS_MAX_NATS_REQUEST_BYTES` (128 KiB), `ARTIFACTS_MAX_NATS_RESPONSE_BYTES` (1 MiB), `ARTIFACTS_UPLOAD_TIMEOUT_MS` (30 min, абсолютный deadline), `ARTIFACTS_RECEIVE_TIMEOUT_MS` (30 s простоя), `ARTIFACTS_REQUEST_TIMEOUT_MS` (15 s), `ARTIFACTS_LOCK_TIMEOUT_MS` (5 s), `ARTIFACTS_QUERY_TIMEOUT_MS` (10 s), `ARTIFACTS_RECONCILE_INTERVAL_MS` (60 s) и `ARTIFACTS_STALE_TEMP_AGE_MS` (1 h). PostgreSQL pool ограничен 8 подключениями с 5-секундным connect timeout. Upload limit сервиса независим от ограничений клиента/модели.
 
 `GET /health` проверяет собственную таблицу artifacts, обе директории файлового тома с правами чтения/записи/обхода и состояние NATS; `npm run health --workspace=@brai/artifacts` опрашивает этот маршрут. При SIGINT/SIGTERM runtime прекращает новые запросы, отменяет незавершённые входящие upload streams и ждёт текущие NATS вызовы и сверку в пределах `ARTIFACTS_REQUEST_TIMEOUT_MS`. Если NATS соединение не отвечает к этому сроку, runtime закрывает собственное соединение; результат операции, которая успела изменить данные, может быть неизвестен клиенту и восстанавливается чтением или точным повтором по контракту. Затем закрываются HTTP и PostgreSQL. Если публикация файла уже завершилась, остановка сохраняет ready объект.
 
-Request timeout не превышает 2147482647 ms: HTTP shutdown резервирует ещё 1000 ms. Receive/reconcile/query/lock timers не превышают 2147483647 ms, чтобы Node не превратил переполнение в 1 ms. Возраст stale temp не является платформенным таймером. Sharing deadline охватывает проверку разрешения, open/stat и передачу; поздно открытый после deadline descriptor закрывается, включая HEAD.
+Request timeout не превышает 2147482647 ms: HTTP shutdown резервирует ещё 1000 ms. Upload/receive/reconcile/query/lock timers не превышают 2147483647 ms, чтобы Node не превратил переполнение в 1 ms. Возраст stale temp не является платформенным таймером. Sharing deadline охватывает проверку разрешения, open/stat и передачу; поздно открытый после deadline descriptor закрывается, включая HEAD.
 
 Журналирует результат, код ошибки и длительность вместе с endpoint/executor и известным requestId. Тела, метаданные, имена файлов, upload token и внешние URL не журналируются.
 
 ## MCP Streamable HTTP
 
-MCP запускается отдельной командой `npm run mcp --workspace=@brai/artifacts` после общей сборки. Он подключается только к NATS и не требует `ARTIFACTS_DATABASE_URL` или `ARTIFACTS_DATA_DIR`. Все 16 tools соответствуют операциям `CONTRACT.md`; вызовы и проверка ответов идут по фиксированным NATS subjects. MCP не принимает и не возвращает байты файлов: `prepare` выдаёт HTTP upload URL для стандартного PUT.
+MCP запускается отдельной командой `npm run mcp --workspace=@brai/artifacts` после общей сборки. Он подключается только к NATS и не требует `ARTIFACTS_DATABASE_URL` или `ARTIFACTS_DATA_DIR`. Все 18 tools соответствуют операциям `CONTRACT.md`; вызовы и проверка ответов идут по фиксированным NATS subjects. MCP не принимает и не возвращает байты файлов: `prepare` выдаёт HTTP upload URL для стандартного PUT.
 
 По умолчанию сервер слушает `127.0.0.1:3005` и использует `/mcp`. Настройки NATS общие: `NATS_URL`, необязательные `NATS_USER` и `NATS_PASSWORD`; inbox prefix `NATS_INBOX_PREFIX` по умолчанию `_INBOX.brai_artifacts_mcp`. Параметры HTTP: `ARTIFACTS_MCP_HOST`, `ARTIFACTS_MCP_PORT`, `ARTIFACTS_MCP_ALLOWED_HOSTS` и `ARTIFACTS_MCP_ALLOWED_ORIGINS`. При bind вне loopback укажите оба allowlist; внешнюю публикацию endpoint отдельно не настраивает.
 

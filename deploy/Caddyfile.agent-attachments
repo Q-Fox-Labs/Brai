@@ -42,6 +42,36 @@
 			reverse_proxy {$BRAI_AGENT_ARTIFACTS_FILE_SERVER}
 		}
 	}
+	@result path_regexp artifact_result ^/api/agent/results/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$
+	handle @result {
+		route {
+			@unsupported not method GET HEAD
+			respond @unsupported 405
+			request_header -X-Artifact-Content-Type
+			request_header -X-Artifact-Content-Disposition
+			request_header -X-Artifact-Disposition
+			request_header -X-Artifact-User
+			request_header -X-Artifact-Project
+			request_header -X-Artifact-Thread
+			forward_auth {$BRAI_WEB_UPSTREAM} {
+				uri /api/agent/artifact-auth
+				header_up Cookie {http.request.header.Cookie}
+				header_up X-Forwarded-Uri {http.request.uri}
+				header_up X-Forwarded-Method {http.request.method}
+				copy_headers Content-Type>X-Artifact-Content-Type Content-Disposition>X-Artifact-Content-Disposition
+			}
+			header {
+				>Content-Type {http.request.header.X-Artifact-Content-Type}
+				>Content-Disposition {http.request.header.X-Artifact-Content-Disposition}
+				>Cache-Control "private, no-store"
+				>X-Content-Type-Options nosniff
+				>Cross-Origin-Resource-Policy same-origin
+				>X-Frame-Options SAMEORIGIN
+			}
+			rewrite * /files/{re.artifact_result.1}
+			reverse_proxy {$BRAI_AGENT_RESULTS_FILE_SERVER}
+		}
+	}
 }
 
 
