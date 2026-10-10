@@ -2,7 +2,7 @@
 // ABOUTME: Владеет только bounded live проекцией; историю читает у Codex.
 import { performance } from 'node:perf_hooks';
 import { randomUUID, createHash } from 'node:crypto';
-import { bytes, limits, validateCommand } from '../contracts/index.mjs';
+import { bytes, limits, rpcTimeouts, validateCommand } from '../contracts/index.mjs';
 import type { Command, EventEnvelope, NativeSnapshot, PendingRequest, NativeTurn, ModelCatalog, DisplayItem, GoalProjection, PlanProgress } from '../contracts/index.mjs';
 import type { CodexPort, Observation } from './codex.js';
 import { createAttachments, type ArtifactsConfig, type ArtifactsPort, type NatsConfig } from './attachments.js';
@@ -24,7 +24,7 @@ function projectTurn(turn: any): NativeTurn {
 export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void, artifactsPort?: ArtifactsPort, resultsPort: ArtifactsPort | undefined = artifactsPort) {
   const attachments = createAttachments(codex, config.artifacts, artifactsPort);
   const results = createResults(codex, config.artifacts, config.ownerId, resultsPort);
-  const decorate = async (r: Command, items: DisplayItem[]) => results.decorate(r, await attachments.decorate(r, items));
+  const decorate = async (r: Command, items: DisplayItem[], deadline?: number) => results.decorate(r, await attachments.decorate(r, items, deadline), deadline);
   const sessions = new Map<string, Session>();
   const messageTimes = new Map<string, { updatedAt: number; lastMessageAt: number; finalMessageId: string | null; awaitingReply: boolean }>();
   let creating = 0, admission = Promise.resolve();
@@ -100,7 +100,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     while (s.details.size > 128) s.details.delete(s.details.keys().next().value!);
     s.revisions.set(value.id, s.view.seq + 1);
   }
-  async function detail(s: Session, turnId: string, itemId: string, fullMessage = false, cursor?: string, ownerId?: string): Promise<{ item: DisplayItem; nextCursor?: string | null }> {
+  async function detail(s: Session, turnId: string, itemId: string, fullMessage = false, cursor?: string, ownerId?: string, deadline?: number): Promise<{ item: DisplayItem; nextCursor?: string | null }> {
     const cached = s.details.get(itemId);
     if (cached?.turnId === turnId && !cached.imageCount && !cursor && !(fullMessage && cached.truncated && ['userMessage', 'agentMessage'].includes(cached.type))) return { item: structuredClone(cached) };
     const generation = current(), cut = s.view.seq;
@@ -114,7 +114,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     results.trackItems({ action: 'item', projectId: s.view.projectId, threadId: s.view.threadId }, [entry]);
     const newer = s.details.get(itemId);
     if (newer?.turnId === turnId && !newer.imageCount && !cursor && !(fullMessage && newer.truncated && ['userMessage', 'agentMessage'].includes(newer.type)) && (s.revisions.get(itemId) ?? 0) > cut) return { item: structuredClone(newer) };
-    await attachments.recoverItems({ action: 'item', projectId: s.view.projectId, threadId: s.view.threadId, ownerId }, [entry]);
+    await attachments.recoverItems({ action: 'item', projectId: s.view.projectId, threadId: s.view.threadId, ownerId }, [entry], deadline);
     const native = historyItem(entry, s.view.turn), revision = s.view.items.find(i => i.id === itemId)?.revision ?? 0;
     if (fullMessage && ['userMessage', 'agentMessage'].includes(native.type)) {
       const page = messagePage(native, turnId, cursor);
@@ -150,7 +150,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
     return s;
     } finally { release(); }
   }
-  async function open(r: Command): Promise<Session> {
+  async function open(r: Command, deadline?: number): Promise<Session> {
     const p = project(r.projectId), id = r.threadId!;
     let s = sessions.get(id);
     if (s && s.view.projectId !== p.projectId) fail('INVALID_ARGUMENT');
@@ -181,7 +181,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       const latestMessage = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
       if (latestMessage) s.view.thread.lastMessageAt = Math.max(s.view.thread.lastMessageAt ?? 0, latestMessage.startedAtMs ?? latestMessage.completedAtMs ?? s.view.thread.updatedAt * 1000);
       for (const entry of items.data.slice().reverse()) if ((s.revisions.get(entry.item.id) ?? 0) <= cut) put(s, historyItem(entry, turns.data[0]), entry.turnId, entry.startedAtMs ?? entry.completedAtMs ?? s.view.thread.updatedAt * 1000, true);
-      await attachments.recoverItems(r, items.data);
+      await attachments.recoverItems(r, items.data, deadline);
       const pageIds = new Set(items.data.map((entry: any) => entry.item.id));
       s.view.items = [...items.data.slice().reverse().map((entry: any) => s!.view.items.find(item => item.id === entry.item.id)!), ...s.view.items.filter(item => !pageIds.has(item.id) && (s!.revisions.get(item.id) ?? 0) > cut)];
       if (s.view.turn === previousTurn) {
@@ -351,7 +351,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
   }
   const limitMonitor = createLimitsMonitor(codex);
   const unsubscribe = codex.subscribe(observe);
-  async function execute(r: Command): Promise<any> {
+  async function execute(r: Command, deadline?: number): Promise<any> {
     if (r.action === 'status') return { ...codex.status(), ready: codex.status().connection === 'connected' && codex.status().authorization === 'ready', limits: limitMonitor.snapshot() };
     if (r.action === 'projects') return { generation: current(), projects: config.projects.map(p => ({ projectId: p.projectId, name: p.name, available: p.available !== false })) };
     if (codex.status().connection !== 'connected' || codex.status().authorization !== 'ready') fail('UPSTREAM_UNAVAILABLE', r.operationId ? 'not-sent' : 'query');
@@ -423,22 +423,22 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
       sessions.delete(r.threadId!); messageTimes.delete(r.threadId!);
       return { generation: current(), operationId: r.operationId, outcome: 'accepted', threadId: r.threadId };
     }
-    const s = await open(r);
+    const s = await open(r, deadline);
     const buildInput = (images: { type: string; url: string }[]) => ({ threadId: r.threadId, input: [...(r.text?.trim() ? [{ type: 'text', text: r.text }] : []), ...images], clientUserMessageId: attachments.clientId(r), ...(r.action === 'steer' ? { expectedTurnId: r.expectedTurnId } : { ...permissions(r.permissionMode, p.cwd), ...(r.model ? { model: r.model } : {}), ...(r.effort ? { effort: r.effort } : {}), collaborationMode: collaboration(r.agentMode === 'plan' ? 'plan' : 'default', r.model ?? s.view.thread.model ?? config.newThread?.model ?? '', r.effort ?? s.view.thread.reasoningEffort) }) });
     const durableInput = Boolean(config.artifacts && ['start', 'steer'].includes(r.action) && r.agentMode !== 'goal');
     if (durableInput || r.attachments?.length) {
       if (!r.ownerId) fail('INVALID_ARGUMENT');
       const existing = await attachments.existing(r, buildInput); if (existing) return existing;
     }
-    if (r.action === 'open') { const view = structuredClone(s.view); view.items = await decorate(r, view.items); return view; }
+    if (r.action === 'open') { const view = structuredClone(s.view); view.items = await decorate(r, view.items, deadline); return view; }
     if (r.action === 'goalGet') { await readGoal(s); publish(s); return { generation: current(), goal: structuredClone(s.view.goal) }; }
     if (r.action === 'activities' || r.action === 'item') {
       const generation = current();
       const pages: { item: DisplayItem; nextCursor?: string | null }[] = [];
       const ids = r.action === 'item' ? [r.itemId!] : r.itemIds!;
-      for (let offset = 0; offset < ids.length; offset += 4) pages.push(...await Promise.all(ids.slice(offset, offset + 4).map(id => detail(s, r.turnId!, id, r.action === 'item', r.cursor, r.ownerId))));
+      for (let offset = 0; offset < ids.length; offset += 4) pages.push(...await Promise.all(ids.slice(offset, offset + 4).map(id => detail(s, r.turnId!, id, r.action === 'item', r.cursor, r.ownerId, deadline))));
       if (generation !== current()) fail('STALE_GENERATION', 'query');
-      const decorated = await decorate(r, pages.map(page => page.item));
+      const decorated = await decorate(r, pages.map(page => page.item), deadline);
       return r.action === 'item' ? { generation, ...pages[0], item: decorated[0] } : { generation, data: decorated.map(item => ({ ...summary(item), ...(item.attachments ? { attachments: item.attachments, attachmentsState: item.attachmentsState } : {}), ...(item.imageCount ? { imageCount: item.imageCount, ...(item.attachmentsState ? { attachmentsState: item.attachmentsState } : {}) } : {}) })) };
     }
     if (r.action === 'items' || r.action === 'turns') {
@@ -451,7 +451,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
         const part = await codex.call(r.action === 'items' ? 'thread/items/list' : 'thread/turns/list', { threadId: r.threadId, limit: r.action === 'items' ? Math.min(10 - messages, 1000 - page.data.length, Math.max(1, Math.floor((limits.state - bytes(page) - 2048) / 49152))) : 100, cursor: page.nextCursor, sortDirection: 'desc', ...(r.action === 'items' ? { turnId: r.turnId } : { itemsView: 'notLoaded' }) });
         if (generation !== current()) fail('STALE_GENERATION', 'query');
         if (part.nextCursor && (!part.data.length || part.nextCursor === page.nextCursor)) fail('UPSTREAM_UNAVAILABLE', 'query');
-        if (r.action === 'items') { results.trackItems(r, part.data); await attachments.recoverItems(r, part.data); }
+        if (r.action === 'items') { results.trackItems(r, part.data); await attachments.recoverItems(r, part.data, deadline); }
         messages += part.data.filter((e: any) => e.item?.type === 'userMessage' || e.item?.type === 'agentMessage').length;
         page.data.push(...(r.action === 'items' ? part.data.map((e: any) => {
           const revision = s.view.items.find(i => i.id === e.item.id)?.revision ?? 0;
@@ -461,7 +461,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
         }) : part.data.map((t: any) => ({ id: t.id, status: t.status }))));
         page.nextCursor = part.nextCursor ?? null;
       } while (r.action === 'items' && page.nextCursor && messages < 10 && page.data.length < 1000 && bytes(page) < limits.state - 51200);
-      return { generation, data: r.action === 'items' ? await decorate(r, page.data.reverse()) : page.data, nextCursor: page.nextCursor };
+      return { generation, data: r.action === 'items' ? await decorate(r, page.data.reverse(), deadline) : page.data, nextCursor: page.nextCursor };
     }
     if (r.generation !== current()) fail('STALE_GENERATION');
     if (s.closing) fail('CAPACITY_EXHAUSTED');
@@ -619,7 +619,8 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
   /** Повтор того же operation ID возвращает исходный результат без native вызова. */
   async function request(r: Command): Promise<any> {
     if (!validateCommand(r)) fail('INVALID_ARGUMENT');
-    if (!r.operationId) return execute(r);
+    // AIDEV-NOTE: Metadata делит один read budget с native чтением; остаётся запас для NATS ответа.
+    if (!r.operationId) return execute(r, performance.now() + Math.min(config.artifacts?.timeoutMs ?? rpcTimeouts.read, rpcTimeouts.read - 500));
     if (r.generation !== current()) fail('STALE_GENERATION');
     const hash = commandHash(r), old = operations.get(r.operationId);
     if (old) return old.hash === hash ? old.result : fail('OPERATION_CONFLICT');

@@ -150,9 +150,9 @@ export function createAttachments(codex: CodexPort, config: ArtifactsConfig | un
       fail('UPSTREAM_UNAVAILABLE', 'unknown');
     }
   }
-  /** Decorates только RPC ответ текущего owner; shared session и события остаются без metadata. */
-  async function decorate(r: Command, items: DisplayItem[]): Promise<DisplayItem[]> {
-    const generation = codex.status().generation, deadline = performance.now() + budget;
+  /** Decorates owner RPC в оставшемся общем read budget; shared session не меняет. */
+  async function decorate(r: Command, items: DisplayItem[], readDeadline = Infinity): Promise<DisplayItem[]> {
+    const generation = codex.status().generation, deadline = Math.min(readDeadline, performance.now() + budget);
     let unavailable = false;
     const copy = structuredClone(items); if (!r.ownerId || !items.length) return copy;
     try {
@@ -183,11 +183,11 @@ export function createAttachments(codex: CodexPort, config: ArtifactsConfig | un
     return copy;
   }
   /** Page native clientId восстанавливает только собственный scope; чужие IDs не подтверждаются. */
-  async function recoverItems(r: Command, entries: any[]) {
+  async function recoverItems(r: Command, entries: any[], readDeadline = Infinity) {
     if (!r.ownerId || !port || !config) return;
     for (const entry of entries) if (entry.item.type === 'userMessage' && typeof entry.item.clientId === 'string' && entry.item.clientId.startsWith(prefix)) unresolved.add(itemKey(r, entry.item.id));
     while (unresolved.size > limits.operations) unresolved.delete(unresolved.values().next().value!);
-    const seen = new Set<string>(), deadline = performance.now() + 8000, generation = codex.status().generation;
+    const seen = new Set<string>(), deadline = Math.min(readDeadline, performance.now() + 8000), generation = codex.status().generation;
     for (const entry of entries) {
       const id = entry.item.clientId;
       if (entry.item.type !== 'userMessage' || typeof id !== 'string' || !id.startsWith(prefix) || !id.slice(prefix.length) || seen.has(id)) continue;

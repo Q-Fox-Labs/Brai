@@ -16,7 +16,7 @@ const command = { action: 'open', ownerId, projectId: 'p', threadId: 't' };
 const ajv = new Ajv({ strict: false, validateFormats: false, schemas: [artifactSchema] });
 ajv.addSchema(artifactSchema, '../../artifacts/schemas/messages.schema.json'); ajv.addSchema(publicSchema, 'agent');
 const validItem = ajv.compile({ $ref: 'agent#/definitions/DisplayItem' });
-function fixture(text = markdown, completed = true) {
+function fixture(text = markdown, completed = true, timeoutMs = 10000) {
   let generation = 'g', observer, unavailable = false;
   const history = [{ turnId: 'turn', item: { id: 'message', type: 'agentMessage', text, phase: 'final_answer' }, completedAtMs: completed ? 1 : null }];
   const calls = [], events = [], bindings = new Map();
@@ -51,7 +51,7 @@ function fixture(text = markdown, completed = true) {
     }
     throw new Error('Unexpected native call ' + method);
   } };
-  const config = { ownerId, artifacts: { baseUrl: 'http://incoming-private', resultRoot: root, resultsBaseUrl: 'http://outgoing-private' }, projects: [{ projectId: 'p', name: 'P', cwd: thread.cwd }] };
+  const config = { ownerId, artifacts: { baseUrl: 'http://incoming-private', timeoutMs, resultRoot: root, resultsBaseUrl: 'http://outgoing-private' }, projects: [{ projectId: 'p', name: 'P', cwd: thread.cwd }] };
   let app = createApplication(native, config, event => events.push(event), incomingPort, outputPort);
   return { get app() { return app; }, native, config, incomingPort, outputPort, calls, events, history, artifacts, bindings, offline: value => { unavailable = value; }, restart: () => { app.close(); generation = 'next'; app = createApplication(native, config, event => events.push(event), incomingPort, outputPort); }, observe: (method, item = history[0].item) => observer({ type: 'notification', method, params: { threadId: 't', turnId: 'turn', item } }) };
 }
@@ -170,4 +170,70 @@ test('a configured but missing results port gives explicit unavailable and respo
   for (const artifactId of ids) f.artifacts.set(artifactId, { ...f.artifacts.get(id), artifactId, requestId: artifactId, filename: 'x'.repeat(1000) + '.png', internalUrl: 'http://private-artifacts/files/' + artifactId });
   const helper = createResults(f.native, f.config.artifacts, ownerId, f.outputPort);
   await assert.rejects(helper.decorate(command, [{ id: 'message', turnId: 'turn', type: 'agentMessage', text: '', resultCount: ids.length }]), error => error.code === 'CAPACITY_EXHAUSTED' && error.outcome === 'query');
+});
+
+test('ordinary native text never queries an unresponsive results store', async t => {
+  const source = 'Native answer with no artifact links', f = fixture(source, true, 100); t.after(() => f.app.close());
+  let outputCalls = 0;
+  f.outputPort.request = async () => { outputCalls++; throw new Error('unresponsive outgoing must not be queried'); };
+  const opened = await f.app.request(command), detailed = await f.app.request({ ...command, action: 'item', turnId: 'turn', itemId: 'message' }), listed = await f.app.request({ ...command, action: 'items' });
+  assert.equal(opened.items[0].text, source); assert.equal(detailed.item.text, source); assert.equal(listed.data[0].text, source); assert.equal(outputCalls, 0);
+});
+
+test('native reads and slow incoming/outgoing metadata share one request deadline and preserve native text', async t => {
+  const f = fixture(markdown, true, 200); t.after(() => f.app.close());
+  const nativeCall = f.native.call; f.native.call = async (...args) => { if (args[0] === 'thread/read') await new Promise(resolve => setTimeout(resolve, 40)); return nativeCall(...args); };
+  const incoming = f.incomingPort.request; const metadataTimeouts = [];
+  f.incomingPort.request = async (subject, value, options) => { metadataTimeouts.push({ phase: 'incoming', timeoutMs: options.timeoutMs }); await new Promise(resolve => setTimeout(resolve, 140)); return incoming(subject, value, options); };
+  f.outputPort.request = async (_subject, _value, options) => { metadataTimeouts.push({ phase: 'outgoing', timeoutMs: options.timeoutMs }); await new Promise(resolve => setTimeout(resolve, options.timeoutMs)); throw new Error('outgoing timeout'); };
+  let timer;
+  const work = f.app.request(command);
+  const result = await Promise.race([work, new Promise(resolve => { timer = setTimeout(() => resolve(null), 350); })]); clearTimeout(timer); await work;
+  assert.ok(result, 'Metadata must return before the external read deadline');
+  assert.equal(result.items[0].text, markdown); assert.equal(result.items[0].resultsState, 'unavailable');
+  assert.equal(metadataTimeouts.filter(entry => entry.phase === 'outgoing').length, 1);
+  assert.ok(metadataTimeouts.find(entry => entry.phase === 'incoming').timeoutMs < 200, 'Native read consumes the same deadline');
+  assert.ok(metadataTimeouts.find(entry => entry.phase === 'outgoing').timeoutMs < 60, 'Incoming read cannot reset the outgoing budget');
+});
+
+test('incoming history recovery consumes the read budget before both decorators', async t => {
+  const f = fixture(markdown, true, 200); t.after(() => f.app.close());
+  f.history.unshift({ turnId: 'turn', completedAtMs: 1, item: { id: 'input', type: 'userMessage', clientId: 'brai:agent:v3:recovery', content: [{ type: 'text', text: 'Native user text' }] } });
+  const nativeCall = f.native.call; f.native.call = async (...args) => { if (args[0] === 'thread/read') await new Promise(resolve => setTimeout(resolve, 40)); return nativeCall(...args); };
+  const incoming = f.incomingPort.request, observed = [];
+  f.incomingPort.request = async (subject, value, options) => {
+    observed.push({ phase: subject === subjects.referenceGet ? 'recovery' : 'incoming', timeoutMs: options.timeoutMs });
+    if (subject === subjects.referenceGet) { await new Promise(resolve => setTimeout(resolve, 110)); throw Object.assign(new Error('not found'), { code: 'NOT_FOUND' }); }
+    return incoming(subject, value, options);
+  };
+  f.outputPort.request = async (_subject, _value, options) => { observed.push({ phase: 'outgoing', timeoutMs: options.timeoutMs }); await new Promise(resolve => setTimeout(resolve, options.timeoutMs)); throw new Error('outgoing timeout'); };
+  let timer;
+  const work = f.app.request(command);
+  const result = await Promise.race([work, new Promise(resolve => { timer = setTimeout(() => resolve(null), 300); })]); clearTimeout(timer); await work;
+  assert.ok(result, 'Recovery must not grant fresh decorator budgets');
+  assert.equal(result.items[0].text, 'Native user text'); assert.equal(result.items[1].text, markdown); assert.equal(result.items[1].resultsState, 'unavailable');
+  assert.ok(observed.find(entry => entry.phase === 'recovery').timeoutMs < 200);
+  assert.ok(observed.find(entry => entry.phase === 'incoming').timeoutMs < 80);
+  assert.ok(observed.find(entry => entry.phase === 'outgoing').timeoutMs < 80);
+  assert.equal(observed.filter(entry => entry.phase === 'outgoing').length, 1);
+});
+
+test('incoming attachment descriptors survive an expired outgoing deadline', async t => {
+  const f = fixture(markdown, true, 200); t.after(() => f.app.close());
+  f.history.unshift({ turnId: 'turn', completedAtMs: 1, item: { id: 'input', type: 'userMessage', content: [{ type: 'image', url: 'data:image/png;base64,native-private-media' }] } });
+  const observed = [], attachment = { originalArtifactId: id, modelArtifactId: id };
+  f.incomingPort.request = async (subject, _value, options) => {
+    observed.push({ phase: 'incoming', timeoutMs: options.timeoutMs });
+    if (subject === subjects.referenceList) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      return { items: [{ scope: { ownerId, projectId: 'p', threadId: 't', operationId: 'input-operation' }, clientUserMessageId: 'brai:agent:v3:input-operation', commandHash: 'a'.repeat(64), attachments: [attachment], state: 'confirmed', turnId: 'turn', itemId: 'input', createdAt: '2026-10-10T00:00:00.000Z', updatedAt: '2026-10-10T00:00:00.000Z' }] };
+    }
+    assert.equal(subject, subjects.get); await new Promise(resolve => setTimeout(resolve, 80)); return structuredClone(f.artifacts.get(id));
+  };
+  f.outputPort.request = async (_subject, _value, options) => { observed.push({ phase: 'outgoing', timeoutMs: options.timeoutMs }); await new Promise(resolve => setTimeout(resolve, options.timeoutMs)); throw new Error('outgoing timeout'); };
+  let timer; const work = f.app.request(command);
+  const result = await Promise.race([work, new Promise(resolve => { timer = setTimeout(() => resolve(null), 300); })]); clearTimeout(timer); await work;
+  assert.ok(result, 'The outgoing timeout must preserve the completed incoming decoration');
+  assert.equal(result.items[0].imageCount, 1); assert.equal(result.items[0].attachmentsState, 'ready'); assert.equal(result.items[0].attachments[0].status, 'ready'); assert.ok(result.items[0].attachments[0].url.startsWith(`/api/agent/attachments/${id}?`));
+  assert.equal(result.items[1].text, markdown); assert.equal(result.items[1].resultsState, 'unavailable'); assert.ok(observed.find(entry => entry.phase === 'outgoing').timeoutMs < 100); assert.ok(!JSON.stringify(result).includes('native-private-media'));
 });

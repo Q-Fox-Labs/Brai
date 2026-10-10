@@ -113,7 +113,7 @@
     "authority": "Only configured ownerId receives Result descriptors in open/items/item RPC replies. Shared live snapshots contain resultCount only.",
     "completion": "Completed native agentMessage full Markdown is parsed before display truncation; started and streamed messages never bind. Native text and native media are never rewritten.",
     "recovery": "Completed native history restores the same owner/project/thread/turn/item binding through artifacts output.list/output.bind. Identical repeated bindings are idempotent; deleted results retain descriptors.",
-    "metadata": "Recovery and decoration share artifacts.timeoutMs for outgoing metadata. First availability failure stops remaining metadata reads; unavailable state remains explicit. Descriptors repeat on every native message text page; response budget exhaustion fails explicitly.",
+    "metadata": "Read metadata uses one deadline from request admission: min(artifacts.timeoutMs, rpcTimeouts.read minus 500ms), including time spent reading native history and recovering incoming references. Both decorators use only its remainder; ordinary messages without results/candidates never query outgoing metadata. Background completion and incoming mutations keep their existing budgets. First availability failure stops remaining metadata reads; expired metadata preserves native text with unavailable state. Descriptors repeat on every native message text page; response budget exhaustion fails explicitly.",
     "subjects": {
       "$ref": "../artifacts/asyncapi.json"
     },

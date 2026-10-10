@@ -139,11 +139,11 @@ export function createResults(codex: CodexPort, config: ArtifactsConfig | undefi
     for (const entry of entries) if (entry.item.type === 'agentMessage' && entry.completedAtMs != null && typeof entry.item.text === 'string') remember(r, entry);
   }
   /** Descriptors принадлежат только trusted owner RPC и повторяются на каждой текстовой странице. */
-  async function decorate(r: Command, items: DisplayItem[]): Promise<DisplayItem[]> {
+  async function decorate(r: Command, items: DisplayItem[], readDeadline = Infinity): Promise<DisplayItem[]> {
     const copy = structuredClone(items);
     if (!enabled || r.ownerId !== ownerId) return copy;
-    const messages = copy.filter(item => item.type === 'agentMessage'); if (!messages.length) return copy;
-    const generation = codex.status().generation, deadline = performance.now() + budget;
+    const messages = copy.filter(item => item.type === 'agentMessage' && (Boolean(item.resultCount) || candidates.has(key(r, item.id)))); if (!messages.length) return copy;
+    const generation = codex.status().generation, deadline = Math.min(readDeadline, performance.now() + budget);
     let unavailable = false;
     try {
       if (!await recoverItems(r, messages.filter(item => candidates.has(key(r, item.id))).map(item => ({ item: { id: item.id, type: item.type }, turnId: item.turnId, completedAtMs: 0 })), deadline, generation)) throw new Error('UPSTREAM_UNAVAILABLE');
