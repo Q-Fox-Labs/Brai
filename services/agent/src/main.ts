@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { connect, headers, ServiceErrorHeader, ServiceErrorCodeHeader, type NatsConnection } from 'nats';
 import { createArtifactsPort, type ArtifactsPort } from './attachments.js';
 import { createCodex } from './codex.js';
+import { openReadState } from './read-state.js';
 import { createApplication, type Config } from './application.js';
 import { subjects, bytes, limits } from '../contracts/index.mjs';
 import type { Command, EventEnvelope } from '../contracts/index.mjs';
@@ -21,8 +22,10 @@ export async function startAgent(config: Config) {
     const base = new URL(config.artifacts.baseUrl);
     if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash || config.artifacts.timeoutMs !== undefined && (!Number.isSafeInteger(config.artifacts.timeoutMs) || config.artifacts.timeoutMs < 1 || config.artifacts.timeoutMs > 10000)) throw new Error('INVALID_AGENT_CONFIG');
   }
+  if (config.readStatePath !== undefined && (!config.readStatePath.startsWith('/') || !config.ownerId)) throw new Error('INVALID_AGENT_CONFIG');
+  const readState = config.readStatePath ? await openReadState(config.readStatePath) : undefined;
   const codex = createCodex(config.codex);
-  const nc = await connect({ ...config.nats, pass: config.nats.password, inboxPrefix: config.nats.inboxPrefix ?? '_INBOX.brai_agent', maxReconnectAttempts: -1 });
+  const nc = await connect({ ...config.nats, pass: config.nats.password, inboxPrefix: config.nats.inboxPrefix ?? '_INBOX.brai_agent', maxReconnectAttempts: -1 }).catch(async error => { await readState?.close(); await codex.close(); throw error; });
   const service = await nc.services.add({ name: 'brai_agent', version: '3.0.0', queue: 'brai_agent' });
   let closed = false, brokerConnected = true, sending = false, activeRequests = 0;
   let artifactsNc: NatsConnection | undefined, artifactsConnecting: Promise<void> | undefined;
@@ -110,7 +113,7 @@ export async function startAgent(config: Config) {
     }
     queue.set(key, event);
     void drain();
-  }, artifactsPort, resultsPort);
+  }, artifactsPort, resultsPort, readState);
   const codes: Record<string, number> = { INVALID_ARGUMENT: 400, REQUEST_TOO_LARGE: 413, ITEM_TOO_LARGE: 413, STALE_GENERATION: 409, STALE_ITEM: 409, STALE_REQUEST: 409, OPERATION_CONFLICT: 409, CAPACITY_EXHAUSTED: 503, UPSTREAM_UNAVAILABLE: 503, TIMEOUT: 504, NOT_FOUND: 404, UNSUPPORTED: 501 };
   service.addEndpoint('rpc', { subject: subjects.rpc, handler: (_error, message) => {
     void (async () => {
@@ -138,7 +141,7 @@ export async function startAgent(config: Config) {
   return { status: () => codex.status(), async close() {
     if (closed) return;
     closed = true; clearInterval(timer); app.close();
-    const results = await Promise.allSettled([service.stop(), codex.close(), artifactsNc?.close(), artifactsConnecting, resultsNc?.close(), resultsConnecting]);
+    const results = await Promise.allSettled([readState?.close(), service.stop(), codex.close(), artifactsNc?.close(), artifactsConnecting, resultsNc?.close(), resultsConnecting]);
     await nc.close();
     const failed = results.find(result => result.status === 'rejected');
     if (failed?.status === 'rejected') throw failed.reason;

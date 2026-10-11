@@ -6,7 +6,8 @@ import type { DisplayItem, NativeSnapshot, ModelCatalog, PermissionMode, ThreadM
 import type { AgentLimits } from "@brai/agent/contracts";
 import { createAgentClient, AgentError } from "../../lib/agent/client";
 import { mergeThreadMetadata } from "../../lib/agent/thread";
-import { readThreadRange, startCatalogPolling } from "../../lib/agent/catalog";
+import { readAllThreads, startCatalogPolling } from "../../lib/agent/catalog";
+import { createReadStateSync } from "../../lib/agent/read-state";
 import ModelSettings, { AgentModeButton, ComposerIcon } from "./settings";
 import NativeForm from "./request";
 import QuestionCard from "./questions";
@@ -51,9 +52,9 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsSettled, setProjectsSettled] = useState(false), [modelsSettled, setModelsSettled] = useState(false);
   const [accountLimits, setAccountLimits] = useState<AgentLimits>({ state: "loading", revision: 0, observedAt: null, windows: [] });
-  const [readMessages, setReadMessages] = useState<Record<string, string>>({});
+  const [readMessages, setReadMessages] = useState<Record<string, string[]>>({}), [readError, setReadError] = useState("");
+  const readSync = useRef<ReturnType<typeof createReadStateSync> | null>(null);
   const [pages, setPages] = useState<Record<string, ThreadPage>>({});
-  const pagesRef = useRef(pages); pagesRef.current = pages;
   const catalogPending = useRef(false), catalogVisible = useRef(visible); catalogVisible.current = visible;
   const [projectId, setProjectId] = useState(""), [threadId, setThreadId] = useState("");
   const [snapshot, setSnapshot] = useState<NativeSnapshot | null>(null), [connected, setConnected] = useState(false);
@@ -112,17 +113,20 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     if (pageRequests.current.has(id)) return;
     const token = Symbol(), observed = metadataVersion.current;
     pageRequests.current.set(id, token);
-    if (!quiet) setPages(previous => ({ ...previous, [id]: { data: previous[id]?.data ?? [], nextCursor: previous[id]?.nextCursor ?? null, loading: true, error: "" } }));
+    if (!quiet) setPages(previous => ({ ...previous, [id]: { ...previous[id], data: previous[id]?.data ?? [], nextCursor: previous[id]?.nextCursor ?? null, loading: true, error: "" } }));
     try {
-      const read = (cursor?: string) => client.request({ action: "threads", projectId: id, ...(cursor ? { cursor } : {}) });
-      const value = nextCursor ? await read(nextCursor) : await readThreadRange(read, pagesRef.current[id]?.data.length ?? 0);
+      const read = (cursor?: string) => {
+        if (pageRequests.current.get(id) !== token) throw new Error("Чтение отменено.");
+        return client.request({ action: "threads", projectId: id, ...(cursor ? { cursor } : {}) });
+      };
+      const value = nextCursor ? await read(nextCursor) : await readAllThreads(read);
       if (pageRequests.current.get(id) !== token) return;
       setPages(previous => {
-        const data = [...new Map([...(nextCursor ? previous[id]?.data ?? [] : []), ...value.data.filter(thread => !archived.current.has(`${id}:${thread.id}`)).map(thread => { const live = liveMetadata.current.get(`${id}:${thread.id}`); return live && live.generation === value.generation && live.observed > observed ? mergeThreadMetadata(thread, live.thread) : thread; })].map(thread => [thread.id, thread])).values()].slice(0, 1000);
-        return { ...previous, [id]: { data, nextCursor: data.length < 1000 ? value.nextCursor : null, loading: false, error: "" } };
+        const data = [...new Map([...(nextCursor ? previous[id]?.data ?? [] : []), ...value.data.filter(thread => !archived.current.has(`${id}:${thread.id}`)).map(thread => { const live = liveMetadata.current.get(`${id}:${thread.id}`); return live && live.generation === value.generation && live.observed > observed ? mergeThreadMetadata(thread, live.thread) : thread; })].map(thread => [thread.id, thread])).values()];
+        return { ...previous, [id]: { data, complete: !value.nextCursor, nextCursor: value.nextCursor, loading: false, error: "" } };
       });
     } catch (error) {
-      if (pageRequests.current.get(id) === token) setPages(previous => ({ ...previous, [id]: { data: previous[id]?.data ?? [], nextCursor: previous[id]?.nextCursor ?? null, loading: false, error: errorText(error) } }));
+      if (pageRequests.current.get(id) === token) setPages(previous => ({ ...previous, [id]: { ...previous[id], data: previous[id]?.data ?? [], nextCursor: previous[id]?.nextCursor ?? null, loading: false, error: errorText(error) } }));
     } finally { if (pageRequests.current.get(id) === token) pageRequests.current.delete(id); }
   }, [client]);
 
@@ -147,7 +151,6 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       const previous = liveMetadata.current.get(key);
       if (previous && previous.generation === value.generation && previous.epoch === value.epoch && previous.seq > value.seq) return;
       liveMetadata.current.delete(key); liveMetadata.current.set(key, { generation: value.generation, epoch: value.epoch, seq: value.seq, thread: value.thread, observed: ++metadataVersion.current });
-      if (liveMetadata.current.size > 1000) liveMetadata.current.delete(liveMetadata.current.keys().next().value!);
       setPages(pages => updateThreadPage(pages, value.projectId, value.thread));
     });
     const stopLimits = client.subscribeLimits(setAccountLimits);
@@ -554,14 +557,17 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     return () => { stopped = true; clearInterval(timer); };
   }, [corrections, client]);
   useEffect(() => {
-    try {
-      const saved: unknown = JSON.parse(localStorage.getItem(`brai.agent.read:${userId}`) ?? "{}");
-      setReadMessages(saved && typeof saved === "object" && !Array.isArray(saved) ? Object.fromEntries(Object.entries(saved).filter(([key, value]) => key.length <= 300 && typeof value === "string" && value.length <= 128).slice(-1000)) : {});
-    } catch { setReadMessages({}); }
-  }, [userId]);
+    setReadMessages({}); setReadError("");
+    const storage = { getItem: (key: string) => localStorage.getItem(key), setItem: (key: string, value: string) => localStorage.setItem(key, value), removeItem: (key: string) => localStorage.removeItem(key) };
+    const sync = createReadStateSync({ userId, storage, read: () => client.request({ action: "readState" }), mark: entry => client.request({ action: "readMark", ...entry }), update: (state, error) => { setReadMessages(state.marks); setReadError(error); } });
+    readSync.current = sync; void sync.sync();
+    const stop = startCatalogPolling(sync.sync, () => catalogVisible.current);
+    return () => { stop(); sync.dispose(); if (readSync.current === sync) readSync.current = null; };
+  }, [client, userId]);
   // AIDEV-NOTE: Чтение относится к показанной истории; metadata live окна может не содержать старый итог.
   const lastShownMessage = items.findLast(item => item.type === "userMessage" || item.type === "agentMessage");
   const readMessageId = lastShownMessage?.type === "agentMessage" && lastShownMessage.phase === "final_answer" ? lastShownMessage.id : null;
+  const readMessageAt = lastShownMessage?.timestamp ?? (view?.thread.finalMessageId === readMessageId ? view.thread.lastMessageAt : undefined) ?? 0;
   const readEpoch = view?.epoch;
   useEffect(() => {
     const messageId = readMessageId;
@@ -569,17 +575,11 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     const element = conversation.current;
     if (!element) return;
     let marker: HTMLElement | undefined;
-    const key = `${projectId}:${threadId}`;
     const markRead = () => {
       if (!marker) return;
       const rect = marker.getBoundingClientRect(), area = conversation.current?.getBoundingClientRect();
       if (document.visibilityState !== "visible" || !marker.getClientRects().length || !area || rect.bottom < area.top || rect.top > area.bottom + 1) return;
-      setReadMessages(previous => {
-        if (previous[key] === messageId) return previous;
-        const next = Object.fromEntries([...Object.entries(previous).filter(([id]) => id !== key), [key, messageId]].slice(-1000));
-        try { localStorage.setItem(`brai.agent.read:${userId}`, JSON.stringify(next)); } catch { /* Чтение сохраняется в памяти при недоступном хранилище. */ }
-        return next;
-      });
+      readSync.current?.seen({ projectId, threadId, messageId, lastMessageAt: Number.isSafeInteger(readMessageAt) && readMessageAt >= 0 ? readMessageAt : 0 });
     };
     // AIDEV-NOTE: Частые snapshot не пересоздают observer; scroll и первый кадр снимают зависимость от задержки его callback.
     const observer = new IntersectionObserver(markRead, { root: element, threshold: 0 });
@@ -595,7 +595,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     element?.addEventListener("scroll", markRead, { passive: true });
     document.addEventListener("visibilitychange", markRead);
     return () => { cancelAnimationFrame(frame); observer.disconnect(); changes.disconnect(); element?.removeEventListener("scroll", markRead); document.removeEventListener("visibilitychange", markRead); };
-  }, [visible, userId, projectId, threadId, readMessageId, readEpoch, active, history]);
+  }, [visible, userId, projectId, threadId, readMessageId, readMessageAt, readEpoch, active, history]);
   const pendingAsyncQuestions = view?.requests.filter(request => request.method === "agentMessage/questions" && !request.answered) ?? [];
   const timeline = groupTimeline(items).filter(entry => entry.kind !== "message" || !pendingAsyncQuestions.some(request => request.params.itemId === entry.item.id || entry.item.type === "agentMessage" && !entry.item.text.trim() && request.turnId === entry.item.turnId));
   const activityContext = useMemo(() => ({ generation: view?.generation ?? historyGeneration, epoch: view?.epoch ?? "", projectId, threadId }), [view?.generation, view?.epoch, historyGeneration, projectId, threadId]);
@@ -881,6 +881,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
       select={selectChat} create={id => { selectChat(id); requestAnimationFrame(() => composerInput.current?.focus()); }} more={id => { const next = pages[id]?.nextCursor; if (next) void loadThreads(id, next); }}
       archive={(id, chatId) => { void archiveChat(id, chatId); }} refresh={id => { void loadThreads(id); }} close={() => setSidebarOpen(false)} logout={onLogout} />
     <section className="agent-workspace" aria-labelledby="agent-chat-title">
+      {readError && <p role="status" className="agent-read-error">{readError}</p>}
       <header className="agent-toolbar border-b border-border bg-background">
         <Button type="button" variant="ghost" className="agent-mobile-toggle" aria-controls="agent-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(value => !value)}>☰ <span>Чаты</span></Button>
         <div className="agent-heading"><p>{project?.name ?? "Агент"}</p><h1 id="agent-chat-title" title={title}>{title}</h1></div>
@@ -967,6 +968,6 @@ function Item({ item, context, reads, pending, localImages, imageProgress, uploa
 
 function updateThreadPage(pages: Record<string, ThreadPage>, projectId: string, thread: ThreadMetadata): Record<string, ThreadPage> {
   const page = pages[projectId], found = page?.data.some(value => value.id === thread.id);
-  const data = found ? page.data.map(value => value.id === thread.id ? mergeThreadMetadata(value, thread) : value) : [thread, ...(page?.data ?? [])].slice(0, 1000);
-  return { ...pages, [projectId]: { data, nextCursor: page?.nextCursor ?? null, loading: page?.loading ?? false, error: page?.error ?? "" } };
+  const data = found ? page.data.map(value => value.id === thread.id ? mergeThreadMetadata(value, thread) : value) : [thread, ...(page?.data ?? [])];
+  return { ...pages, [projectId]: { data, complete: page?.complete ?? false, nextCursor: page?.nextCursor ?? null, loading: page?.loading ?? false, error: page?.error ?? "" } };
 }

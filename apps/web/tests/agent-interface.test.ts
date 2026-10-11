@@ -9,6 +9,7 @@ import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createLazyReads } from "../lib/agent/lazy.ts";
 import { formatLimitReset, limitCountdown } from "../lib/agent/limits.ts";
+import { unreadFinal } from "../lib/agent/read-state.ts";
 import { composerAction, groupTimeline } from "../app/agent/timeline.ts";
 import type { Command, DisplayItem } from "@brai/agent/contracts";
 const context = { generation: "gen", epoch: "epoch", projectId: "project", threadId: "chat" };
@@ -95,7 +96,7 @@ function component(name: string) {
   const source = readFileSync(new URL(`../app/agent/${name}.tsx`, import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const module = { exports: {} as { default: ComponentType<Record<string, unknown>> } };
-  new Function("require", "module", "exports", compiled)((dependency: string) => dependency.endsWith(".css") ? {} : dependency.startsWith("./") ? { default: component(dependency.slice(2)) } : dependency.startsWith("@/components/ui/") ? ui(dependency) : dependency === "../../lib/agent/activity" ? { activityPresentation } : dependency === "../../lib/agent/limits" ? { formatLimitReset, limitCountdown } : require(dependency), module, module.exports);
+  new Function("require", "module", "exports", compiled)((dependency: string) => dependency.endsWith(".css") ? {} : dependency.startsWith("./") ? { default: component(dependency.slice(2)) } : dependency.startsWith("@/components/ui/") ? ui(dependency) : dependency === "../../lib/agent/activity" ? { activityPresentation } : dependency === "../../lib/agent/read-state" ? { unreadFinal } : dependency === "../../lib/agent/limits" ? { formatLimitReset, limitCountdown } : require(dependency), module, module.exports);
   return module.exports.default;
 }
 
@@ -165,6 +166,19 @@ test("sidebar renders both account limit windows with accessible remaining value
   assert.match(html, /aria-valuenow="0"/);
   assert.match(html, /aria-valuenow="100"/);
   assert.equal((html.match(/сброс неизвестен/g) ?? []).length, 2);
+});
+test("project count includes hidden completed threads with the same rules as checkmarks", () => {
+  const base = { title: "title", preview: "", model: null, canAcceptDirectInput: true, updatedAt: 1, finalMessageId: "final" };
+  const data = Array.from({ length: 8 }, (_, index) => ({ ...base, id: String(index), lastMessageAt: 10 - index, ...(index === 0 ? { awaitingReply: true } : index === 1 ? { active: true } : {}) }));
+  const noop = () => {}, props = { projects: [{ projectId: "project", name: "Project", available: true }], pages: { project: { data, complete: true, nextCursor: null, loading: false, error: "" } }, readMessages: { "project:2": ["final"] }, projectId: "project", threadId: "", email: "user@example.test", open: true, busy: false, accountLimits: { state: "unavailable", revision: 0, observedAt: null, windows: [] }, select: noop, create: noop, more: noop, refresh: noop, close: noop, logout: noop };
+  const html = renderToStaticMarkup(createElement(component("sidebar"), props));
+  assert.match(html, /class="agent-project-unread" aria-label="Непрочитанных итогов: 5">5<\/span><span class="agent-project-dot/);
+  assert.equal((html.match(/aria-label="Непрочитанный итог"/g) ?? []).length, 2);
+  assert.doesNotMatch(html, /data-thread-id="5"/); assert.match(html, /Показать больше/);
+  const incomplete = renderToStaticMarkup(createElement(component("sidebar"), { ...props, pages: { project: { ...props.pages.project, complete: false } } }));
+  assert.doesNotMatch(incomplete, /agent-project-unread/);
+  const read = renderToStaticMarkup(createElement(component("sidebar"), { ...props, readMessages: Object.fromEntries(data.map(thread => [`project:${thread.id}`, ["final"]])) }));
+  assert.doesNotMatch(read, /agent-project-unread|aria-label="Непрочитанный итог"/);
 });
 
 test("countdown shows remaining days and hours and the fraction of the reset window", () => {
@@ -241,7 +255,7 @@ test("sidebar prioritizes questions over work and hides a read final check", () 
     { ...thread, id: "unread", finalMessageId: "final" },
     { ...thread, id: "read", finalMessageId: "seen" },
   ], nextCursor: null, loading: false, error: "" } }, projectId: "p", threadId: "question", email: "test@example.test", open: true, busy: false,
-    accountLimits: { state: "unavailable", revision: 0, observedAt: null, windows: [] }, readMessages: { "p:read": "seen" }, select: noop, create: noop, more: noop, refresh: noop, archive: noop, close: noop, logout: noop };
+    accountLimits: { state: "unavailable", revision: 0, observedAt: null, windows: [] }, readMessages: { "p:read": ["seen"] }, select: noop, create: noop, more: noop, refresh: noop, archive: noop, close: noop, logout: noop };
   const html = renderToStaticMarkup(createElement(component("sidebar"), props));
   assert.equal((html.match(/aria-label="Агент ждёт ответа"/g) ?? []).length, 1);
   assert.equal((html.match(/aria-label="Непрочитанный итог"/g) ?? []).length, 1);

@@ -1,7 +1,22 @@
 // ABOUTME: Обновляет каталог при видимой вкладке и перечитывает загруженный диапазон чатов.
-// ABOUTME: Не открывает чаты, не хранит историю и ограничивает результат 1000 строками.
+// ABOUTME: Не открывает чаты и не хранит историю; полная выборка нужна для точного счётчика.
 import type { ThreadMetadata } from "@brai/agent/contracts";
 type Page = { generation: string; data: ThreadMetadata[]; nextCursor: string | null };
+
+/** Читает все страницы атомарно; ошибка или смена поколения сохраняет прежний каталог UI. */
+export async function readAllThreads(read: (cursor?: string) => Promise<Page>): Promise<Page> {
+  const data = new Map<string, ThreadMetadata>(), seen = new Set<string>();
+  let cursor: string | undefined, generation: string | undefined;
+  for (;;) {
+    const page = await read(cursor);
+    if (generation && generation !== page.generation) throw new Error("Каталог обновился. Повторите чтение.");
+    generation = page.generation;
+    for (const thread of page.data) data.set(thread.id, thread);
+    if (!page.nextCursor) return { generation, data: [...data.values()], nextCursor: null };
+    if (seen.has(page.nextCursor)) throw new Error("Некорректное продолжение каталога.");
+    seen.add(page.nextCursor); cursor = page.nextCursor;
+  }
+}
 
 /** Читает прежний объём с начала; одна страница обязательна, cursor и поколение проверяются. */
 export async function readThreadRange(read: (cursor?: string) => Promise<Page>, count: number): Promise<Page> {

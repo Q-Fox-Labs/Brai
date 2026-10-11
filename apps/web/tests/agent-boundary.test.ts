@@ -50,6 +50,30 @@ function fixture(mapped = true) {
   return { session, artifact, binding, calls, connections, request, agent, artifacts, transport, setUpload(value: string) { uploadUrl = value; }, setAgent(value: unknown) { agentReply = value; }, close() { for (const key of variables) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; } } };
 }
 const prepare = { projectId: "project", threadId: "thread", requestId: "prepare-id", kind: "original", filename: "image.png", mimeType: "image/png" };
+test("readState and readMark use session-owned storage, strict methods and reject owner injection", async () => {
+  const f = fixture();
+  try {
+    f.setAgent({ marks: { "project:thread": ["final"] } });
+    const route = (action: string) => ({ params: Promise.resolve({ path: [action] }) });
+    const read = await f.agent.agentGet(f.request("readState"), route("readState"));
+    assert.equal(read.status, 200); assert.deepEqual(await read.json(), { marks: { "project:thread": ["final"] } });
+    assert.deepEqual(f.calls.at(-1)?.payload, { action: "readState", ownerId: "canonical-owner" });
+    const entry = { projectId: "project", threadId: "thread", messageId: "final", lastMessageAt: 100 };
+    assert.equal((await f.agent.agentPost(f.request("readMark", entry), route("readMark"))).status, 202);
+    assert.deepEqual(f.calls.at(-1)?.payload, { action: "readMark", ...entry, ownerId: "canonical-owner" });
+    const before = f.calls.filter(call => call.subject === "brai.agent.v3.rpc").length;
+    assert.equal((await f.agent.agentGet(f.request("readState?ownerId=other"), route("readState"))).status, 400);
+    assert.equal((await f.agent.agentPost(f.request("readState", {}), route("readState"))).status, 400);
+    assert.equal((await f.agent.agentGet(f.request("readMark?projectId=project&threadId=thread&messageId=final&lastMessageAt=100"), route("readMark"))).status, 400);
+    assert.equal((await f.agent.agentPost(f.request("readMark", { ...entry, ownerId: "other" }), route("readMark"))).status, 400);
+    assert.equal((await f.agent.agentPost(f.request("readMark", { ...entry, lastMessageAt: "100" }), route("readMark"))).status, 400);
+    assert.equal((await f.agent.agentGet(f.request("readState", undefined, "canonical-owner"), route("readState"))).status, 401);
+    assert.equal((await f.agent.agentPost(f.request("readMark", entry, "canonical-owner"), route("readMark"))).status, 401);
+    const crossOrigin = new Request("https://dev.test/api/agent/readMark", { method: "POST", headers: { origin: "https://evil.test", "x-brai-user": "local-user", "content-type": "application/json" }, body: JSON.stringify(entry) });
+    assert.equal((await f.agent.agentPost(crossOrigin, route("readMark"))).status, 403);
+    assert.equal(f.calls.filter(call => call.subject === "brai.agent.v3.rpc").length, before);
+  } finally { f.close(); }
+});
 
 test("HTTP uses canonical owner internally and local identity in returned attachment URLs", async () => {
   const f = fixture();

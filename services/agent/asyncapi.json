@@ -120,5 +120,12 @@
     "result": {
       "$ref": "./schemas/messages.schema.json#/definitions/Result"
     }
+  },
+  "x-agent-read-state": {
+    "authority": "ownerId is provided by the trusted web gateway and must equal configured ownerId. Read state is private; shared STATE_SNAPSHOT events never include marks.",
+    "operations": "readState(ownerId) and readMark(ownerId,projectId,threadId,messageId,lastMessageAt) return ReadState. Keys are projectId:threadId; values contain read IDs retained under the greatest timestamp, at most 128 IDs per chat. Both commands work independently of Codex generation.",
+    "persistence": "Both agent processes share explicit config.readStatePath SQLite storage. BEGIN IMMEDIATE isolates writers, WAL permits readers, synchronous=FULL confirms durable commit. busy_timeout is 1000ms. Corrupt/unreadable files fail startup; only a missing file initializes empty state. File must be restored separately from immutable code.",
+    "retry": "readMark is idempotent and may be retried after any outcome. Older/equal timestamps merge IDs to preserve live/history clock differences; a newer timestamp for an unknown ID replaces the set. A known ID is a no-op at any timestamp. Import legacy localStorage IDs with lastMessageAt=0; live reads use thread/item lastMessageAt. Snapshot is bounded by limits.state and stored row content by 16*limits.state; overflow fails CAPACITY_EXHAUSTED before writing, without eviction.",
+    "failure": "A failure before commit is UPSTREAM_UNAVAILABLE/not-sent; commit failure is unknown. readState returns a coherent snapshot after previous admitted writes, or query error."
   }
 }

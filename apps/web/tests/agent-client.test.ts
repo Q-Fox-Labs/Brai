@@ -47,6 +47,21 @@ test("goalGet uses query-only GET without mutation body or automatic turn", asyn
     assert.equal(f.sources.length, 0);
   } finally { f.client.dispose(); }
 });
+test("read state uses GET and idempotent readMark uses POST without browser-selected owner", async () => {
+  const f = fixture();
+  try {
+    await f.client.request({ action: "readState" });
+    await f.client.request({ action: "readMark", projectId: "brai", threadId: "A", messageId: "final", lastMessageAt: 100 });
+    assert.deepEqual(f.requests, [
+      { path: "/api/agent/readState?", method: "GET", body: undefined },
+      { path: "/api/agent/readMark", method: "POST", body: JSON.stringify({ projectId: "brai", threadId: "A", messageId: "final", lastMessageAt: 100 }) },
+    ]);
+    assert.equal(f.sources.length, 0);
+    await assert.rejects(f.client.request({ action: "readState", ownerId: "other" }), /INVALID_ARGUMENT/);
+    await assert.rejects(f.client.request({ action: "readMark", projectId: "brai", threadId: "A", messageId: "final", lastMessageAt: -1 }), /INVALID_ARGUMENT/);
+    assert.equal(f.requests.length, 2);
+  } finally { f.client.dispose(); }
+});
 
 test("A→B→A keeps one stream, immediate SDK state and background text without repeated open", async () => {
   const f = fixture();
