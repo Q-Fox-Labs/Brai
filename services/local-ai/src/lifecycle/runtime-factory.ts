@@ -17,7 +17,7 @@ type ProfileConfig = {
   stopGraceMs: number;
   maxLineBytes: number;
 };
-type LlamaProfileConfig = ProfileConfig & { host: string; port: () => number; dimensions: number; contextTokens: number; maxBatchTokens: number; queryInstruction: string; documentInstruction?: string; symmetricInstruction?: string };
+type LlamaProfileConfig = ProfileConfig & { deferredMedia?: boolean; host: string; port: () => number; dimensions: number; contextTokens: number; maxBatchTokens: number; queryInstruction: string; documentInstruction?: string; symmetricInstruction?: string };
 export type ProfileRuntimeFactoryConfig = {
   profiles: {
     llama_cpp: LlamaProfileConfig;
@@ -175,6 +175,8 @@ function spawnRuntime(config: ProfileConfig, args: readonly string[], options: S
     monitorTimer = undefined;
     exitResolve();
     diagnostic('runtime', 'group_exit', options.executor, 'EXIT_CONFIRMED', Date.now() - startedAt, child);
+    // AIDEV-NOTE: Даже после failed bounded stop поздний physical exit обязан запустить cleanup один раз.
+    if (options.cleanupAfterGroupExit) void cleanup().catch(() => undefined);
     return true;
   };
   const monitorExit = (): void => {
@@ -569,6 +571,83 @@ Query: ${text}` : text;
   }
 }
 
+/** Держит один Gemma runner; первый media-вход заменяет text-only на закреплённый полный профиль. */
+function deferredGemmaRuntime(initial: RuntimePort, openMedia: (context: OperationContext) => Promise<RuntimePort>): RuntimePort {
+  let current = initial;
+  let full = false;
+  let closing = false;
+  let switching = false;
+  let finished = false;
+  let transition: Promise<void> | undefined;
+  let closePromise: Promise<void> | undefined;
+  let resolveExit!: () => void;
+  const exited = new Promise<void>(resolve => { resolveExit = resolve; });
+  const finish = () => { finished = true; resolveExit(); };
+  const watch = (runtime: RuntimePort) => {
+    void runtime.exited.then(() => {
+      // AIDEV-NOTE: Выход text-only при переходе не означает выход логического runtime.
+      if (current === runtime && !switching) finish();
+    });
+  };
+  watch(initial);
+  const activateMedia = async (context: OperationContext): Promise<void> => {
+    if (full) return;
+    if (!transition) {
+      switching = true;
+      transition = (async () => {
+        try {
+          // AIDEV-NOTE: В pinned llama.cpp нет hot-attach mmproj; подтверждаем exit до следующего spawn.
+          await current.close();
+          await current.exited;
+          checkContext(context);
+          if (closing) throw serviceError('CANCELLED');
+          const next = await openMedia(context);
+          if (closing) {
+            await next.close();
+            await next.exited;
+            throw serviceError('CANCELLED');
+          }
+          current = next;
+          full = true;
+          switching = false;
+          watch(next);
+        } catch (error) {
+          // openMedia подтверждает выход неготового child; current остаётся прежним либо принятым runner.
+          await current.close().catch(() => undefined);
+          await current.exited;
+          switching = false;
+          finish();
+          throw error;
+        }
+      })();
+    }
+    await transition;
+  };
+  return {
+    exited,
+    async embed(input, context) {
+      checkContext(context);
+      if (closing || finished) throw serviceError('ENGINE_UNAVAILABLE');
+      if (input.inputs?.some(item => item.type !== 'text')) await activateMedia(context);
+      checkContext(context);
+      if (closing || finished) throw serviceError('ENGINE_UNAVAILABLE');
+      return current.embed(input, context);
+    },
+    transcribe(input, context) { return current.transcribe(input, context); },
+    close() {
+      if (closePromise) return closePromise;
+      closing = true;
+      closePromise = (async () => {
+        if (transition) await transition.catch(() => undefined);
+        await current.close();
+        await current.exited;
+        finish();
+      })();
+      return closePromise;
+    },
+  };
+}
+
 /** Создаёт адаптеры только для закреплённых профилей и проверяет готовность до возврата runtime. */
 export function createProfileRuntimeFactory(config: ProfileRuntimeFactoryConfig): RuntimeFactory {
   const fetcher = config.fetch ?? fetch;
@@ -585,17 +664,27 @@ export function createProfileRuntimeFactory(config: ProfileRuntimeFactoryConfig)
         const port = profile.port();
         if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw serviceError('MODEL_LOAD_FAILED');
         const args = substitute(profile.args, { modelPath: join(model.installation.directory, gguf.path), port: String(port), ...(model.model.profileId === 'embeddinggemma2_llama_cpp' ? { mmprojPath: modelPath(model, 'mmproj-embeddinggemma-2-Q8_0.gguf') } : {}) });
-        const process = spawnRuntime(profile, args, { executor: 'llama_cpp' });
-        const runtime = new LlamaRuntime(process.child, process.exited, profile, port, fetcher, process.stop);
-        try {
-          await waitUntilReady(runtime, process.exited, profile.startupTimeoutMs, context, model.model);
-          return runtime;
-        } catch (error) {
-          try { await runtime.close(); }
-          catch { await runtime.exited; }
-          if (error instanceof LocalAiError) throw error;
-          throw serviceError('MODEL_LOAD_FAILED');
+        const openRunner = async (runnerArgs: readonly string[], loadContext: OperationContext): Promise<RuntimePort> => {
+          const process = spawnRuntime(profile, runnerArgs, { executor: 'llama_cpp' });
+          const runtime = new LlamaRuntime(process.child, process.exited, profile, port, fetcher, process.stop);
+          try {
+            await waitUntilReady(runtime, process.exited, profile.startupTimeoutMs, loadContext, model.model);
+            return runtime;
+          } catch (error) {
+            try { await runtime.close(); }
+            catch { await runtime.exited; }
+            if (error instanceof LocalAiError) throw error;
+            throw serviceError('MODEL_LOAD_FAILED');
+          }
+        };
+        const projector = args.indexOf('--mmproj');
+        if (model.model.profileId === 'embeddinggemma2_llama_cpp' && profile.deferredMedia && projector >= 0) {
+          if (projector + 1 >= args.length || args[projector + 1].startsWith('--')) throw serviceError('MODEL_LOAD_FAILED');
+          const textArgs = [...args.slice(0, projector), ...args.slice(projector + 2), '--no-mmproj'];
+          const initial = await openRunner(textArgs, context);
+          return deferredGemmaRuntime(initial, loadContext => openRunner(args, loadContext));
         }
+        return openRunner(args, context);
       }
       if (model.model.profileId === 'gigaam_pytorch') {
         const profile = config.profiles.gigaam_pytorch;

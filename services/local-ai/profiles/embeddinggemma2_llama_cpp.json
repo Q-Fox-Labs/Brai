@@ -86,5 +86,10 @@
     "threadsBatch": 4,
     "gpuLayers": 0,
     "nativeContextTokens": 8192
+  },
+  "lifecycle": {
+    "initialMode": "text",
+    "mediaActivation": "reload_full_on_first_media",
+    "afterMedia": "keep_full"
   }
 }

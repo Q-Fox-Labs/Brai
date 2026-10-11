@@ -399,7 +399,8 @@ test('nonresponding native health is bounded by startup and retains allocation u
     await rejected;
     assert.equal(lifecycle.status().loading, 0);
     assert.throws(() => originalKill(-pid, 0), error => error.code === 'ESRCH');
-    assert.equal((await readdir(root)).some(name => name.startsWith('brai-local-ai-giga-')), false);
+    // AIDEV-NOTE: exited подтверждает группу процессов; независимая cleanup завершается после него.
+    await waitFor(async () => !(await readdir(root)).some(name => name.startsWith('brai-local-ai-giga-')));
     await writeFile(ready, 'ready');
     await lifecycle.load(selector, context());
     await lifecycle.unload(selector, context());

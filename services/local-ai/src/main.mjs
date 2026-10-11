@@ -213,6 +213,7 @@ function runtimeConfig(config) {
       },
       ...(config.runtime.embeddinggemma2_llama_cpp ? { embeddinggemma2_llama_cpp: {
         ...config.runtime.embeddinggemma2_llama_cpp,
+        deferredMedia: gemmaProfile.lifecycle.initialMode === 'text',
         port: () => config.runtime.embeddinggemma2_llama_cpp.port,
       } } : {}),
       gigaam_pytorch: {
