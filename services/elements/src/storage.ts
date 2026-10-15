@@ -28,9 +28,9 @@ function link(row: Row): MoveLink { return { move_id: row.move_id, element_id: r
 async function query(client: PoolClient, context: OperationContext | undefined, text: string, values: unknown[] = []) { check(context); await client.query("SELECT set_config('statement_timeout',$1,true)", [sqlTimeout(context)]); const result = await client.query<Row>(text, values); check(context); return result; }
 
 function historyCodes(type: string): { category: string; code: string } { if (type.endsWith("created") || type === "structure.created") return { category: "object", code: "create" }; if (type.endsWith("revised")) return { category: "object", code: "update" }; if (type === "move.linked") return { category: "relationship", code: "link" }; if (type === "element.activated") return { category: "lifecycle", code: "activate" }; if (type === "element.completed") return { category: "state", code: "transition" }; return { category: "execution", code: "execute" }; }
-function envelope(ownerId: string, actorId: string | null, type: string, aggregate: EventEnvelope["aggregate"], data: Record<string, unknown>, notification?: EventEnvelope["notification"]): EventEnvelope { const codes = historyCodes(type); return { event_id: randomUUID(), event_version: 1, event_type: type, occurred_at: new Date().toISOString(), owner_id: ownerId, actor: { kind: actorId ? "agent" : "system", id: actorId }, aggregate, data: { ...data, history_category_code: codes.category, history_type_code: codes.code }, ...(notification ? { notification } : {}) }; }
-async function emit(client: PoolClient, ownerId: string, actorId: string | null, type: string, aggregate: EventEnvelope["aggregate"], data: Record<string, unknown>, notification?: EventEnvelope["notification"]): Promise<void> {
-  const event = envelope(ownerId, actorId, type, aggregate, data, notification);
+function envelope(ownerId: string, actorId: string | null, actorKind: ExecutorKind | undefined, type: string, aggregate: EventEnvelope["aggregate"], data: Record<string, unknown>, notification?: EventEnvelope["notification"]): EventEnvelope { const codes = historyCodes(type); return { event_id: randomUUID(), event_version: 1, event_type: type, occurred_at: new Date().toISOString(), owner_id: ownerId, actor: { kind: actorKind ?? (actorId ? "agent" : "system"), id: actorId }, aggregate, data: { ...data, history_category_code: codes.category, history_type_code: codes.code }, ...(notification ? { notification } : {}) }; }
+async function emit(client: PoolClient, ownerId: string, actorId: string | null, type: string, aggregate: EventEnvelope["aggregate"], data: Record<string, unknown>, notification?: EventEnvelope["notification"], actorKind?: ExecutorKind): Promise<void> {
+  const event = envelope(ownerId, actorId, actorKind, type, aggregate, data, notification);
   await client.query(`INSERT INTO elements.outbox(id,event_type,subject,payload) VALUES($1,$2,$3,$4::jsonb)`, [event.event_id, event.event_type, `brai.elements.v1.events.${event.event_type}`, json(event)]);
 }
 async function selectedElement(client: PoolClient, ownerId: string, id: string, context?: OperationContext, forUpdate = false): Promise<Element> {
@@ -102,7 +102,7 @@ function transactionPort(ownerId: string, client: PoolClient, context?: Operatio
       if (active) throw new ElementsFault("CONFLICT");
       try { await query(client, context, `INSERT INTO elements.move_attempts(id,owner_id,move_id,idempotency_key,executor_kind,executor_id,status,input) VALUES($1,$2,$3,$4,$5,$6,'running',$7::jsonb)`, [input.attempt_id, ownerId, input.move_id, input.idempotency_key, input.executor_kind, input.executor_id, json(input.input)]); await query(client, context, `UPDATE elements.moves SET status='claimed' WHERE owner_id=$1 AND id=$2`, [ownerId, input.move_id]); }
       catch (error) { throw failure(error); }
-      await emit(client, ownerId, actorId, "move.claimed", { kind: "attempt", id: input.attempt_id }, { move_id: input.move_id, executor_kind: input.executor_kind });
+      await emit(client, ownerId, input.executor_id ?? actorId, "move.claimed", { kind: "attempt", id: input.attempt_id }, { move_id: input.move_id, executor_kind: input.executor_kind }, undefined, input.executor_kind);
       const row = (await query(client, context, `SELECT id,move_id,executor_kind,executor_id,status,input,result,error_code,started_at,finished_at FROM elements.move_attempts WHERE id=$1`, [input.attempt_id])).rows[0];
       return { attempt: attempt(row), move: { ...mv, status: "claimed" } };
     },
@@ -117,8 +117,8 @@ function transactionPort(ownerId: string, client: PoolClient, context?: Operatio
       await query(client, context, `UPDATE elements.move_attempts SET status='succeeded',result=$1::jsonb,finished_at=clock_timestamp() WHERE owner_id=$2 AND id=$3`, [json(result), ownerId, attemptId]);
       await query(client, context, `UPDATE elements.moves SET status='succeeded' WHERE owner_id=$1 AND id=$2`, [ownerId, row.move_id]);
       const completed = (await query(client, context, `UPDATE elements.elements e SET status='completed' WHERE e.owner_id=$1 AND e.id IN (SELECT element_id FROM elements.move_element_links WHERE move_id=$2 AND role='accept') RETURNING e.id`, [ownerId, row.move_id])).rows.map(item => item.id as string);
-      await emit(client, ownerId, actorId, "move.completed", { kind: "attempt", id: attemptId }, { move_id: row.move_id, result });
-      for (const id of completed) await emit(client, ownerId, actorId, "element.completed", { kind: "element", id }, { move_id: row.move_id }, { type_code: "completed", title: "Элемент завершён", text: "Операция приняла результат хода.", data: { element_id: id, move_id: row.move_id } });
+      await emit(client, ownerId, row.executor_id ?? actorId, "move.completed", { kind: "attempt", id: attemptId }, { move_id: row.move_id, result }, undefined, row.executor_kind);
+      for (const id of completed) await emit(client, ownerId, row.executor_id ?? actorId, "element.completed", { kind: "element", id }, { move_id: row.move_id }, { type_code: "completed", title: "Элемент завершён", text: "Операция приняла результат хода.", data: { element_id: id, move_id: row.move_id } }, row.executor_kind);
       const saved = (await query(client, context, `SELECT id,move_id,executor_kind,executor_id,status,input,result,error_code,started_at,finished_at FROM elements.move_attempts WHERE id=$1`, [attemptId])).rows[0];
       return { attempt: attempt(saved), move: move({ ...row, status: "succeeded" }), completed_elements: completed };
     },
@@ -127,7 +127,7 @@ function transactionPort(ownerId: string, client: PoolClient, context?: Operatio
       if (!row) throw new ElementsFault("NOT_FOUND"); if (row.status !== "running") throw new ElementsFault("INVALID_STATE");
       await query(client, context, `UPDATE elements.move_attempts SET status='failed',error_code=$1,finished_at=clock_timestamp() WHERE owner_id=$2 AND id=$3`, [errorCode, ownerId, attemptId]);
       await query(client, context, `UPDATE elements.moves SET status='planned' WHERE owner_id=$1 AND id=$2`, [ownerId, row.move_id]);
-      await emit(client, ownerId, actorId, "move.failed", { kind: "attempt", id: attemptId }, { move_id: row.move_id, error_code: errorCode });
+      await emit(client, ownerId, row.executor_id ?? actorId, "move.failed", { kind: "attempt", id: attemptId }, { move_id: row.move_id, error_code: errorCode }, undefined, row.executor_kind);
       return attempt({ ...row, status: "failed", error_code: errorCode, finished_at: new Date() });
     },
     async createStructure(input: StructureDraft, actorId) {
