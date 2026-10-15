@@ -1,0 +1,46 @@
+asyncapi: 2.6.0
+info:
+  title: Brai Elements
+  version: 1.0.0
+  description: NATS Services и JetStream контракт Elements.
+defaultContentType: application/json
+channels:
+  brai.elements.v1.query.graph:
+    publish:
+      message: { $ref: '#/components/messages/request' }
+  brai.elements.v1.query.timeline:
+    publish:
+      message: { $ref: '#/components/messages/request' }
+  brai.elements.v1.query.element:
+    publish:
+      message: { $ref: '#/components/messages/request' }
+  brai.elements.v1.query.moves:
+    publish:
+      message: { $ref: '#/components/messages/request' }
+  brai.elements.v1.command.create:
+    publish:
+      message: { $ref: '#/components/messages/request' }
+  brai.elements.v1.command.revise:
+    publish:
+      message: { $ref: '#/components/messages/request' }
+  brai.elements.v1.command.claim:
+    publish:
+      message: { $ref: '#/components/messages/request' }
+  brai.elements.v1.command.complete:
+    publish:
+      message: { $ref: '#/components/messages/request' }
+  brai.elements.v1.command.activate:
+    publish:
+      message: { $ref: '#/components/messages/request' }
+  'brai.elements.v1.events.>':
+    subscribe:
+      message: { $ref: '#/components/messages/event' }
+      bindings:
+        nats:
+          subject: brai.elements.v1.events.>
+components:
+  messages:
+    request:
+      payload: { $ref: './schemas/messages.schema.json#/definitions/request' }
+    event:
+      payload: { $ref: './schemas/messages.schema.json#/definitions/event' }

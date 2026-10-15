@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.app/schemas/elements/messages.schema.json",
+  "definitions": {
+    "request": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "event_id": { "type": "string", "format": "uuid" },
+        "event_version": { "const": 1 },
+        "event_type": { "type": "string", "pattern": "^[a-z][a-z0-9_.]{1,95}$" },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "owner_id": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "actor": { "type": "object", "additionalProperties": false, "properties": { "kind": { "enum": ["human", "agent", "system"] }, "id": { "type": ["string", "null"] } }, "required": ["kind", "id"] },
+        "aggregate": { "type": "object", "additionalProperties": false, "properties": { "kind": { "enum": ["element", "move", "attempt"] }, "id": { "type": "string", "format": "uuid" } }, "required": ["kind", "id"] },
+        "data": { "type": "object" },
+        "notification": { "type": "object" }
+      },
+      "required": ["event_id", "event_version", "event_type", "occurred_at", "owner_id", "actor", "aggregate", "data"]
+    }
+  }
+}

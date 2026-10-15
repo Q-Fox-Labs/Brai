@@ -1,7 +1,7 @@
 // ABOUTME: Реализует транзакционный порт истории в PostgreSQL.
 // ABOUTME: Веб-чтения используют отдельный пул и только локальный RLS-контекст.
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
-import { checkContext, HistoryFault, type HistoryStore, type HistoryTransaction, type OperationContext, type CatalogRow, type EventInput, type EventKey, type Filters } from "./domain.js";
+import { checkContext, HistoryFault, type HistoryStore, type HistoryTransaction, type OperationContext, type CatalogRow, type EventInput, type EventKey, type Filters, type EventType } from "./domain.js";
 import type { HistoryEvent } from "./contracts.js";
 
 const eventFields = `e.id,e.source,e.type_id,
@@ -57,6 +57,9 @@ function transactionPort(client: PoolClient, context: OperationContext) {
     },
     async catalog(table, id, lock = false) {
       return (await query<CatalogRow>(`SELECT * FROM history.${table} WHERE id=$1${lock ? " FOR UPDATE" : ""}`, [id])).rows[0] ?? null;
+    },
+    async typeByCode(categoryCode, typeCode) {
+      return (await query<EventType>(`SELECT t.* FROM history.sys_types t JOIN history.sys_categories c ON c.id=t.category_id WHERE c.code=$1 AND t.code=$2`, [categoryCode, typeCode])).rows[0] ?? null;
     },
     async catalogList(table, categoryId, after, count) {
       const values: unknown[] = [];

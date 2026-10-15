@@ -16,6 +16,7 @@ export interface Config {
   mcpAllowedOrigins: string[];
   mcpMaxSessions: number;
   mcpSessionIdleMs: number;
+  elementsEventsEnabled: boolean;
 }
 
 type SecretReader = (path: string) => Buffer;
@@ -39,6 +40,7 @@ function list(env: NodeJS.ProcessEnv, name: string): string[] {
   if (values.some(value => !value) || new Set(values).size !== values.length) throw new Error(`INVALID_${name}`);
   return values;
 }
+function flag(env: NodeJS.ProcessEnv, name: string): boolean { const value = (env[name] ?? "false").trim().toLowerCase(); if (!["true", "false"].includes(value)) throw new Error(`INVALID_${name}`); return value === "true"; }
 
 function databaseURL(env: NodeJS.ProcessEnv, name: string): string {
   const raw = required(env, name);
@@ -91,5 +93,6 @@ export function config(env: NodeJS.ProcessEnv = process.env, readSecret: SecretR
     mcpAllowedOrigins,
     mcpMaxSessions: positiveInteger(env, "HISTORY_MCP_MAX_SESSIONS"),
     mcpSessionIdleMs: positiveInteger(env, "HISTORY_MCP_SESSION_IDLE_MS"),
+    elementsEventsEnabled: flag(env, "HISTORY_ELEMENTS_EVENTS_ENABLED"),
   };
 }

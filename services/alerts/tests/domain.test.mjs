@@ -10,7 +10,7 @@ function fixture() {
   let saved;
   let committed = false;
   const signals = [];
-  const tx = { async insert(e) { if (saved) return false; saved = { ...e, recorded_at: '2026-10-06T09:00:00.123456Z', category: {}, type: {}, read_at: null }; return true; }, async get() { return saved; }, async list() { return saved ? [saved, { ...saved, id: 'bbbbbbbb-1111-4111-8111-111111111111' }] : []; }, async summary() { return { unread_count: 1, category: null }; }, async read() { return true; }, async readAll() { return true; } };
+  const tx = { async insert(e) { if (saved) return false; saved = { ...e, recorded_at: '2026-10-06T09:00:00.123456Z', category: {}, type: {}, read_at: null }; return true; }, async typeByCode() { return 5; }, async get() { return saved; }, async list() { return saved ? [saved, { ...saved, id: 'bbbbbbbb-1111-4111-8111-111111111111' }] : []; }, async summary() { return { unread_count: 1, category: null }; }, async read() { return true; }, async readAll() { return true; } };
   const store = { async ready() {}, async transaction(user, context, work) { committed = false; const value = await work(tx); committed = true; return value; } };
   return { handlers: createAlertsHandlers(store, { cursorKey: key, changed(user) { assert.equal(committed, true); signals.push(user); } }), signals, tx };
 }
@@ -53,4 +53,10 @@ test('valid legacy HMAC cursors remain readable after the compact cursor upgrade
   await f.handlers.execute('list', { user_id: 'u', cursor: token });
   assert.deepEqual(received, position);
   await assert.rejects(f.handlers.execute('list', { user_id: 'other', cursor: token }), { code: 'INVALID_CURSOR' });
+});
+test('Elements notification envelope resolves local type and repeats safely', async () => {
+  const f = fixture(); const event = { event_id: 'aaaaaaaa-1111-4111-8111-111111111111', event_version: 1, event_type: 'element.completed', occurred_at: '2026-10-15T20:00:00.000Z', owner_id: 'u', actor: { kind: 'agent', id: 'agent-1' }, aggregate: { kind: 'element', id: 'bbbbbbbb-1111-4111-8111-111111111111' }, data: {}, notification: { type_code: 'completed', title: 'Завершено', text: 'Ход принят', data: {} } };
+  assert.deepEqual(await f.handlers.ingestElementsEvent(event), { inserted: true, user_id: 'u' });
+  assert.deepEqual(await f.handlers.ingestElementsEvent(event), { inserted: false, user_id: 'u' });
+  assert.deepEqual(f.signals, ['u']);
 });

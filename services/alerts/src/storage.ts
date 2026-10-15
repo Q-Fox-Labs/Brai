@@ -33,6 +33,9 @@ function port(client: PoolClient, context: OperationContext, userId: string | nu
         VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) ON CONFLICT(service_id,id) DO NOTHING RETURNING id`,
       [input.id, input.service_id, input.type_id, input.scope_type, input.scope_id, input.title, input.text, JSON.stringify(input.data), input.occurred_at])).rowCount;
     },
+    async typeByCode(code) {
+      return (await query(`SELECT id FROM alerts.sys_types WHERE code=$1`, [code])).rows[0]?.id ?? null;
+    },
     async get(serviceId, id) {
       return (await query(`SELECT ${fields} ${joins} WHERE n.service_id=$1 AND n.id=$2`, [serviceId, id])).rows[0] as Notification ?? null;
     },

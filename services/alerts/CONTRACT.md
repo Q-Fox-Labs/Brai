@@ -91,6 +91,8 @@ Summary: `{unread_count,category}`. `category` — `null` при нуле либ
 
 ## Долговечный вход и сигналы
 
+При `ALERTS_ELEMENTS_EVENTS_ENABLED=true` сервис дополнительно подключает durable consumer `alerts_elements_events` к stream `BRAI_ELEMENTS_EVENTS_V1`. Он обрабатывает только envelope с полем `notification`, разрешает `notification.type_code` в собственном справочнике и ACK-ает сообщение после COMMIT. События без notification безопасно подтверждаются без записи.
+
 `brai.alerts.v1.ingest` — JetStream `BRAI_ALERTS_INGEST_V1`, file storage, WorkQueue retention, без expiry, лимит 256 MiB, `DiscardNew`, максимум сообщения 65 536 байт. Producer сохраняет ID/содержимое до успешного PubAck и при отказе заполненного stream повторяет позже. PubAck подтверждает хранение у брокера, а не COMMIT alerts. Потеря неотправленного события между чужой БД и брокером остаётся ответственностью источника; новый outbox не введён.
 
 Durable `alerts_ingest`: pull, filter ingest, explicit ACK, deliver all, `ack_wait=30s`, `max_deliver=-1`, `max_ack_pending=8`. Runtime запрашивает максимум одно сообщение за раз и проверяет готовую конфигурацию, не создаёт stream или consumer. ACK следует только после COMMIT. При отказе БД, BUSY, deadline или неожиданной внутренней ошибке — NAK с задержкой 1,2,4,8,16,30 секунд, затем до 30 секунд без конечного числа попыток. При malformed input, конфликте ID или неизвестном типе — TERM без повторов. Это удаляет terminal сообщение из work queue; отдельная DLQ не нужна. Безопасный журнал содержит код, номер доставки, stream sequence и длительность, не содержимое. Поток не гарантирует строгий глобальный порядок, а recorded_at назначается фактической записью.

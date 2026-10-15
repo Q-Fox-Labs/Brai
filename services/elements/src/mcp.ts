@@ -1,0 +1,64 @@
+// ABOUTME: Предоставляет MCP-инструменты Elements через Streamable HTTP.
+// ABOUTME: Владелец MCP фиксируется конфигурацией и не берётся из аргументов модели.
+import { createServer, type Server as HttpServer } from "node:http";
+import { randomUUID } from "node:crypto";
+import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, McpError, ErrorCode, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import type { Config } from "./config.js";
+import type { ElementsHandlers } from "./domain.js";
+import type { LoadGate } from "./load.js";
+
+export const toolNames = ["elements_structure_create", "elements_element_create", "elements_element_revise", "elements_move_create", "elements_move_link", "elements_element_activate", "elements_graph_get", "elements_timeline_get", "elements_moves_available", "elements_move_claim", "elements_move_complete", "elements_move_fail"] as const;
+type ToolName = typeof toolNames[number];
+const operation: Record<ToolName, keyof ElementsHandlers> = { elements_structure_create: "structureCreate", elements_element_create: "elementCreate", elements_element_revise: "elementRevise", elements_move_create: "moveCreate", elements_move_link: "moveLink", elements_element_activate: "elementActivate", elements_graph_get: "graphGet", elements_timeline_get: "timelineGet", elements_moves_available: "movesAvailable", elements_move_claim: "moveClaim", elements_move_complete: "moveComplete", elements_move_fail: "moveFail" };
+const descriptions: Record<ToolName, string> = { elements_structure_create: "Создать ветку Elements, Moves и связей атомарно.", elements_element_create: "Создать Element.", elements_element_revise: "Создать неизменяемую ревизию Element.", elements_move_create: "Создать Action или Operation с JSON Schema результата.", elements_move_link: "Связать Move с Element.", elements_element_activate: "Проверить структуру и активировать Element.", elements_graph_get: "Получить карту Elements и Moves.", elements_timeline_get: "Получить ленту попыток выполнения.", elements_moves_available: "Получить доступные Moves.", elements_move_claim: "Начать попытку выполнения Move.", elements_move_complete: "Принять и проверить результат попытки.", elements_move_fail: "Завершить попытку с ошибкой для повторного запуска." };
+const uuid = { type: "string", format: "uuid" };
+export const toolInputs: Record<ToolName, Tool["inputSchema"]> = {
+  elements_structure_create: { type: "object", additionalProperties: false, properties: { elements: { type: "array", items: { type: "object" } }, moves: { type: "array", items: { type: "object" } }, links: { type: "array", items: { type: "object" } } }, required: ["elements", "moves", "links"] },
+  elements_element_create: { type: "object", additionalProperties: false, properties: { id: uuid, kind: { enum: ["level", "mission", "quest", "goal", "task"] }, parent_id: { anyOf: [uuid, { type: "null" }] }, title: { type: "string" }, description: { type: "string" }, result_spec: { type: "object" } }, required: ["kind", "title", "description", "result_spec"] },
+  elements_element_revise: { type: "object", additionalProperties: false, properties: { element_id: uuid, title: { type: "string" }, description: { type: "string" }, result_spec: { type: "object" } }, required: ["element_id", "title", "description", "result_spec"] },
+  elements_move_create: { type: "object", additionalProperties: false, properties: { id: uuid, kind: { enum: ["action", "operation"] }, title: { type: "string" }, instructions: { type: "string" }, result_schema: { type: "object" } }, required: ["kind", "title", "instructions", "result_schema"] },
+  elements_move_link: { type: "object", additionalProperties: false, properties: { move_id: uuid, element_id: uuid, revision_id: uuid, role: { enum: ["launch", "input", "output", "accept"] }, required: { type: "boolean" }, position: { type: "integer" } }, required: ["move_id", "element_id", "role"] },
+  elements_element_activate: { type: "object", additionalProperties: false, properties: { element_id: uuid }, required: ["element_id"] },
+  elements_graph_get: { type: "object", additionalProperties: false, properties: { root_id: uuid, depth: { type: "integer", minimum: 0, maximum: 20 } } },
+  elements_timeline_get: { type: "object", additionalProperties: false, properties: { element_id: uuid, limit: { type: "integer", minimum: 1, maximum: 100 }, cursor: { type: "string" } } },
+  elements_moves_available: { type: "object", additionalProperties: false, properties: { element_id: uuid, limit: { type: "integer", minimum: 1, maximum: 100 } } },
+  elements_move_claim: { type: "object", additionalProperties: false, properties: { move_id: uuid, attempt_id: uuid, idempotency_key: { type: "string" }, executor_kind: { enum: ["human", "agent", "system"] }, executor_id: { type: ["string", "null"] }, input: { type: "object" } }, required: ["move_id", "idempotency_key", "executor_kind", "input"] },
+  elements_move_complete: { type: "object", additionalProperties: false, properties: { attempt_id: uuid, result: {} }, required: ["attempt_id", "result"] },
+  elements_move_fail: { type: "object", additionalProperties: false, properties: { attempt_id: uuid, error_code: { type: "string" } }, required: ["attempt_id", "error_code"] },
+};
+function safe(error: unknown): { code: string; message: string } { const code = error instanceof Error ? error.message : "INTERNAL"; return { code: /^[A-Z_]+$/.test(code) ? code : "INTERNAL", message: /^[A-Z_]+$/.test(code) ? code : "INTERNAL" }; }
+interface Session { server: McpServer; transport: StreamableHTTPServerTransport; touched: number }
+export interface McpRuntime { http: HttpServer; url: string; close(): Promise<void> }
+/** Запускает MCP listener с короткими сессиями и безопасными ответами ошибок. */
+export async function startMcp(config: Config, handlers: ElementsHandlers, gate: LoadGate): Promise<McpRuntime> {
+  const sessions = new Map<string, Session>(); const pending = new Set<Session>();
+  function make(): Session {
+    const server = new McpServer({ name: "brai-elements", version: "1.0.0" }, { capabilities: { tools: { listChanged: false } } });
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID(), enableJsonResponse: true, enableDnsRebindingProtection: true, allowedHosts: config.mcpAllowedHosts, allowedOrigins: config.mcpAllowedOrigins });
+    const session = { server, transport, touched: Date.now() }; pending.add(session);
+    transport.onclose = () => { if (transport.sessionId) sessions.delete(transport.sessionId); pending.delete(session); };
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolNames.map(name => ({ name, description: descriptions[name], inputSchema: toolInputs[name] })) }));
+    server.setRequestHandler(CallToolRequestSchema, async request => {
+      const name = request.params.name as ToolName; if (!toolNames.includes(name)) throw new McpError(ErrorCode.InvalidParams, "Unknown tool");
+      const args = { ...(request.params.arguments ?? {}), user_id: config.mcpOwnerId };
+      try { const fn = handlers[operation[name]] as unknown as (value: unknown, context?: any) => Promise<unknown>; const value = await gate.run(context => fn(args, context), { actorId: config.mcpOwnerId }); return { content: [], structuredContent: value }; }
+      catch (error) { const failure = safe(error); return { isError: true, content: [{ type: "text", text: JSON.stringify({ code: failure.code, message: failure.message, retryable: ["BUSY", "DATABASE_UNAVAILABLE", "DEADLINE_EXCEEDED"].includes(failure.code) }) }] }; }
+    });
+    return session;
+  }
+  const http = createServer(async (req, res) => {
+    if (req.url !== "/mcp") { res.writeHead(404).end(); return; }
+    const id = typeof req.headers["mcp-session-id"] === "string" ? req.headers["mcp-session-id"] : undefined;
+    let session = id ? sessions.get(id) : undefined;
+    if (!session && req.method === "POST") { session = make(); await session.transport.handleRequest(req, res); if (session.transport.sessionId) { pending.delete(session); sessions.set(session.transport.sessionId, session); } return; }
+    if (!session) { res.writeHead(404).end(); return; }
+    session.touched = Date.now(); await session.transport.handleRequest(req, res);
+  });
+  await new Promise<void>((resolve, reject) => { http.once("error", reject); http.listen(config.mcpPort, config.mcpHost, () => { http.removeListener("error", reject); resolve(); }); });
+  const address = http.address(); if (!address || typeof address === "string") throw new Error("MCP_LISTEN_FAILED");
+  const urlHost = config.mcpHost.includes(":") && !config.mcpHost.startsWith("[") ? `[${config.mcpHost}]` : config.mcpHost;
+  const cleanup = setInterval(() => { for (const [id, session] of sessions) if (Date.now() - session.touched > 30 * 60_000) { void session.transport.close(); sessions.delete(id); } }, 60_000); cleanup.unref();
+  return { http, url: `http://${urlHost}:${address.port}/mcp`, async close() { clearInterval(cleanup); for (const session of sessions.values()) await session.transport.close().catch(() => {}); await new Promise<void>(resolve => http.close(() => resolve())); } };
+}
