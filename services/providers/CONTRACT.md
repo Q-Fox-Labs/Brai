@@ -73,9 +73,9 @@ queue brai_providers, стандартные PING/INFO/STATS. PING не пров
 Существующими зависимостями: `npm test --prefix services/providers`.
 Для real NATS задайте PROVIDERS_TEST_NATS_URL собственного изолированного broker;
 без него NATS-тест явно skipped. Контроль HTTP/egress бесплатный, не заменяет
-stock LiteLLM и настоящий Jev. Последние проверенные18 тестов включали real NATS.
-Живая приёмка ещё не выполнена: ready-image pull упал из-за заполненного диска.
-Нельзя объявлять этот v0 принятым для live по одним mock-тестам.
+stock LiteLLM и настоящий Jev. Начальные18 тестов включали real NATS.
+Живая приёмка v0 выполнена 2026-10-18 через authenticated stock1.104.2 и
+TypeSafe jev-1.13.0; requested/actual model совпали. Health модели не вызывает.
 
 [LiteLLM1.104.2 source](https://github.com/BerriAI/litellm/tree/v1.104.2),
 [TypeSafe API](https://docs.typesafe.ai/api), [цена](https://docs.typesafe.ai/models).
@@ -179,7 +179,10 @@ ready log явно содержит protocols=[v0], v1 endpoints не регис
 С PROVIDERS_DATABASE_URL запускаются v0+v1 после lock/recover. Остальной v0
 путь и private egress неизменны.
 
-Controlled HTTP/PG/NATS проверки подтверждают протокол и lifecycle. Фактическая
-работа stock LiteLLM1.104.2 + реального Jev ещё не принята. Первичная попытка
-развёртывания была остановлена нехваткой места. Отдельная live-приёмка после
-устранения этой причины обязательна и не заменяется controlled tests.
+Controlled HTTP/PG/NATS проверки подтверждают протокол и lifecycle.
+Живая приёмка v1 выполнена 2026-10-18: один NATS invoke через собственный PG
+journal, authenticated stock LiteLLM1.104.2 и одноразовый egress вернул
+реальный jev-1.13.0. Noul/choice/score и object state прошли без потери
+metadata; dispatch зафиксирован до model port. Get и точный invoke replay
+вернули тот же сохранённый итог при одном model call. Usage363input/61output.
+Иные capabilities этой приёмкой не подтверждаются.
