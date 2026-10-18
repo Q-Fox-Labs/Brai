@@ -38,7 +38,7 @@ export function readLayout(raw: string | null, defaults: Record<string, Point>):
  } catch { return null; }
 }
 
-/** Вычисляет место Хода по предшественникам; независимые ветви могут иметь одинаковый номер. */
+/** Сортирует по предшественникам и считает номер только среди Ходов владельца. */
 export function sequenceMoves(moves: Move[]): (Move & { order: number })[] {
  const byId = new Map(moves.map(move => [move.id, move]));
  const depths = new Map<string, number>();
@@ -51,5 +51,17 @@ export function sequenceMoves(moves: Move[]): (Move & { order: number })[] {
   depths.set(id, value);
   return value;
  }
- return moves.map(move => ({ ...move, order: depth(move.id) })).sort((a, b) => a.order - b.order);
+ function localOrder(move: Move): number {
+  let order = 1, previous = move.previousId;
+  const seen = new Set([move.id]);
+  while (previous && !seen.has(previous)) {
+   seen.add(previous);
+   const ancestor = byId.get(previous);
+   if (!ancestor) break;
+   if (ancestor.ownerId === move.ownerId) order += 1;
+   previous = ancestor.previousId;
+  }
+  return order;
+ }
+ return moves.map(move => ({ ...move, order: localOrder(move) })).sort((a, b) => depth(a.id) - depth(b.id));
 }

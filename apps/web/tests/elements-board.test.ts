@@ -43,11 +43,17 @@ test("layout accepts new identities and a parentless element, ignores stale IDs 
  assert.ok(fitted.y + 20 * fitted.zoom >= 0);
 });
 
-test("move positions follow predecessor links rather than storage order", () => {
+test("move numbers are local to each owner and follow predecessor links rather than storage order", () => {
  const shuffled = [...data.moves].reverse();
  const sequenced = sequenceMoves(shuffled);
  assert.deepEqual(sequenced.map(move => move.id), data.moves.map(move => move.id));
- assert.deepEqual(sequenced.map(move => move.order), Array.from({ length: 23 }, (_, index) => index + 1));
+ for (const [owner, count] of Object.entries({ G1: 10, T1: 3, T2: 5, T3: 5 })) {
+  assert.deepEqual(sequenced.filter(move => move.ownerId === owner).map(move => move.order), Array.from({ length: count }, (_, index) => index + 1));
+ }
+ assert.equal(sequenced.find(move => move.id === "G1-M6")!.order, 6);
+ assert.equal(sequenced.find(move => move.id === "G1-M6")!.previousId, "T2-F2");
+ assert.equal(sequenced.find(move => move.id === "T2-F2")!.order, 5);
+ assert.ok(data.moves.every(move => !("order" in move)));
  const branches = sequenceMoves([{ ...data.moves[0], id: "root", previousId: null }, { ...data.moves[0], id: "left", previousId: "root" }, { ...data.moves[0], id: "right", previousId: "root" }]);
  assert.deepEqual(branches.map(move => move.order), [1, 2, 2]);
 });

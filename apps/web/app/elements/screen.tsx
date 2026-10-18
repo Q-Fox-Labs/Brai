@@ -3,9 +3,9 @@
 // ABOUTME: Только раскладка сохраняется в браузере; реальные действия и API не вызываются.
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Check, Grip, Maximize, Minus, Plus, RotateCcw, X } from "lucide-react";
+import { Check, Grip, Maximize, X } from "lucide-react";
 import demo from "./demo.json";
-import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, readLayout, sequenceMoves, type BoardData, type Layout, type Move, type Point } from "./model";
+import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, readLayout, sequenceMoves, type BoardData, type Layout, type Point } from "./model";
 import "./elements.css";
 const data: BoardData = demo;
 const defaults = initialPositions(data.elements);
@@ -17,8 +17,7 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
  const positionsDefault = dataset === data ? defaults : initialPositions(dataset.elements);
  const storageKey = `brai.elements.demo-layout.v1:${userId}`;
  const [layout, setLayout] = useState<Layout>({ positions: positionsDefault, view: { x: 0, y: 0, zoom: 0.5 } });
- const [ready, setReady] = useState(false), [notice, setNotice] = useState(""), [selected, setSelected] = useState<Move | null>(null);
- const [hierarchy, setHierarchy] = useState(true), [results, setResults] = useState(true);
+ const [ready, setReady] = useState(false), [selected, setSelected] = useState<(typeof orderedMoves)[number] | null>(null);
  const drag = useRef<{ pointer: number; start: Point; origin: Point; elementId?: string } | null>(null);
  const [dragging, setDragging] = useState(false);
  const listTouch = useRef<{ y: number; top: number } | null>(null);
@@ -30,7 +29,7 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
  useEffect(() => {
   const bounds = canvas.current?.getBoundingClientRect();
   let saved: Layout | null = null;
-  try { saved = readLayout(localStorage.getItem(storageKey), positionsDefault); } catch { setNotice("Хранение недоступно. Раскладка сохранится до закрытия страницы."); }
+  try { saved = readLayout(localStorage.getItem(storageKey), positionsDefault); } catch { /* Раскладка остаётся в памяти, если браузер запретил хранилище. */ }
   setLayout(saved ?? { positions: positionsDefault, view: fitView(positionsDefault, bounds?.width ?? 900, bounds?.height ?? 650) });
   setReady(true);
   // AIDEV-NOTE: Account размонтирует экран при смене раздела; восстановление относится к текущему набору.
@@ -39,7 +38,7 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
   if (!ready) return;
   const timer = setTimeout(() => {
    try { localStorage.setItem(storageKey, JSON.stringify({ version: 1, ...layout })); }
-   catch { setNotice("Не удалось сохранить раскладку. Она доступна до закрытия страницы."); }
+   catch { /* Раскладка остаётся в памяти, если браузер запретил хранилище. */ }
   }, 180);
   return () => clearTimeout(timer);
  }, [layout, ready, storageKey]);
@@ -82,15 +81,11 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
   setLayout(old => d.elementId ? { ...old, positions: { ...old.positions, [d.elementId]: next } } : { ...old, view: { ...old.view, ...next } });
  }
  function stopDrag() { drag.current = null; setDragging(false); }
- function reset() {
-  const bounds = canvas.current?.getBoundingClientRect(); if (!bounds) return;
-  setLayout({ positions: positionsDefault, view: fitView(positionsDefault, bounds.width, bounds.height) });
-  setNotice("Исходная раскладка восстановлена.");
- }
  // Передача к следующей Задаче берётся из её входов. Накопленные транзитивные входы не дублируют линию.
+ const chainPositions = new Map(orderedMoves.map((move, index) => [move.id, index]));
  const transfers = dataset.elements.flatMap(target => {
   const sources = dataset.elements.filter(source => source.id !== target.id && source.output.some(id => target.input.includes(id)));
-  const latest = sources.sort((a, b) => Math.max(...orderedMoves.filter(m => m.targetId === b.id).map(m => m.order)) - Math.max(...orderedMoves.filter(m => m.targetId === a.id).map(m => m.order)))[0];
+  const latest = sources.sort((a, b) => Math.max(...orderedMoves.filter(m => m.targetId === b.id).map(m => chainPositions.get(m.id)!)) - Math.max(...orderedMoves.filter(m => m.targetId === a.id).map(m => chainPositions.get(m.id)!)))[0];
   return latest ? [{ from: latest.id, to: target.id, label: latest.output.filter(id => target.input.includes(id)).join(", "), returnToParent: false }] : [];
  });
  // Приёмка принадлежит родителю. Выход дочернего Элемента создаёт именно этот Ход.
@@ -100,20 +95,12 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
   if (acceptance) transfers.push({ from: source.id, to: source.parentId, label: `${source.output.join(", ")} · ${acceptance.id}`, returnToParent: true });
  }
  const links = [
-  ...(hierarchy ? dataset.elements.filter(e => e.parentId && layout.positions[e.parentId]).map(e => ({ from: e.parentId!, to: e.id, label: "Вложенность", type: "hierarchy", returnToParent: false })) : []),
-  ...(results ? transfers.map(t => ({ ...t, type: "result" })) : []),
+  ...dataset.elements.filter(e => e.parentId && layout.positions[e.parentId]).map(e => ({ from: e.parentId!, to: e.id, label: "Вложенность", type: "hierarchy", returnToParent: false })),
+  ...transfers.map(t => ({ ...t, type: "result" })),
  ];
- return <main className="elements-screen">
-  <header className="elements-heading"><div><h1>Элементы</h1><p>Карта Цели, Задач и их Ходов</p></div><span className="elements-demo">Демонстрация</span></header>
-  <div className="elements-context"><span><Check size={15} /> Исторический конечный снимок</span><span>{dataset.elements.length} Элемента · {dataset.moves.length} Хода · {dataset.resources.length} ресурсов. Все Ходы выполнены.</span><span>Это симуляция. Живое исполнение не подключено.</span></div>
-  <div className="elements-toolbar" aria-label="Управление картой">
-   <button type="button" onClick={showAll}><Maximize size={16} /> Вся карта</button>
-   <select aria-label="Приблизить Элемент" value="" onChange={event => focusElement(event.target.value)}><option value="" disabled>К Элементу…</option>{dataset.elements.map(e => <option key={e.id} value={e.id}>{e.id} · {e.title}</option>)}</select>
-   <div className="elements-zoom"><button type="button" aria-label="Уменьшить масштаб" onClick={() => zoomAt(1 / 1.2)}><Minus size={16} /></button><output aria-label="Масштаб">{Math.round(layout.view.zoom * 100)}%</output><button type="button" aria-label="Увеличить масштаб" onClick={() => zoomAt(1.2)}><Plus size={16} /></button></div>
-   <button type="button" className="elements-reset" onClick={reset}><RotateCcw size={15} /><span>Сбросить раскладку</span></button>
-  </div>
-  <div className="elements-legend"><label><input type="checkbox" checked={hierarchy} onChange={event => setHierarchy(event.target.checked)} /><i className="elements-line-key hierarchy" />Вложенность</label><label><input type="checkbox" checked={results} onChange={event => setResults(event.target.checked)} /><i className="elements-line-key result" />Передача результата</label><span>Стрелка указывает получателя. Нажмите Ход для подробностей.</span></div>
-  <div ref={canvas} className={"elements-canvas" + (dragging ? " is-dragging" : "")} tabIndex={0} role="region" aria-label="Полотно Элементов" aria-describedby="elements-help"
+ return <main className="elements-screen" aria-label="Карта Элементов">
+  <button type="button" className="elements-fit" aria-label="Вся карта" title="Вся карта" onClick={showAll}><Maximize size={18} /></button>
+  <div ref={canvas} className={"elements-canvas" + (dragging ? " is-dragging" : "")} tabIndex={0} role="region" aria-label="Полотно Элементов"
    onPointerDown={event => startDrag(event)} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={stopDrag}
    onKeyDown={event => { if (event.target !== event.currentTarget) return; const shifts: Record<string, Point> = { ArrowLeft: { x: 60, y: 0 }, ArrowRight: { x: -60, y: 0 }, ArrowUp: { x: 0, y: 60 }, ArrowDown: { x: 0, y: -60 } }; const delta = shifts[event.key]; if (delta) { event.preventDefault(); setLayout(old => ({ ...old, view: { ...old.view, x: old.view.x + delta.x, y: old.view.y + delta.y } })); } if (event.key === "+" || event.key === "=") zoomAt(1.2); if (event.key === "-") zoomAt(1 / 1.2); }}>
    {!dataset.elements.length && <p className="elements-empty">На карте пока нет Элементов.</p>}
@@ -145,11 +132,10 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
     })}
    </div>
   </div>
-  <footer className="elements-help" id="elements-help"><span>Тяните фон для перемещения. Колесо или + / − меняют масштаб. Тяните карточку за верхнюю строку.</span><span role="status">{notice || "Раскладка сохраняется в этом браузере."}</span></footer>
   <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open) setSelected(null); }}><Dialog.Portal><Dialog.Overlay className="elements-detail-overlay" /><Dialog.Content className="elements-detail" aria-describedby="elements-detail-description">
    <Dialog.Close className="elements-detail-close" aria-label="Закрыть подробности"><X size={20} /></Dialog.Close>
    <Dialog.Title>{selected?.title}</Dialog.Title><Dialog.Description id="elements-detail-description">Исторический Ход {selected?.id}. Выполнен в симуляции.</Dialog.Description>
-   {selected && <><dl><dt>Тип</dt><dd>{selected.kind === "operation" ? "Операция" : "Экшен"}</dd><dt>Исполнитель</dt><dd>{selected.executor === "agent" ? "Агент" : "Игрок"}</dd><dt>Владелец Хода</dt><dd>{selected.ownerId} · {dataset.elements.find(e => e.id === selected.ownerId)?.title}</dd><dt>Целевой Элемент</dt><dd>{selected.targetId} · {dataset.elements.find(e => e.id === selected.targetId)?.title}</dd><dt>Предшественник</dt><dd>{selected.previousId ? <button type="button" className="elements-text-link" onClick={() => setSelected(orderedMoves.find(m => m.id === selected.previousId) ?? null)}>{selected.previousId} · {orderedMoves.find(m => m.id === selected.previousId)?.title}</button> : "Нет — начало цепочки"}</dd><dt>Попытка</dt><dd>{selected.attemptId} · Успешна</dd></dl>
+   {selected && <><dl><dt>Номер Хода в Элементе</dt><dd>{selected.order}</dd><dt>Тип</dt><dd>{selected.kind === "operation" ? "Операция" : "Экшен"}</dd><dt>Исполнитель</dt><dd>{selected.executor === "agent" ? "Агент" : "Игрок"}</dd><dt>Владелец Хода</dt><dd>{selected.ownerId} · {dataset.elements.find(e => e.id === selected.ownerId)?.title}</dd><dt>Целевой Элемент</dt><dd>{selected.targetId} · {dataset.elements.find(e => e.id === selected.targetId)?.title}</dd><dt>Предшественник</dt><dd>{selected.previousId ? <button type="button" className="elements-text-link" onClick={() => setSelected(orderedMoves.find(m => m.id === selected.previousId) ?? null)}>{selected.previousId} · {orderedMoves.find(m => m.id === selected.previousId)?.title}</button> : "Нет — начало цепочки"}</dd><dt>Попытка</dt><dd>{selected.attemptId} · Успешна</dd></dl>
     <p className="elements-detail-note">Подробная инструкция в исходном снимке не приведена. Просмотр Хода не запускает действий.</p>
     {(["output", "input"] as const).map(role => <section key={role} className="elements-resources"><h3>{role === "input" ? "Входные ресурсы" : "Выходные ресурсы"} <span>{selected[role].length}</span></h3>{role === "input" && <p>Все накопленные ссылки предшественника.</p>}{selected[role].map(id => { const resource = dataset.resources.find(r => r.id === id); if (!resource) return null; const creator = orderedMoves.find(m => m.attemptId === resource.attemptId); return <details key={id}><summary><span>{id}</span> {resource.title}</summary><p>{resource.content}</p><p className="elements-resource-origin">Происхождение: {creator ? <button type="button" className="elements-text-link" onClick={() => setSelected(creator)}>{creator.id} · {resource.attemptId}</button> : "Внешнее поручение Игрока"}</p></details>; })}</section>)}
    </>}
