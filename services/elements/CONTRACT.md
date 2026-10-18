@@ -38,3 +38,11 @@
 Пределы транспорта: запрос 65536 bytes, ответ 524288 bytes; входная очередь 64, активных запросов 8, deadline 10s. Ошибки: INVALID_ARGUMENT (400), NOT_FOUND (404 для отсутствующей и чужой записи), FORBIDDEN (403), CONFLICT/INVALID_STATE (409), BUSY/DATABASE_UNAVAILABLE (503), DEADLINE_EXCEEDED (504), INTERNAL (500). Слишком большая карта возвращает ошибку; потоковый обход не реализован.
 
 CLI `dist/import-snapshot.js <private-json>` принимает снимок и владельца из защищённой среды. Частный набор не входит в публичный репозиторий. Импорт атомарен; повтор не перезаписывает существующие записи, частичный или чужой набор отклоняется. Событие фиксирует именно импорт реконструкции сегодня. Исторические даты, реальные сайты, телефон и секреты не восстанавливаются догадкой.
+
+## Ручные статусы DEV
+
+`brai.elements.v1.command.dev-status` принимает `{user_id,kind,id,status,request_id}`. kind — element или move; id и request_id — UUID. Возможность включена только при одновременных BRAI_ENVIRONMENT=dev и ELEMENTS_DEV_STATUS_ENABLED=true. Во всех остальных конфигурациях команда возвращает FORBIDDEN. Владелец проверяется по записи; web подставляет его из сессии и требует правильный Origin.
+
+Элемент допускает draft, active, completed, cancelled. Ход допускает planned, claimed, succeeded, cancelled. Команда меняет только status одной записи. Она не каскадирует отмену, не создаёт успешных попыток, ресурсов, решений или outcome. Обычные команды исполнения сохраняют прежние проверки. Ручной статус служит тестированию и сам по себе не подтверждает работу.
+
+Смена атомарно записывает outbox event element.status_overridden или move.status_overridden с прежним/новым статусом, human actor и manual=true/environment=dev. UUID request_id является UUID события; точный повтор не создаёт второго события, изменённый запрос с тем же UUID получает CONFLICT. History принимает аудит существующим durable путём. Ответ содержит id,status,event_id,changed.

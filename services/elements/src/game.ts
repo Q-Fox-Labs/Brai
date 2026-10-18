@@ -17,9 +17,9 @@ async function one(c: PoolClient, owner: string, table: string, id: any): Promis
  const r = (await c.query(`SELECT * FROM game_core.${table} WHERE owner_id=$1 AND id=$2`, [owner,uuid(id)])).rows[0];
  return r ?? fail('NOT_FOUND');
 }
-async function event(c: PoolClient, owner: string, type: string, id: string, data: Value) {
- const eventId=randomUUID();
- const payload={event_id:eventId,event_version:1,event_type:type,occurred_at:new Date().toISOString(),owner_id:owner,actor:{kind:'system',id:null},aggregate:{kind:'move',id},data:{...data,history_category_code:'execution',history_type_code:'execute'}};
+async function event(c: PoolClient, owner: string, type: string, id: string, data: Value, audit?: {id:string;kind:"element"|"move";actor:string}) {
+ const eventId=audit?.id??randomUUID();
+ const payload={event_id:eventId,event_version:1,event_type:type,occurred_at:new Date().toISOString(),owner_id:owner,actor:{kind:audit?'human':'system',id:audit?.actor??null},aggregate:{kind:audit?.kind??'move',id},data:{...data,history_category_code:'execution',history_type_code:'execute'}};
  await c.query('INSERT INTO game_core.outbox(id,owner_id,event_type,subject,payload) VALUES($1,$2,$3,$4,$5)',[eventId,owner,type,`brai.elements.v1.events.${type}`,payload]);
 }
 async function inputs(c: PoolClient, owner: string, move: Value): Promise<string[]> {
@@ -100,7 +100,7 @@ async function createMove(c:PoolClient,owner:string,v:Value) {
  return {id};
 }
 /** Собирает совместимые транспортные обработчики; все новые записи принадлежат game_core. */
-export function createGameHandlers(pool:Pool, legacy:ElementsStore, verifyArtifact?: (owner:string,id:string)=>Promise<void>):ElementsHandlers {
+export function createGameHandlers(pool:Pool, legacy:ElementsStore, verifyArtifact?: (owner:string,id:string)=>Promise<void>, devStatusEnabled=false):ElementsHandlers {
  async function run(operation:string,value:unknown,context?:OperationContext):Promise<any> {
   const v=object(value), owner=text(v.user_id,255);
   if(Buffer.byteLength(json(v))>262144) return fail('INVALID_ARGUMENT');
@@ -115,6 +115,24 @@ export function createGameHandlers(pool:Pool, legacy:ElementsStore, verifyArtifa
    else if(operation==='element') {const g=await graph(c,owner);result=g.elements.find((x:Value)=>x.id===v.element_id)??fail('NOT_FOUND');}
    else if(operation==='timeline') {const q=await c.query('SELECT a.* FROM game_core.move_attempts a JOIN game_core.moves m ON m.id=a.move_id WHERE a.owner_id=$1 AND ($2::uuid IS NULL OR m.element_id=$2) ORDER BY a.recorded_at DESC LIMIT $3',[owner,v.element_id??null,Math.min(100,v.limit??50)]);result={items:q.rows,next_cursor:null};}
    else if(operation==='available') {const all=(await c.query("SELECT * FROM game_core.moves WHERE owner_id=$1 AND status='planned' AND ($2::uuid IS NULL OR element_id=$2)",[owner,v.element_id??null])).rows;const items=[];for(const m of all){try{await ready(c,owner,m);items.push(m);}catch(e){if(!(e instanceof ElementsFault))throw e;}}result={items};}
+   else if(operation==='devStatus') {
+    if(!devStatusEnabled)return fail('FORBIDDEN');
+    if(!['element','move'].includes(v.kind))return fail('INVALID_ARGUMENT');
+    const allowed=v.kind==='element'?['draft','active','completed','cancelled']:['planned','claimed','succeeded','cancelled'];
+    if(!allowed.includes(v.status))return fail('INVALID_ARGUMENT');
+    const id=uuid(v.id),requestId=uuid(v.request_id),type=v.kind+'.status_overridden';
+    const row=await one(c,owner,v.kind==='element'?'elements':'moves',id);
+    const prior=(await c.query('SELECT payload FROM game_core.outbox WHERE owner_id=$1 AND id=$2',[owner,requestId])).rows[0]?.payload;
+    if(prior){
+     if(prior.event_type!==type||prior.aggregate.kind!==v.kind||prior.aggregate.id!==id||prior.data.status!==v.status)return fail('CONFLICT');
+     result={id,status:prior.data.status,event_id:requestId,changed:prior.data.previous_status!==prior.data.status};
+    }else{
+     // AIDEV-NOTE: Ручной DEV статус не создаёт свидетельств исполнения и не меняет ресурсы, попытки или outcome.
+     await c.query(`UPDATE game_core.${v.kind==='element'?'elements':'moves'} SET status=$1 WHERE owner_id=$2 AND id=$3`,[v.status,owner,id]);
+     await event(c,owner,type,id,{manual:true,environment:'dev',reason:'manual_test_status',previous_status:row.status,status:v.status,request_id:requestId},{id:requestId,kind:v.kind,actor:owner});
+     result={id,status:v.status,event_id:requestId,changed:row.status!==v.status};
+    }
+   }
    else if(operation==='create') {
     if(!Array.isArray(v.elements)||!Array.isArray(v.moves)) return fail('INVALID_ARGUMENT');
     const elements=[];for(const e of list(v.elements)) elements.push(await createElement(c,owner,e));
@@ -201,5 +219,5 @@ export function createGameHandlers(pool:Pool, legacy:ElementsStore, verifyArtifa
   finally{c.release();}
  }
  const handler=(op:string)=>(v:unknown,c?:OperationContext)=>run(op,v,c);
- return {ready:async()=>{await pool.query('SELECT 1 FROM game_core.elements LIMIT 0');},graphGet:handler('graph'),elementGet:handler('element'),timelineGet:handler('timeline'),movesAvailable:handler('available'),structureCreate:handler('create'),elementCreate:handler('elementCreate'),elementRevise:handler('revise'),moveCreate:handler('moveCreate'),moveLink:handler('link'),elementActivate:handler('activate'),moveClaim:handler('claim'),moveComplete:handler('complete'),moveFail:handler('fail')} as ElementsHandlers;
+ return {ready:async()=>{await pool.query('SELECT 1 FROM game_core.elements LIMIT 0');},graphGet:handler('graph'),elementGet:handler('element'),timelineGet:handler('timeline'),movesAvailable:handler('available'),structureCreate:handler('create'),elementCreate:handler('elementCreate'),elementRevise:handler('revise'),moveCreate:handler('moveCreate'),moveLink:handler('link'),elementActivate:handler('activate'),moveClaim:handler('claim'),moveComplete:handler('complete'),moveFail:handler('fail'),devStatus:handler('devStatus')} as ElementsHandlers;
 }

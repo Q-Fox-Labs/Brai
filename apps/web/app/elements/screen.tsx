@@ -1,27 +1,75 @@
 "use client";
-// ABOUTME: Показывает личную карту Элементов и подробности Ходов.
-// ABOUTME: Данные читаются через серверный API; браузер сохраняет только раскладку.
+// ABOUTME: Показывает карту Элементов и понятные подробности выбранной записи.
+// ABOUTME: Данные меняются через серверный API; браузер хранит только раскладку.
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Check, CircleDashed, Grip, Layers, ListOrdered, Maximize, Play, X } from "lucide-react";
-import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, readLayout, sequenceMoves, statusPresentation, type BoardData, type CardHeights, type Layout, type Move, type Point } from "./model";
+import { Check, CircleDashed, Grip, Layers, ListOrdered, Maximize, Play, X, Ban } from "lucide-react";
+import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, readLayout, sequenceMoves, statusPresentation, type BoardData, type CardHeights, type Layout, type Point } from "./model";
 import "./elements.css";
 
-function describe(value: unknown): string {
- if (typeof value === "string") return value;
- try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+const UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi;
+const SHORT_ID_PATTERN = /\b(?:V?[GT]\d+(?:-[MF]?\d+)?|M\d+|R\d+)\b/gi;
+function readable(value: string | undefined | null) {
+ return (value ?? "").replace(UUID_PATTERN, "").replace(SHORT_ID_PATTERN, "").replace(/\s{2,}/g, " ").trim();
 }
-
+function resourceText(value: string) {
+ try {
+  const parsed: unknown = JSON.parse(value);
+  if (parsed === null) return "";
+  if (typeof parsed === "string" || typeof parsed === "number" || typeof parsed === "boolean") return readable(String(parsed));
+  if (parsed && typeof parsed === "object") {
+   const parts: string[] = [];
+   const collect = (item: unknown) => {
+    if (typeof item === "string" || typeof item === "number" || typeof item === "boolean") parts.push(String(item));
+    else if (Array.isArray(item)) item.forEach(collect);
+    else if (item && typeof item === "object") Object.values(item).forEach(collect);
+   };
+   collect(parsed);
+   return readable(parts.join("\n"));
+  }
+ } catch { /* Обычный текст показываем без преобразования. */ }
+ return readable(value);
+}
+function conditionText(value: unknown) {
+ if (typeof value === "string") return readable(value);
+ if (!value || typeof value !== "object") return "";
+ const prerequisite = (value as { prerequisite?: unknown }).prerequisite;
+ return typeof prerequisite === "string" ? readable(prerequisite) : "";
+}
+/** Подставляет имена в старые текстовые ссылки, не меняя канонические записи. */
+function presentBoard(source: BoardData): BoardData {
+ const names = new Map<string, string>();
+ const alias = (value: unknown) => value && typeof value === "object" && typeof (value as { source_alias?: unknown }).source_alias === "string" ? (value as { source_alias: string }).source_alias : "";
+ for (const element of source.elements) {
+  const revisionAlias = alias(element.fields);
+  const elementAlias = revisionAlias.replace(/^V/, "").replace(/-\d+$/, "");
+  if (elementAlias) names.set(elementAlias, element.title);
+  if (revisionAlias) names.set(revisionAlias, `постановка «${element.title}»`);
+ }
+ for (const move of source.moves) if (alias(move.fields)) names.set(alias(move.fields), move.title);
+ for (const resource of source.resources) if (alias(resource.metadata)) names.set(alias(resource.metadata), resource.title);
+ const text = (value: string) => {
+  // Два прохода раскрывают название ресурса, которое само ссылается на Элемент.
+  for (let i = 0; i < 2; i++) value = value.replace(/\b(?:V?[GT]\d+(?:-[MF]?\d+)?|R\d+|S[12])\b/g, token => token === "S1" ? "первый сервис" : token === "S2" ? "второй сервис" : names.get(token) ?? "");
+  return readable(value);
+ };
+ return { ...source,
+  elements: source.elements.map(item => ({ ...item, title: text(item.title), description: text(item.description), instructions: text(item.instructions ?? "") })),
+  moves: source.moves.map(item => ({ ...item, title: text(item.title), instructions: text(item.instructions ?? ""), conditions: text(conditionText(item.conditions)) })),
+  resources: source.resources.map(item => ({ ...item, title: text(item.title), content: text(resourceText(item.content)) })) };
+}
 function elementLabel(kind: string) {
- return ({ level: "Уровень", mission: "Миссия", quest: "Квест", goal: "Цель", task: "Задача" } as Record<string, string>)[kind] ?? kind;
+ return ({ level: "Уровень", mission: "Миссия", quest: "Квест", goal: "Цель", task: "Задача" } as Record<string, string>)[kind] ?? "Элемент";
+}
+function moveKind(kind: string) { return kind === "operation" ? "Операция" : "Действие"; }
+function executorLabel(executor: string) { return executor === "agent" ? "Агент" : executor === "human" || executor === "player" ? "Игрок" : "Исполнитель"; }
+function statusOptions(kind: "element" | "move") {
+ return kind === "element"
+  ? [{ value: "draft", label: "Черновик" }, { value: "active", label: "В работе" }, { value: "completed", label: "Выполнена" }, { value: "cancelled", label: "Отменена" }]
+  : [{ value: "planned", label: "Запланирован" }, { value: "claimed", label: "В работе" }, { value: "succeeded", label: "Выполнен" }, { value: "cancelled", label: "Отменён" }];
 }
 
-function attemptsFor(move: Move, dataset: BoardData) {
- const attempts = move.attempts ?? [];
- return [...attempts, ...(dataset.attempts ?? []).filter(attempt => attempt.moveId === move.id && !attempts.some(item => item.id === attempt.id))];
-}
-
-/** Загружает личный граф; переданный набор оставляет компонент пригодным для проверки. */
+/** Загружает личную карту; переданный набор оставляет компонент пригодным для проверки. */
 export default function ElementsScreen({ userId, dataset }: { userId: string; dataset?: BoardData }) {
  const [loaded, setLoaded] = useState<BoardData | null>(dataset ?? null);
  const [error, setError] = useState("");
@@ -30,25 +78,45 @@ export default function ElementsScreen({ userId, dataset }: { userId: string; da
   if (dataset) { setLoaded(dataset); setError(""); return; }
   const controller = new AbortController(); setLoaded(null); setError("");
   void fetch("/api/elements", { cache: "no-store", signal: controller.signal }).then(async response => {
-   if (!response.ok) throw new Error(response.status === 401 ? "Сессия завершена. Войдите снова." : "Не удалось загрузить карту Элементов.");
+   if (!response.ok) throw new Error(response.status === 401 ? "Сессия завершена. Войдите снова." : "Не удалось загрузить карту.");
    return await response.json() as BoardData;
   }).then(value => { if (!controller.signal.aborted) setLoaded(value); }).catch(reason => {
-   if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Не удалось загрузить карту Элементов.");
+   if (!controller.signal.aborted) setError(reason instanceof Error && reason.message === "Сессия завершена. Войдите снова." ? reason.message : "Не удалось загрузить карту.");
   });
   return () => controller.abort();
  }, [dataset, retry, userId]);
  if (!dataset && error) return <main className="elements-screen" aria-label="Карта Элементов"><p className="elements-empty" role="alert">{error}</p><button type="button" onClick={() => setRetry(value => value + 1)}>Повторить</button></main>;
- if (!dataset && !loaded) return <main className="elements-screen" aria-label="Карта Элементов"><p className="elements-empty" role="status">Загружаем карту Элементов…</p></main>;
- return <ElementsBoard userId={userId} dataset={dataset ?? loaded!} />;
+ if (!loaded) return <main className="elements-screen" aria-label="Карта Элементов"><p className="elements-empty" role="status">Загружаем карту…</p></main>;
+ return <ElementsBoard userId={userId} dataset={presentBoard(loaded)} onDataChange={setLoaded} />;
 }
 
 function StatusLabel({ status, kind, className }: { status: string; kind: "element" | "move"; className: string }) {
- const { tone, label } = statusPresentation(status, kind), Icon = tone === "completed" ? Check : tone === "active" ? Play : CircleDashed;
+ const { tone, label } = statusPresentation(status, kind);
+ const Icon = tone === "completed" ? Check : tone === "active" ? Play : tone === "cancelled" ? Ban : CircleDashed;
  return <span className={className} data-state={tone}><Icon size={16} aria-hidden="true" /><span>{label}</span></span>;
 }
 
-/** Отображает BoardData на согласованном полотне с правой панелью подробностей. */
-function ElementsBoard({ userId, dataset }: { userId: string; dataset: BoardData }) {
+function ResourceDetails({ ids, label, dataset, moves, onSelectMove }: { ids: string[]; label: string; dataset: BoardData; moves: ReturnType<typeof sequenceMoves>; onSelectMove: (id: string) => void }) {
+ if (!ids.length) return null;
+ return <section className="elements-resources"><h3>{label}</h3>
+  {ids.map(id => {
+   const resource = dataset.resources.find(item => item.id === id);
+   if (!resource) return <p className="elements-resource-missing" key={id}>Связанный ресурс недоступен.</p>;
+   const creator = moves.find(move => move.attemptId === resource.attemptId);
+   return <details key={resource.id}>
+    <summary>{readable(resource.title) || "Ресурс"}</summary>
+    {resourceText(resource.content) && <p>{resourceText(resource.content)}</p>}
+    {creator && <p className="elements-resource-origin">Создан в ходе: <button type="button" className="elements-text-link" onClick={() => onSelectMove(creator.id)}>{readable(creator.title) || "Открыть ход"}</button></p>}
+    {resource.artifacts?.map(file => file.available
+      ? <a className="elements-file-link" key={file.id} href={`/api/elements/artifacts/${encodeURIComponent(file.id)}`} target="_blank" rel="noreferrer">Открыть {readable(file.name) || "файл"}</a>
+      : <span className="elements-file-unavailable" key={file.id}>{readable(file.name) || "Файл"} · недоступен</span>)}
+   </details>;
+  })}
+ </section>;
+}
+
+/** Отображает карту с панелью подробностей и ручным выбором статуса в DEV. */
+function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; dataset: BoardData; onDataChange: (data: BoardData) => void }) {
  const orderedMoves = sequenceMoves(dataset.moves);
  const canvas = useRef<HTMLDivElement>(null);
  const positionsDefault = initialPositions(dataset.elements);
@@ -57,6 +125,8 @@ function ElementsBoard({ userId, dataset }: { userId: string; dataset: BoardData
  const [heights, setHeights] = useState<CardHeights>({});
  const [ready, setReady] = useState(false);
  const [selection, setSelection] = useState<{ kind: "element" | "move"; id: string } | null>(null);
+ const [savingStatus, setSavingStatus] = useState(false);
+ const [statusError, setStatusError] = useState("");
  const selectedElement = selection?.kind === "element" ? dataset.elements.find(element => element.id === selection.id) : null;
  const selectedMove = selection?.kind === "move" ? orderedMoves.find(move => move.id === selection.id) : null;
  const selected = selectedElement ?? selectedMove ?? null;
@@ -87,7 +157,7 @@ function ElementsBoard({ userId, dataset }: { userId: string; dataset: BoardData
    setReady(true);
   };
   const observer = new ResizeObserver(measure);
-  // AIDEV-NOTE: Первую раскладку считаем после шрифта; далее наблюдаем переносы текста и рост карточек.
+  // AIDEV-NOTE: Первую раскладку считаем после шрифта; далее наблюдаем рост карточек.
   void document.fonts.ready.then(() => {
    if (disposed) return;
    node.querySelectorAll(".elements-card").forEach(card => observer.observe(card));
@@ -113,11 +183,7 @@ function ElementsBoard({ userId, dataset }: { userId: string; dataset: BoardData
  }, []);
  useEffect(() => {
   const node = canvas.current; if (!node) return;
-  const wheel = (event: WheelEvent) => {
-   event.preventDefault();
-   const bounds = node.getBoundingClientRect();
-   zoomAt(Math.exp(-event.deltaY * 0.002), { x: event.clientX - bounds.left, y: event.clientY - bounds.top });
-  };
+  const wheel = (event: WheelEvent) => { event.preventDefault(); const bounds = node.getBoundingClientRect(); zoomAt(Math.exp(-event.deltaY * 0.002), { x: event.clientX - bounds.left, y: event.clientY - bounds.top }); };
   node.addEventListener("wheel", wheel, { passive: false });
   return () => node.removeEventListener("wheel", wheel);
  }, [zoomAt]);
@@ -128,9 +194,8 @@ function ElementsBoard({ userId, dataset }: { userId: string; dataset: BoardData
  }
  function startDrag(event: PointerEvent<HTMLElement>, elementId?: string) {
   if (event.button !== 0 || drag.current) return;
-  if (!elementId && (event.target as HTMLElement).closest("article,button,select")) return;
-  event.preventDefault(); event.stopPropagation();
-  event.currentTarget.setPointerCapture(event.pointerId);
+  if (!elementId && (event.target as HTMLElement).closest("article,button,select,a,details")) return;
+  event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId);
   drag.current = { pointer: event.pointerId, start: { x: event.clientX, y: event.clientY }, origin: elementId ? layout.positions[elementId] : layout.view, elementId, moved: false };
   setDragging(true);
  }
@@ -143,57 +208,65 @@ function ElementsBoard({ userId, dataset }: { userId: string; dataset: BoardData
   setLayout(old => d.elementId ? { ...old, positions: { ...old.positions, [d.elementId]: next } } : { ...old, view: { ...old.view, ...next } });
  }
  function stopDrag() { drag.current = null; setDragging(false); }
- // Передача к следующей Задаче берётся из её входов. Накопленные транзитивные входы не дублируют линию.
+ const resourceName = (id: string) => readable(dataset.resources.find(resource => resource.id === id)?.title) || "Ресурс";
  const chainPositions = new Map(orderedMoves.map((move, index) => [move.id, index]));
  const transfers = dataset.elements.flatMap(target => {
   const sources = dataset.elements.filter(source => source.id !== target.id && source.output.some(id => target.input.includes(id)));
-  const latest = sources.sort((a, b) => Math.max(...orderedMoves.filter(m => m.targetId === b.id).map(m => chainPositions.get(m.id)!)) - Math.max(...orderedMoves.filter(m => m.targetId === a.id).map(m => chainPositions.get(m.id)!)))[0];
-  return latest ? [{ from: latest.id, to: target.id, label: latest.output.filter(id => target.input.includes(id)).join(", "), returnToParent: false }] : [];
+  const latest = sources.sort((a, b) => Math.max(-1, ...orderedMoves.filter(m => m.targetId === b.id).map(m => chainPositions.get(m.id)!)) - Math.max(-1, ...orderedMoves.filter(m => m.targetId === a.id).map(m => chainPositions.get(m.id)!)))[0];
+  return latest ? [{ from: latest.id, to: target.id, label: latest.output.filter(id => target.input.includes(id)).map(resourceName).join(", "), returnToParent: false }] : [];
  });
- // Приёмка принадлежит родителю. Выход дочернего Элемента создаёт именно этот Ход.
  for (const source of dataset.elements) {
   if (!source.parentId) continue;
   const acceptance = orderedMoves.find(m => m.ownerId === source.parentId && m.targetId === source.id && m.output.some(id => source.output.includes(id)));
-  if (acceptance) transfers.push({ from: source.id, to: source.parentId, label: `${source.output.join(", ")} · ${acceptance.id}`, returnToParent: true });
+  if (acceptance) transfers.push({ from: source.id, to: source.parentId, label: source.output.map(resourceName).join(", "), returnToParent: true });
  }
- const links = [
-  ...dataset.elements.filter(e => e.parentId && layout.positions[e.parentId]).map(e => ({ from: e.parentId!, to: e.id, label: "Вложенность", type: "hierarchy", returnToParent: false })),
-  ...transfers.map(t => ({ ...t, type: "result" })),
- ];
- const selectedMoveAttempts = selectedMove ? attemptsFor(selectedMove, dataset) : [];
- const selectedElementAttempts = selectedElement ? [...(selectedElement.attempts ?? []), ...orderedMoves.filter(move => move.ownerId === selectedElement.id).flatMap(move => attemptsFor(move, dataset))] : [];
+ const links = [...dataset.elements.filter(e => e.parentId && layout.positions[e.parentId]).map(e => ({ from: e.parentId!, to: e.id, label: "Подчинённый элемент", type: "hierarchy", returnToParent: false })), ...transfers.map(t => ({ ...t, type: "result" }))];
+ async function changeStatus(kind: "element" | "move", id: string, status: string) {
+  setSavingStatus(true); setStatusError("");
+  try {
+   const response = await fetch("/api/elements/status", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind, id, status, request_id: crypto.randomUUID() }) });
+   if (!response.ok) throw new Error("Не удалось сохранить статус. Повторите попытку.");
+   onDataChange(await response.json() as BoardData);
+  } catch { setStatusError("Не удалось сохранить статус. Повторите попытку."); }
+  finally { setSavingStatus(false); }
+ }
  return <main className="elements-screen" aria-label="Карта Элементов">
   <button type="button" className="elements-fit" aria-label="Вся карта" title="Вся карта" onClick={showAll}><Maximize size={18} /></button>
   <div ref={canvas} className={"elements-canvas" + (dragging ? " is-dragging" : "")} tabIndex={0} role="region" aria-label="Полотно Элементов"
-   onPointerDownCapture={() => { suppressClick.current = false; }}
-   onClickCapture={event => { if (suppressClick.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation(); } suppressClick.current = false; }}
+   onPointerDownCapture={() => { suppressClick.current = false; }} onClickCapture={event => { if (suppressClick.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation(); } suppressClick.current = false; }}
    onPointerDown={event => startDrag(event)} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={stopDrag}
    onKeyDown={event => { if (event.target !== event.currentTarget) return; const shifts: Record<string, Point> = { ArrowLeft: { x: 60, y: 0 }, ArrowRight: { x: -60, y: 0 }, ArrowUp: { x: 0, y: 60 }, ArrowDown: { x: 0, y: -60 } }; const delta = shifts[event.key]; if (delta) { event.preventDefault(); setLayout(old => ({ ...old, view: { ...old.view, x: old.view.x + delta.x, y: old.view.y + delta.y } })); } if (event.key === "+" || event.key === "=") zoomAt(1.2); if (event.key === "-") zoomAt(1 / 1.2); }}>
    {!dataset.elements.length && <p className="elements-empty">На карте пока нет Элементов.</p>}
    <div className="elements-world" style={{ transform: `translate(${layout.view.x}px, ${layout.view.y}px) scale(${layout.view.zoom})`, visibility: ready ? "visible" : "hidden" }}>
-    <svg className="elements-links" aria-label="Связи Элементов"><defs>{["hierarchy", "result"].map(type => <marker key={type} id={`elements-arrow-${type}`} markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M1,1 L8,5 L1,9" fill="none" stroke={type === "result" ? "#8ea2ff" : "#8c9c96"} strokeWidth="1.5" /></marker>)}</defs>
+    <svg className="elements-links" aria-label="Связи Элементов"><defs>{["hierarchy", "result"].map(type => <marker key={type} id={`elements-arrow-${type}`} markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M1,1 L8,5 L1,9" fill="none" stroke={type === "result" ? "#91a8e8" : "#8c9c96"} strokeWidth="1.5" /></marker>)}</defs>
      {links.map((link, index) => {
       const a = layout.positions[link.from], b = layout.positions[link.to]; if (!a || !b) return null;
-      const hierarchyLink = link.type === "hierarchy";
-      const side = !hierarchyLink && !link.returnToParent;
+      const hierarchyLink = link.type === "hierarchy", side = !hierarchyLink && !link.returnToParent;
       const start = side ? { x: a.x + cardWidth, y: a.y + cardHeight(link.from, heights) / 2 } : { x: a.x + cardWidth / 2 + (link.returnToParent ? 135 : -50), y: a.y + (link.returnToParent ? 0 : cardHeight(link.from, heights)) };
       const end = side ? { x: b.x, y: b.y + cardHeight(link.to, heights) / 2 } : { x: b.x + cardWidth / 2 + (link.returnToParent ? 100 : -50), y: b.y + (link.returnToParent ? cardHeight(link.to, heights) : 0) };
       const middle = (start.y + end.y) / 2 + (link.returnToParent ? 35 : -25);
       const path = side ? `M${start.x},${start.y} C${start.x + 70},${start.y} ${end.x - 70},${end.y} ${end.x},${end.y}` : `M${start.x},${start.y} C${start.x},${middle} ${end.x},${middle} ${end.x},${end.y}`;
-      return <g key={`${link.type}-${link.from}-${link.to}`} className={`elements-link ${link.type}`}><title>{`${link.from} → ${link.to}: ${link.label}`}</title><path d={path} markerEnd={`url(#elements-arrow-${link.type})`} /><text x={(start.x + end.x) / 2} y={side ? start.y - 12 : middle + (index % 2) * 20} textAnchor="middle">{link.label}</text></g>;
+      return <g key={`${link.type}-${link.from}-${link.to}`} className={`elements-link ${link.type}`}><title>{`${readable(dataset.elements.find(item => item.id === link.from)?.title) || "Элемент"} → ${readable(dataset.elements.find(item => item.id === link.to)?.title) || "Элемент"}: ${link.label}`}</title><path d={path} markerEnd={`url(#elements-arrow-${link.type})`} /><text x={(start.x + end.x) / 2} y={side ? start.y - 12 : middle + (index % 2) * 20} textAnchor="middle">{link.label}</text></g>;
      })}
     </svg>
     {dataset.elements.map(element => {
-     const point = layout.positions[element.id] ?? { x: 0, y: 0 }, moves = orderedMoves.filter(m => m.ownerId === element.id);
-     return <article key={element.id} className="elements-card" data-state={statusPresentation(element.status, "element").tone} data-element-id={element.id} style={{ left: point.x, top: point.y, width: cardWidth }} aria-label={`${element.id}: ${element.title}`} onClick={event => { if (!(event.target as HTMLElement).closest("button,a,details")) selectElement(element.id); }}>
-      <button type="button" className="elements-card-grip" aria-label={`Переместить ${element.id}. Стрелки перемещают карточку`} onPointerDown={event => startDrag(event, element.id)} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={stopDrag}
-       onDoubleClick={() => focusElement(element.id)} onKeyDown={event => { const deltas: Record<string, Point> = { ArrowLeft: { x: -20, y: 0 }, ArrowRight: { x: 20, y: 0 }, ArrowUp: { x: 0, y: -20 }, ArrowDown: { x: 0, y: 20 } }; const delta = deltas[event.key]; if (delta) { event.preventDefault(); setLayout(old => ({ ...old, positions: { ...old.positions, [element.id]: { x: point.x + delta.x, y: point.y + delta.y } } })); } }}><span>{elementLabel(element.kind)} · {element.id}</span><StatusLabel status={element.status} kind="element" className="elements-card-status" /><Grip size={16} /></button>
-      <h2><button type="button" className="elements-card-title" aria-label={`Открыть Элемент ${element.id}`} onClick={event => { event.stopPropagation(); selectElement(element.id); }}>{element.title}</button></h2><p className="elements-description">{element.description}</p>
-      <div className="elements-moves-title"><span>Ходы</span><span>{moves.filter(move => statusPresentation(move.status, "move").tone === "completed").length} / {moves.length}</span></div>
-      <div className="elements-moves" aria-label={`Ходы ${element.id}`}>
-       {moves.map(move => <button type="button" key={move.id} className="elements-move" data-state={statusPresentation(move.status, "move").tone} data-move-id={move.id} onClick={event => { event.stopPropagation(); selectMove(move.id); }}><span className="elements-move-number">{move.order}</span><span className="elements-move-body"><span>{move.title}</span><small>{move.kind === "operation" ? "Операция" : "Экшен"} · {move.id}</small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" /></button>)}
-       {!moves.length && <p>Ходов пока нет.</p>}
-      </div><footer>Результат: {element.output.map(id => dataset.resources.find(r => r.id === id)?.title ?? id).join(", ") || "Не указан"}</footer>
+     const point = layout.positions[element.id] ?? { x: 0, y: 0 }, moves = orderedMoves.filter(move => move.ownerId === element.id);
+     const completeCount = moves.filter(move => statusPresentation(move.status, "move").tone === "completed").length;
+     return <article key={element.id} className="elements-card" data-state={statusPresentation(element.status, "element").tone} data-element-id={element.id} style={{ left: point.x, top: point.y, width: cardWidth }} aria-label={`${elementLabel(element.kind)}: ${readable(element.title)}`} onClick={event => { if (!(event.target as HTMLElement).closest("button,a,details,select")) selectElement(element.id); }}>
+      <button type="button" className="elements-card-grip" aria-label={`Переместить карточку «${readable(element.title)}»`} onPointerDown={event => startDrag(event, element.id)} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={stopDrag}
+       onDoubleClick={() => focusElement(element.id)} onKeyDown={event => { const deltas: Record<string, Point> = { ArrowLeft: { x: -20, y: 0 }, ArrowRight: { x: 20, y: 0 }, ArrowUp: { x: 0, y: -20 }, ArrowDown: { x: 0, y: 20 } }; const delta = deltas[event.key]; if (delta) { event.preventDefault(); setLayout(old => ({ ...old, positions: { ...old.positions, [element.id]: { x: point.x + delta.x, y: point.y + delta.y } } })); } }}>
+       <span>{elementLabel(element.kind)}</span><StatusLabel status={element.status} kind="element" className="elements-card-status" /><Grip size={16} aria-hidden="true" />
+      </button>
+      <h2><button type="button" className="elements-card-title" aria-label={`Открыть ${elementLabel(element.kind)} «${readable(element.title)}»`} onClick={event => { event.stopPropagation(); selectElement(element.id); }}>{readable(element.title) || "Без названия"}</button></h2>
+      {readable(element.description) && <p className="elements-description">{readable(element.description)}</p>}
+      <div className="elements-moves-title"><span>Ходы</span><span>{completeCount} из {moves.length} завершено</span></div>
+      <div className="elements-moves" aria-label={`Ходы элемента «${readable(element.title)}»`}>
+       {moves.map(move => <button type="button" key={move.id} className="elements-move" data-state={statusPresentation(move.status, "move").tone} data-move-id={move.id} onClick={event => { event.stopPropagation(); selectMove(move.id); }}>
+        <span className="elements-move-number">{move.order}</span><span className="elements-move-body"><span>{readable(move.title) || "Без названия"}</span><small>{moveKind(move.kind)} · {executorLabel(move.executor)}</small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" />
+       </button>)}
+       {!moves.length && <p className="elements-no-moves">Ходов пока нет.</p>}
+      </div>
+      {element.output.length > 0 && <footer>Результат: {element.output.map(resourceName).join(", ")}</footer>}
      </article>;
     })}
    </div>
@@ -201,32 +274,34 @@ function ElementsBoard({ userId, dataset }: { userId: string; dataset: BoardData
   <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open) setSelection(null); }}><Dialog.Portal><Dialog.Overlay className="elements-detail-overlay" /><Dialog.Content className="elements-detail" data-kind={selection?.kind} data-detail-id={selected?.id} data-state={selected && selection ? statusPresentation(selected.status, selection.kind).tone : undefined} aria-describedby="elements-detail-description">
    <Dialog.Close className="elements-detail-close" aria-label="Закрыть подробности"><X size={20} /></Dialog.Close>
    <header className="elements-detail-heading">
-    <div className="elements-detail-kind">{selectedElement ? <Layers size={22} aria-hidden="true" /> : <ListOrdered size={22} aria-hidden="true" />}<span>{selectedElement ? `Элемент · ${elementLabel(selectedElement.kind)}` : `Ход · ${selectedMove?.kind === "operation" ? "Операция" : "Экшен"} · №${selectedMove?.order}`}</span></div>
-    <Dialog.Title>{selected?.title}</Dialog.Title><Dialog.Description id="elements-detail-description">{selected?.id}</Dialog.Description>
+    <div className="elements-detail-kind">{selectedElement ? <Layers size={22} aria-hidden="true" /> : <ListOrdered size={22} aria-hidden="true" />}<span>{selectedElement ? `${elementLabel(selectedElement.kind)}` : `${moveKind(selectedMove?.kind ?? "")} · ход ${selectedMove?.order}`}</span></div>
+    <Dialog.Title>{readable(selected?.title) || "Без названия"}</Dialog.Title><Dialog.Description id="elements-detail-description">{selectedElement ? "Подробности элемента" : "Подробности хода"}</Dialog.Description>
     {selected && selection && <StatusLabel status={selected.status} kind={selection.kind} className="elements-detail-summary-status" />}
+    {selected && dataset.manualStatusEnabled && selection && <label className="elements-status-control">Изменить статус
+     <select value={selected.status} disabled={savingStatus} onChange={event => void changeStatus(selection.kind, selected.id, event.target.value)}>
+      {statusOptions(selection.kind).map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+     </select>
+    </label>}
+    {selected && dataset.manualStatusEnabled && <p className="elements-dev-note">Ручная проверка в DEV. Результаты работы не создаются.</p>}
+    {statusError && <p className="elements-status-error" role="alert">{statusError}</p>}
    </header>
    {selectedElement && <>
-    <p className="elements-detail-description">{selectedElement.description}</p>
-    <dl><dt>Уровень</dt><dd>{elementLabel(selectedElement.kind)}</dd><dt>Статус Элемента</dt><dd><StatusLabel status={selectedElement.status} kind="element" className="elements-detail-status" /></dd><dt>Родитель</dt><dd>{selectedElement.parentId ? <button type="button" className="elements-text-link" onClick={() => selectElement(selectedElement.parentId!)}>{selectedElement.parentId} · {dataset.elements.find(element => element.id === selectedElement.parentId)?.title}</button> : "Нет — корневой Элемент"}</dd><dt>Версия</dt><dd>{selectedElement.revision}</dd></dl>
-    {selectedElement.instructions && <section className="elements-resources"><h3>Инструкция</h3><p>{selectedElement.instructions}</p></section>}
-    {selectedElement.conditions !== undefined && <section className="elements-resources"><h3>Условия</h3><pre>{describe(selectedElement.conditions)}</pre></section>}
-    {selectedElement.fields !== undefined && <section className="elements-resources"><h3>Поля</h3><pre>{describe(selectedElement.fields)}</pre></section>}
-    {selectedElement.provenance && <section className="elements-resources"><h3>Происхождение</h3><pre>{describe(selectedElement.provenance)}</pre></section>}
-    {!!selectedElementAttempts.length && <section className="elements-resources"><h3>Попытки <span>{selectedElementAttempts.length}</span></h3>{selectedElementAttempts.map(attempt => <details key={attempt.id}><summary>{attempt.id} · {attempt.status}</summary><pre>{describe(attempt)}</pre></details>)}</section>}
-    <section className="elements-panel-moves"><h3>Собственные Ходы <span>{orderedMoves.filter(move => move.ownerId === selectedElement.id).length}</span></h3>
-     {orderedMoves.filter(move => move.ownerId === selectedElement.id).map(move => <button type="button" key={move.id} className="elements-move" data-state={statusPresentation(move.status, "move").tone} data-panel-move-id={move.id} onClick={() => selectMove(move.id)}><span className="elements-move-number">{move.order}</span><span className="elements-move-body"><span>{move.title}</span><small>{move.id}</small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" /></button>)}
+    {readable(selectedElement.description) && <p className="elements-detail-description">{readable(selectedElement.description)}</p>}
+    {selectedElement.parentId && <p className="elements-parent">Входит в: <button type="button" className="elements-text-link" onClick={() => selectElement(selectedElement.parentId!)}>{readable(dataset.elements.find(item => item.id === selectedElement.parentId)?.title) || "Родительский элемент"}</button></p>}
+    {selectedElement.instructions && <details className="elements-secondary"><summary>Дополнительная инструкция</summary><p>{readable(selectedElement.instructions)}</p></details>}
+    <ResourceDetails ids={selectedElement.input} label="Входящие ресурсы" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
+    <ResourceDetails ids={selectedElement.output} label="Итоговые ресурсы" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
+    <section className="elements-panel-moves"><h3>Ходы <span>{orderedMoves.filter(move => move.ownerId === selectedElement.id).length}</span></h3>
+     {orderedMoves.filter(move => move.ownerId === selectedElement.id).map(move => <button type="button" key={move.id} className="elements-move" data-state={statusPresentation(move.status, "move").tone} data-panel-move-id={move.id} onClick={() => selectMove(move.id)}><span className="elements-move-number">{move.order}</span><span className="elements-move-body"><span>{readable(move.title) || "Без названия"}</span><small>{moveKind(move.kind)} · {executorLabel(move.executor)}</small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" /></button>)}
     </section>
    </>}
    {selectedMove && <>
-    <dl><dt>Статус Хода</dt><dd><StatusLabel status={selectedMove.status} kind="move" className="elements-detail-status" /></dd><dt>Номер Хода в Элементе</dt><dd>{selectedMove.order}</dd><dt>Тип</dt><dd>{selectedMove.kind === "operation" ? "Операция" : "Экшен"}</dd><dt>Исполнитель</dt><dd>{selectedMove.executor === "agent" ? "Агент" : selectedMove.executor === "human" || selectedMove.executor === "player" ? "Игрок" : selectedMove.executor || "Не указан"}</dd><dt>Владелец Хода</dt><dd>{selectedMove.ownerId} · {dataset.elements.find(element => element.id === selectedMove.ownerId)?.title}</dd><dt>Целевой Элемент</dt><dd>{selectedMove.targetId} · {dataset.elements.find(element => element.id === selectedMove.targetId)?.title}</dd><dt>Предшественник</dt><dd>{selectedMove.previousId ? <button type="button" className="elements-text-link" onClick={() => selectMove(selectedMove.previousId!)}>{selectedMove.previousId} · {orderedMoves.find(move => move.id === selectedMove.previousId)?.title}</button> : "Нет — начало цепочки"}</dd><dt>Попытка</dt><dd>{selectedMove.attemptId || "Не указана"}{statusPresentation(selectedMove.status, "move").tone === "completed" ? " · Успешна" : ""}</dd></dl>
-    {selectedMove.instructions && <section className="elements-resources"><h3>Инструкция</h3><p>{selectedMove.instructions}</p></section>}
-    {selectedMove.conditions !== undefined && <section className="elements-resources"><h3>Условия</h3><pre>{describe(selectedMove.conditions)}</pre></section>}
-    {selectedMove.fields !== undefined && <section className="elements-resources"><h3>Поля результата</h3><pre>{describe(selectedMove.fields)}</pre></section>}
-    {selectedMove.provenance && <section className="elements-resources"><h3>Происхождение</h3><pre>{describe(selectedMove.provenance)}</pre></section>}
-    {!!selectedMoveAttempts.length && <section className="elements-resources"><h3>Попытки <span>{selectedMoveAttempts.length}</span></h3>{selectedMoveAttempts.map(attempt => <details key={attempt.id}><summary>{attempt.id} · {attempt.status}</summary><pre>{describe(attempt)}</pre></details>)}</section>}
-   </>}
-   {selected && <>
-    {(["output", "input"] as const).filter(role => selected[role].length).map(role => <section key={role} className="elements-resources"><h3>{role === "input" ? "Входные ресурсы" : "Выходные ресурсы"} <span>{selected[role].length}</span></h3>{selected[role].map(id => { const resource = dataset.resources.find(resource => resource.id === id); if (!resource) return <details key={id}><summary>{id}</summary><p>Ресурс не включён в карту.</p></details>; const creator = orderedMoves.find(move => move.attemptId === resource.attemptId); return <details key={id}><summary><span>{id}</span> {resource.title}</summary><p>{resource.content}</p>{resource.attemptId && <p className="elements-resource-origin">Попытка: {creator ? <button type="button" className="elements-text-link" onClick={() => selectMove(creator.id)}>{creator.id} · {resource.attemptId}</button> : resource.attemptId}</p>}</details>; })}</section>)}
+    <dl className="elements-move-facts"><dt>Исполнитель</dt><dd>{executorLabel(selectedMove.executor)}</dd><dt>Тип</dt><dd>{moveKind(selectedMove.kind)}</dd></dl>
+    {selectedMove.instructions && <section className="elements-resources"><h3>Инструкция</h3><p>{readable(selectedMove.instructions)}</p></section>}
+    <ResourceDetails ids={selectedMove.input} label="Полученные ресурсы" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
+    <ResourceDetails ids={selectedMove.output} label="Результат" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
+    {selectedMove.previousId && <p className="elements-parent">Предыдущий ход: <button type="button" className="elements-text-link" onClick={() => selectMove(selectedMove.previousId!)}>{readable(orderedMoves.find(move => move.id === selectedMove.previousId)?.title) || "Открыть предыдущий ход"}</button></p>}
+    {selectedMove.conditions !== undefined && conditionText(selectedMove.conditions) && <details className="elements-secondary"><summary>Условия выполнения</summary><p>{conditionText(selectedMove.conditions)}</p></details>}
    </>}
   </Dialog.Content></Dialog.Portal></Dialog.Root>
  </main>;

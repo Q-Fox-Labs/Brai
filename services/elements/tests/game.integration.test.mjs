@@ -76,6 +76,18 @@ test('game-core PostgreSQL: цепочка, ресурсы, повторы, за
   assert.equal((await importSnapshot(admin,snapOwner,snap)).imported,true);
   assert.equal((await importSnapshot(admin,snapOwner,snap)).imported,false);
   await assert.rejects(()=>importSnapshot(admin,owner+'-foreign',snap),/SNAPSHOT_CONFLICT/);
+  const dev=createGameHandlers(app,{},undefined,true);
+  const manual=id(),next=id();await h.moveCreate(req(make(manual,editable.id,editable.id,null,'operation','work')));await h.moveCreate(req(make(next,editable.id,editable.id,manual,'operation','work')));
+  const counts=async()=>Promise.all(['resources','move_attempts','element_resources'].map(async table=>Number((await admin.query(`SELECT count(*) FROM game_core.${table} WHERE owner_id=$1`,[owner])).rows[0].count)));
+  const initialCounts=await counts();
+  await assert.rejects(()=>h.devStatus(req({kind:'move',id:manual,status:'succeeded',request_id:id()})),/FORBIDDEN/);
+  await assert.rejects(()=>dev.devStatus({user_id:owner+'-other',kind:'move',id:manual,status:'succeeded',request_id:id()}),/NOT_FOUND/);
+  for(const [kind,target,statuses] of [['element',editable.id,['draft','active','completed','cancelled']],['move',manual,['planned','claimed','succeeded','cancelled']]]){
+   for(const status of statuses){const request=req({kind,id:target,status,request_id:id()});const first=await dev.devStatus(request);assert.equal(first.status,status);assert.equal((await dev.devStatus(request)).event_id,first.event_id);assert.equal(Number((await admin.query('SELECT count(*) FROM game_core.outbox WHERE id=$1',[request.request_id])).rows[0].count),1);const payload=(await admin.query('SELECT payload FROM game_core.outbox WHERE id=$1',[request.request_id])).rows[0].payload;assert.equal(payload.data.manual,true);assert.equal(payload.aggregate.kind,kind);assert.equal(payload.actor.id,owner);await assert.rejects(()=>dev.devStatus({...request,status:status==='cancelled'?'active':'cancelled'}),/CONFLICT|INVALID_ARGUMENT/);}
+  }
+  assert.deepEqual(await counts(),initialCounts);
+  await dev.devStatus(req({kind:'element',id:editable.id,status:'active',request_id:id()}));await dev.devStatus(req({kind:'move',id:manual,status:'succeeded',request_id:id()}));await assert.rejects(()=>h.moveClaim(req({move_id:next,idempotency_key:id(),executor_kind:'agent'})),/INVALID_STATE/);
+  await assert.rejects(()=>dev.devStatus(req({kind:'move',id:manual,status:'failed',request_id:id()})),/INVALID_ARGUMENT/);
   console.log('game-core integrity, cross-owner chains, retry, rework, acceptance, cancellation, replay and isolation passed');
  }finally{
   const c=await admin.connect();try{await c.query('BEGIN');await c.query('SET CONSTRAINTS ALL DEFERRED');for(const o of [owner,owner+'-snapshot']){for(const table of ['outbox','element_resources','attempt_resources','resources','move_attempts','moves','element_revisions','elements'])await c.query(`DELETE FROM game_core.${table} WHERE owner_id=$1`,[o]);}await c.query('COMMIT');}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();await app.end();await admin.end();}

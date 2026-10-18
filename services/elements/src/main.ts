@@ -18,7 +18,7 @@ const handlers = createGameHandlers(pool, store, async (owner, id) => {
  if(reply.headers?.has("Nats-Service-Error"))throw new ElementsFault("NOT_FOUND");
  const artifact=JSON.parse(new TextDecoder().decode(reply.data));
  if(artifact.ownerId!==owner||artifact.status!=="ready")throw new ElementsFault("FORBIDDEN");
-});
+}, cfg.devStatusEnabled === true);
 let runtime: Awaited<ReturnType<typeof runNats>> | undefined; let mcp: Awaited<ReturnType<typeof startMcp>> | undefined; let stopping = false;
 try { runtime = await runNats(nc, handlers, store, cfg, gate); mcp = await startMcp(cfg, handlers, gate); console.log(JSON.stringify({ service: "service_elements", instance: runtime.service.info().id, mcp: mcp.url, result: "ready" })); } catch (error) { gate.stopAccepting(); await mcp?.close().catch(() => {}); await runtime?.stop().catch(() => {}); await gate.drain(); await nc.close(); await pool.end(); console.error(JSON.stringify({ service: "service_elements", result: "startup_failed", error: error instanceof Error ? error.name : "UNKNOWN" })); process.exitCode = 1; }
 if (runtime && mcp) {

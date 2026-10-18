@@ -51,6 +51,10 @@ channels:
     publish:
       message:
         payload: { $ref: './schemas/messages.schema.json#/definitions/elements_move_link' }
+  brai.elements.v1.command.dev-status:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/devStatusRequest' }
   'brai.elements.v1.events.>':
     subscribe:
       message: { $ref: '#/components/messages/event' }

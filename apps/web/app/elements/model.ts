@@ -7,8 +7,8 @@ export type Attempt = { id: string; moveId?: string; status: string; input?: unk
 export type Element = { id: string; kind: string; parentId: string | null; status: string; revision: string; title: string; description: string; input: string[]; output: string[]; instructions?: string; conditions?: unknown; fields?: unknown; provenance?: Provenance; attempts?: Attempt[] };
 /** ownerId — UUID Элемента, к которому относится Ход. */
 export type Move = { id: string; ownerId: string; targetId: string; previousId: string | null; kind: string; title: string; status: string; attemptId: string; executor: string; input: string[]; output: string[]; instructions?: string; conditions?: unknown; fields?: unknown; provenance?: Provenance; attempts?: Attempt[] };
-export type Resource = { id: string; attemptId: string | null; title: string; content: string };
-export type BoardData = { elements: Element[]; moves: Move[]; resources: Resource[]; attempts?: Attempt[] };
+export type Resource = { id: string; attemptId: string | null; title: string; content: string; metadata?: unknown; artifacts?: { id: string; name: string; available: boolean }[] };
+export type BoardData = { elements: Element[]; moves: Move[]; resources: Resource[]; attempts?: Attempt[]; manualStatusEnabled?: boolean };
 export type Layout = { positions: Record<string, Point>; view: Viewport };
 export const cardWidth = 420;
 export type CardHeights = Record<string, number>;
@@ -84,9 +84,18 @@ export function sequenceMoves(moves: Move[]): (Move & { order: number })[] {
  return moves.map(move => ({ ...move, order: localOrder(move) })).sort((a, b) => depth(a.id) - depth(b.id));
 }
 
-/** Отображает статусы контракта; completed у исторических Ходов равен succeeded. */
+/** Возвращает русскую подпись для каждого допустимого статуса без показа кода. */
 export function statusPresentation(status: string, kind: "element" | "move") {
- if (status === "completed" || status === "succeeded") return { tone: "completed", label: kind === "element" ? "Выполнена" : "Выполнен" };
- if (status === "active" || status === "claimed") return { tone: "active", label: "В работе" };
- return { tone: "planned", label: status === "draft" ? "Черновик" : status === "planned" ? "Запланирован" : status || "Статус не указан" };
+ if (kind === "element") {
+  if (status === "draft") return { tone: "draft", label: "Черновик" };
+  if (status === "active") return { tone: "active", label: "В работе" };
+  if (status === "completed") return { tone: "completed", label: "Выполнена" };
+  if (status === "cancelled") return { tone: "cancelled", label: "Отменена" };
+ } else {
+  if (status === "planned") return { tone: "planned", label: "Запланирован" };
+  if (status === "claimed") return { tone: "active", label: "В работе" };
+  if (status === "succeeded" || status === "completed") return { tone: "completed", label: "Выполнен" };
+  if (status === "cancelled") return { tone: "cancelled", label: "Отменён" };
+ }
+ return { tone: "unknown", label: "Статус не указан" };
 }

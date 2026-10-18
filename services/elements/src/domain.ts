@@ -33,6 +33,8 @@ export interface ElementsStore {
   ready(): Promise<void>;
 }
 export interface ElementsHandlers {
+  /** Только DEV: меняет один статус и пишет аудит, не создавая результатов исполнения. */
+  devStatus?(value: unknown, context?: OperationContext): Promise<unknown>;
   structureCreate(value: unknown, context?: OperationContext): Promise<unknown>;
   elementCreate(value: unknown, context?: OperationContext): Promise<Element>;
   elementRevise(value: unknown, context?: OperationContext): Promise<Element>;

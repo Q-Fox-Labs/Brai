@@ -582,6 +582,76 @@
           "maxItems": 0
         }
       }
+    },
+    "devStatusRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user_id",
+        "kind",
+        "id",
+        "status",
+        "request_id"
+      ],
+      "properties": {
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "kind": {
+          "enum": [
+            "element",
+            "move"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "element"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "draft",
+                  "active",
+                  "completed",
+                  "cancelled"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "planned",
+                  "claimed",
+                  "succeeded",
+                  "cancelled"
+                ]
+              }
+            }
+          }
+        }
+      ]
     }
   }
 }
