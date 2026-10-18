@@ -8,5 +8,7 @@ ajv.addFormat("date-time",{type:"string",validate(value:string){const date=value
 ajv.addSchema(JSON.parse(readFileSync(new URL("../schemas/v1.schema.json",import.meta.url),"utf8")),"v1");
 /** Компилирует ссылку на принадлежащий сервису DTO без копии схемы. */
 export function v1Validator(name:string){return ajv.compile({$ref:`v1#/definitions/${name}`});}
+export const validChatResult=ajv.compile({$ref:"v1#/definitions/chatResult"});
+export const validChatRequest=ajv.compile({$ref:"v1#/definitions/chatRequest"});
 export const validDecideRequest=ajv.compile<DecideRequest>({$ref:"v1#/definitions/decideRequest"});
 export const validDecideUpstream=ajv.compile<DecideUpstream>({$ref:"v1#/definitions/decideUpstream"});

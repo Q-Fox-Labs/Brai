@@ -47,6 +47,35 @@ channels:
         oneOf:
           - $ref: '#/components/messages/v1_operation'
           - $ref: '#/components/messages/v1_error'
+  brai.providers.v1.invoke.chat:
+    description: >-
+      One durable chat turn, shared capacity2 and control8. Caller subscribes and flushes
+      _INBOX.{connectionId}.{token} before invoke. Core NATS has no token replay;
+      sequence gap, disconnect, timeout or local buffer overflow requires operations.get,
+      never automatic inference retry. Deadline90s, request65536/reply73728 bytes.
+    bindings:
+      nats: {queue: brai_providers_v1, bindingVersion: 0.1.0}
+    subscribe:
+      operationId: v1_invoke_chat
+      message: {$ref: '#/components/messages/v1_chatRequest'}
+    publish:
+      operationId: v1_invoke_chat_reply
+      message:
+        oneOf:
+          - {$ref: '#/components/messages/v1_operation'}
+          - {$ref: '#/components/messages/v1_error'}
+  '_INBOX.{connectionId}.{token}':
+    description: >-
+      Private caller subscription authorized by broker ACL, Core NATS best effort.
+      sequence starts1, completed only after durable finish. Local unflushed bytes32768;
+      overflow stops delivery with best-effort STREAM_DELIVERY_INTERRUPTED, compute can finish.
+      Client must bound its subscription and use get on gap/slow-consumer/missing completed.
+    parameters:
+      connectionId: {schema: {type: string}}
+      token: {schema: {type: string}}
+    publish:
+      operationId: v1_chat_events
+      message: {$ref: '#/components/messages/v1_streamEvent'}
   brai.providers.v1.operations.get:
     description: >-
       NATS Services brai_providers_v1, queue brai_providers_v1. Trusted owner ACL.
@@ -209,3 +238,11 @@ components:
       name: V1_statusResponse
       payload:
         $ref: './schemas/v1.schema.json#/definitions/statusResponse'
+    v1_chatRequest:
+      name: V1_chatRequest
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/chatRequest'
+    v1_streamEvent:
+      name: V1_streamEvent
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/streamEvent'

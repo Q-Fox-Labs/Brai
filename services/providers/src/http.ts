@@ -6,6 +6,7 @@ import { validDecideUpstream } from "./v1-schema.js";
 import { canonical } from "./operations.js";
 import type { DecideV1Port, DecideRequest, DecideUpstream } from "./operations.js";
 import { validUpstream } from "./schema.js";
+import { chatWire, consumeSse, createChatAssembler, type ChatPort } from "./chat.js";
 /** Возвращает порт /v1/systemone; baseUrl задаёт доверенная конфигурация запуска. */
 function transport(baseUrl: string, guard: EgressGuard | undefined, v1: boolean, apiKey?: string) {
   const url = new URL("/v1/systemone", baseUrl);
@@ -54,3 +55,24 @@ function transport(baseUrl: string, guard: EgressGuard | undefined, v1: boolean,
 export function liteLLMPort(baseUrl:string,guard?:EgressGuard,apiKey?:string):DecidePort {return transport(baseUrl,guard,false,apiKey) as DecidePort;}
 /** Полный decide v1 использует тот же одноразовый transport без fallback. */
 export function liteLLMDecidePort(baseUrl:string,guard?:EgressGuard,apiKey?:string):DecideV1Port {return transport(baseUrl,guard,true,apiKey) as DecideV1Port;}
+
+/** Одна streaming отправка stock Proxy; raw egress остаётся источником usage и opaque provider state. */
+export function liteLLMChatPort(baseUrl:string,guard:EgressGuard,apiKey?:string):ChatPort {
+  const url=new URL("/v1/chat/completions",baseUrl);
+  if(!["http:","https:"].includes(url.protocol)||url.username||url.password)throw new Error("INVALID_PROXY_URL");
+  return async(input,messages,signal,emit)=>{
+    const dispatch=guard.allocate(input,signal,messages);
+    try{
+      const response=await fetch(url,{method:"POST",redirect:"error",signal,headers:{"content-type":"application/json",...(apiKey?{authorization:`Bearer ${apiKey}`}:{})},body:JSON.stringify({...chatWire(input,messages),num_retries:0,max_retries:0,api_base:dispatch.apiBase})});
+      if(!response.ok){await response.body?.cancel();throw new Failure(response.status===401||response.status===403?"UPSTREAM_ACCESS":response.status===429?"UPSTREAM_RATE_LIMIT":"UPSTREAM_FAILURE",response.status>=500?"unknown":"failed");}
+      if(!response.body)throw new Failure("UPSTREAM_PROTOCOL","unknown");
+      const assembler=createChatAssembler(input,event=>{if(event.type!=="usage"&&event.type!=="tool_call.ready")emit(event);});
+      await consumeSse(response.body,assembler.push);const normalized=assembler.finish(),raw=dispatch.chat();
+      if(!raw||raw.actualModel!==normalized.actualModel||raw.text!==normalized.text||canonical(raw.toolCalls)!==canonical(normalized.toolCalls)||raw.finishReason!==normalized.finishReason)throw new Failure("UPSTREAM_PROTOCOL","unknown");
+      for(const call of raw.toolCalls)emit({type:"tool_call.ready",call});
+      if(raw.usage!==null)emit({type:"usage",usage:raw.usage});
+      return raw;
+    }catch(error){if(error instanceof Failure)throw error;throw new Failure("OUTCOME_UNKNOWN","unknown");}
+    finally{await dispatch.release();}
+  };
+}

@@ -99,8 +99,8 @@ v0 и его закрытые DTO остаются доступны. v1 имее
 
 `catalog.json` — единственный декларативный источник публичных capabilities и
 маршрутов LiteLLM. `npm run catalog` генерирует `litellm.yaml` (JSON — подмножество
-YAML); проверка запрещает дрейф. Поддерживается только TypeSafe jev-1.13.0,
-capability `decide`. Название неизвестной capability не включает её автоматически.
+YAML); проверка запрещает дрейф. Поддерживаются TypeSafe jev-1.13.0 (`decide`) и OpenRouter
+deepseek/deepseek-v3.2 (`chat`, `stream`, `tools`). Название неизвестной capability не включает её автоматически.
 Ключи хранятся во внешнем env_file, каталог содержит только имя переменной.
 
 Вход: state string/object/array;1–16 вопросов noul/choice/score. Instructions —
@@ -170,8 +170,8 @@ PROVIDERS_JEV_DEADLINE_MS), по умолчанию30s; override1–30000ms. NAT
 никогда не создавать новый ID автоматически. Брокер должен допускать payload≥73728.
 
 Assembly `main.ts` подключает store/model ports к lifecycle и NATS. Дополнительные
-chat/image capabilities могут использовать тот же OperationStore, dispatch CAS,
-TTL и Json result; сейчас они не объявлены и не исполняются. History/Alerts и
+chat использует тот же OperationStore, dispatch CAS, TTL и Json result.
+Image остаётся следующей задачей. History/Alerts и
 HTTP consumer остаются следующими задачами. Параметры запуска дополнены
 PROVIDERS_DATABASE_URL и необязательным PROVIDERS_JEV_DEADLINE_MS. Без
 PROVIDERS_DATABASE_URL main запускает только v0, как прежний fixture задачи1;
@@ -186,3 +186,103 @@ journal, authenticated stock LiteLLM1.104.2 и одноразовый egress в�
 metadata; dispatch зафиксирован до model port. Get и точный invoke replay
 вернули тот же сохранённый итог при одном model call. Usage363input/61output.
 Иные capabilities этой приёмкой не подтверждаются.
+
+## v1: один chat-ход и инструменты caller
+
+`brai.providers.v1.invoke.chat` принимает [chatRequest](schemas/v1.schema.json)
+и возвращает обычную durable операцию. Новый журнал, очередь и agent loop
+не добавлены. Chat и decide делят два inference слота; control имеет отдельные
+восемь. Повторы, cancel, unknown, рестарт и TTL совпадают с decide.
+Дедлайн chat — min(deadlineAt-now, catalog.deadlineMs,
+PROVIDERS_CHAT_DEADLINE_MS), по умолчанию90s; override1–90000ms.
+
+Профиль: `openrouter/deepseek/deepseek-v3.2` в stock LiteLLM1.104.2;
+точный OpenRouter endpoint `deepinfra/fp4`. `provider.only` и `order` содержат
+только этот tag, `require_parameters=true`, `allow_fallbacks=false`;
+`reasoning.enabled=false`. Endpoint и его tools/tool_choice/reasoning проверены
+через [публичный API](https://openrouter.ai/api/v1/models/deepseek/deepseek-v3.2/endpoints).
+[Правила маршрутов](https://openrouter.ai/docs/guides/routing/provider-selection)
+разрешают точный endpoint tag. Цена на дату разработки: $0.26/M input,
+$0.38/M output; live-приёмка отдельно сверяет текущую цену перед каждым резервом.
+Профиль передаёт max_tokens, stream и stream_options.include_usage.
+Автоисполнение MCP не включено: допустимы только function tools.
+Неизвестные параметры, включая произвольные extra_body/api_base/reasoning,
+отвергаются закрытой схемой. Drop_params=false; fallback и retries отключены.
+
+Private egress по-прежнему выделяет nonce только после PG dispatch CAS, claim
+происходит до внешнего fetch. Для chat разрешён исключительно POST на
+фиксированный `https://openrouter.ai/api/v1/chat/completions`, путь capability
+заканчивается `/v1/chat/completions`. Отдельный model-level api_base regex
+допускает только loopback18401/dispatch/nonce/v1; Jev regex не расширен.
+Глобального credential bypass нет, Proxy требует master-key. Egress передаёт
+raw SSE bytes с ограничением и backpressure HTTP, не делает модельную адаптацию.
+Он собирает raw сообщение и usage до преобразований LiteLLM; text/tools/finish
+после Proxy обязаны совпасть. Raw отсутствие usage возвращается как null.
+Неизвестные поля provider message сохраняются точно в opaque state; если
+неизвестное поле меняется между delta без поддержанного правила сборки,
+поток отклоняется как UPSTREAM_PROTOCOL, поле молча не теряется. Reasoning
+в этом профиле выключен; восстановление скрытых мыслей не поддерживается.
+
+Вход дополнен connectionId, streamInbox, messages, tools, maxTokens и toolChoice.
+Messages — до32 system/user текстов, каждый1–8192 символов. Пустой список
+допустим при continuation. Tool definitions — до8 function, имя≤64, description
+≤2048; минимальный JSON Schema subset — object, до16 именованных scalar
+properties (string/number/integer/boolean), required и additionalProperties=false.
+Refs/regex/вложенные schema/неизвестные keywords не поддерживаются и отвергаются.
+Полные tool arguments проверяются по этому subset; required должен ссылаться
+на объявленные properties. maxTokens1–2048, toolChoice=auto|none|required.
+
+Caller создаёт приватную подписку и делает NATS flush **до invoke**.
+Inbox имеет форму `{PROVIDERS_INBOX_PREFIX}{connectionId}.{token}`; default
+`_INBOX.`, допустим ещё один/два namespace segments внутри `_INBOX`.
+ConnectionId и token —1–64 ASCII letters/digits/_/-. Адаптер сверяет prefix
+и connectionId, никакие broadcast subjects не принимает. Namespace задаётся
+доверенной runtime конфигурацией; NATS ACL обязаны удостоверять owner/connection
+и право caller на этот inbox. Поля payload сами по себе не аутентифицируют caller.
+
+Events содержат operationId и sequence1…16384, закрытые типы: started,
+text.delta, tool_call.delta, tool_call.ready, usage, completed, error.
+Индексы tools0…7, ID непустые и уникальные. Чередующиеся JSON fragments
+собираются отдельно для каждого индекса; index gap, смена ID и неверные args
+дают UPSTREAM_PROTOCOL/unknown. Ready появляется только после полного
+finish_reason=tool_calls и проверки всех аргументов. Delta ничего не исполняет.
+Finish_reason сохраняется. Completed публикуется после durable finish,
+ошибка потока помечает увиденный caller текст как partial.
+
+Конечные пределы одного хода: вход65536 bytes/depth32, upstream raw и normalized
+SSE каждый1MiB, frame32768 bytes/8192 frames, text8192 bytes, arguments4096 bytes
+на tool, tools8, provider replay context24576 bytes/64 messages. UTF-8 decoder
+строгий, EOF без [DONE] и finish — unknown. Итог≤65536 bytes, ответ операции
+≤73728 bytes; прежняя PG JSONB граница131072 bytes остаётся. Исчерпание input
+context отклоняется до dispatch; переполнение output/stream после dispatch — unknown.
+
+Локальный publisher удерживает≤32768 неподтверждённых bytes на операцию;
+переполнение/ошибка прекращает live delivery, best-effort error
+STREAM_DELIVERY_INTERRUPTED оставляет caller путь к get. Финальный bounded
+результат может сохраниться; streamDelivery=interrupted либо unconfirmed.
+Unconfirmed означает лишь локальную публикацию, не обработку подписчиком.
+Core NATS не хранит tokens и не оказывает backpressure по скорости caller.
+Caller ограничивает свою подписку; sequence gap, slow-consumer, разрыв, timeout
+или отсутствие completed требуют get того же ID. Новой отправки модели нет.
+
+Полный chatResult содержит provider/requestedModel/actualModel, connectionId,
+text, все toolCalls с ID/index/name/parsed arguments, finishReason, usage,
+partial=false (получен целый upstream turn), streamDelivery и continuation.
+Continuation содержит operationId и opaque base64url state; state включает
+точные исходные context messages и raw assistant message. Это содержимое
+результата с TTL24h, не диагностический лог. Его нельзя журналировать.
+
+Следующий ход имеет **новый operationId**, `continuation:{operationId:previous}`
+и toolResults `{id,content}` для каждого исходного tool ID ровно один раз.
+Инструменты и проверка полномочий принадлежат caller. Providers читает сохранённый
+state по reference, не принимает caller-подмену opaque state. Старый owner,
+connection, provider/model должны совпасть; истёкший/несуществующий/чужой
+reference и неполный/лишний набор ID дают INVALID_CONTINUATION/not_sent.
+Нужные tool results добавляются с исходными IDs, затем новые system/user
+messages; общий replay context ограничен. После рестарта сохранённый success
+остаётся пригоден для continuation, dispatching остаётся unknown без resume.
+
+Контролируемые chat/HTTP, настоящий изолированный NATS/PG и бесплатный stock
+LiteLLM probe подтверждают протокол, два tools, raw state/usage и single dispatch
+при transport disconnect. Внешняя приёмка отдельно фиксируется после запуска;
+synthetic upstream не доказывает доступность модели или ключа.
