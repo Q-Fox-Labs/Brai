@@ -22,7 +22,9 @@ const record=(v:unknown):v is Record<string,Json>=>v!==null&&typeof v==="object"
 
 /** Единственный допустимый chat профиль; произвольные upstream параметры caller не передаёт. */
 export function chatWire(input:ChatRequest,messages:Message[]) {
-  return {model:input.model,messages,stream:true,stream_options:{include_usage:true},max_tokens:input.maxTokens,...(input.tools.length?{tools:input.tools,tool_choice:input.toolChoice}:{}),reasoning:{enabled:false},provider:{only:[CHAT_ROUTE],order:[CHAT_ROUTE],require_parameters:true,allow_fallbacks:false}};
+  // Stock LiteLLM omits null assistant content alongside tool_calls; raw continuation stays exact.
+  const wireMessages=messages.map(message=>{if(message.role!=="assistant"||message.content!==null||!Array.isArray(message.tool_calls)||!message.tool_calls.length)return message;const {content,...wire}=message;return wire;});
+  return {model:input.model,messages:wireMessages,stream:true,stream_options:{include_usage:true},max_tokens:input.maxTokens,...(input.tools.length?{tools:input.tools,tool_choice:input.toolChoice}:{}),reasoning:{enabled:false},provider:{only:[CHAT_ROUTE],order:[CHAT_ROUTE],require_parameters:true,allow_fallbacks:false}};
 }
 
 /** Инкрементальный UTF-8 SSE parser; пределы действуют до JSON.parse. EOF без [DONE] не успех. */

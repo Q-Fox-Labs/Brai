@@ -34,6 +34,11 @@ function memory(){const rows=new Map(),key=(o,id)=>JSON.stringify([o,id]),copy=r
 async function server(t,handler){const s=createServer(handler);s.listen(0,'127.0.0.1');await once(s,'listening');t.after(()=>new Promise(resolve=>{s.closeAllConnections();s.close(resolve);}));return `http://127.0.0.1:${s.address().port}`;}
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 
+test('wire omits only null assistant tool content and leaves raw continuation intact',()=>{
+ const raw={role:'assistant',content:null,tool_calls:[{id:'original-id',type:'function',function:{name:'first',arguments:'{"value":1}'}}],provider_signature:'opaque'};
+ const messages=[raw,{role:'assistant',content:'text',tool_calls:raw.tool_calls},{role:'tool',tool_call_id:'original-id',content:'result'},{role:'assistant',content:null}];
+ const wire=chatWire(input(),messages);assert.equal(Object.hasOwn(wire.messages[0],'content'),false);assert.equal(raw.content,null);assert.equal(wire.messages[0].provider_signature,'opaque');assert.deepEqual(wire.messages[0].tool_calls,raw.tool_calls);assert.equal(wire.messages[1].content,'text');assert.equal(wire.messages[2].content,'result');assert.equal(wire.messages[3].content,null);
+});
 test('SSE arbitrary byte boundaries, comments, empty choices, usage; interleaved tools become ready once complete',()=>{
  const events=[],assembler=createChatAssembler(input(),e=>events.push(e)),parser=createSseParser(assembler.push),data=Buffer.concat([Buffer.from(':keepalive\r\n\r\n'),encode(fragments())]);
  for(const byte of data)parser.push(Uint8Array.of(byte));parser.end();assert.equal(events.filter(e=>e.type==='tool_call.ready').length,0);
