@@ -275,7 +275,10 @@ Caller ограничивает свою подписку; sequence gap, slow-co
 text, все toolCalls с ID/index/name/parsed arguments, finishReason, usage,
 partial=false (получен целый upstream turn), streamDelivery и continuation.
 Continuation содержит operationId и opaque base64url state; state включает
-точные исходные context messages и raw assistant message. Это содержимое
+точные исходные context messages и raw assistant message. Stock LiteLLM удаляет
+assistant content:null рядом с tool_calls; только wire-запрос опускает этот null,
+исходный durable state остаётся неизменным. IDs, arguments и opaque поля
+передаются без такой нормализации. Это содержимое
 результата с TTL24h, не диагностический лог. Его нельзя журналировать.
 
 Следующий ход имеет **новый operationId**, `continuation:{operationId:previous}`
@@ -290,5 +293,13 @@ messages; общий replay context ограничен. После рестар�
 
 Контролируемые chat/HTTP, настоящий изолированный NATS/PG и бесплатный stock
 LiteLLM probe подтверждают протокол, два tools, raw state/usage и single dispatch
-при transport disconnect. Внешняя приёмка отдельно фиксируется после запуска;
-synthetic upstream не доказывает доступность модели или ключа.
+при transport disconnect. Внешняя приёмка завершена 2026-10-18: authenticated
+stock1.104.2 → OpenRouter deepinfra/fp4, первый ход дал два tool calls
+(430 input/77 output tokens), caller вернул оба результата с исходными IDs,
+новый operationId завершил ответ потоково (184/16 tokens). Контент поступил
+до финала, get/replay совпали, raw continuation сохранён. Принятый первый ход
+не повторялся; после бесплатных parser/wire fixes продолжался сохранённый op.
+Один отдельный continuation получил429, после разрешённой ручной проверки
+временной недоступности следующий завершился; автоматических retries/fallback
+нет. Metadata receipts root600: /var/lib/brai-dev/providers-test/task3-live.json
+и task3-live-before-continuation.json; не содержат промпта/ответа/ключей.
