@@ -59,7 +59,7 @@ test('durable final, replay, two caller results and provider opaque message surv
  const port=async(r,m,_signal,emit)=>{calls++;seen.push(m);return completion(r,calls===1?fragments():[chunk({content:'finished'}),chunk({},'stop')],emit);};
  let ops=createOperations(store,async()=>{throw Error('no decide');},{chatPort:port});const first=input();await ops.invokeChat(first,e=>{events.push(e);return true;});await ops.idle();
  const done=await ops.get(first.ownerId,first.operationId);assert.equal(done.phase,'succeeded');assert.equal(v1Validator('operation')(done),true);assert.equal(calls,1);assert.equal(events.at(-1).type,'completed');assert.ok(events.every((e,i)=>v1Validator('streamEvent')(e)&&e.sequence===i+1));
- assert.equal((await ops.invokeChat(first)).phase,'succeeded');assert.equal(calls,1);
+ assert.equal((await ops.invokeChat({...first,streamInbox:'_INBOX.fixture.reconnected'})).phase,'succeeded');assert.equal(calls,1);
  ops=createOperations(store,async()=>{throw Error('no decide');},{chatPort:port});
  const second={...input(),messages:[],continuation:{operationId:first.operationId},toolResults:[{id:'id-two',content:'two'},{id:'id-one',content:'one'}]};
  for(const bad of [{...second,ownerId:'other'},{...second,connectionId:'other'},{...second,toolResults:[{id:'id-one',content:'one'}]},{...second,toolResults:[{id:'id-one',content:'one'},{id:'id-one',content:'duplicate'}]}])await assert.rejects(ops.invokeChat(bad),e=>e.code==='INVALID_CONTINUATION');
@@ -101,4 +101,11 @@ test('accepted upstream body then disconnect remains unknown and nonce replay ca
 test('chat deadline abort is unknown once, and event count overflow preserves bounded final get',async()=>{
  let calls=0;const ops=createOperations(memory(),async()=>{}, {chatDeadlineMs:5,chatPort:async(_r,_m,signal)=>{calls++;await new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(Error('deadline')),{once:true}));}});const r=input();await ops.invokeChat(r);await ops.idle();assert.equal((await ops.invokeChat(r)).phase,'outcome_unknown');assert.equal(calls,1);
  const events=[],bounded=createOperations(memory(),async()=>{}, {chatPort:async(r,_m,_s,emit)=>{for(let i=0;i<CHAT_LIMITS.events+10;i++)emit({type:'text.delta',text:'x'});return completion(r);}});const q=input();await bounded.invokeChat(q,e=>{events.push(e);return true;});await bounded.idle();assert.equal(events.length,CHAT_LIMITS.events);assert.equal(events.at(-1).code,'STREAM_DELIVERY_INTERRUPTED');assert.equal((await bounded.get(q.ownerId,q.operationId)).result.streamDelivery,'interrupted');
+});
+
+test('OpenRouter documented accounting frame repeats empty assistant finish; content/changed finish after terminal rejected',()=>{
+ const usage={prompt_tokens:11,completion_tokens:7},accounting=chunk({role:'assistant',content:''},'tool_calls',usage);
+ assert.equal(completion(input(),[...fragments().slice(0,-1),chunk({role:'assistant',content:''}),chunk({},null,usage)]).toolCalls.length,2);
+ const events=[],done=completion(input(),[...fragments().slice(0,-1),accounting],e=>events.push(e));assert.equal(done.toolCalls.length,2);assert.deepEqual(done.usage,{inputTokens:11,outputTokens:7});assert.equal(events.filter(e=>e.type==='tool_call.ready').length,2);
+ for(const invalid of [chunk({content:'late'},'tool_calls',usage),chunk({role:'assistant',content:''},'stop',usage),chunk({role:'assistant',content:''},'tool_calls'),chunk({tool_calls:[{index:0,function:{arguments:'late'}}]},'tool_calls',usage)])assert.throws(()=>completion(input(),[...fragments().slice(0,-1),invalid]),e=>e.code==='UPSTREAM_PROTOCOL');
 });

@@ -81,7 +81,14 @@ export function createChatAssembler(request:Pick<ChatRequest,"tools">,emit:(even
     if(!chunk.choices.length)return;
     const choice=chunk.choices[0];if(!record(choice)||choice.index!==0||!record(choice.delta))throw fail();
     const delta=choice.delta;
-    if(finishReason!==null&&Object.values(delta).some(v=>v!=null&&v!==""))throw fail();
+    // AIDEV-NOTE: OpenRouter usage frame повторяет finish_reason и пустую assistant delta.
+    // Это accounting, не второй finish и не разрешение принимать новые tokens/tools после finish.
+    if(finishReason!==null){
+      if(choice.finish_reason!=null&&(choice.finish_reason!==finishReason||chunk.usage==null)||delta.content!=null&&delta.content!==""||delta.tool_calls!=null&&(!Array.isArray(delta.tool_calls)||delta.tool_calls.length>0))throw fail();
+      if(delta.role!=null&&delta.role!=="assistant")throw fail();
+      for(const [k,v]of Object.entries(delta))if(!["role","content","tool_calls"].includes(k)&&v!=null)preserve(extra,k,v);
+      return;
+    }
     if(delta.role!=null&&delta.role!=="assistant")throw fail();
     if(delta.content!=null){if(typeof delta.content!=="string")throw fail();text+=delta.content;if(bytes(text)>CHAT_LIMITS.textBytes)throw fail();if(delta.content)emit({type:"text.delta",text:delta.content});}
     if(delta.tool_calls!=null){if(!Array.isArray(delta.tool_calls))throw fail();for(const fragment of delta.tool_calls){
@@ -129,7 +136,7 @@ export async function chatMessages(store:OperationStore,input:ChatRequest,now:nu
     if(!old||old.phase!=="succeeded"||old.resultExpiresAt===null||old.resultExpiresAt<=now||!record(r)||r.connectionId!==input.connectionId||r.provider!==input.provider||r.requestedModel!==input.model||!record(r.continuation)||typeof r.continuation.state!=="string"||!Array.isArray(r.toolCalls))throw new Failure("INVALID_CONTINUATION","not_sent");
     try{messages=JSON.parse(Buffer.from(r.continuation.state,"base64url").toString("utf8"));}catch{throw new Failure("INVALID_CONTINUATION","not_sent");}
     const expected=r.toolCalls.map(c=>(c as Record<string,Json>).id),results=input.toolResults??[];
-    if(results.length!==expected.length||new Set(results.map(r=>r.id)).size!==results.length||results.some(r=>!expected.includes(r.id)))throw new Failure("INVALID_CONTINUATION","not_sent");
+    if(results.length!==expected.length||new Set(results.map(r=>r.id)).size!==results.length||results.some(r=>!expected.includes(r.id))||r.toolCalls.some(c=>!input.tools.some(tool=>tool.function.name===(c as Record<string,Json>).name)))throw new Failure("INVALID_CONTINUATION","not_sent");
     messages.push(...results.map(r=>({role:"tool",tool_call_id:r.id,content:r.content})));
   }else if(input.toolResults?.length||!input.messages.length)throw new Failure("INVALID_REQUEST","not_sent");
   messages.push(...input.messages);

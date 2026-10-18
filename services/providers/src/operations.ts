@@ -126,7 +126,9 @@ export function createOperations(store:OperationStore,port:DecideV1Port,options:
   async function invoke(input:InvokeInput,isChat:boolean,sink?:EventSink) {
     if(!boundedJson(input) || Buffer.byteLength(JSON.stringify(input))>V1_LIMITS.requestBytes || !(isChat?validChatRequest(input):validDecideRequest(input)))throw new Failure("INVALID_REQUEST","not_sent");
     const snapshot=structuredClone(input),key=identity(input.ownerId,input.operationId);
-    const hash=createHash("sha256").update(canonical(snapshot)).digest("hex");
+    // AIDEV-NOTE: Новый inbox после разрыва меняет доставку, не вычисление; replay не переигрывает tokens.
+    const {streamInbox:_,...chatInput}=snapshot as ChatRequest;
+    const hash=createHash("sha256").update(canonical(isChat?chatInput:snapshot)).digest("hex");
     if(admitting>=V1_LIMITS.controlConcurrency)throw new Failure("OVERLOADED","not_sent");
     admitting++;
     try {

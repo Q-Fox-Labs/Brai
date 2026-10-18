@@ -128,7 +128,7 @@ LiteLLM и соседних сервисов. [Миграция001](migrations/0
 runtime не стартует. Потеря lock-сессии останавливает процесс.
 
 `(ownerId,operationId)` — ключ; hash SHA256 вычисляется по полному каноническому
-JSON запроса, включая deadlineAt, с сортировкой object keys и сохранением array
+JSON запроса, включая deadlineAt (для chat кроме транспортного streamInbox), с сортировкой object keys и сохранением array
 order. Вход сохраняется только в памяти активного слота. Долговечная запись
 содержит hash, route/version, фазу, cancelRequested, даты и ограниченный итог.
 Проверка идентичного повтора выполняется до чтения каталога и до проверки
@@ -225,7 +225,8 @@ raw SSE bytes с ограничением и backpressure HTTP, не делае�
 
 Вход дополнен connectionId, streamInbox, messages, tools, maxTokens и toolChoice.
 Messages — до32 system/user текстов, каждый1–8192 символов. Пустой список
-допустим при continuation. Tool definitions — до8 function, имя≤64, description
+допустим при continuation. Tools должны включать определения всех вызванных
+на предыдущем ходу функций; toolChoice=none запрещает новые вызовы. Tool definitions — до8 function, имя≤64, description
 ≤2048; минимальный JSON Schema subset — object, до16 именованных scalar
 properties (string/number/integer/boolean), required и additionalProperties=false.
 Refs/regex/вложенные schema/неизвестные keywords не поддерживаются и отвергаются.
@@ -252,7 +253,11 @@ Finish_reason сохраняется. Completed публикуется посл�
 Конечные пределы одного хода: вход65536 bytes/depth32, upstream raw и normalized
 SSE каждый1MiB, frame32768 bytes/8192 frames, text8192 bytes, arguments4096 bytes
 на tool, tools8, provider replay context24576 bytes/64 messages. UTF-8 decoder
-строгий, EOF без [DONE] и finish — unknown. Итог≤65536 bytes, ответ операции
+строгий, EOF без [DONE] и finish — unknown.
+[Accounting frame OpenRouter](https://openrouter.ai/docs/api_reference/streaming)
+может повторять прежний finish_reason с usage и пустой assistant delta; он
+обновляет счётчики, не создавая второй finish. Новые tokens/tools или изменённый
+finish после terminal frame остаются protocol error. Итог≤65536 bytes, ответ операции
 ≤73728 bytes; прежняя PG JSONB граница131072 bytes остаётся. Исчерпание input
 context отклоняется до dispatch; переполнение output/stream после dispatch — unknown.
 
@@ -263,7 +268,8 @@ STREAM_DELIVERY_INTERRUPTED оставляет caller путь к get. Фина�
 Unconfirmed означает лишь локальную публикацию, не обработку подписчиком.
 Core NATS не хранит tokens и не оказывает backpressure по скорости caller.
 Caller ограничивает свою подписку; sequence gap, slow-consumer, разрыв, timeout
-или отсутствие completed требуют get того же ID. Новой отправки модели нет.
+или отсутствие completed требуют get того же ID. Новой отправки модели нет. Новый inbox при replay не меняет вычислительный hash
+и возвращает прежнюю операцию; live events в новый inbox не переигрываются.
 
 Полный chatResult содержит provider/requestedModel/actualModel, connectionId,
 text, все toolCalls с ID/index/name/parsed arguments, finishReason, usage,
