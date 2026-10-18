@@ -4,9 +4,11 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { Failure, LIMITS, type Request } from "./core.js";
+import { validDecideUpstream } from "./v1-schema.js";
+import { canonical, type DecideRequest, type DecideUpstream } from "./operations.js";
 import { validUpstream } from "./schema.js";
 type Usage = {input_tokens: number; output_tokens: number} | null;
-type Entry = {claimed: boolean; request: Request; controller: AbortController; usage?: Usage; pending?: Promise<void>};
+type Entry = {claimed: boolean; request: Request | DecideRequest; controller: AbortController; usage?: Usage; raw?: DecideUpstream; pending?: Promise<void>};
 /** Читает ограниченные байты; прерывает источник при переполнении. */
 async function readBody(source: AsyncIterable<Uint8Array>, limit: number) {
   const chunks: Uint8Array[]=[];let length=0;
@@ -28,19 +30,19 @@ export async function createEgressGuard(options: {host: string; port: number; up
     entry.controller.signal.addEventListener("abort",stop,{once:true});
     entry.pending=(async()=>{
       try {
-        const body=await readBody(req,LIMITS.requestBytes);
+        const body=await readBody(req,"operationId" in entry.request ? 65536 : LIMITS.requestBytes);
         const data=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(body));
-        const key=Object.keys(entry.request.questions)[0];
-        if(data.model!==entry.request.model || data.state!==entry.request.state || Object.keys(data).sort().join()!=="model,questions,state" || Object.keys(data.questions ?? {}).join()!==key || Object.keys(data.questions[key]).sort().join()!=="instructions,type" || data.questions[key].type!=="noul" || data.questions[key].instructions!==entry.request.questions[key].instructions) throw new Error("DISPATCH_BODY");
+        if(canonical(data)!==canonical({model:entry.request.model,state:entry.request.state,questions:entry.request.questions})) throw new Error("DISPATCH_BODY");
         const authorization=req.headers.authorization;
         if(!authorization?.startsWith("Bearer ")) throw new Error("DISPATCH_AUTH");
         const response=await fetch(upstream,{method:"POST",redirect:"error",signal:entry.controller.signal,headers:{"content-type":"application/json",authorization},body});
         if(!response.ok) {await response.body?.cancel();res.writeHead(response.status,{"content-type":"application/json"});res.end('{"error":"UPSTREAM_REJECTED"}');return;}
         if(!response.body) throw new Error("UPSTREAM_PROTOCOL");
-        const bytes=await readBody(response.body,LIMITS.responseBytes);
+        const bytes=await readBody(response.body,"operationId" in entry.request ? 65536 : LIMITS.responseBytes);
         const raw:unknown=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes));
-        if(!validUpstream(raw)) throw new Error("UPSTREAM_PROTOCOL");
-        entry.usage=raw.usage ?? null;
+        if(!("operationId" in entry.request ? validDecideUpstream(raw) : validUpstream(raw))) throw new Error("UPSTREAM_PROTOCOL");
+        entry.usage=(raw as {usage?:Usage}).usage ?? null;
+        entry.raw=raw as DecideUpstream;
         res.writeHead(200,{"content-type":"application/json"});res.end(bytes);
       } catch {if(!res.destroyed){res.writeHead(502,{"content-type":"application/json"});res.end('{"error":"UPSTREAM_UNKNOWN"}');}}
       finally {entry.controller.signal.removeEventListener("abort",stop);}
@@ -52,7 +54,7 @@ export async function createEgressGuard(options: {host: string; port: number; up
   const origin=`http://${options.host}:${address.port}`;
   return {
     /** Регистрирует случайную capability, не являющуюся caller requestId или дедупликацией v0. */
-    allocate(request: Request, signal: AbortSignal) {
+    allocate(request: Request | DecideRequest, signal: AbortSignal) {
       if(active.size>=LIMITS.concurrency) throw new Failure("OVERLOADED","not_sent");
       const nonce=randomUUID(),controller=new AbortController();
       const entry:Entry={claimed:false,request,controller};
@@ -61,6 +63,7 @@ export async function createEgressGuard(options: {host: string; port: number; up
       return {
         apiBase:`${origin}/dispatch/${nonce}`,
         usage:()=>entry.usage,
+        raw:()=>entry.raw,
         async release() {controller.abort();await entry.pending;active.delete(nonce);signal.removeEventListener("abort",abort);}
       };
     },

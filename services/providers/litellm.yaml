@@ -1,25 +1,32 @@
-# ABOUTME: Закрепляет единственный маршрут TypeSafe и отключает настраиваемые повторы.
-# ABOUTME: Внутренний transport retry ограничивается одноразовым egress в программе Brai.
-model_list:
-  - model_name: jev-1.13.0
-    litellm_params:
-      model: typesafe/jev-1.13.0
-      api_key: os.environ/TYPESAFE_API_KEY
-      num_retries: 0
-      max_retries: 0
-      timeout: 30
-router_settings:
-  num_retries: 0
-  disable_fallbacks: true
-  fallbacks: []
-  context_window_fallbacks: []
-  content_policy_fallbacks: []
-  timeout: 30
-litellm_settings:
-  num_retries: 0
-  drop_params: false
-  set_verbose: false
-  turn_off_message_logging: true
-  request_timeout: 30
-general_settings:
-  disable_background_health_check: true
+{
+  "model_list": [
+    {
+      "model_name": "jev-1.13.0",
+      "litellm_params": {
+        "model": "typesafe/jev-1.13.0",
+        "api_key": "os.environ/TYPESAFE_API_KEY",
+        "num_retries": 0,
+        "max_retries": 0,
+        "timeout": 30
+      }
+    }
+  ],
+  "router_settings": {
+    "num_retries": 0,
+    "disable_fallbacks": true,
+    "fallbacks": [],
+    "context_window_fallbacks": [],
+    "content_policy_fallbacks": [],
+    "timeout": 30
+  },
+  "litellm_settings": {
+    "num_retries": 0,
+    "drop_params": false,
+    "set_verbose": false,
+    "turn_off_message_logging": true,
+    "request_timeout": 30
+  },
+  "general_settings": {
+    "disable_background_health_check": true
+  }
+}

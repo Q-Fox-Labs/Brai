@@ -1,0 +1,13 @@
+{
+  "version": "jev-v1-1",
+  "models": [{
+    "provider": "typesafe",
+    "model": "jev-1.13.0",
+    "upstreamModel": "typesafe/jev-1.13.0",
+    "apiKeyEnv": "TYPESAFE_API_KEY",
+    "capabilities": ["decide"],
+    "questionTypes": ["noul", "choice", "score"],
+    "stateTypes": ["string", "object", "array"],
+    "deadlineMs": 30000
+  }]
+}
