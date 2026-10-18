@@ -64,7 +64,7 @@ export function liteLLMChatPort(baseUrl:string,guard:EgressGuard,apiKey?:string)
     const dispatch=guard.allocate(input,signal,messages);
     try{
       const response=await fetch(url,{method:"POST",redirect:"error",signal,headers:{"content-type":"application/json",...(apiKey?{authorization:`Bearer ${apiKey}`}:{})},body:JSON.stringify({...chatWire(input,messages),num_retries:0,max_retries:0,api_base:dispatch.apiBase})});
-      if(!response.ok){await response.body?.cancel();throw new Failure(response.status===401||response.status===403?"UPSTREAM_ACCESS":response.status===429?"UPSTREAM_RATE_LIMIT":"UPSTREAM_FAILURE",response.status>=500?"unknown":"failed");}
+      if(!response.ok){await response.body?.cancel();throw new Failure(response.status===401||response.status===403?"UPSTREAM_ACCESS":response.status===402?"UPSTREAM_BALANCE":response.status===429?"UPSTREAM_RATE_LIMIT":"UPSTREAM_FAILURE",response.status>=500?"unknown":"failed");}
       if(!response.body)throw new Failure("UPSTREAM_PROTOCOL","unknown");
       const assembler=createChatAssembler(input,event=>{if(event.type!=="usage"&&event.type!=="tool_call.ready")emit(event);});
       await consumeSse(response.body,assembler.push);const normalized=assembler.finish(),raw=dispatch.chat();

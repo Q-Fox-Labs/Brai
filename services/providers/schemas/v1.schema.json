@@ -865,7 +865,8 @@
             "UPSTREAM_PROTOCOL",
             "OUTCOME_UNKNOWN",
             "INVALID_CONTINUATION",
-            "STREAM_DELIVERY_INTERRUPTED"
+            "STREAM_DELIVERY_INTERRUPTED",
+            "UPSTREAM_BALANCE"
           ]
         },
         "outcome": {
@@ -1445,23 +1446,7 @@
               "const": "error"
             },
             "code": {
-              "enum": [
-                "INVALID_REQUEST",
-                "MODEL_NOT_ALLOWED",
-                "UNSUPPORTED_OPERATION",
-                "DEADLINE_EXCEEDED",
-                "OVERLOADED",
-                "IDEMPOTENCY_CONFLICT",
-                "NOT_FOUND",
-                "STORAGE_UNAVAILABLE",
-                "UPSTREAM_ACCESS",
-                "UPSTREAM_RATE_LIMIT",
-                "UPSTREAM_FAILURE",
-                "UPSTREAM_PROTOCOL",
-                "OUTCOME_UNKNOWN",
-                "INVALID_CONTINUATION",
-                "STREAM_DELIVERY_INTERRUPTED"
-              ]
+              "$ref": "#/definitions/error/properties/code"
             },
             "partial": {
               "const": true

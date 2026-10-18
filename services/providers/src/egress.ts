@@ -21,7 +21,7 @@ export async function createEgressGuard(options: {host: string; port: number; up
   const upstream = options.upstream ?? "https://api.typesafe.ai/v1/systemone";
   const chatUpstream=options.chatUpstream ?? "https://openrouter.ai/api/v1/chat/completions";
   const active = new Map<string,Entry>();
-  let dispatches=0;
+  let dispatches=0,upstreamStatus:number|null=null;
   const server=createServer((req,res)=>{
     const reject=()=>{res.writeHead(409,{"content-type":"application/json"});res.end('{"error":"DISPATCH_REJECTED"}');};
     const match=/^\/dispatch\/([a-f0-9-]{36})\/v1\/(systemone|chat\/completions)$/.exec(req.url ?? "");
@@ -44,6 +44,7 @@ export async function createEgressGuard(options: {host: string; port: number; up
         if(!authorization?.startsWith("Bearer ")) throw new Error("DISPATCH_AUTH");
         dispatches++;
         const response=await fetch(entry.messages?chatUpstream:upstream,{method:"POST",redirect:"error",signal:entry.controller.signal,headers:{"content-type":"application/json",authorization},body});
+        upstreamStatus=response.status;
         if(!response.ok) {await response.body?.cancel();res.writeHead(response.status,{"content-type":"application/json"});res.end('{"error":"UPSTREAM_REJECTED"}');return;}
         if(!response.body) throw new Error("UPSTREAM_PROTOCOL");
         if(entry.messages){
@@ -73,7 +74,7 @@ export async function createEgressGuard(options: {host: string; port: number; up
   const origin=`http://${options.host}:${address.port}`;
   return {
     /** Счётчик отправок без owner, payload, URL capability или credentials. */
-    stats:()=>({dispatches}),
+    stats:()=>({dispatches,upstreamStatus}),
     /** Регистрирует случайную capability, не являющуюся caller requestId или дедупликацией v0. */
     allocate(request: Request | DecideRequest | ChatRequest, signal: AbortSignal, messages?:Message[]) {
       if(active.size>=LIMITS.concurrency) throw new Failure("OVERLOADED","not_sent");
