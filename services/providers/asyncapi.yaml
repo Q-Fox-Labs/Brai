@@ -1,0 +1,49 @@
+# ABOUTME: Описывает единственный синхронный NATS endpoint providers v0.
+# ABOUTME: Структуры принадлежат локальным Draft-07 схемам; v1 не объявлен.
+asyncapi: 2.6.0
+info:
+  title: Brai providers v0
+  version: 0.0.1
+  description: Изолированный синхронный decide, без дедупликации и повторов вычисления.
+defaultContentType: application/json
+channels:
+  brai.providers.v0.invoke.decide:
+    description: >-
+      NATS Services brai_providers, queue brai_providers. Request-reply на inbox caller.
+      Предел 32768 bytes вход /16384 bytes upstream, concurrency2, deadline≤30s.
+      После unknown повтор вычисления автоматически запрещён. Сервисные ошибки
+      имеют Nats-Service-Error и Nats-Service-Error-Code=500, без upstream text.
+    bindings:
+      nats:
+        queue: brai_providers
+        bindingVersion: 0.1.0
+    subscribe:
+      operationId: decide
+      message:
+        $ref: '#/components/messages/request'
+    publish:
+      operationId: decideReply
+      message:
+        oneOf:
+          - $ref: '#/components/messages/response'
+          - $ref: '#/components/messages/error'
+components:
+  messages:
+    request:
+      name: DecideRequest
+      payload:
+        $ref: './schemas/v0.schema.json#/definitions/request'
+    response:
+      name: DecideResponse
+      payload:
+        $ref: './schemas/v0.schema.json#/definitions/response'
+    error:
+      name: DecideError
+      headers:
+        type: object
+        required: [Nats-Service-Error, Nats-Service-Error-Code]
+        properties:
+          Nats-Service-Error: {type: string}
+          Nats-Service-Error-Code: {const: '500'}
+      payload:
+        $ref: './schemas/v0.schema.json#/definitions/error'
