@@ -3,12 +3,17 @@
 // ABOUTME: Только раскладка сохраняется в браузере; реальные действия и API не вызываются.
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Check, Grip, Maximize, X } from "lucide-react";
+import { Check, CircleDashed, Grip, Maximize, Play, X } from "lucide-react";
 import demo from "./demo.json";
-import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, readLayout, sequenceMoves, type BoardData, type Layout, type Point } from "./model";
+import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, readLayout, sequenceMoves, statusPresentation, type BoardData, type CardHeights, type Layout, type Point } from "./model";
 import "./elements.css";
 const data: BoardData = demo;
 const defaults = initialPositions(data.elements);
+
+function StatusLabel({ status, kind, className }: { status: string; kind: "element" | "move"; className: string }) {
+ const { tone, label } = statusPresentation(status, kind), Icon = tone === "completed" ? Check : tone === "active" ? Play : CircleDashed;
+ return <span className={className} data-state={tone}><Icon size={16} aria-hidden="true" /><span>{label}</span></span>;
+}
 
 /** Создаёт карту по переданным записям; хранилище разделено по аккаунтам. */
 export default function ElementsScreen({ userId, dataset = data }: { userId: string; dataset?: BoardData }) {
@@ -17,27 +22,44 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
  const positionsDefault = dataset === data ? defaults : initialPositions(dataset.elements);
  const storageKey = `brai.elements.demo-layout.v1:${userId}`;
  const [layout, setLayout] = useState<Layout>({ positions: positionsDefault, view: { x: 0, y: 0, zoom: 0.5 } });
+ const [heights, setHeights] = useState<CardHeights>({});
  const [ready, setReady] = useState(false), [selected, setSelected] = useState<(typeof orderedMoves)[number] | null>(null);
  const drag = useRef<{ pointer: number; start: Point; origin: Point; elementId?: string } | null>(null);
  const [dragging, setDragging] = useState(false);
- const listTouch = useRef<{ y: number; top: number } | null>(null);
  const state = useRef(layout); state.current = layout;
  const showAll = useCallback(() => {
   const bounds = canvas.current?.getBoundingClientRect();
-  if (bounds) setLayout(old => ({ ...old, view: fitView(old.positions, bounds.width, bounds.height) }));
- }, []);
+  if (bounds) setLayout(old => ({ ...old, view: fitView(old.positions, bounds.width, bounds.height, heights) }));
+ }, [heights]);
  useEffect(() => {
-  const bounds = canvas.current?.getBoundingClientRect();
-  let saved: Layout | null = null;
-  try { saved = readLayout(localStorage.getItem(storageKey), positionsDefault); } catch { /* Раскладка остаётся в памяти, если браузер запретил хранилище. */ }
-  setLayout(saved ?? { positions: positionsDefault, view: fitView(positionsDefault, bounds?.width ?? 900, bounds?.height ?? 650) });
-  setReady(true);
-  // AIDEV-NOTE: Account размонтирует экран при смене раздела; восстановление относится к текущему набору.
+  const node = canvas.current;
+  if (!node) return;
+  let disposed = false, initialized = false;
+  const measure = () => {
+   if (disposed) return;
+   const measured = Object.fromEntries([...node.querySelectorAll<HTMLElement>(".elements-card")].map(card => [card.dataset.elementId!, card.offsetHeight]));
+   setHeights(old => Object.keys(measured).every(id => old[id] === measured[id]) && Object.keys(old).length === Object.keys(measured).length ? old : measured);
+   if (initialized) return;
+   initialized = true;
+   const positions = initialPositions(dataset.elements, measured), bounds = node.getBoundingClientRect();
+   let saved: Layout | null = null;
+   try { saved = readLayout(localStorage.getItem(storageKey), positions, measured); } catch { /* Без localStorage карта работает в памяти. */ }
+   setLayout(saved ?? { positions, view: fitView(positions, bounds.width, bounds.height, measured) });
+   setReady(true);
+  };
+  const observer = new ResizeObserver(measure);
+  // AIDEV-NOTE: Первую раскладку считаем после шрифта; далее наблюдаем переносы текста и рост карточек.
+  void document.fonts.ready.then(() => {
+   if (disposed) return;
+   node.querySelectorAll(".elements-card").forEach(card => observer.observe(card));
+   measure();
+  });
+  return () => { disposed = true; observer.disconnect(); };
  }, [storageKey, dataset]);
  useEffect(() => {
   if (!ready) return;
   const timer = setTimeout(() => {
-   try { localStorage.setItem(storageKey, JSON.stringify({ version: 1, ...layout })); }
+   try { localStorage.setItem(storageKey, JSON.stringify({ version: 2, ...layout })); }
    catch { /* Раскладка остаётся в памяти, если браузер запретил хранилище. */ }
   }, 180);
   return () => clearTimeout(timer);
@@ -53,7 +75,6 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
  useEffect(() => {
   const node = canvas.current; if (!node) return;
   const wheel = (event: WheelEvent) => {
-   if ((event.target as HTMLElement).closest?.(".elements-moves") && !event.ctrlKey && !event.metaKey) return;
    event.preventDefault();
    const bounds = node.getBoundingClientRect();
    zoomAt(Math.exp(-event.deltaY * 0.002), { x: event.clientX - bounds.left, y: event.clientY - bounds.top });
@@ -63,8 +84,8 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
  }, [zoomAt]);
  function focusElement(id: string) {
   const p = layout.positions[id], bounds = canvas.current?.getBoundingClientRect(); if (!p || !bounds) return;
-  const zoom = Math.min(1, (bounds.width - 36) / cardWidth, (bounds.height - 36) / cardHeight);
-  setLayout(old => ({ ...old, view: { x: bounds.width / 2 - (p.x + cardWidth / 2) * zoom, y: bounds.height / 2 - (p.y + cardHeight / 2) * zoom, zoom: clampZoom(zoom) } }));
+  const height = cardHeight(id, heights), zoom = Math.min(1, (bounds.width - 36) / cardWidth, (bounds.height - 36) / height);
+  setLayout(old => ({ ...old, view: { x: bounds.width / 2 - (p.x + cardWidth / 2) * zoom, y: bounds.height / 2 - (p.y + height / 2) * zoom, zoom: clampZoom(zoom) } }));
  }
  function startDrag(event: PointerEvent<HTMLElement>, elementId?: string) {
   if (event.button !== 0 || drag.current) return;
@@ -110,8 +131,8 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
       const a = layout.positions[link.from], b = layout.positions[link.to]; if (!a || !b) return null;
       const hierarchyLink = link.type === "hierarchy";
       const side = !hierarchyLink && !link.returnToParent;
-      const start = side ? { x: a.x + cardWidth, y: a.y + cardHeight / 2 } : { x: a.x + cardWidth / 2 + (link.returnToParent ? 135 : -50), y: a.y + (link.returnToParent ? 0 : cardHeight) };
-      const end = side ? { x: b.x, y: b.y + cardHeight / 2 } : { x: b.x + cardWidth / 2 + (link.returnToParent ? 100 : -50), y: b.y + (link.returnToParent ? cardHeight : 0) };
+      const start = side ? { x: a.x + cardWidth, y: a.y + cardHeight(link.from, heights) / 2 } : { x: a.x + cardWidth / 2 + (link.returnToParent ? 135 : -50), y: a.y + (link.returnToParent ? 0 : cardHeight(link.from, heights)) };
+      const end = side ? { x: b.x, y: b.y + cardHeight(link.to, heights) / 2 } : { x: b.x + cardWidth / 2 + (link.returnToParent ? 100 : -50), y: b.y + (link.returnToParent ? cardHeight(link.to, heights) : 0) };
       const middle = (start.y + end.y) / 2 + (link.returnToParent ? 35 : -25);
       const path = side ? `M${start.x},${start.y} C${start.x + 70},${start.y} ${end.x - 70},${end.y} ${end.x},${end.y}` : `M${start.x},${start.y} C${start.x},${middle} ${end.x},${middle} ${end.x},${end.y}`;
       return <g key={`${link.type}-${link.from}-${link.to}`} className={`elements-link ${link.type}`}><title>{`${link.from} → ${link.to}: ${link.label}`}</title><path d={path} markerEnd={`url(#elements-arrow-${link.type})`} /><text x={(start.x + end.x) / 2} y={side ? start.y - 12 : middle + (index % 2) * 20} textAnchor="middle">{link.label}</text></g>;
@@ -119,13 +140,13 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
     </svg>
     {dataset.elements.map(element => {
      const point = layout.positions[element.id] ?? { x: 0, y: 0 }, moves = orderedMoves.filter(m => m.ownerId === element.id);
-     return <article key={element.id} className="elements-card" data-element-id={element.id} style={{ left: point.x, top: point.y, width: cardWidth, height: cardHeight }} aria-label={`${element.id}: ${element.title}`}>
+     return <article key={element.id} className="elements-card" data-state={statusPresentation(element.status, "element").tone} data-element-id={element.id} style={{ left: point.x, top: point.y, width: cardWidth }} aria-label={`${element.id}: ${element.title}`}>
       <button type="button" className="elements-card-grip" aria-label={`Переместить ${element.id}. Стрелки перемещают карточку`} onPointerDown={event => startDrag(event, element.id)} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={stopDrag}
-       onDoubleClick={() => focusElement(element.id)} onKeyDown={event => { const deltas: Record<string, Point> = { ArrowLeft: { x: -20, y: 0 }, ArrowRight: { x: 20, y: 0 }, ArrowUp: { x: 0, y: -20 }, ArrowDown: { x: 0, y: 20 } }; const delta = deltas[event.key]; if (delta) { event.preventDefault(); setLayout(old => ({ ...old, positions: { ...old.positions, [element.id]: { x: point.x + delta.x, y: point.y + delta.y } } })); } }}><span>{element.kind === "goal" ? "Цель" : "Задача"} {element.id}</span><span className="elements-card-done"><Check size={14} /> Выполнена</span><Grip size={16} /></button>
+       onDoubleClick={() => focusElement(element.id)} onKeyDown={event => { const deltas: Record<string, Point> = { ArrowLeft: { x: -20, y: 0 }, ArrowRight: { x: 20, y: 0 }, ArrowUp: { x: 0, y: -20 }, ArrowDown: { x: 0, y: 20 } }; const delta = deltas[event.key]; if (delta) { event.preventDefault(); setLayout(old => ({ ...old, positions: { ...old.positions, [element.id]: { x: point.x + delta.x, y: point.y + delta.y } } })); } }}><span>{element.kind === "goal" ? "Цель" : "Задача"} {element.id}</span><StatusLabel status={element.status} kind="element" className="elements-card-status" /><Grip size={16} /></button>
       <h2>{element.title}</h2><p className="elements-description">{element.description}</p>
-      <div className="elements-moves-title"><span>Ходы</span><span>{moves.length} / {moves.length}</span></div>
-      <div className="elements-moves" tabIndex={0} aria-label={`Ходы ${element.id}`} onPointerDown={event => { if (event.pointerType === "touch") listTouch.current = { y: event.clientY, top: event.currentTarget.scrollTop }; }} onPointerMove={event => { if (event.pointerType === "touch" && listTouch.current) event.currentTarget.scrollTop = listTouch.current.top + listTouch.current.y - event.clientY; }} onPointerUp={() => { listTouch.current = null; }} onPointerCancel={() => { listTouch.current = null; }}>
-       {moves.map(move => <button type="button" key={move.id} className="elements-move" data-move-id={move.id} onClick={() => setSelected(move)}><span className="elements-move-number">{move.order}</span><span className="elements-move-body"><span>{move.title}</span><small>{move.kind === "operation" ? "Операция" : "Экшен"} · {move.id}</small></span><span className="elements-move-status" aria-label="Выполнен"><Check size={16} /></span></button>)}
+      <div className="elements-moves-title"><span>Ходы</span><span>{moves.filter(move => statusPresentation(move.status, "move").tone === "completed").length} / {moves.length}</span></div>
+      <div className="elements-moves" aria-label={`Ходы ${element.id}`}>
+       {moves.map(move => <button type="button" key={move.id} className="elements-move" data-state={statusPresentation(move.status, "move").tone} data-move-id={move.id} onClick={() => setSelected(move)}><span className="elements-move-number">{move.order}</span><span className="elements-move-body"><span>{move.title}</span><small>{move.kind === "operation" ? "Операция" : "Экшен"} · {move.id}</small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" /></button>)}
        {!moves.length && <p>Ходов пока нет.</p>}
       </div><footer>Результат: {element.output.map(id => dataset.resources.find(r => r.id === id)?.title ?? id).join(", ") || "Не указан"}</footer>
      </article>;
@@ -134,8 +155,8 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
   </div>
   <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open) setSelected(null); }}><Dialog.Portal><Dialog.Overlay className="elements-detail-overlay" /><Dialog.Content className="elements-detail" aria-describedby="elements-detail-description">
    <Dialog.Close className="elements-detail-close" aria-label="Закрыть подробности"><X size={20} /></Dialog.Close>
-   <Dialog.Title>{selected?.title}</Dialog.Title><Dialog.Description id="elements-detail-description">Исторический Ход {selected?.id}. Выполнен в симуляции.</Dialog.Description>
-   {selected && <><dl><dt>Номер Хода в Элементе</dt><dd>{selected.order}</dd><dt>Тип</dt><dd>{selected.kind === "operation" ? "Операция" : "Экшен"}</dd><dt>Исполнитель</dt><dd>{selected.executor === "agent" ? "Агент" : "Игрок"}</dd><dt>Владелец Хода</dt><dd>{selected.ownerId} · {dataset.elements.find(e => e.id === selected.ownerId)?.title}</dd><dt>Целевой Элемент</dt><dd>{selected.targetId} · {dataset.elements.find(e => e.id === selected.targetId)?.title}</dd><dt>Предшественник</dt><dd>{selected.previousId ? <button type="button" className="elements-text-link" onClick={() => setSelected(orderedMoves.find(m => m.id === selected.previousId) ?? null)}>{selected.previousId} · {orderedMoves.find(m => m.id === selected.previousId)?.title}</button> : "Нет — начало цепочки"}</dd><dt>Попытка</dt><dd>{selected.attemptId} · Успешна</dd></dl>
+   <Dialog.Title>{selected?.title}</Dialog.Title><Dialog.Description id="elements-detail-description">Ход {selected?.id}. {selected && statusPresentation(selected.status, "move").label}.</Dialog.Description>
+   {selected && <><dl><dt>Статус Хода</dt><dd><StatusLabel status={selected.status} kind="move" className="elements-detail-status" /></dd><dt>Номер Хода в Элементе</dt><dd>{selected.order}</dd><dt>Тип</dt><dd>{selected.kind === "operation" ? "Операция" : "Экшен"}</dd><dt>Исполнитель</dt><dd>{selected.executor === "agent" ? "Агент" : "Игрок"}</dd><dt>Владелец Хода</dt><dd>{selected.ownerId} · {dataset.elements.find(e => e.id === selected.ownerId)?.title}</dd><dt>Целевой Элемент</dt><dd>{selected.targetId} · {dataset.elements.find(e => e.id === selected.targetId)?.title}</dd><dt>Предшественник</dt><dd>{selected.previousId ? <button type="button" className="elements-text-link" onClick={() => setSelected(orderedMoves.find(m => m.id === selected.previousId) ?? null)}>{selected.previousId} · {orderedMoves.find(m => m.id === selected.previousId)?.title}</button> : "Нет — начало цепочки"}</dd><dt>Попытка</dt><dd>{selected.attemptId || "Не указана"}{statusPresentation(selected.status, "move").tone === "completed" ? " · Успешна" : ""}</dd></dl>
     <p className="elements-detail-note">Подробная инструкция в исходном снимке не приведена. Просмотр Хода не запускает действий.</p>
     {(["output", "input"] as const).map(role => <section key={role} className="elements-resources"><h3>{role === "input" ? "Входные ресурсы" : "Выходные ресурсы"} <span>{selected[role].length}</span></h3>{role === "input" && <p>Все накопленные ссылки предшественника.</p>}{selected[role].map(id => { const resource = dataset.resources.find(r => r.id === id); if (!resource) return null; const creator = orderedMoves.find(m => m.attemptId === resource.attemptId); return <details key={id}><summary><span>{id}</span> {resource.title}</summary><p>{resource.content}</p><p className="elements-resource-origin">Происхождение: {creator ? <button type="button" className="elements-text-link" onClick={() => setSelected(creator)}>{creator.id} · {resource.attemptId}</button> : "Внешнее поручение Игрока"}</p></details>; })}</section>)}
    </>}

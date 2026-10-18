@@ -11,19 +11,20 @@
 .elements-link > path { fill: none; stroke: #8ea2ff; stroke-width: 2; }
 .elements-link.hierarchy > path { stroke: #8c9c96; stroke-dasharray: 7 7; stroke-width: 1.5; }
 .elements-link text { fill: var(--foreground); font-size: 12px; paint-order: stroke; stroke: var(--background); stroke-width: 7px; stroke-linejoin: round; }
-.elements-card { position: absolute; display: flex; flex-direction: column; border: 1px solid #88968f; border-radius: 5px; background: #0d1110; color: #dcebe5; box-shadow: 0 7px 24px #0002; cursor: default; }
-.elements-card-grip { display: flex; align-items: center; flex: none; gap: 12px; width: 100%; padding: 12px 18px; border: 0; border-bottom: 1px solid #36433d; background: #18211d; color: #dcebe5; font-size: 12px; cursor: grab; touch-action: none; text-align: left; }
-.elements-card-done { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; color: #a0c5b5; }
+.elements-card { position: absolute; display: flex; flex-direction: column; border: 1px solid #88968f; border-radius: 5px; background: var(--state-card); color: #e7eee9; border-left: 5px solid var(--state-color); box-shadow: 0 7px 24px #0002; cursor: default; }
+.elements-card-grip { display: flex; align-items: center; flex: none; gap: 12px; width: 100%; padding: 12px 18px; border: 0; border-bottom: 1px solid var(--state-color); background: var(--state-fill); color: #dcebe5; font-size: 12px; cursor: grab; touch-action: none; text-align: left; }
+.elements-card-status { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; color: var(--state-color); font-weight: 600; }
 .elements-card h2 { font-size: 21px; line-height: 1.3; letter-spacing: -.3px; margin: 18px 20px 9px; overflow-wrap: anywhere; }
 .elements-description { min-height: 48px; margin: 0 20px 16px; font-size: 13px; line-height: 1.5; color: #adc0b7; }
 .elements-moves-title { display: flex; justify-content: space-between; margin: 0 20px 8px; font-size: 12px; color: #adc0b7; }
-.elements-moves { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 12px 8px; scrollbar-width: thin; scrollbar-color: #5f7368 #0d1110; }
-.elements-move { width: 100%; display: flex; gap: 10px; align-items: center; min-height: 62px; margin-bottom: 6px; padding: 10px; border: 1px solid #35433c; border-radius: 10px; background: #18221c; color: #dcebe5; text-align: left; line-height: 1.35; font-size: 14px; }
-.elements-move:hover, .elements-move:focus-visible { border-color: #b4c4ed; background: #222d28; }
+.elements-moves { padding: 0 12px 8px; }
+.elements-move { width: 100%; display: flex; gap: 10px; align-items: center; min-height: 62px; margin-bottom: 6px; padding: 10px; border: 1px solid var(--state-color); border-left-width: 4px; border-radius: 10px; background: var(--state-fill); color: #dcebe5; text-align: left; line-height: 1.35; font-size: 14px; }
+.elements-move:hover, .elements-move:focus-visible { outline: 2px solid var(--state-color); outline-offset: 1px; filter: brightness(1.15); }
 .elements-move-number { flex: none; width: 18px; color: #91a69b; text-align: center; font-size: 11px; }
 .elements-move-body { display: grid; gap: 5px; flex: 1; }
 .elements-move-body small { color: #99aea3; font-size: 11px; }
-.elements-move-status { color: #a5cdb8; }
+.elements-move-status { display: flex; flex: none; flex-direction: column; align-items: center; gap: 4px; width: 75px; color: var(--state-color); font-size: 10px; font-weight: 600; }
+.elements-detail-status { display: inline-flex; align-items: center; gap: 6px; color: var(--foreground); }
 .elements-card footer { flex: none; padding: 12px 20px; border-top: 1px solid #36433d; font-size: 11px; color: #adc0b7; overflow-wrap: anywhere; }
 .elements-empty { margin: 50px; }
 .elements-detail-overlay { position: fixed; inset: 0; z-index: 100; background: #0007; }
@@ -48,3 +49,8 @@
 @media (max-width: 700px) {
  .elements-detail { padding: 30px 20px; }
 }
+
+/* Цвет, форма рамки и явная подпись вместе показывают статус. */
+.elements-card[data-state="planned"], .elements-move[data-state="planned"] { --state-color: #b1bece; --state-card: #131a24; --state-fill: #202b3b; border-color: var(--state-color); border-style: dashed; }
+.elements-card[data-state="active"], .elements-move[data-state="active"] { --state-color: #ffd078; --state-card: #211a0e; --state-fill: #443113; border-color: var(--state-color); }
+.elements-card[data-state="completed"], .elements-move[data-state="completed"] { --state-color: #91ddb1; --state-card: #0d1913; --state-fill: #193428; border-color: var(--state-color); }

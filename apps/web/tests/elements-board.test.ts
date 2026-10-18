@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
-import { fitView, initialPositions, readLayout, sequenceMoves, type BoardData } from "../app/elements/model.ts";
+import { fitView, initialPositions, readLayout, sequenceMoves, statusPresentation, type BoardData } from "../app/elements/model.ts";
 const data = JSON.parse(readFileSync(new URL("../app/elements/demo.json", import.meta.url), "utf8")) as BoardData;
 
 test("demo keeps unique identities, cross-owner predecessors and cumulative resource provenance", () => {
@@ -38,7 +38,7 @@ test("layout accepts new identities and a parentless element, ignores stale IDs 
  assert.equal(readLayout(JSON.stringify({ version: 1, view: { x: 0, y: 0, zoom: 99 } }), defaults), null);
  assert.deepEqual(fitView({}, 800, 600), { x: 0, y: 0, zoom: 1 });
  const fitted = fitView({ a: { x: -100, y: 20 }, b: { x: 600, y: 700 } }, 1200, 900);
- assert.ok(fitted.zoom >= 0.2 && fitted.zoom <= 1);
+ assert.ok(fitted.zoom >= 0.01 && fitted.zoom <= 1);
  assert.ok(fitted.x + -100 * fitted.zoom >= 0);
  assert.ok(fitted.y + 20 * fitted.zoom >= 0);
 });
@@ -56,4 +56,37 @@ test("move numbers are local to each owner and follow predecessor links rather t
  assert.ok(data.moves.every(move => !("order" in move)));
  const branches = sequenceMoves([{ ...data.moves[0], id: "root", previousId: null }, { ...data.moves[0], id: "left", previousId: "root" }, { ...data.moves[0], id: "right", previousId: "root" }]);
  assert.deepEqual(branches.map(move => move.order), [1, 2, 2]);
+});
+
+test("measured card heights determine initial rows, fit and legacy overlap migration", () => {
+ const heights = { G1: 1400, T1: 450, T2: 700, T3: 800 };
+ const positions = initialPositions(data.elements, heights);
+ assert.equal(positions.T1.y, 1544);
+ const fit = fitView(positions, 1200, 900, heights);
+ for (const [id, point] of Object.entries(positions)) {
+  assert.ok(fit.y + (point.y + heights[id as keyof typeof heights]) * fit.zoom <= 900);
+  assert.ok(fit.x + (point.x + 420) * fit.zoom <= 1200);
+ }
+ const old = { G1: { x: 520, y: 0 }, T1: { x: 0, y: 700 }, T2: { x: 520, y: 700 }, T3: { x: 1040, y: 700 } };
+ const stored = { version: 1, positions: old, view: { x: 0, y: 0, zoom: 0.5 } };
+ const migrated = readLayout(JSON.stringify(stored), positions, heights)!;
+ assert.deepEqual(migrated.positions.G1, old.G1);
+ assert.deepEqual(migrated.positions.T1, old.T1);
+ assert.deepEqual(migrated.positions.T3, old.T3);
+ assert.equal(migrated.positions.T2.y, 1544);
+ assert.deepEqual(readLayout(JSON.stringify({ ...stored, version: 2 }), positions, heights)!.positions, old);
+ const taller = { ...heights, G1: 12000 };
+ const tallFit = fitView(initialPositions(data.elements, taller), 1200, 900, taller);
+ assert.ok(tallFit.zoom < 0.2);
+});
+
+test("status presentation follows the existing contract and preserves historical completion", () => {
+ assert.ok(data.elements.every(element => element.status === "completed"));
+ for (const [kind, statuses] of [["element", ["draft", "active", "completed"]], ["move", ["planned", "claimed", "succeeded"]]] as const) {
+  const states = statuses.map(status => statusPresentation(status, kind));
+  assert.equal(new Set(states.map(state => state.tone)).size, 3);
+  assert.ok(states.every(state => state.label));
+ }
+ assert.deepEqual(statusPresentation("completed", "move"), statusPresentation("succeeded", "move"));
+ assert.notEqual(statusPresentation("unexpected", "move").tone, "completed");
 });

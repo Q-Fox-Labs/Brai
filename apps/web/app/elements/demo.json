@@ -3,6 +3,7 @@
     {
       "id": "G1",
       "kind": "goal",
+      "status": "completed",
       "parentId": null,
       "revision": "VG1-1",
       "title": "Рабочий аккаунт Codex готов",
@@ -17,6 +18,7 @@
     {
       "id": "T1",
       "kind": "task",
+      "status": "completed",
       "parentId": "G1",
       "revision": "VT1-2",
       "title": "Способ подтверждения телефона в Codex выбран",
@@ -33,6 +35,7 @@
     {
       "id": "T2",
       "kind": "task",
+      "status": "completed",
       "parentId": "G1",
       "revision": "VT2-2",
       "title": "Источник номера для Codex выбран",
@@ -54,6 +57,7 @@
     {
       "id": "T3",
       "kind": "task",
+      "status": "completed",
       "parentId": "G1",
       "revision": "VT3-2",
       "title": "Номер Codex привязан и сохранён",
