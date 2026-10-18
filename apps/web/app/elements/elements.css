@@ -1,0 +1,73 @@
+/* ABOUTME: Оформляет карту и панель Хода внутри существующей темы Brai. */
+/* ABOUTME: Тёмные карточки сохраняют схему Архитектора при любой теме оболочки. */
+.elements-screen { height: 100%; display: flex; flex-direction: column; min-height: 0; background: var(--background); color: var(--foreground); }
+.elements-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 22px 28px 12px; }
+.elements-heading h1 { margin: 0; font-size: 27px; letter-spacing: -.6px; }
+.elements-heading p { margin: 3px 0 0; font-size: 14px; opacity: .7; }
+.elements-demo { padding: 6px 11px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
+.elements-context { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 0 28px 16px; font-size: 12px; opacity: .8; }
+.elements-context span:first-child { display: inline-flex; align-items: center; gap: 5px; }
+.elements-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 28px; border-block: 1px solid var(--border); }
+.elements-toolbar button, .elements-toolbar select { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 6px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--card); color: var(--foreground); font-size: 13px; }
+.elements-toolbar button:hover { background: var(--accent); }
+.elements-toolbar select { max-width: 260px; text-overflow: ellipsis; }
+.elements-zoom { display: flex; align-items: center; gap: 4px; }
+.elements-zoom output { width: 44px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
+.elements-toolbar .elements-reset { margin-left: auto; }
+.elements-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px; padding: 10px 28px; font-size: 12px; }
+.elements-legend label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+.elements-legend input { accent-color: var(--primary); }
+.elements-legend > span { opacity: .65; }
+.elements-line-key { display: inline-block; width: 24px; border-top: 2px solid #8ea2ff; }
+.elements-line-key.hierarchy { border-top: 2px dashed #8c9c96; }
+.elements-canvas { position: relative; flex: 1; min-height: 240px; overflow: hidden; cursor: grab; touch-action: none; background-color: var(--background); background-image: radial-gradient(circle, color-mix(in srgb, var(--foreground) 20%, transparent) 1px, transparent 1px); background-size: 24px 24px; }
+.elements-canvas.is-dragging, .elements-canvas.is-dragging * { cursor: grabbing; user-select: none; }
+.elements-world { position: absolute; inset: 0 auto auto 0; width: 1px; height: 1px; transform-origin: 0 0; }
+.elements-links { position: absolute; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+.elements-link > path { fill: none; stroke: #8ea2ff; stroke-width: 2; }
+.elements-link.hierarchy > path { stroke: #8c9c96; stroke-dasharray: 7 7; stroke-width: 1.5; }
+.elements-link text { fill: var(--foreground); font-size: 12px; paint-order: stroke; stroke: var(--background); stroke-width: 7px; stroke-linejoin: round; }
+.elements-card { position: absolute; display: flex; flex-direction: column; border: 1px solid #88968f; border-radius: 5px; background: #0d1110; color: #dcebe5; box-shadow: 0 7px 24px #0002; cursor: default; }
+.elements-card-grip { display: flex; align-items: center; flex: none; gap: 12px; width: 100%; padding: 12px 18px; border: 0; border-bottom: 1px solid #36433d; background: #18211d; color: #dcebe5; font-size: 12px; cursor: grab; touch-action: none; text-align: left; }
+.elements-card-done { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; color: #a0c5b5; }
+.elements-card h2 { font-size: 21px; line-height: 1.3; letter-spacing: -.3px; margin: 18px 20px 9px; overflow-wrap: anywhere; }
+.elements-description { min-height: 48px; margin: 0 20px 16px; font-size: 13px; line-height: 1.5; color: #adc0b7; }
+.elements-moves-title { display: flex; justify-content: space-between; margin: 0 20px 8px; font-size: 12px; color: #adc0b7; }
+.elements-moves { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 12px 8px; scrollbar-width: thin; scrollbar-color: #5f7368 #0d1110; }
+.elements-move { width: 100%; display: flex; gap: 10px; align-items: center; min-height: 62px; margin-bottom: 6px; padding: 10px; border: 1px solid #35433c; border-radius: 10px; background: #18221c; color: #dcebe5; text-align: left; line-height: 1.35; font-size: 14px; }
+.elements-move:hover, .elements-move:focus-visible { border-color: #b4c4ed; background: #222d28; }
+.elements-move-number { flex: none; width: 18px; color: #91a69b; text-align: center; font-size: 11px; }
+.elements-move-body { display: grid; gap: 5px; flex: 1; }
+.elements-move-body small { color: #99aea3; font-size: 11px; }
+.elements-move-status { color: #a5cdb8; }
+.elements-card footer { flex: none; padding: 12px 20px; border-top: 1px solid #36433d; font-size: 11px; color: #adc0b7; overflow-wrap: anywhere; }
+.elements-help { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 18px; padding: 9px 28px; border-top: 1px solid var(--border); font-size: 11px; opacity: .75; }
+.elements-empty { margin: 50px; }
+.elements-detail-overlay { position: fixed; inset: 0; z-index: 100; background: #0007; }
+.elements-detail { position: fixed; z-index: 101; inset: 12px 12px 12px auto; width: min(470px, calc(100vw - 24px)); overflow-y: auto; overscroll-behavior: contain; padding: 32px 25px; border: 1px solid var(--border); border-radius: 12px; background: var(--card); color: var(--foreground); box-shadow: 0 12px 55px #0005; }
+.elements-detail h2 { margin: 0 32px 12px 0; font-size: 23px; line-height: 1.3; }
+.elements-detail > p { font-size: 13px; opacity: .75; line-height: 1.6; }
+.elements-detail-close { position: absolute; right: 12px; top: 12px; display: grid; place-items: center; width: 34px; height: 34px; border: 0; border-radius: 6px; background: var(--secondary); color: var(--foreground); }
+.elements-detail dl { margin-block: 24px; display: grid; gap: 5px; }
+.elements-detail dt { margin-top: 12px; font-size: 12px; opacity: .65; }
+.elements-detail dd { margin: 0; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.elements-text-link { display: inline; border: 0; padding: 0; color: var(--primary); text-align: left; background: transparent; text-decoration: underline; text-underline-offset: 3px; }
+.elements-detail-note { padding: 12px; border-left: 2px solid var(--border); }
+.elements-resources { margin-top: 24px; }
+.elements-resources h3 { display: flex; align-items: center; gap: 9px; font-size: 16px; }
+.elements-resources h3 span { font-size: 12px; opacity: .65; }
+.elements-resources > p { font-size: 12px; opacity: .7; }
+.elements-resources details { padding: 12px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.elements-resources summary { cursor: pointer; line-height: 1.5; }
+.elements-resources summary span { color: var(--primary); }
+.elements-resources details p { line-height: 1.6; }
+.elements-resource-origin { font-size: 12px; opacity: .8; }
+@media (max-width: 700px) {
+ .elements-heading { padding: 14px 16px 10px; } .elements-heading h1 { font-size: 23px; }
+ .elements-context { padding: 0 16px 10px; gap: 5px; font-size: 11px; }
+ .elements-toolbar { padding: 8px 12px; gap: 6px; } .elements-toolbar select { max-width: 130px; }
+ .elements-toolbar .elements-reset { margin-left: 0; } .elements-reset span { display: none; }
+ .elements-legend { padding: 8px 12px; gap: 8px 14px; } .elements-legend > span { display: none; }
+ .elements-help { padding: 6px 12px; font-size: 10px; } .elements-help > span:first-child { display: none; }
+ .elements-detail { padding: 30px 20px; }
+}

@@ -1,0 +1,922 @@
+{
+  "elements": [
+    {
+      "id": "G1",
+      "kind": "goal",
+      "parentId": null,
+      "revision": "VG1-1",
+      "title": "Рабочий аккаунт Codex готов",
+      "description": "Телефон привязан, использованный номер сохранён у Игрока",
+      "input": [
+        "R00"
+      ],
+      "output": [
+        "R25"
+      ]
+    },
+    {
+      "id": "T1",
+      "kind": "task",
+      "parentId": "G1",
+      "revision": "VT1-2",
+      "title": "Способ подтверждения телефона в Codex выбран",
+      "description": "Принято решение по отчёту с оценкой риска",
+      "input": [
+        "R00",
+        "R01",
+        "R02"
+      ],
+      "output": [
+        "R07"
+      ]
+    },
+    {
+      "id": "T2",
+      "kind": "task",
+      "parentId": "G1",
+      "revision": "VT2-2",
+      "title": "Источник номера для Codex выбран",
+      "description": "Выбраны сайты для принятого в T1 способа",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07"
+      ],
+      "output": [
+        "R14"
+      ]
+    },
+    {
+      "id": "T3",
+      "kind": "task",
+      "parentId": "G1",
+      "revision": "VT3-2",
+      "title": "Номер Codex привязан и сохранён",
+      "description": "Привязка через выбранный сайт подтверждена; сохранение номера подтверждено без передачи секрета",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10",
+        "R11",
+        "R12",
+        "R13",
+        "R14"
+      ],
+      "output": [
+        "R23"
+      ]
+    }
+  ],
+  "moves": [
+    {
+      "id": "G1-M1",
+      "order": 1,
+      "ownerId": "G1",
+      "targetId": "G1",
+      "previousId": null,
+      "kind": "operation",
+      "title": "Поставить Цель",
+      "status": "completed",
+      "attemptId": "A01",
+      "executor": "agent",
+      "input": [
+        "R00"
+      ],
+      "output": [
+        "R01"
+      ]
+    },
+    {
+      "id": "G1-M2",
+      "order": 2,
+      "ownerId": "G1",
+      "targetId": "G1",
+      "previousId": "G1-M1",
+      "kind": "action",
+      "title": "Рассмотреть постановку Цели",
+      "status": "completed",
+      "attemptId": "A02",
+      "executor": "human",
+      "input": [
+        "R00",
+        "R01"
+      ],
+      "output": [
+        "R02"
+      ]
+    },
+    {
+      "id": "G1-M3",
+      "order": 3,
+      "ownerId": "G1",
+      "targetId": "T1",
+      "previousId": "G1-M2",
+      "kind": "operation",
+      "title": "Поставить первую Задачу",
+      "status": "completed",
+      "attemptId": "A03",
+      "executor": "agent",
+      "input": [
+        "R00",
+        "R01",
+        "R02"
+      ],
+      "output": [
+        "R03"
+      ]
+    },
+    {
+      "id": "T1-M1",
+      "order": 4,
+      "ownerId": "T1",
+      "targetId": "T1",
+      "previousId": "G1-M3",
+      "kind": "action",
+      "title": "Рассмотреть постановку первой Задачи",
+      "status": "completed",
+      "attemptId": "A04",
+      "executor": "human",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03"
+      ],
+      "output": [
+        "R04"
+      ]
+    },
+    {
+      "id": "T1-M2",
+      "order": 5,
+      "ownerId": "T1",
+      "targetId": "T1",
+      "previousId": "T1-M1",
+      "kind": "operation",
+      "title": "Исследовать требования к номеру",
+      "status": "completed",
+      "attemptId": "A05",
+      "executor": "agent",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04"
+      ],
+      "output": [
+        "R05"
+      ]
+    },
+    {
+      "id": "T1-M3",
+      "order": 6,
+      "ownerId": "T1",
+      "targetId": "T1",
+      "previousId": "T1-M2",
+      "kind": "action",
+      "title": "Выбрать способ подтверждения",
+      "status": "completed",
+      "attemptId": "A06",
+      "executor": "human",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05"
+      ],
+      "output": [
+        "R06"
+      ]
+    },
+    {
+      "id": "G1-M4",
+      "order": 7,
+      "ownerId": "G1",
+      "targetId": "T1",
+      "previousId": "T1-M3",
+      "kind": "operation",
+      "title": "Принять результат первой Задачи",
+      "status": "completed",
+      "attemptId": "A07",
+      "executor": "agent",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06"
+      ],
+      "output": [
+        "R07"
+      ]
+    },
+    {
+      "id": "G1-M5",
+      "order": 8,
+      "ownerId": "G1",
+      "targetId": "T2",
+      "previousId": "G1-M4",
+      "kind": "operation",
+      "title": "Поставить вторую Задачу",
+      "status": "completed",
+      "attemptId": "A08",
+      "executor": "agent",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07"
+      ],
+      "output": [
+        "R08"
+      ]
+    },
+    {
+      "id": "T2-M1",
+      "order": 9,
+      "ownerId": "T2",
+      "targetId": "T2",
+      "previousId": "G1-M5",
+      "kind": "action",
+      "title": "Рассмотреть постановку второй Задачи",
+      "status": "completed",
+      "attemptId": "A09",
+      "executor": "human",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08"
+      ],
+      "output": [
+        "R09"
+      ]
+    },
+    {
+      "id": "T2-M2",
+      "order": 10,
+      "ownerId": "T2",
+      "targetId": "T2",
+      "previousId": "T2-M1",
+      "kind": "operation",
+      "title": "Исследовать сайты получения номера",
+      "status": "completed",
+      "attemptId": "A10",
+      "executor": "agent",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09"
+      ],
+      "output": [
+        "R10"
+      ]
+    },
+    {
+      "id": "T2-M3",
+      "order": 11,
+      "ownerId": "T2",
+      "targetId": "T2",
+      "previousId": "T2-M2",
+      "kind": "action",
+      "title": "Рассмотреть предложенный сайт",
+      "status": "completed",
+      "attemptId": "A11",
+      "executor": "human",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10"
+      ],
+      "output": [
+        "R11"
+      ]
+    },
+    {
+      "id": "T2-F1",
+      "order": 12,
+      "ownerId": "T2",
+      "targetId": "T2",
+      "previousId": "T2-M3",
+      "kind": "operation",
+      "title": "Доработать сравнение сайтов",
+      "status": "completed",
+      "attemptId": "A12",
+      "executor": "agent",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10",
+        "R11"
+      ],
+      "output": [
+        "R12"
+      ]
+    },
+    {
+      "id": "T2-F2",
+      "order": 13,
+      "ownerId": "T2",
+      "targetId": "T2",
+      "previousId": "T2-F1",
+      "kind": "action",
+      "title": "Рассмотреть доработанный отчёт",
+      "status": "completed",
+      "attemptId": "A13",
+      "executor": "human",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10",
+        "R11",
+        "R12"
+      ],
+      "output": [
+        "R13"
+      ]
+    },
+    {
+      "id": "G1-M6",
+      "order": 14,
+      "ownerId": "G1",
+      "targetId": "T2",
+      "previousId": "T2-F2",
+      "kind": "operation",
+      "title": "Принять результат второй Задачи",
+      "status": "completed",
+      "attemptId": "A14",
+      "executor": "agent",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10",
+        "R11",
+        "R12",
+        "R13"
+      ],
+      "output": [
+        "R14"
+      ]
+    },
+    {
+      "id": "G1-M7",
+      "order": 15,
+      "ownerId": "G1",
+      "targetId": "T3",
+      "previousId": "G1-M6",
+      "kind": "operation",
+      "title": "Поставить третью Задачу",
+      "status": "completed",
+      "attemptId": "A15",
+      "executor": "agent",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10",
+        "R11",
+        "R12",
+        "R13",
+        "R14"
+      ],
+      "output": [
+        "R15"
+      ]
+    },
+    {
+      "id": "T3-M1",
+      "order": 16,
+      "ownerId": "T3",
+      "targetId": "T3",
+      "previousId": "G1-M7",
+      "kind": "action",
+      "title": "Рассмотреть постановку третьей Задачи",
+      "status": "completed",
+      "attemptId": "A16",
+      "executor": "human",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10",
+        "R11",
+        "R12",
+        "R13",
+        "R14",
+        "R15"
+      ],
+      "output": [
+        "R16",
+        "R17"
+      ]
+    },
+    {
+      "id": "T3-M2",
+      "order": 17,
+      "ownerId": "T3",
+      "targetId": "T3",
+      "previousId": "T3-M1",
+      "kind": "action",
+      "title": "Зарегистрироваться в выбранном сервисе",
+      "status": "completed",
+      "attemptId": "A17",
+      "executor": "human",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10",
+        "R11",
+        "R12",
+        "R13",
+        "R14",
+        "R15",
+        "R16",
+        "R17"
+      ],
+      "output": [
+        "R18"
+      ]
+    },
+    {
+      "id": "T3-M3",
+      "order": 18,
+      "ownerId": "T3",
+      "targetId": "T3",
+      "previousId": "T3-M2",
+      "kind": "action",
+      "title": "Пополнить баланс сервиса",
+      "status": "completed",
+      "attemptId": "A18",
+      "executor": "human",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10",
+        "R11",
+        "R12",
+        "R13",
+        "R14",
+        "R15",
+        "R16",
+        "R17",
+        "R18"
+      ],
+      "output": [
+        "R19"
+      ]
+    },
+    {
+      "id": "T3-M4",
+      "order": 19,
+      "ownerId": "T3",
+      "targetId": "T3",
+      "previousId": "T3-M3",
+      "kind": "action",
+      "title": "Получить номер и привязать Codex",
+      "status": "completed",
+      "attemptId": "A19",
+      "executor": "human",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10",
+        "R11",
+        "R12",
+        "R13",
+        "R14",
+        "R15",
+        "R16",
+        "R17",
+        "R18",
+        "R19"
+      ],
+      "output": [
+        "R20"
+      ]
+    },
+    {
+      "id": "T3-M5",
+      "order": 20,
+      "ownerId": "T3",
+      "targetId": "T3",
+      "previousId": "T3-M4",
+      "kind": "action",
+      "title": "Сохранить номер и сообщить итог",
+      "status": "completed",
+      "attemptId": "A20",
+      "executor": "human",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10",
+        "R11",
+        "R12",
+        "R13",
+        "R14",
+        "R15",
+        "R16",
+        "R17",
+        "R18",
+        "R19",
+        "R20"
+      ],
+      "output": [
+        "R21",
+        "R22"
+      ]
+    },
+    {
+      "id": "G1-M8",
+      "order": 21,
+      "ownerId": "G1",
+      "targetId": "T3",
+      "previousId": "T3-M5",
+      "kind": "operation",
+      "title": "Принять результат третьей Задачи",
+      "status": "completed",
+      "attemptId": "A21",
+      "executor": "agent",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10",
+        "R11",
+        "R12",
+        "R13",
+        "R14",
+        "R15",
+        "R16",
+        "R17",
+        "R18",
+        "R19",
+        "R20",
+        "R21",
+        "R22"
+      ],
+      "output": [
+        "R23"
+      ]
+    },
+    {
+      "id": "G1-M9",
+      "order": 22,
+      "ownerId": "G1",
+      "targetId": "G1",
+      "previousId": "G1-M8",
+      "kind": "action",
+      "title": "Рассмотреть итог Цели",
+      "status": "completed",
+      "attemptId": "A22",
+      "executor": "human",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10",
+        "R11",
+        "R12",
+        "R13",
+        "R14",
+        "R15",
+        "R16",
+        "R17",
+        "R18",
+        "R19",
+        "R20",
+        "R21",
+        "R22",
+        "R23"
+      ],
+      "output": [
+        "R24"
+      ]
+    },
+    {
+      "id": "G1-M10",
+      "order": 23,
+      "ownerId": "G1",
+      "targetId": "G1",
+      "previousId": "G1-M9",
+      "kind": "operation",
+      "title": "Завершить Цель",
+      "status": "completed",
+      "attemptId": "A23",
+      "executor": "agent",
+      "input": [
+        "R00",
+        "R01",
+        "R02",
+        "R03",
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R08",
+        "R09",
+        "R10",
+        "R11",
+        "R12",
+        "R13",
+        "R14",
+        "R15",
+        "R16",
+        "R17",
+        "R18",
+        "R19",
+        "R20",
+        "R21",
+        "R22",
+        "R23",
+        "R24"
+      ],
+      "output": [
+        "R25"
+      ]
+    }
+  ],
+  "resources": [
+    {
+      "id": "R00",
+      "attemptId": null,
+      "title": "Поручение Игрока",
+      "content": "Нужен аккаунт с привязанным и сохранённым номером. Подход и источник ещё не выбраны. Внешние действия и платежи выполняет Игрок. Доступы и средства пока не подтверждены"
+    },
+    {
+      "id": "R01",
+      "attemptId": "A01",
+      "title": "Постановка G1",
+      "content": "Версия VG1-1, черновики T1–T3 и план Ходов Цели"
+    },
+    {
+      "id": "R02",
+      "attemptId": "A02",
+      "title": "Подтверждение постановки G1",
+      "content": "Игрок подтвердил VG1-1"
+    },
+    {
+      "id": "R03",
+      "attemptId": "A03",
+      "title": "Постановка T1",
+      "content": "Версия VT1-2 и внутренние Ходы T1"
+    },
+    {
+      "id": "R04",
+      "attemptId": "A04",
+      "title": "Подтверждение постановки T1",
+      "content": "Игрок подтвердил VT1-2"
+    },
+    {
+      "id": "R05",
+      "attemptId": "A05",
+      "title": "Отчёт о требованиях к номеру",
+      "content": "Материал для оценки риска утраты доступа к номеру; исходные источники не восстановлены"
+    },
+    {
+      "id": "R06",
+      "attemptId": "A06",
+      "title": "Итоговое решение по T1",
+      "content": "Игрок выбирает одноразовый номер и принимает риск потери аккаунта; проекты находятся на его серверах"
+    },
+    {
+      "id": "R07",
+      "attemptId": "A07",
+      "title": "Принятый способ получения номера",
+      "content": "Одноразовый вариант; основания и подтверждения — R05 и R06"
+    },
+    {
+      "id": "R08",
+      "attemptId": "A08",
+      "title": "Постановка T2",
+      "content": "Версия VT2-2: найти источник номера с учётом R07"
+    },
+    {
+      "id": "R09",
+      "attemptId": "A09",
+      "title": "Подтверждение постановки T2",
+      "content": "Игрок подтвердил VT2-2"
+    },
+    {
+      "id": "R10",
+      "attemptId": "A10",
+      "title": "Первый отчёт о сайте",
+      "content": "Предложен условный сайт S1"
+    },
+    {
+      "id": "R11",
+      "attemptId": "A11",
+      "title": "Замечания к отчёту T2",
+      "content": "Предмет — R10. Проверить отзывы и сравнить несколько сайтов. Итогового решения нет"
+    },
+    {
+      "id": "R12",
+      "attemptId": "A12",
+      "title": "Доработанный отчёт о сайтах",
+      "content": "Условная выборка S1 и S2, сравнение и проверка отзывов; заменяет R10 как актуальный отчёт"
+    },
+    {
+      "id": "R13",
+      "attemptId": "A13",
+      "title": "Итоговое решение по T2",
+      "content": "Игрок разрешает использовать S1 или S2 из доработанной выборки"
+    },
+    {
+      "id": "R14",
+      "attemptId": "A14",
+      "title": "Принятые источники номера",
+      "content": "S1 и S2; основания и подтверждения — R12 и R13"
+    },
+    {
+      "id": "R15",
+      "attemptId": "A15",
+      "title": "Постановка T3",
+      "content": "Версия VT3-2 и внутренние Экшены с учётом R07 и R14"
+    },
+    {
+      "id": "R16",
+      "attemptId": "A16",
+      "title": "Подтверждение постановки T3",
+      "content": "Игрок подтвердил VT3-2"
+    },
+    {
+      "id": "R17",
+      "attemptId": "A16",
+      "title": "Сведения о возможностях Игрока",
+      "content": "В симуляции Игрок отдельно подтвердил доступ к Codex и личному хранилищу, наличие денег и способа платежа"
+    },
+    {
+      "id": "R18",
+      "attemptId": "A17",
+      "title": "Доступ к сервису номеров",
+      "content": "Игрок зарегистрировался в S1; учётные данные остаются у него"
+    },
+    {
+      "id": "R19",
+      "attemptId": "A18",
+      "title": "Доступный баланс сервиса",
+      "content": "Игрок пополнил баланс и подтвердил достаточность для выбранного номера; сумма не восстановлена"
+    },
+    {
+      "id": "R20",
+      "attemptId": "A19",
+      "title": "Подтверждение привязки",
+      "content": "После нескольких попыток номер успешно привязан к Codex; значение номера не передаётся"
+    },
+    {
+      "id": "R21",
+      "attemptId": "A20",
+      "title": "Подтверждение сохранения номера",
+      "content": "Игрок сохранил использованный номер в личном хранилище; секрет не передаётся"
+    },
+    {
+      "id": "R22",
+      "attemptId": "A20",
+      "title": "Итоговое решение по T3",
+      "content": "Игрок сообщил об успешной привязке и сохранении номера, считает T3 выполненной"
+    },
+    {
+      "id": "R23",
+      "attemptId": "A21",
+      "title": "Принятый результат привязки",
+      "content": "Привязка и сохранение подтверждены R20, R21 и R22"
+    },
+    {
+      "id": "R24",
+      "attemptId": "A22",
+      "title": "Итоговое решение по G1",
+      "content": "Игрок принял результат всей Цели: аккаунт готов"
+    },
+    {
+      "id": "R25",
+      "attemptId": "A23",
+      "title": "Рабочий аккаунт Codex",
+      "content": "Принятый итог G1; подтверждения — R07, R14, R23 и R24"
+    }
+  ]
+}
