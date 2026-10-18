@@ -127,7 +127,7 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
       const end = side ? { x: b.x, y: b.y + cardHeight / 2 } : { x: b.x + cardWidth / 2 + (link.returnToParent ? 100 : -50), y: b.y + (link.returnToParent ? cardHeight : 0) };
       const middle = (start.y + end.y) / 2 + (link.returnToParent ? 35 : -25);
       const path = side ? `M${start.x},${start.y} C${start.x + 70},${start.y} ${end.x - 70},${end.y} ${end.x},${end.y}` : `M${start.x},${start.y} C${start.x},${middle} ${end.x},${middle} ${end.x},${end.y}`;
-      return <g key={`${link.type}-${link.from}-${link.to}`} className={`elements-link ${link.type}`}><title>{link.from} → {link.to}: {link.label}</title><path d={path} markerEnd={`url(#elements-arrow-${link.type})`} /><text x={(start.x + end.x) / 2} y={side ? start.y - 12 : middle + (index % 2) * 20} textAnchor="middle">{link.label}</text></g>;
+      return <g key={`${link.type}-${link.from}-${link.to}`} className={`elements-link ${link.type}`}><title>{`${link.from} → ${link.to}: ${link.label}`}</title><path d={path} markerEnd={`url(#elements-arrow-${link.type})`} /><text x={(start.x + end.x) / 2} y={side ? start.y - 12 : middle + (index % 2) * 20} textAnchor="middle">{link.label}</text></g>;
      })}
     </svg>
     {dataset.elements.map(element => {
