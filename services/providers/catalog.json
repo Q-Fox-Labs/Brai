@@ -1,5 +1,5 @@
 {
-  "version": "chat-v1-1",
+  "version": "artifacts-v1-1",
   "models": [
     {
       "provider": "typesafe",
@@ -34,6 +34,18 @@
       "questionTypes": [],
       "stateTypes": [],
       "deadlineMs": 90000
+    },
+    {
+      "provider": "openrouter",
+      "model": "google/gemini-2.5-flash-image",
+      "upstreamModel": "openrouter/google/gemini-2.5-flash-image",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "capabilities": [
+        "image"
+      ],
+      "questionTypes": [],
+      "stateTypes": [],
+      "deadlineMs": 180000
     }
   ]
 }

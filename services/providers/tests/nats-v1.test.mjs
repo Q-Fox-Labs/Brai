@@ -26,5 +26,5 @@ test('real NATS+PG: v1 schemas, catalogue, owner scope and safe errors',{skip:!p
  const eight=Array.from({length:8},()=>call('operations.get',key));
  while(waiting.length<8)await new Promise(resolve=>setTimeout(resolve,5));
  assert.equal((await call('status',{})).headers.get('Nats-Service-Error'),'OVERLOADED');waiting.forEach(f=>f());await Promise.all(eight);ops.get=original;
- const info=(await nc.request('$SRV.INFO.brai_providers_v1','',{timeout:2000})).json();assert.equal(info.endpoints.length,7);
+ const info=(await nc.request('$SRV.INFO.brai_providers_v1','',{timeout:2000})).json();assert.equal(info.endpoints.length,8);
 });

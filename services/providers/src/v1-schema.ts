@@ -12,3 +12,5 @@ export const validChatResult=ajv.compile({$ref:"v1#/definitions/chatResult"});
 export const validChatRequest=ajv.compile({$ref:"v1#/definitions/chatRequest"});
 export const validDecideRequest=ajv.compile<DecideRequest>({$ref:"v1#/definitions/decideRequest"});
 export const validDecideUpstream=ajv.compile<DecideUpstream>({$ref:"v1#/definitions/decideUpstream"});
+
+export const validImageRequest=ajv.compile({$ref:"v1#/definitions/imageRequest"});

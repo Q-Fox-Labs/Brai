@@ -5,6 +5,7 @@ import { Failure } from "./core.js";
 import { listModels, getModel, catalogVersion } from "./catalog.js";
 import { boundedJson, V1_LIMITS, type Operations, type DecideRequest } from "./operations.js";
 import { v1Validator } from "./v1-schema.js";
+import type { ImageRequest } from "./image.js";
 import { CHAT_LIMITS, type ChatRequest, type EventSink, type StreamEvent } from "./chat.js";
 /** Ограничивает неподтверждённые локальные публикации. Core NATS не подтверждает обработку caller. */
 export function createStreamPublisher(nc:Pick<NatsConnection,"publish"|"flush"|"isClosed">,inbox:string):EventSink {
@@ -32,6 +33,7 @@ export async function registerProvidersV1(nc:NatsConnection,operations:Operation
   const service=await nc.services.add({name:"brai_providers_v1",version:"1.0.0",description:"Durable owner scoped operations",queue:"brai_providers_v1"});
   let controls=0;
   const endpoints:[string,string,string,boolean,(input:Record<string,unknown>)=>unknown][]=[
+    ["invoke.image","imageRequest","operation",false,input=>operations.invokeImage(input as ImageRequest)],
     ["invoke.decide","decideRequest","operation",false,input=>operations.invoke(input as DecideRequest)],
     ["invoke.chat","chatRequest","operation",false,input=>{
       const chat=input as ChatRequest;

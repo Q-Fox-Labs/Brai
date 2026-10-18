@@ -29,6 +29,21 @@
           }
         ]
       }
+    },
+    {
+      "model_name": "google/gemini-2.5-flash-image",
+      "litellm_params": {
+        "model": "openrouter/google/gemini-2.5-flash-image",
+        "api_key": "os.environ/OPENROUTER_API_KEY",
+        "num_retries": 0,
+        "max_retries": 0,
+        "timeout": 180,
+        "configurable_clientside_auth_params": [
+          {
+            "api_base": "^http://127[.]0[.]0[.]1:18401/dispatch/[a-f0-9-]{36}/v1\\Z"
+          }
+        ]
+      }
     }
   ],
   "router_settings": {
@@ -36,14 +51,14 @@
     "fallbacks": [],
     "context_window_fallbacks": [],
     "content_policy_fallbacks": [],
-    "timeout": 90
+    "timeout": 180
   },
   "litellm_settings": {
     "num_retries": 0,
     "drop_params": false,
     "set_verbose": false,
     "turn_off_message_logging": true,
-    "request_timeout": 90
+    "request_timeout": 180
   },
   "general_settings": {
     "disable_background_health_check": true

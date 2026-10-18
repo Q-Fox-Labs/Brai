@@ -8,8 +8,9 @@ import { validDecideUpstream } from "./v1-schema.js";
 import { canonical, type DecideRequest, type DecideUpstream } from "./operations.js";
 import { validUpstream } from "./schema.js";
 import { chatWire, createChatAssembler, createSseParser, type ChatRequest, type ChatCompletion, type Message } from "./chat.js";
+import { imageWire, rawImage, type ImageRequest, type ImageCompletion } from "./image.js";
 type Usage = {input_tokens: number; output_tokens: number} | null;
-type Entry = {claimed: boolean; request: Request | DecideRequest | ChatRequest; messages?:Message[]; controller: AbortController; usage?: Usage; raw?: DecideUpstream; chat?:ChatCompletion; pending?: Promise<void>};
+type Entry = {claimed: boolean; request: Request | DecideRequest | ChatRequest | ImageRequest; messages?:Message[]; controller: AbortController; usage?: Usage; raw?: DecideUpstream; chat?:ChatCompletion; image?:ImageCompletion; pending?: Promise<void>};
 /** Читает ограниченные байты; прерывает источник при переполнении. */
 async function readBody(source: AsyncIterable<Uint8Array>, limit: number) {
   const chunks: Uint8Array[]=[];let length=0;
@@ -26,7 +27,7 @@ export async function createEgressGuard(options: {host: string; port: number; up
     const reject=()=>{res.writeHead(409,{"content-type":"application/json"});res.end('{"error":"DISPATCH_REJECTED"}');};
     const match=/^\/dispatch\/([a-f0-9-]{36})\/v1\/(systemone|chat\/completions)$/.exec(req.url ?? "");
     const entry=match ? active.get(match[1]) : undefined;
-    if(req.method!=="POST" || !entry || (match![2]==="chat/completions")!==!!entry.messages || entry.claimed || entry.controller.signal.aborted || Date.now()>=Date.parse(entry.request.deadlineAt)) {req.resume();reject();return;}
+    if(req.method!=="POST" || !entry || (match![2]==="chat/completions")!== (!!entry.messages || "prompt" in entry.request) || entry.claimed || entry.controller.signal.aborted || Date.now()>=Date.parse(entry.request.deadlineAt)) {req.resume();reject();return;}
     // AIDEV-NOTE: Claim синхронный, до чтения тела и любого внешнего эффекта.
     entry.claimed=true;
     const stop=()=>{req.destroy();res.destroy();};
@@ -35,7 +36,8 @@ export async function createEgressGuard(options: {host: string; port: number; up
       try {
         const body=await readBody(req,"operationId" in entry.request ? 65536 : LIMITS.requestBytes);
         const data=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(body));
-        if(entry.messages){
+        if("prompt" in entry.request){if(canonical(data)!==canonical(imageWire(entry.request)))throw new Error("DISPATCH_BODY");}
+        else if(entry.messages){
           // AIDEV-NOTE: Stock OpenRouter добавляет только usage.include. Все остальные поля обязаны совпасть.
           const {usage,...wire}=data;
           if(usage!==undefined&&canonical(usage)!==canonical({include:true}) || canonical(wire)!==canonical(chatWire(entry.request as ChatRequest,entry.messages)))throw new Error("DISPATCH_BODY");
@@ -43,7 +45,7 @@ export async function createEgressGuard(options: {host: string; port: number; up
         const authorization=req.headers.authorization;
         if(!authorization?.startsWith("Bearer ")) throw new Error("DISPATCH_AUTH");
         dispatches++;
-        const response=await fetch(entry.messages?chatUpstream:upstream,{method:"POST",redirect:"error",signal:entry.controller.signal,headers:{"content-type":"application/json",authorization},body});
+        const response=await fetch(entry.messages || "prompt" in entry.request?chatUpstream:upstream,{method:"POST",redirect:"error",signal:entry.controller.signal,headers:{"content-type":"application/json",authorization},body});
         upstreamStatus=response.status;
         if(!response.ok) {await response.body?.cancel();res.writeHead(response.status,{"content-type":"application/json"});res.end('{"error":"UPSTREAM_REJECTED"}');return;}
         if(!response.body) throw new Error("UPSTREAM_PROTOCOL");
@@ -58,6 +60,7 @@ export async function createEgressGuard(options: {host: string; port: number; up
           }finally{res.removeListener("close",disconnected);}
           return;
         }
+        if("prompt" in entry.request){const bytes=await readBody(response.body,23068672);entry.image=rawImage(JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes)));res.writeHead(200,{"content-type":"application/json"});res.end(bytes);return;}
         const bytes=await readBody(response.body,"operationId" in entry.request ? 65536 : LIMITS.responseBytes);
         const raw:unknown=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes));
         if(!("operationId" in entry.request ? validDecideUpstream(raw) : validUpstream(raw))) throw new Error("UPSTREAM_PROTOCOL");
@@ -68,7 +71,7 @@ export async function createEgressGuard(options: {host: string; port: number; up
       finally {entry.controller.signal.removeEventListener("abort",stop);}
     })();
   });
-  server.requestTimeout=90000;server.headersTimeout=5000;server.maxConnections=8;
+  server.requestTimeout=180000;server.headersTimeout=5000;server.maxConnections=8;
   server.listen(options.port,options.host);await once(server,"listening");
   const address=server.address();if(!address || typeof address==="string") throw new Error("EGRESS_BIND");
   const origin=`http://${options.host}:${address.port}`;
@@ -76,17 +79,18 @@ export async function createEgressGuard(options: {host: string; port: number; up
     /** Счётчик отправок без owner, payload, URL capability или credentials. */
     stats:()=>({dispatches,upstreamStatus}),
     /** Регистрирует случайную capability, не являющуюся caller requestId или дедупликацией v0. */
-    allocate(request: Request | DecideRequest | ChatRequest, signal: AbortSignal, messages?:Message[]) {
+    allocate(request: Request | DecideRequest | ChatRequest | ImageRequest, signal: AbortSignal, messages?:Message[]) {
       if(active.size>=LIMITS.concurrency) throw new Failure("OVERLOADED","not_sent");
       const nonce=randomUUID(),controller=new AbortController();
       const entry:Entry={claimed:false,request,controller,messages};
       const abort=()=>controller.abort();signal.addEventListener("abort",abort,{once:true});if(signal.aborted)abort();
       active.set(nonce,entry);
       return {
-        apiBase:`${origin}/dispatch/${nonce}${messages?"/v1":""}`,
+        apiBase:`${origin}/dispatch/${nonce}${messages || "prompt" in request?"/v1":""}`,
         usage:()=>entry.usage,
         raw:()=>entry.raw,
         chat:()=>entry.chat,
+        image:()=>entry.image,
         async release() {controller.abort();await entry.pending;active.delete(nonce);signal.removeEventListener("abort",abort);}
       };
     },

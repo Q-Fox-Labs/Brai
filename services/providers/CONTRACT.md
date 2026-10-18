@@ -171,7 +171,7 @@ PROVIDERS_JEV_DEADLINE_MS), по умолчанию30s; override1–30000ms. NAT
 
 Assembly `main.ts` подключает store/model ports к lifecycle и NATS. Дополнительные
 chat использует тот же OperationStore, dispatch CAS, TTL и Json result.
-Image остаётся следующей задачей. History/Alerts и
+Image использует то же ядро и описан ниже. History/Alerts и
 HTTP consumer остаются следующими задачами. Параметры запуска дополнены
 PROVIDERS_DATABASE_URL и необязательным PROVIDERS_JEV_DEADLINE_MS. Без
 PROVIDERS_DATABASE_URL main запускает только v0, как прежний fixture задачи1;
@@ -303,3 +303,81 @@ stock1.104.2 → OpenRouter deepinfra/fp4, первый ход дал два too
 временной недоступности следующий завершился; автоматических retries/fallback
 нет. Metadata receipts root600: /var/lib/brai-dev/providers-test/task3-live.json
 и task3-live-before-continuation.json; не содержат промпта/ответа/ключей.
+
+## v1: текстовые Артефакты и один image output
+
+`invoke.decide`, `invoke.chat` и `brai.providers.v1.invoke.image` принимают
+необязательные `artifactIds`: до4 уникальных UUID. Только `text/plain`, суммарно
+и на файл≤65536 bytes. Metadata/get и prepare используют публичный
+[контракт artifacts](../artifacts/CONTRACT.md); bytes идут по HTTP. Consumer
+получает owner от доверенного caller, затем проверяет owner, ready, отсутствие
+удаления, MIME, размер и SHA256. GET не следует redirect, ограничен по bytes и
+15s; metadata перечитывается после загрузки для удаления/изменения во время чтения.
+При ошибке — INVALID_ARTIFACT/not_sent, без вызова модели. Origin и путь
+`/files/{artifactId}` обязаны точно совпасть с доверенной конфигурацией.
+
+Replay/hash conflict проверяются **до** повторного чтения dependency. Изменение
+или удаление файла не меняет уже сохранённый итог. Без artifactIds прежние DTO
+и wire semantics сохраняются. С ними decide получает state `{state:original,
+artifacts:[{artifactId,text}]}`; исходное значение state сохраняется в поле state.
+Chat добавляет user messages `Artifact {id}\n{text}` после своего context,
+с прежними пределами24KiB/64messages. Image добавляет тот же текст к prompt;
+полный prompt≤8192 UTF8 bytes. Эти context messages входят в bounded chat
+continuation с TTL24h. URLs и bearer tokens никогда не передаются модели.
+Извлечение PDF/office, произвольные ссылки и upstream file hosting не поддержаны.
+
+Image request фиксирует provider=openrouter, model=google/gemini-2.5-flash-image,
+`n:1,size:1024x1024,quality:standard|low,responseFormat:b64_json`, prompt и общие
+ownerId(≤128символов)/operationId/deadlineAt. Закрытая [схема](schemas/v1.schema.json) отвергает
+иные размеры, high quality и произвольные upstream params. Дедлайн≤180s.
+Профиль stock LiteLLM1.104.2 `/v1/images/generations` преобразует size в1:1,
+quality в1K и извлекает b64_json из OpenRouter dataURI. Его request-параметр
+response_format не поддержан: b64_json закреплён как проверяемая форма результата,
+не передаваемый параметр. drop_params остаётся false. Провайдер получает только
+фиксированный Google route `google-vertex/global`, require_parameters=true,
+allow_fallbacks=false, max_tokens2048. Egress claim по nonce происходит до
+фиксированного OpenRouter chat/completions fetch, как в chat. Второй POST и
+fallback запрещены. Raw model/count/PNG MIME, b64 bytes и usage проверяются до
+нормализации; normalized bytes обязаны совпасть. PNG≤16MiB, IHDR ровно1024².
+
+После model response собственный journal атомарно сохраняет точные bytes,
+SHA256, stable prepare requestId и bounded model/usage metadata **до** prepare/PUT.
+Миграция002 добавляет providers_pending_outputs и фазу output_pending. До compute
+резервируется один из двух16MiB слотов; полная квота32MiB, без waiting queue.
+Ошибка reservation даёт OUTPUT_STORAGE_FULL/not_sent. Pending bytes TTL24h;
+успех удаляет bytes. sweep сначала фиксирует OUTPUT_BYTES_EXPIRED, затем очищает
+байты. Утраченный pending original даёт OUTPUT_BYTES_LOST, не regeneration.
+
+Save использует prepare→HTTP PUT→get ready. По проверенному контракту artifacts
+точный prepare requestId возвращает тот же artifactId/uploadUrl. Поэтому потеря
+prepare response безопасна при точном повторе. PUT response может потеряться;
+готовность, owner, MIME, размер и SHA подтверждаются get. Уже ready объект не
+загружается снова. Чужая DB, agent reference/output.bind и public sharing не нужны.
+Operation/output связь принадлежит providers и хранится в его результате.
+Artifact details содержит только operationId/provider/model как безопасное происхождение.
+
+Пока сохранение не подтверждено, result=null, phase=output_pending,
+errorCode=OUTPUT_SAVE_PENDING. Точный invoke replay и startup `resumeOutputs`
+повторяют только сохранение прежних bytes/requestId, даже после истечения
+вычислительного deadline или удаления входного файла. get только читает.
+После успеха result содержит provider/requestedModel/actualModel, raw usage и
+`outputs:[{artifactId,status:ready,sizeBytes,sha256}]`, без URL. Cancel в pending
+помечает запрос; следующий save recovery завершает cancelled и удаляет pending
+bytes. При race уже начатое сохранение может завершиться, как и внешний compute.
+Неопределённый dispatch без durable bytes по-прежнему не возобновляется.
+
+Runtime использует NATS_USER/NATS_PASSWORD/NATS_INBOX_PREFIX из opaque env_file;
+права callers и trusted owner определяются broker ACL. Для artifacts нужны
+PROVIDERS_ARTIFACTS_INTERNAL_ORIGIN и PROVIDERS_ARTIFACTS_UPLOAD_ORIGIN: exact
+http(s) origins без path/credentials/query. Без adapter invoke.image отвергается.
+При упаковке runtime включают публичные artifacts/contracts и его schema,
+без внутренних source artifacts. Миграции001/002 применяются оператором до старта.
+
+Приёмка2026-10-18: один настоящий text artifact(84bytes) прошёл DEV metadata/HTTP
+и hash; его текст дошёл в image context без URL. Единственный внешний image
+через authenticated stock1.104.2 дал PNG246325bytes/1024² и готовый artifact,
+проверенный повторным get/fetch/hash. Usage71input/1291output(1290image),
+cost$0.0387238; replay/get не увеличили modelCalls1. Controlled tests проверяют
+owner/status/MIME/size/hash/origin, удаление при чтении, lost prepare/PUT и
+stage COMMIT response, partial upload, PG reconnect/recovery тех же bytes/IDs,
+квоту, cancel, TTL и отсутствие original. Повторной платной генерации не было.

@@ -47,6 +47,26 @@ channels:
         oneOf:
           - $ref: '#/components/messages/v1_operation'
           - $ref: '#/components/messages/v1_error'
+  brai.providers.v1.invoke.image:
+    description: >-
+      Shared durable ledger/capacity2, no compute retry. Exactly one1024x1024 PNG,
+      quality standard/low, responseFormat b64_json, model google/gemini-2.5-flash-image.
+      Deadline180s. Optional artifactIds only text/plain, total65536bytes.
+      output_pending means durable bytes await artifacts save; result stays null.
+      Same invoke replay/startup repeats only prepare/PUT/get with stable IDs/bytes.
+      Pending quota32MiB/2slots,TTL24h; successful result exposes ready artifactId/hash,
+      never public/internal URLs. NATS errors code500, direct DTO, trusted owner ACL.
+    bindings:
+      nats: {queue: brai_providers_v1, bindingVersion: 0.1.0}
+    subscribe:
+      operationId: v1_invoke_image
+      message: {$ref: '#/components/messages/v1_imageRequest'}
+    publish:
+      operationId: v1_invoke_image_reply
+      message:
+        oneOf:
+          - {$ref: '#/components/messages/v1_operation'}
+          - {$ref: '#/components/messages/v1_error'}
   brai.providers.v1.invoke.chat:
     description: >-
       One durable chat turn, shared capacity2 and control8. Caller subscribes and flushes
@@ -246,3 +266,7 @@ components:
       name: V1_streamEvent
       payload:
         $ref: './schemas/v1.schema.json#/definitions/streamEvent'
+    v1_imageRequest:
+      name: V1_imageRequest
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/imageRequest'

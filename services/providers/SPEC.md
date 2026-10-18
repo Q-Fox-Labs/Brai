@@ -266,6 +266,16 @@ Core NATS не хранит сообщения и не обещает replay п�
 Контракт соседа — [artifacts](../artifacts/CONTRACT.md). Метаданные идут по
 NATS, байты — по HTTP. Чужие таблицы и каталоги файлов не используются.
 
+### Принятый файловый профиль v1
+
+Текущая реализация принимает `artifactIds` только как text/plain context для
+Decide/Chat/Image. Выход — один PNG1024×1024 от Google Gemini2.5 Flash Image
+через stock LiteLLM1.104.2/OpenRouter. Остальные форматы остаются возможностями
+будущих отдельно принятых профилей. Pending bytes находятся в собственном
+PG journal (≤32MiB, два слота, TTL24h); replay/startup возобновляют только
+сохранение прежних bytes/requestId. Фактические DTO и лимиты — в
+[CONTRACT](CONTRACT.md#v1-текстовые-артефакты-и-один-image-output).
+
 ### Вход
 
 Caller передаёт `artifactId` и назначение (`context`, изображение или иной

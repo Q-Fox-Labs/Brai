@@ -1,5 +1,7 @@
 // ABOUTME: Выполняет одну ограниченную HTTP-отправку штатному LiteLLM Proxy.
 // ABOUTME: Не получает ключ TypeSafe, не обращается к провайдеру напрямую.
+import { imageBytes, type ImagePort } from "./image.js";
+import { boundedBytes } from "./artifacts.js";
 import { Failure, LIMITS, type DecidePort } from "./core.js";
 import type { EgressGuard } from "./egress.js";
 import { validDecideUpstream } from "./v1-schema.js";
@@ -75,4 +77,20 @@ export function liteLLMChatPort(baseUrl:string,guard:EgressGuard,apiKey?:string)
     }catch(error){if(error instanceof Failure)throw error;throw new Failure("OUTCOME_UNKNOWN","unknown");}
     finally{await dispatch.release();}
   };
+}
+
+/** Один stock /v1/images/generations; egress проверяет raw image до преобразований. */
+export function liteLLMImagePort(baseUrl:string,guard:EgressGuard,apiKey?:string):ImagePort {
+ const url=new URL('/v1/images/generations',baseUrl);
+ if(!['http:','https:'].includes(url.protocol)||url.username||url.password)throw new Error('INVALID_PROXY_URL');
+ return async(input,signal)=>{
+  const dispatch=guard.allocate(input,signal);
+  try{
+   const response=await fetch(url,{method:'POST',redirect:'error',signal,headers:{'content-type':'application/json',...(apiKey?{authorization:`Bearer ${apiKey}`}:{})},body:JSON.stringify({model:input.model,prompt:input.prompt,n:1,size:input.size,quality:input.quality,max_tokens:2048,provider:{only:['google-vertex/global'],order:['google-vertex/global'],require_parameters:true,allow_fallbacks:false},num_retries:0,max_retries:0,api_base:dispatch.apiBase})});
+   if(!response.ok){await response.body?.cancel();throw new Failure(response.status===401||response.status===403?'UPSTREAM_ACCESS':response.status===402?'UPSTREAM_BALANCE':response.status===429?'UPSTREAM_RATE_LIMIT':'UPSTREAM_FAILURE',response.status>=500?'unknown':'failed');}
+   const data=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(await boundedBytes(response.body,23068672)));
+   if(!Array.isArray(data.data)||data.data.length!==1||data.data[0].url)throw new Failure('UPSTREAM_PROTOCOL','unknown');
+   const bytes=imageBytes(data.data[0].b64_json),raw=dispatch.image();if(!raw||!raw.bytes.equals(bytes))throw new Failure('UPSTREAM_PROTOCOL','unknown');return raw;
+  }catch(error){if(error instanceof Failure)throw error;throw new Failure('OUTCOME_UNKNOWN','unknown');}finally{await dispatch.release();}
+ };
 }

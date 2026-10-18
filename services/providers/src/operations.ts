@@ -3,20 +3,26 @@
 import { createHash } from "node:crypto";
 import { Failure } from "./core.js";
 import { catalogVersion, getModel } from "./catalog.js";
-import { validDecideRequest, validDecideUpstream, validChatRequest, validChatResult } from "./v1-schema.js";
+import { validDecideRequest, validDecideUpstream, validChatRequest, validChatResult, validImageRequest } from "./v1-schema.js";
 import { CHAT_LIMITS, chatMessages, chatResult, type ChatRequest, type ChatPort, type Message, type EventSink, type ChatPart, type StreamEvent } from "./chat.js";
-type InvokeInput=DecideRequest|ChatRequest;
+import { ARTIFACT_LIMITS, type ArtifactPort, type PendingOutput } from "./artifacts.js";
+import type { ImageRequest, ImagePort } from "./image.js";
+type InvokeInput=DecideRequest|ChatRequest|ImageRequest;
 export const V1_LIMITS = Object.freeze({requestBytes:65536,resultBytes:65536,depth:JSON_DEPTH,concurrency:2,controlConcurrency:8,keyTtlMs:7*86400000,resultTtlMs:86400000,maxRows:100000});
 import { JSON_DEPTH, boundedJson, canonical, type Json } from "./json.js";
 export { boundedJson, canonical, type Json } from "./json.js";
 export type Question = {type:"noul"|"choice"|"score";instructions: string;criteria?: Json};
-export type DecideRequest = {operationId:string;ownerId:string;provider:string;model:string;state:string|Json[]|{[key:string]:Json};questions:Record<string,Question>;deadlineAt:string};
+export type DecideRequest = {operationId:string;ownerId:string;provider:string;model:string;state:string|Json[]|{[key:string]:Json};questions:Record<string,Question>;artifactIds?:string[];deadlineAt:string};
 export type DecideUpstream = {model:string;answers:Record<string,Record<string,Json>>;usage?: {input_tokens:number;output_tokens:number}|null};
 export type DecideV1Port = (request:DecideRequest,signal:AbortSignal)=>Promise<DecideUpstream>;
-export type Phase = "accepted"|"dispatching"|"succeeded"|"failed"|"cancelled"|"outcome_unknown";
+export type Phase = "accepted"|"dispatching"|"output_pending"|"succeeded"|"failed"|"cancelled"|"outcome_unknown";
 export type Operation = {operationId:string;ownerId:string;inputHash:string;phase:Phase;cancelRequested:boolean;createdAt:number;finishedAt:number|null;keyExpiresAt:number;resultExpiresAt:number|null;route:{provider:string;model:string;catalogVersion:string};result:Json|null;errorCode:string|null};
 /** Все изменения атомарны. claim коммитится до model port; finish не меняет чужой финал. */
 export interface OperationStore {
+  reserveOutput?(owner:string,id:string,hash:string,requestId:string,expiresAt:number):Promise<void>;
+  stageOutput?(output:PendingOutput,metadata:Json):Promise<void>;
+  pendingOutputs?(owner?:string,id?:string):Promise<(PendingOutput&{metadata:Json})[]>;
+  dropOutput?(owner:string,id:string,hash:string):Promise<void>;
   find(ownerId:string,operationId:string,now:number):Promise<Operation|null>;
   accept(operation:Operation):Promise<{operation:Operation;inserted:boolean}>;
   claim(ownerId:string,operationId:string,inputHash:string):Promise<boolean>;
@@ -48,7 +54,7 @@ export function checkAnswer(request:DecideRequest,result:DecideUpstream) {
   }
 }
 /** Два вычисления без очереди; повторы присоединяются только к принятию своего ключа. */
-export function createOperations(store:OperationStore,port:DecideV1Port,options:{now?:()=>number;lookupModel?:typeof getModel;deadlineMs?:number;chatDeadlineMs?:number;chatPort?:ChatPort}={}) {
+export function createOperations(store:OperationStore,port:DecideV1Port,options:{now?:()=>number;lookupModel?:typeof getModel;deadlineMs?:number;chatDeadlineMs?:number;chatPort?:ChatPort;imagePort?:ImagePort;artifacts?:ArtifactPort}={}) {
   const now=options.now ?? Date.now,lookup=options.lookupModel ?? getModel;
   const maximum=options.deadlineMs ?? 30000;
   if (!Number.isInteger(maximum) || maximum<1 || maximum>30000) throw new Error("INVALID_DEADLINE");
@@ -58,6 +64,31 @@ export function createOperations(store:OperationStore,port:DecideV1Port,options:
   const accepting=new Map<string,{hash:string;promise:Promise<Operation>}>();
   const running=new Map<string,{controller:AbortController;done:Promise<void>}>();
   const identity=(owner:string,id:string)=>JSON.stringify([owner,id]);
+  const outputRequestId=(owner:string,id:string,hash:string)=>'providers:'+createHash('sha256').update(canonical([owner,id,hash])).digest('hex');
+  const saving=new Map<string,Promise<void>>();
+  async function savePending(pending:PendingOutput&{metadata:Json},signal:AbortSignal) {
+    const key=identity(pending.ownerId,pending.operationId);
+    if(saving.has(key))return saving.get(key);
+    const work=(async()=>{
+      const op=await store.find(pending.ownerId,pending.operationId,now());
+      if(!op||op.inputHash!==pending.inputHash)return;
+      if(op.phase!=='output_pending'){await store.dropOutput!(pending.ownerId,pending.operationId,pending.inputHash);return;}
+      if(op.cancelRequested||pending.expiresAt<=now()){
+        await store.finish(pending.ownerId,pending.operationId,op.cancelRequested?'cancelled':'failed',null,op.cancelRequested?'CANCELLED':'OUTPUT_BYTES_EXPIRED',now(),pending.inputHash);
+        await store.dropOutput!(pending.ownerId,pending.operationId,pending.inputHash);return;
+      }
+      try{
+        const saved=await options.artifacts!.save(pending,signal);
+        await store.finish(pending.ownerId,pending.operationId,'succeeded',{...pending.metadata as Record<string,Json>,outputs:[saved]},null,now(),pending.inputHash);
+        await store.dropOutput!(pending.ownerId,pending.operationId,pending.inputHash);
+      }catch{/* Durable bytes сохраняются; повторяются только операции сохранения. */}
+    })();saving.set(key,work);try{await work;}finally{saving.delete(key);}
+  }
+  /** Повторяет только сохранение прежних bytes/IDs; модель не вызывается. */
+  async function resumeOutputs(owner?:string,id?:string){
+    if(!store.pendingOutputs||!options.artifacts)return;
+    for(const pending of await store.pendingOutputs(owner,id))await savePending(pending,AbortSignal.timeout(ARTIFACT_LIMITS.timeoutMs));
+  }
   async function execute(input:InvokeInput,key:string,hash:string,deadlineMs:number,messages:Message[]|undefined,sink?:EventSink) {
     let sequence=0,deliveryInterrupted=false;
     const emit=(part:ChatPart|{type:"started"|"completed"}|{type:"error";code:string;partial:true})=>{
@@ -66,7 +97,7 @@ export function createOperations(store:OperationStore,port:DecideV1Port,options:
       try{if(!sink({...part,operationId:input.operationId,sequence:++sequence} as StreamEvent))deliveryInterrupted=true;}catch{deliveryInterrupted=true;}
     };
     const controller=running.get(key)!.controller;
-    let timer:ReturnType<typeof setTimeout>|undefined,claimed=false;
+    let timer:ReturnType<typeof setTimeout>|undefined,claimed=false,staged=false;
     try {
       // AIDEV-NOTE: Cancel и этот CAS сериализованы БД. Nonce создаётся только после commit.
       if (!(await store.claim(input.ownerId,input.operationId,hash))) return;
@@ -75,7 +106,19 @@ export function createOperations(store:OperationStore,port:DecideV1Port,options:
       if (remaining<=0) {await store.finish(input.ownerId,input.operationId,"failed",null,"DEADLINE_EXCEEDED",now(),hash);return;}
       timer=setTimeout(()=>controller.abort(),remaining);
       let output:Json;
-      if("connectionId" in input){
+      if("prompt" in input){
+        const result=await options.imagePort!(input,controller.signal);
+        if(controller.signal.aborted || now()>=Date.parse(input.deadlineAt))throw new Failure("OUTCOME_UNKNOWN","unknown");
+        const pending:PendingOutput={ownerId:input.ownerId,operationId:input.operationId,inputHash:hash,requestId:outputRequestId(input.ownerId,input.operationId,hash),bytes:result.bytes,sha256:createHash('sha256').update(result.bytes).digest('hex'),expiresAt:now()+ARTIFACT_LIMITS.ttlMs};
+        const metadata={provider:input.provider,requestedModel:input.model,actualModel:result.actualModel,usage:result.usage};
+        try{await store.stageOutput!(pending,metadata);staged=true;}catch{
+          // AIDEV-NOTE: Потерянный COMMIT response может означать durable bytes. Сначала читаем, никогда не удаляем их вслепую.
+          try{const saved=(await store.pendingOutputs!(input.ownerId,input.operationId))[0];if(saved){staged=true;await savePending(saved,controller.signal);}else{await store.finish(input.ownerId,input.operationId,'outcome_unknown',null,'OUTPUT_BYTES_LOST',now(),hash);await store.dropOutput!(input.ownerId,input.operationId,hash);}}catch{healthy=false;}return;
+        }
+        if(timer){clearTimeout(timer);timer=undefined;}
+        await savePending({...pending,metadata},controller.signal);
+        return;
+      }else if("connectionId" in input){
         emit({type:"started"});
         const result=await options.chatPort!(input,messages!,controller.signal,emit);
         if(controller.signal.aborted || now()>=Date.parse(input.deadlineAt))throw new Failure("OUTCOME_UNKNOWN","unknown");
@@ -91,44 +134,56 @@ export function createOperations(store:OperationStore,port:DecideV1Port,options:
       await store.finish(input.ownerId,input.operationId,"succeeded",output,null,now(),hash);
       if("connectionId" in input)emit({type:"completed"});
     } catch(error) {
+      if(staged){healthy=false;return;}
       const failure=error instanceof Failure?error:new Failure("OUTCOME_UNKNOWN",claimed?"unknown":"not_sent");
       if("connectionId" in input)emit({type:"error",code:failure.code,partial:true});
-      try {await store.finish(input.ownerId,input.operationId,failure.outcome==="unknown"?"outcome_unknown":"failed",null,failure.code,now(),hash);} catch {healthy=false;}
-    } finally {if(timer)clearTimeout(timer);active--;running.delete(key);}
+      try {await store.dropOutput?.(input.ownerId,input.operationId,hash);await store.finish(input.ownerId,input.operationId,failure.outcome==="unknown"?"outcome_unknown":"failed",null,failure.code,now(),hash);} catch {healthy=false;}
+    } finally {if(timer)clearTimeout(timer);if(!claimed&&"prompt" in input)await store.dropOutput?.(input.ownerId,input.operationId,hash).catch(()=>{healthy=false;});active--;running.delete(key);}
   }
   async function accept(input:InvokeInput,hash:string,key:string,sink?:EventSink) {
     const old=await store.find(input.ownerId,input.operationId,now());
-    if(old){if(old.inputHash!==hash)throw new Failure("IDEMPOTENCY_CONFLICT","not_sent");return old;}
+    if(old){if(old.inputHash!==hash)throw new Failure("IDEMPOTENCY_CONFLICT","not_sent");if(old.phase==="output_pending"){await resumeOutputs(input.ownerId,input.operationId);return (await store.find(input.ownerId,input.operationId,now()))!;}return old;}
     if(!healthy)throw new Failure("STORAGE_UNAVAILABLE","not_sent");
     const card=lookup(input.provider,input.model);
     if(!card)throw new Failure("MODEL_NOT_ALLOWED","not_sent");
-    const isChat="connectionId" in input;
-    if(!card.capabilities.includes(isChat?"chat":"decide") || isChat&&!options.chatPort)throw new Failure("UNSUPPORTED_OPERATION","not_sent");
+    const isChat="connectionId" in input,isImage="prompt" in input;
+    if(!card.capabilities.includes(isImage?"image":isChat?"chat":"decide") || isChat&&!options.chatPort || isImage&&(!options.imagePort||!options.artifacts||!store.reserveOutput||!store.stageOutput||!store.pendingOutputs||!store.dropOutput))throw new Failure("UNSUPPORTED_OPERATION","not_sent");
     if(Date.parse(input.deadlineAt)<=now())throw new Failure("DEADLINE_EXCEEDED","not_sent");
     if(active>=V1_LIMITS.concurrency)throw new Failure("OVERLOADED","not_sent");
     active++;
     let held=true;
     try {
+      let prepared=input;
+      const texts=input.artifactIds?.length ? await options.artifacts?.text(input.ownerId,input.artifactIds,AbortSignal.timeout(15000)):[];
+      if(input.artifactIds?.length&&!texts)throw new Failure('INVALID_ARTIFACT','not_sent');
+      if(texts?.length){
+        if(isImage){prepared={...input,prompt:input.prompt+'\n'+texts.map(t=>'Artifact '+t.artifactId+'\n'+t.text).join('\n')};if(Buffer.byteLength(prepared.prompt)>8192)throw new Failure('INVALID_ARTIFACT','not_sent');}
+        else if(!isChat)prepared={...input,state:{state:input.state,artifacts:texts}};
+      }
       const messages=isChat?await chatMessages(store,input,now()):undefined;
+      if(messages&&texts?.length){messages.push(...texts.map(t=>({role:'user',content:'Artifact '+t.artifactId+'\n'+t.text})));if(Buffer.byteLength(canonical(messages))>CHAT_LIMITS.stateBytes||messages.length>64)throw new Failure('INVALID_ARTIFACT','not_sent');}
+      if(isImage&&Buffer.byteLength((prepared as ImageRequest).prompt)>8192)throw new Failure('INVALID_REQUEST','not_sent');
+      if(!boundedJson(prepared)||Buffer.byteLength(JSON.stringify(prepared))>V1_LIMITS.requestBytes)throw new Failure('INVALID_ARTIFACT','not_sent');
       const createdAt=now();
       const fresh:Operation={operationId:input.operationId,ownerId:input.ownerId,inputHash:hash,phase:"accepted",cancelRequested:false,createdAt,finishedAt:null,keyExpiresAt:createdAt+V1_LIMITS.keyTtlMs,resultExpiresAt:null,route:{provider:input.provider,model:input.model,catalogVersion},result:null,errorCode:null};
       const accepted=await store.accept(fresh);
       if(accepted.operation.inputHash!==hash)throw new Failure("IDEMPOTENCY_CONFLICT","not_sent");
       if(accepted.inserted){
+        if(isImage)try{await store.reserveOutput!(input.ownerId,input.operationId,hash,outputRequestId(input.ownerId,input.operationId,hash),now()+ARTIFACT_LIMITS.ttlMs);}catch(error){await store.finish(input.ownerId,input.operationId,'failed',null,'OUTPUT_STORAGE_FULL',now(),hash);throw error;}
         held=false;
         // AIDEV-NOTE: Один setImmediate на принятый слот, никакой очереди вычислений.
-        const done=new Promise<void>(resolve=>setImmediate(()=>{void execute(input,key,hash,Math.min(isChat?chatMaximum:maximum,card.deadlineMs),messages,sink).finally(resolve);}));
+        const done=new Promise<void>(resolve=>setImmediate(()=>{void execute(prepared,key,hash,Math.min(isImage?180000:isChat?chatMaximum:maximum,card.deadlineMs),messages,sink).finally(resolve);}));
         running.set(key,{controller:new AbortController(),done});
       }
       return accepted.operation;
     } finally {if(held)active--;}
   }
-  async function invoke(input:InvokeInput,isChat:boolean,sink?:EventSink) {
-    if(!boundedJson(input) || Buffer.byteLength(JSON.stringify(input))>V1_LIMITS.requestBytes || !(isChat?validChatRequest(input):validDecideRequest(input)))throw new Failure("INVALID_REQUEST","not_sent");
+  async function invoke(input:InvokeInput,kind:"decide"|"chat"|"image",sink?:EventSink) {
+    if(!boundedJson(input) || Buffer.byteLength(JSON.stringify(input))>V1_LIMITS.requestBytes || !(kind==="image"?validImageRequest(input):kind==="chat"?validChatRequest(input):validDecideRequest(input)))throw new Failure("INVALID_REQUEST","not_sent");
     const snapshot=structuredClone(input),key=identity(input.ownerId,input.operationId);
     // AIDEV-NOTE: Новый inbox после разрыва меняет доставку, не вычисление; replay не переигрывает tokens.
     const {streamInbox:_,...chatInput}=snapshot as ChatRequest;
-    const hash=createHash("sha256").update(canonical(isChat?chatInput:snapshot)).digest("hex");
+    const hash=createHash("sha256").update(canonical(kind==="chat"?chatInput:snapshot)).digest("hex");
     if(admitting>=V1_LIMITS.controlConcurrency)throw new Failure("OVERLOADED","not_sent");
     admitting++;
     try {
@@ -140,16 +195,19 @@ export function createOperations(store:OperationStore,port:DecideV1Port,options:
   }
   return {
     /** Проверяет неизменяемый decide wire, затем durable replay до чтения каталога. */
-    invoke:(input:DecideRequest)=>invoke(input,false),
+    invoke:(input:DecideRequest)=>invoke(input,"decide"),
     /** Один chat-ход занимает общий слот. Replay возвращает итог без повторения token events. */
-    invokeChat:(input:ChatRequest,sink?:EventSink)=>invoke(input,true,sink),
+    invokeChat:(input:ChatRequest,sink?:EventSink)=>invoke(input,"chat",sink),
+    /** Image использует общие слоты, журнал и CAS перед отправкой. */
+    invokeImage:(input:ImageRequest)=>invoke(input,"image"),
+    resumeOutputs,
     /** Owner обязателен; чужая операция неотличима от отсутствующей. */
     async get(owner:string,id:string){const op=await store.find(owner,id,now());if(!op)throw new Failure("NOT_FOUND","not_sent");return operationView(op,now());},
     /** До dispatch подтверждает отмену; после него прекращение списания не обещает. */
     async cancel(owner:string,id:string){const op=await store.cancel(owner,id,now());if(!op)throw new Failure("NOT_FOUND","not_sent");if(op.phase==="dispatching")running.get(identity(owner,id))?.controller.abort();return operationView(op,now());},
     status(){return {ready:healthy,active,capacity:V1_LIMITS.concurrency,waiting:0};},
     /** Ожидает собственные локальные действия, без новой отправки. */
-    async idle(){await Promise.all([...running.values()].map(e=>e.done));}
+    async idle(){await Promise.all([...running.values()].map(e=>e.done));await Promise.all(saving.values());}
   };
 }
 export type Operations = ReturnType<typeof createOperations>;
