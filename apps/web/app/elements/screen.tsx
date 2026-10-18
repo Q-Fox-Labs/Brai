@@ -1,26 +1,58 @@
 "use client";
-// ABOUTME: Показывает карту и различимые подробности Элементов и Ходов демонабора.
-// ABOUTME: Только раскладка сохраняется в браузере; реальные действия и API не вызываются.
+// ABOUTME: Показывает личную карту Элементов и подробности Ходов.
+// ABOUTME: Данные читаются через серверный API; браузер сохраняет только раскладку.
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Check, CircleDashed, Grip, Layers, ListOrdered, Maximize, Play, X } from "lucide-react";
-import demo from "./demo.json";
-import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, readLayout, sequenceMoves, statusPresentation, type BoardData, type CardHeights, type Layout, type Point } from "./model";
+import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, readLayout, sequenceMoves, statusPresentation, type BoardData, type CardHeights, type Layout, type Move, type Point } from "./model";
 import "./elements.css";
-const data: BoardData = demo;
-const defaults = initialPositions(data.elements);
+
+function describe(value: unknown): string {
+ if (typeof value === "string") return value;
+ try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+}
+
+function elementLabel(kind: string) {
+ return ({ level: "Уровень", mission: "Миссия", quest: "Квест", goal: "Цель", task: "Задача" } as Record<string, string>)[kind] ?? kind;
+}
+
+function attemptsFor(move: Move, dataset: BoardData) {
+ const attempts = move.attempts ?? [];
+ return [...attempts, ...(dataset.attempts ?? []).filter(attempt => attempt.moveId === move.id && !attempts.some(item => item.id === attempt.id))];
+}
+
+/** Загружает личный граф; переданный набор оставляет компонент пригодным для проверки. */
+export default function ElementsScreen({ userId, dataset }: { userId: string; dataset?: BoardData }) {
+ const [loaded, setLoaded] = useState<BoardData | null>(dataset ?? null);
+ const [error, setError] = useState("");
+ const [retry, setRetry] = useState(0);
+ useEffect(() => {
+  if (dataset) { setLoaded(dataset); setError(""); return; }
+  const controller = new AbortController(); setLoaded(null); setError("");
+  void fetch("/api/elements", { cache: "no-store", signal: controller.signal }).then(async response => {
+   if (!response.ok) throw new Error(response.status === 401 ? "Сессия завершена. Войдите снова." : "Не удалось загрузить карту Элементов.");
+   return await response.json() as BoardData;
+  }).then(value => { if (!controller.signal.aborted) setLoaded(value); }).catch(reason => {
+   if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Не удалось загрузить карту Элементов.");
+  });
+  return () => controller.abort();
+ }, [dataset, retry, userId]);
+ if (!dataset && error) return <main className="elements-screen" aria-label="Карта Элементов"><p className="elements-empty" role="alert">{error}</p><button type="button" onClick={() => setRetry(value => value + 1)}>Повторить</button></main>;
+ if (!dataset && !loaded) return <main className="elements-screen" aria-label="Карта Элементов"><p className="elements-empty" role="status">Загружаем карту Элементов…</p></main>;
+ return <ElementsBoard userId={userId} dataset={dataset ?? loaded!} />;
+}
 
 function StatusLabel({ status, kind, className }: { status: string; kind: "element" | "move"; className: string }) {
  const { tone, label } = statusPresentation(status, kind), Icon = tone === "completed" ? Check : tone === "active" ? Play : CircleDashed;
  return <span className={className} data-state={tone}><Icon size={16} aria-hidden="true" /><span>{label}</span></span>;
 }
 
-/** Создаёт карту по переданным записям; хранилище разделено по аккаунтам. */
-export default function ElementsScreen({ userId, dataset = data }: { userId: string; dataset?: BoardData }) {
+/** Отображает BoardData на согласованном полотне с правой панелью подробностей. */
+function ElementsBoard({ userId, dataset }: { userId: string; dataset: BoardData }) {
  const orderedMoves = sequenceMoves(dataset.moves);
  const canvas = useRef<HTMLDivElement>(null);
- const positionsDefault = dataset === data ? defaults : initialPositions(dataset.elements);
- const storageKey = `brai.elements.demo-layout.v1:${userId}`;
+ const positionsDefault = initialPositions(dataset.elements);
+ const storageKey = `brai.elements-layout.v1:${userId}`;
  const [layout, setLayout] = useState<Layout>({ positions: positionsDefault, view: { x: 0, y: 0, zoom: 0.5 } });
  const [heights, setHeights] = useState<CardHeights>({});
  const [ready, setReady] = useState(false);
@@ -128,6 +160,8 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
   ...dataset.elements.filter(e => e.parentId && layout.positions[e.parentId]).map(e => ({ from: e.parentId!, to: e.id, label: "Вложенность", type: "hierarchy", returnToParent: false })),
   ...transfers.map(t => ({ ...t, type: "result" })),
  ];
+ const selectedMoveAttempts = selectedMove ? attemptsFor(selectedMove, dataset) : [];
+ const selectedElementAttempts = selectedElement ? [...(selectedElement.attempts ?? []), ...orderedMoves.filter(move => move.ownerId === selectedElement.id).flatMap(move => attemptsFor(move, dataset))] : [];
  return <main className="elements-screen" aria-label="Карта Элементов">
   <button type="button" className="elements-fit" aria-label="Вся карта" title="Вся карта" onClick={showAll}><Maximize size={18} /></button>
   <div ref={canvas} className={"elements-canvas" + (dragging ? " is-dragging" : "")} tabIndex={0} role="region" aria-label="Полотно Элементов"
@@ -153,7 +187,7 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
      const point = layout.positions[element.id] ?? { x: 0, y: 0 }, moves = orderedMoves.filter(m => m.ownerId === element.id);
      return <article key={element.id} className="elements-card" data-state={statusPresentation(element.status, "element").tone} data-element-id={element.id} style={{ left: point.x, top: point.y, width: cardWidth }} aria-label={`${element.id}: ${element.title}`} onClick={event => { if (!(event.target as HTMLElement).closest("button,a,details")) selectElement(element.id); }}>
       <button type="button" className="elements-card-grip" aria-label={`Переместить ${element.id}. Стрелки перемещают карточку`} onPointerDown={event => startDrag(event, element.id)} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={stopDrag}
-       onDoubleClick={() => focusElement(element.id)} onKeyDown={event => { const deltas: Record<string, Point> = { ArrowLeft: { x: -20, y: 0 }, ArrowRight: { x: 20, y: 0 }, ArrowUp: { x: 0, y: -20 }, ArrowDown: { x: 0, y: 20 } }; const delta = deltas[event.key]; if (delta) { event.preventDefault(); setLayout(old => ({ ...old, positions: { ...old.positions, [element.id]: { x: point.x + delta.x, y: point.y + delta.y } } })); } }}><span>{element.kind === "goal" ? "Цель" : "Задача"} {element.id}</span><StatusLabel status={element.status} kind="element" className="elements-card-status" /><Grip size={16} /></button>
+       onDoubleClick={() => focusElement(element.id)} onKeyDown={event => { const deltas: Record<string, Point> = { ArrowLeft: { x: -20, y: 0 }, ArrowRight: { x: 20, y: 0 }, ArrowUp: { x: 0, y: -20 }, ArrowDown: { x: 0, y: 20 } }; const delta = deltas[event.key]; if (delta) { event.preventDefault(); setLayout(old => ({ ...old, positions: { ...old.positions, [element.id]: { x: point.x + delta.x, y: point.y + delta.y } } })); } }}><span>{elementLabel(element.kind)} · {element.id}</span><StatusLabel status={element.status} kind="element" className="elements-card-status" /><Grip size={16} /></button>
       <h2><button type="button" className="elements-card-title" aria-label={`Открыть Элемент ${element.id}`} onClick={event => { event.stopPropagation(); selectElement(element.id); }}>{element.title}</button></h2><p className="elements-description">{element.description}</p>
       <div className="elements-moves-title"><span>Ходы</span><span>{moves.filter(move => statusPresentation(move.status, "move").tone === "completed").length} / {moves.length}</span></div>
       <div className="elements-moves" aria-label={`Ходы ${element.id}`}>
@@ -167,24 +201,32 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
   <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open) setSelection(null); }}><Dialog.Portal><Dialog.Overlay className="elements-detail-overlay" /><Dialog.Content className="elements-detail" data-kind={selection?.kind} data-detail-id={selected?.id} data-state={selected && selection ? statusPresentation(selected.status, selection.kind).tone : undefined} aria-describedby="elements-detail-description">
    <Dialog.Close className="elements-detail-close" aria-label="Закрыть подробности"><X size={20} /></Dialog.Close>
    <header className="elements-detail-heading">
-    <div className="elements-detail-kind">{selectedElement ? <Layers size={22} aria-hidden="true" /> : <ListOrdered size={22} aria-hidden="true" />}<span>{selectedElement ? `Элемент · ${selectedElement.kind === "goal" ? "Цель" : "Задача"}` : `Ход · ${selectedMove?.kind === "operation" ? "Операция" : "Экшен"} · №${selectedMove?.order}`}</span></div>
+    <div className="elements-detail-kind">{selectedElement ? <Layers size={22} aria-hidden="true" /> : <ListOrdered size={22} aria-hidden="true" />}<span>{selectedElement ? `Элемент · ${elementLabel(selectedElement.kind)}` : `Ход · ${selectedMove?.kind === "operation" ? "Операция" : "Экшен"} · №${selectedMove?.order}`}</span></div>
     <Dialog.Title>{selected?.title}</Dialog.Title><Dialog.Description id="elements-detail-description">{selected?.id}</Dialog.Description>
     {selected && selection && <StatusLabel status={selected.status} kind={selection.kind} className="elements-detail-summary-status" />}
    </header>
    {selectedElement && <>
     <p className="elements-detail-description">{selectedElement.description}</p>
-    <dl><dt>Уровень</dt><dd>{selectedElement.kind === "goal" ? "Цель" : "Задача"}</dd><dt>Статус Элемента</dt><dd><StatusLabel status={selectedElement.status} kind="element" className="elements-detail-status" /></dd><dt>Родитель</dt><dd>{selectedElement.parentId ? <button type="button" className="elements-text-link" onClick={() => selectElement(selectedElement.parentId!)}>{selectedElement.parentId} · {dataset.elements.find(element => element.id === selectedElement.parentId)?.title}</button> : "Нет — корневой Элемент"}</dd><dt>Версия</dt><dd>{selectedElement.revision}</dd></dl>
+    <dl><dt>Уровень</dt><dd>{elementLabel(selectedElement.kind)}</dd><dt>Статус Элемента</dt><dd><StatusLabel status={selectedElement.status} kind="element" className="elements-detail-status" /></dd><dt>Родитель</dt><dd>{selectedElement.parentId ? <button type="button" className="elements-text-link" onClick={() => selectElement(selectedElement.parentId!)}>{selectedElement.parentId} · {dataset.elements.find(element => element.id === selectedElement.parentId)?.title}</button> : "Нет — корневой Элемент"}</dd><dt>Версия</dt><dd>{selectedElement.revision}</dd></dl>
+    {selectedElement.instructions && <section className="elements-resources"><h3>Инструкция</h3><p>{selectedElement.instructions}</p></section>}
+    {selectedElement.conditions !== undefined && <section className="elements-resources"><h3>Условия</h3><pre>{describe(selectedElement.conditions)}</pre></section>}
+    {selectedElement.fields !== undefined && <section className="elements-resources"><h3>Поля</h3><pre>{describe(selectedElement.fields)}</pre></section>}
+    {selectedElement.provenance && <section className="elements-resources"><h3>Происхождение</h3><pre>{describe(selectedElement.provenance)}</pre></section>}
+    {!!selectedElementAttempts.length && <section className="elements-resources"><h3>Попытки <span>{selectedElementAttempts.length}</span></h3>{selectedElementAttempts.map(attempt => <details key={attempt.id}><summary>{attempt.id} · {attempt.status}</summary><pre>{describe(attempt)}</pre></details>)}</section>}
     <section className="elements-panel-moves"><h3>Собственные Ходы <span>{orderedMoves.filter(move => move.ownerId === selectedElement.id).length}</span></h3>
      {orderedMoves.filter(move => move.ownerId === selectedElement.id).map(move => <button type="button" key={move.id} className="elements-move" data-state={statusPresentation(move.status, "move").tone} data-panel-move-id={move.id} onClick={() => selectMove(move.id)}><span className="elements-move-number">{move.order}</span><span className="elements-move-body"><span>{move.title}</span><small>{move.id}</small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" /></button>)}
     </section>
    </>}
    {selectedMove && <>
-    <dl><dt>Статус Хода</dt><dd><StatusLabel status={selectedMove.status} kind="move" className="elements-detail-status" /></dd><dt>Номер Хода в Элементе</dt><dd>{selectedMove.order}</dd><dt>Тип</dt><dd>{selectedMove.kind === "operation" ? "Операция" : "Экшен"}</dd><dt>Исполнитель</dt><dd>{selectedMove.executor === "agent" ? "Агент" : "Игрок"}</dd><dt>Владелец Хода</dt><dd>{selectedMove.ownerId} · {dataset.elements.find(element => element.id === selectedMove.ownerId)?.title}</dd><dt>Целевой Элемент</dt><dd>{selectedMove.targetId} · {dataset.elements.find(element => element.id === selectedMove.targetId)?.title}</dd><dt>Предшественник</dt><dd>{selectedMove.previousId ? <button type="button" className="elements-text-link" onClick={() => selectMove(selectedMove.previousId!)}>{selectedMove.previousId} · {orderedMoves.find(move => move.id === selectedMove.previousId)?.title}</button> : "Нет — начало цепочки"}</dd><dt>Попытка</dt><dd>{selectedMove.attemptId || "Не указана"}{statusPresentation(selectedMove.status, "move").tone === "completed" ? " · Успешна" : ""}</dd></dl>
-    <p className="elements-detail-note">Подробная инструкция в исходном снимке не приведена. Просмотр Хода не запускает действий.</p>
+    <dl><dt>Статус Хода</dt><dd><StatusLabel status={selectedMove.status} kind="move" className="elements-detail-status" /></dd><dt>Номер Хода в Элементе</dt><dd>{selectedMove.order}</dd><dt>Тип</dt><dd>{selectedMove.kind === "operation" ? "Операция" : "Экшен"}</dd><dt>Исполнитель</dt><dd>{selectedMove.executor === "agent" ? "Агент" : selectedMove.executor === "human" || selectedMove.executor === "player" ? "Игрок" : selectedMove.executor || "Не указан"}</dd><dt>Владелец Хода</dt><dd>{selectedMove.ownerId} · {dataset.elements.find(element => element.id === selectedMove.ownerId)?.title}</dd><dt>Целевой Элемент</dt><dd>{selectedMove.targetId} · {dataset.elements.find(element => element.id === selectedMove.targetId)?.title}</dd><dt>Предшественник</dt><dd>{selectedMove.previousId ? <button type="button" className="elements-text-link" onClick={() => selectMove(selectedMove.previousId!)}>{selectedMove.previousId} · {orderedMoves.find(move => move.id === selectedMove.previousId)?.title}</button> : "Нет — начало цепочки"}</dd><dt>Попытка</dt><dd>{selectedMove.attemptId || "Не указана"}{statusPresentation(selectedMove.status, "move").tone === "completed" ? " · Успешна" : ""}</dd></dl>
+    {selectedMove.instructions && <section className="elements-resources"><h3>Инструкция</h3><p>{selectedMove.instructions}</p></section>}
+    {selectedMove.conditions !== undefined && <section className="elements-resources"><h3>Условия</h3><pre>{describe(selectedMove.conditions)}</pre></section>}
+    {selectedMove.fields !== undefined && <section className="elements-resources"><h3>Поля результата</h3><pre>{describe(selectedMove.fields)}</pre></section>}
+    {selectedMove.provenance && <section className="elements-resources"><h3>Происхождение</h3><pre>{describe(selectedMove.provenance)}</pre></section>}
+    {!!selectedMoveAttempts.length && <section className="elements-resources"><h3>Попытки <span>{selectedMoveAttempts.length}</span></h3>{selectedMoveAttempts.map(attempt => <details key={attempt.id}><summary>{attempt.id} · {attempt.status}</summary><pre>{describe(attempt)}</pre></details>)}</section>}
    </>}
    {selected && <>
-    <p className="elements-detail-note">Ресурсы и попытки относятся к историческому демонстрационному примеру.</p>
-    {(["output", "input"] as const).map(role => <section key={role} className="elements-resources"><h3>{role === "input" ? "Входные ресурсы" : "Выходные ресурсы"} <span>{selected[role].length}</span></h3>{role === "input" && selectedMove && <p>Все накопленные ссылки предшественника.</p>}{selected[role].map(id => { const resource = dataset.resources.find(resource => resource.id === id); if (!resource) return null; const creator = orderedMoves.find(move => move.attemptId === resource.attemptId); return <details key={id}><summary><span>{id}</span> {resource.title}</summary><p>{resource.content}</p><p className="elements-resource-origin">Происхождение: {creator ? <button type="button" className="elements-text-link" onClick={() => selectMove(creator.id)}>{creator.id} · {resource.attemptId}</button> : "Внешнее поручение Игрока"}</p></details>; })}</section>)}
+    {(["output", "input"] as const).filter(role => selected[role].length).map(role => <section key={role} className="elements-resources"><h3>{role === "input" ? "Входные ресурсы" : "Выходные ресурсы"} <span>{selected[role].length}</span></h3>{selected[role].map(id => { const resource = dataset.resources.find(resource => resource.id === id); if (!resource) return <details key={id}><summary>{id}</summary><p>Ресурс не включён в карту.</p></details>; const creator = orderedMoves.find(move => move.attemptId === resource.attemptId); return <details key={id}><summary><span>{id}</span> {resource.title}</summary><p>{resource.content}</p>{resource.attemptId && <p className="elements-resource-origin">Попытка: {creator ? <button type="button" className="elements-text-link" onClick={() => selectMove(creator.id)}>{creator.id} · {resource.attemptId}</button> : resource.attemptId}</p>}</details>; })}</section>)}
    </>}
   </Dialog.Content></Dialog.Portal></Dialog.Root>
  </main>;

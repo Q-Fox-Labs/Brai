@@ -14,6 +14,13 @@ export async function migrate(pool: Pool, ownerRole: string, appRole: string): P
     for (const role of [appRole]) { const data = (await client.query("SELECT rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=$1", [role])).rows[0]; if (!data || Object.values(data).some(Boolean)) throw new Error("UNSAFE_RUNTIME_ROLE"); }
     await client.query(`REVOKE ALL ON DATABASE ${quote(row.db)} FROM PUBLIC,${quote(appRole)}`); await client.query("REVOKE CREATE ON SCHEMA public FROM PUBLIC");
     await client.query(readFileSync(new URL("../migrations/001.sql", import.meta.url), "utf8"));
+    if (Number((await client.query("SELECT count(*) AS n FROM elements.elements")).rows[0].n) > 0) throw new Error("LEGACY_ELEMENTS_REQUIRE_EXPLICIT_MIGRATION");
+    await client.query(readFileSync(new URL("../migrations/002-game-core.sql", import.meta.url), "utf8"));
+    await client.query(`REVOKE ALL ON SCHEMA game_core FROM PUBLIC,${quote(appRole)}`);
+    await client.query(`REVOKE ALL ON ALL TABLES IN SCHEMA game_core FROM PUBLIC,${quote(appRole)}`);
+    await client.query(`GRANT USAGE ON SCHEMA game_core TO ${quote(appRole)}`);
+    await client.query(`GRANT SELECT,INSERT,UPDATE ON ALL TABLES IN SCHEMA game_core TO ${quote(appRole)}`);
+    await client.query(`REVOKE UPDATE ON game_core.element_revisions,game_core.resources,game_core.attempt_resources,game_core.element_resources FROM ${quote(appRole)}`);
     await client.query(`REVOKE ALL ON SCHEMA elements FROM PUBLIC,${quote(appRole)}`); await client.query(`REVOKE ALL ON ALL TABLES IN SCHEMA elements FROM PUBLIC,${quote(appRole)}`); await client.query(`REVOKE ALL ON ALL SEQUENCES IN SCHEMA elements FROM PUBLIC,${quote(appRole)}`);
     await client.query(`GRANT CONNECT ON DATABASE ${quote(row.db)} TO ${quote(appRole)}`); await client.query(`GRANT USAGE ON SCHEMA elements TO ${quote(appRole)}`);
     await client.query(`GRANT SELECT ON elements.migrations TO ${quote(appRole)}`);

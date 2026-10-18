@@ -1,37 +1,56 @@
+# ABOUTME: Описывает game-core на сохранённом NATS транспорте Elements.
+# ABOUTME: События совместимы с существующими History и Alerts adapters.
 asyncapi: 2.6.0
 info:
-  title: Brai Elements
+  title: Brai game-core
   version: 1.0.0
-  description: NATS Services и JetStream контракт Elements.
+  description: NATS Services и JetStream контракт game-core с совместимыми Elements subjects.
 defaultContentType: application/json
 channels:
   brai.elements.v1.query.graph:
     publish:
-      message: { $ref: '#/components/messages/request' }
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/elements_graph_get' }
   brai.elements.v1.query.timeline:
     publish:
-      message: { $ref: '#/components/messages/request' }
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/elements_timeline_get' }
   brai.elements.v1.query.element:
     publish:
-      message: { $ref: '#/components/messages/request' }
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/elements_graph_get' }
   brai.elements.v1.query.moves:
     publish:
-      message: { $ref: '#/components/messages/request' }
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/elements_moves_available' }
   brai.elements.v1.command.create:
     publish:
-      message: { $ref: '#/components/messages/request' }
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/elements_structure_create' }
   brai.elements.v1.command.revise:
     publish:
-      message: { $ref: '#/components/messages/request' }
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/elements_element_revise' }
   brai.elements.v1.command.claim:
     publish:
-      message: { $ref: '#/components/messages/request' }
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/elements_move_claim' }
   brai.elements.v1.command.complete:
     publish:
-      message: { $ref: '#/components/messages/request' }
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/elements_move_complete' }
   brai.elements.v1.command.activate:
     publish:
-      message: { $ref: '#/components/messages/request' }
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/elements_element_activate' }
+  brai.elements.v1.command.fail:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/elements_move_fail' }
+  brai.elements.v1.command.link:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/elements_move_link' }
   'brai.elements.v1.events.>':
     subscribe:
       message: { $ref: '#/components/messages/event' }

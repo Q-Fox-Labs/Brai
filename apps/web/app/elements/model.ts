@@ -2,10 +2,13 @@
 // ABOUTME: Сохранённая раскладка не меняет Ходы, ресурсы или зависимости.
 export type Point = { x: number; y: number };
 export type Viewport = Point & { zoom: number };
-export type Element = { id: string; kind: string; parentId: string | null; status: string; revision: string; title: string; description: string; input: string[]; output: string[] };
-export type Move = { id: string; ownerId: string; targetId: string; previousId: string | null; kind: string; title: string; status: string; attemptId: string; executor: string; input: string[]; output: string[] };
+export type Provenance = { createdBy?: string | null; createdAt?: string | null; [key: string]: unknown };
+export type Attempt = { id: string; moveId?: string; status: string; input?: unknown; result?: unknown; errorCode?: string | null; startedAt?: string; finishedAt?: string | null };
+export type Element = { id: string; kind: string; parentId: string | null; status: string; revision: string; title: string; description: string; input: string[]; output: string[]; instructions?: string; conditions?: unknown; fields?: unknown; provenance?: Provenance; attempts?: Attempt[] };
+/** ownerId — UUID Элемента, к которому относится Ход. */
+export type Move = { id: string; ownerId: string; targetId: string; previousId: string | null; kind: string; title: string; status: string; attemptId: string; executor: string; input: string[]; output: string[]; instructions?: string; conditions?: unknown; fields?: unknown; provenance?: Provenance; attempts?: Attempt[] };
 export type Resource = { id: string; attemptId: string | null; title: string; content: string };
-export type BoardData = { elements: Element[]; moves: Move[]; resources: Resource[] };
+export type BoardData = { elements: Element[]; moves: Move[]; resources: Resource[]; attempts?: Attempt[] };
 export type Layout = { positions: Record<string, Point>; view: Viewport };
 export const cardWidth = 420;
 export type CardHeights = Record<string, number>;

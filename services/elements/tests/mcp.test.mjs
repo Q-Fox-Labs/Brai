@@ -28,7 +28,7 @@ test('MCP публикует полный набор инструментов El
 });
 
 test('MCP требует JSON Schema результата для элементов и ходов', () => {
-  assert.deepEqual(toolInputs.elements_element_create.required, ['kind', 'title', 'description', 'result_spec']);
-  assert.deepEqual(toolInputs.elements_move_create.required, ['kind', 'title', 'instructions', 'result_schema']);
+  assert.deepEqual(toolInputs.elements_element_create.required, ['kind', 'title']);
+  assert.deepEqual(toolInputs.elements_move_create.required, ['element_id', 'kind', 'title', 'instructions', 'result_schema']);
   assert.equal(toolInputs.elements_move_complete.required.includes('result'), true);
 });
