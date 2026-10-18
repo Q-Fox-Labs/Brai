@@ -1,4 +1,4 @@
-/* ABOUTME: Оформляет карту и панель Хода внутри существующей темы Brai. */
+/* ABOUTME: Оформляет карту и панели Элемента и Хода внутри существующей темы Brai. */
 /* ABOUTME: Тёмные карточки сохраняют схему Архитектора при любой теме оболочки. */
 .elements-screen { position: relative; height: 100%; display: flex; flex-direction: column; min-height: 0; background: var(--background); color: var(--foreground); }
 .elements-fit { position: absolute; z-index: 2; top: 12px; right: 12px; display: grid; place-items: center; width: 40px; height: 40px; border: 1px solid var(--border); border-radius: 7px; background: var(--card); color: var(--foreground); cursor: pointer; }
@@ -51,6 +51,26 @@
 }
 
 /* Цвет, форма рамки и явная подпись вместе показывают статус. */
-.elements-card[data-state="planned"], .elements-move[data-state="planned"] { --state-color: #b1bece; --state-card: #131a24; --state-fill: #202b3b; border-color: var(--state-color); border-style: dashed; }
-.elements-card[data-state="active"], .elements-move[data-state="active"] { --state-color: #ffd078; --state-card: #211a0e; --state-fill: #443113; border-color: var(--state-color); }
-.elements-card[data-state="completed"], .elements-move[data-state="completed"] { --state-color: #91ddb1; --state-card: #0d1913; --state-fill: #193428; border-color: var(--state-color); }
+.elements-card[data-state="planned"], .elements-move[data-state="planned"], .elements-detail[data-state="planned"] { --state-color: #b1bece; --state-card: #131a24; --state-fill: #202b3b; border-color: var(--state-color); border-style: dashed; }
+.elements-card[data-state="active"], .elements-move[data-state="active"], .elements-detail[data-state="active"] { --state-color: #ffd078; --state-card: #211a0e; --state-fill: #443113; border-color: var(--state-color); }
+.elements-card[data-state="completed"], .elements-move[data-state="completed"], .elements-detail[data-state="completed"] { --state-color: #91ddb1; --state-card: #0d1913; --state-fill: #193428; border-color: var(--state-color); }
+
+/* Заголовок доступен с клавиатуры; кнопка перетаскивания остаётся отдельной. */
+.elements-card-title { display: block; width: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; letter-spacing: inherit; text-align: left; cursor: pointer; }
+.elements-card-title:focus-visible { outline: 2px solid var(--state-color); outline-offset: 5px; border-radius: 2px; }
+.elements-detail { border-left-width: 5px; background: var(--state-card); color: #e7eee9; }
+.elements-detail[data-kind="element"] { border-top-width: 6px; }
+.elements-detail-heading { margin: 10px 0 20px; padding: 18px; border: 1px solid var(--state-color); border-radius: 8px; background: var(--state-fill); }
+.elements-detail[data-kind="move"] .elements-detail-heading { padding-left: 0; border: 0; border-bottom: 1px solid var(--state-color); border-radius: 0; background: transparent; }
+.elements-detail-kind { display: flex; align-items: center; gap: 9px; margin-bottom: 18px; color: var(--state-color); font-size: 13px; font-weight: 600; }
+.elements-detail-heading h2 { margin-right: 0; font-size: 23px; }
+.elements-detail-heading p { margin: 8px 0 14px; color: #adc0b7; font-size: 12px; }
+.elements-detail-summary-status, .elements-detail-status { display: inline-flex; align-items: center; gap: 6px; color: var(--state-color); font-size: 13px; font-weight: 600; }
+.elements-detail-close { background: var(--state-fill); color: #e7eee9; }
+.elements-detail .elements-text-link, .elements-detail .elements-resources summary span { color: var(--state-color); }
+.elements-detail .elements-detail-note { border-color: var(--state-color); }
+.elements-detail .elements-resources details { border-color: #ffffff29; }
+.elements-panel-moves { margin-top: 28px; }
+.elements-panel-moves h3 { display: flex; align-items: center; gap: 9px; font-size: 16px; }
+.elements-panel-moves h3 span { color: #adc0b7; font-size: 12px; }
+.elements-panel-moves .elements-move { font-size: 13px; }
