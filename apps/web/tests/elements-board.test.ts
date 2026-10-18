@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
-import { fitView, initialPositions, readLayout, type BoardData } from "../app/elements/model.ts";
+import { fitView, initialPositions, readLayout, sequenceMoves, type BoardData } from "../app/elements/model.ts";
 const data = JSON.parse(readFileSync(new URL("../app/elements/demo.json", import.meta.url), "utf8")) as BoardData;
 
 test("demo keeps unique identities, cross-owner predecessors and cumulative resource provenance", () => {
@@ -41,4 +41,13 @@ test("layout accepts new identities and a parentless element, ignores stale IDs 
  assert.ok(fitted.zoom >= 0.2 && fitted.zoom <= 1);
  assert.ok(fitted.x + -100 * fitted.zoom >= 0);
  assert.ok(fitted.y + 20 * fitted.zoom >= 0);
+});
+
+test("move positions follow predecessor links rather than storage order", () => {
+ const shuffled = [...data.moves].reverse();
+ const sequenced = sequenceMoves(shuffled);
+ assert.deepEqual(sequenced.map(move => move.id), data.moves.map(move => move.id));
+ assert.deepEqual(sequenced.map(move => move.order), Array.from({ length: 23 }, (_, index) => index + 1));
+ const branches = sequenceMoves([{ ...data.moves[0], id: "root", previousId: null }, { ...data.moves[0], id: "left", previousId: "root" }, { ...data.moves[0], id: "right", previousId: "root" }]);
+ assert.deepEqual(branches.map(move => move.order), [1, 2, 2]);
 });

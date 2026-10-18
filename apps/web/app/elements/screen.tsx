@@ -5,13 +5,14 @@ import { useCallback, useEffect, useRef, useState, type PointerEvent } from "rea
 import * as Dialog from "@radix-ui/react-dialog";
 import { Check, Grip, Maximize, Minus, Plus, RotateCcw, X } from "lucide-react";
 import demo from "./demo.json";
-import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, readLayout, type BoardData, type Layout, type Move, type Point } from "./model";
+import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, readLayout, sequenceMoves, type BoardData, type Layout, type Move, type Point } from "./model";
 import "./elements.css";
 const data: BoardData = demo;
 const defaults = initialPositions(data.elements);
 
 /** Создаёт карту по переданным записям; хранилище разделено по аккаунтам. */
 export default function ElementsScreen({ userId, dataset = data }: { userId: string; dataset?: BoardData }) {
+ const orderedMoves = sequenceMoves(dataset.moves);
  const canvas = useRef<HTMLDivElement>(null);
  const positionsDefault = dataset === data ? defaults : initialPositions(dataset.elements);
  const storageKey = `brai.elements.demo-layout.v1:${userId}`;
@@ -89,13 +90,13 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
  // Передача к следующей Задаче берётся из её входов. Накопленные транзитивные входы не дублируют линию.
  const transfers = dataset.elements.flatMap(target => {
   const sources = dataset.elements.filter(source => source.id !== target.id && source.output.some(id => target.input.includes(id)));
-  const latest = sources.sort((a, b) => Math.max(...dataset.moves.filter(m => m.targetId === b.id).map(m => m.order)) - Math.max(...dataset.moves.filter(m => m.targetId === a.id).map(m => m.order)))[0];
+  const latest = sources.sort((a, b) => Math.max(...orderedMoves.filter(m => m.targetId === b.id).map(m => m.order)) - Math.max(...orderedMoves.filter(m => m.targetId === a.id).map(m => m.order)))[0];
   return latest ? [{ from: latest.id, to: target.id, label: latest.output.filter(id => target.input.includes(id)).join(", "), returnToParent: false }] : [];
  });
  // Приёмка принадлежит родителю. Выход дочернего Элемента создаёт именно этот Ход.
  for (const source of dataset.elements) {
   if (!source.parentId) continue;
-  const acceptance = dataset.moves.find(m => m.ownerId === source.parentId && m.targetId === source.id && m.output.some(id => source.output.includes(id)));
+  const acceptance = orderedMoves.find(m => m.ownerId === source.parentId && m.targetId === source.id && m.output.some(id => source.output.includes(id)));
   if (acceptance) transfers.push({ from: source.id, to: source.parentId, label: `${source.output.join(", ")} · ${acceptance.id}`, returnToParent: true });
  }
  const links = [
@@ -130,7 +131,7 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
      })}
     </svg>
     {dataset.elements.map(element => {
-     const point = layout.positions[element.id] ?? { x: 0, y: 0 }, moves = dataset.moves.filter(m => m.ownerId === element.id);
+     const point = layout.positions[element.id] ?? { x: 0, y: 0 }, moves = orderedMoves.filter(m => m.ownerId === element.id);
      return <article key={element.id} className="elements-card" data-element-id={element.id} style={{ left: point.x, top: point.y, width: cardWidth, height: cardHeight }} aria-label={`${element.id}: ${element.title}`}>
       <button type="button" className="elements-card-grip" aria-label={`Переместить ${element.id}. Стрелки перемещают карточку`} onPointerDown={event => startDrag(event, element.id)} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={stopDrag}
        onDoubleClick={() => focusElement(element.id)} onKeyDown={event => { const deltas: Record<string, Point> = { ArrowLeft: { x: -20, y: 0 }, ArrowRight: { x: 20, y: 0 }, ArrowUp: { x: 0, y: -20 }, ArrowDown: { x: 0, y: 20 } }; const delta = deltas[event.key]; if (delta) { event.preventDefault(); setLayout(old => ({ ...old, positions: { ...old.positions, [element.id]: { x: point.x + delta.x, y: point.y + delta.y } } })); } }}><span>{element.kind === "goal" ? "Цель" : "Задача"} {element.id}</span><span className="elements-card-done"><Check size={14} /> Выполнена</span><Grip size={16} /></button>
@@ -148,9 +149,9 @@ export default function ElementsScreen({ userId, dataset = data }: { userId: str
   <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open) setSelected(null); }}><Dialog.Portal><Dialog.Overlay className="elements-detail-overlay" /><Dialog.Content className="elements-detail" aria-describedby="elements-detail-description">
    <Dialog.Close className="elements-detail-close" aria-label="Закрыть подробности"><X size={20} /></Dialog.Close>
    <Dialog.Title>{selected?.title}</Dialog.Title><Dialog.Description id="elements-detail-description">Исторический Ход {selected?.id}. Выполнен в симуляции.</Dialog.Description>
-   {selected && <><dl><dt>Тип</dt><dd>{selected.kind === "operation" ? "Операция" : "Экшен"}</dd><dt>Исполнитель</dt><dd>{selected.executor === "agent" ? "Агент" : "Игрок"}</dd><dt>Владелец Хода</dt><dd>{selected.ownerId} · {dataset.elements.find(e => e.id === selected.ownerId)?.title}</dd><dt>Целевой Элемент</dt><dd>{selected.targetId} · {dataset.elements.find(e => e.id === selected.targetId)?.title}</dd><dt>Предшественник</dt><dd>{selected.previousId ? <button type="button" className="elements-text-link" onClick={() => setSelected(dataset.moves.find(m => m.id === selected.previousId) ?? null)}>{selected.previousId} · {dataset.moves.find(m => m.id === selected.previousId)?.title}</button> : "Нет — начало цепочки"}</dd><dt>Попытка</dt><dd>{selected.attemptId} · Успешна</dd></dl>
+   {selected && <><dl><dt>Тип</dt><dd>{selected.kind === "operation" ? "Операция" : "Экшен"}</dd><dt>Исполнитель</dt><dd>{selected.executor === "agent" ? "Агент" : "Игрок"}</dd><dt>Владелец Хода</dt><dd>{selected.ownerId} · {dataset.elements.find(e => e.id === selected.ownerId)?.title}</dd><dt>Целевой Элемент</dt><dd>{selected.targetId} · {dataset.elements.find(e => e.id === selected.targetId)?.title}</dd><dt>Предшественник</dt><dd>{selected.previousId ? <button type="button" className="elements-text-link" onClick={() => setSelected(orderedMoves.find(m => m.id === selected.previousId) ?? null)}>{selected.previousId} · {orderedMoves.find(m => m.id === selected.previousId)?.title}</button> : "Нет — начало цепочки"}</dd><dt>Попытка</dt><dd>{selected.attemptId} · Успешна</dd></dl>
     <p className="elements-detail-note">Подробная инструкция в исходном снимке не приведена. Просмотр Хода не запускает действий.</p>
-    {(["output", "input"] as const).map(role => <section key={role} className="elements-resources"><h3>{role === "input" ? "Входные ресурсы" : "Выходные ресурсы"} <span>{selected[role].length}</span></h3>{role === "input" && <p>Все накопленные ссылки предшественника.</p>}{selected[role].map(id => { const resource = dataset.resources.find(r => r.id === id); if (!resource) return null; const creator = dataset.moves.find(m => m.attemptId === resource.attemptId); return <details key={id}><summary><span>{id}</span> {resource.title}</summary><p>{resource.content}</p><p className="elements-resource-origin">Происхождение: {creator ? <button type="button" className="elements-text-link" onClick={() => setSelected(creator)}>{creator.id} · {resource.attemptId}</button> : "Внешнее поручение Игрока"}</p></details>; })}</section>)}
+    {(["output", "input"] as const).map(role => <section key={role} className="elements-resources"><h3>{role === "input" ? "Входные ресурсы" : "Выходные ресурсы"} <span>{selected[role].length}</span></h3>{role === "input" && <p>Все накопленные ссылки предшественника.</p>}{selected[role].map(id => { const resource = dataset.resources.find(r => r.id === id); if (!resource) return null; const creator = orderedMoves.find(m => m.attemptId === resource.attemptId); return <details key={id}><summary><span>{id}</span> {resource.title}</summary><p>{resource.content}</p><p className="elements-resource-origin">Происхождение: {creator ? <button type="button" className="elements-text-link" onClick={() => setSelected(creator)}>{creator.id} · {resource.attemptId}</button> : "Внешнее поручение Игрока"}</p></details>; })}</section>)}
    </>}
   </Dialog.Content></Dialog.Portal></Dialog.Root>
  </main>;

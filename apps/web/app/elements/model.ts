@@ -3,7 +3,7 @@
 export type Point = { x: number; y: number };
 export type Viewport = Point & { zoom: number };
 export type Element = { id: string; kind: string; parentId: string | null; revision: string; title: string; description: string; input: string[]; output: string[] };
-export type Move = { id: string; order: number; ownerId: string; targetId: string; previousId: string | null; kind: string; title: string; status: string; attemptId: string; executor: string; input: string[]; output: string[] };
+export type Move = { id: string; ownerId: string; targetId: string; previousId: string | null; kind: string; title: string; status: string; attemptId: string; executor: string; input: string[]; output: string[] };
 export type Resource = { id: string; attemptId: string | null; title: string; content: string };
 export type BoardData = { elements: Element[]; moves: Move[]; resources: Resource[] };
 export type Layout = { positions: Record<string, Point>; view: Viewport };
@@ -36,4 +36,20 @@ export function readLayout(raw: string | null, defaults: Record<string, Point>):
   for (const id of Object.keys(defaults)) if (point(value.positions?.[id])) positions[id] = value.positions[id];
   return { positions, view: value.view };
  } catch { return null; }
+}
+
+/** Вычисляет место Хода по предшественникам; независимые ветви могут иметь одинаковый номер. */
+export function sequenceMoves(moves: Move[]): (Move & { order: number })[] {
+ const byId = new Map(moves.map(move => [move.id, move]));
+ const depths = new Map<string, number>();
+ function depth(id: string, seen = new Set<string>()): number {
+  if (depths.has(id)) return depths.get(id)!;
+  if (seen.has(id)) return 0;
+  seen.add(id);
+  const previous = byId.get(id)?.previousId;
+  const value = previous && byId.has(previous) ? depth(previous, seen) + 1 : 1;
+  depths.set(id, value);
+  return value;
+ }
+ return moves.map(move => ({ ...move, order: depth(move.id) })).sort((a, b) => a.order - b.order);
 }

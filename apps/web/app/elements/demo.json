@@ -83,7 +83,6 @@
   "moves": [
     {
       "id": "G1-M1",
-      "order": 1,
       "ownerId": "G1",
       "targetId": "G1",
       "previousId": null,
@@ -101,7 +100,6 @@
     },
     {
       "id": "G1-M2",
-      "order": 2,
       "ownerId": "G1",
       "targetId": "G1",
       "previousId": "G1-M1",
@@ -120,7 +118,6 @@
     },
     {
       "id": "G1-M3",
-      "order": 3,
       "ownerId": "G1",
       "targetId": "T1",
       "previousId": "G1-M2",
@@ -140,7 +137,6 @@
     },
     {
       "id": "T1-M1",
-      "order": 4,
       "ownerId": "T1",
       "targetId": "T1",
       "previousId": "G1-M3",
@@ -161,7 +157,6 @@
     },
     {
       "id": "T1-M2",
-      "order": 5,
       "ownerId": "T1",
       "targetId": "T1",
       "previousId": "T1-M1",
@@ -183,7 +178,6 @@
     },
     {
       "id": "T1-M3",
-      "order": 6,
       "ownerId": "T1",
       "targetId": "T1",
       "previousId": "T1-M2",
@@ -206,7 +200,6 @@
     },
     {
       "id": "G1-M4",
-      "order": 7,
       "ownerId": "G1",
       "targetId": "T1",
       "previousId": "T1-M3",
@@ -230,7 +223,6 @@
     },
     {
       "id": "G1-M5",
-      "order": 8,
       "ownerId": "G1",
       "targetId": "T2",
       "previousId": "G1-M4",
@@ -255,7 +247,6 @@
     },
     {
       "id": "T2-M1",
-      "order": 9,
       "ownerId": "T2",
       "targetId": "T2",
       "previousId": "G1-M5",
@@ -281,7 +272,6 @@
     },
     {
       "id": "T2-M2",
-      "order": 10,
       "ownerId": "T2",
       "targetId": "T2",
       "previousId": "T2-M1",
@@ -308,7 +298,6 @@
     },
     {
       "id": "T2-M3",
-      "order": 11,
       "ownerId": "T2",
       "targetId": "T2",
       "previousId": "T2-M2",
@@ -336,7 +325,6 @@
     },
     {
       "id": "T2-F1",
-      "order": 12,
       "ownerId": "T2",
       "targetId": "T2",
       "previousId": "T2-M3",
@@ -365,7 +353,6 @@
     },
     {
       "id": "T2-F2",
-      "order": 13,
       "ownerId": "T2",
       "targetId": "T2",
       "previousId": "T2-F1",
@@ -395,7 +382,6 @@
     },
     {
       "id": "G1-M6",
-      "order": 14,
       "ownerId": "G1",
       "targetId": "T2",
       "previousId": "T2-F2",
@@ -426,7 +412,6 @@
     },
     {
       "id": "G1-M7",
-      "order": 15,
       "ownerId": "G1",
       "targetId": "T3",
       "previousId": "G1-M6",
@@ -458,7 +443,6 @@
     },
     {
       "id": "T3-M1",
-      "order": 16,
       "ownerId": "T3",
       "targetId": "T3",
       "previousId": "G1-M7",
@@ -492,7 +476,6 @@
     },
     {
       "id": "T3-M2",
-      "order": 17,
       "ownerId": "T3",
       "targetId": "T3",
       "previousId": "T3-M1",
@@ -527,7 +510,6 @@
     },
     {
       "id": "T3-M3",
-      "order": 18,
       "ownerId": "T3",
       "targetId": "T3",
       "previousId": "T3-M2",
@@ -563,7 +545,6 @@
     },
     {
       "id": "T3-M4",
-      "order": 19,
       "ownerId": "T3",
       "targetId": "T3",
       "previousId": "T3-M3",
@@ -600,7 +581,6 @@
     },
     {
       "id": "T3-M5",
-      "order": 20,
       "ownerId": "T3",
       "targetId": "T3",
       "previousId": "T3-M4",
@@ -639,7 +619,6 @@
     },
     {
       "id": "G1-M8",
-      "order": 21,
       "ownerId": "G1",
       "targetId": "T3",
       "previousId": "T3-M5",
@@ -679,7 +658,6 @@
     },
     {
       "id": "G1-M9",
-      "order": 22,
       "ownerId": "G1",
       "targetId": "G1",
       "previousId": "G1-M8",
@@ -720,7 +698,6 @@
     },
     {
       "id": "G1-M10",
-      "order": 23,
       "ownerId": "G1",
       "targetId": "G1",
       "previousId": "G1-M9",
