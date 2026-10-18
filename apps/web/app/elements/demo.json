@@ -3,7 +3,7 @@
     {
       "id": "G1",
       "kind": "goal",
-      "status": "completed",
+      "status": "active",
       "parentId": null,
       "revision": "VG1-1",
       "title": "Рабочий аккаунт Codex готов",
@@ -35,7 +35,7 @@
     {
       "id": "T2",
       "kind": "task",
-      "status": "completed",
+      "status": "active",
       "parentId": "G1",
       "revision": "VT2-2",
       "title": "Источник номера для Codex выбран",
@@ -57,7 +57,7 @@
     {
       "id": "T3",
       "kind": "task",
-      "status": "completed",
+      "status": "draft",
       "parentId": "G1",
       "revision": "VT3-2",
       "title": "Номер Codex привязан и сохранён",
@@ -92,7 +92,7 @@
       "previousId": null,
       "kind": "operation",
       "title": "Поставить Цель",
-      "status": "completed",
+      "status": "succeeded",
       "attemptId": "A01",
       "executor": "agent",
       "input": [
@@ -109,7 +109,7 @@
       "previousId": "G1-M1",
       "kind": "action",
       "title": "Рассмотреть постановку Цели",
-      "status": "completed",
+      "status": "succeeded",
       "attemptId": "A02",
       "executor": "human",
       "input": [
@@ -127,7 +127,7 @@
       "previousId": "G1-M2",
       "kind": "operation",
       "title": "Поставить первую Задачу",
-      "status": "completed",
+      "status": "succeeded",
       "attemptId": "A03",
       "executor": "agent",
       "input": [
@@ -146,7 +146,7 @@
       "previousId": "G1-M3",
       "kind": "action",
       "title": "Рассмотреть постановку первой Задачи",
-      "status": "completed",
+      "status": "succeeded",
       "attemptId": "A04",
       "executor": "human",
       "input": [
@@ -166,7 +166,7 @@
       "previousId": "T1-M1",
       "kind": "operation",
       "title": "Исследовать требования к номеру",
-      "status": "completed",
+      "status": "succeeded",
       "attemptId": "A05",
       "executor": "agent",
       "input": [
@@ -187,7 +187,7 @@
       "previousId": "T1-M2",
       "kind": "action",
       "title": "Выбрать способ подтверждения",
-      "status": "completed",
+      "status": "succeeded",
       "attemptId": "A06",
       "executor": "human",
       "input": [
@@ -209,7 +209,7 @@
       "previousId": "T1-M3",
       "kind": "operation",
       "title": "Принять результат первой Задачи",
-      "status": "completed",
+      "status": "succeeded",
       "attemptId": "A07",
       "executor": "agent",
       "input": [
@@ -232,7 +232,7 @@
       "previousId": "G1-M4",
       "kind": "operation",
       "title": "Поставить вторую Задачу",
-      "status": "completed",
+      "status": "succeeded",
       "attemptId": "A08",
       "executor": "agent",
       "input": [
@@ -256,7 +256,7 @@
       "previousId": "G1-M5",
       "kind": "action",
       "title": "Рассмотреть постановку второй Задачи",
-      "status": "completed",
+      "status": "succeeded",
       "attemptId": "A09",
       "executor": "human",
       "input": [
@@ -281,7 +281,7 @@
       "previousId": "T2-M1",
       "kind": "operation",
       "title": "Исследовать сайты получения номера",
-      "status": "completed",
+      "status": "succeeded",
       "attemptId": "A10",
       "executor": "agent",
       "input": [
@@ -307,7 +307,7 @@
       "previousId": "T2-M2",
       "kind": "action",
       "title": "Рассмотреть предложенный сайт",
-      "status": "completed",
+      "status": "succeeded",
       "attemptId": "A11",
       "executor": "human",
       "input": [
@@ -334,7 +334,7 @@
       "previousId": "T2-M3",
       "kind": "operation",
       "title": "Доработать сравнение сайтов",
-      "status": "completed",
+      "status": "claimed",
       "attemptId": "A12",
       "executor": "agent",
       "input": [
@@ -362,7 +362,7 @@
       "previousId": "T2-F1",
       "kind": "action",
       "title": "Рассмотреть доработанный отчёт",
-      "status": "completed",
+      "status": "planned",
       "attemptId": "A13",
       "executor": "human",
       "input": [
@@ -391,7 +391,7 @@
       "previousId": "T2-F2",
       "kind": "operation",
       "title": "Принять результат второй Задачи",
-      "status": "completed",
+      "status": "claimed",
       "attemptId": "A14",
       "executor": "agent",
       "input": [
@@ -421,7 +421,7 @@
       "previousId": "G1-M6",
       "kind": "operation",
       "title": "Поставить третью Задачу",
-      "status": "completed",
+      "status": "planned",
       "attemptId": "A15",
       "executor": "agent",
       "input": [
@@ -452,7 +452,7 @@
       "previousId": "G1-M7",
       "kind": "action",
       "title": "Рассмотреть постановку третьей Задачи",
-      "status": "completed",
+      "status": "planned",
       "attemptId": "A16",
       "executor": "human",
       "input": [
@@ -485,7 +485,7 @@
       "previousId": "T3-M1",
       "kind": "action",
       "title": "Зарегистрироваться в выбранном сервисе",
-      "status": "completed",
+      "status": "planned",
       "attemptId": "A17",
       "executor": "human",
       "input": [
@@ -519,7 +519,7 @@
       "previousId": "T3-M2",
       "kind": "action",
       "title": "Пополнить баланс сервиса",
-      "status": "completed",
+      "status": "planned",
       "attemptId": "A18",
       "executor": "human",
       "input": [
@@ -554,7 +554,7 @@
       "previousId": "T3-M3",
       "kind": "action",
       "title": "Получить номер и привязать Codex",
-      "status": "completed",
+      "status": "planned",
       "attemptId": "A19",
       "executor": "human",
       "input": [
@@ -590,7 +590,7 @@
       "previousId": "T3-M4",
       "kind": "action",
       "title": "Сохранить номер и сообщить итог",
-      "status": "completed",
+      "status": "planned",
       "attemptId": "A20",
       "executor": "human",
       "input": [
@@ -628,7 +628,7 @@
       "previousId": "T3-M5",
       "kind": "operation",
       "title": "Принять результат третьей Задачи",
-      "status": "completed",
+      "status": "planned",
       "attemptId": "A21",
       "executor": "agent",
       "input": [
@@ -667,7 +667,7 @@
       "previousId": "G1-M8",
       "kind": "action",
       "title": "Рассмотреть итог Цели",
-      "status": "completed",
+      "status": "planned",
       "attemptId": "A22",
       "executor": "human",
       "input": [
@@ -707,7 +707,7 @@
       "previousId": "G1-M9",
       "kind": "operation",
       "title": "Завершить Цель",
-      "status": "completed",
+      "status": "planned",
       "attemptId": "A23",
       "executor": "agent",
       "input": [

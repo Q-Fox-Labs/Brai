@@ -80,8 +80,13 @@ test("measured card heights determine initial rows, fit and legacy overlap migra
  assert.ok(tallFit.zoom < 0.2);
 });
 
-test("status presentation follows the existing contract and preserves historical completion", () => {
- assert.ok(data.elements.every(element => element.status === "completed"));
+test("status presentation follows the existing contract and the fixed demo shows all states", () => {
+ assert.deepEqual(new Set(data.elements.map(element => element.status)), new Set(["draft", "active", "completed"]));
+ assert.deepEqual(new Set(data.moves.map(move => move.status)), new Set(["planned", "claimed", "succeeded"]));
+ for (const owner of ["G1", "T1", "T2", "T3"]) {
+  const statuses = sequenceMoves(data.moves).filter(move => move.ownerId === owner).map(move => ["succeeded", "claimed", "planned"].indexOf(move.status));
+  assert.deepEqual(statuses, [...statuses].sort((a, b) => a - b));
+ }
  for (const [kind, statuses] of [["element", ["draft", "active", "completed"]], ["move", ["planned", "claimed", "succeeded"]]] as const) {
   const states = statuses.map(status => statusPresentation(status, kind));
   assert.equal(new Set(states.map(state => state.tone)).size, 3);
