@@ -15,6 +15,7 @@ export function postgresStore(connectionString:string) {
   pool.on("error",()=>{/* Без payload; следующий SQL вернёт безопасный отказ. */});
   const find:OperationStore['find']=async(owner,id,now)=>{const r=await pool.query("SELECT * FROM providers_operations WHERE owner_id=$1 AND operation_id=$2 AND key_expires_at>$3",[owner,id,now]);return r.rows[0]?decode(r.rows[0]):null;};
   const store:OperationStore={
+    async markOutputSaveFailed(owner,id,hash){await pool.query("UPDATE providers_operations SET observation_pending=true,observation_at=COALESCE(observation_at,$4) WHERE owner_id=$1 AND operation_id=$2 AND input_hash=$3 AND phase='output_pending'",[owner,id,hash,Date.now()]);},
     async reserveOutput(owner,id,hash,requestId,expiresAt){
       const client=await pool.connect();try{await client.query('BEGIN');await client.query('LOCK TABLE providers_pending_outputs IN SHARE ROW EXCLUSIVE MODE');
         const count=await client.query('SELECT count(*)::int AS total FROM providers_pending_outputs');if(count.rows[0].total>=2)throw new Failure('OUTPUT_STORAGE_FULL','not_sent');
@@ -53,7 +54,7 @@ export function postgresStore(connectionString:string) {
   };
   return {...store,
     /** Вызывать явно при выпуске от роли-владельца, никогда не через shared DB. */
-    async migrate(){for(const name of ["001_operations.sql","002_outputs.sql"])await pool.query(readFileSync(new URL("../migrations/"+name,import.meta.url),"utf8"));},
+    async migrate(){for(const name of ["001_operations.sql","002_outputs.sql","003_observation.sql"])await pool.query(readFileSync(new URL("../migrations/"+name,import.meta.url),"utf8"));},
     /** Блокировка живёт на выделенной сессии; её потеря немедленно останавливает runtime. */
     async exclusive(onLost:()=>void){lock=await pool.connect();const r=await lock.query("SELECT pg_try_advisory_lock(18401,1) AS acquired");if(!r.rows[0].acquired){lock.release();lock=undefined;throw new Error("PROVIDERS_INSTANCE_ALREADY_RUNNING");}lock.on("error",onLost);lock.on("end",onLost);},
     async close(){if(lock){lock.removeAllListeners("error");lock.removeAllListeners("end");await lock.query("SELECT pg_advisory_unlock(18401,1)").catch(()=>{});lock.release();lock=undefined;}await pool.end();}

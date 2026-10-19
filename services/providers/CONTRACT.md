@@ -93,9 +93,14 @@ v0 и его закрытые DTO остаются доступны. v1 имее
 - `brai.providers.v1.invoke.decide`: ownerId, operationId UUID, provider, model,
   state, questions, deadlineAt → операция, без ожидания вычисления.
 - `brai.providers.v1.operations.get/cancel`: `{ownerId,operationId}` → операция.
-- `brai.providers.v1.status`: `{}` → `{ready,active,capacity:2,waiting:0}`;
+- `brai.providers.v1.status`: `{}` → `{ready,active,capacity:2,waiting:0,dependencies?,metrics?}`;
   модели для проверки готовности не вызываются. active относится к v1;
   общий egress ограничивает также совместные вызовы v0/v1 двумя отправками.
+
+Runtime v1 возвращает `dependencies` и `metrics` по разделу наблюдаемости ниже.
+`ready` подтверждает приём операций через NATS и собственную БД, а не успешный
+ответ выбранной модели. PING подтверждает только процесс. LiteLLM остаётся
+`unknown` без отдельной проверки; status никогда не вызывает модель.
 
 `catalog.json` — единственный декларативный источник публичных capabilities и
 маршрутов LiteLLM. `npm run catalog` генерирует `litellm.yaml` (JSON — подмножество
@@ -381,3 +386,86 @@ cost$0.0387238; replay/get не увеличили modelCalls1. Controlled tests
 owner/status/MIME/size/hash/origin, удаление при чтении, lost prepare/PUT и
 stage COMMIT response, partial upload, PG reconnect/recovery тех же bytes/IDs,
 квоту, cancel, TTL и отсутствие original. Повторной платной генерации не было.
+
+## Безопасная история, Alerts и диагностика v1
+
+Наблюдаемость использует существующий lifecycle `providers_operations`.
+Миграция `003_observation.sql` атомарно отмечает изменение в конечную фазу.
+`output_pending` отмечается только после фактического отказа artifacts.save,
+а не во время нормального сохранения; старые завершённые строки при миграции
+не переигрываются.
+Observer читает максимум 8 последних состояний за проход, начиная с самых
+старых наблюдаемых завершений. Если сохранение файла закончилось до прохода, виден
+уже конечный итог. Это итог операции, а не журнал каждого внутреннего перехода.
+Время наблюдаемого завершения/первого failed save задаёт порядок episode
+failure/recovery; повтор failed save сохраняет время и тот же History ID.
+Marker не является очередью model calls: observer никогда не вызывает модель,
+не держит её слот и не влияет на вычисление или публикацию файла. После restart
+необработанный marker сохраняется; recover может отметить потерю конкретной
+ранее принятой операции. Пустой polling/startup/readiness сами событий не создают.
+
+History: `source=service_providers`, subject
+`brai.history.v1.append.service_providers`, `type_id=1201` (execute) либо 1202
+для подтверждённой отмены. `scope_type=user`, `scope_id=ownerId`, `actor_id=null`,
+`object_type=provider_operation`, `object_id=operationId`. ID детерминирован для
+owner/operation/createdAt/phase. Данные создаются whitelist: phase, проверенные
+по каталогу provider/model, durationMs, безопасный errorClass, usage, cost=null.
+Usage включает только известные неотрицательные целые inputTokens/outputTokens/
+totalTokens, неизвестные данные остаются null. Произвольные raw usage/cost не
+копируются; History не является billing ledger. Ни input hash, ни prompt,
+контекст, ответы, имена/аргументы/результаты tools, outputs/URL, bytes, ключи
+или upstream error body в side channels не передаются.
+
+Форма History принадлежит [History](../history/CONTRACT.md). Доставка — Core
+NATS request без retry/очереди, максимум 8 одновременно, срок каждого 1 секунда.
+Успешный ответ подтверждает append; потеря ответа/ошибка/переполнение учитывается
+как failed/dropped и не меняет модельный исход. После снятия marker повторная
+History доставка не обещана, даже при crash между COMMIT observer и send.
+
+Alerts: [owner ingest](../alerts/CONTRACT.md), `service_id=service_providers`,
+`type_id=1` (failure), область только user/ownerId. Отказ принятой операции
+`failed/outcome_unknown/output_pending` создаёт один episode на owner/provider/
+model; повторные ошибки до успешной операции молчат. `succeeded` закрывает
+эпизод без уведомления. Отмена сама по себе не является аварией. Сбой доставки
+History/Alerts/observer не создаёт рекурсивных Alerts.
+
+Снятие marker, episode и готовый Alerts DTO фиксируются одной транзакцией в
+собственной БД. Outbox содержит не более 128 событий по 8192 байта, TTL 24 часа;
+эпизодов не более 256, TTL 7 суток. При заполнении новое событие пропускается
+счётчиком `outboxDropped`; истёкшие строки удаляются с `outboxExpired`.
+Это явные пределы гарантии: переполнение и TTL допускают потерю уведомления,
+а episode может подавлять продолжение проблемы до успеха или своего TTL.
+Строка outbox удаляется только после PubAck. Lost PubAck/DELETE response сохраняет
+тот же eventId/JSON; `Nats-Msg-Id=eventId`. Дедупликация Alerts по service_id/id
+сохраняет смысл и после окончания окна дедупликации JetStream. PubAck означает
+хранение у брокера, не COMMIT Alerts.
+
+Проход запускается раз в 5 секунд без наложения; не более 8 последовательных
+публикаций, каждая с таймаутом 1 секунда. При ошибке публикации проход прекращается,
+тот же DTO повторяется в следующем. Observer использует отдельный PG pool на
+одно соединение, connection timeout 1 с, statement timeout 1 с, query timeout
+1,5 с. Основной pool и control/admission не ждут History/Alerts. Startup не
+создаёт stream/consumer или справочники; нужен существующий
+`BRAI_ALERTS_INGEST_V1` по контракту Alerts. Новых model retries/fallback нет.
+
+`dependencies`: nats/storage/history/alerts принимают unknown/ready/unavailable;
+LiteLLM — честный unknown без inference-пробы, `modelProbe=disabled`. History
+state основан на append, Alerts state — только PubAck, не готовности consumer.
+`metrics` — счётчики текущего процесса: outboxDropped/outboxExpired/published/
+publishFailed/storageFailed, текущие outboxSize/episodes и
+history `{state,active,sent,dropped,failed}`. Ни owner, ни model request/result
+не являются labels. `ready` не зависит от side channels. Неподключённая библиотечная
+сборка может опускать diagnostics; штатный main их подключает.
+
+Минимальный NATS ACL runtime: собственные v0/v1 endpoints и Service API;
+History publish только append.service_providers + reply inbox; Alerts publish
+только brai.alerts.v1.ingest + reply inbox. Права создавать stream/consumer, читать чужие
+History/Alerts, менять каталоги или отправлять от другого source не нужны.
+Owner передаётся доверенным caller: этот слой не удостоверяет пользователя.
+Совместимый HTTP-вход обязан использовать тот же v1 lifecycle.
+
+Новые `observation*.test.mjs` проверяют whitelist и actual PG/NATS/JetStream с
+controlled HTTP upstream: outage, lost PubAck/restart, episode recovery, capacity,
+TTL, owner scope и отсутствие recompute. Отдельная приёмка admin проверяет
+реальную DEV History/Alerts запись только по synthetic owner/ID без платного
+модельного вызова. Прежний v0 не имеет durable lifecycle и этих гарантий.

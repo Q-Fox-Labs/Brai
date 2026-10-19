@@ -27,7 +27,7 @@ export function createStreamPublisher(nc:Pick<NatsConnection,"publish"|"flush"|"
   };
 }
 /** Единственный v1 instance; broker ACL должен удостоверять доверенного caller owner. */
-export async function registerProvidersV1(nc:NatsConnection,operations:Operations,options:{inboxPrefix?:string}={}) {
+export async function registerProvidersV1(nc:NatsConnection,operations:Operations,options:{inboxPrefix?:string;diagnostics?:()=>{dependencies:Record<string,string>;metrics:unknown}}={}) {
   const inboxPrefix=options.inboxPrefix??"_INBOX.";
   if(!/^_INBOX[.](?:[a-zA-Z0-9_-]{1,64}[.]){0,2}$/.test(inboxPrefix))throw new Error("INVALID_INBOX_PREFIX");
   const service=await nc.services.add({name:"brai_providers_v1",version:"1.0.0",description:"Durable owner scoped operations",queue:"brai_providers_v1"});
@@ -45,7 +45,10 @@ export async function registerProvidersV1(nc:NatsConnection,operations:Operation
     ["operations.cancel","operationKey","operation",true,input=>operations.cancel(input.ownerId as string,input.operationId as string)],
     ["models.list","modelsListRequest","modelsListResponse",true,()=>({version:catalogVersion,models:listModels()})],
     ["models.get","modelsGetRequest","model",true,input=>{const card=getModel(input.provider as string,input.model as string);if(!card)throw new Failure("NOT_FOUND","not_sent");return card;}],
-    ["status","statusRequest","statusResponse",true,()=>operations.status()]
+    ["status","statusRequest","statusResponse",true,()=>{
+      const status=operations.status(),diagnostics=options.diagnostics?.();
+      return diagnostics?{...status,ready:status.ready&&diagnostics.dependencies.nats==='ready'&&diagnostics.dependencies.storage==='ready',...diagnostics}:status;
+    }]
   ];
   for(const [suffix,requestName,responseName,control,handle] of endpoints) {
     const validInput=v1Validator(requestName),validOutput=v1Validator(responseName);

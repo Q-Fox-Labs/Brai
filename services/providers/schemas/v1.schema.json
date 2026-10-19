@@ -849,6 +849,138 @@
         },
         "waiting": {
           "const": 0
+        },
+        "dependencies": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "nats": {
+              "enum": [
+                "unknown",
+                "ready",
+                "unavailable"
+              ]
+            },
+            "storage": {
+              "enum": [
+                "unknown",
+                "ready",
+                "unavailable"
+              ]
+            },
+            "litellm": {
+              "enum": [
+                "unknown",
+                "ready",
+                "unavailable"
+              ]
+            },
+            "history": {
+              "enum": [
+                "unknown",
+                "ready",
+                "unavailable"
+              ]
+            },
+            "alerts": {
+              "enum": [
+                "unknown",
+                "ready",
+                "unavailable"
+              ]
+            },
+            "modelProbe": {
+              "const": "disabled"
+            }
+          },
+          "required": [
+            "nats",
+            "storage",
+            "litellm",
+            "modelProbe",
+            "history",
+            "alerts"
+          ]
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "outboxDropped": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "outboxExpired": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "published": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "publishFailed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "storageFailed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "outboxSize": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "episodes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "history": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "enum": [
+                    "unknown",
+                    "ready",
+                    "unavailable"
+                  ]
+                },
+                "active": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "sent": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "dropped": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "failed": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "state",
+                "active",
+                "sent",
+                "dropped",
+                "failed"
+              ]
+            }
+          },
+          "required": [
+            "outboxDropped",
+            "outboxExpired",
+            "published",
+            "publishFailed",
+            "storageFailed",
+            "outboxSize",
+            "episodes",
+            "history"
+          ]
         }
       },
       "required": [

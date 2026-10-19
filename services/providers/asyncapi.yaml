@@ -196,6 +196,30 @@ channels:
         oneOf:
           - $ref: '#/components/messages/v1_statusResponse'
           - $ref: '#/components/messages/v1_error'
+  brai.history.v1.append.service_providers:
+    description: >-
+      Best-effort owner scoped safe operation fact; Core request timeout1s, active8,
+      no retry/queue. Source bound by ACL; reply confirms append, failures do not affect model.
+    publish:
+      operationId: appendSafeOperationFact
+      message:
+        payload:
+          $ref: '../history/schemas/messages.schema.json#/definitions/appendRequest'
+  brai.alerts.v1.ingest:
+    description: >-
+      Existing BRAI_ALERTS_INGEST_V1. Source durable outbox128/TTL24h, batch8,
+      PubAck timeout1s, poll5s. Stable eventId/JSON and Nats-Msg-Id across lost PubAck.
+      user owner scope, failure type1, episode owner/provider/model; success closes silently.
+    publish:
+      operationId: publishOperationFailure
+      message:
+        headers:
+          type: object
+          required: [Nats-Msg-Id]
+          properties:
+            Nats-Msg-Id: {type: string, format: uuid}
+        payload:
+          $ref: '../alerts/schemas/messages.schema.json#/definitions/ingest'
 components:
   messages:
     request:

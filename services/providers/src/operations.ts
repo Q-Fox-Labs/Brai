@@ -19,6 +19,7 @@ export type Phase = "accepted"|"dispatching"|"output_pending"|"succeeded"|"faile
 export type Operation = {operationId:string;ownerId:string;inputHash:string;phase:Phase;cancelRequested:boolean;createdAt:number;finishedAt:number|null;keyExpiresAt:number;resultExpiresAt:number|null;route:{provider:string;model:string;catalogVersion:string};result:Json|null;errorCode:string|null};
 /** Все изменения атомарны. claim коммитится до model port; finish не меняет чужой финал. */
 export interface OperationStore {
+  markOutputSaveFailed?(owner:string,id:string,hash:string):Promise<void>;
   reserveOutput?(owner:string,id:string,hash:string,requestId:string,expiresAt:number):Promise<void>;
   stageOutput?(output:PendingOutput,metadata:Json):Promise<void>;
   pendingOutputs?(owner?:string,id?:string):Promise<(PendingOutput&{metadata:Json})[]>;
@@ -81,7 +82,11 @@ export function createOperations(store:OperationStore,port:DecideV1Port,options:
         const saved=await options.artifacts!.save(pending,signal);
         await store.finish(pending.ownerId,pending.operationId,'succeeded',{...pending.metadata as Record<string,Json>,outputs:[saved]},null,now(),pending.inputHash);
         await store.dropOutput!(pending.ownerId,pending.operationId,pending.inputHash);
-      }catch{/* Durable bytes сохраняются; повторяются только операции сохранения. */}
+      }catch{
+        // AIDEV-NOTE: Только фактический отказ save, а не нормальная промежуточная фаза, даёт observation marker.
+        await store.markOutputSaveFailed?.(pending.ownerId,pending.operationId,pending.inputHash).catch(()=>{});
+        /* Durable bytes сохраняются; повторяются только операции сохранения. */
+      }
     })();saving.set(key,work);try{await work;}finally{saving.delete(key);}
   }
   /** Повторяет только сохранение прежних bytes/IDs; модель не вызывается. */
