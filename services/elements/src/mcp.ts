@@ -34,7 +34,7 @@ export interface McpRuntime { http: HttpServer; url: string; close(): Promise<vo
 /** Запускает MCP listener с короткими сессиями и безопасными ответами ошибок. */
 export async function startMcp(config: Config, handlers: ElementsHandlers, gate: LoadGate): Promise<McpRuntime> {
   const sessions = new Map<string, Session>(); const pending = new Set<Session>();
-  function make(): Session {
+  async function make(): Promise<Session> {
     const server = new McpServer({ name: "brai-elements", version: "1.0.0" }, { capabilities: { tools: { listChanged: false } } });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: () => randomUUID(), enableJsonResponse: true, enableDnsRebindingProtection: true, allowedHosts: config.mcpAllowedHosts, allowedOrigins: config.mcpAllowedOrigins });
     const session = { server, transport, touched: Date.now() }; pending.add(session);
@@ -46,13 +46,14 @@ export async function startMcp(config: Config, handlers: ElementsHandlers, gate:
       try { const fn = handlers[operation[name]] as unknown as (value: unknown, context?: any) => Promise<unknown>; const value = await gate.run(context => fn(args, context), { actorId: config.mcpOwnerId }); return { content: [], structuredContent: value }; }
       catch (error) { const failure = safe(error); return { isError: true, content: [{ type: "text", text: JSON.stringify({ code: failure.code, message: failure.message, retryable: ["BUSY", "DATABASE_UNAVAILABLE", "DEADLINE_EXCEEDED"].includes(failure.code) }) }] }; }
     });
+    await server.connect(transport);
     return session;
   }
   const http = createServer(async (req, res) => {
     if (req.url !== "/mcp") { res.writeHead(404).end(); return; }
     const id = typeof req.headers["mcp-session-id"] === "string" ? req.headers["mcp-session-id"] : undefined;
     let session = id ? sessions.get(id) : undefined;
-    if (!session && req.method === "POST") { session = make(); await session.transport.handleRequest(req, res); if (session.transport.sessionId) { pending.delete(session); sessions.set(session.transport.sessionId, session); } return; }
+    if (!session && req.method === "POST") { session = await make(); await session.transport.handleRequest(req, res); if (session.transport.sessionId) { pending.delete(session); sessions.set(session.transport.sessionId, session); } return; }
     if (!session) { res.writeHead(404).end(); return; }
     session.touched = Date.now(); await session.transport.handleRequest(req, res);
   });
