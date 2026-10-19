@@ -127,7 +127,13 @@ const destination = join(output, workspacePath);
 await mkdir(destination, { recursive: true });
 for (const item of sourceFiles) {
   const sourcePath = join(sourcePackage, item);
-  const copyOptions = item === '.next' ? { recursive: true, dereference: true, filter: (path) => !path.startsWith(`${sourcePath}${sep}cache${sep}`) && path !== join(sourcePath, 'cache') && path !== join(sourcePath, 'trace') } : { recursive: true, dereference: true };
+  // AIDEV-NOTE: next dev хранит собственный cache внутри .next/dev; production bundle его не использует.
+  const excludedNextRoots = new Set(['cache', 'dev', 'trace']);
+  const copyOptions = item === '.next' ? {
+    recursive: true,
+    dereference: true,
+    filter: (path) => !excludedNextRoots.has(relative(sourcePath, path).split(sep)[0]),
+  } : { recursive: true, dereference: true };
   await cp(sourcePath, join(destination, item), copyOptions);
 }
 if (workspace === '@brai/agent' || workspace === '@brai/web') await copyArtifactSiblings();
