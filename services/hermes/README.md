@@ -41,6 +41,13 @@ node services/hermes/tools.mjs
       "revision": "50081637b602126ee06cb3bc8a744d25651d2da1",
       "profileId": "silero_pytorch"
     }
+  },
+  "stt": {
+    "model": {
+      "modelId": "gigaam-v3-e2e-ctc",
+      "revision": "cec030b4c4f35d928e4a9044a3bdb29ebd499fac",
+      "profileId": "gigaam_pytorch"
+    }
   }
 }
 ```
@@ -54,6 +61,25 @@ node services/hermes/tools.mjs
 Доверенный Telegram плагин запускает `node services/hermes/trusted.mjs` с теми же двумя переменными окружения. Он использует ограниченный JSON-RPC stdio, описанный в [CONTRACT.md](CONTRACT.md) и [trusted.openrpc.json](trusted.openrpc.json). Этот процесс нельзя регистрировать как инструмент модели.
 
 `voice.mjs --input /absolute/text.txt --output /absolute/speech.ogg --voice eugene` подключает нативный tts Hermes к Local AI. Вход — UTF-8 файл с текстом до 900 Unicode code points; выбранная модель приходит из `tts.model`. Результат получает Artifacts ID и восстанавливается через publisher с проверкой owner/hash. Готовый OGG копируется в незанятый путь output. Timeout не вызывает автоматический новый синтез.
+
+`transcribe.mjs --input /absolute/voice.ogg --output /absolute/transcript.txt` подключает нативный command STT к существующему Transcription/GigaAM без нового ключа. Входной обычный файл должен находиться в `allowedReadRoots` publisher; поддержаны OGG, WAV, FLAC и MP3. Мост публикует файл, один раз отправляет required local submit, читает состояние и эфемерный результат через MCP, затем создаёт новый UTF-8 output с правами `0600`. Полный фактический selector проверяется против `stt.model`. Общий срок публикации и расшифровки — 180 секунд. Неизвестный исход или утрата результата не запускают повтор; выходной файл не перезаписывается. Текст ASR не проходит отдельную LLM-нормализацию.
+
+Пример секции нативного `config.yaml` Hermes, отдельного от защищённого JSON мостов выше:
+
+```yaml
+stt:
+  enabled: true
+  provider: brai_local_ai
+  providers:
+    brai_local_ai:
+      type: command
+      command: '/usr/local/bin/node /absolute/hermes/brai/services/hermes/transcribe.mjs --input {input_path} --output {output_path}'
+      output_format: txt
+      normalize: false
+      timeout: 200
+```
+
+Обе переменные `BRAI_HERMES_CONFIG` и `BRAI_HERMES_OWNER_ID` нужны дочерней команде. Native timeout оставляет запас для запуска и закрытия подключений. До включения проверьте установленность выбранной модели, owner-bound Transcription bearer и отсутствие доступного альтернативного локального STT: нативный gateway может попытаться использовать его после отказа выбранного provider. Сам мост не выполняет fallback и не устанавливает модели. Для голосовых ответов используется существующий TTS provider и нативный режим `/voice`; слышимая доставка Telegram проверяется отдельно.
 
 Постоянные задачи и решения хранятся в game-core/Elements. Встроенный todo Hermes служит временной рабочей заметкой.
 

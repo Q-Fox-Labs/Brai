@@ -19,6 +19,20 @@
 
 Запуск требует защищённого JSON и отдельного доверенного `BRAI_HERMES_OWNER_ID`. Они должны совпадать. NATS identity Hermes имеет только необходимые subjects и свой inbox; старые связи сервисов не меняются. Credentials не включаются в ошибки. Конфигурация экземпляра отвечает за owner binding Elements endpoint и Transcription bearer. Подмена owner во входе отвергается.
 
+## Голосовой вход через Transcription
+
+`transcribe.mjs --input <absolute-audio-path> --output <absolute-text-path>` — файловый адаптер штатного command STT Hermes. Он использует существующий publisher и [Transcription MCP](../transcription/CONTRACT.md); собственного ASR runtime, ключа провайдера и долговечного хранилища текста нет. `config.stt.model` — полный selector по owner-схеме `ModelSelector`: `{modelId,revision,profileId}`. Неизвестные поля selector отклоняются. Owner берётся из защищённой конфигурации подключений, а не из CLI или запроса модели.
+
+Вход должен быть непустым обычным файлом, допускаемым read roots publisher. После одного `publish_file` принимаются только MIME `audio/ogg`, `audio/wav`, `audio/flac`, `audio/mpeg` и UUID готового артефакта владельца. Один `transcription_request_submit` получает новый `clientIdempotencyKey`, `audioArtifactId`, `{route:"local",selection:"required",modelId}` и абсолютный `deadlineAt`. API Transcription сам фиксирует revision/profile; мост проверяет все поля фактического selector против конфигурации. Схемы запросов и ответов принадлежат Transcription и не копируются в Hermes.
+
+После submit читается только `transcription_request_get` с интервалом 250 ms. Когда task succeeded и result available, один `transcription_result_get` получает эфемерный текст и actual selector. Проверяются request ID, требуемая модель и owner DTO ответа. Непустой UTF-8 текст размером до 1 MiB записывается без изменения в новый output с правами `0600`; существующий путь не перезаписывается, в том числе если он появился во время вычисления. Groq-нормализация к этому тексту не применяется.
+
+Общий срок publish/submit/poll/output — максимум 180 секунд; тот же абсолютный deadline передаётся Transcription. Тестируемая функция `transcribeFile` допускает более короткий `timeoutMs`, CLI его не переопределяет. Native command provider задаёт timeout 200 секунд для запаса на подключение и закрытие. Timeout не подтверждает физическую остановку вычисления; его deadline и lifecycle принадлежат Transcription/Local AI. Мост не выполняет автоматический повтор, resubmit, замену модели или удаление готовых артефактов.
+
+`OUTCOME_UNKNOWN` означает потерю подтверждения изменяющего вызова, невалидный ответ submit либо явно неизвестный исход владельца. `MODEL_MISMATCH` запрещает принимать другую модель или result request ID. `RESULT_UNAVAILABLE` обозначает потерянный или истёкший результат; `EMPTY_TRANSCRIPT` — отсутствие распознанных слов. `INVALID_ARGUMENT`, `OUTPUT_EXISTS`, `RESULT_TOO_LARGE`, `DEADLINE_EXCEEDED` и безопасные ошибки владельцев завершают команду без нового compute. CLI выводит только безопасный код в stderr; stdout не содержит текст или служебный протокол. Нативный command STT читает output-файл. Настройка provider показана в [README](README.md#telegram-и-голос).
+
+Сам мост не имеет fallback. До включения экземпляра нужно проверить, что fallback нативного gateway не может незаметно заменить выбранный сервис установленным альтернативным локальным backend. Это отдельная проверка runtime; настройка named provider сама по себе не доказывает отсутствие такого backend.
+
 ## MemOS embeddings
 
 `memos/embedding/adapter.mjs` предоставляет `POST /v1/embeddings` для закреплённой модели `embeddinggemma-2-q8` через публичный Local AI invoke.embed. Owner и selector берутся из доверенной конфигурации, назначение всегда `symmetric`; порядок входного пакета сохраняется. Настройка процесса описана в [MemOS README](memos/README.md).
