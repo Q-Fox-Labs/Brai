@@ -125,6 +125,52 @@ test('Artifacts publishing verifies owner, trusted upload origin and ready bytes
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test('Artifacts publishes to the configured upload origin and rejects unsafe URLs before PUT', async () => {
+  const originalFetch = globalThis.fetch;
+  const hash = createHash('sha256').update(audio).digest('hex');
+  const trusted = 'https://upload.invalid/upload/opaque-token';
+  let uploadUrl = trusted; let puts = 0; let gets = 0; let responseStatus = 201;
+  const nats = { async request(subject, bytes) {
+    if (subject.endsWith('.prepare')) {
+      const input = JSON.parse(Buffer.from(bytes));
+      return { data: Buffer.from(JSON.stringify({ artifact: { artifactId, ownerId: 'owner', requestId: input.requestId, status: 'pending', mimeType: 'audio/ogg' }, uploadUrl })) };
+    }
+    assert.equal(subject, 'brai.artifacts.v1.get'); gets++;
+    return { data: Buffer.from(JSON.stringify({ artifactId, ownerId: 'owner', status: 'ready', mimeType: 'audio/ogg', sizeBytes: audio.length, sha256: hash })) };
+  } };
+  globalThis.fetch = async (url, options) => {
+    puts++;
+    assert.equal(url.href, trusted, 'PUT uses the validated returned upload endpoint, not the files endpoint');
+    assert.equal(options.method, 'PUT'); assert.equal(options.redirect, 'manual'); assert.deepEqual(options.body, audio);
+    return new Response(null, { status: responseStatus, headers: { location: 'https://foreign.invalid/upload/other', 'x-artifact-id': artifactId, 'x-artifact-state': 'ready', 'x-artifact-size': String(audio.length), 'x-artifact-sha256': hash } });
+  };
+  try {
+    const configuration = { nats, internalBaseUrl: 'http://files.invalid:9081/', uploadBaseUrl: 'https://upload.invalid/', tempRoot: '/tmp', maxAudioBytes: 1, allowedMimeTypes: ['audio/ogg'] };
+    const adapter = createArtifactsAdapter(configuration);
+    const ctx = context(request());
+    assert.deepEqual(await adapter.publishAudio({ audio, mimeType: 'audio/ogg' }, ctx), { artifactId });
+    assert.equal(puts, 1); assert.equal(gets, 1);
+    for (uploadUrl of [
+      'https://foreign.invalid/upload/opaque-token', 'http://files.invalid:9081/upload/opaque-token',
+      'http://upload.invalid/upload/opaque-token', 'https://upload.invalid:444/upload/opaque-token',
+      'https://user:secret@upload.invalid/upload/opaque-token', `${trusted}?secret=value`, `${trusted}#fragment`,
+      `${trusted}?`, `${trusted}#`,
+      'https://upload.invalid/upload/%6fpaque-token', 'https://upload.invalid/upload/a%2fb',
+      'https://upload.invalid/upload/../upload/opaque-token', 'https://upload.invalid/files/opaque-token',
+      `${trusted}/extra`, 'https://upload.invalid/upload/', 'https://upload.invalid\\upload\\opaque-token',
+    ]) {
+      await assert.rejects(adapter.publishAudio({ audio, mimeType: 'audio/ogg' }, ctx), error => error.code === 'DEPENDENCY_UNAVAILABLE');
+      assert.equal(puts, 1, 'unsafe URL must not receive audio'); assert.equal(gets, 1);
+    }
+    uploadUrl = trusted; responseStatus = 307;
+    await assert.rejects(adapter.publishAudio({ audio, mimeType: 'audio/ogg' }, ctx), error => error.code === 'DEPENDENCY_UNAVAILABLE');
+    assert.equal(puts, 2, 'redirect is not followed'); assert.equal(gets, 1);
+    for (const uploadBaseUrl of [null, '', 'invalid', 'ftp://upload.invalid/', 'https://user:secret@upload.invalid/', 'https://upload.invalid/path', 'https://upload.invalid/?q=1', 'https://upload.invalid/#fragment', 'https://upload.invalid/?', 'https://upload.invalid/#']) {
+      assert.throws(() => createArtifactsAdapter({ ...configuration, uploadBaseUrl }), error => error.code === 'INVALID_ARGUMENT');
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('installer accepts only the exact pinned Silero source and preserves HTTP redirect rejection', async () => {
   const root = await mkdtemp(join(tmpdir(), 'local-ai-silero-install-'));
   const operations = new Map(); let downloadUrl; let redirect;

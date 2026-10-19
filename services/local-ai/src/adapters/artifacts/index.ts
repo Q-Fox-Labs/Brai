@@ -12,6 +12,7 @@ import type { OperationContext, ServiceErrorCode } from '../../types.js';
 export type ArtifactsAdapterConfig = {
   nats: NatsConnection;
   internalBaseUrl: string;
+  uploadBaseUrl?: string;
   tempRoot: string;
   maxAudioBytes: number;
   allowedMimeTypes: readonly string[];
@@ -271,8 +272,12 @@ async function download(
 /** Создаёт порт, удерживающий проверенный temp-файл только пока исполняется callback. */
 export function createArtifactsAdapter(config: ArtifactsAdapterConfig): ArtifactPort {
   let base: URL;
+  let uploadBase: URL;
   try {
     base = new URL(config.internalBaseUrl);
+    if (config.uploadBaseUrl !== undefined && (typeof config.uploadBaseUrl !== 'string' || config.uploadBaseUrl.length === 0
+      || config.uploadBaseUrl.includes('?') || config.uploadBaseUrl.includes('#'))) fail('INVALID_ARGUMENT');
+    uploadBase = new URL(config.uploadBaseUrl ?? config.internalBaseUrl);
   } catch {
     fail('INVALID_ARGUMENT');
   }
@@ -282,6 +287,12 @@ export function createArtifactsAdapter(config: ArtifactsAdapterConfig): Artifact
     || base.search !== ''
     || base.hash !== ''
     || base.pathname !== '/'
+    || !['http:', 'https:'].includes(uploadBase.protocol)
+    || uploadBase.username !== ''
+    || uploadBase.password !== ''
+    || uploadBase.search !== ''
+    || uploadBase.hash !== ''
+    || uploadBase.pathname !== '/'
     || !isAbsolute(config.tempRoot)
     || !Number.isSafeInteger(config.maxAudioBytes)
     || config.maxAudioBytes < 1
@@ -355,7 +366,8 @@ export function createArtifactsAdapter(config: ArtifactsAdapterConfig): Artifact
       || artifact.requestId !== requestId || artifact.status !== 'pending' || artifact.mimeType !== 'audio/ogg') fail('DEPENDENCY_UNAVAILABLE');
     let url: URL;
     try { url = new URL(prepared.uploadUrl); } catch { fail('DEPENDENCY_UNAVAILABLE'); }
-    if (url.origin !== base.origin || url.username || url.password || url.search || url.hash
+    if (url.origin !== uploadBase.origin || url.username || url.password || url.search || url.hash
+      || prepared.uploadUrl.includes('?') || prepared.uploadUrl.includes('#')
       || !/^\/upload\/[A-Za-z0-9._~-]+$/.test(url.pathname) || url.href !== prepared.uploadUrl) fail('DEPENDENCY_UNAVAILABLE');
     assertActive(context);
     let response: Response;

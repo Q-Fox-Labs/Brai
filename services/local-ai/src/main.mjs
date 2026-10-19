@@ -108,11 +108,19 @@ export function validateLocalAiConfig(input) {
 
   const artifacts = object(config.artifacts, 'artifacts', [
     'internalBaseUrl', 'tempRoot', 'maxAudioBytes',
+    ...(Object.hasOwn(config.artifacts ?? {}, 'uploadBaseUrl') ? ['uploadBaseUrl'] : []),
   ]);
   const baseUrl = string(artifacts.internalBaseUrl, 'artifacts.internalBaseUrl');
   let parsedUrl;
   try { parsedUrl = new URL(baseUrl); } catch { invalid('artifacts.internalBaseUrl'); }
   if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password || parsedUrl.pathname !== '/') invalid('artifacts.internalBaseUrl');
+  if (Object.hasOwn(artifacts, 'uploadBaseUrl')) {
+    const uploadBaseUrl = string(artifacts.uploadBaseUrl, 'artifacts.uploadBaseUrl');
+    let uploadUrl;
+    try { uploadUrl = new URL(uploadBaseUrl); } catch { invalid('artifacts.uploadBaseUrl'); }
+    if (!['http:', 'https:'].includes(uploadUrl.protocol) || uploadUrl.username || uploadUrl.password
+      || uploadUrl.pathname !== '/' || uploadBaseUrl.includes('?') || uploadBaseUrl.includes('#')) invalid('artifacts.uploadBaseUrl');
+  }
   string(artifacts.tempRoot, 'artifacts.tempRoot');
   if (!path.isAbsolute(artifacts.tempRoot)) invalid('artifacts.tempRoot');
   positive(artifacts.maxAudioBytes, 'artifacts.maxAudioBytes');
@@ -423,6 +431,7 @@ export async function startLocalAi(input, dependencies = {}) {
     const runtimeFactory = (factories.createProfileRuntimeFactory ?? createProfileRuntimeFactory)(runtimeConfig(config));
     const artifacts = makeArtifacts({
       nats: nc, internalBaseUrl: config.artifacts.internalBaseUrl,
+      ...(Object.hasOwn(config.artifacts, 'uploadBaseUrl') ? { uploadBaseUrl: config.artifacts.uploadBaseUrl } : {}),
       tempRoot: config.artifacts.tempRoot, maxAudioBytes: config.artifacts.maxAudioBytes,
       allowedMimeTypes: AUDIO_MIME_TYPES,
     });

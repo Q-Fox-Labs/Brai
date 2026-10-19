@@ -71,6 +71,24 @@ test('configuration rejects omitted or unmeasured runtime limits before resource
   assert.throws(() => validateLocalAiConfig({ ...valid, nats: { ...valid.nats, inboxPrefix: '_INBOX' } }), /nats\.inboxPrefix/);
 });
 
+test('optional upload origin is validated before startup and passed to the Artifacts adapter', async () => {
+  const input = config();
+  input.artifacts.uploadBaseUrl = 'https://upload.invalid/';
+  assert.equal(validateLocalAiConfig(input), input);
+  for (const uploadBaseUrl of [undefined, null, '', 'invalid', 'ftp://upload.invalid/', 'https://user:secret@upload.invalid/', 'https://upload.invalid/path', 'https://upload.invalid/?q=1', 'https://upload.invalid/#fragment', 'https://upload.invalid/?', 'https://upload.invalid/#']) {
+    assert.throws(() => validateLocalAiConfig({ ...input, artifacts: { ...input.artifacts, uploadBaseUrl } }), /artifacts\.uploadBaseUrl/);
+  }
+  assert.throws(() => validateLocalAiConfig({ ...input, artifacts: { ...input.artifacts, unknownUploadOption: true } }), /artifacts/);
+  const deps = dependencies([]);
+  let actual;
+  deps.factories.createArtifactsAdapter = value => { actual = value; return {}; };
+  const runtime = await startLocalAi(input, deps);
+  try {
+    assert.equal(actual.internalBaseUrl, input.artifacts.internalBaseUrl);
+    assert.equal(actual.uploadBaseUrl, input.artifacts.uploadBaseUrl);
+  } finally { await runtime.close(); }
+});
+
 test('supported profile projection preserves pinned manifest and unknown GigaAM audio limit', () => {
   const projection = supportedProfiles({ runtime: { gigaam_pytorch: { longformMaximumSeconds: null } } });
   const embedding = projection.find(profile => profile.profileId === llamaProfile.profileId);
