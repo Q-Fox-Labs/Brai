@@ -1,0 +1,50 @@
+# Нативный Telegram плагин Brai
+
+Компонент `brai-telegram` подключается к штатному gateway Hermes через публичный plugin API закреплённой версии `517b5e10febd619ce30bb22580e29b160266eb43`. Каталог копируется целиком в `HERMES_HOME/plugins/brai-telegram`. Плагин не запускает polling, не заменяет Telegram adapter и сохраняет остальные инструменты Hermes.
+
+## Конфигурация и границы
+
+Защищённое окружение процесса задаёт следующие параметры:
+
+| Переменная | Значение |
+| --- | --- |
+| `BRAI_TELEGRAM_OWNER_ID` | Положительный decimal Telegram user ID. Private chat ID должен совпадать с ним. |
+| `BRAI_TELEGRAM_STATE_DIR` | Абсолютный профильный каталог с последним сегментом `brai-telegram`. Содержит private SQLite подтверждений. |
+| `BRAI_HERMES_TRUSTED_ENTRY` | Абсолютный путь к `services/hermes/trusted.mjs`. |
+| `BRAI_HERMES_NODE_EXECUTABLE` | Абсолютный путь к доверенному Node; окружение экземпляра задаёт `/usr/local/bin/node`. |
+| `BRAI_TELEGRAM_RESULT_ROOT` | Точный абсолютный **файловый** `resultRoot` publisher, без завершающего `/`, кроме корня файловой системы. Это не HTTP URL. |
+| `BRAI_HERMES_CONFIG` | Наследуемый защищённый JSON config private порта; формат принадлежит [Hermes tools](../CONTRACT.md). |
+
+Состояние принадлежит плагину; Graph и Artifacts принадлежат своим сервисам. Связи: native ingress → owner-private проверка → publisher RPC → exact Markdown; model output → descriptor → fetch RPC → native MEDIA upload; model tool → human prepare → native кнопки → owner callback → read/complete или cancel. Точка сборки — `register(ctx)`, native bot и loop предоставляет factory `(app, adapter)`.
+
+Сам Hermes считается доверенным ядром. Защита callback обеспечивает обычный маршрут MCP/Telegram. Она не изолирует private CLI от произвольного кода, запущенного native terminal тем же Unix пользователем с тем же окружением. Planning revision проверяется атомарно владельцем; для final/review доступны предварительные проверки private порта, общего атомарного CAS нет.
+
+## Файлы
+
+`pre_gateway_dispatch` выполняется до штатной авторизации. События других платформ проходят без изменений. Telegram допускается только для `source.chat_type=dm`, `source.user_id=owner` и `source.chat_id=owner`, без Business connection. Другие Telegram события получают `skip`.
+
+До десяти уже загруженных native вложений публикуются последовательно через `files.publish`. `requestId=tg:<chatId>:<messageId>:<zero-based-index>` сохраняется при повторной доставке. Publisher проверяет разрешённый read root, owner, ready и SHA-256; его предел — 2 GiB. Точный возвращённый Markdown добавляется к тексту через `rewrite`. Ошибка публикации закрывает весь вход для дальнейшей обработки; владелец получает native сообщение об ошибке, если Telegram доступен. Успешно опубликованные до ошибки файлы не удаляются; повтор использует прежние ключи.
+
+`transform_llm_output` работает только для Telegram. Распознаются publisher descriptors `[label](<resultRoot/UUID/filename>)` и `![label](<...>)`, включая экранированные скобки, Unicode и пробелы. UUID должен быть каноническим lowercase. Посторонние URL и пути не вызывают fetch. Каждый artifactId восстанавливается через `files.fetch` один раз. Проверяются идентичность, DTO metadata, точный путь `resultRoot/artifactId/filename`, канонический realpath без symlink и обычный файл. Только после этого descriptor заменяется на quoted `MEDIA:"<localPath>"` для штатной отправки. Ogg/Opus добавляет штатный `[[audio_as_voice]]`. Число вложений — до десяти, общий deadline преобразования — 20 секунд, ниже стандартного 30-секундного hook timeout Hermes. Ошибки остаются видимыми как «Файл не отправлен».
+
+Native MEDIA parser поддерживает пробелы, Unicode и скобки в quoted path. Пути с double quote, backtick, backslash, control characters или `MEDIA:` отклоняются с видимой ошибкой; плагин не копирует файл и не изменяет descriptor произвольно. Преобразование подготавливает native upload; оно не утверждает, что Telegram уже принял байты. Фактический результат отправки принадлежит gateway.
+
+## Подтверждения
+
+Единственный model tool — `brai_telegram_request_confirmation({moveId,revisionId,stage?})`; stage по умолчанию `planning`, также доступны `final` и `review`. Он не принимает решение, owner или attemptId. Точный публичный API Hermes: `ctx.register_tool(..., handler(args, **kwargs), is_async=True)`. Factory захватывает native loop; вызов из worker loop передаётся через `run_coroutine_threadsafe`, все bot операции выполняются на loop приложения.
+
+Перед `actions.prepare` транзакция SQLite сохраняет случайный opaque token, owner, move/revision/stage и срок 15 минут. Этот token служит стабильным idempotencyKey prepare. Допускается одна незавершённая запись на move и не более 100 незавершённых записей на профиль. Claim создаёт human attempt до показа кнопок; attemptId сохраняется до native отправки. Перед отправкой дополнительно читаются актуальные move status, attemptId, revisionId, human/running. Сообщение показывает title, доступные target title/description, moveId, targetId, revisionId и stage. В SQLite закрепляется фактический messageId.
+
+Scoped `CallbackQueryHandler(pattern="^brai:")` не перехватывает остальные кнопки Hermes. Callback data не превышает 64 байт. Допускаются только private owner, точный исходный messageId и сохранённый token. Token атомарно поглощается один раз **до** внешнего эффекта. Подмена, повтор, чужой чат или пользователь не подтверждают действие. `planning/review` допускают approved/changes/cancelled; `final` — success/changes/cancelled. Старая revision/attempt не завершается. Cancel и cleanup обращаются только к прежней текущей human/running attempt; новую попытку не отменяют. Изменившаяся revision допускает отмену прежней attempt для освобождения Action.
+
+Поглощение и успешное завершение сохраняются отдельно. Ошибка/timeout complete не повторяет approval и не выдаётся за успех. Кнопки снимаются; пользователь видит неопределённый исход и необходимость проверить Action. Cleanup читает текущую точную attempt и при необходимости отменяет её, после чего возможен новый запрос кнопок. Сбой native отправки также отменяет связанную attempt.
+
+Native asyncio timer погашает истёкший token и вызывает `actions.cancel(reason=expired)`. После перезапуска восстанавливаются ожидающие таймеры; consumed-but-unresolved записи очищаются сразу. Reservation без сохранённого attemptId восстанавливается **тем же** prepare key исключительно для отмены, без повторного approval и без новых кнопок. Private порт гарантирует восстановление прежней running attempt этого ключа, в том числе после смены revision; чужой ключ не может присвоить claimed move. Это закрывает crash между claim и записью attemptId. Crash после успешного complete определяется чтением; уже завершённая/заменённая attempt не отменяется, сообщение остаётся нейтральным.
+
+Если cleanup не подтверждён, native task повторяет проверку через 60 секунд. Каждый повтор сначала читает состояние; complete никогда не повторяется. При недоступном владельце невозможно гарантировать немедленное освобождение attempt: token уже неактивен, статус остаётся неизвестным до успешного чтения/cleanup. `ctx.on_unload` снимает только собственные handlers и tasks, SQLite остаётся для следующего запуска.
+
+## Private RPC и проверки
+
+Схемы операций принадлежат [trusted.openrpc.json](../trusted.openrpc.json). Один вызов запускает отдельный private процесс: одна UTF-8 JSON-RPC 2.0 строка → один ответ с тем же строковым id → выход. До двух процессов одновременно; semaphore ожидание входит в 15-секундный deadline. Запрос до 65536 байт, stdout до 1 MiB. Проверяются версия, id, взаимоисключение result/error и object result. stderr и сырые ошибки не передаются владельцу или модели. Timeout завершает всю собственную process group, включая publisher child; уже возможный удалённый эффект считается неизвестным. Автоматического повтора публикации/complete нет; повтор доставки publish применяет стабильный requestId, recovery prepare — прежний idempotencyKey.
+
+Локальная проверка: `python3 -m unittest discover -s services/hermes/telegram/tests -v`. Зависимости не устанавливаются, живой бот не используется. Stubs проверяют native API и thread/loop переходы; SQLite и stdio child processes реальные. При наличии read-only `tmp/hermes-pinned-telegram` отдельные тесты сверяют API и точный MEDIA parser закреплённого исходника. Полный Telegram/Artifacts/game-core сценарий требует отдельной DEV-приёмки с доступным ботом.

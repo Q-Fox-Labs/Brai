@@ -1,0 +1,12 @@
+# ABOUTME: Подключает файлы и человеческие подтверждения Brai к штатному Telegram Hermes.
+# ABOUTME: Не создаёт платформу, polling loop и замену штатных инструментов.
+name: brai-telegram
+version: 1.0.0
+description: "Brai owner-private Telegram files and human confirmation callbacks"
+author: Brai
+kind: standalone
+provides_tools:
+  - brai_telegram_request_confirmation
+provides_hooks:
+  - pre_gateway_dispatch
+  - transform_llm_output
