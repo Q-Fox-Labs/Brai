@@ -24,7 +24,7 @@ new Function("require", "module", "exports", output)((name: string) => {
   if (name === "./shell/login-galaxy") return { LoginGalaxy: control };
   if (name.startsWith("@/components/ui/")) return new Proxy({}, { get: () => control });
   if (name === "./agent/screen") return { default: () => createElement("main", null, "DEV Agent client") };
-  if (name === "./agent/telegram-entry") return { default: ({ username }: { username: string | null }) => createElement("a", { href: username ? `https://t.me/${username}` : undefined }, "Telegram entry") };
+  if (name === "./agent/telegram-entry") return { default: () => createElement("main", null, "Telegram entry") };
   if (name.startsWith("./")) return { default: screen };
   return require(name);
 }, module, module.exports);
@@ -48,13 +48,12 @@ test("anonymous document renders login immediately; auth outage renders retry wi
   assert.ok(!offline.includes("workspace-content"));
 });
 
-test("Hermes mode replaces the DEV Agent screen with the configured bot link", () => {
+test("Hermes mode replaces the DEV Agent screen with the Telegram workspace entry", () => {
   const html = renderToStaticMarkup(createElement(module.exports.default, {
     initialSession: { status: "authenticated", user: { id: "owner", email: "owner@example.test" } },
     agentMode: "hermes_telegram",
     telegramBotUsername: "brai_hermes_bot",
   }));
-  assert.ok(html.includes('href="https://t.me/brai_hermes_bot"'));
   assert.ok(html.includes("Telegram entry"));
   assert.ok(!html.includes("DEV Agent client"));
 });

@@ -80,9 +80,9 @@ GET `/api/alerts` принимает только `limit` и `cursor` и воз�
 
 ## Вход в Agent
 
-`BRAI_WEB_AGENT_MODE` — runtime-настройка раздела `/agent`. По умолчанию и при неизвестном значении остаётся прежний `dev_agent`; `hermes_telegram` заменяет экран Agent ссылкой на Telegram-бота. В режиме Hermes браузер не запускает прежний Agent-клиент, а web API блокирует запросы старого Agent и его artifacts до проверки сессии и NATS.
+`BRAI_WEB_AGENT_MODE` — runtime-настройка раздела `/agent`. По умолчанию и при неизвестном значении остаётся прежний `dev_agent`; `hermes_telegram` заменяет экран Agent инструкцией открыть рабочий чат Brai в Telegram. В режиме Hermes браузер не запускает прежний Agent-клиент, а web API блокирует запросы старого Agent и его artifacts до проверки сессии и NATS.
 
-Для режима `hermes_telegram` задайте `BRAI_HERMES_TELEGRAM_BOT_USERNAME` — username бота с необязательным начальным `@`, от 5 до 32 латинских букв, цифр или `_`. Web строит ссылку `https://t.me/<username>`. Эти переменные читаются сервером при запросе и не требуют `NEXT_PUBLIC_`.
+Необязательный `BRAI_HERMES_TELEGRAM_BOT_USERNAME` — username бота с необязательным начальным `@`, от 5 до 32 латинских букв, цифр или `_`. Web показывает имя рабочего бота в инструкции; ссылка в личный чат не создаётся. Эти переменные читаются сервером при запросе и не требуют `NEXT_PUBLIC_`.
 
 ## Агент: HTTP/SSE
 
