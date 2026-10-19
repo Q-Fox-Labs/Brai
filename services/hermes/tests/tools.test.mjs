@@ -3,7 +3,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -194,4 +195,37 @@ test('voice CLI adapter получает owner artifact и копирует то
     await assert.rejects(synthesizeFile(voiceConfig, runtime, { input, output: join(directory, 'new.ogg'), voice: 'eugene' }), /INPUT_TOO_LARGE/);
     assert.equal(calls.length, 2);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('CLI entry points start through direct and stable directory symlink paths', async () => {
+  const tmpRoot = fileURLToPath(new URL('../../../tmp/', import.meta.url));
+  await mkdir(tmpRoot, { recursive: true });
+  const directory = await mkdtemp(join(tmpRoot, 'hermes-cli-'));
+  try {
+    const root = fileURLToPath(new URL('../', import.meta.url));
+    const link = join(directory, 'runtime');
+    await symlink(root, link, 'dir');
+    const env = { BRAI_HERMES_CONFIG: join(directory, 'absent-config.json') };
+    for (const [name, rejection] of [['tools.mjs', 'HERMES_TOOLS_STARTUP_FAILED'], ['trusted.mjs', 'HERMES_TRUSTED_FAILED'], ['voice.mjs', 'ENOENT']]) {
+      for (const base of [root, link]) {
+        const result = spawnSync(process.execPath, [join(base, name)], { env, encoding: 'utf8', timeout: 5000 });
+        assert.equal(result.error, undefined, name);
+        assert.equal(result.signal, null, name);
+        assert.equal(result.status, 1, `${name} must start and reject missing config`);
+        assert.equal(result.stdout, '', name);
+        assert.equal(result.stderr.trim(), rejection, name);
+      }
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('CLI entry points remain importable with nonexistent argv path and no config', () => {
+  const modules = ['tools.mjs', 'trusted.mjs', 'voice.mjs'].map(name => new URL(`../${name}`, import.meta.url).href);
+  const code = modules.map(url => `await import(${JSON.stringify(url)});`).join('');
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', code, '/nonexistent-hermes-import-argv'], { env: {}, encoding: 'utf8', timeout: 5000 });
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, '');
 });

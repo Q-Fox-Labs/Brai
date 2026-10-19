@@ -1,6 +1,7 @@
 // ABOUTME: Предоставляет private JSON-RPC stdio для файлов и Telegram подтверждений.
 // ABOUTME: Запускается доверенным плагином отдельно от MCP модели; владельца не принимает.
 import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
 import { once } from 'node:events';
 import { loadConfig } from './config.mjs';
 import { startBraiTools } from './runtime.mjs';
@@ -70,7 +71,10 @@ export async function serveTrusted(runtime, input = process.stdin, output = proc
   if (pending.length) throw new Error('RPC_INCOMPLETE_LINE');
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// Стабильная ссылка выпуска и import.meta.url должны указывать на один файл.
+let isMain = false;
+try { isMain = Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]); } catch {}
+if (isMain) {
   let runtime;
   try {
     runtime = await startBraiTools(await loadConfig());

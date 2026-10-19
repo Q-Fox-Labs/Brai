@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { copyFile, lstat, open, constants } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
 import { loadConfig } from './config.mjs';
 import { startBraiTools, fault } from './runtime.mjs';
 
@@ -31,7 +32,10 @@ export async function synthesizeFile(config, runtime, { input, output, voice }) 
   return { artifactId: result.audioArtifactId, output };
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// Стабильная ссылка выпуска и import.meta.url должны указывать на один файл.
+let isMain = false;
+try { isMain = Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]); } catch {}
+if (isMain) {
   let runtime;
   try {
     const args = {};

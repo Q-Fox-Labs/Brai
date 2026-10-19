@@ -1,6 +1,7 @@
 // ABOUTME: Предоставляет переносимый MCP stdio вход существующих инструментов Brai для Hermes.
 // ABOUTME: Человеческие подтверждения доступны только отдельной доверенной программе.
 import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -27,7 +28,10 @@ export async function serveTools(runtime, transport = new StdioServerTransport()
   return { server, close };
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// Стабильная ссылка выпуска и import.meta.url должны указывать на один файл.
+let isMain = false;
+try { isMain = Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]); } catch {}
+if (isMain) {
   try {
     const runtime = await serveTools(await startBraiTools(await loadConfig()));
     for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { void runtime.close(); });
