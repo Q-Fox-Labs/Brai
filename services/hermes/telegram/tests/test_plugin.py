@@ -2,11 +2,13 @@
 # ABOUTME: Подменяет private Brai порт и PTB, сохраняя реальные SQLite и loop transitions.
 import ast
 import asyncio
+from dataclasses import replace
 import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import sys
 import tempfile
 import time
@@ -24,6 +26,7 @@ spec.loader.exec_module(mod)
 
 MOVE, REVISION, ATTEMPT, TARGET, ARTIFACT = [f"00000000-0000-4000-8000-{i:012d}" for i in range(1, 6)]
 ROOT = "/publisher/results"
+GROUP = "-1009876543210"
 MARKDOWN = rf"[Отчёт \[план\].pdf](<{ROOT}/{ARTIFACT}/Отчёт [план].pdf>)"
 
 
@@ -96,9 +99,14 @@ class FakeQuery:
 
 def ptb_stubs():
     """Создать минимальные public PTB объекты для регистрации и кнопок."""
-    telegram = NS(InlineKeyboardButton=lambda label, callback_data: NS(text=label, callback_data=callback_data),
+    class ApplicationHandlerStop(Exception):
+        """Остановить дальнейшие группы fake PTB dispatch."""
+
+    telegram = NS(Update=object, InlineKeyboardButton=lambda label, callback_data: NS(text=label, callback_data=callback_data),
                   InlineKeyboardMarkup=lambda rows: NS(inline_keyboard=rows))
-    ext = NS(CallbackQueryHandler=lambda callback, pattern: NS(callback=callback, pattern=pattern))
+    ext = NS(CallbackQueryHandler=lambda callback, pattern: NS(callback=callback, pattern=pattern),
+             TypeHandler=lambda kind, callback: NS(callback=callback, update_type=kind),
+             ApplicationHandlerStop=ApplicationHandlerStop)
     return {"telegram": telegram, "telegram.ext": ext}
 
 
@@ -115,8 +123,12 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.file["markdown"] = self.markdown
         self.plugin = mod.TelegramPlugin(self.config, self.bridge)
         self.bot = FakeBot()
-        self.app = NS(bot=self.bot, handlers=[], add_handler=lambda h: self.app.handlers.append(h),
-                      remove_handler=lambda h: self.app.handlers.remove(h))
+        self.app = NS(bot=self.bot, handlers=[])
+        def add_handler(handler, group=0):
+            handler.group = group
+            self.app.handlers.append(handler)
+        self.app.add_handler = add_handler
+        self.app.remove_handler = lambda h, group=0: self.app.handlers.remove(h)
         self.stubs = patch.dict(sys.modules, ptb_stubs())
         self.stubs.start()
         self.plugin.factory(self.app, object())
@@ -143,11 +155,146 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         return self.bot.sent[-1]["reply_markup"].inline_keyboard[0][0].callback_data
 
     async def test_factory_scopes_handler_and_unload_removes_it(self):
-        self.assertEqual(self.app.handlers[0].pattern, "^brai:")
+        self.assertEqual(self.app.handlers[0].group, -100)
+        self.assertEqual(self.app.handlers[1].pattern, "^brai:")
         self.assertIs(self.plugin.loop, asyncio.get_running_loop())
         self.plugin.close()
         await asyncio.sleep(0)
         self.assertEqual(self.app.handlers, [])
+
+    async def set_group_route(self, chat=GROUP):
+        """Перезапустить только плагин с прежним SQLite и новым защищённым route."""
+        self.plugin.close()
+        await asyncio.sleep(0)
+        await asyncio.gather(*tuple(self.plugin.tasks), return_exceptions=True)
+        self.config = replace(self.config, chat_id=chat)
+        self.plugin = mod.TelegramPlugin(self.config, self.bridge)
+        self.plugin.factory(self.app, object())
+
+    def update(self, chat=GROUP, owner=123, chat_type="supergroup", **message):
+        """Создать native update с отдельными sender, chat и effective message."""
+        return NS(effective_chat=NS(id=int(chat), type=chat_type), effective_user=NS(id=owner),
+                  effective_message=NS(**message))
+
+    async def test_group_owner_guard_precedes_native_command_media_callback_and_inline(self):
+        await self.set_group_route()
+        reached = []
+        self.assertEqual(self.app.handlers[0].group, -100)
+        stop = sys.modules["telegram.ext"].ApplicationHandlerStop
+        async def dispatch(update, handler):
+            # PTB обходит группы по возрастанию и прекращает все при ApplicationHandlerStop.
+            try:
+                await self.app.handlers[0].callback(update, None)
+                reached.append(handler)
+            except stop:
+                pass
+        denied = [self.update(owner=456), self.update(chat="-1009876543211"),
+                  self.update(chat="123", chat_type="private"), self.update(sender_chat=NS(id=int(GROUP))),
+                  self.update(business_connection_id="business"), self.update(owner=None),
+                  NS(effective_chat=None, effective_user=NS(id=123), effective_message=None)]
+        denied.append(self.update())
+        denied[-1].effective_user.is_bot = True
+        for handler in ("command", "media_download", "native_callback", "inline_query"):
+            for update in denied:
+                await dispatch(update, handler)
+        self.assertEqual(reached, [])
+        self.assertEqual(self.bridge.calls, [])
+        self.assertEqual(self.bot.sent, [])
+        await dispatch(self.update(), "owner")
+        self.assertEqual(reached, ["owner"])
+
+    async def test_group_ingress_route_owner_and_idempotent_attachment_namespace(self):
+        await self.set_group_route()
+        event = self.event(media_urls=["/native-download/file.pdf"],
+            source=NS(platform="telegram", chat_type="group", user_id="123", chat_id=GROUP))
+        first = await self.plugin.incoming(event)
+        second = await self.plugin.incoming(event)
+        self.assertEqual(first["action"], "rewrite")
+        self.assertEqual(first, second)
+        self.assertEqual(self.bridge.calls[0][1]["requestId"], f"tg:{GROUP}:42:0")
+        self.assertEqual(self.bridge.calls[0], self.bridge.calls[1])
+        self.bridge.calls.clear()
+        for changes in ({"user_id": "456"}, {"chat_id": "-1009876543211"}, {"is_bot": True}):
+            source = NS(**{**vars(event.source), **changes})
+            self.assertEqual((await self.plugin.incoming(self.event(source=source, media_urls=["/file"])))["action"], "skip")
+        for raw in (NS(sender_chat=NS(id=int(GROUP))), NS(business_connection_id="business")):
+            self.assertEqual((await self.plugin.incoming(self.event(source=event.source, raw_message=raw, media_urls=["/file"])))["action"], "skip")
+        self.assertEqual(self.bridge.calls, [])
+
+    async def test_group_callback_binds_route_owner_message_and_rejects_replay(self):
+        await self.set_group_route()
+        data = await self.request()
+        self.assertEqual(self.bot.sent[-1]["chat_id"], int(GROUP))
+        self.assertEqual(self.plugin.tokens.pending()[0]["chat_id"], GROUP)
+        self.bridge.calls.clear()
+        for query in (FakeQuery(data), FakeQuery(data, owner=456, chat=int(GROUP), chat_type="supergroup"),
+                      FakeQuery(data, chat=int(GROUP) - 1, chat_type="supergroup"),
+                      FakeQuery(data, chat=int(GROUP), chat_type="supergroup", message_id=9)):
+            await self.plugin.callback(NS(callback_query=query), None)
+        self.assertEqual(self.bridge.calls, [])
+        query = FakeQuery(data, chat=int(GROUP), chat_type="supergroup")
+        await self.plugin.callback(NS(callback_query=query), None)
+        await self.plugin.callback(NS(callback_query=query), None)
+        self.assertEqual(sum(method == "actions.complete" for method, _ in self.bridge.calls), 1)
+        self.assertEqual(self.bot.sent[-1]["chat_id"], int(GROUP))
+
+    async def test_route_change_rejects_same_message_id_and_cancels_old_pending_on_restart(self):
+        data = await self.request()
+        await self.set_group_route()
+        query = FakeQuery(data, chat=int(GROUP), chat_type="supergroup")
+        await self.plugin.callback(NS(callback_query=query), None)
+        for _ in range(100):
+            if not self.plugin.tokens.pending():
+                break
+            await asyncio.sleep(0.005)
+        self.assertEqual(self.plugin.tokens.pending(), [])
+        self.assertFalse(any(method == "actions.complete" for method, _ in self.bridge.calls))
+        self.assertTrue(any(method == "actions.cancel" for method, _ in self.bridge.calls))
+        self.assertEqual(self.bot.sent[-1]["chat_id"], 123)
+
+    async def test_group_restart_keeps_pending_until_expiry_then_cancels_in_recorded_chat(self):
+        await self.set_group_route()
+        data = await self.request()
+        token = data.split(":")[1]
+        await self.set_group_route()
+        self.assertEqual(self.plugin.tokens.pending()[0]["chat_id"], GROUP)
+        self.assertFalse(any(method == "actions.cancel" for method, _ in self.bridge.calls))
+        await asyncio.wait_for(self.plugin._expire(token, time.time() - 1), 1)
+        self.assertEqual(self.plugin.tokens.pending(), [])
+        self.assertEqual(self.bridge.calls[-1][0], "actions.cancel")
+        self.assertEqual(self.bot.sent[-1]["chat_id"], int(GROUP))
+
+    async def test_legacy_sqlite_migration_binds_old_tokens_to_owner_dm(self):
+        directory = Path(self.tmp.name) / "legacy"
+        directory.mkdir()
+        with sqlite3.connect(directory / "confirmations.sqlite3") as db:
+            db.execute("""CREATE TABLE tokens (token TEXT PRIMARY KEY, owner TEXT NOT NULL,
+                move_id TEXT NOT NULL, attempt_id TEXT NOT NULL, revision_id TEXT NOT NULL,
+                stage TEXT NOT NULL, expires REAL NOT NULL, consumed INTEGER NOT NULL DEFAULT 0,
+                message_id TEXT, resolved INTEGER NOT NULL DEFAULT 0)""")
+            db.execute("INSERT INTO tokens VALUES ('old','123',?,?,?,'planning',?,0,'1',0)",
+                       (MOVE, ATTEMPT, REVISION, time.time() + 900))
+        tokens = mod.Tokens(directory)
+        self.assertEqual(tokens.pending()[0]["chat_id"], "123")
+        self.assertIsNone(tokens.consume("old", "123", 1, GROUP))
+        self.assertIsNotNone(tokens.consume("old", "123", 1, "123"))
+
+    async def test_protected_chat_config_is_optional_and_never_substitutes_owner(self):
+        env = {"BRAI_TELEGRAM_OWNER_ID": "123", "BRAI_TELEGRAM_STATE_DIR": str(self.config.state_dir),
+               "BRAI_HERMES_TRUSTED_ENTRY": self.config.entry, "BRAI_HERMES_NODE_EXECUTABLE": self.config.node,
+               "BRAI_TELEGRAM_RESULT_ROOT": self.config.result_root}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(mod.Config.from_env().chat, "123")
+            os.environ["BRAI_TELEGRAM_CHAT_ID"] = GROUP
+            self.assertEqual(mod.Config.from_env().chat, GROUP)
+            for invalid in ("0", "-0", "00123", "+123", "456", "group", " 123"):
+                os.environ["BRAI_TELEGRAM_CHAT_ID"] = invalid
+                with self.assertRaises(ValueError):
+                    mod.Config.from_env()
+            os.environ["BRAI_TELEGRAM_CHAT_ID"] = GROUP
+            os.environ["BRAI_TELEGRAM_OWNER_ID"] = GROUP
+            with self.assertRaises(ValueError):
+                mod.Config.from_env()
 
     async def test_foreign_owner_group_and_business_never_publish(self):
         for changes in ({"user_id": "456"}, {"chat_id": "456"}, {"chat_type": "group"}):
@@ -481,6 +628,13 @@ class NativeContractTests(unittest.TestCase):
         self.assertEqual([a.arg for a in methods["register_telegram_handler"].args.args], ["self", "factory"])
         self.assertIn("is_async", [a.arg for a in methods["register_tool"].args.args])
         self.assertIn("callback", [a.arg for a in methods["on_unload"].args.args])
+        tree = ast.parse((upstream / "plugins/platforms/telegram/adapter.py").read_text())
+        register = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_register_handlers")
+        groups = [next((kw.value.value for kw in n.keywords if kw.arg == "group"), 0)
+                  for n in ast.walk(register) if isinstance(n, ast.Call)
+                  and isinstance(n.func, ast.Attribute) and n.func.attr == "add_handler"]
+        self.assertTrue(groups)
+        self.assertTrue(all(-100 < group for group in groups))
         calls = []
         ctx = NS(register_telegram_handler=lambda f: calls.append(("factory", f)),
                  register_hook=lambda name, f: calls.append((name, f)),
