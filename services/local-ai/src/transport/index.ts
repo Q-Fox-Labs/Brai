@@ -19,6 +19,7 @@ export type LocalAiSubject =
   | 'brai.local_ai.v1.models.remove'
   | 'brai.local_ai.v1.invoke.embed'
   | 'brai.local_ai.v1.invoke.transcribe'
+  | 'brai.local_ai.v1.invoke.synthesize'
   | 'brai.local_ai.v1.cancel'
   | 'brai.local_ai.v1.status';
 
@@ -100,7 +101,7 @@ function requestContext(
   const deadlineMs = suppliedDeadline === Number.POSITIVE_INFINITY ? now + maxRequestMs : suppliedDeadline;
   const requestId = typeof value.requestId === 'string' ? value.requestId : undefined;
   const operationId = typeof value.operationId === 'string' ? value.operationId : randomUUID();
-  if ((subject === subjects.invokeEmbed || subject === subjects.invokeTranscribe)
+  if ((subject === subjects.invokeEmbed || subject === subjects.invokeTranscribe || subject === subjects.invokeSynthesize)
     && requestId && operationId === requestId) {
     throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_ARGUMENT');
   }

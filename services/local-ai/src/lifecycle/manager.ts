@@ -14,8 +14,10 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
 type CommonInvocation = { requestId: string; operationId: string; model: ModelSelector; ownerId: string; deadlineAt: string };
 export type EmbedInvocation = CommonInvocation & { operation: 'embed'; texts?: readonly string[]; inputs?: readonly EmbeddingItem[]; purpose: 'query' | 'document' | 'symmetric' };
 export type TranscribeInvocation = CommonInvocation & { operation: 'transcribe'; audioArtifactId: string };
-export type Invocation = EmbedInvocation | TranscribeInvocation;
+export type SynthesizeInvocation = CommonInvocation & { operation: 'synthesize'; text: string; voice: 'eugene' };
+export type Invocation = EmbedInvocation | TranscribeInvocation | SynthesizeInvocation;
 export type InvocationResult =
+  | { operation: 'synthesize'; model: ModelSelector; audioArtifactId: string; durationMs: number }
   | { operation: 'embed'; model: ModelSelector; vectors: readonly (readonly number[])[]; durationMs: number }
   | { operation: 'transcribe'; model: ModelSelector; text: string; segments: TranscribeOutput['segments'] | null; durationMs: number };
 export type LifecycleLimits = {
@@ -194,7 +196,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
     refreshing.set(modelId, update);
     try { await update; } finally { if (refreshing.get(modelId) === update) refreshing.delete(modelId); }
   }
-  async function prepare(selector: ModelSelector, operation?: 'embed' | 'transcribe'): Promise<Prepared> {
+  async function prepare(selector: ModelSelector, operation?: 'embed' | 'transcribe' | 'synthesize'): Promise<Prepared> {
     validateSelector(selector);
     if (refreshing.has(selector.modelId)) await refreshing.get(selector.modelId);
     if (!metadata.has(selector.modelId)) {
@@ -219,6 +221,8 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
   }
   function assertInput(input: Invocation, model: ModelRecord, bytes: number): void {
     if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > limits.maxInputBytes || model.limits.maxInputBytes !== null && bytes > model.limits.maxInputBytes) fail('INPUT_TOO_LARGE');
+    if (input.operation === 'synthesize' && (typeof input.text !== 'string' || input.text.trim().length === 0
+      || [...input.text].length > 900 || /[\u0000\uD800-\uDFFF]/u.test(input.text) || input.voice !== 'eugene')) fail('INVALID_ARGUMENT');
     if (input.operation === 'embed') {
       if ((input.texts === undefined) === (input.inputs === undefined)) fail('INVALID_ARGUMENT');
       const items = input.inputs ?? input.texts?.map(text => ({ type: 'text' as const, text })) ?? [];
@@ -255,11 +259,11 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
     return job;
   }
   function operationContext(job: Job): OperationContext {
-    return { ownerId: job.input.ownerId, operationId: job.input.operationId, deadlineAt: job.input.deadlineAt, signal: job.controller.signal };
+    return { ownerId: job.input.ownerId, operationId: job.input.operationId, deadlineAt: job.input.operation === 'synthesize' ? new Date(Math.min(Date.parse(job.input.deadlineAt), job.acceptedAt + 180_000)).toISOString() : job.input.deadlineAt, signal: job.controller.signal };
   }
   function startDeadline(job: Job): void {
     const tick = () => {
-      const left = Date.parse(job.input.deadlineAt) - now();
+      const left = Math.min(Date.parse(job.input.deadlineAt), job.input.operation === 'synthesize' ? job.acceptedAt + 180_000 : Infinity) - now();
       if (left <= 0) {
         job.failure = new LocalAiError('DEADLINE_EXCEEDED', 'DEADLINE_EXCEEDED');
         job.abortListener();
@@ -283,7 +287,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
   }
   function contextOutcome(job: Job): LocalAiError | undefined {
     if (job.failure) return job.failure;
-    if (Date.parse(job.input.deadlineAt) <= now()) return new LocalAiError('DEADLINE_EXCEEDED', 'DEADLINE_EXCEEDED');
+    if (Math.min(Date.parse(job.input.deadlineAt), job.input.operation === 'synthesize' ? job.acceptedAt + 180_000 : Infinity) <= now()) return new LocalAiError('DEADLINE_EXCEEDED', 'DEADLINE_EXCEEDED');
     if (job.controller.signal.aborted) return new LocalAiError('CANCELLED', 'CANCELLED');
     return undefined;
   }
@@ -424,6 +428,16 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
           || output.vectors.some(vector => !Array.isArray(vector) || dimensions !== null && vector.length !== dimensions
             || !vector.every(value => typeof value === 'number' && Number.isFinite(value)))) fail('ENGINE_UNAVAILABLE');
         result = { operation: 'embed', model: job.input.model, vectors: output.vectors, durationMs: Math.max(0, Math.floor(now() - job.acceptedAt)) };
+      } else if (job.input.operation === 'synthesize') {
+        if (!runtime.synthesize || !artifacts.publishAudio) fail('UNSUPPORTED_OPERATION');
+        const output = await runtime.synthesize({ model: job.input.model, text: job.input.text, voice: job.input.voice }, callContext);
+        if (!(output.audio instanceof Uint8Array) || output.mimeType !== 'audio/ogg' || output.audio.byteLength === 0) fail('ENGINE_UNAVAILABLE');
+        if (output.audio.byteLength > 64 * 1024 * 1024) fail('RESULT_TOO_LARGE');
+        const interrupted = contextOutcome(job);
+        if (interrupted) throw interrupted;
+        const published = await artifacts.publishAudio(output, callContext);
+        if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(published.artifactId)) fail('DEPENDENCY_UNAVAILABLE');
+        result = { operation: 'synthesize', model: job.input.model, audioArtifactId: published.artifactId, durationMs: Math.max(0, Math.floor(now() - job.acceptedAt)) };
       } else {
         const audioPath = job.audioPath;
         if (!audioPath) fail('ARTIFACT_NOT_AVAILABLE');
@@ -435,7 +449,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
         }
         result = { operation: 'transcribe', model: job.input.model, text: output.text, segments: output.segments ?? null, durationMs: Math.max(0, Math.floor(now() - job.acceptedAt)) };
       }
-      const payload = result.operation === 'embed' ? result.vectors : { text: result.text, segments: result.segments };
+      const payload = result.operation === 'embed' ? result.vectors : result.operation === 'synthesize' ? { audioArtifactId: result.audioArtifactId } : { text: result.text, segments: result.segments };
       const size = resultBytes(payload);
       if (size > limits.maxResultBytes || job.record!.limits.maxResultBytes != null && size > job.record!.limits.maxResultBytes || result.operation === 'embed' && result.vectors.some(vector => vector.length * 8 > limits.maxResultBytes)) fail('RESULT_TOO_LARGE');
       const end = contextOutcome(job);
@@ -489,7 +503,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
     outstanding++;
     pendingAdmissions.set(input.model.modelId, (pendingAdmissions.get(input.model.modelId) ?? 0) + 1);
     const job = createJob(input, context);
-    if (!context.deadlineManaged) startDeadline(job);
+    if (!context.deadlineManaged || input.operation === 'synthesize') startDeadline(job);
     return job;
   }
   function resultForCaller(job: Job): Promise<InvocationResult> {
@@ -513,7 +527,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
         try {
           const prepared = await prepare(input.model, input.operation);
           job.record = prepared.record;
-          job.inputBytes = input.operation === 'embed' ? Buffer.byteLength(JSON.stringify(input.inputs ?? input.texts), 'utf8') : 0;
+          job.inputBytes = input.operation === 'embed' ? Buffer.byteLength(JSON.stringify(input.inputs ?? input.texts), 'utf8') : input.operation === 'synthesize' && typeof input.text === 'string' ? Buffer.byteLength(input.text, 'utf8') : 0;
           assertInput(input, prepared.record, job.inputBytes);
           const enqueue = async (audioPath?: string) => {
             const interrupted = contextOutcome(job);
@@ -550,6 +564,7 @@ export function createLifecycleManager(options: LifecycleManagerOptions): Lifecy
             };
             await prepareItems(0);
           }
+          else if (input.operation === 'synthesize') await enqueue();
           else await artifacts.withReadyAudio({ artifactId: input.audioArtifactId, ownerId: input.ownerId, operationId: input.operationId }, operationContext(job), async audio => {
             try { job.inputBytes = (await stat(audio.localPath)).size; } catch { fail('ARTIFACT_NOT_AVAILABLE'); }
             assertInput(input, prepared.record, job.inputBytes);

@@ -1,6 +1,6 @@
-// ABOUTME: Получает готовое аудио, изображение и видео из публичного artifacts API во временный файл.
-// ABOUTME: Проверяет владельца и байты до передачи пути модели; удаляет только свои temp-файлы.
-import { createHash } from 'node:crypto';
+// ABOUTME: Получает готовые media из Artifacts и публикует готовое аудио синтеза владельцу.
+// ABOUTME: Проверяет владельца, доверенный origin и байты; удаляет только свои temp-файлы.
+import { createHash, randomUUID } from 'node:crypto';
 import { open, mkdtemp, rm } from 'node:fs/promises';
 import { join, isAbsolute } from 'node:path';
 import type { NatsConnection } from 'nats';
@@ -332,7 +332,56 @@ export function createArtifactsAdapter(config: ArtifactsAdapterConfig): Artifact
     audio_artifact: allowedMimeTypes,
     video_artifact: new Set(['video/mp4']),
   };
+  async function publishAudio(input: { audio: Uint8Array; mimeType: 'audio/ogg' }, context: OperationContext): Promise<{ artifactId: string }> {
+    if (!(input.audio instanceof Uint8Array) || input.mimeType !== 'audio/ogg' || input.audio.byteLength < 1) fail('INVALID_ARGUMENT');
+    if (input.audio.byteLength > 64 * 1024 * 1024) fail('RESULT_TOO_LARGE');
+    assertActive(context);
+    const requestId = `local_ai:synthesize:${randomUUID()}`;
+    let prepared: unknown;
+    try {
+      const reply = await waitForOperation(config.nats.request('brai.artifacts.v1.prepare', Buffer.from(JSON.stringify({
+        requestId, ownerId: context.ownerId, kind: 'original',
+        metadata: { title: 'Синтез речи', filename: 'speech.ogg', extension: 'ogg', mimeType: 'audio/ogg', source: 'local_ai' },
+      })), { timeout: deadlineMs(context) }), context);
+      if (reply.headers?.get(ServiceErrorHeader) || reply.headers?.get(ServiceErrorCodeHeader)) fail('DEPENDENCY_UNAVAILABLE');
+      prepared = JSON.parse(Buffer.from(reply.data).toString('utf8'));
+    } catch (error) {
+      if (error instanceof LocalAiError) throw error;
+      fail(cancellationCode(context) ?? 'DEPENDENCY_UNAVAILABLE');
+    }
+    if (!record(prepared) || !record(prepared.artifact) || typeof prepared.uploadUrl !== 'string') fail('DEPENDENCY_UNAVAILABLE');
+    const artifact = prepared.artifact;
+    if (typeof artifact.artifactId !== 'string' || !UUID.test(artifact.artifactId) || artifact.ownerId !== context.ownerId
+      || artifact.requestId !== requestId || artifact.status !== 'pending' || artifact.mimeType !== 'audio/ogg') fail('DEPENDENCY_UNAVAILABLE');
+    let url: URL;
+    try { url = new URL(prepared.uploadUrl); } catch { fail('DEPENDENCY_UNAVAILABLE'); }
+    if (url.origin !== base.origin || url.username || url.password || url.search || url.hash
+      || !/^\/upload\/[A-Za-z0-9._~-]+$/.test(url.pathname) || url.href !== prepared.uploadUrl) fail('DEPENDENCY_UNAVAILABLE');
+    assertActive(context);
+    let response: Response;
+    const deadline = AbortSignal.timeout(Math.min(deadlineMs(context), 2_147_483_647));
+    try {
+      response = await fetch(url, { method: 'PUT', redirect: 'manual', signal: AbortSignal.any([context.signal, deadline]),
+        headers: { 'content-type': 'audio/ogg' }, body: Buffer.from(input.audio) });
+    } catch { fail(cancellationCode(context) ?? (deadline.aborted ? 'DEADLINE_EXCEEDED' : 'DEPENDENCY_UNAVAILABLE')); }
+    try {
+      assertActive(context);
+      const hash = createHash('sha256').update(input.audio).digest('hex');
+      if (response.status !== 201 || response.headers.get('x-artifact-state') !== 'ready'
+        || response.headers.get('x-artifact-id')?.toLowerCase() !== artifact.artifactId.toLowerCase()
+        || response.headers.get('x-artifact-size') !== String(input.audio.byteLength)
+        || response.headers.get('x-artifact-sha256')?.toLowerCase() !== hash) fail('DEPENDENCY_UNAVAILABLE');
+      const ready = await getArtifact(config.nats, artifact.artifactId, context);
+      if (ready.artifactId.toLowerCase() !== artifact.artifactId.toLowerCase() || ready.ownerId !== context.ownerId
+        || ready.status !== 'ready' || ready.mimeType !== 'audio/ogg' || ready.sizeBytes !== input.audio.byteLength
+        || ready.sha256?.toLowerCase() !== hash) fail('DEPENDENCY_UNAVAILABLE');
+      assertActive(context);
+      return { artifactId: ready.artifactId };
+    } finally { await response.body?.cancel().catch(() => undefined); }
+  }
+
   return {
+    publishAudio,
     withReadyAudio: (input, context, use) => withReady(input, context, allowedMimeTypes, use),
     withReadyMedia: (input, context, use) => withReady(input, context, mediaTypes[input.kind], use),
   };

@@ -53,7 +53,7 @@ function dependencies(order, hooks = {}) {
       createHuggingFaceCatalog() { order.push('hub.create'); return {}; },
       createHistoryFactPublisher() { order.push('history.create'); return history; },
       startLocalAiNats(_nc, _config, handlers) {
-        assert.equal(Object.keys(handlers).length, 13, 'all public subjects must be wired');
+        assert.equal(Object.keys(handlers).length, 14, 'all public subjects must be wired');
         order.push('transport.start');
         if (hooks.transportFailure) throw new Error('fixture failure');
         return transport;

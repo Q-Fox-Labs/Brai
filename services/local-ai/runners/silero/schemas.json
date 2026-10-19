@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "HealthParams": {"type": "object", "properties": {}, "additionalProperties": false},
+    "HealthResult": {
+      "type": "object",
+      "required": ["ready", "model_id", "revision"],
+      "properties": {
+        "ready": {"const": true},
+        "model_id": {"const": "silero-tts-ru-v5_5"},
+        "revision": {"const": "50081637b602126ee06cb3bc8a744d25651d2da1"}
+      },
+      "additionalProperties": false
+    },
+    "SynthesizeParams": {
+      "type": "object",
+      "required": ["text", "voice"],
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 900,
+          "pattern": "^(?![\\s\\S]*[\\u0000\\uD800-\\uDFFF])[\\s\\S]*\\S[\\s\\S]*$",
+          "description": "At most 900 Unicode codepoints; whitespace-only text, NUL and surrogate codepoints are rejected. The runner also checks these constraints directly."
+        },
+        "voice": {"const": "eugene"}
+      },
+      "additionalProperties": false
+    },
+    "SynthesizeResult": {
+      "type": "object",
+      "required": ["audio_path", "mime_type"],
+      "properties": {
+        "audio_path": {"type": "string", "pattern": "^/.*/audio\\.ogg$", "description": "Fixed audio.ogg inside the configured private output directory; not a public API path."},
+        "mime_type": {"const": "audio/ogg"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

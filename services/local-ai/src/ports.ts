@@ -2,7 +2,7 @@
 // ABOUTME: Контракты не раскрывают transport, SQL и устройство соседних сервисов.
 import type {
   EmbedInput, EmbedOutput, LocalAiHistoryMetadataEvent,
-  LocalAiTx, OperationContext, ResolvedModel, TranscribeInput, TranscribeOutput,
+  LocalAiTx, OperationContext, ResolvedModel, TranscribeInput, TranscribeOutput, SynthesizeInput, SynthesizeOutput,
 } from './types.js';
 
 /** Открывает выбранную установленную модель и возвращает только готовый к вызовам runtime. */
@@ -15,6 +15,7 @@ export interface RuntimePort {
   readonly exited: Promise<void>;
   embed(input: EmbedInput, context: OperationContext): Promise<EmbedOutput>;
   transcribe(input: TranscribeInput, context: OperationContext): Promise<TranscribeOutput>;
+  synthesize?(input: SynthesizeInput, context: OperationContext): Promise<SynthesizeOutput>;
   close(): Promise<void>;
 }
 
@@ -30,6 +31,8 @@ export interface ModelSettingsChangedPort {
 
 /** Предоставляет временный путь только внутри callback и очищает рабочую копию после его завершения. */
 export interface ArtifactPort {
+  /** Публикует готовое Ogg/Opus аудио владельцу; возвращает только ready artifact ID. */
+  publishAudio?(input: { audio: Uint8Array; mimeType: 'audio/ogg' }, context: OperationContext): Promise<{ artifactId: string }>;
   /** Проверяет владельца media-артефакта и удерживает файл до окончания callback. */
   withReadyMedia?<T>(
     input: { artifactId: string; ownerId: string; operationId: string; kind: 'image_artifact' | 'audio_artifact' | 'video_artifact' },

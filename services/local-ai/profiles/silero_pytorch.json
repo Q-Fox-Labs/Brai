@@ -1,0 +1,44 @@
+{
+  "profileId": "silero_pytorch",
+  "modelId": "silero-tts-ru-v5_5",
+  "operation": "synthesize",
+  "source": {
+    "repository": "silero-models/tts",
+    "revision": "50081637b602126ee06cb3bc8a744d25651d2da1",
+    "files": [
+      {
+        "path": "v5_5_ru.pt",
+        "url": "https://models.silero.ai/models/tts/ru/v5_5_ru.pt",
+        "bytes": 145420684,
+        "sha256": "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437"
+      }
+    ]
+  },
+  "engine": {
+    "kind": "python-stdin-stdout-jsonrpc",
+    "executable": "python",
+    "entrypoint": "runners/silero/runner.py",
+    "args": [
+      "runners/silero/runner.py",
+      "--model-path", "{{modelPath}}",
+      "--revision", "{{revision}}",
+      "--threads", "{{threads}}",
+      "--output-directory", "{{outputDirectory}}",
+      "--ffmpeg", "{{ffmpegExecutable}}"
+    ],
+    "systemDependencies": ["ffmpeg"]
+  },
+  "rpc": "runners/silero/openrpc.json",
+  "python": {
+    "version": "3.12",
+    "directPins": {"torch": "2.8.0+cpu", "numpy": "2.2.6"}
+  },
+  "limits": {
+    "maximumTextCodepoints": 900,
+    "maximumOutputBytes": 67108864,
+    "maximumRpcLineBytes": 65536,
+    "ffmpegTimeoutSeconds": 180,
+    "threads": 4
+  },
+  "audio": {"voice": "eugene", "sampleRate": 48000, "channels": 1, "codec": "opus", "bitrate": 32000, "mimeType": "audio/ogg"}
+}

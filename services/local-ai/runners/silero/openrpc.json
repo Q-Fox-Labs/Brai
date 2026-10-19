@@ -1,0 +1,57 @@
+{
+  "openrpc": "1.2.6",
+  "info": {
+    "title": "Brai private Silero Russian TTS runner",
+    "version": "1.0.0",
+    "description": "Private JSON-RPC 2.0 over UTF-8 stdin/stdout lines. A checksum-verified local Silero package runs on CPU with four threads; eugene is the only accepted voice. No network listener or model downloader. Closed named parameters and envelope; unknown fields are rejected."
+  },
+  "servers": [],
+  "methods": [
+    {
+      "name": "health",
+      "summary": "Confirm that the pinned model with voice eugene is loaded.",
+      "params": [],
+      "paramStructure": "by-name",
+      "x-paramsSchema": {"$ref": "schemas.json#/definitions/HealthParams"},
+      "result": {"name": "result", "schema": {"$ref": "schemas.json#/definitions/HealthResult"}},
+      "errors": [{"code": -32602, "message": "Invalid params"}, {"code": -32603, "message": "Internal error"}]
+    },
+    {
+      "name": "synthesize",
+      "summary": "Synthesize Russian text to mono 48 kHz OggOpus at 32 kbit/s.",
+      "params": [
+        {"name": "text", "required": true, "schema": {"$ref": "schemas.json#/definitions/SynthesizeParams/properties/text"}},
+        {"name": "voice", "required": true, "schema": {"const": "eugene"}}
+      ],
+      "paramStructure": "by-name",
+      "x-paramsSchema": {"$ref": "schemas.json#/definitions/SynthesizeParams"},
+      "result": {"name": "result", "schema": {"$ref": "schemas.json#/definitions/SynthesizeResult"}},
+      "errors": [{"code": -32602, "message": "Invalid params"}, {"code": -32603, "message": "Internal error"}]
+    }
+  ],
+  "x-transport": {
+    "type": "UTF-8 JSON text lines over child-process stdin/stdout",
+    "maximumLineBytes": 65536,
+    "request": "Closed JSON-RPC 2.0 object or nonempty batch; params is an object or absent; id is a string, finite number or null.",
+    "response": "One result/error line; request id is echoed for recognized requests.",
+    "notification": "Valid notifications execute without a response, including failed notifications.",
+    "batch": "Sequential execution; one response array in request order, omitting notifications; an all-notification batch emits nothing.",
+    "diagnostics": "Model and ffmpeg output is discarded; startup failure emits one fixed safe stderr message. stdout contains only RPC responses.",
+    "offline": "Local checksum-verified package only; ffmpeg accepts only local file protocol and WAV demuxer."
+  },
+  "x-jsonrpc-errors": {
+    "-32700": "Parse error; invalid UTF-8/JSON, duplicate object keys, non-JSON constants or line beyond limit; id null.",
+    "-32600": "Invalid Request; invalid or non-closed envelope, invalid id or empty batch; id null.",
+    "-32601": "Method not found; original id preserved.",
+    "-32602": "Invalid params; original id preserved.",
+    "-32603": "Internal error; model, filesystem, encoding, timeout and output-limit failures; no details."
+  },
+  "x-resource-lifecycle": {
+    "owner": "Local AI parent owns the private directory and entire process group; no unload or cancel RPC.",
+    "output": "synthesize removes the previous audio.ogg, uses a per-request temporary directory, then atomically replaces outputDirectory/audio.ogg. Temporary files are removed on success or failure. Output survives until next accepted synthesis or parent cleanup after confirmed process-group exit.",
+    "maximumOutputBytes": 67108864,
+    "ffmpegTimeoutSeconds": 180,
+    "deadline": "Parent bounds the full operation at 180 seconds and cancels by stopping the entire process group. RPC timeout alone does not confirm exit.",
+    "retry": "No automatic retries or id deduplication; each invocation, including a notification, synthesizes again. Multiple syntheses in a batch overwrite the same output path."
+  }
+}
