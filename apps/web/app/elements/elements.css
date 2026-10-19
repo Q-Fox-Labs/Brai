@@ -7,13 +7,10 @@
 .elements-canvas { position: relative; flex: 1; min-height: 0; overflow: hidden; cursor: grab; touch-action: none; background-color: var(--background); background-image: radial-gradient(circle, color-mix(in srgb, var(--foreground) 20%, transparent) 1px, transparent 1px); background-size: 24px 24px; }
 .elements-canvas.is-dragging, .elements-canvas.is-dragging * { cursor: grabbing; user-select: none; }
 .elements-world { position: absolute; inset: 0 auto auto 0; width: 1px; height: 1px; transform-origin: 0 0; }
-.elements-links { position: absolute; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+.elements-links { position: absolute; z-index: 1; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
 .elements-link.identity > path { fill: none; stroke: #87948f; stroke-width: 1.5; }
+.elements-link.identity > circle { fill: #87948f; }
 .elements-link.identity > path.is-highlighted { stroke: #f1c56e; stroke-width: 3; }
-.elements-link.resource > path { fill: none; stroke: #e6a75d; stroke-width: 2.75; }
-.elements-link.resource.is-expected > path { stroke-dasharray: 7 5; }
-#elements-arrow-resource path { fill: #e6a75d; stroke: none; }
-.elements-link.resource text { fill: #f1d5ad; font-size: 12px; paint-order: stroke; stroke: var(--background); stroke-width: 6px; stroke-linejoin: round; }
 .elements-card { --state-color: #b1bece; --state-fill: #202b3b; --state-card: #131a24; position: absolute; display: flex; flex-direction: column; border: 1px solid var(--state-color); border-left-width: 5px; border-radius: 8px; background: var(--state-card); color: #e7eee9; box-shadow: 0 7px 24px #0002; cursor: default; }
 .elements-card[data-state="active"], .elements-move[data-state="active"], .elements-detail[data-state="active"] { --state-color: #ffd078; --state-card: #211a0e; --state-fill: #443113; }
 .elements-card[data-state="completed"], .elements-move[data-state="completed"], .elements-detail[data-state="completed"] { --state-color: #91ddb1; --state-card: #0d1913; --state-fill: #193428; }

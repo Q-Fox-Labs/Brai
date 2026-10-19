@@ -121,24 +121,13 @@ export function sequenceMoves(moves: Move[]): (Move & { order: number })[] {
 export function projectMoves(moves: Move[], elementId: string): ProjectedMove[] {
  const ordered = sequenceMoves(moves);
  const sourceById = new Map(moves.map(move => [move.id, move]));
- const byId = new Map(ordered.map(move => [move.id, move]));
  const shared = (move: Move) => move.kind === "operation" && move.ownerId !== move.targetId && (move.purpose === "start" || move.purpose === "accept");
- const visible = new Set(ordered.filter(move => move.ownerId === elementId || (shared(move) && move.targetId === elementId)).map(move => move.id));
- const localOrder = (move: Move) => {
-  let order = 1, previous = move.previousId;
-  const seen = new Set([move.id]);
-  while (previous && !seen.has(previous)) {
-   seen.add(previous);
-   const ancestor = byId.get(previous);
-   if (!ancestor) break;
-   if (visible.has(ancestor.id)) order += 1;
-   previous = ancestor.previousId;
-  }
-  return order;
- };
- return ordered.filter(move => visible.has(move.id)).map(orderedMove => {
+ const incoming = ordered.filter(move => shared(move) && move.targetId === elementId);
+ // AIDEV-NOTE: Управляющая цепь родителя не задаёт место внутренних Ходов ребёнка.
+ const visible = [...incoming.filter(move => move.purpose === "start"), ...ordered.filter(move => move.ownerId === elementId), ...incoming.filter(move => move.purpose === "accept")];
+ return visible.map((orderedMove, index) => {
   const move = sourceById.get(orderedMove.id)!;
-  return { move, order: localOrder(orderedMove), shared: shared(move) };
+  return { move, order: index + 1, shared: shared(move) };
  });
 }
 

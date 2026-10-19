@@ -22,7 +22,7 @@ test("shared start and accept are one move projected to both cards with local nu
  const goalRows = projectMoves(source, goal);
  const taskRows = projectMoves(source, task);
  assert.deepEqual(goalRows.map(row => [row.move.id, row.order]), [["first", 1], ["start", 2], ["parent-work", 3], ["accept", 4], ["unrelated", 5]]);
- assert.deepEqual(taskRows.map(row => [row.move.id, row.order]), [["start", 1], ["task-work", 2], ["accept", 3], ["after-accept", 4]]);
+ assert.deepEqual(taskRows.map(row => [row.move.id, row.order]), [["start", 1], ["task-work", 2], ["after-accept", 3], ["accept", 4]]);
  assert.equal(goalRows.filter(row => row.move.id === "start").length, 1);
  assert.equal(taskRows.filter(row => row.move.id === "accept").length, 1);
  assert.equal(goalRows.find(row => row.move.id === "start")!.move, taskRows.find(row => row.move.id === "start")!.move);
@@ -137,4 +137,15 @@ test("new groups stay clear of saved manual positions when graph ordering change
  assert.ok(layout.positions["new-root"].x >= 540);
  assert.ok(layout.positions["new-child"].x >= 540);
  assert.equal(layout.positions["new-root"].x-layout.positions["new-child"].x,defaults["new-root"].x-defaults["new-child"].x);
+});
+
+// Родительские постановка/приёмка и внутренняя работа имеют независимые цепи.
+test("child projection brackets the complete independent rework chain", () => {
+ const parent = move("parent", "goal");
+ const start = move("start", "goal", "task", parent.id, "start");
+ const accept = move("accept", "goal", "task", start.id, "accept");
+ const own = [move("confirm", "task"), move("work", "task", "task", "confirm"), move("review", "task", "task", "work"), move("rework", "task", "task", "review"), move("final", "task", "task", "rework")];
+ const rows = projectMoves([accept, ...own.toReversed(), start, parent], "task");
+ assert.deepEqual(rows.map(row => row.move.id), ["start", "confirm", "work", "review", "rework", "final", "accept"]);
+ assert.deepEqual(rows.map(row => row.order), [1, 2, 3, 4, 5, 6, 7]);
 });
