@@ -22,7 +22,7 @@ const js=nc.jetstream();
 const observation=observationStore?createObservation(observationStore,historySender(nc),event=>js.publish('brai.alerts.v1.ingest',new TextEncoder().encode(JSON.stringify(event)),{msgID:event.id,timeout:OBSERVATION_LIMITS.timeoutMs}),()=>!nc.isClosed()):undefined;
 const operations=store?createOperations(store,liteLLMDecidePort(LITELLM_URL,guard,LITELLM_API_KEY),{deadlineMs:Number(process.env.PROVIDERS_JEV_DEADLINE_MS ?? "30000"),chatPort:liteLLMChatPort(LITELLM_URL,guard,LITELLM_API_KEY),chatDeadlineMs:Number(process.env.PROVIDERS_CHAT_DEADLINE_MS??"90000"),imagePort:liteLLMImagePort(LITELLM_URL,guard,LITELLM_API_KEY),artifacts:process.env.PROVIDERS_ARTIFACTS_INTERNAL_ORIGIN&&process.env.PROVIDERS_ARTIFACTS_UPLOAD_ORIGIN?artifactsPort(nc,{internalOrigin:process.env.PROVIDERS_ARTIFACTS_INTERNAL_ORIGIN,uploadOrigin:process.env.PROVIDERS_ARTIFACTS_UPLOAD_ORIGIN}):undefined}):undefined;
 await operations?.resumeOutputs();
-const v0=await registerProviders(nc,liteLLMPort(LITELLM_URL,guard,LITELLM_API_KEY));
+const v0=process.env.PROVIDERS_V0_ENABLED==="0"?undefined:await registerProviders(nc,liteLLMPort(LITELLM_URL,guard,LITELLM_API_KEY));
 await observation?.tick();
 const v1=operations?await registerProvidersV1(nc,operations,{inboxPrefix:process.env.PROVIDERS_INBOX_PREFIX,diagnostics:()=>observation!.status()}):undefined;
 const http=process.env.PROVIDERS_HTTP_PORT?createChatHttp(operations??(()=>{throw new Error('HTTP_REQUIRES_PG');})(),[{token:process.env.PROVIDERS_HTTP_TOKEN??'',ownerId:process.env.PROVIDERS_HTTP_OWNER_ID??'',connectionId:process.env.PROVIDERS_HTTP_CONNECTION_ID??''}]):undefined;
@@ -33,6 +33,6 @@ for(const signal of ["SIGTERM","SIGINT"] as const)process.once(signal,()=>{
   const stopHttp=http?new Promise<void>(resolve=>http.close(()=>resolve())):undefined;
   if(sweep)clearInterval(sweep);
   if(observe)clearInterval(observe);observation?.stop();
-  void Promise.all([v0.stop(),v1?.stop(),stopHttp]).then(()=>operations?.idle()).then(()=>nc.drain()).finally(async()=>{await guard.close();await observationStore?.close();await store?.close();});
+  void Promise.all([v0?.stop(),v1?.stop(),stopHttp]).then(()=>operations?.idle()).then(()=>nc.drain()).finally(async()=>{await guard.close();await observationStore?.close();await store?.close();});
 });
-console.log(JSON.stringify({service:"brai_providers",version:store?"1.0.0":"0.0.1",protocols:store?["v0","v1"]:["v0"],status:"started"}));
+console.log(JSON.stringify({service:"brai_providers",version:store?"1.0.0":"0.0.1",protocols:store?(v0?["v0","v1"]:["v1"]):["v0"],status:"started"}));
