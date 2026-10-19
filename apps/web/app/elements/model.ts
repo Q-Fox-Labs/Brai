@@ -6,18 +6,40 @@ export type Provenance = { createdBy?: string | null; createdAt?: string | null;
 export type Attempt = { id: string; moveId?: string; status: string; input?: unknown; result?: unknown; errorCode?: string | null; startedAt?: string; finishedAt?: string | null };
 export type Element = { id: string; kind: string; parentId: string | null; status: string; revision: string; title: string; description: string; input: string[]; output: string[]; instructions?: string; conditions?: unknown; fields?: unknown; provenance?: Provenance; attempts?: Attempt[] };
 /** ownerId — UUID Элемента, к которому относится Ход. */
-export type Move = { id: string; ownerId: string; targetId: string; previousId: string | null; kind: string; title: string; status: string; attemptId: string; executor: string; input: string[]; output: string[]; instructions?: string; conditions?: unknown; fields?: unknown; provenance?: Provenance; attempts?: Attempt[] };
+export type Move = { id: string; ownerId: string; targetId: string; previousId: string | null; kind: string; purpose?: string; title: string; status: string; attemptId: string; executor: string; input: string[]; output: string[]; instructions?: string; conditions?: unknown; fields?: unknown; provenance?: Provenance; attempts?: Attempt[] };
+export type ProjectedMove = { move: Move; order: number; shared: boolean };
+export type MoveAnchor = { x: number; y: number; width: number };
 export type Resource = { id: string; attemptId: string | null; title: string; content: string; metadata?: unknown; artifacts?: { id: string; name: string; available: boolean }[] };
 export type BoardData = { elements: Element[]; moves: Move[]; resources: Resource[]; attempts?: Attempt[]; manualStatusEnabled?: boolean };
 export type Layout = { positions: Record<string, Point>; view: Viewport };
 export const cardWidth = 420;
 export type CardHeights = Record<string, number>;
 export const cardHeight = (id: string, heights: CardHeights) => heights[id] ?? 556;
-/** Размещает корни над дочерними Элементами; новые ID не требуют разметки. */
+const cardGap = 100;
+const rowGap = 144;
+/** Размещает каждый корень над его детьми и сохраняет места для неизвестных высот. */
 export function initialPositions(elements: Element[], heights: CardHeights = {}): Record<string, Point> {
- const roots = elements.filter(e => !e.parentId || !elements.some(p => p.id === e.parentId));
- const children = elements.filter(e => !roots.includes(e));
- return Object.fromEntries([...roots.map((e, i) => [e.id, { x: i * 520 + Math.max(0, children.length - 1) * 260, y: 0 }]), ...children.map((e, i) => [e.id, { x: i * 520, y: Math.max(0, ...roots.map(root => cardHeight(root.id, heights))) + 144 }])]);
+ const byId = new Map(elements.map(element => [element.id, element]));
+ const children = new Map<string, Element[]>();
+ for (const element of elements) if (element.parentId && byId.has(element.parentId)) children.set(element.parentId, [...(children.get(element.parentId) ?? []), element]);
+ const roots = elements.filter(element => !element.parentId || !byId.has(element.parentId));
+ const positions: Record<string, Point> = {};
+ let cursor = 0;
+ for (const root of roots) {
+  const group = children.get(root.id) ?? [];
+  const groupWidth = Math.max(cardWidth, group.length * cardWidth + Math.max(0, group.length - 1) * cardGap);
+  const rootX = cursor + (groupWidth - cardWidth) / 2;
+  positions[root.id] = { x: rootX, y: 0 };
+  const childrenWidth = group.length * cardWidth + Math.max(0, group.length - 1) * cardGap;
+  const childStart = cursor + (groupWidth - childrenWidth) / 2;
+  group.forEach((child, index) => { positions[child.id] = { x: childStart + index * (cardWidth + cardGap), y: cardHeight(root.id, heights) + rowGap }; });
+  cursor += groupWidth + cardGap;
+ }
+ for (const element of elements) if (!positions[element.id]) {
+  positions[element.id] = { x: cursor, y: 0 };
+  cursor += cardWidth + cardGap;
+ }
+ return positions;
 }
 /** Ограничивает масштаб для сохранения управляемого просмотра. */
 export function clampZoom(value: number) { return Math.max(0.01, Math.min(1.6, value)); }
@@ -56,9 +78,10 @@ export function readLayout(raw: string | null, defaults: Record<string, Point>, 
  } catch { return null; }
 }
 
-/** Сортирует по предшественникам и считает номер только среди Ходов владельца. */
+/** Убирает повторные проекции, сортирует по predecessor и считает номер владельца. */
 export function sequenceMoves(moves: Move[]): (Move & { order: number })[] {
- const byId = new Map(moves.map(move => [move.id, move]));
+ const unique = [...new Map(moves.map(move => [move.id, move])).values()];
+ const byId = new Map(unique.map(move => [move.id, move]));
  const depths = new Map<string, number>();
  function depth(id: string, seen = new Set<string>()): number {
   if (depths.has(id)) return depths.get(id)!;
@@ -81,7 +104,41 @@ export function sequenceMoves(moves: Move[]): (Move & { order: number })[] {
   }
   return order;
  }
- return moves.map(move => ({ ...move, order: localOrder(move) })).sort((a, b) => depth(a.id) - depth(b.id));
+ return unique.map(move => ({ ...move, order: localOrder(move) })).sort((a, b) => depth(a.id) - depth(b.id));
+}
+
+/** Выбирает единую запись для владельца и, только у start/accept, её дочерней цели. */
+export function projectMoves(moves: Move[], elementId: string): ProjectedMove[] {
+ const ordered = sequenceMoves(moves);
+ const sourceById = new Map(moves.map(move => [move.id, move]));
+ const byId = new Map(ordered.map(move => [move.id, move]));
+ const shared = (move: Move) => move.kind === "operation" && move.ownerId !== move.targetId && (move.purpose === "start" || move.purpose === "accept");
+ const visible = new Set(ordered.filter(move => move.ownerId === elementId || (shared(move) && move.targetId === elementId)).map(move => move.id));
+ const localOrder = (move: Move) => {
+  let order = 1, previous = move.previousId;
+  const seen = new Set([move.id]);
+  while (previous && !seen.has(previous)) {
+   seen.add(previous);
+   const ancestor = byId.get(previous);
+   if (!ancestor) break;
+   if (visible.has(ancestor.id)) order += 1;
+   previous = ancestor.previousId;
+  }
+  return order;
+ };
+ return ordered.filter(move => visible.has(move.id)).map(orderedMove => {
+  const move = sourceById.get(orderedMove.id)!;
+  return { move, order: localOrder(orderedMove), shared: shared(move) };
+ });
+}
+
+/** Возвращает общие внешние точки строк для связи родителя и дочерней цели. */
+export function sharedMoveLinkAnchors(parent: MoveAnchor, child: MoveAnchor, purpose: string) {
+ const side = child.x < parent.x ? "left" : "right";
+ const parentPoint = { x: side === "left" ? parent.x : parent.x + parent.width, y: parent.y };
+ const childPoint = { x: side === "left" ? child.x : child.x + child.width, y: child.y };
+ const gutterX = side === "left" ? Math.min(parent.x, child.x) - 60 : Math.max(parent.x + parent.width, child.x + child.width) + 60;
+ return { start: purpose === "start" ? parentPoint : childPoint, end: purpose === "start" ? childPoint : parentPoint, gutterX, side };
 }
 
 /** Возвращает русскую подпись для каждого допустимого статуса без показа кода. */

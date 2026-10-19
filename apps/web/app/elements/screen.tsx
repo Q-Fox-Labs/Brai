@@ -3,8 +3,8 @@
 // ABOUTME: Данные меняются через серверный API; браузер хранит только раскладку.
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Check, CircleDashed, Grip, Layers, ListOrdered, Maximize, Play, X, Ban } from "lucide-react";
-import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, readLayout, sequenceMoves, statusPresentation, type BoardData, type CardHeights, type Layout, type Point } from "./model";
+import { Bot, Check, CircleDashed, Grip, Layers, ListOrdered, Maximize, Play, UserRound, X, Ban } from "lucide-react";
+import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, projectMoves, readLayout, sequenceMoves, sharedMoveLinkAnchors, statusPresentation, type BoardData, type CardHeights, type Layout, type MoveAnchor, type Point } from "./model";
 import "./elements.css";
 
 import { readable, resourceText, conditionText, presentBoard } from "./presentation";
@@ -14,6 +14,8 @@ function elementLabel(kind: string) {
 }
 function moveKind(kind: string) { return kind === "operation" ? "Операция" : "Действие"; }
 function executorLabel(executor: string) { return executor === "agent" ? "Агент" : executor === "human" || executor === "player" ? "Игрок" : "Исполнитель"; }
+function movePurpose(purpose?: string) { return purpose === "start" ? "Запуск" : purpose === "accept" ? "Приёмка" : ""; }
+function projectionKey(elementId: string, moveId: string) { return `${elementId}:${moveId}`; }
 function statusOptions(kind: "element" | "move") {
  return kind === "element"
   ? [{ value: "draft", label: "Черновик" }, { value: "active", label: "В работе" }, { value: "completed", label: "Выполнена" }, { value: "cancelled", label: "Отменена" }]
@@ -75,18 +77,22 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
  const [layout, setLayout] = useState<Layout>({ positions: positionsDefault, view: { x: 0, y: 0, zoom: 0.5 } });
  const [heights, setHeights] = useState<CardHeights>({});
  const [ready, setReady] = useState(false);
- const [selection, setSelection] = useState<{ kind: "element" | "move"; id: string } | null>(null);
+ const [selection, setSelection] = useState<{ kind: "element" | "move"; id: string; elementId?: string } | null>(null);
+ const [highlightedMoveId, setHighlightedMoveId] = useState<string | null>(null);
+ const [moveAnchors, setMoveAnchors] = useState<Record<string, MoveAnchor>>({});
  const [savingStatus, setSavingStatus] = useState(false);
  const [statusError, setStatusError] = useState("");
  const selectedElement = selection?.kind === "element" ? dataset.elements.find(element => element.id === selection.id) : null;
  const selectedMove = selection?.kind === "move" ? orderedMoves.find(move => move.id === selection.id) : null;
  const selected = selectedElement ?? selectedMove ?? null;
+ const selectedMoveOrder = selectedMove ? projectMoves(dataset.moves, selection?.elementId ?? selectedMove.ownerId).find(row => row.move.id === selectedMove.id)?.order ?? selectedMove.order : null;
  const selectElement = (id: string) => setSelection({ kind: "element", id });
- const selectMove = (id: string) => setSelection({ kind: "move", id });
+ const selectMove = (id: string, elementId?: string) => setSelection({ kind: "move", id, elementId });
  const suppressClick = useRef(false);
  const drag = useRef<{ pointer: number; start: Point; origin: Point; elementId?: string; moved: boolean } | null>(null);
  const [dragging, setDragging] = useState(false);
  const state = useRef(layout); state.current = layout;
+ const measureMoveAnchors = useRef<() => void>(() => {});
  const showAll = useCallback(() => {
   const bounds = canvas.current?.getBoundingClientRect();
   if (bounds) setLayout(old => ({ ...old, view: fitView(old.positions, bounds.width, bounds.height, heights) }));
@@ -116,6 +122,30 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
   });
   return () => { disposed = true; observer.disconnect(); };
  }, [storageKey, dataset]);
+ useEffect(() => {
+  const node = canvas.current;
+  if (!node || !ready) return;
+  let frame = 0;
+  const measure = () => {
+   cancelAnimationFrame(frame);
+   frame = requestAnimationFrame(() => {
+    const currentView = state.current.view, bounds = node.getBoundingClientRect(), zoom = currentView.zoom;
+    const measured = Object.fromEntries([...node.querySelectorAll<HTMLElement>(".elements-move[data-projection-key]")].map(row => {
+     const rect = row.getBoundingClientRect();
+     return [row.dataset.projectionKey!, { x: (rect.left - bounds.left - currentView.x) / zoom, y: (rect.top + rect.height / 2 - bounds.top - currentView.y) / zoom, width: rect.width / zoom }];
+    }));
+    setMoveAnchors(previous => Object.keys(measured).length === Object.keys(previous).length && Object.keys(measured).every(key => {
+     const a = measured[key], b = previous[key]; return b && Math.abs(a.x - b.x) < 0.5 && Math.abs(a.y - b.y) < 0.5 && Math.abs(a.width - b.width) < 0.5;
+    }) ? previous : measured);
+   });
+  };
+  measureMoveAnchors.current = measure;
+  const observer = new ResizeObserver(measure);
+  node.querySelectorAll<HTMLElement>(".elements-move[data-projection-key]").forEach(row => observer.observe(row));
+  measure();
+  return () => { observer.disconnect(); cancelAnimationFrame(frame); measureMoveAnchors.current = () => {}; };
+ }, [dataset.moves, ready]);
+ useEffect(() => { measureMoveAnchors.current(); }, [layout, heights]);
  useEffect(() => {
   if (!ready) return;
   const timer = setTimeout(() => {
@@ -160,18 +190,7 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
  }
  function stopDrag() { drag.current = null; setDragging(false); }
  const resourceName = (id: string) => readable(dataset.resources.find(resource => resource.id === id)?.title) || "Ресурс";
- const chainPositions = new Map(orderedMoves.map((move, index) => [move.id, index]));
- const transfers = dataset.elements.flatMap(target => {
-  const sources = dataset.elements.filter(source => source.id !== target.id && source.output.some(id => target.input.includes(id)));
-  const latest = sources.sort((a, b) => Math.max(-1, ...orderedMoves.filter(m => m.targetId === b.id).map(m => chainPositions.get(m.id)!)) - Math.max(-1, ...orderedMoves.filter(m => m.targetId === a.id).map(m => chainPositions.get(m.id)!)))[0];
-  return latest ? [{ from: latest.id, to: target.id, label: latest.output.filter(id => target.input.includes(id)).map(resourceName).join(", "), returnToParent: false }] : [];
- });
- for (const source of dataset.elements) {
-  if (!source.parentId) continue;
-  const acceptance = orderedMoves.find(m => m.ownerId === source.parentId && m.targetId === source.id && m.output.some(id => source.output.includes(id)));
-  if (acceptance) transfers.push({ from: source.id, to: source.parentId, label: source.output.map(resourceName).join(", "), returnToParent: true });
- }
- const links = [...dataset.elements.filter(e => e.parentId && layout.positions[e.parentId]).map(e => ({ from: e.parentId!, to: e.id, label: "Подчинённый элемент", type: "hierarchy", returnToParent: false })), ...transfers.map(t => ({ ...t, type: "result" }))];
+ const sharedMoves = orderedMoves.filter(move => move.kind === "operation" && move.ownerId !== move.targetId && (move.purpose === "start" || move.purpose === "accept"));
  async function changeStatus(kind: "element" | "move", id: string, status: string) {
   setSavingStatus(true); setStatusError("");
   try {
@@ -189,20 +208,21 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
    onKeyDown={event => { if (event.target !== event.currentTarget) return; const shifts: Record<string, Point> = { ArrowLeft: { x: 60, y: 0 }, ArrowRight: { x: -60, y: 0 }, ArrowUp: { x: 0, y: 60 }, ArrowDown: { x: 0, y: -60 } }; const delta = shifts[event.key]; if (delta) { event.preventDefault(); setLayout(old => ({ ...old, view: { ...old.view, x: old.view.x + delta.x, y: old.view.y + delta.y } })); } if (event.key === "+" || event.key === "=") zoomAt(1.2); if (event.key === "-") zoomAt(1 / 1.2); }}>
    {!dataset.elements.length && <p className="elements-empty">На карте пока нет Элементов.</p>}
    <div className="elements-world" style={{ transform: `translate(${layout.view.x}px, ${layout.view.y}px) scale(${layout.view.zoom})`, visibility: ready ? "visible" : "hidden" }}>
-    <svg className="elements-links" aria-label="Связи Элементов"><defs>{["hierarchy", "result"].map(type => <marker key={type} id={`elements-arrow-${type}`} markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M1,1 L8,5 L1,9" fill="none" stroke={type === "result" ? "#91a8e8" : "#8c9c96"} strokeWidth="1.5" /></marker>)}</defs>
-     {links.map((link, index) => {
-      const a = layout.positions[link.from], b = layout.positions[link.to]; if (!a || !b) return null;
-      const hierarchyLink = link.type === "hierarchy", side = !hierarchyLink && !link.returnToParent;
-      const start = side ? { x: a.x + cardWidth, y: a.y + cardHeight(link.from, heights) / 2 } : { x: a.x + cardWidth / 2 + (link.returnToParent ? 135 : -50), y: a.y + (link.returnToParent ? 0 : cardHeight(link.from, heights)) };
-      const end = side ? { x: b.x, y: b.y + cardHeight(link.to, heights) / 2 } : { x: b.x + cardWidth / 2 + (link.returnToParent ? 100 : -50), y: b.y + (link.returnToParent ? cardHeight(link.to, heights) : 0) };
-      const middle = (start.y + end.y) / 2 + (link.returnToParent ? 35 : -25);
-      const path = side ? `M${start.x},${start.y} C${start.x + 70},${start.y} ${end.x - 70},${end.y} ${end.x},${end.y}` : `M${start.x},${start.y} C${start.x},${middle} ${end.x},${middle} ${end.x},${end.y}`;
-      return <g key={`${link.type}-${link.from}-${link.to}`} className={`elements-link ${link.type}`}><title>{`${readable(dataset.elements.find(item => item.id === link.from)?.title) || "Элемент"} → ${readable(dataset.elements.find(item => item.id === link.to)?.title) || "Элемент"}: ${link.label}`}</title><path d={path} markerEnd={`url(#elements-arrow-${link.type})`} /><text x={(start.x + end.x) / 2} y={side ? start.y - 12 : middle + (index % 2) * 20} textAnchor="middle">{link.label}</text></g>;
+    <svg className="elements-links" aria-label="Переходы общих Ходов"><defs><marker id="elements-arrow-shared" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M1,1 L8,5 L1,9" /></marker></defs>
+     {sharedMoves.map(move => {
+      const parent = moveAnchors[projectionKey(move.ownerId, move.id)], child = moveAnchors[projectionKey(move.targetId, move.id)];
+      if (!parent || !child) return null;
+      const { start, end, gutterX } = sharedMoveLinkAnchors(parent, child, move.purpose ?? "");
+      const path = `M${start.x},${start.y} C${gutterX},${start.y} ${gutterX},${end.y} ${end.x},${end.y}`;
+      const fromElement = move.purpose === "start" ? move.ownerId : move.targetId, toElement = move.purpose === "start" ? move.targetId : move.ownerId;
+      const from = dataset.elements.find(element => element.id === fromElement), to = dataset.elements.find(element => element.id === toElement);
+      const label = `${movePurpose(move.purpose)}: ${readable(from?.title) || "Элемент"} → ${readable(to?.title) || "Элемент"}`;
+      return <g key={move.id} className="elements-link"><title>{label}</title><path className={highlightedMoveId === move.id ? "is-highlighted" : ""} d={path} markerEnd="url(#elements-arrow-shared)" /></g>;
      })}
     </svg>
     {dataset.elements.map(element => {
-     const point = layout.positions[element.id] ?? { x: 0, y: 0 }, moves = orderedMoves.filter(move => move.ownerId === element.id);
-     const completeCount = moves.filter(move => statusPresentation(move.status, "move").tone === "completed").length;
+     const point = layout.positions[element.id] ?? { x: 0, y: 0 }, moves = projectMoves(dataset.moves, element.id);
+     const completeCount = moves.filter(({ move }) => statusPresentation(move.status, "move").tone === "completed").length;
      return <article key={element.id} className="elements-card" data-state={statusPresentation(element.status, "element").tone} data-element-id={element.id} style={{ left: point.x, top: point.y, width: cardWidth }} aria-label={`${elementLabel(element.kind)}: ${readable(element.title)}`} onClick={event => { if (!(event.target as HTMLElement).closest("button,a,details,select")) selectElement(element.id); }}>
       <button type="button" className="elements-card-grip" aria-label={`Переместить карточку «${readable(element.title)}»`} onPointerDown={event => startDrag(event, element.id)} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={stopDrag}
        onDoubleClick={() => focusElement(element.id)} onKeyDown={event => { const deltas: Record<string, Point> = { ArrowLeft: { x: -20, y: 0 }, ArrowRight: { x: 20, y: 0 }, ArrowUp: { x: 0, y: -20 }, ArrowDown: { x: 0, y: 20 } }; const delta = deltas[event.key]; if (delta) { event.preventDefault(); setLayout(old => ({ ...old, positions: { ...old.positions, [element.id]: { x: point.x + delta.x, y: point.y + delta.y } } })); } }}>
@@ -211,10 +231,14 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
       <h2><button type="button" className="elements-card-title" aria-label={`Открыть ${elementLabel(element.kind)} «${readable(element.title)}»`} onClick={event => { event.stopPropagation(); selectElement(element.id); }}>{readable(element.title) || "Без названия"}</button></h2>
       {readable(element.description) && <p className="elements-description">{readable(element.description)}</p>}
       <div className="elements-moves-title"><span>Ходы</span><span>{completeCount} из {moves.length} завершено</span></div>
+      {element.parentId && <button type="button" className="elements-related-link" onClick={() => focusElement(element.parentId!)}>Родитель: {readable(dataset.elements.find(item => item.id === element.parentId)?.title) || "Открыть родителя"}</button>}
       <div className="elements-moves" aria-label={`Ходы элемента «${readable(element.title)}»`}>
-       {moves.map(move => <button type="button" key={move.id} className="elements-move" data-state={statusPresentation(move.status, "move").tone} data-move-id={move.id} onClick={event => { event.stopPropagation(); selectMove(move.id); }}>
-        <span className="elements-move-number">{move.order}</span><span className="elements-move-body"><span>{readable(move.title) || "Без названия"}</span><small>{moveKind(move.kind)} · {executorLabel(move.executor)}</small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" />
-       </button>)}
+       {moves.map(({ move, order, shared }) => <div key={move.id} className="elements-move-entry" data-linked={highlightedMoveId === move.id || undefined} onPointerEnter={() => shared && setHighlightedMoveId(move.id)} onPointerLeave={() => setHighlightedMoveId(current => current === move.id ? null : current)} onFocusCapture={() => shared && setHighlightedMoveId(move.id)} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setHighlightedMoveId(current => current === move.id ? null : current); }}>
+        <button type="button" className="elements-move" data-kind={move.kind} data-state={statusPresentation(move.status, "move").tone} data-move-id={move.id} data-projection-key={projectionKey(element.id, move.id)} onClick={event => { event.stopPropagation(); selectMove(move.id, element.id); }}>
+         <span className="elements-move-number">{order}</span><span className="elements-move-actor" aria-hidden="true">{move.kind === "operation" ? <Bot size={23} /> : <UserRound size={26} />}</span><span className="elements-move-body"><span>{readable(move.title) || "Без названия"}</span><small><span className="elements-move-kind">{moveKind(move.kind)}</span><span>{executorLabel(move.executor)}</span></small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" />
+        </button>
+        {shared && move.ownerId === element.id && <button type="button" className="elements-move-target" onClick={() => focusElement(move.targetId)}>{movePurpose(move.purpose)} для: {readable(dataset.elements.find(item => item.id === move.targetId)?.title) || "Задачи"}</button>}
+       </div>)}
        {!moves.length && <p className="elements-no-moves">Ходов пока нет.</p>}
       </div>
       {element.output.length > 0 && <footer>Результат: {element.output.map(resourceName).join(", ")}</footer>}
@@ -225,7 +249,7 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
   <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open) setSelection(null); }}><Dialog.Portal><Dialog.Overlay className="elements-detail-overlay" /><Dialog.Content className="elements-detail" data-kind={selection?.kind} data-detail-id={selected?.id} data-state={selected && selection ? statusPresentation(selected.status, selection.kind).tone : undefined} aria-describedby="elements-detail-description">
    <Dialog.Close className="elements-detail-close" aria-label="Закрыть подробности"><X size={20} /></Dialog.Close>
    <header className="elements-detail-heading">
-    <div className="elements-detail-kind">{selectedElement ? <Layers size={22} aria-hidden="true" /> : <ListOrdered size={22} aria-hidden="true" />}<span>{selectedElement ? `${elementLabel(selectedElement.kind)}` : `${moveKind(selectedMove?.kind ?? "")} · ход ${selectedMove?.order}`}</span></div>
+    <div className="elements-detail-kind">{selectedElement ? <Layers size={22} aria-hidden="true" /> : <ListOrdered size={22} aria-hidden="true" />}<span>{selectedElement ? `${elementLabel(selectedElement.kind)}` : `${moveKind(selectedMove?.kind ?? "")} · ход ${selectedMoveOrder}`}</span></div>
     <Dialog.Title>{readable(selected?.title) || "Без названия"}</Dialog.Title><Dialog.Description id="elements-detail-description">{selectedElement ? "Подробности элемента" : "Подробности хода"}</Dialog.Description>
     {selected && selection && <StatusLabel status={selected.status} kind={selection.kind} className="elements-detail-summary-status" />}
     {selected && dataset.manualStatusEnabled && selection && <label className="elements-status-control">Изменить статус
@@ -242,8 +266,8 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
     {selectedElement.instructions && <details className="elements-secondary"><summary>Дополнительная инструкция</summary><p>{readable(selectedElement.instructions)}</p></details>}
     <ResourceDetails ids={selectedElement.input} label="Входящие ресурсы" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
     <ResourceDetails ids={selectedElement.output} label="Итоговые ресурсы" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
-    <section className="elements-panel-moves"><h3>Ходы <span>{orderedMoves.filter(move => move.ownerId === selectedElement.id).length}</span></h3>
-     {orderedMoves.filter(move => move.ownerId === selectedElement.id).map(move => <button type="button" key={move.id} className="elements-move" data-state={statusPresentation(move.status, "move").tone} data-panel-move-id={move.id} onClick={() => selectMove(move.id)}><span className="elements-move-number">{move.order}</span><span className="elements-move-body"><span>{readable(move.title) || "Без названия"}</span><small>{moveKind(move.kind)} · {executorLabel(move.executor)}</small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" /></button>)}
+    <section className="elements-panel-moves"><h3>Ходы <span>{projectMoves(dataset.moves, selectedElement.id).length}</span></h3>
+     {projectMoves(dataset.moves, selectedElement.id).map(({ move, order, shared }) => <div key={move.id} className="elements-move-entry" data-linked={highlightedMoveId === move.id || undefined} onPointerEnter={() => shared && setHighlightedMoveId(move.id)} onPointerLeave={() => setHighlightedMoveId(current => current === move.id ? null : current)} onFocusCapture={() => shared && setHighlightedMoveId(move.id)} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setHighlightedMoveId(current => current === move.id ? null : current); }}><button type="button" className="elements-move" data-kind={move.kind} data-state={statusPresentation(move.status, "move").tone} data-panel-move-id={move.id} onClick={() => selectMove(move.id)}><span className="elements-move-number">{order}</span><span className="elements-move-actor" aria-hidden="true">{move.kind === "operation" ? <Bot size={23} /> : <UserRound size={26} />}</span><span className="elements-move-body"><span>{readable(move.title) || "Без названия"}</span><small><span className="elements-move-kind">{moveKind(move.kind)}</span><span>{executorLabel(move.executor)}</span></small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" /></button></div>)}
     </section>
    </>}
    {selectedMove && <>
@@ -251,7 +275,7 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
     {selectedMove.instructions && <section className="elements-resources"><h3>Инструкция</h3><p>{readable(selectedMove.instructions)}</p></section>}
     <ResourceDetails ids={selectedMove.input} label="Полученные ресурсы" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
     <ResourceDetails ids={selectedMove.output} label="Результат" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
-    {selectedMove.previousId && <p className="elements-parent">Предыдущий ход: <button type="button" className="elements-text-link" onClick={() => selectMove(selectedMove.previousId!)}>{readable(orderedMoves.find(move => move.id === selectedMove.previousId)?.title) || "Открыть предыдущий ход"}</button></p>}
+    {selectedMove.previousId && <p className="elements-parent">Предыдущий ход: <button type="button" className="elements-text-link" onClick={() => selectMove(selectedMove.previousId!, selection?.elementId)}>{readable(orderedMoves.find(move => move.id === selectedMove.previousId)?.title) || "Открыть предыдущий ход"}</button></p>}
     {selectedMove.conditions !== undefined && conditionText(selectedMove.conditions) && <details className="elements-secondary"><summary>Условия выполнения</summary><p>{conditionText(selectedMove.conditions)}</p></details>}
    </>}
   </Dialog.Content></Dialog.Portal></Dialog.Root>

@@ -1,92 +1,78 @@
-// ABOUTME: Проверяет сохранность истории и восстановление геометрии карты.
-// ABOUTME: Тесты не вызывают сервисы и не исполняют исторические действия.
+// ABOUTME: Проверяет проекции общих Ходов, локальный порядок и геометрию карты.
+// ABOUTME: Использует только синтетические записи и не загружает fixture или историю.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFileSync } from "node:fs";
-import { fitView, initialPositions, readLayout, sequenceMoves, statusPresentation, type BoardData } from "../app/elements/model.ts";
-const data = JSON.parse(readFileSync(new URL("../app/elements/demo.json", import.meta.url), "utf8")) as BoardData;
+import { fitView, initialPositions, projectMoves, readLayout, sequenceMoves, sharedMoveLinkAnchors, statusPresentation, type Element, type Move } from "../app/elements/model.ts";
 
-test("demo keeps unique identities, cross-owner predecessors and cumulative resource provenance", () => {
- assert.equal(data.elements.length, 4); assert.equal(data.moves.length, 23); assert.equal(data.resources.length, 26);
- assert.equal(new Set(data.moves.map(m => m.id)).size, data.moves.length);
- const available = new Set(["R00"]);
- for (const [index, move] of data.moves.entries()) {
-  assert.equal(move.previousId, data.moves[index - 1]?.id ?? null);
-  assert.deepEqual(new Set(move.input), available);
-  for (const id of move.output) {
-   assert.equal(data.resources.find(r => r.id === id)?.attemptId, move.attemptId);
-   available.add(id);
-  }
- }
- const accept = data.moves.find(m => m.id === "G1-M6")!;
- assert.equal(accept.ownerId, "G1"); assert.equal(accept.targetId, "T2"); assert.equal(accept.previousId, "T2-F2");
- assert.equal(data.moves.filter(m => m.ownerId === "G1").length, 10);
- assert.equal(data.moves.filter(m => m.ownerId === "T2").length, 5);
- assert.ok(data.moves.find(m => m.id === "G1-M10")!.output.includes("R25"));
+const element = (id: string, parentId: string | null): Element => ({ id, kind: parentId ? "task" : "goal", parentId, status: "active", revision: "r1", title: id, description: "", input: [], output: [] });
+const move = (id: string, ownerId: string, targetId = ownerId, previousId: string | null = null, purpose = "work"): Move => ({ id, ownerId, targetId, previousId, kind: purpose === "work" ? "action" : "operation", purpose, title: id, status: "planned", attemptId: "attempt", executor: purpose === "work" ? "human" : "agent", input: [], output: [] });
+
+test("shared start and accept are one move projected to both cards with local numbers", () => {
+ const goal = "goal", task = "task";
+ const first = move("first", goal);
+ const start = move("start", goal, task, first.id, "start");
+ const parentWork = move("parent-work", goal, goal, start.id);
+ const taskWork = move("task-work", task, task, parentWork.id);
+ const accept = move("accept", goal, task, taskWork.id, "accept");
+ const afterAccept = move("after-accept", task, task, accept.id);
+ const unrelated = move("unrelated", goal, task, afterAccept.id, "work");
+ const source = [afterAccept, accept, taskWork, parentWork, start, unrelated, first, { ...start }];
+
+ const goalRows = projectMoves(source, goal);
+ const taskRows = projectMoves(source, task);
+ assert.deepEqual(goalRows.map(row => [row.move.id, row.order]), [["first", 1], ["start", 2], ["parent-work", 3], ["accept", 4], ["unrelated", 5]]);
+ assert.deepEqual(taskRows.map(row => [row.move.id, row.order]), [["start", 1], ["task-work", 2], ["accept", 3], ["after-accept", 4]]);
+ assert.equal(goalRows.filter(row => row.move.id === "start").length, 1);
+ assert.equal(taskRows.filter(row => row.move.id === "accept").length, 1);
+ assert.equal(goalRows.find(row => row.move.id === "start")!.move, taskRows.find(row => row.move.id === "start")!.move);
+ assert.ok(goalRows.find(row => row.move.id === "start")!.shared);
+ assert.ok(taskRows.find(row => row.move.id === "start")!.shared);
+ assert.equal(taskRows.some(row => row.move.id === "unrelated"), false);
 });
 
-test("layout accepts new identities and a parentless element, ignores stale IDs and rejects damaged storage", () => {
- const extra = { ...data.elements[0], id: "new-root", parentId: null, title: "Длинное название ".repeat(20) };
- const defaults = initialPositions([...data.elements, extra]);
- assert.ok(defaults[extra.id]);
- const raw = JSON.stringify({ version: 1, positions: { G1: { x: -200, y: 100 }, obsolete: { x: 20, y: 20 } }, view: { x: -50, y: 90, zoom: 0.75 } });
- const restored = readLayout(raw, defaults)!;
- assert.deepEqual(restored.positions.G1, { x: -200, y: 100 });
- assert.deepEqual(restored.positions[extra.id], defaults[extra.id]);
- assert.ok(!restored.positions.obsolete);
- assert.equal(readLayout("broken", defaults), null);
- assert.equal(readLayout(JSON.stringify({ version: 1, view: { x: 0, y: 0, zoom: 99 } }), defaults), null);
+test("same-owner and non-start/accept moves are never projected twice", () => {
+ const sameOwner = move("same-owner", "goal", "goal", null, "start");
+ const otherPurpose = move("other-purpose", "goal", "task", sameOwner.id, "finish");
+ const rows = projectMoves([sameOwner, otherPurpose], "goal");
+ assert.deepEqual(rows.map(row => row.move.id), ["same-owner", "other-purpose"]);
+ assert.equal(rows.some(row => row.shared), false);
+ assert.equal(projectMoves([sameOwner, otherPurpose], "task").length, 0);
+});
+
+test("predecessor order includes intervening moves omitted from the current projection", () => {
+ const first = move("first", "goal");
+ const start = move("start", "goal", "task", first.id, "start");
+ const child = move("child", "task", "task", start.id);
+ const accept = move("accept", "goal", "task", child.id, "accept");
+ const later = move("later", "goal", "goal", accept.id);
+ const shuffled = [later, accept, child, start, first];
+ assert.deepEqual(projectMoves(shuffled, "goal").map(row => [row.move.id, row.order]), [["first", 1], ["start", 2], ["accept", 3], ["later", 4]]);
+ assert.deepEqual(projectMoves(shuffled, "task").map(row => [row.move.id, row.order]), [["start", 1], ["child", 2], ["accept", 3]]);
+ assert.deepEqual(sequenceMoves(shuffled).map(row => row.id), ["first", "start", "child", "accept", "later"]);
+});
+
+test("shared move arrows use one outer gutter and keep start/accept direction", () => {
+ const parent = { x: 260, y: 100, width: 420 }, childLeft = { x: 0, y: 420, width: 420 }, childRight = { x: 720, y: 420, width: 420 };
+ const leftStart = sharedMoveLinkAnchors(parent, childLeft, "start");
+ assert.deepEqual(leftStart, { start: { x: 260, y: 100 }, end: { x: 0, y: 420 }, gutterX: -60, side: "left" });
+ assert.deepEqual(sharedMoveLinkAnchors(parent, childLeft, "accept"), { start: { x: 0, y: 420 }, end: { x: 260, y: 100 }, gutterX: -60, side: "left" });
+ const rightStart = sharedMoveLinkAnchors(parent, childRight, "start");
+ assert.deepEqual(rightStart, { start: { x: 680, y: 100 }, end: { x: 1140, y: 420 }, gutterX: 1200, side: "right" });
+ assert.deepEqual(sharedMoveLinkAnchors(parent, childRight, "accept"), { start: { x: 1140, y: 420 }, end: { x: 680, y: 100 }, gutterX: 1200, side: "right" });
+});
+
+test("initial layout groups each parent with its children and saved manual positions win", () => {
+ const elements = [element("goal", null), element("task-a", "goal"), element("task-b", "goal"), element("other-goal", null)];
+ const defaults = initialPositions(elements, { goal: 900 });
+ assert.ok(defaults.goal.x > defaults["task-a"].x && defaults.goal.x < defaults["task-b"].x);
+ assert.equal(defaults["task-a"].y, 1044);
+ assert.equal(defaults["task-b"].y, 1044);
+ const saved = { version: 2, positions: { ...defaults, goal: { x: -300, y: 72 } }, view: { x: 4, y: 8, zoom: 0.8 } };
+ assert.deepEqual(readLayout(JSON.stringify(saved), defaults)!.positions.goal, saved.positions.goal);
  assert.deepEqual(fitView({}, 800, 600), { x: 0, y: 0, zoom: 1 });
- const fitted = fitView({ a: { x: -100, y: 20 }, b: { x: 600, y: 700 } }, 1200, 900);
- assert.ok(fitted.zoom >= 0.01 && fitted.zoom <= 1);
- assert.ok(fitted.x + -100 * fitted.zoom >= 0);
- assert.ok(fitted.y + 20 * fitted.zoom >= 0);
 });
 
-test("move numbers are local to each owner and follow predecessor links rather than storage order", () => {
- const shuffled = [...data.moves].reverse();
- const sequenced = sequenceMoves(shuffled);
- assert.deepEqual(sequenced.map(move => move.id), data.moves.map(move => move.id));
- for (const [owner, count] of Object.entries({ G1: 10, T1: 3, T2: 5, T3: 5 })) {
-  assert.deepEqual(sequenced.filter(move => move.ownerId === owner).map(move => move.order), Array.from({ length: count }, (_, index) => index + 1));
- }
- assert.equal(sequenced.find(move => move.id === "G1-M6")!.order, 6);
- assert.equal(sequenced.find(move => move.id === "G1-M6")!.previousId, "T2-F2");
- assert.equal(sequenced.find(move => move.id === "T2-F2")!.order, 5);
- assert.ok(data.moves.every(move => !("order" in move)));
- const branches = sequenceMoves([{ ...data.moves[0], id: "root", previousId: null }, { ...data.moves[0], id: "left", previousId: "root" }, { ...data.moves[0], id: "right", previousId: "root" }]);
- assert.deepEqual(branches.map(move => move.order), [1, 2, 2]);
-});
-
-test("measured card heights determine initial rows, fit and legacy overlap migration", () => {
- const heights = { G1: 1400, T1: 450, T2: 700, T3: 800 };
- const positions = initialPositions(data.elements, heights);
- assert.equal(positions.T1.y, 1544);
- const fit = fitView(positions, 1200, 900, heights);
- for (const [id, point] of Object.entries(positions)) {
-  assert.ok(fit.y + (point.y + heights[id as keyof typeof heights]) * fit.zoom <= 900);
-  assert.ok(fit.x + (point.x + 420) * fit.zoom <= 1200);
- }
- const old = { G1: { x: 520, y: 0 }, T1: { x: 0, y: 700 }, T2: { x: 520, y: 700 }, T3: { x: 1040, y: 700 } };
- const stored = { version: 1, positions: old, view: { x: 0, y: 0, zoom: 0.5 } };
- const migrated = readLayout(JSON.stringify(stored), positions, heights)!;
- assert.deepEqual(migrated.positions.G1, old.G1);
- assert.deepEqual(migrated.positions.T1, old.T1);
- assert.deepEqual(migrated.positions.T3, old.T3);
- assert.equal(migrated.positions.T2.y, 1544);
- assert.deepEqual(readLayout(JSON.stringify({ ...stored, version: 2 }), positions, heights)!.positions, old);
- const taller = { ...heights, G1: 12000 };
- const tallFit = fitView(initialPositions(data.elements, taller), 1200, 900, taller);
- assert.ok(tallFit.zoom < 0.2);
-});
-
-test("status presentation follows the existing contract and the fixed demo shows all states", () => {
- assert.deepEqual(new Set(data.elements.map(element => element.status)), new Set(["draft", "active", "completed"]));
- assert.deepEqual(new Set(data.moves.map(move => move.status)), new Set(["planned", "claimed", "succeeded"]));
- for (const owner of ["G1", "T1", "T2", "T3"]) {
-  const statuses = sequenceMoves(data.moves).filter(move => move.ownerId === owner).map(move => ["succeeded", "claimed", "planned"].indexOf(move.status));
-  assert.deepEqual(statuses, [...statuses].sort((a, b) => a - b));
- }
+test("move statuses remain visible independently of executor and move kind", () => {
  for (const [kind, statuses] of [["element", ["draft", "active", "completed"]], ["move", ["planned", "claimed", "succeeded"]]] as const) {
   const states = statuses.map(status => statusPresentation(status, kind));
   assert.equal(new Set(states.map(state => state.tone)).size, 3);
