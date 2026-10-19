@@ -5,6 +5,7 @@ import { GatewayError, natsConnection } from "./gateway";
 import { bytes, limits, rpcTimeouts, subjects, validateCommand, validateEnvelope, validateLimits } from "@brai/agent/contracts";
 import type { AgentLimits, Command, ErrorResponse, EventEnvelope, NativeSnapshot } from "@brai/agent/contracts";
 import { encodeFrame } from "../lib/agent/stream";
+import { disabledAgentResponse } from "./web-config";
 const reads = new Set(["projects", "status", "models", "threads", "open", "turns", "items", "activities", "item", "goalGet", "readState"]);
 const key = Symbol.for("brai.web.agent-streams.v3");
 const globals = globalThis as typeof globalThis & { [key]?: Map<() => void, string> };
@@ -228,6 +229,8 @@ async function events(request: Request, session: Session, command?: Command): Pr
 }
 /** Проверяет аккаунт, Origin и закрытый action до передачи единственной команды владельцу. */
 async function handle(request: Request, context: { params: Promise<{ path: string[] }> }): Promise<Response> {
+  const disabled = disabledAgentResponse();
+  if (disabled) return disabled;
   let outcome: ErrorResponse["outcome"] = request.method === "POST" ? "not-sent" : "query";
   if (pending >= limits.clients) return Response.json({ code: "CAPACITY_EXHAUSTED", outcome }, { status: 429 });
   pending++;

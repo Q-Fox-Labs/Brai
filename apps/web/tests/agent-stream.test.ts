@@ -48,6 +48,7 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = f
   const module = { exports: {} as { agentGet: (request: Request, context: { params: Promise<{ path: string[] }> }) => Promise<Response> } };
   const overrides: Record<string, unknown> = {
     "../lib/agent/stream": { encodeFrame },
+    "./web-config": { disabledAgentResponse: () => null },
     "./gateway": { natsConnection: async () => nc, GatewayError: class extends Error {} },
     "./auth": { checkOrigin() {}, requireTimerSession: async () => { if (!allowed) throw new Error("revoked"); return session; } },
   };
