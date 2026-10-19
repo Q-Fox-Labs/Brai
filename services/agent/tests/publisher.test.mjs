@@ -14,6 +14,7 @@ import { createPublisher, streamPublisherFile, publisherMaxBytes } from '../dist
 import { createPublisherPort, createPublisherMcpServer, validatePublisherConfig, publisherTools } from '../dist/publisher-mcp.js';
 import { publisherFetch } from '../dist/publisher-http.js';
 import { subjects, validateRequest, validateResponse } from '../../artifacts/contracts/index.mjs';
+import { transcribeFile } from '../../hermes/transcribe.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2]);
@@ -61,6 +62,42 @@ test('publishes verified immutable bytes; repeat and restart keep one artifact; 
   await writeFile(path, 'changed'); await assert.rejects(f.publisher.publishFile({ path, requestId: 'stable-key' }), error => error.code === 'OPERATION_CONFLICT');
   const next = await f.publisher.publishFile({ path, requestId: 'new-key' }); assert.notEqual(next.artifactId, result.artifactId); assert.deepEqual(await readFile(result.localPath), png);
   assert.deepEqual((await readdir(f.output)).filter(name => name.startsWith('.pending-')), []);
+});
+
+test('audio signatures publish ready hashes and OGG reaches the real STT admission boundary', async t => {
+  const f = await fixture(t);
+  const ogg = packet => {
+    const page = Buffer.alloc(28); page.write('OggS'); page[5] = 2; page[26] = 1; page[27] = packet.length;
+    return Buffer.concat([page, packet]);
+  };
+  const cases = [
+    ['opus.bin', ogg(Buffer.concat([Buffer.from('OpusHead'), Buffer.alloc(11)])), 'audio/ogg', true],
+    ['vorbis.ogg', ogg(Buffer.from([1, 118, 111, 114, 98, 105, 115])), 'audio/ogg'],
+    ['voice.bin', Buffer.from('RIFF0000WAVEfmt '), 'audio/wav'],
+    ['lossless.bin', Buffer.from('fLaC0000'), 'audio/flac'],
+    ['false.ogg', Buffer.from('not an OGG stream'), 'application/octet-stream', false],
+    ['other.ogg', ogg(Buffer.from('not-audio')), 'application/octet-stream'],
+    ['false.wav', Buffer.from('RIFF0000AVI '), 'application/octet-stream'],
+  ];
+  for (const [filename, bytes, mimeType, reachesSubmit] of cases) {
+    const path = join(f.input, filename); await writeFile(path, bytes);
+    const published = await f.publisher.publishFile({ path, requestId: filename });
+    assert.equal(published.mimeType, mimeType); assert.equal(published.sha256, sha(bytes)); assert.equal(published.sizeBytes, bytes.length);
+    assert.equal(f.records.get(published.artifactId).status, 'ready'); assert.ok(!published.markdown.startsWith('!'));
+    if (reachesSubmit !== undefined) {
+      let publications = 0, submissions = 0;
+      const runtime = { async call(name) {
+        if (name === 'publish_file') { publications++; return published; }
+        assert.equal(name, 'transcription_request_submit'); submissions++;
+        throw Object.assign(new Error('PROBE_SUBMIT_REACHED'), { code: 'PROBE_SUBMIT_REACHED' });
+      } };
+      const model = { modelId: 'gigaam-v3-e2e-ctc', revision: 'cec030b4c4f35d928e4a9044a3bdb29ebd499fac', profileId: 'gigaam_pytorch' };
+      await assert.rejects(transcribeFile({ stt: { model } }, runtime, { input: path, output: join(f.input, filename + '.txt') }),
+        error => error.code === (reachesSubmit ? 'PROBE_SUBMIT_REACHED' : 'INVALID_UPSTREAM_RESPONSE'));
+      assert.equal(publications, 1); assert.equal(submissions, Number(reachesSubmit));
+    }
+  }
+  assert.equal(f.calls.filter(call => call.http === 'PUT').length, cases.length);
 });
 
 test('lost PUT acknowledgement reads persisted ready before any byte retry', async t => {
