@@ -14,7 +14,7 @@ const assets = [
   'services/providers/schemas/v0.schema.json', 'services/providers/schemas/v1.schema.json',
   'services/providers/migrations/001_operations.sql', 'services/providers/migrations/002_outputs.sql',
   'services/providers/migrations/003_observation.sql',
-  'services/artifacts/contracts/index.mjs', 'services/artifacts/schemas/messages.schema.json',
+  'services/artifacts/contracts/index.mjs', 'services/artifacts/contracts/index.d.mts', 'services/artifacts/schemas/messages.schema.json',
 ];
 const entrypoints = ['main.js', 'migrate.js', 'chat-http.js', 'observation.js', 'observation-postgres.js'];
 const fail = code => { throw new Error(code); };
