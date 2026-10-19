@@ -6,9 +6,10 @@ export type Provenance = { createdBy?: string | null; createdAt?: string | null;
 export type Attempt = { id: string; moveId?: string; status: string; input?: unknown; result?: unknown; errorCode?: string | null; startedAt?: string; finishedAt?: string | null };
 export type Element = { id: string; kind: string; parentId: string | null; status: string; revision: string; title: string; description: string; input: string[]; output: string[]; instructions?: string; conditions?: unknown; fields?: unknown; provenance?: Provenance; attempts?: Attempt[] };
 /** ownerId — UUID Элемента, к которому относится Ход. */
-export type Move = { id: string; ownerId: string; targetId: string; previousId: string | null; kind: string; purpose?: string; title: string; status: string; attemptId: string; executor: string; input: string[]; output: string[]; instructions?: string; conditions?: unknown; fields?: unknown; provenance?: Provenance; attempts?: Attempt[] };
+export type Move = { id: string; ownerId: string; targetId: string; previousId: string | null; kind: string; purpose?: string; title: string; status: string; attemptId: string; executor: string; input: string[]; output: string[]; instructions?: string; conditions?: unknown; requiredResourceIds?: string[]; fields?: unknown; provenance?: Provenance; attempts?: Attempt[] };
 export type ProjectedMove = { move: Move; order: number; shared: boolean };
 export type MoveAnchor = { x: number; y: number; width: number };
+export type ResourceMoveLink = { id: string; resourceId: string; resourceTitle: string; producerId: string; consumerId: string; fromElementId: string; toElementId: string; expected: boolean };
 export type Resource = { id: string; attemptId: string | null; title: string; content: string; metadata?: unknown; artifacts?: { id: string; name: string; available: boolean }[] };
 export type BoardData = { elements: Element[]; moves: Move[]; resources: Resource[]; attempts?: Attempt[]; manualStatusEnabled?: boolean };
 export type Layout = { positions: Record<string, Point>; view: Viewport };
@@ -139,6 +140,85 @@ export function sharedMoveLinkAnchors(parent: MoveAnchor, child: MoveAnchor, pur
  const childPoint = { x: side === "left" ? child.x : child.x + child.width, y: child.y };
  const gutterX = side === "left" ? Math.min(parent.x, child.x) - 60 : Math.max(parent.x + parent.width, child.x + child.width) + 60;
  return { start: purpose === "start" ? parentPoint : childPoint, end: purpose === "start" ? childPoint : parentPoint, gutterX, side };
+}
+
+/** Находит передачу существующего ресурса между Ходами разных целей. */
+export function resourceMoveLinks(moves: Move[], resources: Resource[], attempts: Attempt[] = []): ResourceMoveLink[] {
+ const uniqueMoves = [...new Map(moves.map(move => [move.id, move])).values()];
+ const resourceById = new Map(resources.map(resource => [resource.id, resource]));
+ const isShared = (move: Move) => move.kind === "operation" && move.ownerId !== move.targetId && (move.purpose === "start" || move.purpose === "accept");
+ const producedBy = new Map<string, Move[]>();
+ const requiredResources = (move: Move) => {
+  if (move.status !== "planned" || move.attemptId) return [];
+  if (move.requiredResourceIds) return move.requiredResourceIds;
+  if (!move.conditions || typeof move.conditions !== "object") return [];
+  const required = (move.conditions as { required_resources?: unknown }).required_resources;
+  return Array.isArray(required) ? required.filter((id): id is string => typeof id === "string") : [];
+ };
+ const targetInputs = (move: Move) => {
+  if (move.purpose !== "start") return move.status === "planned" && !move.attemptId ? requiredResources(move) : move.input;
+  const result = attempts.find(attempt => attempt.id === move.attemptId)?.result;
+  if (!result || typeof result !== "object") return [];
+  const claim = (result as { claim?: unknown }).claim;
+  if (!claim || typeof claim !== "object") return [];
+  const ids = (claim as { target_input_resource_ids?: unknown }).target_input_resource_ids;
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
+ };
+ for (const producer of uniqueMoves) {
+  const produced = new Set(producer.output.filter(id => resourceById.has(id)));
+  if (producer.attemptId) for (const resource of resources) if (resource.attemptId === producer.attemptId) produced.add(resource.id);
+  for (const resourceId of produced) producedBy.set(resourceId, [...(producedBy.get(resourceId) ?? []), producer]);
+ }
+ const links: ResourceMoveLink[] = [], seen = new Set<string>();
+ for (const consumer of uniqueMoves) {
+  const expectedIds = new Set(requiredResources(consumer));
+  const inputs = new Set(targetInputs(consumer).filter(id => resourceById.has(id)));
+  for (const resourceId of inputs) for (const producer of producedBy.get(resourceId) ?? []) {
+   if (producer.id === consumer.id || producer.targetId === consumer.targetId) continue;
+   const key = `${resourceId}:${producer.id}:${consumer.id}`;
+   if (seen.has(key)) continue;
+   seen.add(key);
+   links.push({ id: key, resourceId, resourceTitle: resourceById.get(resourceId)!.title, producerId: producer.id, consumerId: consumer.id, fromElementId: isShared(producer) ? producer.targetId : producer.ownerId, toElementId: isShared(consumer) ? consumer.targetId : consumer.ownerId, expected: expectedIds.has(resourceId) });
+  }
+ }
+ return links;
+}
+
+/** Wraps a resource name to a bounded number of readable SVG lines. */
+export function wrapResourceLabel(value: string, width: number, maxLines = 3): string[] {
+ const limit = Math.max(1, Math.floor(width / 7));
+ const words = value.trim().split(/\s+/).filter(Boolean);
+ const lines: string[] = [];
+ let line = "";
+ for (const word of words) {
+  if (word.length > limit) {
+   if (line) { lines.push(line); line = ""; }
+   for (let offset = 0; offset < word.length; offset += limit) {
+    if (lines.length === maxLines) break;
+    lines.push(word.slice(offset, offset + limit));
+   }
+   if (lines.length === maxLines) break;
+   continue;
+  }
+  const next = line ? `${line} ${word}` : word;
+  if (next.length > limit) { lines.push(line); line = word; }
+  else line = next;
+  if (lines.length === maxLines) break;
+ }
+ if (lines.length < maxLines && line) lines.push(line);
+ const consumed = lines.join(" ").replace(/…$/, "").length;
+ if (lines.length === maxLines && consumed < words.join(" ").length) lines[maxLines - 1] = `${lines[maxLines - 1].replace(/…$/, "")}…`;
+ return lines;
+}
+
+/** Прокладывает ребро между строками по кратчайшим сторонам или внешнему gutter. */
+export function resourceMoveLinkAnchors(from: MoveAnchor, to: MoveAnchor) {
+ const fromRight = from.x + from.width, toRight = to.x + to.width;
+ if (fromRight <= to.x) return { start: { x: fromRight, y: from.y }, end: { x: to.x, y: to.y }, controlX: (fromRight + to.x) / 2, side: "gap" as const };
+ if (toRight <= from.x) return { start: { x: from.x, y: from.y }, end: { x: toRight, y: to.y }, controlX: (from.x + toRight) / 2, side: "gap" as const };
+ const useLeft = Math.abs(from.x - to.x) <= Math.abs(fromRight - toRight);
+ const controlX = useLeft ? Math.min(from.x, to.x) - 60 : Math.max(fromRight, toRight) + 60;
+ return { start: { x: useLeft ? from.x : fromRight, y: from.y }, end: { x: useLeft ? to.x : toRight, y: to.y }, controlX, side: useLeft ? "left" as const : "right" as const };
 }
 
 /** Возвращает русскую подпись для каждого допустимого статуса без показа кода. */

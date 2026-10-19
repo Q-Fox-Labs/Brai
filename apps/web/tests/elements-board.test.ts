@@ -2,7 +2,8 @@
 // ABOUTME: Использует только синтетические записи и не загружает fixture или историю.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fitView, initialPositions, projectMoves, readLayout, sequenceMoves, sharedMoveLinkAnchors, statusPresentation, type Element, type Move } from "../app/elements/model.ts";
+import { fitView, initialPositions, projectMoves, readLayout, resourceMoveLinkAnchors, resourceMoveLinks, sequenceMoves, sharedMoveLinkAnchors, statusPresentation, wrapResourceLabel, type BoardData, type Element, type Move, type Resource } from "../app/elements/model.ts";
+import { presentBoard } from "../app/elements/presentation.ts";
 
 const element = (id: string, parentId: string | null): Element => ({ id, kind: parentId ? "task" : "goal", parentId, status: "active", revision: "r1", title: id, description: "", input: [], output: [] });
 const move = (id: string, ownerId: string, targetId = ownerId, previousId: string | null = null, purpose = "work"): Move => ({ id, ownerId, targetId, previousId, kind: purpose === "work" ? "action" : "operation", purpose, title: id, status: "planned", attemptId: "attempt", executor: purpose === "work" ? "human" : "agent", input: [], output: [] });
@@ -59,6 +60,53 @@ test("shared move arrows use one outer gutter and keep start/accept direction", 
  const rightStart = sharedMoveLinkAnchors(parent, childRight, "start");
  assert.deepEqual(rightStart, { start: { x: 680, y: 100 }, end: { x: 1140, y: 420 }, gutterX: 1200, side: "right" });
  assert.deepEqual(sharedMoveLinkAnchors(parent, childRight, "accept"), { start: { x: 1140, y: 420 }, end: { x: 680, y: 100 }, gutterX: 1200, side: "right" });
+});
+
+test("resource links use real inputs, target transfer for start, and explicit planned requirements", () => {
+ const producer = { ...move("accept-child-1", "root", "child-1", null, "accept"), attemptId: "producer-attempt", output: [] };
+ const start = { ...move("start-child-2", "root", "child-2", null, "start"), attemptId: "start-attempt", input: ["parent-approval", "shared", "shared"] };
+ const approvalProducer = { ...move("parent-approval", "root", "root"), attemptId: "approval-attempt", output: ["parent-approval"] };
+ const actualProducer = { ...move("actual-producer", "child-1"), attemptId: "actual-attempt", output: ["actual"] };
+ const actualConsumer = { ...move("actual-consumer", "child-2"), input: ["actual", "absent"] };
+ const sameTargetProducer = { ...move("same-target-producer", "child-2"), output: ["same-target"] };
+ const sameTargetConsumer = { ...move("same-target-consumer", "child-2"), input: ["same-target"] };
+ const plannedProducer = { ...move("planned-producer", "child-1"), output: ["planned"] };
+ const plannedConsumer = { ...move("planned-consumer", "child-2"), status: "planned", attemptId: "", input: [], requiredResourceIds: ["planned", "planned", "absent"] };
+ const plannedStart = { ...move("planned-start", "root", "child-3", null, "start"), status: "planned", attemptId: "", requiredResourceIds: ["planned"] };
+ const resources: Resource[] = [
+  { id: "shared", title: "Подтверждённый ресурс", content: "", attemptId: "producer-attempt" },
+  { id: "parent-approval", title: "Подтверждение родителя", content: "", attemptId: "approval-attempt" },
+  { id: "actual", title: "Результат", content: "", attemptId: "actual-attempt" },
+  { id: "same-target", title: "Локальный ресурс", content: "", attemptId: null },
+  { id: "planned", title: "Ожидаемый ресурс", content: "", attemptId: null },
+ ];
+ const attempts = [{ id: "start-attempt", status: "succeeded", result: { claim: { target_input_resource_ids: ["shared"] } } }];
+ const links = resourceMoveLinks([producer, start, approvalProducer, actualProducer, actualConsumer, sameTargetProducer, sameTargetConsumer, plannedProducer, plannedConsumer, plannedStart], resources, attempts);
+ assert.deepEqual(links.map(link => [link.resourceId, link.producerId, link.consumerId, link.fromElementId, link.toElementId, link.expected]), [
+  ["shared", "accept-child-1", "start-child-2", "child-1", "child-2", false],
+  ["actual", "actual-producer", "actual-consumer", "child-1", "child-2", false],
+  ["planned", "planned-producer", "planned-consumer", "child-1", "child-2", true],
+ ]);
+ assert.equal(links[0].resourceTitle, "Подтверждённый ресурс");
+});
+
+test("resource labels wrap within the available width and ellipsize after three lines", () => {
+ assert.deepEqual(wrapResourceLabel("Выбранный маршрут", 76), ["Выбранный", "маршрут"]);
+ assert.deepEqual(wrapResourceLabel("Слишком длинное название ресурса для подписи", 70), ["Слишком", "длинное", "название…"]);
+});
+
+test("resource links retain planned required IDs through readable conditions", () => {
+ const raw: BoardData = { elements: [], moves: [{ ...move("planned", "task"), status: "planned", attemptId: "", conditions: { prerequisite: "Есть ресурс", required_resources: ["resource-id", "resource-id"] } }], resources: [] };
+ const presented = presentBoard(raw);
+ assert.deepEqual(presented.moves[0].requiredResourceIds, ["resource-id"]);
+ assert.equal(presented.moves[0].conditions, "Есть ресурс");
+});
+
+test("resource arrows use facing sides or an outside gutter for overlapping rows", () => {
+ const left = { x: 0, y: 20, width: 420 }, right = { x: 600, y: 300, width: 420 };
+ assert.deepEqual(resourceMoveLinkAnchors(left, right), { start: { x: 420, y: 20 }, end: { x: 600, y: 300 }, controlX: 510, side: "gap" });
+ assert.deepEqual(resourceMoveLinkAnchors(right, left), { start: { x: 600, y: 300 }, end: { x: 420, y: 20 }, controlX: 510, side: "gap" });
+ assert.deepEqual(resourceMoveLinkAnchors(left, { x: 120, y: 220, width: 420 }), { start: { x: 0, y: 20 }, end: { x: 120, y: 220 }, controlX: -60, side: "left" });
 });
 
 test("initial layout groups each parent with its children and saved manual positions win", () => {

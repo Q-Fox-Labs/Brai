@@ -31,6 +31,11 @@ export function conditionText(value: unknown) {
  const prerequisite = (value as { prerequisite?: unknown }).prerequisite;
  return typeof prerequisite === "string" ? prerequisite : "";
 }
+function requiredResourceIds(value: unknown) {
+ if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+ const ids = (value as { required_resources?: unknown }).required_resources;
+ return Array.isArray(ids) ? [...new Set(ids.filter((id): id is string => typeof id === "string"))] : [];
+}
 /** Подставляет имена в старые текстовые ссылки, не меняя канонические записи. */
 export function presentBoard(source: BoardData): BoardData {
  const names = new Map<string, string>();
@@ -50,6 +55,6 @@ export function presentBoard(source: BoardData): BoardData {
  };
  return { ...source,
   elements: source.elements.map(item => ({ ...item, title: text(item.title), description: text(item.description), instructions: text(item.instructions ?? "") })),
-  moves: source.moves.map(item => ({ ...item, title: text(item.title), instructions: text(item.instructions ?? ""), conditions: text(conditionText(item.conditions)) })),
+  moves: source.moves.map(item => ({ ...item, requiredResourceIds: item.requiredResourceIds ?? requiredResourceIds(item.conditions), title: text(item.title), instructions: text(item.instructions ?? ""), conditions: text(conditionText(item.conditions)) })),
   resources: source.resources.map(item => ({ ...item, title: text(item.title), content: text(resourceText(item.content)) })) };
 }

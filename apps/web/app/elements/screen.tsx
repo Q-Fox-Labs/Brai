@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Bot, Check, CircleDashed, Grip, Layers, ListOrdered, Maximize, Play, UserRound, X, Ban } from "lucide-react";
-import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, projectMoves, readLayout, sequenceMoves, sharedMoveLinkAnchors, statusPresentation, type BoardData, type CardHeights, type Layout, type MoveAnchor, type Point } from "./model";
+import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, projectMoves, readLayout, resourceMoveLinkAnchors, resourceMoveLinks, sequenceMoves, sharedMoveLinkAnchors, statusPresentation, wrapResourceLabel, type BoardData, type CardHeights, type Layout, type MoveAnchor, type Point } from "./model";
 import "./elements.css";
 
 import { readable, resourceText, conditionText, presentBoard } from "./presentation";
@@ -191,6 +191,7 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
  function stopDrag() { drag.current = null; setDragging(false); }
  const resourceName = (id: string) => readable(dataset.resources.find(resource => resource.id === id)?.title) || "Ресурс";
  const sharedMoves = orderedMoves.filter(move => move.kind === "operation" && move.ownerId !== move.targetId && (move.purpose === "start" || move.purpose === "accept"));
+ const resourceLinks = resourceMoveLinks(dataset.moves, dataset.resources, dataset.attempts ?? []);
  async function changeStatus(kind: "element" | "move", id: string, status: string) {
   setSavingStatus(true); setStatusError("");
   try {
@@ -208,16 +209,25 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
    onKeyDown={event => { if (event.target !== event.currentTarget) return; const shifts: Record<string, Point> = { ArrowLeft: { x: 60, y: 0 }, ArrowRight: { x: -60, y: 0 }, ArrowUp: { x: 0, y: 60 }, ArrowDown: { x: 0, y: -60 } }; const delta = shifts[event.key]; if (delta) { event.preventDefault(); setLayout(old => ({ ...old, view: { ...old.view, x: old.view.x + delta.x, y: old.view.y + delta.y } })); } if (event.key === "+" || event.key === "=") zoomAt(1.2); if (event.key === "-") zoomAt(1 / 1.2); }}>
    {!dataset.elements.length && <p className="elements-empty">На карте пока нет Элементов.</p>}
    <div className="elements-world" style={{ transform: `translate(${layout.view.x}px, ${layout.view.y}px) scale(${layout.view.zoom})`, visibility: ready ? "visible" : "hidden" }}>
-    <svg className="elements-links" aria-label="Переходы общих Ходов"><defs><marker id="elements-arrow-shared" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M1,1 L8,5 L1,9" /></marker></defs>
+    <svg className="elements-links" aria-label="Связи между Ходами"><defs><marker id="elements-arrow-resource" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M1,1 L8,5 L1,9" /></marker></defs>
      {sharedMoves.map(move => {
       const parent = moveAnchors[projectionKey(move.ownerId, move.id)], child = moveAnchors[projectionKey(move.targetId, move.id)];
       if (!parent || !child) return null;
       const { start, end, gutterX } = sharedMoveLinkAnchors(parent, child, move.purpose ?? "");
       const path = `M${start.x},${start.y} C${gutterX},${start.y} ${gutterX},${end.y} ${end.x},${end.y}`;
-      const fromElement = move.purpose === "start" ? move.ownerId : move.targetId, toElement = move.purpose === "start" ? move.targetId : move.ownerId;
-      const from = dataset.elements.find(element => element.id === fromElement), to = dataset.elements.find(element => element.id === toElement);
-      const label = `${movePurpose(move.purpose)}: ${readable(from?.title) || "Элемент"} → ${readable(to?.title) || "Элемент"}`;
-      return <g key={move.id} className="elements-link"><title>{label}</title><path className={highlightedMoveId === move.id ? "is-highlighted" : ""} d={path} markerEnd="url(#elements-arrow-shared)" /></g>;
+      const label = `Одна общая операция «${readable(move.title) || "Операция"}»`;
+      return <g key={move.id} className="elements-link identity" role="img" aria-label={label}><title>{label}</title><path className={highlightedMoveId === move.id ? "is-highlighted" : ""} d={path} /></g>;
+     })}
+     {resourceLinks.map(link => {
+      const from = moveAnchors[projectionKey(link.fromElementId, link.producerId)], to = moveAnchors[projectionKey(link.toElementId, link.consumerId)];
+      if (!from || !to) return null;
+      const route = resourceMoveLinkAnchors(from, to), path = `M${route.start.x},${route.start.y} C${route.controlX},${route.start.y} ${route.controlX},${route.end.y} ${route.end.x},${route.end.y}`;
+      const label = readable(link.resourceTitle) || "Ресурс";
+      const accessibleLabel = `${link.expected ? "Ожидается ресурс" : "Ресурс"} «${label}»: ${readable(orderedMoves.find(move => move.id === link.producerId)?.title) || "Ход"} → ${readable(orderedMoves.find(move => move.id === link.consumerId)?.title) || "Ход"}`;
+      const labelWidth = route.side === "gap" ? Math.max(40, Math.abs(route.end.x - route.start.x) - 24) : 180;
+      const lines = wrapResourceLabel(label, labelWidth, 3);
+      const labelY = (route.start.y + route.end.y) / 2 - (lines.length - 1) * 7 + 4;
+      return <g key={link.id} className={`elements-link resource${link.expected ? " is-expected" : ""}`} role="img" aria-label={accessibleLabel}><title>{accessibleLabel}</title><path d={path} markerEnd="url(#elements-arrow-resource)" /><text x={route.controlX} y={labelY} textAnchor="middle">{lines.map((line, index) => <tspan key={index} x={route.controlX} dy={index === 0 ? 0 : 14}>{line}</tspan>)}</text></g>;
      })}
     </svg>
     {dataset.elements.map(element => {
