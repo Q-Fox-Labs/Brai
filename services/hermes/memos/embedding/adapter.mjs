@@ -74,11 +74,14 @@ function httpError(status, code, message = code) {
 export function buildInvocation(body, config) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw httpError(400, 'invalid_request', 'An object is required');
   if (body.model !== MODEL_ID) throw httpError(400, 'model_mismatch', 'This adapter serves embeddinggemma-2-q8 only');
-  if (Object.keys(body).some((key) => !['model', 'input', 'encoding_format'].includes(key))) {
+  if (Object.keys(body).some((key) => !['model', 'input', 'dimensions', 'encoding_format'].includes(key))) {
     throw httpError(400, 'unsupported_parameter', 'Unsupported embeddings parameter');
   }
-  if (body.encoding_format !== undefined && body.encoding_format !== 'float') {
-    throw httpError(400, 'invalid_request', 'Only float embeddings are supported');
+  if (body.dimensions !== undefined && body.dimensions !== DIMENSIONS) {
+    throw httpError(400, 'invalid_request', 'Only 768-dimensional embeddings are supported');
+  }
+  if (body.encoding_format !== undefined && !['float', 'base64'].includes(body.encoding_format)) {
+    throw httpError(400, 'invalid_request', 'Only float or base64 embeddings are supported');
   }
   const texts = typeof body.input === 'string' ? [body.input] : body.input;
   if (!Array.isArray(texts) || texts.length === 0 || !texts.every((text) => typeof text === 'string')) {
@@ -148,12 +151,27 @@ export async function handleEmbedding(body, config, invokeEmbedding) {
         || !vector.every((item) => typeof item === 'number' && Number.isFinite(item)))) {
       throw httpError(502, 'invalid_local_ai_response', 'LocalAI returned an invalid embedding response');
     }
+    const data = result.vectors.map((vector, index) => {
+      let embedding = vector;
+      if (body.encoding_format === 'base64') {
+        // AIDEV-NOTE: Python OpenAI SDK по умолчанию просит base64 и декодирует float32.
+        const bytes = Buffer.alloc(DIMENSIONS * 4);
+        vector.forEach((value, position) => {
+          if (!Number.isFinite(Math.fround(value))) {
+            throw httpError(502, 'invalid_local_ai_response', 'LocalAI returned an invalid embedding response');
+          }
+          bytes.writeFloatLE(value, position * 4);
+        });
+        embedding = bytes.toString('base64');
+      }
+      return { object: 'embedding', index, embedding };
+    });
     return {
       status: 200,
       body: {
         object: 'list',
         model: MODEL_ID,
-        data: result.vectors.map((embedding, index) => ({ object: 'embedding', index, embedding })),
+        data,
       },
     };
   } catch (error) {
