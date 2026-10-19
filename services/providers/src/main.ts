@@ -1,5 +1,6 @@
 // ABOUTME: Собирает v0/v1 NATS, PG journal и один LiteLLM egress в одной программе.
 // ABOUTME: Без PG запускает только прежний v0; миграции и платный health не выполняет.
+import { createChatHttp } from "./chat-http.js";
 import { artifactsPort } from "./artifacts.js";
 import { connect } from "nats";
 import { registerProviders } from "./nats.js";
@@ -24,11 +25,14 @@ await operations?.resumeOutputs();
 const v0=await registerProviders(nc,liteLLMPort(LITELLM_URL,guard,LITELLM_API_KEY));
 await observation?.tick();
 const v1=operations?await registerProvidersV1(nc,operations,{inboxPrefix:process.env.PROVIDERS_INBOX_PREFIX,diagnostics:()=>observation!.status()}):undefined;
+const http=process.env.PROVIDERS_HTTP_PORT?createChatHttp(operations??(()=>{throw new Error('HTTP_REQUIRES_PG');})(),[{token:process.env.PROVIDERS_HTTP_TOKEN??'',ownerId:process.env.PROVIDERS_HTTP_OWNER_ID??'',connectionId:process.env.PROVIDERS_HTTP_CONNECTION_ID??''}]):undefined;
+if(http){const port=Number(process.env.PROVIDERS_HTTP_PORT);if(!Number.isInteger(port)||port<1||port>65535)throw new Error('INVALID_HTTP_CONFIGURATION');await new Promise<void>((resolve,reject)=>{http.once('error',reject);http.listen(port,process.env.PROVIDERS_HTTP_HOST??'127.0.0.1',resolve);});}
 const observe=observation?setInterval(()=>{void observation.tick();},OBSERVATION_LIMITS.pollMs):undefined;observe?.unref();
 const sweep=store?setInterval(()=>{void store.sweep(Date.now()).catch(()=>{console.error('{"code":"STORAGE_UNAVAILABLE"}');});},60000):undefined;sweep?.unref();
 for(const signal of ["SIGTERM","SIGINT"] as const)process.once(signal,()=>{
+  const stopHttp=http?new Promise<void>(resolve=>http.close(()=>resolve())):undefined;
   if(sweep)clearInterval(sweep);
   if(observe)clearInterval(observe);observation?.stop();
-  void Promise.all([v0.stop(),v1?.stop()]).then(()=>operations?.idle()).then(()=>nc.drain()).finally(async()=>{await guard.close();await observationStore?.close();await store?.close();});
+  void Promise.all([v0.stop(),v1?.stop(),stopHttp]).then(()=>operations?.idle()).then(()=>nc.drain()).finally(async()=>{await guard.close();await observationStore?.close();await store?.close();});
 });
 console.log(JSON.stringify({service:"brai_providers",version:store?"1.0.0":"0.0.1",protocols:store?["v0","v1"]:["v0"],status:"started"}));

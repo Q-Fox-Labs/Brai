@@ -1753,6 +1753,101 @@
         "usage",
         "outputs"
       ]
+    },
+    "httpChatRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "messages": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "role": {
+                    "enum": [
+                      "system",
+                      "user"
+                    ]
+                  },
+                  "content": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 8192
+                  }
+                },
+                "required": [
+                  "role",
+                  "content"
+                ]
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "role": {
+                    "const": "tool"
+                  },
+                  "tool_call_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255
+                  },
+                  "content": {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "role",
+                  "tool_call_id",
+                  "content"
+                ]
+              }
+            ]
+          }
+        },
+        "stream": {
+          "type": "boolean"
+        },
+        "stream_options": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "include_usage": {
+              "const": true
+            }
+          },
+          "required": [
+            "include_usage"
+          ]
+        },
+        "max_tokens": {
+          "$ref": "#/definitions/chatRequest/properties/maxTokens"
+        },
+        "tools": {
+          "$ref": "#/definitions/chatRequest/properties/tools"
+        },
+        "tool_choice": {
+          "$ref": "#/definitions/chatRequest/properties/toolChoice"
+        },
+        "n": {
+          "const": 1
+        }
+      },
+      "required": [
+        "model",
+        "messages"
+      ]
     }
   }
 }

@@ -469,3 +469,57 @@ controlled HTTP upstream: outage, lost PubAck/restart, episode recovery, capacit
 TTL, owner scope и отсутствие recompute. Отдельная приёмка admin проверяет
 реальную DEV History/Alerts запись только по synthetic owner/ID без платного
 модельного вызова. Прежний v0 не имеет durable lifecycle и этих гарантий.
+
+## Публичный NATS-клиент и HTTP
+
+`@brai/providers` экспортирует `createProvidersClient`, `Failure` и типы из
+модулей владельца (ChatRequest/ChatInput/ChatResult/Tool/ToolCall/StreamEvent,
+DecideRequest, ImageRequest, OperationView). Схема доступна через
+`@brai/providers/schemas/v1.schema.json`; копия DTO потребителю не нужна.
+PG/runtime/model adapters в публичный exports не входят.
+
+`createProvidersClient(nc,{ownerId,connectionId,inboxPrefix?})` предназначен
+доверенному caller с broker ACL. Owner закреплён экземпляром клиента и
+перезаписывает caller input. Доступны invoke (decide), invokeImage, get, cancel
+и chat. Первые invoke возвращают operation view; chat ждёт terminal через get,
+принимает ChatInput без owner/connection/inbox и необязательный live callback.
+Client подписывается на уникальный private inbox и завершает flush **до**
+единственного invoke. До 4 одновременных chat ожиданий, без очереди. Reply и events
+проверяются схемами владельца и owner/operation ID; stream seq идёт от 1.
+Gap, malformed event или callback error отключают live callback. Потеря invoke
+reply пытается get того же ID. Каждые 100мс читается get до terminal, максимум
+95с; завершение не зависит от completed event. Потеря всего NATS соединения
+даёт TRANSPORT_UNAVAILABLE/unknown: caller создаёт соединение/клиент и вызывает
+get прежнего ID. Ни одного повторного invoke или model retry в recovery нет.
+Client ACL: publish только нужные brai.providers.v1.invoke.* и operations.get/cancel;
+subscribe на собственные request-reply и stream inbox. stream inboxPrefix должен
+совпадать с PROVIDERS_INBOX_PREFIX runtime; право subscribe ограничивают
+собственным connectionId. HTTP не требует новых NATS subjects или ACL.
+
+Signal прекращает клиентское ожидание, но не compute; после отправки это
+RESULT_PENDING/unknown с recovery get. До отправки abort даёт CANCELLED/not_sent.
+Known service errors передаются как safe Failure, неизвестные replies/body
+не попадают в сообщение ошибки. Неограниченного накопления events нет:
+callback синхронный, caller отвечает за свой bounded downstream.
+Полные tools/continuation берутся из сохранённого ChatResult; инструменты
+исполняет caller. Пример:
+
+```ts
+import {createProvidersClient, type ChatInput} from '@brai/providers';
+const client = createProvidersClient(nc, {ownerId, connectionId});
+const completed = await client.chat(input satisfies ChatInput, event => consume(event));
+// После разрыва: await clientWithNewConnection.get(input.operationId).
+```
+
+Ограниченный HTTP POST JSON/SSE/function tools и owner-scoped GET recovery
+описаны в [матрице HTTP](HTTP.md). Это optional listener той же TS-программы и
+того же createOperations/PG; в нём нет обхода к LiteLLM. Runtime credentials
+приходят только через защищённый env_file. Существующие потребители не переключены.
+
+Приёмка task6: actual изолированные NATS/PG и controlled HTTP SSE upstream;
+встроенный fetch Node24.21.0/Undici7.29.1. Оба входа дали одинаковые text/tool IDs,
+caller вернул оба tool result и получил одинаковый следующий ход с сохранённым
+opaque provider state. Проверены auth/owner spoof, malformed JSON/SSE, unknown
+fields, mismatched tool results, gap, lost reply, NATS/HTTP disconnect, durable
+GET и точный replay без повторного compute. Upstream synthetic; новой проверки
+платной модели нет. Принятая внешняя chat-проверка задачи3 не повторялась.

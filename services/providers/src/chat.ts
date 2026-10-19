@@ -15,6 +15,7 @@ export type StreamEvent=({type:"started"}|ChatPart|{type:"completed"}|{type:"err
 export type EventSink=(event:StreamEvent)=>boolean;
 export type Usage={inputTokens:number;outputTokens:number}|null;
 export type ChatCompletion={actualModel:string;text:string;toolCalls:ToolCall[];finishReason:string;usage:Usage;message:Message};
+export type ChatResult={provider:string;requestedModel:string;actualModel:string;connectionId:string;text:string;toolCalls:ToolCall[];finishReason:string;usage:Usage;partial:false;streamDelivery:"interrupted"|"unconfirmed";continuation:{operationId:string;state:string}};
 export type ChatPort=(request:ChatRequest,messages:Message[],signal:AbortSignal,emit:(event:ChatPart)=>void)=>Promise<ChatCompletion>;
 const fail=()=>new Failure("UPSTREAM_PROTOCOL","unknown");
 const bytes=(s:string)=>Buffer.byteLength(s);
@@ -149,8 +150,8 @@ export async function chatMessages(store:OperationStore,input:ChatRequest,now:nu
 }
 
 /** Строит полный durable итог; opaque state не принимается от caller, только через ссылку operationId. */
-export function chatResult(input:ChatRequest,messages:Message[],result:ChatCompletion,deliveryInterrupted:boolean):Json {
+export function chatResult(input:ChatRequest,messages:Message[],result:ChatCompletion,deliveryInterrupted:boolean):ChatResult {
   if(result.actualModel!==input.model)throw fail();
   const state=JSON.stringify([...messages,result.message]);if(bytes(state)>CHAT_LIMITS.stateBytes)throw fail();
-  return {provider:input.provider,requestedModel:input.model,actualModel:result.actualModel,connectionId:input.connectionId,text:result.text,toolCalls:result.toolCalls as unknown as Json,finishReason:result.finishReason,usage:result.usage,partial:false,streamDelivery:deliveryInterrupted?"interrupted":"unconfirmed",continuation:{operationId:input.operationId,state:Buffer.from(state).toString("base64url")}};
+  return {provider:input.provider,requestedModel:input.model,actualModel:result.actualModel,connectionId:input.connectionId,text:result.text,toolCalls:result.toolCalls,finishReason:result.finishReason,usage:result.usage,partial:false,streamDelivery:deliveryInterrupted?"interrupted":"unconfirmed",continuation:{operationId:input.operationId,state:Buffer.from(state).toString("base64url")}};
 }

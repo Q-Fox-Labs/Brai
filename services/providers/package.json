@@ -23,5 +23,12 @@
   },
   "engines": {
     "node": ">=24"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./schemas/v1.schema.json": "./schemas/v1.schema.json"
   }
 }
