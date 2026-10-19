@@ -2,7 +2,7 @@
 // ABOUTME: Использует только синтетические записи и не загружает fixture или историю.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fitView, initialPositions, projectMoves, readLayout, resourceMoveLinkAnchors, resourceMoveLinks, sequenceMoves, sharedMoveLinkAnchors, statusPresentation, wrapResourceLabel, type BoardData, type Element, type Move, type Resource } from "../app/elements/model.ts";
+import { fitView, initialPositions, projectMoves, readLayout, resourceMoveLinkAnchors, resourceMoveLinks, sequenceMoves, sharedMoveLinkAnchors, taskResourceLinks, statusPresentation, wrapResourceLabel, type BoardData, type Element, type Move, type Resource } from "../app/elements/model.ts";
 import { presentBoard } from "../app/elements/presentation.ts";
 
 const element = (id: string, parentId: string | null): Element => ({ id, kind: parentId ? "task" : "goal", parentId, status: "active", revision: "r1", title: id, description: "", input: [], output: [] });
@@ -160,4 +160,24 @@ test("child projection brackets the complete independent rework chain", () => {
  const rows = projectMoves([accept, ...own.toReversed(), start, parent], "task");
  assert.deepEqual(rows.map(row => row.move.id), ["start", "confirm", "work", "review", "rework", "final", "accept"]);
  assert.deepEqual(rows.map(row => row.order), [1, 2, 3, 4, 5, 6, 7]);
+});
+
+
+test("task transfers show only proven accepted outputs into sibling start projections", () => {
+ const goal=element("root",null), tasks=[element("one",goal.id),element("two",goal.id),element("three",goal.id)];
+ tasks[0].output=["first"];tasks[1].input=["first"];tasks[1].output=["second"];tasks[2].input=["second"];
+ const accept1={...move("accept-one",goal.id,tasks[0].id,null,"accept"),attemptId:"a1",output:["first"]};
+ const accept2={...move("accept-two",goal.id,tasks[1].id,null,"accept"),attemptId:"a2",output:["second"]};
+ const start2={...move("start-two",goal.id,tasks[1].id,null,"start"),attemptId:"s2",input:["first"]};
+ const start3={...move("start-three",goal.id,tasks[2].id,null,"start"),attemptId:"s3",input:["second"]};
+ const work={...move("internal",tasks[1].id),input:["first"]}, final={...move("final",goal.id),input:["first","second"]};
+ const data:BoardData={elements:[goal,...tasks],moves:[accept1,accept2,start2,start3,work,final],resources:[{id:"first",title:"Принятый итог",content:"",attemptId:"a1"},{id:"second",title:"Следующий итог",content:"",attemptId:"a2"}],attempts:[{id:"a1",moveId:accept1.id,status:"succeeded"},{id:"a2",moveId:accept2.id,status:"succeeded"},{id:"s2",moveId:start2.id,status:"succeeded",result:{claim:{target_input_resource_ids:["first"]}}},{id:"s3",moveId:start3.id,status:"succeeded",result:{claim:{target_input_resource_ids:["second"]}}}]};
+ const before=JSON.stringify(data);
+ assert.deepEqual(taskResourceLinks(data).map(l=>[l.resourceId,l.producerId,l.consumerId,l.fromElementId,l.toElementId]),[["first","accept-one","start-two","one","two"],["second","accept-two","start-three","two","three"]]);
+ assert.equal(JSON.stringify(data),before);
+ assert.equal(taskResourceLinks({...data,attempts:[]}).length,0);
+ assert.equal(taskResourceLinks({...data,elements:[goal,...tasks.map(task=>({...task,input:[]}))]}).length,0);
+ assert.equal(taskResourceLinks({...data,elements:[goal,...tasks.map(task=>({...task,output:[]}))]}).length,0);
+ assert.equal(taskResourceLinks({...data,resources:data.resources.map(r=>({...r,attemptId:"unrelated"}))}).length,0);
+ assert.equal(taskResourceLinks({...data,attempts:data.attempts!.map(a=>a.id.startsWith("s")?{...a,result:{claim:{target_input_resource_ids:[]}}}:a)}).length,0);
 });

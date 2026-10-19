@@ -10,6 +10,7 @@
 .elements-links { position: absolute; z-index: 1; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
 .elements-link.identity > path { fill: none; stroke: #87948f; stroke-width: 1.5; }
 .elements-link.identity > circle { fill: #87948f; }
+.elements-link.resource > path { fill: none; stroke: #f1c56e; stroke-width: 2.5; pointer-events: stroke; }
 .elements-link.identity > path.is-highlighted { stroke: #f1c56e; stroke-width: 3; }
 .elements-card { --state-color: #b1bece; --state-fill: #202b3b; --state-card: #131a24; position: absolute; display: flex; flex-direction: column; border: 1px solid var(--state-color); border-left-width: 5px; border-radius: 8px; background: var(--state-card); color: #e7eee9; box-shadow: 0 7px 24px #0002; cursor: default; }
 .elements-card[data-state="active"], .elements-move[data-state="active"], .elements-detail[data-state="active"] { --state-color: #ffd078; --state-card: #211a0e; --state-fill: #443113; }
@@ -34,12 +35,8 @@
 .elements-move-number { flex: none; width: 22px; color: #aebdb5; text-align: center; font-size: 13px; font-weight: 650; }
 .elements-move-actor { display: grid; flex: none; place-items: center; width: 36px; height: 36px; background: transparent; color: #b4e1f2; }
 .elements-move-actor[data-role="human"] { border-radius: 50%; background: #963642; color: #fff0f0; }
-.elements-move-body { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.elements-move-body { flex: 1; min-width: 0; }
 .elements-move-body > span { overflow-wrap: anywhere; }
-.elements-move-body small { color: #adc0b7; font-size: 12px; }
-.elements-move-body small span + span { margin-left: 8px; }
-.elements-move-kind { display: inline-block; padding: 2px 7px; border-radius: 4px; background: #1b3c4a; color: #c8edf8; font-weight: 700; }
-.elements-move[data-kind="action"] .elements-move-kind { border-radius: 999px; background: #3d3153; color: #eadcff; }
 .elements-move-status { display: flex; flex: none; flex-direction: column; align-items: center; gap: 4px; width: 82px; color: var(--state-color); font-size: 11px; font-weight: 650; text-align: center; }
 .elements-related-link { display: block; margin: 5px 0 0 43px; padding: 0; border: 0; background: transparent; color: #c2d0ff; font-size: 12px; text-align: left; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .elements-related-link:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }

@@ -195,6 +195,24 @@ export function resourceMoveLinks(moves: Move[], resources: Resource[], attempts
  return links;
 }
 
+/** Показывает только реальный принятый итог между постановками соседних Задач. */
+export function taskResourceLinks(data: BoardData): ResourceMoveLink[] {
+ const elements = new Map(data.elements.map(element => [element.id, element]));
+ const moves = new Map(data.moves.map(move => [move.id, move]));
+ const resources = new Map(data.resources.map(resource => [resource.id, resource]));
+ const attempts = new Map((data.attempts ?? []).map(attempt => [attempt.id, attempt]));
+ return resourceMoveLinks(data.moves, data.resources, data.attempts).filter(link => {
+  const from = elements.get(link.fromElementId), to = elements.get(link.toElementId);
+  const producer = moves.get(link.producerId)!, consumer = moves.get(link.consumerId)!;
+  const resource = resources.get(link.resourceId)!;
+  return from?.kind === "task" && to?.kind === "task" && Boolean(from.parentId) && from.parentId === to.parentId
+   && producer.kind === "operation" && producer.purpose === "accept" && producer.ownerId === from.parentId && producer.targetId === from.id
+   && consumer.kind === "operation" && consumer.purpose === "start" && consumer.ownerId === to.parentId && consumer.targetId === to.id
+   && from.output.includes(resource.id) && to.input.includes(resource.id)
+   && Boolean(resource.attemptId) && attempts.get(resource.attemptId!)?.moveId === producer.id;
+ });
+}
+
 /** Wraps a resource name to a bounded number of readable SVG lines. */
 export function wrapResourceLabel(value: string, width: number, maxLines = 3): string[] {
  const limit = Math.max(1, Math.floor(width / 7));
