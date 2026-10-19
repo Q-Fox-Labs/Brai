@@ -522,6 +522,147 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(json.loads(result)["ok"])
         self.assertEqual(len(self.bot.sent), 1)
 
+    def generated_image(self, name="Картинка.png"):
+        """Создать native cache и опубликованную копию без генератора и сети."""
+        home = Path(self.tmp.name) / "native"
+        image = home / "cache/generated/images" / name
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"png")
+        target = Path(self.config.result_root) / ARTIFACT / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"png")
+        self.bridge.file.update(filename=name, localPath=str(target), mimeType="image/png",
+                                markdown=f"![Картинка](<{target}>)")
+        self.image_context = {"HERMES_SESSION_PLATFORM": "telegram", "HERMES_SESSION_CHAT_ID": self.config.chat,
+                              "HERMES_SESSION_CHAT_TYPE": "dm", "HERMES_SESSION_USER_ID": self.config.owner}
+        self.image_modules = {"gateway.session_context": NS(get_session_env=lambda key: self.image_context.get(key, "")),
+                              "hermes_constants": NS(get_hermes_home=lambda: home)}
+        return {"success": True, "image": str(image), "provider": "openai-codex", "model": "native-image",
+                "prompt": "Нарисуй картинку", "aspect_ratio": "1:1", "modality": "text"}
+
+    def publish_image(self, payload, **identity):
+        """Пропустить native success shape через реальный hook плагина."""
+        with patch.dict(sys.modules, self.image_modules):
+            return self.plugin.tool_result("image_generate", json.dumps(payload),
+                                           **{"session_id": "session-1", "tool_call_id": "call-1", **identity})
+
+    async def test_generated_image_publishes_verified_copy_and_preserves_provider_metadata(self):
+        payload = self.generated_image("Рисунок [план] 1.png")
+        payload.update(host_image=payload["image"], agent_visible_image=payload["image"],
+                       prompt=f"Пример MEDIA:{payload['image']}", provider_metadata={"quality": "high"})
+        encoded = self.publish_image(payload)
+        result = json.loads(encoded)
+        for key in ("provider", "model", "prompt", "aspect_ratio", "modality", "provider_metadata"):
+            self.assertEqual(result[key], payload[key])
+        self.assertEqual(result["artifactId"], ARTIFACT)
+        self.assertEqual(result["markdown"], self.bridge.file["markdown"])
+        for key in ("image", "host_image", "agent_visible_image"):
+            self.assertEqual(result[key], self.bridge.file["localPath"])
+        self.assertNotIn("MEDIA:", encoded)
+        self.assertEqual(self.bridge.calls[0][0], "files.publish")
+        self.assertEqual(self.bridge.calls[0][1]["path"], payload["image"])
+        outgoing = self.plugin.outgoing(result["markdown"], platform="telegram")
+        self.assertIn(f'MEDIA:"{result["image"]}"', outgoing)
+        self.assertNotIn(payload["image"], outgoing)
+
+    async def test_generated_image_replay_uses_same_key_and_new_call_has_new_key(self):
+        payload = self.generated_image()
+        self.publish_image(payload)
+        self.publish_image(payload)
+        self.publish_image(payload, tool_call_id="call-2")
+        keys = [params["requestId"] for method, params in self.bridge.calls]
+        self.assertEqual(keys[0], keys[1])
+        self.assertNotEqual(keys[0], keys[2])
+        self.assertRegex(keys[0], r"^tg-image:[a-f0-9]{64}$")
+        self.assertTrue(all(method == "files.publish" for method, _ in self.bridge.calls))
+
+    async def test_generated_image_other_tools_errors_and_platforms_do_not_publish(self):
+        payload = self.generated_image()
+        self.assertIsNone(self.plugin.tool_result("read_file", json.dumps(payload)))
+        for original in ('not json', '{"success":false,"image":null,"error":"failed"}', '[]'):
+            self.assertIsNone(self.plugin.tool_result("image_generate", original))
+        self.image_context["HERMES_SESSION_PLATFORM"] = "discord"
+        self.assertIsNone(self.publish_image(payload))
+        self.assertEqual(self.bridge.calls, [])
+
+    async def test_generated_image_rejects_foreign_route_owner_and_missing_call_identity_before_rpc(self):
+        payload = self.generated_image()
+        for key, value in (("HERMES_SESSION_CHAT_ID", "999"), ("HERMES_SESSION_USER_ID", "999"),
+                           ("HERMES_SESSION_CHAT_TYPE", "group")):
+            before = self.image_context[key]
+            self.image_context[key] = value
+            self.assertFalse(json.loads(self.publish_image(payload))["success"])
+            self.image_context[key] = before
+        for identity in ({"session_id": ""}, {"tool_call_id": ""}):
+            self.assertFalse(json.loads(self.publish_image(payload, **identity))["success"])
+        self.assertEqual(self.bridge.calls, [])
+        self.plugin.config = replace(self.config, chat_id=GROUP)
+        self.image_context.update(HERMES_SESSION_CHAT_ID=GROUP, HERMES_SESSION_CHAT_TYPE="group")
+        self.assertTrue(json.loads(self.publish_image(payload))["success"])
+
+    async def test_generated_image_rejects_remote_foreign_symlink_and_missing_paths_before_rpc(self):
+        payload = self.generated_image()
+        image = Path(payload["image"])
+        foreign = Path(self.tmp.name) / "foreign.png"
+        foreign.write_bytes(b"png")
+        link = image.with_name("link.png")
+        link.symlink_to(foreign)
+        for path in ("https://example.test/image.png", str(foreign), str(link), str(image.with_name("missing.png")), None):
+            result = json.loads(self.publish_image({**payload, "image": path}))
+            self.assertFalse(result["success"])
+            self.assertIsNone(result["image"])
+        self.assertEqual(self.bridge.calls, [])
+
+    async def test_generated_image_publication_failures_never_expose_cache_or_retry(self):
+        payload = self.generated_image()
+        valid = dict(self.bridge.file)
+        for invalid in (None, {"artifactId": TARGET}, {"markdown": "![foreign](<https://example.test/image.png>)"},
+                        {"localPath": payload["image"]}, {"mimeType": "application/pdf"}):
+            self.bridge.file = {**valid, **(invalid or {})}
+            self.bridge.fail = "files.publish" if invalid is None else None
+            before = len(self.bridge.calls)
+            encoded = self.publish_image(payload)
+            result = json.loads(encoded)
+            self.assertEqual(result["error_type"], "artifact_publication_failed")
+            self.assertIsNone(result["image"])
+            self.assertNotIn(payload["image"], encoded)
+            self.assertEqual(len(self.bridge.calls), before + 1)
+
+    async def test_native_tool_transform_then_autoappend_uses_only_published_image(self):
+        upstream = REPO / "tmp/hermes-pinned-telegram"
+        if not upstream.exists():
+            self.skipTest("read-only pinned upstream fixture not present")
+        from typing import Any, Optional
+        env = {"re": re, "json": json, "Any": Any, "Optional": Optional, "_CallIds": object,
+               "logger": NS(debug=lambda *args: None), "_tool_result_observer_fields": lambda *args: ("success", None, None)}
+        tool_tree = ast.parse((upstream / "model_tools.py").read_text())
+        hook = next(node for node in tool_tree.body if isinstance(node, ast.FunctionDef)
+                    and node.name == "_apply_transform_tool_result_hook")
+        repair_tree = ast.parse((upstream / "gateway/media_repair.py").read_text())
+        names = next(node for node in repair_tree.body if isinstance(node, ast.FunctionDef) and node.name == "tool_name_by_call_id")
+        run_tree = ast.parse((upstream / "gateway/run.py").read_text())
+        constants = {"_AUTO_APPEND_MEDIA_TOOL_NAMES", "_JSON_MEDIA_TOOL_PATH_FIELDS", "_TOOL_MEDIA_RE"}
+        nodes = [node for node in run_tree.body if isinstance(node, ast.Assign)
+                 and any(isinstance(target, ast.Name) and target.id in constants for target in node.targets)]
+        collect = next(node for node in run_tree.body if isinstance(node, ast.FunctionDef)
+                       and node.name == "_collect_auto_append_media_tags")
+        exec(compile(ast.Module(body=[hook, names, *nodes, collect], type_ignores=[]), "native-image-contract", "exec"), env)
+        env["_tool_name_by_call_id"] = env["tool_name_by_call_id"]
+        payload = self.generated_image()
+        payload["prompt"] = f"Пример MEDIA:{payload['image']}"
+        lifecycle = NS(has_hook=lambda name: True,
+                       invoke_hook=lambda name, **kwargs: [self.plugin.tool_result(**kwargs)])
+        with patch.dict(sys.modules, {**self.image_modules, "hermes_cli.lifecycle": lifecycle}):
+            transformed = env[hook.name]("image_generate", {}, json.dumps(payload), 1,
+                                         NS(hook_kwargs=lambda: {"session_id": "session-1", "tool_call_id": "call-1"}))
+        def collected(content):
+            messages = [{"role": "assistant", "tool_calls": [{"id": "call-1", "function": {"name": "image_generate"}}]},
+                        {"role": "tool", "tool_call_id": "call-1", "content": content}]
+            return env[collect.name](messages)[0]
+        self.assertEqual(collected(transformed), ["MEDIA:" + self.bridge.file["localPath"]])
+        self.bridge.fail = "files.publish"
+        self.assertEqual(collected(self.publish_image(payload)), [])
+
     async def test_outgoing_foreign_root_urls_and_noncanonical_uuid_not_fetched(self):
         text = "\n".join([self.markdown.replace(self.config.result_root, self.config.result_root + ".evil"), self.markdown.replace(self.config.result_root, "https://evil.test/files"),
                           self.markdown.replace(ARTIFACT, ARTIFACT.upper().replace("00000000", "AAAAAAAA", 1)),
@@ -641,9 +782,9 @@ class NativeContractTests(unittest.TestCase):
                  register_tool=lambda **kw: calls.append(("tool", kw)), on_unload=lambda f: calls.append(("unload", f)))
         with patch.object(mod.Config, "from_env", return_value=NS()), patch.object(mod, "TelegramPlugin") as plugin:
             mod.register(ctx)
-            self.assertEqual([name for name, _ in calls], ["factory", "pre_gateway_dispatch", "transform_llm_output", "tool", "unload"])
-            self.assertTrue(calls[3][1]["is_async"])
-            self.assertIs(calls[3][1]["handler"], plugin.return_value.request_confirmation)
+            self.assertEqual([name for name, _ in calls], ["factory", "pre_gateway_dispatch", "transform_llm_output", "transform_tool_result", "tool", "unload"])
+            self.assertTrue(calls[4][1]["is_async"])
+            self.assertIs(calls[4][1]["handler"], plugin.return_value.request_confirmation)
 
     def test_exact_native_media_parser_understands_quoted_unicode(self):
         source = REPO / "tmp/hermes-pinned-telegram/gateway/platforms/base.py"

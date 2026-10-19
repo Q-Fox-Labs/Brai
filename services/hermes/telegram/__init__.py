@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from contextlib import contextmanager
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -383,6 +384,68 @@ class TelegramPlugin:
                 pass
             return {"action": "skip", "reason": "brai-file-publication-failed"}
 
+    def _published_path(self, result, artifact_id, filename):
+        """Проверить publisher DTO и канонический локальный файл перед native delivery."""
+        path = result.get("localPath")
+        if (result.get("artifactId") != artifact_id or not isinstance(path, str)
+                or not isinstance(filename, str) or not filename or Path(filename).name != filename
+                or filename in {".", ".."} or result.get("filename") != filename
+                or path != str(Path(self.config.result_root) / artifact_id / filename)
+                or Path(path).resolve() != Path(path)
+                or type(result.get("sizeBytes")) is not int or not 0 <= result["sizeBytes"] <= 2 * 1024**3
+                or not isinstance(result.get("mimeType"), str)
+                or not re.fullmatch(r"[a-f0-9]{64}", str(result.get("sha256", "")))
+                or not Path(path).is_absolute() or any(ord(c) < 32 for c in path)
+                or any(c in path for c in '\\"`') or "MEDIA:" in path
+                or not stat.S_ISREG(os.stat(path, follow_symlinks=False).st_mode)):
+            raise BridgeError("RPC_MALFORMED")
+        return path
+
+    def tool_result(self, tool_name, result, session_id="", tool_call_id="", **kwargs):
+        """Опубликовать готовую native image_generate картинку до попадания в model context."""
+        if tool_name != "image_generate":
+            return None
+        try:
+            payload = json.loads(result)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict) or payload.get("success") is not True:
+            return None
+        try:
+            from gateway.session_context import get_session_env
+            from hermes_constants import get_hermes_home
+            if get_session_env("HERMES_SESSION_PLATFORM") != "telegram":
+                return None
+            if (not self._route_matches(get_session_env("HERMES_SESSION_CHAT_ID"),
+                                        get_session_env("HERMES_SESSION_CHAT_TYPE"))
+                    or get_session_env("HERMES_SESSION_USER_ID") != self.config.owner
+                    or not all(isinstance(value, str) and value for value in (session_id, tool_call_id))):
+                raise BridgeError("IMAGE_CONTEXT_INVALID")
+            path = Path(payload.get("image", ""))
+            root = Path(get_hermes_home()) / "cache/generated/images"
+            if (not path.is_absolute() or path.parent != root or path.resolve() != path
+                    or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+                    or not stat.S_ISREG(path.lstat().st_mode)):
+                raise BridgeError("IMAGE_PATH_INVALID")
+            identity = json.dumps([self.config.owner, self.config.chat, session_id, tool_call_id],
+                                  ensure_ascii=False, separators=(",", ":"))
+            published = self.bridge.call("files.publish", {
+                "path": str(path), "requestId": "tg-image:" + sha256(identity.encode()).hexdigest()})
+            match = self.descriptor.fullmatch(published.get("markdown", ""))
+            if not match or not published.get("mimeType", "").startswith("image/"):
+                raise BridgeError("RPC_MALFORMED")
+            local_path = self._published_path(published, match["id"], match["name"])
+            payload.update(image=local_path, artifactId=published["artifactId"], markdown=published["markdown"])
+            for alias in ("host_image", "agent_visible_image"):
+                if alias in payload:
+                    payload[alias] = local_path
+            # AIDEV-NOTE: Literal MEDIA в prompt не должен переключать native JSON-image autoappend в regex scan.
+            return json.dumps(payload, ensure_ascii=False).replace("MEDIA:", r"MEDIA\u003a")
+        except Exception:
+            return json.dumps({"success": False, "image": None, "error_type": "artifact_publication_failed",
+                               "error": "Картинка создана, но публикация Brai не подтверждена. Не запускайте генерацию повторно; проверьте Artifacts."},
+                              ensure_ascii=False)
+
     def outgoing(self, response_text, platform=None, **kwargs):
         """Заменять только точные publisher descriptors native MEDIA; не скачивать URL."""
         if _platform(platform) != "telegram":
@@ -401,20 +464,7 @@ class TelegramPlugin:
                     raise BridgeError("ATTACHMENT_LIMIT")
                 result = self.bridge.call("files.fetch", {"artifactId": artifact_id},
                                           timeout=min(RPC_TIMEOUT, deadline - time.monotonic()))
-                path = result.get("localPath")
-                filename = result.get("filename")
-                if (result.get("artifactId") != artifact_id or not isinstance(path, str)
-                        or not isinstance(filename, str) or not filename or Path(filename).name != filename
-                        or filename in {".", ".."} or filename != match["name"]
-                        or path != str(Path(self.config.result_root) / artifact_id / filename)
-                        or Path(path).resolve() != Path(path)
-                        or type(result.get("sizeBytes")) is not int or not 0 <= result["sizeBytes"] <= 2 * 1024**3
-                        or not isinstance(result.get("mimeType"), str)
-                        or not re.fullmatch(r"[a-f0-9]{64}", str(result.get("sha256", "")))
-                        or not Path(path).is_absolute() or any(ord(c) < 32 for c in path)
-                        or any(c in path for c in '\\"`') or "MEDIA:" in path
-                        or not stat.S_ISREG(os.stat(path, follow_symlinks=False).st_mode)):
-                    raise BridgeError("RPC_MALFORMED")
+                path = self._published_path(result, artifact_id, match["name"])
                 # AIDEV-NOTE: Штатный parser принимает quoted paths с пробелами и Unicode.
                 voice = "[[audio_as_voice]]\n" if Path(path).suffix.lower() in {".ogg", ".opus"} else ""
                 return f'\n{voice}MEDIA:"{path}"\n'
@@ -595,6 +645,7 @@ def register(ctx):
     ctx.register_telegram_handler(plugin.factory)
     ctx.register_hook("pre_gateway_dispatch", plugin.incoming)
     ctx.register_hook("transform_llm_output", plugin.outgoing)
+    ctx.register_hook("transform_tool_result", plugin.tool_result)
     ctx.register_tool(name="brai_telegram_request_confirmation", toolset="brai_telegram",
         description="Ask the owner to confirm a human Action in the configured Telegram chat.",
         schema={"name": "brai_telegram_request_confirmation", "description": "Send owner confirmation buttons; never completes an Action.",
