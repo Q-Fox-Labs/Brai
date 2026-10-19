@@ -61,6 +61,15 @@ export function readLayout(raw: string | null, defaults: Record<string, Point>, 
   if (![1, 2].includes(value?.version) || !point(value.view) || !Number.isFinite(value.view.zoom) || value.view.zoom < 0.01 || value.view.zoom > 1.6) return null;
   const positions = { ...defaults };
   for (const id of Object.keys(defaults)) if (point(value.positions?.[id])) positions[id] = value.positions[id];
+  // AIDEV-NOTE: Новые группы не занимают места сохранённых вручную карточек.
+  const savedIds = Object.keys(defaults).filter(id => point(value.positions?.[id]));
+  const addedIds = Object.keys(defaults).filter(id => !savedIds.includes(id));
+  if (savedIds.length && addedIds.length) {
+   const right = Math.max(...savedIds.map(id => positions[id].x + cardWidth));
+   const left = Math.min(...addedIds.map(id => positions[id].x));
+   const shift = Math.max(0, right + cardGap - left);
+   for (const id of addedIds) positions[id] = { ...positions[id], x: positions[id].x + shift };
+  }
   // AIDEV-NOTE: v1 использовала фиксированную высоту. Сохраняем x и сдвигаем только пересечения вниз.
   if (value.version === 1) {
    const placed: string[] = [];

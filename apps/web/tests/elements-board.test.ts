@@ -129,3 +129,12 @@ test("move statuses remain visible independently of executor and move kind", () 
  assert.deepEqual(statusPresentation("completed", "move"), statusPresentation("succeeded", "move"));
  assert.notEqual(statusPresentation("unexpected", "move").tone, "completed");
 });
+
+test("new groups stay clear of saved manual positions when graph ordering changes", () => {
+ const defaults = initialPositions([element("new-root", null), element("new-child", "new-root"), element("saved-root", null)]);
+ const layout = readLayout(JSON.stringify({version:2,positions:{"saved-root":{x:20,y:0}},view:{x:0,y:0,zoom:1}}),defaults);
+ assert.deepEqual(layout?.positions["saved-root"],{x:20,y:0});
+ assert.ok(layout.positions["new-root"].x >= 540);
+ assert.ok(layout.positions["new-child"].x >= 540);
+ assert.equal(layout.positions["new-root"].x-layout.positions["new-child"].x,defaults["new-root"].x-defaults["new-child"].x);
+});
