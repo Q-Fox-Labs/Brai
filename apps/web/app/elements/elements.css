@@ -32,8 +32,8 @@
 .elements-move[data-state="planned"] { --state-color: #b1bece; --state-fill: #202b3b; border-style: dashed; }
 .elements-move:hover, .elements-move:focus-visible { outline: 2px solid var(--state-color); outline-offset: 1px; filter: brightness(1.12); }
 .elements-move-number { flex: none; width: 22px; color: #aebdb5; text-align: center; font-size: 13px; font-weight: 650; }
-.elements-move-actor { display: grid; flex: none; place-items: center; width: 36px; height: 36px; border-radius: 8px; background: #193441; color: #b4e1f2; }
-.elements-move[data-kind="action"] .elements-move-actor { width: 40px; height: 40px; border-radius: 50%; background: #362d48; color: #dfc8ff; }
+.elements-move-actor { display: grid; flex: none; place-items: center; width: 36px; height: 36px; background: transparent; color: #b4e1f2; }
+.elements-move-actor[data-role="human"] { border-radius: 50%; background: #963642; color: #fff0f0; }
 .elements-move-body { display: grid; gap: 4px; flex: 1; min-width: 0; }
 .elements-move-body > span { overflow-wrap: anywhere; }
 .elements-move-body small { color: #adc0b7; font-size: 12px; }
@@ -41,8 +41,8 @@
 .elements-move-kind { display: inline-block; padding: 2px 7px; border-radius: 4px; background: #1b3c4a; color: #c8edf8; font-weight: 700; }
 .elements-move[data-kind="action"] .elements-move-kind { border-radius: 999px; background: #3d3153; color: #eadcff; }
 .elements-move-status { display: flex; flex: none; flex-direction: column; align-items: center; gap: 4px; width: 82px; color: var(--state-color); font-size: 11px; font-weight: 650; text-align: center; }
-.elements-move-target, .elements-related-link { display: block; margin: 5px 0 0 43px; padding: 0; border: 0; background: transparent; color: #c2d0ff; font-size: 12px; text-align: left; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
-.elements-move-target:focus-visible, .elements-related-link:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.elements-related-link { display: block; margin: 5px 0 0 43px; padding: 0; border: 0; background: transparent; color: #c2d0ff; font-size: 12px; text-align: left; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.elements-related-link:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
 .elements-no-moves { margin: 8px 10px; color: #adc0b7; font-size: 13px; }
 .elements-card footer { flex: none; padding: 12px 20px; border-top: 1px solid #ffffff29; font-size: 13px; line-height: 1.5; color: #adc0b7; overflow-wrap: anywhere; }
 .elements-empty { margin: 50px; }

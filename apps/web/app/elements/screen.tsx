@@ -3,7 +3,7 @@
 // ABOUTME: Данные меняются через серверный API; браузер хранит только раскладку.
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Bot, Check, CircleDashed, Grip, Layers, ListOrdered, Maximize, Play, UserRound, X, Ban } from "lucide-react";
+import { Bot, Check, CircleDashed, Grip, Layers, Maximize, Play, UserRound, X, Ban } from "lucide-react";
 import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, projectMoves, readLayout, sequenceMoves, sharedMoveLinkAnchors, statusPresentation, type BoardData, type CardHeights, type Layout, type MoveAnchor, type Point } from "./model";
 import "./elements.css";
 
@@ -14,7 +14,9 @@ function elementLabel(kind: string) {
 }
 function moveKind(kind: string) { return kind === "operation" ? "Операция" : "Действие"; }
 function executorLabel(executor: string) { return executor === "agent" ? "Агент" : executor === "human" || executor === "player" ? "Игрок" : "Исполнитель"; }
-function movePurpose(purpose?: string) { return purpose === "start" ? "Запуск" : purpose === "accept" ? "Приёмка" : ""; }
+function MoveActor({ kind }: { kind: string }) {
+ return <span className="elements-move-actor" data-role={kind === "operation" ? "agent" : "human"} aria-hidden="true">{kind === "operation" ? <Bot size={24} /> : <UserRound size={24} />}</span>;
+}
 function projectionKey(elementId: string, moveId: string) { return `${elementId}:${moveId}`; }
 function statusOptions(kind: "element" | "move") {
  return kind === "element"
@@ -213,8 +215,8 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
      {sharedMoves.map(move => {
       const parent = moveAnchors[projectionKey(move.ownerId, move.id)], child = moveAnchors[projectionKey(move.targetId, move.id)];
       if (!parent || !child) return null;
-      const { start, end, gutterX } = sharedMoveLinkAnchors(parent, child, move.purpose ?? "");
-      const path = `M${start.x},${start.y} C${gutterX},${start.y} ${gutterX},${end.y} ${end.x},${end.y}`;
+      const { start, end, controlStart, controlEnd } = sharedMoveLinkAnchors(parent, child);
+      const path = `M${start.x},${start.y} C${controlStart.x},${controlStart.y} ${controlEnd.x},${controlEnd.y} ${end.x},${end.y}`;
       const label = `Одна общая операция «${readable(move.title) || "Операция"}»`;
       return <g key={move.id} className="elements-link identity" data-move-id={move.id} data-parent-element-id={move.ownerId} data-child-element-id={move.targetId} role="img" aria-label={label}><title>{label}</title><path className={highlightedMoveId === move.id ? "is-highlighted" : ""} d={path} /><circle cx={start.x} cy={start.y} r={3} /><circle cx={end.x} cy={end.y} r={3} /></g>;
      })}
@@ -235,9 +237,8 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
       <div className="elements-moves" aria-label={`Ходы элемента «${readable(element.title)}»`}>
        {moves.map(({ move, order, shared }) => <div key={move.id} className="elements-move-entry" data-linked={highlightedMoveId === move.id || undefined} onPointerEnter={() => shared && setHighlightedMoveId(move.id)} onPointerLeave={() => setHighlightedMoveId(current => current === move.id ? null : current)} onFocusCapture={() => shared && setHighlightedMoveId(move.id)} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setHighlightedMoveId(current => current === move.id ? null : current); }}>
         <button type="button" className="elements-move" data-kind={move.kind} data-state={statusPresentation(move.status, "move").tone} data-move-id={move.id} data-projection-key={projectionKey(element.id, move.id)} onClick={event => { event.stopPropagation(); selectMove(move.id, element.id); }}>
-         <span className="elements-move-number">{order}</span><span className="elements-move-actor" aria-hidden="true">{move.kind === "operation" ? <Bot size={23} /> : <UserRound size={26} />}</span><span className="elements-move-body"><span>{readable(move.title) || "Без названия"}</span><small><span className="elements-move-kind">{moveKind(move.kind)}</span><span>{executorLabel(move.executor)}</span></small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" />
+         <span className="elements-move-number">{order}</span><MoveActor kind={move.kind} /><span className="elements-move-body"><span>{readable(move.title) || "Без названия"}</span><small><span className="elements-move-kind">{moveKind(move.kind)}</span><span>{executorLabel(move.executor)}</span></small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" />
         </button>
-        {shared && move.ownerId === element.id && <button type="button" className="elements-move-target" onClick={() => focusElement(move.targetId)}>{movePurpose(move.purpose)} для: {readable(dataset.elements.find(item => item.id === move.targetId)?.title) || "Задачи"}</button>}
        </div>)}
        {!moves.length && <p className="elements-no-moves">Ходов пока нет.</p>}
       </div>
@@ -249,7 +250,7 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
   <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open) setSelection(null); }}><Dialog.Portal><Dialog.Overlay className="elements-detail-overlay" /><Dialog.Content className="elements-detail" data-kind={selection?.kind} data-detail-id={selected?.id} data-state={selected && selection ? statusPresentation(selected.status, selection.kind).tone : undefined} aria-describedby="elements-detail-description">
    <Dialog.Close className="elements-detail-close" aria-label="Закрыть подробности"><X size={20} /></Dialog.Close>
    <header className="elements-detail-heading">
-    <div className="elements-detail-kind">{selectedElement ? <Layers size={22} aria-hidden="true" /> : <ListOrdered size={22} aria-hidden="true" />}<span>{selectedElement ? `${elementLabel(selectedElement.kind)}` : `${moveKind(selectedMove?.kind ?? "")} · ход ${selectedMoveOrder}`}</span></div>
+    <div className="elements-detail-kind">{selectedElement ? <Layers size={22} aria-hidden="true" /> : <MoveActor kind={selectedMove?.kind ?? "operation"} />}<span>{selectedElement ? `${elementLabel(selectedElement.kind)}` : `${moveKind(selectedMove?.kind ?? "")} · ход ${selectedMoveOrder}`}</span></div>
     <Dialog.Title>{readable(selected?.title) || "Без названия"}</Dialog.Title><Dialog.Description id="elements-detail-description">{selectedElement ? "Подробности элемента" : "Подробности хода"}</Dialog.Description>
     {selected && selection && <StatusLabel status={selected.status} kind={selection.kind} className="elements-detail-summary-status" />}
     {selected && dataset.manualStatusEnabled && selection && <label className="elements-status-control">Изменить статус
@@ -267,7 +268,7 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
     <ResourceDetails ids={selectedElement.input} label="Входящие ресурсы" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
     <ResourceDetails ids={selectedElement.output} label="Итоговые ресурсы" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
     <section className="elements-panel-moves"><h3>Ходы <span>{(projections.get(selectedElement.id) ?? []).length}</span></h3>
-     {(projections.get(selectedElement.id) ?? []).map(({ move, order, shared }) => <div key={move.id} className="elements-move-entry" data-linked={highlightedMoveId === move.id || undefined} onPointerEnter={() => shared && setHighlightedMoveId(move.id)} onPointerLeave={() => setHighlightedMoveId(current => current === move.id ? null : current)} onFocusCapture={() => shared && setHighlightedMoveId(move.id)} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setHighlightedMoveId(current => current === move.id ? null : current); }}><button type="button" className="elements-move" data-kind={move.kind} data-state={statusPresentation(move.status, "move").tone} data-panel-move-id={move.id} onClick={() => selectMove(move.id, selectedElement.id)}><span className="elements-move-number">{order}</span><span className="elements-move-actor" aria-hidden="true">{move.kind === "operation" ? <Bot size={23} /> : <UserRound size={26} />}</span><span className="elements-move-body"><span>{readable(move.title) || "Без названия"}</span><small><span className="elements-move-kind">{moveKind(move.kind)}</span><span>{executorLabel(move.executor)}</span></small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" /></button></div>)}
+     {(projections.get(selectedElement.id) ?? []).map(({ move, order, shared }) => <div key={move.id} className="elements-move-entry" data-linked={highlightedMoveId === move.id || undefined} onPointerEnter={() => shared && setHighlightedMoveId(move.id)} onPointerLeave={() => setHighlightedMoveId(current => current === move.id ? null : current)} onFocusCapture={() => shared && setHighlightedMoveId(move.id)} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setHighlightedMoveId(current => current === move.id ? null : current); }}><button type="button" className="elements-move" data-kind={move.kind} data-state={statusPresentation(move.status, "move").tone} data-panel-move-id={move.id} onClick={() => selectMove(move.id, selectedElement.id)}><span className="elements-move-number">{order}</span><MoveActor kind={move.kind} /><span className="elements-move-body"><span>{readable(move.title) || "Без названия"}</span><small><span className="elements-move-kind">{moveKind(move.kind)}</span><span>{executorLabel(move.executor)}</span></small></span><StatusLabel status={move.status} kind="move" className="elements-move-status" /></button></div>)}
     </section>
    </>}
    {selectedMove && <>

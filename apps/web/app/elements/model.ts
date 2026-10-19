@@ -131,13 +131,26 @@ export function projectMoves(moves: Move[], elementId: string): ProjectedMove[] 
  });
 }
 
-/** Возвращает общие внешние точки строк для связи родителя и дочерней цели. */
-export function sharedMoveLinkAnchors(parent: MoveAnchor, child: MoveAnchor, purpose: string) {
- const side = child.x < parent.x ? "left" : "right";
- const parentPoint = { x: side === "left" ? parent.x : parent.x + parent.width, y: parent.y };
- const childPoint = { x: side === "left" ? child.x : child.x + child.width, y: child.y };
- const gutterX = side === "left" ? Math.min(parent.x, child.x) - 60 : Math.max(parent.x + parent.width, child.x + child.width) + 60;
- return { start: purpose === "start" ? parentPoint : childPoint, end: purpose === "start" ? childPoint : parentPoint, gutterX, side };
+/** Соединяет обращённые стороны строк; при вертикальном расположении обходит их снаружи. */
+export function sharedMoveLinkAnchors(parent: MoveAnchor, child: MoveAnchor) {
+ const parentRight = parent.x + parent.width, childRight = child.x + child.width;
+ if (parentRight <= child.x || childRight <= parent.x) {
+  const childOnRight = parentRight <= child.x;
+  const start = { x: childOnRight ? parentRight : parent.x, y: parent.y };
+  const end = { x: childOnRight ? child.x : childRight, y: child.y };
+  const direction = childOnRight ? 1 : -1;
+  const bend = Math.min(80, Math.abs(end.x - start.x) / 2);
+  return { start, end, controlStart: { x: start.x + direction * bend, y: start.y }, controlEnd: { x: end.x - direction * bend, y: end.y }, side: "gap" };
+ }
+ // AIDEV-NOTE: При общем диапазоне X обращённые порты вели бы сквозь карточки.
+ const left = Math.min(parent.x, child.x), right = Math.max(parentRight, childRight);
+ const leftDistance = parent.x + child.x - 2 * left;
+ const rightDistance = 2 * right - parentRight - childRight;
+ const useLeft = leftDistance < rightDistance || (leftDistance === rightDistance && child.x + child.width / 2 < parent.x + parent.width / 2);
+ const start = { x: useLeft ? parent.x : parentRight, y: parent.y };
+ const end = { x: useLeft ? child.x : childRight, y: child.y };
+ const gutter = useLeft ? left - 48 : right + 48;
+ return { start, end, controlStart: { x: gutter, y: start.y }, controlEnd: { x: gutter, y: end.y }, side: useLeft ? "left" : "right" };
 }
 
 /** Находит передачу существующего ресурса между Ходами разных целей. */

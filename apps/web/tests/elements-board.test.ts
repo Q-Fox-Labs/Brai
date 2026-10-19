@@ -52,14 +52,26 @@ test("predecessor order includes intervening moves omitted from the current proj
  assert.deepEqual(sequenceMoves(shuffled).map(row => row.id), ["first", "start", "child", "accept", "later"]);
 });
 
-test("shared move arrows use one outer gutter and keep start/accept direction", () => {
- const parent = { x: 260, y: 100, width: 420 }, childLeft = { x: 0, y: 420, width: 420 }, childRight = { x: 720, y: 420, width: 420 };
- const leftStart = sharedMoveLinkAnchors(parent, childLeft, "start");
- assert.deepEqual(leftStart, { start: { x: 260, y: 100 }, end: { x: 0, y: 420 }, gutterX: -60, side: "left" });
- assert.deepEqual(sharedMoveLinkAnchors(parent, childLeft, "accept"), { start: { x: 0, y: 420 }, end: { x: 260, y: 100 }, gutterX: -60, side: "left" });
- const rightStart = sharedMoveLinkAnchors(parent, childRight, "start");
- assert.deepEqual(rightStart, { start: { x: 680, y: 100 }, end: { x: 1140, y: 420 }, gutterX: 1200, side: "right" });
- assert.deepEqual(sharedMoveLinkAnchors(parent, childRight, "accept"), { start: { x: 1140, y: 420 }, end: { x: 680, y: 100 }, gutterX: 1200, side: "right" });
+test("shared identity curves face across the gap and switch ports when cards cross", () => {
+ const parent = { x: 500, y: 100, width: 400 };
+ const left = sharedMoveLinkAnchors(parent, { x: 0, y: 500, width: 400 });
+ assert.deepEqual(left, { start: { x: 500, y: 100 }, end: { x: 400, y: 500 }, controlStart: { x: 450, y: 100 }, controlEnd: { x: 450, y: 500 }, side: "gap" });
+ const right = sharedMoveLinkAnchors(parent, { x: 1000, y: 500, width: 400 });
+ assert.deepEqual(right, { start: { x: 900, y: 100 }, end: { x: 1000, y: 500 }, controlStart: { x: 950, y: 100 }, controlEnd: { x: 950, y: 500 }, side: "gap" });
+ for(const route of [left,right]) for(let i=0;i<=100;i++) {
+  const t=i/100,u=1-t,x=u**3*route.start.x+3*u*u*t*route.controlStart.x+3*u*t*t*route.controlEnd.x+t**3*route.end.x;
+  assert.ok(x>=Math.min(route.start.x,route.end.x)&&x<=Math.max(route.start.x,route.end.x));
+ }
+});
+
+test("vertically aligned and partially overlapping X ranges use an outside corridor", () => {
+ const parent={x:500,y:100,width:400};
+ for(const child of [{x:500,y:600,width:400},{x:650,y:600,width:400},{x:350,y:600,width:400}]) {
+  const route=sharedMoveLinkAnchors(parent,child);
+  if(route.side==='right') {assert.equal(route.start.x,900);assert.equal(route.end.x,child.x+child.width);assert.ok(route.controlStart.x>Math.max(900,child.x+child.width));}
+  else {assert.equal(route.side,'left');assert.equal(route.start.x,500);assert.equal(route.end.x,child.x);assert.ok(route.controlStart.x<Math.min(500,child.x));}
+  assert.equal(route.controlStart.x,route.controlEnd.x);
+ }
 });
 
 test("resource links use real inputs, target transfer for start, and explicit planned requirements", () => {
