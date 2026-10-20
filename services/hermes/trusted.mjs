@@ -20,6 +20,7 @@ export function createTrustedDispatcher(runtime) {
     'actions.prepare': args => human.prepare(args),
     'actions.complete': args => human.complete(args),
     'actions.cancel': args => human.cancel(args),
+    'actions.feedback': args => human.feedback(args),
   };
   async function dispatch(request) {
     const object = request && typeof request === 'object' && !Array.isArray(request);

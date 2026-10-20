@@ -26,7 +26,7 @@ export const toolInputs: Record<ToolName, Tool["inputSchema"]> = {
   elements_element_revise: { type: "object", additionalProperties: false, properties: { fields: { type: "object" }, revision_id: uuid, element_id: uuid, title: { type: "string" }, description: { type: "string" }, result_spec: { type: "object" } }, required: ["element_id", "revision_id", "title"] },
   elements_move_create: moveCreateInput,
   elements_move_link: { type: "object", additionalProperties: false, properties: { after_move_id: uuid, before_move_id: uuid, moves: { type: "array", minItems: 2, maxItems: 2, items: { type: "object" } } }, required: ["after_move_id", "before_move_id", "moves"] },
-  elements_element_activate: { type: "object", additionalProperties: false, properties: { element_id: uuid, cancel: { type: "boolean" } }, required: ["element_id"] },
+  elements_element_activate: { type: "object", additionalProperties: false, properties: { element_id: uuid, cancel: { type: "boolean" }, revision_id: uuid, feedback: { type: "object", additionalProperties: false, required: ["id","content","source"], properties: { id: uuid, content: { type: "string", minLength: 1, maxLength: 16000 }, source: { type: "object" } } } }, required: ["element_id"] },
   elements_graph_get: { type: "object", additionalProperties: false, properties: { root_id: uuid, depth: { type: "integer", minimum: 0, maximum: 20 } } },
   elements_timeline_get: { type: "object", additionalProperties: false, properties: { element_id: uuid, limit: { type: "integer", minimum: 1, maximum: 100 }, cursor: { type: "string" } } },
   elements_moves_available: { type: "object", additionalProperties: false, properties: { element_id: uuid, limit: { type: "integer", minimum: 1, maximum: 100 } } },

@@ -344,3 +344,28 @@ test('CLI entry points remain importable with nonexistent argv path and no confi
   assert.equal(result.stdout, '');
   assert.equal(result.stderr, '');
 });
+
+
+test('trusted text feedback writes actual remarks and delegates cancellation with revision CAS', async () => {
+  const { ports, graph, calls } = fixture();
+  graph.moves[0].fields = { planning: { decision: 'confirm', revision_id: ids[1], output_contracts: [{ key: ids[6] }] } };
+  ports.mcp = async (endpoint, name, args) => {
+    calls.push({ endpoint, name, args });
+    if (name === 'elements_graph_get') return graph;
+    if (name === 'elements_element_activate') return { id: ids[0], status: 'cancelled', element_ids: [ids[0]] };
+    return { attempt: { id: ids[3], status: 'succeeded' } };
+  };
+  const human = createHumanActions(await createBraiTools(config, ports));
+  const feedback = { id: ids[7], content: 'Сократи план до нужного результата.', source: { platform: 'telegram', message_id: '42' } };
+  const args = { elementId: ids[0], revisionId: ids[1], moveId: ids[2], feedback };
+  await human.feedback({ ...args, decision: 'changes' });
+  const decision = calls.at(-1).args.result.resources[0];
+  assert.equal(decision.content, feedback.content);
+  assert.deepEqual(decision.metadata.source, feedback.source);
+  assert.equal(decision.metadata.outcome, 'changes');
+  await human.feedback({ ...args, decision: 'cancelled' });
+  assert.equal(calls.at(-1).name, 'elements_element_activate');
+  assert.deepEqual(calls.at(-1).args, { element_id: ids[0], revision_id: ids[1], cancel: true, feedback });
+  await assert.rejects(human.feedback({ ...args, decision: 'approved' }), /INVALID_ARGUMENT/);
+  await assert.rejects(human.feedback({ ...args, elementId: ids[5], decision: 'cancelled' }), /NOT_FOUND/);
+});

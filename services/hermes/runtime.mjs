@@ -145,6 +145,7 @@ export async function createBraiTools(config, ports) {
         const upstream = remote.get(name);
         if (upstream) {
           if (!upstream.validate(args)) throw fault('INVALID_ARGUMENT');
+          if (name === 'elements_element_activate' && args.feedback !== undefined) throw fault('FORBIDDEN');
           if (name === 'elements_move_claim' && args.executor_kind !== 'agent') throw fault('FORBIDDEN');
           if (['elements_move_complete', 'elements_move_fail'].includes(name)) {
             const value = await graph(signal), attempt = value.attempts.find(attempt => attempt.id === args.attempt_id);

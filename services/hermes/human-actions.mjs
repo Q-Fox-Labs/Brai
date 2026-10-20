@@ -86,7 +86,7 @@ export function createHumanActions(runtime) {
     },
     /** Завершает только сохранённую human attempt; planning revision дополнительно проверяет owner в транзакции. */
     async complete(args, signal) {
-      if (!exact(args, ['moveId', 'attemptId', 'revisionId', 'stage', 'decision', 'comment']) || !uuid(args.attemptId) || !uuid(args.revisionId) ||
+      if (!exact(args, ['moveId', 'attemptId', 'revisionId', 'stage', 'decision', 'comment', 'source']) || !uuid(args.attemptId) || !uuid(args.revisionId) ||
         !['planning', 'final', 'review'].includes(args.stage) || !['approved', 'success', 'changes', 'cancelled'].includes(args.decision) ||
         args.comment !== undefined && (typeof args.comment !== 'string' || args.comment.length > 16_000)) throw fault('INVALID_ARGUMENT');
       const { action } = await lookup(args, signal);
@@ -95,12 +95,29 @@ export function createHumanActions(runtime) {
       if (action.confirmationStage && ![action.confirmationStage === 'final' ? 'success' : 'approved', 'changes'].includes(args.decision)) throw fault('INVALID_ARGUMENT');
       const stage = args.decision === 'changes' ? 'review' : action.confirmationStage ?? args.stage;
       const result = { resources: [{ title: action.title, content: args.comment?.trim() || args.decision,
-        metadata: { element_id: action.targetId, revision_id: args.revisionId, stage, outcome: args.decision } }] };
+        metadata: { element_id: action.targetId, revision_id: args.revisionId, stage, outcome: args.decision, ...(args.source ? { source: args.source } : {}) } }] };
       try { return await runtime.elementsCall('elements_move_complete', { attempt_id: args.attemptId, result }, signal); }
       catch (error) {
         if (uncertain(error)) throw fault('OUTCOME_UNKNOWN');
         throw error;
       }
+    },
+    /** Только текст реального входящего сообщения из доверенного Telegram плагина. */
+    async feedback(args, signal) {
+      if (!exact(args, ['elementId', 'revisionId', 'moveId', 'decision', 'feedback']) || !uuid(args.elementId) || !uuid(args.revisionId) ||
+          !['changes', 'cancelled'].includes(args.decision) || !uuid(args.feedback?.id) || typeof args.feedback?.content !== 'string' ||
+          !args.feedback.content.trim() || args.feedback.content.length > 16_000 || !args.feedback.source || typeof args.feedback.source !== 'object') throw fault('INVALID_ARGUMENT');
+      const graph = await runtime.graph(signal), target = graph.elements.find(element => element.id === args.elementId);
+      if (!target) throw fault('NOT_FOUND');
+      if (args.decision === 'cancelled') {
+        try { return await runtime.elementsCall('elements_element_activate', { element_id: target.id, revision_id: args.revisionId, cancel: true, feedback: args.feedback }, signal); }
+        catch (error) { if (uncertain(error)) throw fault('OUTCOME_UNKNOWN'); throw error; }
+      }
+      if (target.revision !== args.revisionId || ['completed', 'cancelled'].includes(target.status)) throw fault('STALE_ACTION');
+      const { action } = await lookup({ moveId: args.moveId }, signal);
+      if (action.targetId !== target.id || !['planning', 'final'].includes(action.confirmationStage)) throw fault('HUMAN_OUTPUT_REQUIRED');
+      return this.complete({ moveId: action.moveId, revisionId: args.revisionId, attemptId: action.attemptId,
+        stage: 'review', decision: 'changes', comment: args.feedback.content, source: args.feedback.source }, signal);
     },
     /** Освобождает истёкшую или отменённую human attempt, сохраняя технический итог и planned Move. */
     async cancel(args, signal) {

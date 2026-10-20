@@ -171,7 +171,7 @@ export function createGameHandlers(pool:Pool, legacy:ElementsStore, verifyArtifa
      if(state&&state.snapshot!==snapshot)return fail('CONFLICT');
      if(!state){
       if(a.result?.claim?.revision_id!==revision.id)return fail('CONFLICT');
-      const finish=(await c.query("SELECT * FROM game_core.moves WHERE owner_id=$1 AND target_element_id=$2 AND purpose IN ('accept','finish')",[owner,el.id])).rows;
+      const finish=(await c.query("SELECT * FROM game_core.moves WHERE owner_id=$1 AND target_element_id=$2 AND purpose IN ('accept','finish') AND status!='cancelled'",[owner,el.id])).rows;
       if(finish.length>1)return fail('CONFLICT');
       const context=m.purpose==='start'?selected.filter(r=>assigned.includes(r.id)):selected;
       state={snapshot,assigned_digest:digest(assigned),files:planningFiles(el,revision,m,context,finish[0]??null),source_revision:revision.id};
@@ -202,7 +202,7 @@ export function createGameHandlers(pool:Pool, legacy:ElementsStore, verifyArtifa
         const r=contracts.find((x:Value)=>x.id===key);if(!r?.producer)return fail('INVALID_ARGUMENT');return {move_id:r.producer,output_key:key,revision_id:rid};}),
        decisions:record.requires_confirmation?[{element_id:el.id,stage:'planning',outcome:'approved'}]:[]});
       const existingEnd=(await c.query('SELECT * FROM game_core.moves WHERE owner_id=$1 AND id=$2',[owner,stage.finish.id])).rows[0];
-      if(existingEnd){if(existingEnd.target_element_id!==el.id||existingEnd.element_id!==m.element_id||existingEnd.status!=='planned')return fail('CONFLICT');await c.query('UPDATE game_core.moves SET previous_move_id=NULL WHERE id=$1',[existingEnd.id]);}
+      if(existingEnd){if(existingEnd.target_element_id!==el.id||existingEnd.element_id!==stage.finish.owner||existingEnd.status!=='planned')return fail('CONFLICT');await c.query('UPDATE game_core.moves SET previous_move_id=NULL WHERE id=$1',[existingEnd.id]);}
       await c.query('INSERT INTO game_core.element_revisions(id,owner_id,element_id,revision,title,description,fields,created_by_attempt_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[rid,owner,el.id,revision.revision+1,stage.element.fields.title,stage.element.fields.summary,{...stage.element.fields,planning:{baseline_id:baseline.id,source_revision:revision.id,expected_resources:contracts,chain:stage.chain,notes:v.review.notes??[],criteria:state.baseline.requirements}},a.id]);
       await c.query('UPDATE game_core.elements SET current_revision_id=$1 WHERE owner_id=$2 AND id=$3',[rid,owner,el.id]);
       const records=[...stage.records];if(!records.some((r:Value)=>r.id===stage.finish.id))records.push(stage.finish);
@@ -258,12 +258,27 @@ export function createGameHandlers(pool:Pool, legacy:ElementsStore, verifyArtifa
     await c.query('UPDATE game_core.elements SET current_revision_id=$1 WHERE id=$2',[id,el.id]);result={id,element_id:el.id};await event(c,owner,'element.revised',el.id,{revision_id:id});
    } else if(operation==='activate' && v.cancel===true) {
     const el=await one(c,owner,'elements',v.element_id);
+    const feedback=v.feedback===undefined?null:object(v.feedback);
+    const requestId=feedback?uuid(feedback.id):null;
+    const requestDigest=feedback?digest({element_id:el.id,revision_id:v.revision_id,feedback}):null;
+    const prior=requestId?(await c.query('SELECT payload FROM game_core.outbox WHERE owner_id=$1 AND id=$2',[owner,requestId])).rows[0]?.payload:null;
+    if(prior){if(prior.event_type!=='element.cancelled'||prior.aggregate.id!==el.id||prior.data.request_digest!==requestDigest)return fail('CONFLICT');await c.query('COMMIT');return prior.data.result;}
     if(el.status==='completed')return fail('INVALID_STATE');
+    if(v.revision_id!==undefined&&uuid(v.revision_id)!==el.current_revision_id)return fail('CONFLICT');
+    if(feedback){
+     if(!v.revision_id)return fail('INVALID_ARGUMENT');
+     text(feedback.content,16000);object(feedback.source);
+    }
     const descendants=(await c.query('WITH RECURSIVE tree AS (SELECT id FROM game_core.elements WHERE owner_id=$1 AND id=$2 UNION ALL SELECT e.id FROM game_core.elements e JOIN tree t ON e.parent_id=t.id WHERE e.owner_id=$1) SELECT id FROM tree',[owner,el.id])).rows.map(r=>r.id);
     await c.query("UPDATE game_core.elements SET status='cancelled',outcome='cancelled' WHERE owner_id=$1 AND id=ANY($2::uuid[]) AND status!='completed'",[owner,descendants]);
     await c.query("UPDATE game_core.move_attempts SET status='failed',error_code='CANCELLED',finished_at=now() WHERE owner_id=$1 AND status='running' AND move_id IN (SELECT id FROM game_core.moves WHERE owner_id=$1 AND (element_id=ANY($2::uuid[]) OR target_element_id=ANY($2::uuid[])))",[owner,descendants]);
     await c.query("UPDATE game_core.moves SET status='cancelled' WHERE owner_id=$1 AND (element_id=ANY($2::uuid[]) OR target_element_id=ANY($2::uuid[])) AND status!='succeeded'",[owner,descendants]);
-    result={id:el.id,status:'cancelled'};await event(c,owner,'element.cancelled',el.id,{});
+    result={id:el.id,status:'cancelled',element_ids:descendants};
+    if(feedback){
+     await c.query('INSERT INTO game_core.resources(id,owner_id,title,content,metadata) VALUES($1,$2,$3,$4,$5)',[requestId,owner,'Отмена по сообщению Игрока',feedback.content,{origin:'human_message',element_id:el.id,revision_id:el.current_revision_id,outcome:'cancelled',source:feedback.source}]);
+     await c.query("INSERT INTO game_core.element_resources VALUES($1,$2,$3,'input')",[owner,el.id,requestId]);
+    }
+    await event(c,owner,'element.cancelled',el.id,{request_digest:requestDigest,result},feedback?{id:requestId!,kind:'element',actor:owner}:undefined);
    } else if(operation==='activate') {const el=await one(c,owner,'elements',v.element_id);if(el.status!=='draft')return fail('INVALID_STATE');await c.query("UPDATE game_core.elements SET status='active' WHERE id=$1",[el.id]);result={id:el.id,status:'active'};await event(c,owner,'element.activated',el.id,{});}
    else if(operation==='claim') {
     const m=await one(c,owner,'moves',v.move_id),key=text(v.idempotency_key,255);
@@ -289,7 +304,7 @@ export function createGameHandlers(pool:Pool, legacy:ElementsStore, verifyArtifa
    } else if(operation==='complete') {
     const a=await one(c,owner,'move_attempts',v.attempt_id),m=await one(c,owner,'moves',a.move_id);
     if(a.status==='succeeded') result={attempt:a};else {
-     if(a.status!=='running')return fail('INVALID_STATE');
+     if(a.status!=='running'||m.status!=='claimed'||['completed','cancelled'].includes((await one(c,owner,'elements',m.target_element_id)).status))return fail('INVALID_STATE');
      const body:Value={...object(v.result??{}),claim:a.result?.claim};const outputs:string[]=[];
      const planning=m.fields?.planning,expected=list(planning?.output_contracts??[]),seen=new Set<string>();
      if(planning&&(await one(c,owner,'elements',m.target_element_id)).current_revision_id!==planning.revision_id)return fail('CONFLICT');
@@ -328,6 +343,17 @@ export function createGameHandlers(pool:Pool, legacy:ElementsStore, verifyArtifa
      }
      await c.query("UPDATE game_core.move_attempts SET status='succeeded',result=$1,finished_at=now() WHERE id=$2",[body,a.id]);
      await c.query("UPDATE game_core.moves SET status='succeeded' WHERE id=$1",[m.id]);
+     if(planning?.decision==='confirm'&&a.executor_kind==='human'&&body.resources.some((r:Value)=>r.metadata?.stage==='review'&&r.metadata?.outcome==='changes')) {
+      const ends=(await c.query("SELECT * FROM game_core.moves WHERE owner_id=$1 AND target_element_id=$2 AND purpose IN ('accept','finish') AND status='planned'",[owner,m.target_element_id])).rows;
+      if(ends.length!==1)return fail('INVALID_STATE');
+      const end=ends[0],fixId=planningId(`${a.id}:replan`);
+      // Старые невыполненные Ходы остаются в истории; финальную общую Операцию переиспользуем.
+      await c.query("UPDATE game_core.moves SET status='cancelled' WHERE owner_id=$1 AND target_element_id=$2 AND status='planned' AND id<>$3",[owner,m.target_element_id,end.id]);
+      await c.query('UPDATE game_core.moves SET previous_move_id=NULL WHERE id=$1',[end.id]);
+      await createMove(c,owner,{id:fixId,element_id:m.element_id,target_element_id:m.target_element_id,previous_move_id:m.id,kind:'operation',purpose:m.element_id===m.target_element_id?'plan':'start',title:'Доработать постановку по замечаниям',instructions:'Прочитать исходное поручение, текущий план и замечания Игрока. Применить планировщик к новой постановке. Повторное подтверждение обязательно.',conditions:{required_resources:await availableInputs(c,owner,m.target_element_id)}});
+      await c.query('UPDATE game_core.moves SET previous_move_id=$1 WHERE id=$2',[fixId,end.id]);
+      await event(c,owner,'plan.changes_requested',m.id,{attempt_id:a.id,resource_ids:outputs,planning_move_id:fixId});
+     }
      if(planning?.decision==='final'&&a.executor_kind==='human'&&body.resources.some((r:Value)=>r.metadata?.stage==='review'&&r.metadata?.outcome==='changes')) {
       const next=(await c.query("SELECT * FROM game_core.moves WHERE owner_id=$1 AND previous_move_id=$2 AND status='planned'",[owner,m.id])).rows;
       if(next.length!==1)return fail('INVALID_STATE');

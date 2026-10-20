@@ -49,7 +49,8 @@
         {"name":"revisionId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},
         {"name":"stage","required":true,"schema":{"enum":["planning","final","review"]}},
         {"name":"decision","required":true,"schema":{"enum":["approved","success","changes","cancelled"]}},
-        {"name":"comment","required":false,"schema":{"type":"string","maxLength":16000}}
+        {"name":"comment","required":false,"schema":{"type":"string","maxLength":16000}},
+        {"name":"source","required":false,"schema":{"type":"object"}}
       ],
       "result":{"name":"result","schema":{"type":"object","description":"Unmodified Elements move_complete owner DTO; see services/elements/CONTRACT.md."}}
     },
@@ -64,7 +65,8 @@
         {"name":"reason","required":true,"schema":{"enum":["expired","cancelled","declined"]}}
       ],
       "result":{"name":"result","schema":{"type":"object","description":"Unmodified Elements move_fail owner DTO; see services/elements/CONTRACT.md."}}
-    }
+    },
+    {"name":"actions.feedback","description":"Only the trusted plugin supplies the exact current owner message text and provenance. Changes complete the current decision-only human Action as review/changes. Cancellation uses element_activate with revision CAS and a durable feedback ID; preserves completed records and cancels the uncompleted descendant tree. Not exposed to the model MCP.","paramStructure":"by-name","params":[{"name":"elementId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},{"name":"revisionId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},{"name":"moveId","required":false,"schema":{"$ref":"#/components/schemas/Uuid"}},{"name":"decision","required":true,"schema":{"enum":["changes","cancelled"]}},{"name":"feedback","required":true,"schema":{"type":"object","required":["id","content","source"],"properties":{"id":{"$ref":"#/components/schemas/Uuid"},"content":{"type":"string","minLength":1,"maxLength":16000},"source":{"type":"object"}}}}],"result":{"name":"result","schema":{"type":"object"}}}
   ],
   "components": {
     "schemas": {

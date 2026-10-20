@@ -56,6 +56,12 @@ class FakeBridge:
         if method == "actions.complete":
             self.action.update(status="succeeded", attemptStatus="succeeded")
             return {"attempt": {"id": self.action["attemptId"], "status": "succeeded"}}
+        if method == "actions.feedback":
+            if params["decision"] == "cancelled":
+                self.action.update(status="cancelled", attemptStatus="failed")
+                return {"id": TARGET, "status": "cancelled", "element_ids": [TARGET]}
+            self.action.update(status="succeeded", attemptStatus="succeeded")
+            return {"attempt": {"id": ATTEMPT, "status": "succeeded"}}
         if method == "actions.cancel":
             self.action["attemptStatus"] = "failed"
             return {"ok": True}
@@ -411,7 +417,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             self.assertLessEqual(len(message['text'].encode('utf-16-le')) // 2, 4096)
         self.assertTrue(all('reply_markup' not in item for item in self.bot.sent[:-1]))
         keyboard = self.bot.sent[-1]['reply_markup'].inline_keyboard
-        self.assertEqual([row[0].text for row in keyboard], ['Принять', 'Нужны изменения', 'Отменить'])
+        self.assertEqual([row[0].text for row in keyboard], ['Принять'])
         self.assertEqual(self.plugin.tokens.pending()[0]['message_id'], str(len(self.bot.sent)))
 
     async def test_missing_reviewable_result_does_not_send_blind_approval_buttons(self):
@@ -423,7 +429,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_integrated_stage_is_persisted_before_ui_and_changes_resumes_review(self):
         for stage, choice in (("planning", "approved"), ("final", "success")):
-            for decision in (choice, "changes"):
+            for decision in (choice,):
                 self.bridge.action.update(status="claimed", attemptStatus="running", confirmationStage=stage)
                 send_message = self.bot.send_message
                 async def checked_send(**kwargs):
@@ -593,7 +599,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.tokens.pending(), [])
 
     async def test_final_success_changes_and_cancel_decisions(self):
-        for stage, decision in (("final", "success"), ("review", "changes"), ("planning", "cancelled")):
+        for stage, decision in (("final", "success"), ("planning", "approved")):
             self.bridge.action.update(status="claimed", attemptStatus="running")
             data = await self.request(stage)
             data = data.rsplit(":", 1)[0] + ":" + decision
@@ -694,16 +700,56 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.observe_resume(session_id="native-session-1", user_message="[native timestamp]\n" + content)
         self.assertEqual(self.plugin.tokens.uncertain_resumes(), [])
 
-    async def test_changes_resumes_discussion_but_cancel_never_injects(self):
+    async def test_old_change_cancel_buttons_are_rejected_without_consuming_acceptance(self):
+        data = await self.request()
+        before = len(self.bridge.calls)
         for decision in ("changes", "cancelled"):
-            self.bridge.action.update(status="claimed", attemptStatus="running")
-            data = await self.request()
-            data = data.rsplit(":", 1)[0] + ":" + decision
-            await self.plugin.callback(NS(callback_query=FakeQuery(data, message_id=len(self.bot.sent))), None)
-        self.assertEqual(len(self.injections), 1)
-        self.assertIn('"decision": "changes"', self.injections[0][0])
-        self.assertIn("Не выполняй подтверждаемый этап", self.injections[0][0])
-        self.assertIn("Запрос отменён", self.bot.sent[-1]["text"])
+            query = FakeQuery(data.rsplit(":", 1)[0] + ":" + decision)
+            await self.plugin.callback(NS(callback_query=query), None)
+            self.assertIn("сообщением", query.answers[-1])
+        self.assertEqual(len(self.bridge.calls), before)
+        self.assertFalse(self.plugin.tokens.pending()[0]["consumed"])
+        self.assertEqual(self.injections, [])
+
+    async def test_one_accept_button_and_exact_text_feedback(self):
+        await self.request()
+        keyboard = self.bot.sent[-1]["reply_markup"].inline_keyboard
+        self.assertEqual(len(keyboard), 1)
+        self.assertEqual(len(keyboard[0]), 1)
+        self.assertEqual(keyboard[0][0].text, "Принять")
+        self.native_context["HERMES_SESSION_MESSAGE_ID"] = "42"
+        event = self.event(text="Сделай пункты короче, без вводного текста.")
+        await self.plugin.incoming(event)
+        args = {"elementId": TARGET, "revisionId": REVISION, "moveId": MOVE, "decision": "changes"}
+        response = json.loads(await self.plugin.submit_feedback(args))
+        self.assertTrue(response["ok"])
+        actual = [params for method, params in self.bridge.calls if method == "actions.feedback"][-1]
+        self.assertEqual(actual["feedback"]["content"], event.text)
+        self.assertEqual(actual["feedback"]["source"]["message_id"], "42")
+        self.assertEqual(self.plugin.tokens.pending(), [])
+        self.assertEqual(self.injections, [])  # Current native turn continues, no second agent turn.
+        before = len(self.bridge.calls)
+        self.assertTrue(json.loads(await self.plugin.submit_feedback(args))["ok"])
+        self.assertEqual(len(self.bridge.calls), before)
+        self.assertFalse(json.loads(await self.plugin.submit_feedback({**args, "decision": "cancelled"}))["ok"])
+
+    async def test_text_cancel_invalidates_button_and_accept_cannot_resume(self):
+        data = await self.request()
+        self.native_context["HERMES_SESSION_MESSAGE_ID"] = "42"
+        await self.plugin.incoming(self.event(text="Отмени эту задачу."))
+        result = json.loads(await self.plugin.submit_feedback({"elementId": TARGET, "revisionId": REVISION, "decision": "cancelled"}))
+        self.assertTrue(result["ok"])
+        await self.plugin.callback(NS(callback_query=FakeQuery(data)), None)
+        self.assertEqual(self.injections, [])
+        self.assertFalse(any(method == "actions.complete" for method, _ in self.bridge.calls))
+
+    async def test_feedback_requires_actual_current_owner_message_and_no_model_text(self):
+        args = {"elementId": TARGET, "revisionId": REVISION, "moveId": MOVE, "decision": "changes"}
+        for extra in ({}, {"comment": "made up"}, {"decision": "approved"}):
+            self.assertFalse(json.loads(await self.plugin.submit_feedback({**args, **extra}))["ok"])
+        await self.plugin.incoming(self.event(source=NS(platform="telegram", user_id="456", chat_id="123", chat_type="dm")))
+        self.assertFalse(json.loads(await self.plugin.submit_feedback(args))["ok"])
+        self.assertFalse(any(method == "actions.feedback" for method, _ in self.bridge.calls))
 
     async def test_false_missing_or_ambiguous_injection_is_visible_and_never_replayed(self):
         for outcome in (False, None, RuntimeError("unknown")):
@@ -1152,10 +1198,11 @@ class NativeContractTests(unittest.TestCase):
                  register_tool=lambda **kw: calls.append(("tool", kw)), on_unload=lambda f: calls.append(("unload", f)))
         with patch.object(mod.Config, "from_env", return_value=NS()), patch.object(mod, "TelegramPlugin") as plugin:
             mod.register(ctx)
-            self.assertEqual([name for name, _ in calls], ["factory", "pre_gateway_dispatch", "transform_llm_output", "transform_tool_result", "post_llm_call", "tool", "unload"])
+            self.assertEqual([name for name, _ in calls], ["factory", "pre_gateway_dispatch", "transform_llm_output", "transform_tool_result", "post_llm_call", "tool", "tool", "unload"])
             self.assertTrue(calls[5][1]["is_async"])
             self.assertIs(calls[5][1]["handler"], plugin.return_value.request_confirmation)
             self.assertIn("Never invent IDs", calls[5][1]["schema"]["description"])
+            self.assertIs(calls[6][1]["handler"], plugin.return_value.submit_feedback)
         inject = methods["inject_message"]
         self.assertEqual([a.arg for a in inject.args.args], ["self", "content", "role"])
         self.assertEqual([a.arg for a in inject.args.kwonlyargs], ["session_key", "origin"])

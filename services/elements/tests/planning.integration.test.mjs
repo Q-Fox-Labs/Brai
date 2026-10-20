@@ -70,6 +70,26 @@ test('planning PostgreSQL: apply/replay/rollback, future outputs, retry, remarks
   assert.equal(reloaded.elements.find(e=>e.id===f.element.id).output.length,1);
   assert.equal(reloaded.attempts.filter(a=>a.moveId===work).length,2);
   assert.ok((await admin.query("SELECT 1 FROM game_core.outbox WHERE owner_id=$1 AND event_type='plan.applied'",[owner])).rowCount);
+  // Текстовые замечания к постановке: новая Операция и новая ревизия, без запуска старого плана.
+  const draft=await prepare();await h.planningApply(draft.apply);
+  const originalRecords=draft.built.stage.records;
+  const confirmDraft=originalRecords.find(m=>m.purpose==='confirm');
+  await done(confirmDraft.id,'TEST: сохрани исходный итог, уточни инструкцию.',{stage:'review',outcome:'changes'});
+  const afterRemarks=await graph(),replan=afterRemarks.moves.find(m=>m.previousId===confirmDraft.id&&m.purpose==='plan');
+  assert.ok(replan);
+  for(const record of originalRecords.filter(m=>m.purpose==='work'||m.purpose==='review'))assert.equal(afterRemarks.moves.find(m=>m.id===record.id).status,'cancelled');
+  const attempt=await take(replan.id),packet=await h.planningPacket(req({attempt_id:attempt.id}));
+  const criteria={...draft.baseline,inputs:Object.fromEntries(Object.entries(packet.files).map(([k,v])=>[k,createHash('sha256').update(v).digest('hex')]))};
+  assert.ok(Object.values(packet.files).some(text=>text.includes('TEST: сохрани исходный итог')));
+  await h.planningBind(req({attempt_id:attempt.id,baseline:criteria}));
+  const revised=await h.planningBuild(req({attempt_id:attempt.id,candidate:{...draft.candidate,fields:{...draft.candidate.fields,inputs:JSON.parse(packet.files['packet.json']).draft.inputs}}}));
+  await h.planningApply(req({attempt_id:attempt.id,candidate_sha256:revised.candidate_sha256,review:{...draft.review,baseline_sha256:revised.baseline_sha256,candidate_sha256:revised.candidate_sha256}}));
+  const revisedGraph=await graph();assert.notEqual(revisedGraph.elements.find(e=>e.id===draft.element.id).revision,afterRemarks.elements.find(e=>e.id===draft.element.id).revision);
+  const newConfirm=revised.stage.records.find(m=>m.purpose==='confirm');
+  assert.ok((await h.movesAvailable(req({}))).items.some(m=>m.id===newConfirm.id));
+  assert.ok(!(await h.movesAvailable(req({}))).items.some(m=>m.id===revised.stage.records.find(m=>m.purpose==='work').id));
+  await done(newConfirm.id,'TEST новая постановка принята.',{stage:'planning',outcome:'approved'});
+  assert.ok((await h.movesAvailable(req({}))).items.some(m=>m.id===revised.stage.records.find(m=>m.purpose==='work').id));
   // Конфликт возникает после создания ревизии/confirm: транзакция обязана откатить обе записи.
   const rollback=await prepare();const collision=rollback.built.stage.symbols.uppercase;
   const other=await h.elementCreate(req({kind:'goal',title:'TEST collision boundary'}));

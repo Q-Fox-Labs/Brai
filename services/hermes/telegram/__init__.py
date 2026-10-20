@@ -30,7 +30,7 @@ CONFIRMATION_DESCRIPTION = (
     "Ask the owner to confirm a human Action in the configured Telegram chat. First create "
     "the Element and Action with the available game-core structure/create tools, or use existing ones. "
     "Call elements_request_human_action for the real moveId; pass its returned moveId and revisionId here. "
-    "Never invent IDs or pass placeholder UUIDs. For integrated plans this tool accepts only decision-only confirm/final Actions with one output; human work requiring substantive results is rejected before claim. The real Action determines its stage. The tool sends the saved plan/result with buttons itself. Do not send a separate copy. After ok=true, finish with NO_REPLY; after failure, explain it. A verified owner decision automatically resumes this session."
+    "Never invent IDs or pass placeholder UUIDs. For integrated plans this tool accepts only decision-only confirm/final Actions with one output; human work requiring substantive results is rejected before claim. The real Action determines its stage. The tool sends the saved plan/result with one Accept button itself. Remarks and cancellation are ordinary owner messages handled by brai_telegram_submit_feedback. Do not send a separate copy. After ok=true, finish with NO_REPLY; after failure, explain it. A verified owner decision automatically resumes this session."
 )
 
 
@@ -343,6 +343,8 @@ class TelegramPlugin:
         self.closed = False
         self.active_callbacks = set()
         self.inbound_events = {}
+        self.feedback_results = {}
+        self.feedback_inflight = set()
         self.descriptor = re.compile(
             r"!?\[(?:\\[^\r\n]|[^\]\\\r\n])*\]\(<" + re.escape(config.result_root.rstrip("/")) + r"/(?P<id>" + UUID
             + r")/(?P<name>[^<>/\r\n]+)>\)")
@@ -613,6 +615,28 @@ class TelegramPlugin:
 
         return self.descriptor.sub(replace, response_text)
 
+    def _tool_context(self, kwargs):
+        """Доверенный маршрут текущего native turn; аргументы модели его не задают."""
+        from gateway.session_context import get_session_env
+        # Native cached agent не восстанавливает ContextVar ID; dispatcher передаёт его отдельно.
+        bound_id = get_session_env("HERMES_SESSION_ID")
+        dispatch_id = kwargs.get("session_id", "")
+        if (not isinstance(dispatch_id, str)
+                or (dispatch_id and bound_id and dispatch_id != bound_id)):
+            raise BridgeError("SESSION_CONTEXT_INVALID")
+        context = {key: get_session_env(name) for key, name in (
+            ("session_key", "HERMES_SESSION_KEY"), ("session_id", "HERMES_SESSION_ID"),
+            ("thread_id", "HERMES_SESSION_THREAD_ID"))}
+        context["session_id"] = dispatch_id or bound_id
+        context["message_id"] = get_session_env("HERMES_SESSION_MESSAGE_ID")
+        if (get_session_env("HERMES_SESSION_PLATFORM") != "telegram"
+                or get_session_env("HERMES_SESSION_USER_ID") != self.config.owner
+                or not self._route_matches(get_session_env("HERMES_SESSION_CHAT_ID"),
+                                           get_session_env("HERMES_SESSION_CHAT_TYPE"))
+                or not self._session_matches({**context, "owner": self.config.owner, "chat_id": self.config.chat})):
+            raise BridgeError("SESSION_CONTEXT_INVALID")
+        return context
+
     async def request_confirmation(self, args, **kwargs):
         """Дать модели только отправку кнопок; завершение доступно только callback handler."""
         try:
@@ -620,24 +644,7 @@ class TelegramPlugin:
                     or not _uuid(args.get("moveId")) or not _uuid(args.get("revisionId"))
                     or args.get("stage", "planning") not in {"planning", "final", "review"}):
                 raise BridgeError("INVALID_ARGUMENT")
-            from gateway.session_context import get_session_env
-            # Native cached agent не восстанавливает ContextVar ID; dispatcher передаёт его отдельно.
-            bound_id = get_session_env("HERMES_SESSION_ID")
-            dispatch_id = kwargs.get("session_id", "")
-            if (not isinstance(dispatch_id, str)
-                    or (dispatch_id and bound_id and dispatch_id != bound_id)):
-                raise BridgeError("SESSION_CONTEXT_INVALID")
-            context = {key: get_session_env(name) for key, name in (
-                ("session_key", "HERMES_SESSION_KEY"), ("session_id", "HERMES_SESSION_ID"),
-                ("thread_id", "HERMES_SESSION_THREAD_ID"))}
-            context["session_id"] = dispatch_id or bound_id
-            context["message_id"] = get_session_env("HERMES_SESSION_MESSAGE_ID")
-            if (get_session_env("HERMES_SESSION_PLATFORM") != "telegram"
-                    or get_session_env("HERMES_SESSION_USER_ID") != self.config.owner
-                    or not self._route_matches(get_session_env("HERMES_SESSION_CHAT_ID"),
-                                               get_session_env("HERMES_SESSION_CHAT_TYPE"))
-                    or not self._session_matches({**context, "owner": self.config.owner, "chat_id": self.config.chat})):
-                raise BridgeError("SESSION_CONTEXT_INVALID")
+            context = self._tool_context(kwargs)
             result = await self._on_native_loop(self._request(args, context))
             if json.loads(result).get("ok"):
                 # Public MessageEvent: this exact inbound request has received its reply.
@@ -652,6 +659,70 @@ class TelegramPlugin:
                 "HUMAN_OUTPUT_REQUIRED", "SEND_UNCONFIRMED"} else "CONFIRMATION_FAILED"
             message = HUMAN_OUTPUT_REQUIRED if code == "HUMAN_OUTPUT_REQUIRED" else "Кнопки не отправлены. Подтверждение пользователя не получено."
             return json.dumps({"ok": False, "code": code, "message": message}, ensure_ascii=False)
+
+    async def submit_feedback(self, args, **kwargs):
+        """Модель выбирает смысл; текст и происхождение берём из реального сообщения."""
+        try:
+            if (not isinstance(args, dict) or set(args) - {"elementId", "revisionId", "moveId", "decision"}
+                    or not _uuid(args.get("elementId")) or not _uuid(args.get("revisionId"))
+                    or args.get("decision") not in {"changes", "cancelled"}
+                    or (args.get("decision") == "changes" and not _uuid(args.get("moveId")))
+                    or ("moveId" in args and not _uuid(args["moveId"]))):
+                raise BridgeError("INVALID_ARGUMENT")
+            context = self._tool_context(kwargs)
+            return await self._on_native_loop(self._feedback(args, context))
+        except Exception:
+            return json.dumps({"ok": False, "code": "FEEDBACK_UNCONFIRMED",
+                               "message": "Решение не подтверждено. Перечитай состояние задачи; не продолжай работу вслепую."}, ensure_ascii=False)
+
+    async def _feedback(self, args, context):
+        key = (self.config.chat, context["thread_id"], context["message_id"])
+        event = self.inbound_events.get(key)
+        if event is None or not isinstance(getattr(event, "text", None), str) or not event.text.strip() or len(event.text) > 16000:
+            raise BridgeError("OWNER_MESSAGE_REQUIRED")
+        signature = {**args, "text": event.text}
+        if key in self.feedback_results:
+            previous, result = self.feedback_results[key]
+            if previous != signature:
+                raise BridgeError("FEEDBACK_ALREADY_USED")
+            return result
+        if key in self.feedback_inflight:
+            raise BridgeError("FEEDBACK_PENDING")
+        self.feedback_inflight.add(key)
+        try:
+            # Same actual owner message has one durable request ID, independent of model retries.
+            value = sha256(json.dumps(key, ensure_ascii=False).encode()).hexdigest()
+            request_id = f"{value[:8]}-{value[8:12]}-5{value[13:16]}-a{value[17:20]}-{value[20:32]}"
+            result = await asyncio.to_thread(self.bridge.call, "actions.feedback", {**args, "feedback": {
+                "id": request_id, "content": event.text, "source": {"platform": "telegram",
+                "chat_id": self.config.chat, "thread_id": context["thread_id"], "message_id": context["message_id"]}}})
+            if args["decision"] == "cancelled":
+                if result.get("id") != args["elementId"] or result.get("status") != "cancelled":
+                    raise BridgeError("FEEDBACK_UNCONFIRMED")
+                targets = set(result.get("element_ids", [args["elementId"]]))
+            else:
+                if result.get("attempt", {}).get("status") != "succeeded":
+                    raise BridgeError("FEEDBACK_UNCONFIRMED")
+                targets = {args["elementId"]}
+            for row in self.tokens.pending():
+                if row["target_id"] in targets:
+                    self.tokens.consume(row["token"])
+                    self.tokens.resolve(row["token"])
+                    if self.bot and row["message_id"]:
+                        try:
+                            await self.bot.edit_message_reply_markup(chat_id=int(row["chat_id"]),
+                                message_id=int(row["message_id"]), reply_markup=None)
+                        except Exception:
+                            pass  # Owner state already makes the old button invalid.
+            response = json.dumps({"ok": True, "decision": args["decision"], "elementId": args["elementId"],
+                "next": "Прочитай доступные Ходы и выполни доработку; затем покажи её на подтверждение."
+                if args["decision"] == "changes" else "Задача и невыполненное продолжение отменены. Сохрани краткий ответ пользователю."}, ensure_ascii=False)
+            self.feedback_results[key] = (signature, response)
+            if len(self.feedback_results) > 128:
+                self.feedback_results.pop(next(iter(self.feedback_results)))
+            return response
+        finally:
+            self.feedback_inflight.discard(key)
 
     async def _request(self, args, context):
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -682,9 +753,7 @@ class TelegramPlugin:
             if not await self._current(self.tokens.unresolved(token)):
                 raise BridgeError("STALE_ACTION")
             decision = "success" if stage == "final" else "approved"
-            buttons = [[InlineKeyboardButton(label, callback_data=f"brai:{token}:{choice}")]
-                       for label, choice in (("Принять", decision), ("Нужны изменения", "changes"),
-                                             ("Отменить", "cancelled"))]
+            buttons = [[InlineKeyboardButton("Принять", callback_data=f"brai:{token}:{decision}")]]
             context = str(action.get("targetDescription") or "")[:1400]
             title = str(action.get("targetTitle") or "")[:400]
             stage_label = {"planning": "План работы", "review": "Проверка результата", "final": "Готовый результат"}[stage]
@@ -695,7 +764,7 @@ class TelegramPlugin:
                 text = f"{stage_label}\n\n{preview}\n\n"
             else:
                 text = f"{stage_label}: {action['title'][:800]}\n{title}\n{context}\n"
-            text += "Нужны изменения — обсудить и доработать; отменить — остановить запрос."
+            text += "Замечания или отмену задачи напиши сообщением."
             thread_id = self.tokens.unresolved(token)["thread_id"]
             route = {"message_thread_id": int(thread_id)} if thread_id and str(thread_id) != "1" else {}
             # Не обрезаем план/результат. 1800 code points помещаются в 4096 UTF-16 units.
@@ -805,9 +874,9 @@ class TelegramPlugin:
                 or getattr(message, "business_connection_id", None)):
             return
         data = getattr(query, "data", "")
-        match = re.fullmatch(r"brai:([A-Za-z0-9_-]{32}):(approved|success|changes|cancelled)", data or "")
+        match = re.fullmatch(r"brai:([A-Za-z0-9_-]{32}):(approved|success)", data or "")
         if not match or len(data.encode("utf-8")) > 64:
-            await query.answer("Кнопка недействительна.", show_alert=True)
+            await query.answer("Используй «Принять». Замечания и отмену напиши сообщением.", show_alert=True)
             return
         row = self.tokens.consume(match[1], self.config.owner, getattr(message, "message_id", None), self.config.chat,
                                   str(getattr(message, "message_thread_id", None) or ""))
@@ -816,7 +885,7 @@ class TelegramPlugin:
             return
         decision = match[2]
         self.active_callbacks.add(match[1])
-        allowed = {"success", "changes", "cancelled"} if row["stage"] == "final" else {"approved", "changes", "cancelled"}
+        allowed = {"success"} if row["stage"] == "final" else {"approved"}
         notice = FAILURE
         try:
             await query.answer("Проверяю подтверждение…")
@@ -826,10 +895,6 @@ class TelegramPlugin:
                 await self._cancel(row, "cancelled")
                 self.tokens.resolve(match[1])
                 notice = "Задача, версия или исходная беседа изменились. Работа не запущена."
-            elif decision == "cancelled":
-                await self._cancel(row, "cancelled")
-                self.tokens.resolve(match[1])
-                notice = "Запрос отменён. Работу не продолжаю."
             else:
                 self.tokens.decide(match[1], decision)
                 result = await asyncio.to_thread(self.bridge.call, "actions.complete", {
@@ -868,4 +933,11 @@ def register(ctx):
                     "revisionId": {"type": "string"}, "stage": {"type": "string", "enum": ["planning", "final", "review"]}},
                     "required": ["moveId", "revisionId"], "additionalProperties": False}},
         handler=plugin.request_confirmation, is_async=True)
+    ctx.register_tool(name="brai_telegram_submit_feedback", toolset="brai_telegram",
+        description="Record explicit owner remarks or cancellation of a real task from the current Telegram message. Questions and discussion are not decisions. Read current graph first. Text and provenance are taken from the actual incoming owner message, never supply a comment. For changes pass the current confirmation/review moveId. Positive acceptance is only the Accept button. After changes execute the available correction and request fresh acceptance; after cancellation stop the task.",
+        schema={"name": "brai_telegram_submit_feedback", "parameters": {"type": "object", "additionalProperties": False,
+            "properties": {"elementId": {"type": "string"}, "revisionId": {"type": "string"},
+                           "moveId": {"type": "string"}, "decision": {"enum": ["changes", "cancelled"]}},
+            "required": ["elementId", "revisionId", "decision"]}},
+        handler=plugin.submit_feedback, is_async=True)
     ctx.on_unload(plugin.close)

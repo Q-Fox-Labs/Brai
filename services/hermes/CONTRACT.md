@@ -72,6 +72,7 @@ Private `actions.complete` проверяет текущую попытку, hum
 | `actions.read` | `{moveId}`; текущие target/revision, move status, attemptId/status/executor, title/description, inputResourceIds. |
 | `actions.prepare` | `{moveId,revisionId,idempotencyKey,inputResourceIds?}`; ключ 1–200; возвращает связанную human attempt и currentRevisionId. Если inputs не заданы, берёт текущие разрешённые owner API inputs. При claimed восстанавливает только точную текущую running попытку прежнего ключа, даже если revision уже сменилась; такой recovery используется для отмены после перезапуска. |
 | `actions.complete` | `{moveId,attemptId,revisionId,stage,decision,comment?}`; stage planning/final/review, decision approved/success/changes/cancelled. |
+| `actions.feedback` | `{elementId,revisionId,moveId?,decision,feedback}`; точное сообщение владельца, decision changes/cancelled; источник поставляет плагин. |
 | `actions.cancel` | `{moveId,attemptId,revisionId,reason}`; reason expired/cancelled/declined. |
 
 Files ответ — `{artifactId,filename,mimeType,sizeBytes,sha256,localPath,markdown}`. Markdown publisher сохраняется без изменения. Telegram распознаёт только настроенный resultRoot/UUID путь, повторно вызывает fetch и отправляет проверенные bytes нативным API.
@@ -83,3 +84,10 @@ RPC строка до 65536 байт проверяется до parse; oversize
 После claim существующей agent Операции `plan`/`start` Hermes вызывает `elements_planning_packet`. Пакет содержит только выбранные реальные входы и версионированные правила. Независимый проверяющий фиксирует критерии через `elements_planning_bind` до кандидата; напарник составляет предметный план по пакету и передаёт `elements_planning_build`. Тот же проверяющий проверяет кандидат; `elements_planning_apply` принимает его SHA256 и проверку. Owner API атомарно сохраняет новую ревизию, Ходы, ресурс постановки и завершение исходной попытки. Повтор того же применения возвращает те же ID. Неподдерживаемые дети/отложенные части останавливаются.
 
 Все четыре инструмента наследуют user_id только из owner-bound runtime. Модель не подтверждает постановку за Игрока: Human Экшен проходит через session-bound web или доверенный Telegram. Фонового исполнителя эта интеграция не запускает; Hermes повторяет протокол по следующему явному поручению.
+
+
+Telegram использует одну кнопку «Принять». Замечания и отмена поступают обычным
+сообщением через brai_telegram_submit_feedback. Модель не задаёт текст и источник
+решения. Отмена сохраняет выполненное и атомарно отменяет невыполненную ветку.
+Параметр feedback у elements_element_activate запрещён обычному MCP модели;
+его передаёт только private порт. Подробности — в telegram/CONTRACT.md.

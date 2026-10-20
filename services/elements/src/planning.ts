@@ -39,10 +39,22 @@ export function planningFiles(element:Value, revision:Value, move:Value, resourc
  const rules=planningRules();
  const operation={id:move.id,owner:move.element_id,target:element.id,title:move.title,actor:'agent',purpose:'plan',previous:move.previous_move_id};
  const packet={element:{id:element.id,kind:'Задача',parent:element.parent_id},operation,
-  finish:{id:finish?.id??planningId(`${move.id}:finish`),owner:move.element_id,target:element.id},draft:fields,
+  finish:{id:finish?.id??planningId(`${move.id}:finish`),owner:finish?.element_id??move.element_id,target:element.id},draft:fields,
   resources:resources.map(r=>({id:r.id,name:r.title,content:r.content,state:'given',producer:null})),
   context_files:resources.map(r=>`inputs/${r.id}.md`),rules:Object.keys(rules)};
  return {'packet.json':serialize(packet),...Object.fromEntries(resources.map(r=>[`inputs/${r.id}.md`,r.content])),...rules};
+}
+/** Отдельная постановка получает новые UUID Ходов/будущих выходов; границы и реальные входы сохраняются. */
+function operationIds(result:Value,files:Record<string,string>):Value {
+ if(!result.stage)return result;
+ const stage=result.stage,operation=JSON.parse(files['packet.json']).operation.id;
+ const mapped=new Map<string,string>();
+ for(const record of stage.records)if(record.id!==stage.finish.id)mapped.set(record.id,planningId(`${operation}:${record.id}`));
+ for(const resource of stage.resources)if(resource.state==='expected')mapped.set(resource.id,planningId(`${operation}:${resource.id}`));
+ const remap=(v:any):any=>typeof v==='string'?(mapped.get(v)??v):Array.isArray(v)?v.map(remap):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).map(([k,value])=>[k,remap(value)])):v;
+ result.stage=remap(stage);
+ if(result.markdown)result.markdown=result.markdown.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g,(id:string)=>mapped.get(id)??id);
+ return result;
 }
 /** Выполняет bounded Python-процесс; недоступный runtime/таймаут не считается принятием. */
 export function assemble(value:Value):Promise<Value> {
@@ -54,7 +66,7 @@ export function assemble(value:Value):Promise<Value> {
   child.on('error',()=>finish(new ElementsFault('INTERNAL')));
   child.stdout.on('data',chunk=>{size+=chunk.length;if(size>524288){child.kill('SIGKILL');finish(new ElementsFault('INVALID_ARGUMENT'));}else output+=chunk;});
   child.stderr.resume();
-  child.on('close',code=>{try{const result=JSON.parse(output);if(code||result.error)finish(new ElementsFault('INVALID_ARGUMENT'));else finish(undefined,result);}catch{finish(new ElementsFault('INTERNAL'));}});
+  child.on('close',code=>{try{const result=JSON.parse(output);if(code||result.error)finish(new ElementsFault('INVALID_ARGUMENT'));else finish(undefined,operationIds(result,value.files));}catch{finish(new ElementsFault('INTERNAL'));}});
   child.stdin.on('error',()=>{});child.stdin.end(JSON.stringify(value));
  });
 }
