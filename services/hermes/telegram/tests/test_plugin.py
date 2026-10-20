@@ -753,6 +753,51 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.injections), 1)
         self.assertEqual(self.bot.sent[-1]["message_thread_id"], 37)
 
+    async def test_cached_native_turn_uses_dispatch_session_id_in_group(self):
+        """Native повторно использует agent; ContextVar ID пуст, dispatch ID настоящий."""
+        upstream = REPO / "tmp/hermes-pinned-telegram"
+        source = upstream / "gateway/session_context.py"
+        if not source.exists():
+            self.skipTest("read-only pinned upstream fixture not present")
+        spec = importlib.util.spec_from_file_location("native_session_context_test", source)
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
+        await self.set_group_route()
+        self.entry.origin.thread_id = "1"
+        # Точное поведение gateway._set_session_env: ID не передаётся повторно.
+        tokens = native.set_session_vars(platform="telegram", chat_id=self.config.chat,
+            chat_type="supergroup", thread_id="1", user_id=self.config.owner,
+            session_key=self.native_context["HERMES_SESSION_KEY"])
+        try:
+            self.assertEqual(native.get_session_env("HERMES_SESSION_ID"), "")
+            with patch.dict(sys.modules, {"gateway.session_context": native}):
+                result = json.loads(await self.plugin.request_confirmation(
+                    {"moveId": MOVE, "revisionId": REVISION}, session_id=self.entry.session_id))
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(self.bot.sent[-1]["message_thread_id"], 1)
+            row = self.plugin.tokens.pending()[0]
+            self.assertEqual(row["session_id"], self.entry.session_id)
+            self.assertEqual(row["session_key"], self.native_context["HERMES_SESSION_KEY"])
+        finally:
+            native.clear_session_vars(tokens)
+
+    async def test_dispatch_session_id_cannot_override_another_or_missing_session(self):
+        cases = (("native-session-1", "wrong-session"), ("", "wrong-session"), ("", ""))
+        for bound, dispatched in cases:
+            with self.subTest(bound=bound, dispatched=dispatched):
+                self.native_context["HERMES_SESSION_ID"] = bound
+                result = json.loads(await self.plugin.request_confirmation(
+                    {"moveId": MOVE, "revisionId": REVISION}, session_id=dispatched))
+                self.assertFalse(result["ok"])
+                self.assertEqual(self.bridge.calls, [])
+                self.assertEqual(self.bot.sent, [])
+                self.assertEqual(self.plugin.tokens.pending(), [])
+        # Модель не передаёт служебный session_id через аргументы инструмента.
+        result = json.loads(await self.plugin.request_confirmation({
+            "moveId": MOVE, "revisionId": REVISION, "session_id": self.entry.session_id}))
+        self.assertFalse(result["ok"])
+        self.assertEqual(self.bridge.calls, [])
+
     async def test_incoming_binds_public_session_store_only_for_owner_route(self):
         self.plugin.session_store = None
         await self.plugin.incoming(self.event(source=NS(platform="telegram", user_id="456", chat_id="123", chat_type="dm")),

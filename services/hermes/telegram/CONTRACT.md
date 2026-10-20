@@ -79,3 +79,14 @@ Telegram показывает сохранённые название, ожид�
 Схемы операций принадлежат [trusted.openrpc.json](../trusted.openrpc.json). Один вызов запускает отдельный private процесс: одна UTF-8 JSON-RPC 2.0 строка → один ответ с тем же строковым id → выход. До двух процессов одновременно; semaphore ожидание входит в 15-секундный deadline. Запрос до 65536 байт, stdout до 1 MiB. Проверяются версия, id, взаимоисключение result/error и object result. stderr и сырые ошибки не передаются владельцу или модели. Из owner error data передаётся только точный allowlisted код `HUMAN_OUTPUT_REQUIRED`, преобразуемый в локальное понятное сообщение; остальные ошибки скрыты. Timeout завершает всю собственную process group, включая publisher child; уже возможный удалённый эффект считается неизвестным. Автоматического повтора публикации/complete нет; повтор доставки publish применяет стабильный requestId, recovery prepare — прежний idempotencyKey.
 
 Локальная проверка: `python3 -m unittest discover -s services/hermes/telegram/tests -v`. Зависимости не устанавливаются, живой бот не используется. Stubs проверяют native API и thread/loop переходы; SQLite и stdio child processes реальные. При наличии read-only `tmp/hermes-pinned-telegram` отдельные тесты сверяют API и точный MEDIA parser закреплённого исходника. Полный Telegram/Artifacts/game-core сценарий требует отдельной DEV-приёмки с доступным ботом.
+
+
+## Продолжение native сессии
+
+Запрос кнопок принимает служебный `session_id` из kwargs публичного dispatcher.
+На повторном ходе cached agent native очищает ContextVar ID и не создаёт agent
+заново; этот случай не должен блокировать кнопки. При наличии двух ID они должны
+совпадать. В любом случае проверяются exact persisted SessionStore entry, owner,
+chat и topic. ID внутри аргументов модели запрещён; пустая или другая сессия
+не создаёт попытку и не отправляет сообщение. Ошибка запроса возвращает только
+allowlisted `code` и понятный текст, без raw исключения или секретов.

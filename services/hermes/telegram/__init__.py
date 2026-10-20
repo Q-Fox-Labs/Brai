@@ -612,9 +612,16 @@ class TelegramPlugin:
                     or args.get("stage", "planning") not in {"planning", "final", "review"}):
                 raise BridgeError("INVALID_ARGUMENT")
             from gateway.session_context import get_session_env
+            # Native cached agent не восстанавливает ContextVar ID; dispatcher передаёт его отдельно.
+            bound_id = get_session_env("HERMES_SESSION_ID")
+            dispatch_id = kwargs.get("session_id", "")
+            if (not isinstance(dispatch_id, str)
+                    or (dispatch_id and bound_id and dispatch_id != bound_id)):
+                raise BridgeError("SESSION_CONTEXT_INVALID")
             context = {key: get_session_env(name) for key, name in (
                 ("session_key", "HERMES_SESSION_KEY"), ("session_id", "HERMES_SESSION_ID"),
                 ("thread_id", "HERMES_SESSION_THREAD_ID"))}
+            context["session_id"] = dispatch_id or bound_id
             if (get_session_env("HERMES_SESSION_PLATFORM") != "telegram"
                     or get_session_env("HERMES_SESSION_USER_ID") != self.config.owner
                     or not self._route_matches(get_session_env("HERMES_SESSION_CHAT_ID"),
@@ -623,8 +630,11 @@ class TelegramPlugin:
                 raise BridgeError("SESSION_CONTEXT_INVALID")
             return await self._on_native_loop(self._request(args, context))
         except Exception as error:
-            message = HUMAN_OUTPUT_REQUIRED if isinstance(error, BridgeError) and str(error) == "HUMAN_OUTPUT_REQUIRED" else FAILURE
-            return json.dumps({"ok": False, "message": message}, ensure_ascii=False)
+            code = str(error) if isinstance(error, BridgeError) and str(error) in {
+                "INVALID_ARGUMENT", "SESSION_CONTEXT_INVALID", "TELEGRAM_UNAVAILABLE",
+                "HUMAN_OUTPUT_REQUIRED", "SEND_UNCONFIRMED"} else "CONFIRMATION_FAILED"
+            message = HUMAN_OUTPUT_REQUIRED if code == "HUMAN_OUTPUT_REQUIRED" else "Кнопки не отправлены. Подтверждение пользователя не получено."
+            return json.dumps({"ok": False, "code": code, "message": message}, ensure_ascii=False)
 
     async def _request(self, args, context):
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
