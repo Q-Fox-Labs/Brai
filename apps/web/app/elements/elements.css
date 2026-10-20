@@ -74,7 +74,7 @@
 .elements-resources > p { font-size: 14px; line-height: 1.6; }
 .elements-resources details { padding: 11px 0; border-bottom: 1px solid #ffffff29; font-size: 14px; }
 .elements-resources summary, .elements-secondary summary { cursor: pointer; line-height: 1.5; }
-.elements-resources details p { line-height: 1.6; overflow-wrap: anywhere; }
+.elements-resources details p { line-height: 1.6; overflow-wrap: anywhere; white-space: pre-wrap; }
 .elements-resource-origin { color: #adc0b7; font-size: 12px; }
 .elements-file-link, .elements-file-unavailable { display: block; margin-top: 8px; font-size: 13px; }
 .elements-file-link { color: #b9c9ff; text-underline-offset: 3px; }

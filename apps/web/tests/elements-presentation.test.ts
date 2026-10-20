@@ -13,3 +13,10 @@ test("names replace aliases before resource and condition cleanup", () => {
  assert.equal(view.moves[0].conditions,"Есть решение по Выбрать способ");
  assert.doesNotMatch(JSON.stringify(view.resources),/Версия ,|Основание \./);
 });
+
+test("resource presentation preserves plan rows and leaves stored bytes intact", () => {
+ const content = "# План\n\n| Поле | Значение |\n| --- | --- |\n| Вход | Поручение |\n| Критерий | Сигнал: МАЯК |";
+ const data: BoardData = {elements:[], moves:[], resources:[{id:"plan", attemptId:null, title:"План", content}]};
+ assert.equal(presentBoard(data).resources[0].content,content);
+ assert.equal(data.resources[0].content,content);
+});

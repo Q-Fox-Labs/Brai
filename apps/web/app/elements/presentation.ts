@@ -56,5 +56,5 @@ export function presentBoard(source: BoardData): BoardData {
  return { ...source,
   elements: source.elements.map(item => ({ ...item, title: text(item.title), description: text(item.description), instructions: text(item.instructions ?? "") })),
   moves: source.moves.map(item => ({ ...item, requiredResourceIds: item.requiredResourceIds ?? requiredResourceIds(item.conditions), title: text(item.title), instructions: text(item.instructions ?? ""), conditions: text(conditionText(item.conditions)) })),
-  resources: source.resources.map(item => ({ ...item, title: text(item.title), content: text(resourceText(item.content)) })) };
+  resources: source.resources.map(item => ({ ...item, title: text(item.title), content: resourceText(item.content).split("\n").map(text).join("\n") })) };
 }
