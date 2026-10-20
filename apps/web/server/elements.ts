@@ -82,7 +82,8 @@ export async function loadElementsBoard(userId: string): Promise<BoardData> {
    catch (error) { if (error instanceof GatewayError && error.status === 404) resource.artifacts.push({id,name:"Файл недоступен",available:false}); else throw error; }
   }
  }
- const available=await requestValue('brai.elements.v1.query.moves',{user_id:userId}) as {items:{id:string}[]};
+ const available=await requestValue('brai.elements.v1.query.moves',{user_id:userId}) as {items:{id:string;required_resource_ids:string[]}[]};
+ for (const move of value.moves) move.requiredResourceIds=available.items.find(item=>item.id===move.id)?.required_resource_ids??move.requiredResourceIds;
  return Object.assign(value, { manualStatusEnabled: manualStatusEnabled(),readyMoveIds:available.items.map(m=>m.id) });
 }
 

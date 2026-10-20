@@ -92,7 +92,7 @@
  .elements-card, .elements-move, .elements-fit { scroll-behavior: auto; transition: none; }
 }
 
-.elements-new-task{position:absolute;z-index:4;top:16px;left:16px;border:1px solid var(--border,#ddd);border-radius:10px;padding:10px 16px;background:var(--background,#fff);color:inherit;cursor:pointer}
+.elements-new-task{position:absolute;z-index:4;top:16px;right:70px;border:1px solid var(--border,#ddd);border-radius:10px;padding:10px 16px;background:var(--background,#fff);color:inherit;cursor:pointer}
 .elements-workflow{margin:20px 0;padding:16px;border:1px solid #d6d9d4;border-radius:12px;background:#f5f7f3;color:#263329}
 .elements-workflow label{display:grid;gap:6px;margin:12px 0;font-size:14px}
 .elements-workflow input,.elements-workflow textarea{width:100%;box-sizing:border-box;padding:10px;border:1px solid #bcc5bb;border-radius:8px;background:white;color:#172119;font:inherit;resize:vertical}

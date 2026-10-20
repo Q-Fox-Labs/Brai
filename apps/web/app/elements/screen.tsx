@@ -281,9 +281,9 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
     </section>
    </>}
    {selectedMove && <>
+    <ResourceDetails ids={selectedMove.input.length?selectedMove.input:selectedMove.requiredResourceIds??[]} label={selectedMove.input.length?"Полученные ресурсы":"Доступные входы"} dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
     <WorkflowAction key={selectedMove.id} move={selectedMove} dataset={dataset} onDataChange={onDataChange} />
     {selectedMove.instructions && <section className="elements-resources"><h3>Инструкция</h3><p>{readable(selectedMove.instructions)}</p></section>}
-    <ResourceDetails ids={selectedMove.input} label="Полученные ресурсы" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
     <ResourceDetails ids={selectedMove.output} label="Результат" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
     {selectedMove.previousId && <p className="elements-parent">Предыдущий ход: <button type="button" className="elements-text-link" onClick={() => selectMove(selectedMove.previousId!, selection?.elementId)}>{readable(orderedMoves.find(move => move.id === selectedMove.previousId)?.title) || "Открыть предыдущий ход"}</button></p>}
     {selectedMove.conditions !== undefined && conditionText(selectedMove.conditions) && <details className="elements-secondary"><summary>Условия выполнения</summary><p>{conditionText(selectedMove.conditions)}</p></details>}
