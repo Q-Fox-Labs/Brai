@@ -1,0 +1,864 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.dev/codeworks/api.schema.json",
+  "definitions": {
+    "writer": {
+      "type": "object",
+      "properties": {
+        "executor_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "enum": [
+            "active",
+            "quiesced"
+          ]
+        }
+      },
+      "required": [
+        "executor_id",
+        "session_id",
+        "epoch",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "repo_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "common_dir": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_root": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "allowed_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^[^\\u0000-\\u001f]+$"
+          },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "excluded_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^[^\\u0000-\\u001f]+$"
+          },
+          "minItems": 0,
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "executors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "minItems": 1,
+          "uniqueItems": true,
+          "maxItems": 32
+        },
+        "git_flow": {
+          "type": "object",
+          "properties": {
+            "feature_base": {
+              "const": "refs/remotes/origin/dev"
+            },
+            "hotfix_base": {
+              "const": "refs/remotes/origin/main"
+            },
+            "feature_prefix": {
+              "const": "feature/"
+            },
+            "hotfix_prefix": {
+              "const": "hotfix/"
+            }
+          },
+          "required": [
+            "feature_base",
+            "hotfix_base",
+            "feature_prefix",
+            "hotfix_prefix"
+          ],
+          "additionalProperties": false
+        },
+        "preparer_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "node_version": {
+          "const": "24.21.0"
+        },
+        "platform": {
+          "enum": [
+            "linux-x64",
+            "linux-arm64"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "repo_path",
+        "common_dir",
+        "workspace_root",
+        "allowed_paths",
+        "excluded_paths",
+        "executors",
+        "git_flow",
+        "preparer_path",
+        "node_version",
+        "platform"
+      ],
+      "additionalProperties": false
+    },
+    "project.register": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "$ref": "#/definitions/project"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "additionalProperties": false
+    },
+    "project.get": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        }
+      },
+      "required": [
+        "project_id"
+      ],
+      "additionalProperties": false
+    },
+    "prepare-write": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "kind": {
+          "enum": [
+            "feature",
+            "hotfix"
+          ]
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "element_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "move_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "project_id",
+        "idempotency_key",
+        "workspace_key",
+        "kind",
+        "session_id"
+      ],
+      "additionalProperties": false
+    },
+    "status": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "project_id",
+        "workspace_id"
+      ],
+      "additionalProperties": false
+    },
+    "attach-or-transfer": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "expected_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mode": {
+          "enum": [
+            "attach",
+            "quiesce"
+          ]
+        },
+        "writes_stopped": {
+          "const": true
+        },
+        "move_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "project_id",
+        "idempotency_key",
+        "workspace_id",
+        "session_id",
+        "expected_epoch",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "request-release": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "expected_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "target": {
+          "enum": [
+            "dev",
+            "prod"
+          ]
+        },
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "required": [
+        "project_id",
+        "idempotency_key",
+        "workspace_id",
+        "session_id",
+        "expected_epoch",
+        "target",
+        "commit_sha"
+      ],
+      "additionalProperties": false
+    },
+    "operation-status": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "project_id",
+        "operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "accepted": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "operation_id",
+        "workspace_id"
+      ],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "INVALID_ARGUMENT",
+            "NOT_FOUND",
+            "FORBIDDEN",
+            "CONFLICT",
+            "WRITER_BUSY",
+            "OWNERSHIP_CONFLICT",
+            "DEPENDENCIES_INCOMPATIBLE",
+            "GIT_FAILED",
+            "BUSY",
+            "INTERNAL"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "additionalProperties": false
+    },
+    "workspace": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "element_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "feature",
+            "hotfix"
+          ]
+        },
+        "base_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "base_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "preparation_state": {
+          "enum": [
+            "intent",
+            "branch",
+            "checkout",
+            "dependencies",
+            "ready",
+            "failed"
+          ]
+        },
+        "writer": {
+          "$ref": "#/definitions/writer"
+        },
+        "created_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "workspace_key",
+        "element_id",
+        "kind",
+        "base_ref",
+        "base_sha",
+        "branch",
+        "path",
+        "preparation_state",
+        "writer",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "attachment": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "executor_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "move_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attempt_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "writer_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "created_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        }
+      },
+      "required": [
+        "id",
+        "workspace_id",
+        "executor_id",
+        "session_id",
+        "move_id",
+        "attempt_id",
+        "writer_epoch",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "operation": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "executor_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "actor_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "^[^\\u0000-\\u001f]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "prepare-write",
+            "attach-or-transfer",
+            "request-release"
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "succeeded",
+            "failed",
+            "awaiting_execution"
+          ]
+        },
+        "step": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "request": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/prepare-write"
+            },
+            {
+              "$ref": "#/definitions/attach-or-transfer"
+            },
+            {
+              "$ref": "#/definitions/request-release"
+            }
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/preparedResult"
+            },
+            {
+              "$ref": "#/definitions/writerResult"
+            },
+            {
+              "$ref": "#/definitions/releaseResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "updated_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "workspace_id",
+        "executor_id",
+        "actor_id",
+        "kind",
+        "status",
+        "step",
+        "request",
+        "result",
+        "error",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    "statusResponse": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "$ref": "#/definitions/workspace"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/attachment"
+          },
+          "maxItems": 100
+        },
+        "git": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "head": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "branch": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 255,
+                  "pattern": "^[^\\u0000-\\u001f]+$"
+                },
+                "dirty": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "head",
+                "branch",
+                "dirty"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "workspace",
+        "attachments",
+        "git"
+      ],
+      "additionalProperties": false
+    },
+    "operationResponse": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "$ref": "#/definitions/operation"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "additionalProperties": false
+    },
+    "projectResponse": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "$ref": "#/definitions/project"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "additionalProperties": false
+    },
+    "preparedResult": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "workspace_id"
+      ],
+      "additionalProperties": false
+    },
+    "writerResult": {
+      "type": "object",
+      "properties": {
+        "writer": {
+          "$ref": "#/definitions/writer"
+        }
+      },
+      "required": [
+        "writer"
+      ],
+      "additionalProperties": false
+    },
+    "releaseResult": {
+      "type": "object",
+      "properties": {
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "reason": {
+          "const": "RELEASE_EXECUTION_NOT_AVAILABLE"
+        }
+      },
+      "required": [
+        "release_id",
+        "reason"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
