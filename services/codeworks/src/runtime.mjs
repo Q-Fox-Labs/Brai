@@ -14,13 +14,13 @@ export function launchWorker(commonDir,operationId,env=process.env) {
   return spawn('/bin/sh',['-c',script,'codeworks',path.join(commonDir,'codeworks.lock'),process.execPath,fileURLToPath(new URL('./worker.mjs',import.meta.url)),operationId],{env,stdio:['ignore','ignore','pipe']});
 }
 /** Создаёт доверенный runtime по явной конфигурации; startRecovery можно отключить в fixture. */
-export async function startRuntime({databaseURL,adminExecutor='codeworks_admin',startRecovery=true,allowedRepositories=JSON.parse(process.env.CODEWORKS_ALLOWED_REPOSITORIES??'[]')}={}) {
+export async function startRuntime({databaseURL,adminExecutor='codeworks_admin',startRecovery=true,assertQuiescent,allowedRepositories=JSON.parse(process.env.CODEWORKS_ALLOWED_REPOSITORIES??'[]')}={}) {
   if(!databaseURL)throw new Error('CODEWORKS_DATABASE_URL_REQUIRED');
   if(!Array.isArray(allowedRepositories)||!allowedRepositories.length||allowedRepositories.some(p=>typeof p!=='string'||!path.isAbsolute(p)))throw new Error('CODEWORKS_ALLOWED_REPOSITORIES_REQUIRED');
   const pool=new Pool({connectionString:databaseURL,max:8,connectionTimeoutMillis:3000,statement_timeout:10000});
   pool.on('error',()=>console.error('codeworks database disconnected'));
   try {await pool.query('SELECT 1 FROM codeworks.projects LIMIT 1');}catch(error){await pool.end();throw error;}
-  const store=createStore(pool),handlers=createHandlers(store,createGit(),{adminExecutor,allowedRepositories});
+  const store=createStore(pool),handlers=createHandlers(store,createGit(),{adminExecutor,allowedRepositories,assertQuiescent});
   let stopping=false,scanning=false,active=0;
   const workers=new Map();
   async function recover() {

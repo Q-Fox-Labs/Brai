@@ -27,23 +27,32 @@ export async function setup() {
   const temporary=[];
   return {config,owner,app,h,
     /** Реальный минимальный monorepo использует установленный подготовщик с package/workspace проверками. */
-    async project() {
+    async project({documentationPaths=[],sharedFixture=false}={}) {
       const temporaryRoot=fileURLToPath(new URL('../../../../tmp/',import.meta.url));
       await mkdir(temporaryRoot,{recursive:true});
       const root=await realpath(await mkdtemp(path.join(temporaryRoot,'codeworks-test-')));temporary.push(root);
       const repo=path.join(root,'repo'),areas=path.join(root,'areas');
       await mkdir(repo);await mkdir(areas);await mkdir(path.join(repo,'node_modules'));
       const manifest={name:'fixture',version:'1.0.0',private:true,workspaces:['packages/*'],engines:{node:'24.21.0',npm:'11.19.0'}};
+      if(sharedFixture)manifest.dependencies={'shared-readonly':'1.0.0'};
       const leaf={name:'@fixture/leaf',version:'1.0.0'};
       await mkdir(path.join(repo,'packages/leaf'),{recursive:true});
       await writeFile(path.join(repo,'packages/leaf/package.json'),JSON.stringify(leaf)+'\n');
       await writeFile(path.join(repo,'package.json'),JSON.stringify(manifest)+'\n');
-      await writeFile(path.join(repo,'package-lock.json'),JSON.stringify({name:'fixture',version:'1.0.0',lockfileVersion:3,packages:{'':manifest,'packages/leaf':leaf,'node_modules/@fixture/leaf':{resolved:'packages/leaf',link:true}}})+'\n');
+      const packages={'':manifest,'packages/leaf':leaf,'node_modules/@fixture/leaf':{resolved:'packages/leaf',link:true}};
+      if(sharedFixture){
+        packages['node_modules/shared-readonly']={version:'1.0.0'};
+        await mkdir(path.join(repo,'node_modules/shared-readonly'));
+        await writeFile(path.join(repo,'node_modules/shared-readonly/package.json'),JSON.stringify({name:'shared-readonly',version:'1.0.0'}));
+        await writeFile(path.join(repo,'node_modules/shared-readonly/keep.js'),'shared dependency\n');
+      }
+      await writeFile(path.join(repo,'package-lock.json'),JSON.stringify({name:'fixture',version:'1.0.0',lockfileVersion:3,packages})+'\n');
       await mkdir(path.join(repo,'node_modules/@fixture'),{recursive:true});
       const {symlink}=await import('node:fs/promises');await symlink(path.join(repo,'packages/leaf'),path.join(repo,'node_modules/@fixture/leaf'));
       await writeFile(path.join(repo,'.gitignore'),'node_modules/\nAGENTS.override.md\n');
       await writeFile(path.join(repo,'AGENTS.override.md'),'Synthetic worktree instructions.\n');
       await writeFile(path.join(repo,'hello.txt'),'frozen base\n');
+      if(documentationPaths.length){await mkdir(path.join(repo,'docs'));await writeFile(path.join(repo,'docs/readme.md'),'base docs\n');}
       await command('git',['init','-b','dev',repo]);
       await command('git',['-C',repo,'add','.']);
       await command('git',['-C',repo,'commit','-m','Synthetic base']);
@@ -55,6 +64,7 @@ export async function setup() {
       const preparer=path.join(common,'hooks/prepare-brai-worktree');
       await copyFile(process.env.CODEWORKS_TEST_PREPARER??path.join(sourceCommon,'hooks/prepare-brai-worktree'),preparer);await chmod(preparer,0o755);
       const project={id:'test_'+randomUUID(),repo_path:repo,common_dir:common,workspace_root:areas,allowed_paths:['.'],excluded_paths:['.git','node_modules','.env'],executors:['codex','hermes'],git_flow:{feature_base:'refs/remotes/origin/dev',hotfix_base:'refs/remotes/origin/main',feature_prefix:'feature/',hotfix_prefix:'hotfix/'},preparer_path:preparer,node_version:'24.21.0',platform:process.platform+'-'+process.arch};
+      if(documentationPaths.length)project.documentation_paths=documentationPaths;
       allowedRepositories.push(repo);
       await h.call('project.register',{project},'codeworks_admin');
       return project;

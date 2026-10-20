@@ -22,7 +22,7 @@ Runtime требует явный `CODEWORKS_ALLOWED_REPOSITORIES` — JSON-ма
 
 `project.register({project})` проверяет канонические `repo_path`, `common_dir`, существующий `workspace_root`, исполняемый файл подготовщика, Node/platform, нормализованные префиксы разрешённых и исключённых путей. Git flow первого этапа: feature от `refs/remotes/origin/dev`, hotfix от `refs/remotes/origin/main`, префиксы `feature/` и `hotfix/`. База читается из текущего локального remote ref; Codeworks не делает fetch. Обновление remote refs — обязанность оператора перед созданием новой области. Запасной переход на main запрещён.
 
-Повтор идентичной регистрации возвращает прежнюю конфигурацию. Изменение политики в этой версии не поддержано. У одного Git common directory и корня областей только один проект. `project.get({project_id})` читает политику для разрешённого исполнителя. Префиксы путей — данные политики для следующих hooks; ограничения произвольных действий редактора/оболочки на этом этапе не реализованы. Сервис изменяет только собственные Git ресурсы и запускает зарегистрированный подготовщик.
+Повтор идентичной регистрации возвращает прежнюю конфигурацию. Изменение политики в этой версии не поддержано. У одного Git common directory и корня областей только один проект. `project.get({project_id})` читает политику для разрешённого исполнителя. Необязательный `documentation_paths` задаёт нормализованные разрешённые префиксы документации без symlink. Регистрировать исключения может только администратор проекта; обычные инструменты агента не меняют реестр. Для managed agents префиксы применяет доверенный executor ниже.
 
 ## Операции
 
@@ -44,10 +44,37 @@ Writer содержит `{executor_id,session_id,epoch,state}`. Первое с�
 
 Передача требует ready, фактического владения Git и двух отдельных действий:
 
-1. Прежний executor/session вызывает `mode=quiesce, expected_epoch, writes_stopped=true`, явно подтверждая прекращение записи. Ядро вызывает также порт `assertQuiescent`; следующий этап может подключить проверку запущенных процессов. Сейчас Codeworks не запускает пользовательские редакторы/агентов и доверяет явному подтверждению прежнего владельца.
+1. Прежний executor/session вызывает `mode=quiesce, expected_epoch, writes_stopped=true`, явно подтверждая прекращение записи. Ядро вызывает порт `assertQuiescent`. При включённом agent host он сначала закрывает admission, сохраняет отзыв session, убивает все её дочерние namespace-процессы и ждёт закрытия pipe/FD. Только после этого ядро фиксирует quiesced.
 2. Новый исполнитель вызывает `mode=attach` с полученной эпохой. Только `quiesced` область меняет writer и увеличивает эпоху. Конкурент получает WRITER_BUSY.
 
-Ни таймаут, ни отсутствие heartbeat, ни новая attempt не освобождают активного writer. Принудительной остановки или кражи активной области нет. После передачи старые epoch/session не могут запросить выпуск или сменить владельца. Проверка OS-записи внешних программ будет отдельным hook этапа 2; текущий writer регулирует операции Codeworks.
+Ни таймаут, ни отсутствие heartbeat, ни новая attempt не освобождают активного writer. Принудительной кражи активной области нет. После передачи старые epoch/session не могут писать через executor, запросить выпуск или сменить владельца. Dirty файлы остаются на месте. Для внешних клиентов без managed host оператор обязан предоставить собственный `assertQuiescent`; одно подтверждение клиента не защищает стороннюю оболочку.
+
+## Доверенное исполнение Codex и Hermes
+
+`CODEWORKS_AGENT_HOST_CONFIG` включает executor в том же owner runtime. Это один core и та же БД, а не отдельный сервис владения. `services/codeworks-agent` содержит тонкие frontend-процессы: Codex app-server stdio/Unix WebSocket и launcher существующего Hermes. На сервере весь исполняемый код, конфигурация, ключи и их родительские каталоги устанавливаются оператором вне writable репозиториев. Host проверяет root ownership и отсутствие group/other write у своих worker файлов; нельзя включать его из рабочего checkout. Корень operational worktrees должен быть отдельным от repo_path.
+
+Нативный агент запускается в Linux bubblewrap namespace: host filesystem readonly, исходники и корень областей скрыты readonly mount, приватные host inputs скрыты, capabilities сброшены, `/tmp` и `/run` локальны. Writable остаётся только его отдельный профиль. Нативные file/patch/command writers не имеют доступа к исходникам даже при запросе `dangerFullAccess`. Существующий RTK hook сохраняется с исходным trust и служит интерфейсу; hooks не являются OS-границей. Оператор обязан скрыть account homes, credentials, управляющие sockets и иные доступные агенту пути удалённой записи. Linux, bubblewrap с user/PID namespaces, подготовленные зависимости и доверенный launcher обязательны; обход через несandboxed прежний процесс требует остановки такого процесса при включении.
+
+Codex получает dynamic tool `codeworks` в настоящем app-server thread. Frontend подписывает запрос с реальным `threadId`; subagent имеет собственный threadId. Managed resume/fork сохраняют инструмент и routing, legacy unmanaged resume отклоняется. Hermes регистрирует тот же owner schema в настоящем `tools.registry`; dispatcher передаёт `AIAgent.session_id`. Секрет adapter передаётся через pipe в private namespace file и удаляется до model loop; подписи не принимаются из аргументов модели. Native Hermes tools закрыты dispatcher gate; его permissive hook не используется как enforcement. `--gateway` загружает штатный gateway через этот же bootstrap; platform toolsets должны разрешать codeworks, а существующий gateway останавливается оператором перед переключением. Самостоятельный запуск старого executable вне launcher не защищён.
+
+У каждого executor отдельный adapter key/socket. Native identity отображается в durable случайный broker session UUID; workspace UUID, Element/Move/attempt и identity процесса не смешиваются. Control socket и scoped session sockets доступны только доверенному frontend/оператору; модель получает подписывающий adapter без возможности выбирать session_id. Перезапуск host убивает дочерние namespaces (`die-with-parent`), а session metadata восстанавливаются. Он не передаёт writer по heartbeat.
+
+Машинный источник инструмента — [agent-tools.json](src/agent-tools.json). Действия:
+
+| Действие | Поведение |
+| --- | --- |
+| `read(path)` | Читает исходную копию до первой записи, затем только свою область. |
+| `batch(operations)` | `write/delete/rename/symlink`; проверяет весь batch, включая обе стороны rename и существующих ancestors. |
+| `patch(patch)` | Parse `*** Begin Patch` с Add/Delete/Update/Move, затем та же общая проверка и исполнение. |
+| `command(mode,argv,input?)` | Обязательный `read` или `write`; содержимое shell не классифицируется. Read mount readonly; write заранее подготавливает область. |
+| `poll(command_id)`, `stdin(command_id,input,eof?)` | Только процессы собственной session. Старый открытый shell после quiesce остановлен; stdin отвергается. |
+| `status` | Текущая область/writer без её создания. |
+
+До первой мутации проверяются фактические канонические пути; абсолютный repo_path становится alias своей области. Переходы через symlink за пределы проекта, `.git`, `node_modules`, `.env*`, `.secrets`, `.agents`, `.codex` запрещены файловым worker. Локальные `@brai/*` разрешены через их настоящие workspace paths; сторонние зависимости readonly. После подготовки все последующие read/write данного агента используют область. Команда в режиме write может менять любые не исключённые файлы внутри области, поэтому shell не является способом документационной записи без worktree.
+
+Только batch без symlink, целиком в `documentation_paths` и с расширениями `.md/.txt/.rst/.adoc`, может записать документацию в исходную копию без области. Mixed docs/code целиком получает область. Проверка всего batch предшествует первой записи; автоматического переноса уже выполненной половины или повтора команды нет. Ошибка IO во время исполнения может оставить частичный результат: агент проверяет его явно. Docs prefix должен существовать, иначе write fail-closed.
+
+Host допускает 32 активных процесса, удерживает не более 256 результатов; команда ограничена 120 секундами (operator maximum 600), stdout+stderr 1 MiB. Scoped input frame 1 MiB, response 2 MiB, socket timeout 180 секунд; подготовка ожидается до 150 секунд, затем остаётся durable pending intent. Один batch содержит до 128 операций. Ни клиент, ни host не повторяют команды после неопределённого результата.
 
 ## Повторы, выполнение и восстановление
 

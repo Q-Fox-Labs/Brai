@@ -107,7 +107,7 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',assert
             if (args.mode==='quiesce') {
               assertWriter(w,executorId,args);
               if (args.writes_stopped!==true) throw new Fault('INVALID_ARGUMENT','Previous writer must explicitly confirm that writes have stopped.');
-              // AIDEV-NOTE: Этап 2 может добавить проверку реальных процессов; отсутствие heartbeat не используется.
+              // AIDEV-NOTE: Managed host перекрывает admission и ждёт реальные namespace children.
               await assertQuiescent({workspace:workspaceDTO(w),executorId,sessionId:args.session_id});
               w.writer={...w.writer,state:'quiesced'};
             } else {

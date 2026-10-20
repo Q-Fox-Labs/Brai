@@ -73,6 +73,12 @@
           "maxItems": 128,
           "uniqueItems": true
         },
+        "documentation_paths": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "maxLength": 512},
+          "uniqueItems": true,
+          "maxItems": 128
+        },
         "excluded_paths": {
           "type": "array",
           "items": {

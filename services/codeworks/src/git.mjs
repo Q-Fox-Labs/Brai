@@ -64,6 +64,11 @@ export function createGit() {
       await topology(project);
       if(project.workspace_root===project.repo_path||project.workspace_root.startsWith(project.common_dir+'/'))throw new Fault('INVALID_ARGUMENT');
       if(!project.allowed_paths.every(relative)||!project.excluded_paths.every(relative))throw new Fault('INVALID_ARGUMENT','Policy paths must be normalized repository-relative prefixes.');
+      for(const prefix of project.documentation_paths??[]) {
+        if(prefix==='.'||!relative(prefix)||!project.allowed_paths.some(p=>p==='.'||prefix===p||prefix.startsWith(p+'/'))||project.excluded_paths.some(p=>prefix===p||prefix.startsWith(p+'/')))throw new Fault('INVALID_ARGUMENT');
+        const absolute=path.join(project.repo_path,prefix);
+        if(await realpath(absolute)!==absolute||(await lstat(absolute)).isSymbolicLink())throw new Fault('INVALID_ARGUMENT');
+      }
       if(!path.isAbsolute(project.preparer_path)||!(await lstat(project.preparer_path)).isFile())throw new Fault('INVALID_ARGUMENT');
       if(project.node_version!==process.version.slice(1)||project.platform!==process.platform+'-'+process.arch)throw new Fault('DEPENDENCIES_INCOMPATIBLE','Node version or platform differs from the registered project.');
     },
