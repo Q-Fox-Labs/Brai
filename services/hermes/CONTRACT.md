@@ -59,7 +59,7 @@ JSON принимает только `model`, текстовый `input`, нео
 
 Private `actions.complete` проверяет текущую попытку, human, running и revision. Game-core атомарно проверяет статус попытки и актуальную planning revision, задаёт `confirmed_by` владельцу и сохраняет результат. Для review/final проверка revision в мосте является предварительной: текущий owner API не даёт общего атомарного CAS. Это известная граница, а не обещание блокировки параллельного редактирования.
 
-Отмена и TTL используют private `actions.cancel`: только та же текущая human/running попытка завершается через owner fail с `HUMAN_EXPIRED`, `HUMAN_CANCELLED` или `HUMAN_DECLINED`; Move снова planned. Новая revision не препятствует уборке старой попытки. Telegram плагин завершает истёкшие pending по native таймеру и сверяет их после перезапуска; повтор callback не создаёт новую попытку. Решения changes/cancelled через complete также завершают human attempt. Неизвестный исход сохраняется как unknown; он не выдаётся за отказ или успешное решение.
+Отмена и восстановление незавершённой отправки используют private `actions.cancel`: только та же текущая human/running попытка завершается через owner fail; Move снова planned. Прежний reason=expired остаётся совместимым с private API, но Telegram больше не задаёт срок решения и не отменяет доставленные кнопки по таймеру. При нажатии проверяются актуальные revision/attempt и отправитель; повтор callback не создаёт новую попытку. Неизвестный исход сохраняется как unknown; он не выдаётся за отказ или успешное решение.
 
 ## Private stdio RPC
 

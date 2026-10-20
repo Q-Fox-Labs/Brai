@@ -68,7 +68,7 @@ class FakeBot:
     def __init__(self):
         """Запомнить текущий loop и отправленные сообщения."""
         self.loop = asyncio.get_running_loop()
-        self.sent = []
+        self.sent, self.edited = [], []
         self.fail = False
 
     async def send_message(self, **kwargs):
@@ -79,6 +79,11 @@ class FakeBot:
             raise RuntimeError("Telegram failed")
         self.sent.append(kwargs)
         return NS(message_id=len(self.sent))
+
+
+    async def edit_message_text(self, **kwargs):
+        self.edited.append(kwargs)
+        return NS(message_id=kwargs["message_id"])
 
 
 class FakeQuery:
@@ -110,7 +115,7 @@ def ptb_stubs():
     ext = NS(CallbackQueryHandler=lambda callback, pattern: NS(callback=callback, pattern=pattern),
              TypeHandler=lambda kind, callback: NS(callback=callback, update_type=kind),
              ApplicationHandlerStop=ApplicationHandlerStop)
-    return {"telegram": telegram, "telegram.ext": ext}
+    return {"telegram": telegram, "telegram.ext": ext, "telegram.error": NS(BadRequest=type("BadRequest", (Exception,), {}))}
 
 
 class PluginTests(unittest.IsolatedAsyncioTestCase):
@@ -279,17 +284,16 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(method == "actions.cancel" for method, _ in self.bridge.calls))
         self.assertEqual(self.bot.sent[-1]["chat_id"], 123)
 
-    async def test_group_restart_keeps_pending_until_expiry_then_cancels_in_recorded_chat(self):
+    async def test_group_restart_keeps_old_button_without_deadline(self):
         await self.set_group_route()
         data = await self.request()
-        token = data.split(":")[1]
         await self.set_group_route()
-        self.assertEqual(self.plugin.tokens.pending()[0]["chat_id"], GROUP)
+        with patch.object(mod.time, "time", return_value=time.time() + 365 * 86400):
+            query = FakeQuery(data, chat=int(GROUP), chat_type="supergroup")
+            await self.plugin.callback(NS(callback_query=query), None)
+        self.assertTrue(any(method == "actions.complete" for method, _ in self.bridge.calls))
         self.assertFalse(any(method == "actions.cancel" for method, _ in self.bridge.calls))
-        await asyncio.wait_for(self.plugin._expire(token, time.time() - 1), 1)
         self.assertEqual(self.plugin.tokens.pending(), [])
-        self.assertEqual(self.bridge.calls[-1][0], "actions.cancel")
-        self.assertEqual(self.bot.sent[-1]["chat_id"], int(GROUP))
 
     async def test_legacy_sqlite_migration_binds_old_tokens_to_owner_dm(self):
         directory = Path(self.tmp.name) / "legacy"
@@ -303,6 +307,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                        (MOVE, ATTEMPT, REVISION, time.time() + 900))
         tokens = mod.Tokens(directory)
         self.assertEqual(tokens.pending()[0]["chat_id"], "123")
+        self.assertNotIn("expires", tokens.pending()[0])
         self.assertIsNone(tokens.consume("old", "123", 1, GROUP))
         self.assertIsNotNone(tokens.consume("old", "123", 1, "123"))
 
@@ -461,15 +466,56 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_null_stage_claim_recovery_cancels_without_new_buttons_or_completion(self):
         self.bridge.action["confirmationStage"] = None
         token = self.plugin.tokens.create("123", {"moveId": MOVE, "revisionId": REVISION, "attemptId": ""}, "planning")
-        await asyncio.wait_for(self.plugin._expire(token, time.time() - 1), 1)
+        await asyncio.wait_for(self.plugin._recover(token), 1)
         prepare = next(args for method, args in self.bridge.calls if method == "actions.prepare")
         self.assertEqual(prepare["idempotencyKey"], token)
         self.assertEqual(self.bridge.calls[-1], ("actions.cancel", {"moveId": MOVE,
-            "attemptId": ATTEMPT, "revisionId": REVISION, "reason": "expired"}))
+            "attemptId": ATTEMPT, "revisionId": REVISION, "reason": "cancelled"}))
         self.assertFalse(any(method == "actions.complete" for method, _ in self.bridge.calls))
         self.assertFalse(any("reply_markup" in message for message in self.bot.sent))
         self.assertEqual(self.plugin.tokens.pending(), [])
         self.assertEqual(self.injections, [])
+
+    async def test_plan_delivery_fulfils_only_exact_inbound_reply(self):
+        source = REPO / "tmp/hermes-pinned-telegram/gateway/response_filters.py"
+        if not source.exists():
+            self.skipTest("read-only pinned upstream fixture not present")
+        spec = importlib.util.spec_from_file_location("native_response_filters_test", source)
+        native = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(native)
+        event = self.event(reply_expected=True)
+        next_event = self.event(message_id="43", reply_expected=True)
+        self.native_context["HERMES_SESSION_MESSAGE_ID"] = "42"
+        await self.plugin.incoming(event)
+        await self.plugin.incoming(next_event)
+        self.assertFalse(native.silence_allowed(None, event.reply_expected))
+        await self.request()
+        self.assertEqual(len(self.bot.sent), 1)
+        self.assertFalse(event.reply_expected)
+        self.assertTrue(next_event.reply_expected)
+        self.assertTrue(native.silence_allowed(None, event.reply_expected))
+        self.assertTrue(native.is_intentional_silence_response("NO_REPLY"))
+        self.assertNotIn("Срок", self.bot.sent[0]["text"])
+        self.assertNotIn("expires", self.plugin.tokens.pending()[0])
+
+    async def test_failed_plan_delivery_does_not_silence_owner_reply(self):
+        event = self.event(reply_expected=True)
+        self.native_context["HERMES_SESSION_MESSAGE_ID"] = "42"
+        await self.plugin.incoming(event)
+        self.bot.fail = True
+        result = json.loads(await self.plugin.request_confirmation({"moveId": MOVE, "revisionId": REVISION}))
+        self.assertFalse(result["ok"])
+        self.assertTrue(event.reply_expected)
+
+    async def test_unchanged_plan_edit_is_success_without_another_message(self):
+        await self.request()
+        async def unchanged(**kwargs):
+            raise sys.modules["telegram.error"].BadRequest("Message is not modified")
+        self.bot.edit_message_text = unchanged
+        result = json.loads(await self.plugin.request_confirmation({"moveId": MOVE, "revisionId": REVISION}))
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(self.bot.sent), 1)
+        self.assertFalse(self.plugin.tokens.pending()[0]["consumed"])
 
     async def test_model_cannot_pass_completion_or_decision(self):
         result = json.loads(await self.plugin.request_confirmation({"moveId": MOVE,
@@ -481,8 +527,10 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.request()
         before = len(self.bridge.calls)
         result = json.loads(await self.plugin.request_confirmation({"moveId": MOVE, "revisionId": REVISION}))
-        self.assertFalse(result["ok"])
-        self.assertEqual(len(self.bridge.calls), before)
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(self.bridge.calls), before + 3)
+        self.assertEqual(len(self.bot.edited), 1)
+        self.assertFalse(any(method == "actions.cancel" for method, _ in self.bridge.calls))
         self.assertEqual(len(self.bot.sent), 1)
 
     async def test_crash_reservation_recovers_same_key_then_cancels_never_approves(self):
@@ -516,11 +564,11 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_reservation_without_remote_claim_does_not_create_new_attempt(self):
         token = self.plugin.tokens.create("123", {"moveId": MOVE, "revisionId": REVISION, "attemptId": ""}, "planning")
         self.bridge.action["status"] = "planned"
-        await asyncio.wait_for(self.plugin._expire(token, time.time() - 1), 1)
+        await asyncio.wait_for(self.plugin._recover(token), 1)
         self.assertEqual([method for method, _ in self.bridge.calls], ["actions.read"])
         self.assertEqual(self.plugin.tokens.pending(), [])
 
-    async def test_expiry_cleanup_rechecks_after_transient_cancel_failure(self):
+    async def test_recovery_rechecks_after_transient_cancel_failure(self):
         data = await self.request()
         original_call, original_sleep = self.bridge.call, asyncio.sleep
         self.bridge.fail = "actions.cancel"
@@ -537,7 +585,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.bridge.call = fail_once
         with patch.object(mod.asyncio, "sleep", quick_sleep):
-            await asyncio.wait_for(self.plugin._expire(data.split(":")[1], time.time() - 1), 2)
+            await asyncio.wait_for(self.plugin._recover(data.split(":")[1]), 2)
         methods = [method for method, _ in self.bridge.calls]
         cancels = [i for i, method in enumerate(methods) if method == "actions.cancel"]
         self.assertEqual(len(cancels), 2)
@@ -588,19 +636,19 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.tokens.pending(), [])
         self.assertFalse(any(method == "actions.complete" for method, _ in self.bridge.calls))
 
-    async def test_expiry_cancels_exact_attempt_and_restart_cleans_consumed(self):
+    async def test_recovery_cancels_exact_attempt_and_restart_cleans_consumed(self):
         data = await self.request()
         token = data.split(":")[1]
         self.plugin.tokens.consume(token)
-        await asyncio.wait_for(self.plugin._expire(token, time.time() - 1), 1)
+        await asyncio.wait_for(self.plugin._recover(token), 1)
         self.assertEqual(self.bridge.calls[-1], ("actions.cancel", {"moveId": MOVE,
-            "attemptId": ATTEMPT, "revisionId": REVISION, "reason": "expired"}))
+            "attemptId": ATTEMPT, "revisionId": REVISION, "reason": "cancelled"}))
         self.assertEqual(self.plugin.tokens.pending(), [])
 
-    async def test_expiry_does_not_cancel_new_attempt(self):
+    async def test_recovery_does_not_cancel_new_attempt(self):
         data = await self.request()
         self.bridge.action["attemptId"] = TARGET
-        await asyncio.wait_for(self.plugin._expire(data.split(":")[1], time.time() - 1), 1)
+        await asyncio.wait_for(self.plugin._recover(data.split(":")[1]), 1)
         self.assertFalse(any(method == "actions.cancel" for method, _ in self.bridge.calls))
 
     async def test_startup_reconciles_consumed_unresolved_immediately(self):

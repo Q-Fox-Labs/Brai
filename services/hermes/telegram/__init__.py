@@ -22,7 +22,6 @@ import time
 
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 MAX_ATTACHMENTS = 10
-TOKEN_TTL = 900
 RPC_TIMEOUT = 15
 OUTPUT_TIMEOUT = 20
 HUMAN_OUTPUT_REQUIRED = "Для этого действия нужны настоящие результаты работы человека. Кнопка решения их не создаёт; сначала выполните работу и сохраните её результаты штатным способом."
@@ -31,7 +30,7 @@ CONFIRMATION_DESCRIPTION = (
     "Ask the owner to confirm a human Action in the configured Telegram chat. First create "
     "the Element and Action with the available game-core structure/create tools, or use existing ones. "
     "Call elements_request_human_action for the real moveId; pass its returned moveId and revisionId here. "
-    "Never invent IDs or pass placeholder UUIDs. For integrated plans this tool accepts only decision-only confirm/final Actions with one output; human work requiring substantive results is rejected before claim. The real Action determines its stage. A verified owner decision automatically resumes this session."
+    "Never invent IDs or pass placeholder UUIDs. For integrated plans this tool accepts only decision-only confirm/final Actions with one output; human work requiring substantive results is rejected before claim. The real Action determines its stage. The tool sends the saved plan/result with buttons itself. Do not send a separate copy. After ok=true, finish with NO_REPLY; after failure, explain it. A verified owner decision automatically resumes this session."
 )
 
 
@@ -178,9 +177,11 @@ class Tokens:
             db.execute("""CREATE TABLE IF NOT EXISTS tokens (
                 token TEXT PRIMARY KEY, owner TEXT NOT NULL, move_id TEXT NOT NULL,
                 attempt_id TEXT NOT NULL, revision_id TEXT NOT NULL, stage TEXT NOT NULL,
-                expires REAL NOT NULL, consumed INTEGER NOT NULL DEFAULT 0, message_id TEXT,
+                consumed INTEGER NOT NULL DEFAULT 0, message_id TEXT,
                 resolved INTEGER NOT NULL DEFAULT 0)""")
             columns = {row[1] for row in db.execute("PRAGMA table_info(tokens)")}
+            if "expires" in columns:
+                db.execute("ALTER TABLE tokens DROP COLUMN expires")
             if "chat_id" not in columns:
                 # AIDEV-NOTE: Прежние кнопки могли принадлежать только личному чату owner.
                 db.execute("ALTER TABLE tokens ADD COLUMN chat_id TEXT NOT NULL DEFAULT ''")
@@ -211,10 +212,10 @@ class Tokens:
                 raise BridgeError("CONFIRMATION_PENDING")
             context = context or {}
             db.execute("""INSERT INTO tokens
-                       (token,owner,move_id,attempt_id,revision_id,stage,expires,chat_id,session_key,session_id,thread_id)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                       (token,owner,move_id,attempt_id,revision_id,stage,chat_id,session_key,session_id,thread_id)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
                        (token, owner, action["moveId"], action["attemptId"],
-                        action["revisionId"], stage, time.time() + TOKEN_TTL, chat_id or owner,
+                        action["revisionId"], stage, chat_id or owner,
                         context.get("session_key", ""), context.get("session_id", ""), context.get("thread_id", "")))
         return token
 
@@ -337,10 +338,11 @@ class TelegramPlugin:
         self.session_store = None
         self.loop = self.bot = None
         self.tasks = set()
-        self.expiry_tasks = {}
+        self.cleanup_tasks = {}
         self.handlers = []
         self.closed = False
         self.active_callbacks = set()
+        self.inbound_events = {}
         self.descriptor = re.compile(
             r"!?\[(?:\\[^\r\n]|[^\]\\\r\n])*\]\(<" + re.escape(config.result_root.rstrip("/")) + r"/(?P<id>" + UUID
             + r")/(?P<name>[^<>/\r\n]+)>\)")
@@ -368,7 +370,8 @@ class TelegramPlugin:
                            or route_changed)
             if route_changed:
                 self.tokens.consume(row["token"])
-            self._schedule_expiry(row["token"], time.time() if recover_now else row["expires"])
+            if recover_now:
+                self._schedule_cleanup(row["token"])
 
     def close(self):
         """Убрать только свои handlers/tasks при native unload; SQLite сохраняет recovery."""
@@ -384,18 +387,18 @@ class TelegramPlugin:
         if self.loop and self.loop.is_running():
             self.loop.call_soon_threadsafe(cleanup)
 
-    def _schedule_expiry(self, token, expires):
-        previous = self.expiry_tasks.get(token)
+    def _schedule_cleanup(self, token):
+        previous = self.cleanup_tasks.get(token)
         if previous:
             previous.cancel()
-        task = self.loop.create_task(self._expire(token, expires))
+        task = self.loop.create_task(self._recover(token))
         self.tasks.add(task)
-        self.expiry_tasks[token] = task
+        self.cleanup_tasks[token] = task
 
         def finished(done):
             self.tasks.discard(done)
-            if self.expiry_tasks.get(token) is done:
-                self.expiry_tasks.pop(token, None)
+            if self.cleanup_tasks.get(token) is done:
+                self.cleanup_tasks.pop(token, None)
 
         task.add_done_callback(finished)
 
@@ -493,6 +496,10 @@ class TelegramPlugin:
             return {"action": "skip", "reason": "brai-owner-route-only"}
         if kwargs.get("session_store") is not None:
             self.session_store = kwargs["session_store"]
+        key = (str(source.chat_id), str(getattr(source, "thread_id", None) or ""), str(event.message_id))
+        self.inbound_events[key] = event
+        if len(self.inbound_events) > 128:
+            self.inbound_events.pop(next(iter(self.inbound_events)))
         paths = getattr(event, "media_urls", [])
         if not paths:
             return None
@@ -624,13 +631,21 @@ class TelegramPlugin:
                 ("session_key", "HERMES_SESSION_KEY"), ("session_id", "HERMES_SESSION_ID"),
                 ("thread_id", "HERMES_SESSION_THREAD_ID"))}
             context["session_id"] = dispatch_id or bound_id
+            context["message_id"] = get_session_env("HERMES_SESSION_MESSAGE_ID")
             if (get_session_env("HERMES_SESSION_PLATFORM") != "telegram"
                     or get_session_env("HERMES_SESSION_USER_ID") != self.config.owner
                     or not self._route_matches(get_session_env("HERMES_SESSION_CHAT_ID"),
                                                get_session_env("HERMES_SESSION_CHAT_TYPE"))
                     or not self._session_matches({**context, "owner": self.config.owner, "chat_id": self.config.chat})):
                 raise BridgeError("SESSION_CONTEXT_INVALID")
-            return await self._on_native_loop(self._request(args, context))
+            result = await self._on_native_loop(self._request(args, context))
+            if json.loads(result).get("ok"):
+                # Public MessageEvent: this exact inbound request has received its reply.
+                key = (self.config.chat, context["thread_id"], context["message_id"])
+                event = self.inbound_events.pop(key, None)
+                if event is not None:
+                    event.reply_expected = False
+            return result
         except Exception as error:
             code = str(error) if isinstance(error, BridgeError) and str(error) in {
                 "INVALID_ARGUMENT", "SESSION_CONTEXT_INVALID", "TELEGRAM_UNAVAILABLE",
@@ -641,9 +656,24 @@ class TelegramPlugin:
     async def _request(self, args, context):
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         stage = args.get("stage", "planning")
-        # AIDEV-NOTE: Reservation до prepare закрывает crash между backend claim и SQLite записью.
-        token = self.tokens.create(self.config.owner, {**args, "attemptId": ""}, stage, self.config.chat, context)
-        self._schedule_expiry(token, time.time() + TOKEN_TTL)
+        existing = None
+        for pending in self.tokens.pending():
+            if pending["move_id"] != args["moveId"]:
+                continue
+            if (not pending["consumed"] and pending["message_id"] is not None
+                    and pending["revision_id"] == args["revisionId"]
+                    and await asyncio.to_thread(self._session_matches, pending)
+                    and await self._current(pending)):
+                existing = pending
+                break
+            if pending["consumed"]:
+                raise BridgeError("CONFIRMATION_PENDING")
+            self.tokens.consume(pending["token"])
+            await self._cleanup(pending, "cancelled")
+            self.tokens.resolve(pending["token"])
+        # Reservation до prepare закрывает crash между backend claim и SQLite записью.
+        token = existing["token"] if existing else self.tokens.create(
+            self.config.owner, {**args, "attemptId": ""}, stage, self.config.chat, context)
         try:
             action = await self._prepare(self.tokens.unresolved(token))
             if action.get("confirmationStage", stage) is None:
@@ -665,17 +695,26 @@ class TelegramPlugin:
                 text = f"{stage_label}\n\n{preview}\n\n"
             else:
                 text = f"{stage_label}: {action['title'][:800]}\n{title}\n{context}\n"
-            text += ("Нужны изменения — обсудить и доработать; отменить — остановить запрос.\n"
-                     "Срок кнопки: 15 минут.")
+            text += "Нужны изменения — обсудить и доработать; отменить — остановить запрос."
             thread_id = self.tokens.unresolved(token)["thread_id"]
             route = {"message_thread_id": int(thread_id)} if thread_id and str(thread_id) != "1" else {}
             # Не обрезаем план/результат. 1800 code points помещаются в 4096 UTF-16 units.
             chunks = [text[index:index + 1800] for index in range(0, len(text), 1800)]
             for index, chunk in enumerate(chunks):
                 keyboard = {"reply_markup": InlineKeyboardMarkup(buttons)} if index == len(chunks) - 1 else {}
-                message = await self.bot.send_message(chat_id=int(self.config.chat), text=chunk, **route,
-                    **keyboard, connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
-            self.tokens.bind(token, message.message_id)
+                if existing and len(chunks) == 1:
+                    from telegram.error import BadRequest
+                    try:
+                        await self.bot.edit_message_text(chat_id=int(self.config.chat),
+                            message_id=int(existing["message_id"]), text=chunk, **keyboard,
+                            connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
+                    except BadRequest as error:
+                        if "message is not modified" not in str(error).lower():
+                            raise
+                else:
+                    message = await self.bot.send_message(chat_id=int(self.config.chat), text=chunk, **route,
+                        **keyboard, connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
+                    self.tokens.bind(token, message.message_id)
             return json.dumps({"ok": True, "status": "awaiting_owner", "moveId": action["moveId"],
                                "attemptId": action["attemptId"], "revisionId": action["revisionId"]})
         except Exception as error:
@@ -684,7 +723,7 @@ class TelegramPlugin:
                 await self._cleanup(self.tokens.unresolved(token), "cancelled")
                 self.tokens.resolve(token)
             except Exception:
-                pass  # Native expiry/restart recovery проверит состояние перед новой отменой.
+                self._schedule_cleanup(token)  # Recovery всегда сверяет exact attempt перед cancel.
             code = "HUMAN_OUTPUT_REQUIRED" if isinstance(error, BridgeError) and str(error) == "HUMAN_OUTPUT_REQUIRED" else "SEND_UNCONFIRMED"
             raise BridgeError(code) from None
 
@@ -727,8 +766,8 @@ class TelegramPlugin:
             row = self.tokens.unresolved(row["token"])
         return await self._cancel(row, reason)
 
-    async def _expire(self, token, expires):
-        await asyncio.sleep(max(0, expires - time.time()))
+    async def _recover(self, token):
+        """Восстановить только незавершённую техническую попытку, без срока решения."""
         while token in self.active_callbacks:
             await asyncio.sleep(0.1)
         warned = False
@@ -737,9 +776,9 @@ class TelegramPlugin:
             if row is None:
                 return
             try:
-                cancelled = await self._cleanup(row, "expired")
+                cancelled = await self._cleanup(row, "cancelled")
                 self.tokens.resolve(token)
-                notice = ("Срок кнопки Brai истёк; попытка отменена. Запросите новую кнопку." if cancelled
+                notice = ("Незавершённая попытка отправки отменена. Запросите кнопки ещё раз." if cancelled
                           else "Кнопка Brai больше не активна. Состояние Action уже изменилось.")
                 await self._notify(notice, row["chat_id"], row["thread_id"])
                 return
@@ -783,11 +822,7 @@ class TelegramPlugin:
             await query.answer("Проверяю подтверждение…")
             if decision not in allowed:
                 raise BridgeError("INVALID_DECISION")
-            if row["expires"] <= time.time():
-                await self._cancel(row, "expired")
-                self.tokens.resolve(match[1])
-                notice = "Срок подтверждения истёк. Запросите новую кнопку."
-            elif not await asyncio.to_thread(self._session_matches, row) or not await self._current(row):
+            if not await asyncio.to_thread(self._session_matches, row) or not await self._current(row):
                 await self._cancel(row, "cancelled")
                 self.tokens.resolve(match[1])
                 notice = "Задача, версия или исходная беседа изменились. Работа не запущена."
@@ -810,7 +845,7 @@ class TelegramPlugin:
         finally:
             self.active_callbacks.discard(match[1])
             if not self.closed and self.tokens.unresolved(match[1]):
-                self._schedule_expiry(match[1], time.time())
+                self._schedule_cleanup(match[1])
         try:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
