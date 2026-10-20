@@ -193,7 +193,11 @@ class Tokens:
                     db.execute(f"ALTER TABLE tokens ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             db.execute("""CREATE TABLE IF NOT EXISTS agent_attempts (
                 owner TEXT NOT NULL, session_id TEXT NOT NULL, move_id TEXT NOT NULL,
-                attempt_id TEXT NOT NULL, PRIMARY KEY(owner,session_id,move_id))""")
+                attempt_id TEXT NOT NULL, terminal_pending INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(owner,session_id,move_id))""")
+            attempt_columns = {row[1] for row in db.execute("PRAGMA table_info(agent_attempts)")}
+            if "terminal_pending" not in attempt_columns:
+                db.execute("ALTER TABLE agent_attempts ADD COLUMN terminal_pending INTEGER NOT NULL DEFAULT 0")
             db.execute("""CREATE TABLE IF NOT EXISTS human_results (
                 owner TEXT NOT NULL, move_id TEXT NOT NULL, revision_id TEXT NOT NULL, attempt_id TEXT NOT NULL,
                 content TEXT NOT NULL, source_json TEXT NOT NULL, PRIMARY KEY(owner,move_id))""")
@@ -309,22 +313,34 @@ class Tokens:
         if not all(isinstance(value, str) and value for value in (owner, session_id, move_id, attempt_id)):
             return
         with self._connect() as db:
-            db.execute("INSERT INTO agent_attempts(owner,session_id,move_id,attempt_id) VALUES(?,?,?,?) "
-                       "ON CONFLICT(owner,session_id,move_id) DO UPDATE SET attempt_id=excluded.attempt_id",
+            db.execute("INSERT INTO agent_attempts(owner,session_id,move_id,attempt_id,terminal_pending) VALUES(?,?,?,?,0) "
+                       "ON CONFLICT(owner,session_id,move_id) DO UPDATE SET attempt_id=excluded.attempt_id,terminal_pending=0",
                        (owner, session_id, move_id, attempt_id))
+
+    def mark_agent_attempt_terminal(self, owner, session_id, attempt_id):
+        with self._connect() as db:
+            db.execute("UPDATE agent_attempts SET terminal_pending=1 WHERE owner=? AND session_id=? AND attempt_id=?",
+                       (owner, session_id, attempt_id))
+
+    def mark_owner_attempts_orphaned(self, owner):
+        """At process startup, only claims persisted by the previous process become terminal."""
+        with self._connect() as db:
+            db.execute("UPDATE agent_attempts SET terminal_pending=1 WHERE owner=?", (owner,))
 
     def clear_agent_attempt(self, owner, session_id, attempt_id):
         with self._connect() as db:
             db.execute("DELETE FROM agent_attempts WHERE owner=? AND session_id=? AND attempt_id=?",
                        (owner, session_id, attempt_id))
 
-    def agent_attempts(self, owner, session_id=None):
+    def agent_attempts(self, owner, session_id=None, terminal_only=False):
         with self._connect() as db:
+            terminal_clause = " AND terminal_pending=1" if terminal_only else ""
             if session_id is None:
-                rows = db.execute("SELECT * FROM agent_attempts WHERE owner=?", (owner,))
+                rows = db.execute("SELECT * FROM agent_attempts WHERE owner=?" + terminal_clause, (owner,))
             else:
-                rows = db.execute("SELECT * FROM agent_attempts WHERE owner=? AND session_id=?", (owner, session_id))
-            return [dict(row) for row in rows]
+                rows = db.execute("SELECT * FROM agent_attempts WHERE owner=? AND session_id=?" + terminal_clause,
+                                  (owner, session_id))
+            return [{key: row[key] for key in ("owner", "session_id", "move_id", "attempt_id")} for row in rows]
 
 
     def decide(self, token, decision):
@@ -440,6 +456,7 @@ class TelegramPlugin:
                 self.tokens.consume(row["token"])
             if recover_now:
                 self._schedule_cleanup(row["token"])
+        self.tokens.mark_owner_attempts_orphaned(self.config.owner)
         task = self.loop.create_task(self.recover_durable_agent_attempts())
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
@@ -594,7 +611,10 @@ class TelegramPlugin:
             return
         source = entry.origin
         thread_id = str(getattr(source, "thread_id", None) or "")
-        for row in self.tokens.agent_attempts(self.config.owner, session_id):
+        rows = self.tokens.agent_attempts(self.config.owner, session_id)
+        for row in rows:
+            self.tokens.mark_agent_attempt_terminal(row["owner"], row["session_id"], row["attempt_id"])
+        for row in self.tokens.agent_attempts(self.config.owner, session_id, terminal_only=True):
             await self._fail_recorded_agent_attempt(row, thread_id, notify=True)
 
     async def _fail_recorded_agent_attempt(self, row, thread_id="", notify=False):
@@ -615,8 +635,8 @@ class TelegramPlugin:
                                    self.config.chat, thread_id)
 
     async def recover_durable_agent_attempts(self):
-        """Reconcile persisted claims at plugin startup; owner binding was checked on insert."""
-        for row in self.tokens.agent_attempts(self.config.owner):
+        """Retry only attempts proven terminal by a lifecycle hook or startup boundary."""
+        for row in self.tokens.agent_attempts(self.config.owner, terminal_only=True):
             entry = self._owner_session(row["session_id"])
             source = getattr(entry, "origin", None)
             thread_id = str(getattr(source, "thread_id", None) or "")

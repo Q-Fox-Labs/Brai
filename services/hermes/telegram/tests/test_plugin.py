@@ -847,6 +847,27 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(method == "actions.fail_agent" for method, _ in self.bridge.calls))
         self.assertEqual(len(self.plugin.tokens.agent_attempts("123", "other-session")), 0)
 
+    async def test_owner_incoming_does_not_fail_active_claim_in_same_or_other_session(self):
+        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+            result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
+            session_id="native-session-1", status="ok")
+        other_attempt = "00000000-0000-4000-8000-000000000088"
+        self.plugin.tokens.track_agent_attempt("123", "other-session", MOVE, other_attempt)
+        await self.plugin.incoming(self.event(text="Продолжи планирование."))
+        self.assertFalse(any(method == "actions.fail_agent" for method, _ in self.bridge.calls))
+        self.assertEqual(len(self.plugin.tokens.agent_attempts("123")), 2)
+
+    async def test_terminal_outage_retries_on_later_owner_incoming(self):
+        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+            result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
+            session_id="native-session-1", status="ok")
+        self.bridge.fail = "actions.fail_agent"
+        await self.plugin.on_session_end(session_id="native-session-1", platform="telegram", completed=True)
+        self.assertEqual(self.plugin.tokens.agent_attempts("123", terminal_only=True)[0]["attempt_id"], ATTEMPT)
+        self.bridge.fail = None
+        await self.plugin.incoming(self.event(text="Следующий вопрос."))
+        self.assertEqual(self.plugin.tokens.agent_attempts("123"), [])
+
     async def test_text_cancel_invalidates_button_and_accept_cannot_resume(self):
         data = await self.request()
         self.native_context["HERMES_SESSION_MESSAGE_ID"] = "42"
