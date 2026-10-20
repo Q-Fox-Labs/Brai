@@ -26,6 +26,12 @@ TOKEN_TTL = 900
 RPC_TIMEOUT = 15
 OUTPUT_TIMEOUT = 20
 FAILURE = "Операция Brai не подтверждена. Проверьте состояние и явно запросите новую кнопку."
+CONFIRMATION_DESCRIPTION = (
+    "Ask the owner to confirm a human Action in the configured Telegram chat. First create "
+    "the Element and Action with the available game-core structure/create tools, or use existing ones. "
+    "Call elements_request_human_action for the real moveId; pass its returned moveId and revisionId here. "
+    "Never invent IDs or pass placeholder UUIDs. A verified owner decision automatically resumes this session."
+)
 
 
 class BridgeError(Exception):
@@ -171,10 +177,14 @@ class Tokens:
                 attempt_id TEXT NOT NULL, revision_id TEXT NOT NULL, stage TEXT NOT NULL,
                 expires REAL NOT NULL, consumed INTEGER NOT NULL DEFAULT 0, message_id TEXT,
                 resolved INTEGER NOT NULL DEFAULT 0)""")
-            if "chat_id" not in {row[1] for row in db.execute("PRAGMA table_info(tokens)")}:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(tokens)")}
+            if "chat_id" not in columns:
                 # AIDEV-NOTE: Прежние кнопки могли принадлежать только личному чату owner.
                 db.execute("ALTER TABLE tokens ADD COLUMN chat_id TEXT NOT NULL DEFAULT ''")
                 db.execute("UPDATE tokens SET chat_id=owner")
+            for name in ("session_key", "session_id", "thread_id", "target_id", "decision", "resume_outcome"):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE tokens ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
         self.path.chmod(0o600)
 
     @contextmanager
@@ -187,7 +197,7 @@ class Tokens:
         finally:
             db.close()
 
-    def create(self, owner, action, stage, chat_id=None):
+    def create(self, owner, action, stage, chat_id=None, context=None):
         """Сохранить токен до отправки кнопок; не более 100 ожидающих подтверждений."""
         token = secrets.token_urlsafe(24)
         with self._connect() as db:
@@ -196,11 +206,13 @@ class Tokens:
                 raise BridgeError("CONFIRMATION_LIMIT")
             if db.execute("SELECT 1 FROM tokens WHERE move_id=? AND resolved=0", (action["moveId"],)).fetchone():
                 raise BridgeError("CONFIRMATION_PENDING")
+            context = context or {}
             db.execute("""INSERT INTO tokens
-                       (token,owner,move_id,attempt_id,revision_id,stage,expires,chat_id)
-                       VALUES (?,?,?,?,?,?,?,?)""",
+                       (token,owner,move_id,attempt_id,revision_id,stage,expires,chat_id,session_key,session_id,thread_id)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                        (token, owner, action["moveId"], action["attemptId"],
-                        action["revisionId"], stage, time.time() + TOKEN_TTL, chat_id or owner))
+                        action["revisionId"], stage, time.time() + TOKEN_TTL, chat_id or owner,
+                        context.get("session_key", ""), context.get("session_id", ""), context.get("thread_id", "")))
         return token
 
     def bind(self, token, message_id):
@@ -209,19 +221,20 @@ class Tokens:
             db.execute("UPDATE tokens SET message_id=? WHERE token=? AND consumed=0",
                        (str(message_id), token))
 
-    def set_attempt(self, token, attempt_id):
+    def set_attempt(self, token, attempt_id, target_id=""):
         """Сохранить результат idempotent prepare перед отправкой кнопки."""
         with self._connect() as db:
-            db.execute("UPDATE tokens SET attempt_id=? WHERE token=? AND resolved=0", (attempt_id, token))
+            db.execute("UPDATE tokens SET attempt_id=?,target_id=? WHERE token=? AND resolved=0",
+                       (attempt_id, target_id, token))
 
-    def consume(self, token, owner=None, message_id=None, chat_id=None):
+    def consume(self, token, owner=None, message_id=None, chat_id=None, thread_id=None):
         """Атомарно погасить токен перед внешним эффектом; чужой message не погашает его."""
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM tokens WHERE token=? AND consumed=0", (token,)).fetchone()
-            if row is None or (owner is not None and
-                               (row["owner"] != owner or row["message_id"] != str(message_id)
-                                or row["chat_id"] != chat_id)):
+            if (row is None or (owner is not None and
+                    (row["owner"] != owner or row["message_id"] != str(message_id) or row["chat_id"] != chat_id))
+                    or (thread_id is not None and row["thread_id"] != thread_id)):
                 return None
             db.execute("UPDATE tokens SET consumed=1 WHERE token=?", (token,))
             return dict(row)
@@ -243,6 +256,62 @@ class Tokens:
             db.execute("UPDATE tokens SET resolved=1 WHERE token=?", (token,))
 
 
+    def decide(self, token, decision):
+        """Сохранить принятое решение до единственного complete RPC."""
+        with self._connect() as db:
+            db.execute("UPDATE tokens SET decision=?,resume_outcome='completing' WHERE token=?", (decision, token))
+
+    def confirm(self, token):
+        """Закрепить доказанный complete отдельно от попытки продолжения."""
+        with self._connect() as db:
+            db.execute("UPDATE tokens SET resolved=1,resume_outcome='confirmed' WHERE token=?", (token,))
+
+    def reserve_resume(self, token):
+        """Разрешить один inject; crash после reserve не повторяет возможную работу."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            changed = db.execute("""UPDATE tokens SET resume_outcome='attempted'
+                WHERE token=? AND resolved=1 AND resume_outcome='confirmed'""", (token,)).rowcount
+            row = db.execute("SELECT * FROM tokens WHERE token=?", (token,)).fetchone() if changed else None
+            return dict(row) if row else None
+
+    def resume_outcome(self, token, outcome):
+        """Уточнить исход единственного inject, не перезаписав наблюдённый ход."""
+        with self._connect() as db:
+            db.execute("""UPDATE tokens SET resume_outcome=? WHERE token=?
+                AND resume_outcome IN ('attempted','submitted')""", (outcome, token))
+
+    def uncertain_resumes(self):
+        """После restart погасить неоднозначные продолжения без нового inject/complete."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = [dict(row) for row in db.execute("""SELECT * FROM tokens
+                WHERE resume_outcome IN ('completing','confirmed','attempted','submitted')""")]
+            db.execute("""UPDATE tokens SET resume_outcome='unknown'
+                WHERE resume_outcome IN ('completing','confirmed','attempted','submitted')""")
+            return rows
+
+    def observe_resume(self, session_id, user_message):
+        """Отметить post_llm_call точного продолжения; это наблюдение, не authority."""
+        with self._connect() as db:
+            for row in db.execute("""SELECT * FROM tokens WHERE session_id=?
+                    AND resume_outcome IN ('attempted','submitted')""", (session_id,)):
+                if _resume_message(row) in user_message:
+                    db.execute("UPDATE tokens SET resume_outcome='observed' WHERE token=?", (row["token"],))
+
+
+def _resume_message(row):
+    """Передать модели только доказанный результат и предел следующего шага."""
+    mode = ("Обсуди необходимые изменения и доработай предложение. Не выполняй подтверждаемый этап: "
+            "владелец запросил изменения." if row["decision"] == "changes" else
+            "Продолжи исходный запрос после подтверждённого этапа. Сначала прочитай актуальное состояние "
+            "game-core. Выполняй только следующий разрешённый шаг; не повторяй уже завершённые действия.")
+    facts = {key: row[column] for key, column in (("elementId", "target_id"), ("moveId", "move_id"),
+             ("revisionId", "revision_id"), ("attemptId", "attempt_id"), ("stage", "stage"), ("decision", "decision"))}
+    return ("Событие Brai: реальный владелец нажал кнопку Telegram; результат записан game-core.\n"
+            + json.dumps(facts, ensure_ascii=False, sort_keys=True) + "\n" + mode)
+
+
 def _platform(value):
     return getattr(value, "value", value)
 
@@ -254,11 +323,13 @@ def _uuid(value):
 class TelegramPlugin:
     """Собирает native hooks, private RPC и локальное состояние подтверждений."""
 
-    def __init__(self, config, bridge=None):
+    def __init__(self, config, bridge=None, inject_message=None):
         """Создать порт и хранилище; сеть Telegram подключает только native factory."""
         self.config = config
         self.bridge = bridge or Bridge(config)
         self.tokens = Tokens(config.state_dir)
+        self.inject_message = inject_message
+        self.session_store = None
         self.loop = self.bot = None
         self.tasks = set()
         self.expiry_tasks = {}
@@ -282,6 +353,10 @@ class TelegramPlugin:
         handler = CallbackQueryHandler(self.callback, pattern=r"^brai:")
         app.add_handler(handler)
         self.handlers.append((app, handler, 0))
+        for row in self.tokens.uncertain_resumes():
+            task = self.loop.create_task(self._report_unknown_resume(row))
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
         for row in self.tokens.pending():
             route_changed = row["chat_id"] != self.config.chat or row["owner"] != self.config.owner
             recover_now = (row["consumed"] or not row["attempt_id"] or row["message_id"] is None
@@ -343,11 +418,61 @@ class TelegramPlugin:
                 or getattr(message, "sender_chat", None) or getattr(message, "business_connection_id", None)):
             raise ApplicationHandlerStop
 
-    async def _notify(self, text, chat_id=None):
+    async def _notify(self, text, chat_id=None, thread_id=""):
         if self.bot is None:
             raise BridgeError("TELEGRAM_UNAVAILABLE")
-        await self.bot.send_message(chat_id=int(chat_id or self.config.chat), text=text,
+        route = {"message_thread_id": int(thread_id)} if thread_id else {}
+        await self.bot.send_message(chat_id=int(chat_id or self.config.chat), text=text, **route,
                                     connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
+
+    async def _report_unknown_resume(self, row):
+        """Сообщить restart-неопределённость один раз, не повторяя работу."""
+        try:
+            await self._notify("Hermes был перезапущен: исход автоматического продолжения не подтверждён. "
+                               "Повтор работы остановлен; требуется проверка состояния.", row["chat_id"], row["thread_id"])
+        except Exception:
+            pass  # Без доступного Telegram доставку уведомления подтвердить нельзя.
+
+    def _session_matches(self, row):
+        """Проверить сохранённую session и source через публичный read-only SessionStore."""
+        if self.session_store is None or not row["session_key"] or not row["session_id"]:
+            return False
+        entry = self.session_store.lookup_by_session_key(row["session_key"])
+        source = getattr(entry, "origin", None)
+        return (getattr(entry, "session_id", None) == row["session_id"]
+                and _platform(getattr(source, "platform", None)) == "telegram"
+                and str(getattr(source, "user_id", "")) == row["owner"] == self.config.owner
+                and str(getattr(source, "chat_id", "")) == row["chat_id"] == self.config.chat
+                and self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))
+                and str(getattr(source, "thread_id", None) or "") == row["thread_id"])
+
+    async def _resume(self, token):
+        """Один раз попросить native gateway продолжить исходную беседу."""
+        row = self.tokens.reserve_resume(token)
+        if row is None:
+            return "Автоматическое продолжение уже было запрошено; повтор работы остановлен."
+        try:
+            if not callable(self.inject_message):
+                self.tokens.resume_outcome(token, "failed")
+                return "Решение записано, но автоматическое продолжение Hermes недоступно. Работа не запущена."
+            if not await asyncio.to_thread(self._session_matches, row):
+                self.tokens.resume_outcome(token, "failed")
+                return "Решение записано, но исходная сессия Hermes недоступна или изменилась. Работа не запущена."
+            # AIDEV-NOTE: Public API pins session id при dispatch, не при этом read-check; /new race остаётся upstream.
+            accepted = self.inject_message(_resume_message(row), session_key=row["session_key"])
+            self.tokens.resume_outcome(token, "submitted" if accepted is True else "failed")
+            if accepted is True:
+                return ("Изменения записаны. Запрашиваю обсуждение и доработку в Hermes."
+                        if row["decision"] == "changes" else "Принято. Запрашиваю автоматическое продолжение работы.")
+            return "Решение записано, но Hermes не принял автоматическое продолжение. Требуется проверка сессии."
+        except Exception:
+            self.tokens.resume_outcome(token, "unknown")
+            return "Решение записано; исход автоматического продолжения неизвестен. Повтор работы остановлен."
+
+    def observe_resume(self, session_id="", user_message=None, **kwargs):
+        """Наблюдать завершённый native turn без изменения ответа и повторного dispatch."""
+        if isinstance(user_message, str):
+            self.tokens.observe_resume(session_id, user_message)
 
     async def incoming(self, event, **kwargs):
         """Отсекать чужие Telegram события до auth и публиковать вложения владельца."""
@@ -360,6 +485,8 @@ class TelegramPlugin:
                 or getattr(source, "is_bot", False) or getattr(raw, "sender_chat", None)
                 or getattr(raw, "business_connection_id", None)):
             return {"action": "skip", "reason": "brai-owner-route-only"}
+        if kwargs.get("session_store") is not None:
+            self.session_store = kwargs["session_store"]
         paths = getattr(event, "media_urls", [])
         if not paths:
             return None
@@ -480,15 +607,25 @@ class TelegramPlugin:
                     or not _uuid(args.get("moveId")) or not _uuid(args.get("revisionId"))
                     or args.get("stage", "planning") not in {"planning", "final", "review"}):
                 raise BridgeError("INVALID_ARGUMENT")
-            return await self._on_native_loop(self._request(args))
+            from gateway.session_context import get_session_env
+            context = {key: get_session_env(name) for key, name in (
+                ("session_key", "HERMES_SESSION_KEY"), ("session_id", "HERMES_SESSION_ID"),
+                ("thread_id", "HERMES_SESSION_THREAD_ID"))}
+            if (get_session_env("HERMES_SESSION_PLATFORM") != "telegram"
+                    or get_session_env("HERMES_SESSION_USER_ID") != self.config.owner
+                    or not self._route_matches(get_session_env("HERMES_SESSION_CHAT_ID"),
+                                               get_session_env("HERMES_SESSION_CHAT_TYPE"))
+                    or not self._session_matches({**context, "owner": self.config.owner, "chat_id": self.config.chat})):
+                raise BridgeError("SESSION_CONTEXT_INVALID")
+            return await self._on_native_loop(self._request(args, context))
         except Exception:
             return json.dumps({"ok": False, "message": FAILURE}, ensure_ascii=False)
 
-    async def _request(self, args):
+    async def _request(self, args, context):
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         stage = args.get("stage", "planning")
         # AIDEV-NOTE: Reservation до prepare закрывает crash между backend claim и SQLite записью.
-        token = self.tokens.create(self.config.owner, {**args, "attemptId": ""}, stage, self.config.chat)
+        token = self.tokens.create(self.config.owner, {**args, "attemptId": ""}, stage, self.config.chat, context)
         self._schedule_expiry(token, time.time() + TOKEN_TTL)
         try:
             action = await self._prepare(self.tokens.unresolved(token))
@@ -500,10 +637,13 @@ class TelegramPlugin:
                                              ("Отменить", "cancelled"))]
             context = str(action.get("targetDescription") or "")[:1400]
             title = str(action.get("targetTitle") or "")[:400]
-            text = (f"Подтверждение Brai: {action['title'][:800]}\n{title}\n{context}\nЭтап: {stage}\n"
-                    f"Action: {action['moveId']}\nОбъект: {action['targetId']}\n"
-                    f"Ревизия: {action['revisionId']}\nСрок: 15 минут.")
-            message = await self.bot.send_message(chat_id=int(self.config.chat), text=text,
+            stage_label = {"planning": "План работы", "review": "Проверка результата", "final": "Готовый результат"}[stage]
+            text = (f"{stage_label}: {action['title'][:800]}\n{title}\n{context}\n"
+                    "Принять — продолжить; нужны изменения — обсудить и доработать; отменить — остановить запрос.\n"
+                    "Срок кнопки: 15 минут.")
+            thread_id = self.tokens.unresolved(token)["thread_id"]
+            route = {"message_thread_id": int(thread_id)} if thread_id else {}
+            message = await self.bot.send_message(chat_id=int(self.config.chat), text=text, **route,
                 reply_markup=InlineKeyboardMarkup(buttons), connect_timeout=5, read_timeout=10,
                 write_timeout=10, pool_timeout=5)
             self.tokens.bind(token, message.message_id)
@@ -525,7 +665,7 @@ class TelegramPlugin:
                 or not _uuid(action.get("attemptId")) or not _uuid(action.get("targetId"))
                 or not isinstance(action.get("title"), str) or action.get("status") != "running"):
             raise BridgeError("RPC_MALFORMED")
-        self.tokens.set_attempt(row["token"], action["attemptId"])
+        self.tokens.set_attempt(row["token"], action["attemptId"], action["targetId"])
         return action
 
     async def _current(self, row):
@@ -567,7 +707,7 @@ class TelegramPlugin:
                 self.tokens.resolve(token)
                 notice = ("Срок кнопки Brai истёк; попытка отменена. Запросите новую кнопку." if cancelled
                           else "Кнопка Brai больше не активна. Состояние Action уже изменилось.")
-                await self._notify(notice, row["chat_id"])
+                await self._notify(notice, row["chat_id"], row["thread_id"])
                 return
             except Exception:
                 if not warned:
@@ -596,7 +736,8 @@ class TelegramPlugin:
         if not match or len(data.encode("utf-8")) > 64:
             await query.answer("Кнопка недействительна.", show_alert=True)
             return
-        row = self.tokens.consume(match[1], self.config.owner, getattr(message, "message_id", None), self.config.chat)
+        row = self.tokens.consume(match[1], self.config.owner, getattr(message, "message_id", None), self.config.chat,
+                                  str(getattr(message, "message_thread_id", None) or ""))
         if row is None:
             await query.answer("Кнопка уже использована или не относится к сообщению.", show_alert=True)
             return
@@ -612,20 +753,24 @@ class TelegramPlugin:
                 await self._cancel(row, "expired")
                 self.tokens.resolve(match[1])
                 notice = "Срок подтверждения истёк. Запросите новую кнопку."
-            elif not await self._current(row):
+            elif not await asyncio.to_thread(self._session_matches, row) or not await self._current(row):
                 await self._cancel(row, "cancelled")
                 self.tokens.resolve(match[1])
-                notice = "Action или ревизия изменились. Запросите новую кнопку."
+                notice = "Задача, версия или исходная беседа изменились. Работа не запущена."
             elif decision == "cancelled":
                 await self._cancel(row, "cancelled")
                 self.tokens.resolve(match[1])
-                notice = "Попытка отменена."
+                notice = "Запрос отменён. Работу не продолжаю."
             else:
-                await asyncio.to_thread(self.bridge.call, "actions.complete", {
+                self.tokens.decide(match[1], decision)
+                result = await asyncio.to_thread(self.bridge.call, "actions.complete", {
                     "moveId": row["move_id"], "attemptId": row["attempt_id"],
                     "revisionId": row["revision_id"], "stage": row["stage"], "decision": decision})
-                self.tokens.resolve(match[1])
-                notice = "Результат подтверждён Brai." if decision != "changes" else "Изменения запрошены в Brai."
+                attempt = result.get("attempt")
+                if not isinstance(attempt, dict) or attempt.get("id") != row["attempt_id"] or attempt.get("status") != "succeeded":
+                    raise BridgeError("COMPLETE_UNCONFIRMED")
+                self.tokens.confirm(match[1])
+                notice = await self._resume(match[1])
         except Exception:
             pass
         finally:
@@ -636,19 +781,20 @@ class TelegramPlugin:
             await query.edit_message_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await self._notify(notice)
+        await self._notify(notice, row["chat_id"], row["thread_id"])
 
 
 def register(ctx):
     """Подключить плагин через публичный API закреплённого Hermes."""
-    plugin = TelegramPlugin(Config.from_env())
+    plugin = TelegramPlugin(Config.from_env(), inject_message=getattr(ctx, "inject_message", None))
     ctx.register_telegram_handler(plugin.factory)
     ctx.register_hook("pre_gateway_dispatch", plugin.incoming)
     ctx.register_hook("transform_llm_output", plugin.outgoing)
     ctx.register_hook("transform_tool_result", plugin.tool_result)
+    ctx.register_hook("post_llm_call", plugin.observe_resume)
     ctx.register_tool(name="brai_telegram_request_confirmation", toolset="brai_telegram",
-        description="Ask the owner to confirm a human Action in the configured Telegram chat.",
-        schema={"name": "brai_telegram_request_confirmation", "description": "Send owner confirmation buttons; never completes an Action.",
+        description=CONFIRMATION_DESCRIPTION,
+        schema={"name": "brai_telegram_request_confirmation", "description": CONFIRMATION_DESCRIPTION,
                 "parameters": {"type": "object", "properties": {"moveId": {"type": "string"},
                     "revisionId": {"type": "string"}, "stage": {"type": "string", "enum": ["planning", "final", "review"]}},
                     "required": ["moveId", "revisionId"], "additionalProperties": False}},

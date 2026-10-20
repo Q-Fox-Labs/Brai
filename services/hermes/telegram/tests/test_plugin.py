@@ -53,8 +53,11 @@ class FakeBridge:
             return {**self.action, "status": "running"}
         if method == "actions.read":
             return dict(self.action)
-        if method in {"actions.complete", "actions.cancel"}:
-            self.action["attemptStatus"] = "completed" if method.endswith("complete") else "failed"
+        if method == "actions.complete":
+            self.action.update(status="succeeded", attemptStatus="succeeded")
+            return {"attempt": {"id": self.action["attemptId"], "status": "succeeded"}}
+        if method == "actions.cancel":
+            self.action["attemptStatus"] = "failed"
             return {"ok": True}
         return dict(self.file)
 
@@ -119,9 +122,18 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.config = mod.Config("123", Path(self.tmp.name) / "brai-telegram", "/test/trusted.mjs",
                                  "/usr/local/bin/node", str(Path(self.tmp.name) / "results"))
         self.bridge = FakeBridge()
+        self.injections = []
+        self.native_context = {"HERMES_SESSION_PLATFORM": "telegram", "HERMES_SESSION_USER_ID": "123",
+            "HERMES_SESSION_CHAT_ID": "123", "HERMES_SESSION_CHAT_TYPE": "dm",
+            "HERMES_SESSION_KEY": "agent:main:telegram:test", "HERMES_SESSION_ID": "native-session-1",
+            "HERMES_SESSION_THREAD_ID": ""}
+        self.entry = NS(session_id="native-session-1", origin=NS(platform="telegram", user_id="123",
+            chat_id="123", chat_type="dm", thread_id=""))
+        self.store = NS(lookup_by_session_key=lambda key: self.entry
+                        if key == self.native_context["HERMES_SESSION_KEY"] else None)
         self.markdown = MARKDOWN.replace(ROOT, self.config.result_root)
         self.bridge.file["markdown"] = self.markdown
-        self.plugin = mod.TelegramPlugin(self.config, self.bridge)
+        self.plugin = mod.TelegramPlugin(self.config, self.bridge, self.inject)
         self.bot = FakeBot()
         self.app = NS(bot=self.bot, handlers=[])
         def add_handler(handler, group=0):
@@ -129,9 +141,21 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             self.app.handlers.append(handler)
         self.app.add_handler = add_handler
         self.app.remove_handler = lambda h, group=0: self.app.handlers.remove(h)
-        self.stubs = patch.dict(sys.modules, ptb_stubs())
+        self.stubs = patch.dict(sys.modules, {**ptb_stubs(), "gateway.session_context":
+            NS(get_session_env=lambda key: self.native_context.get(key, ""))})
         self.stubs.start()
         self.plugin.factory(self.app, object())
+        self.plugin.session_store = self.store
+
+    def inject(self, content, role="user", *, session_key=None, origin=None):
+        """Сохранить штатный inject без модели; потребовать reserve до вызова."""
+        with self.plugin.tokens._connect() as db:
+            row = db.execute("SELECT * FROM tokens WHERE resume_outcome='attempted'").fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(role, "user")
+        self.assertIsNone(origin)
+        self.injections.append((content, session_key))
+        return True
 
     async def asyncTearDown(self):
         """Остановить только свои native таймеры и убрать временные файлы."""
@@ -168,8 +192,11 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         await asyncio.gather(*tuple(self.plugin.tasks), return_exceptions=True)
         self.config = replace(self.config, chat_id=chat)
-        self.plugin = mod.TelegramPlugin(self.config, self.bridge)
+        self.native_context.update(HERMES_SESSION_CHAT_ID=chat, HERMES_SESSION_CHAT_TYPE="supergroup")
+        self.entry.origin.chat_id, self.entry.origin.chat_type = chat, "supergroup"
+        self.plugin = mod.TelegramPlugin(self.config, self.bridge, self.inject)
         self.plugin.factory(self.app, object())
+        self.plugin.session_store = self.store
 
     def update(self, chat=GROUP, owner=123, chat_type="supergroup", **message):
         """Создать native update с отдельными sender, chat и effective message."""
@@ -360,8 +387,10 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.request()
         self.assertEqual(self.bridge.calls[0][0], "actions.prepare")
         text = self.bot.sent[-1]["text"]
-        for value in (MOVE, TARGET, REVISION, "planning", "Проверить описанный план"):
+        for value in ("Принять план", "Результат", "План работы", "Проверить описанный план"):
             self.assertIn(value, text)
+        for value in (MOVE, TARGET, REVISION, "planning"):
+            self.assertNotIn(value, text)
         for row in self.bot.sent[-1]["reply_markup"].inline_keyboard:
             self.assertLessEqual(len(row[0].callback_data.encode()), 64)
 
@@ -440,7 +469,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_final_success_changes_and_cancel_decisions(self):
         for stage, decision in (("final", "success"), ("review", "changes"), ("planning", "cancelled")):
-            self.bridge.action["attemptStatus"] = "running"
+            self.bridge.action.update(status="claimed", attemptStatus="running")
             data = await self.request(stage)
             data = data.rsplit(":", 1)[0] + ":" + decision
             message_id = len(self.bot.sent)
@@ -521,6 +550,139 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         result = await asyncio.to_thread(worker)
         self.assertTrue(json.loads(result)["ok"])
         self.assertEqual(len(self.bot.sent), 1)
+
+    async def test_owner_decision_resumes_same_native_session_once_with_exact_facts(self):
+        data = await self.request()
+        await self.plugin.callback(NS(callback_query=FakeQuery(data)), None)
+        await self.plugin.callback(NS(callback_query=FakeQuery(data)), None)
+        self.assertEqual(len(self.injections), 1)
+        content, key = self.injections[0]
+        facts = json.loads(content.splitlines()[1])
+        self.assertEqual(key, self.native_context["HERMES_SESSION_KEY"])
+        self.assertEqual(facts, dict(elementId=TARGET, moveId=MOVE, revisionId=REVISION,
+                                    attemptId=ATTEMPT, stage="planning", decision="approved"))
+        self.assertNotIn(data.split(":")[1], content)
+        self.assertIn("автоматическое продолжение работы", self.bot.sent[-1]["text"])
+        self.plugin.observe_resume(session_id="other-session", user_message=content)
+        with self.plugin.tokens._connect() as db:
+            self.assertEqual(db.execute("SELECT resume_outcome FROM tokens").fetchone()[0], "submitted")
+        self.plugin.observe_resume(session_id="native-session-1", user_message="[native timestamp]\n" + content)
+        self.assertEqual(self.plugin.tokens.uncertain_resumes(), [])
+
+    async def test_changes_resumes_discussion_but_cancel_never_injects(self):
+        for decision in ("changes", "cancelled"):
+            self.bridge.action.update(status="claimed", attemptStatus="running")
+            data = await self.request()
+            data = data.rsplit(":", 1)[0] + ":" + decision
+            await self.plugin.callback(NS(callback_query=FakeQuery(data, message_id=len(self.bot.sent))), None)
+        self.assertEqual(len(self.injections), 1)
+        self.assertIn('"decision": "changes"', self.injections[0][0])
+        self.assertIn("Не выполняй подтверждаемый этап", self.injections[0][0])
+        self.assertIn("Запрос отменён", self.bot.sent[-1]["text"])
+
+    async def test_false_missing_or_ambiguous_injection_is_visible_and_never_replayed(self):
+        for outcome in (False, None, RuntimeError("unknown")):
+            self.bridge.action.update(status="claimed", attemptStatus="running")
+            data = await self.request()
+            attempted = []
+            def inject(content, **kwargs):
+                attempted.append(content)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return outcome
+            self.plugin.inject_message = None if outcome is None else inject
+            await self.plugin.callback(NS(callback_query=FakeQuery(data, message_id=len(self.bot.sent))), None)
+            self.assertEqual(len(attempted), 0 if outcome is None else 1)
+            self.assertNotIn("автоматическое продолжение работы", self.bot.sent[-1]["text"])
+            self.assertRegex(self.bot.sent[-1]["text"], "не принял|недоступно|недоступна|неизвестен")
+            await self.plugin.callback(NS(callback_query=FakeQuery(data, message_id=len(self.bot.sent) - 1)), None)
+            self.assertEqual(len(attempted), 0 if outcome is None else 1)
+
+    async def test_restart_unknown_dispatch_reports_without_reinject_or_complete(self):
+        data = await self.request()
+        await self.plugin.callback(NS(callback_query=FakeQuery(data)), None)
+        self.assertEqual(len(self.injections), 1)
+        calls = list(self.bridge.calls)
+        self.plugin.factory(self.app, object())
+        await asyncio.sleep(0.01)
+        self.assertEqual(len(self.injections), 1)
+        self.assertEqual(self.bridge.calls, calls)
+        self.assertIn("исход автоматического продолжения не подтверждён", self.bot.sent[-1]["text"])
+        self.plugin.factory(self.app, object())
+        await asyncio.sleep(0.01)
+        self.assertEqual(sum("был перезапущен" in sent["text"] for sent in self.bot.sent), 1)
+
+    async def test_atomic_reserve_survives_crash_before_public_inject(self):
+        data = await self.request()
+        token = data.split(":")[1]
+        self.plugin.tokens.consume(token)
+        self.plugin.tokens.decide(token, "approved")
+        self.plugin.tokens.confirm(token)
+        self.assertIsNotNone(await asyncio.to_thread(self.plugin.tokens.reserve_resume, token))
+        self.assertIsNone(await asyncio.to_thread(self.plugin.tokens.reserve_resume, token))
+        self.plugin.factory(self.app, object())
+        await asyncio.sleep(0.01)
+        self.assertEqual(self.injections, [])
+        self.assertIn("перезапущен", self.bot.sent[-1]["text"])
+
+    async def test_unknown_complete_never_resumes_even_when_remote_effect_succeeded(self):
+        data = await self.request()
+        original = self.bridge.call
+        def lost_reply(method, args, timeout=15):
+            result = original(method, args, timeout)
+            if method == "actions.complete":
+                raise mod.BridgeError("OUTCOME_UNKNOWN")
+            return result
+        self.bridge.call = lost_reply
+        await self.plugin.callback(NS(callback_query=FakeQuery(data)), None)
+        await self.plugin.callback(NS(callback_query=FakeQuery(data)), None)
+        self.assertEqual(self.injections, [])
+        self.assertEqual(sum(method == "actions.complete" for method, _ in self.bridge.calls), 1)
+        self.plugin.factory(self.app, object())
+        await asyncio.sleep(0.03)
+        self.assertEqual(self.injections, [])
+        self.assertEqual(sum(method == "actions.complete" for method, _ in self.bridge.calls), 1)
+
+    async def test_changed_session_source_or_thread_never_completes_or_injects(self):
+        for object_, field, wrong in ((self.entry, "session_id", "replacement"),
+                (self.entry.origin, "user_id", "456"), (self.entry.origin, "chat_id", "-1000000000"),
+                (self.entry.origin, "thread_id", "other-topic")):
+            self.bridge.action.update(status="claimed", attemptStatus="running")
+            data = await self.request()
+            original = getattr(object_, field)
+            setattr(object_, field, wrong)
+            before = sum(method == "actions.complete" for method, _ in self.bridge.calls)
+            await self.plugin.callback(NS(callback_query=FakeQuery(data, message_id=len(self.bot.sent))), None)
+            self.assertEqual(sum(method == "actions.complete" for method, _ in self.bridge.calls), before)
+            setattr(object_, field, original)
+        self.assertEqual(self.injections, [])
+
+    async def test_confirmation_uses_native_context_and_actual_topic_before_any_effect(self):
+        self.native_context["HERMES_SESSION_USER_ID"] = "456"
+        result = json.loads(await self.plugin.request_confirmation({"moveId": MOVE, "revisionId": REVISION}))
+        self.assertFalse(result["ok"])
+        self.assertEqual(self.bridge.calls, [])
+        self.assertEqual(self.bot.sent, [])
+        self.native_context["HERMES_SESSION_USER_ID"] = "123"
+        self.native_context["HERMES_SESSION_THREAD_ID"] = self.entry.origin.thread_id = "37"
+        data = await self.request()
+        self.assertEqual(self.bot.sent[-1]["message_thread_id"], 37)
+        wrong = FakeQuery(data)
+        await self.plugin.callback(NS(callback_query=wrong), None)
+        self.assertFalse(self.plugin.tokens.pending()[0]["consumed"])
+        query = FakeQuery(data)
+        query.message.message_thread_id = 37
+        await self.plugin.callback(NS(callback_query=query), None)
+        self.assertEqual(len(self.injections), 1)
+        self.assertEqual(self.bot.sent[-1]["message_thread_id"], 37)
+
+    async def test_incoming_binds_public_session_store_only_for_owner_route(self):
+        self.plugin.session_store = None
+        await self.plugin.incoming(self.event(source=NS(platform="telegram", user_id="456", chat_id="123", chat_type="dm")),
+                                   session_store=self.store)
+        self.assertIsNone(self.plugin.session_store)
+        await self.plugin.incoming(self.event(), session_store=self.store)
+        self.assertIs(self.plugin.session_store, self.store)
 
     def generated_image(self, name="Картинка.png"):
         """Создать native cache и опубликованную копию без генератора и сети."""
@@ -782,9 +944,81 @@ class NativeContractTests(unittest.TestCase):
                  register_tool=lambda **kw: calls.append(("tool", kw)), on_unload=lambda f: calls.append(("unload", f)))
         with patch.object(mod.Config, "from_env", return_value=NS()), patch.object(mod, "TelegramPlugin") as plugin:
             mod.register(ctx)
-            self.assertEqual([name for name, _ in calls], ["factory", "pre_gateway_dispatch", "transform_llm_output", "transform_tool_result", "tool", "unload"])
-            self.assertTrue(calls[4][1]["is_async"])
-            self.assertIs(calls[4][1]["handler"], plugin.return_value.request_confirmation)
+            self.assertEqual([name for name, _ in calls], ["factory", "pre_gateway_dispatch", "transform_llm_output", "transform_tool_result", "post_llm_call", "tool", "unload"])
+            self.assertTrue(calls[5][1]["is_async"])
+            self.assertIs(calls[5][1]["handler"], plugin.return_value.request_confirmation)
+            self.assertIn("Never invent IDs", calls[5][1]["schema"]["description"])
+        inject = methods["inject_message"]
+        self.assertEqual([a.arg for a in inject.args.args], ["self", "content", "role"])
+        self.assertEqual([a.arg for a in inject.args.kwonlyargs], ["session_key", "origin"])
+
+    def test_exact_public_injection_uses_internal_event_and_busy_native_fifo(self):
+        upstream = REPO / "tmp/hermes-pinned-telegram"
+        if not upstream.exists():
+            self.skipTest("read-only pinned upstream fixture not present")
+        from contextlib import asynccontextmanager
+        from types import MethodType
+        def load_method(path, name, env):
+            tree = ast.parse((upstream / path).read_text())
+            node = next(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
+            future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
+            module = ast.fix_missing_locations(ast.Module(body=[future, node], type_ignores=[]))
+            exec(compile(module, str(upstream / path), "exec"), env)
+            return env[name]
+        async def scenario():
+            source = NS(platform=NS(value="telegram"), user_id="123", chat_id=GROUP, chat_type="group", thread_id="37")
+            entry = NS(session_id="original-session", origin=source)
+            human, key = NS(text="queued human message"), "native-session-key"
+            state = NS(conversation=NS(queued_events=[]))
+            adapter = NS(_pending_messages={key: human})
+            async def lookup(_):
+                return entry
+            async def no_approval(*args):
+                return False
+            @asynccontextmanager
+            async def scope(_):
+                yield
+            runner = NS(_running=True, _draining=False, _gateway_loop=asyncio.get_running_loop(),
+                _background_tasks=set(), async_session_store=NS(lookup_by_session_key=lookup),
+                _plugin_injection_accepting=lambda: True, _restored_source=lambda e: e.origin,
+                _plugin_injection_authorized=lambda *args, **kw: True, _plugin_injection_scope=scope,
+                _delivery_adapter_for=lambda _: adapter, _is_user_authorized_for_source=lambda _: True,
+                _admit_bot_message_for_source=lambda _: True, _effective_busy_input_mode=lambda _: "interrupt",
+                _route_plaintext_approval_while_busy=no_approval, _session_state=lambda _: state)
+            logger = NS(info=lambda *a, **kw: None, warning=lambda *a, **kw: None)
+            env = dict(asyncio=asyncio, logger=logger, MessageEvent=lambda **kw: NS(**kw), MessageType=NS(TEXT="text"))
+            enqueue = load_method("gateway/run_busy.py", "_enqueue_fifo", env)
+            runner._queue_or_replace_pending_event = lambda k, e: enqueue(runner, k, e, adapter)
+            busy = load_method("gateway/run_busy.py", "_handle_active_session_busy_message", env)
+            async def handle(event):
+                await busy(runner, event, key)
+            adapter.handle_message = handle
+            dispatch = load_method("gateway/run_plugin_injection.py", "_dispatch_plugin_message_injection", env)
+            runner._dispatch_plugin_message_injection = MethodType(dispatch, runner)
+            schedule = load_method("gateway/run_plugin_injection.py", "_schedule_plugin_message_injection", env)
+            injection = {}
+            exec((upstream / "hermes_cli/plugins_injection.py").read_text(), injection)
+            inject = load_method("hermes_cli/plugins.py", "inject_message", {})
+            manager = NS(_cli_ref=None, has_tui_message_injector=False, has_gateway_message_injector=True,
+                         inject_gateway_message=MethodType(schedule, runner))
+            ctx = NS(_manager=manager, plugin_id="brai-telegram", _gateway_injection_allowed=lambda: True)
+            modules = {"hermes_cli.plugins_injection": NS(inject_plugin_message=injection["inject_plugin_message"]),
+                       "gateway.run": NS(_AGENT_PENDING_SENTINEL=object(), safe_schedule_threadsafe=None),
+                       "gateway.session_identity": NS(replace_source=lambda s: NS(**vars(s)))}
+            with patch.dict(sys.modules, modules):
+                self.assertIs(inject(ctx, "/approve is ordinary text", session_key=key), True)
+                await asyncio.gather(*tuple(runner._background_tasks))
+            self.assertIs(adapter._pending_messages[key], human)
+            self.assertEqual(len(state.conversation.queued_events), 1)
+            event = state.conversation.queued_events[0]
+            self.assertTrue(event.internal)
+            self.assertFalse(event.allow_gateway_control)
+            self.assertEqual(event.source.chat_id, GROUP)
+            self.assertEqual(event.source.thread_id, "37")
+            self.assertEqual(event.metadata["gateway_session_key"], key)
+            self.assertEqual(event.metadata["gateway_session_id"], entry.session_id)
+            self.assertIs(event.metadata["gateway_session_strict"], True)
+        asyncio.run(scenario())
 
     def test_exact_native_media_parser_understands_quoted_unicode(self):
         source = REPO / "tmp/hermes-pinned-telegram/gateway/platforms/base.py"
