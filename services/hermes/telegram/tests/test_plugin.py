@@ -432,7 +432,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.tokens.pending()[0]['message_id'], str(len(self.bot.sent)))
 
     async def test_confirmation_html_escapes_owner_text_and_keeps_format_after_edit(self):
-        preview = 'Проверить <камера> & объектив\n\nПлан\n\n1. Сверить A&B < C\n2. Осмотреть < корпус >'
+        preview = 'Проверить <камера> & объектив\n\nПлан\n\n1. Сверить A&B < C\n2. Осмотреть < корпус >\n\n2.1. Проверить вложенную задачу'
         self.bridge.action.update(confirmationStage='planning', confirmationText=preview)
         await self.request()
         original = self.bot.sent[0]
@@ -441,6 +441,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('<b>Проверить &lt;камера&gt; &amp; объектив</b>', original['text'])
         self.assertIn('<b>1. Сверить A&amp;B &lt; C</b>', original['text'])
         self.assertIn('<b>2. Осмотреть &lt; корпус &gt;</b>', original['text'])
+        self.assertIn('<b>2.1. Проверить вложенную задачу</b>', original['text'])
         self.assertNotIn('<камера>', original['text'])
         self.assertNotIn('Замечания или отмену задачи напиши сообщением.', original['text'])
         self.assertEqual([button.text for row in original['reply_markup'].inline_keyboard for button in row], ['Принять'])

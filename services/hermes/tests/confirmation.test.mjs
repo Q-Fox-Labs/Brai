@@ -31,11 +31,11 @@ test('Task confirmation shows current subject work and constraints, omitting lif
   const text = confirmationText(graph, move('decision', 'confirm', 'Рассмотреть постановку',
     { planning: { revision_id: revision, decision: 'confirm' } }), task);
   for (const phrase of ['Проверенный список покупок.', 'Не покупать новое', '4 000 ₽', 'до пятницы',
-    'в мастерской', 'Проверить гарантийный чек', 'Сверить срок и адрес', 'Раскрыть повторную проверку',
+    'в мастерской', 'Не выдумывать дополнительные шаги', 'Проверить гарантийный чек', 'Сверить срок и адрес', 'Раскрыть повторную проверку',
     'Поставить неизвестное продолжение', 'Уточнить поручение']) assert.ok(text.includes(phrase), phrase);
   for (const phrase of ['Старая проверка', 'Начать составлять план', 'Подтвердить план',
     'Служебная граница приёмки', 'Служебное завершение', 'Служебная проверка',
-    'Внутренняя политика сервиса', 'Не выдумывать дополнительные шаги', 'Casio']) assert.ok(!text.includes(phrase), phrase);
+    'Внутренняя политика сервиса', 'Casio']) assert.ok(!text.includes(phrase), phrase);
 });
 
 test('Goal and Quest confirmations number saved children and compactly include known nested Tasks', () => {
@@ -56,14 +56,18 @@ test('Goal and Quest confirmations number saved children and compactly include k
   const questChildren = [
     { id: 'goal-home', parentId: quest.id, kind: 'goal', title: 'Подготовить жильё', description: 'Ключи и коммунальные вопросы.' },
     { id: 'goal-move', parentId: quest.id, kind: 'goal', title: 'Перевезти вещи', description: 'Вещи доставлены целыми.' },
-    { id: 'task-nested', parentId: 'goal-move', kind: 'task', title: 'Заказать коробки', description: 'Подобрать подходящий размер.' },
+    { id: 'task-nested', parentId: 'goal-move', kind: 'task', title: 'Заказать коробки', description: 'Подобрать подходящий размер.', fields: { scope: 'Я: сравню размеры коробок.\nТы: выберешь подходящий размер.' } },
+    { id: 'task-nested-work', parentId: 'goal-move', kind: 'task', title: 'Проверить упаковку' },
   ];
-  const questGraph = { elements: [quest, ...questChildren], resources: [], moves: [] };
+  const questGraph = { elements: [quest, ...questChildren], resources: [], moves: [move('nested-work', 'work', 'Проверю целостность коробок', { actor: 'agent' }, { targetId: 'task-nested-work' })] };
   const questText = confirmationText(questGraph, move('quest-confirm', 'confirm', 'Рассмотреть Квест',
     { planning: { revision_id: revision, decision: 'confirm' } }), quest);
   assert.ok(questText.includes('Подготовить переезд без потери важных вещей.'));
   assert.match(questText, /1\.[\s\S]*Подготовить жильё[\s\S]*2\.[\s\S]*Перевезти вещи/);
-  assert.ok(questText.includes('Заказать коробки'));
+  assert.ok(questText.includes('2.1. Заказать коробки'));
+  assert.ok(questText.includes('Я: сравню размеры коробок.'));
+  assert.ok(questText.includes('Ты: выберешь подходящий размер.'));
+  assert.ok(questText.includes('Я: Проверю целостность коробок'));
   assert.ok(questText.includes('Ключи и коммунальные вопросы.'));
 });
 
@@ -127,3 +131,10 @@ test('Final confirmation shows only required actual resources with their full sa
   assert.ok(!text.includes('Служебное завершение'));
 });
 
+
+test('Subject fields preserve every saved condition and work phrase without lexical filtering', () => {
+  const phrases = ['Не выдумывать дополнительные шаги.', 'Не повторять выбор подрядчика.', 'Зафиксировать решение комиссии.', 'Подготовить постановку спектакля.'];
+  const task = target('task', { expected_result: phrases[2], constraints: phrases.slice(0, 2).join(' '), scope: `Я: ${phrases[3]}` });
+  const result = confirmationText({ elements: [task], moves: [] }, { fields: { planning: { decision: 'confirm' } } }, task);
+  for (const phrase of phrases) assert.ok(result.includes(phrase), phrase);
+});

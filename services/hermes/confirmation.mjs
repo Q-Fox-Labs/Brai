@@ -1,9 +1,6 @@
 // ABOUTME: Человекочитаемый обзор сохранённого плана; не меняет план и решения.
 const text = value => typeof value === 'string' ? value.trim() : '';
-const technical = sentence => /^(?:Не выдумывать|Постановку и результат каждого Элемента|Два результата Задач|Исходную дату не переносить автоматически|Каждый практический результат опирается|Подтверждение плана не подтверждает|Не повторять выбор|Прочитать пакет ребёнка|Зафиксировать (?:итоговое )?решение|Подготовить постановку|Поставить:|Принять:)/iu.test(sentence);
-const sentences = value => text(value).split(/\n+|(?<=[.!?])\s+(?=[А-ЯЁA-Z])/u).map(text).filter(Boolean);
-const readable = value => sentences(value).filter(sentence => !technical(sentence)).join(' ')
-  .replace(/Игроком/gu, 'тобой').replace(/Игрока/gu, 'тебя');
+const readable = value => text(value).replace(/Игроком/gu, 'тобой').replace(/Игрока/gu, 'тебя');
 const fieldsOf = element => element.fields?.draft ?? element.fields ?? {};
 const management = new Set(['plan', 'start', 'accept', 'finish', 'confirm', 'review']);
 
@@ -72,18 +69,19 @@ export function confirmationText(graph, move, target, inputs = move.input ?? [])
   const result = readable(fields.expected_result || fields.summary || target.description);
   if (result && result !== target.title) blocks.push(`Результат: ${result}`);
   const constraints = readable(fields.constraints);
-  if (constraints) blocks.push(`Важно: ${constraints}`);
+  if (constraints) blocks.push('Условия:\n' + constraints.split(/\n+|(?<=[.!?])\s+(?=[А-ЯЁA-Z])/u).map(item => `• ${item}`).join('\n'));
   let unresolved = false;
   if (children.length) {
-    const plan = children.map((child, index) => {
-      const lines = [`${index + 1}. ${child.title}`], knownRoles = savedRoles(graph, child), summary = childSummary(child);
+    const overview = (child, label) => {
+      const lines = [`${label}. ${child.title}`], knownRoles = savedRoles(graph, child), summary = childSummary(child);
       if (summary && summary !== child.title) lines.push(summary);
       lines.push(...knownRoles);
-      const nested = target.kind === 'quest' ? childrenOf(graph, child) : [];
-      if (nested.length) lines.push(`Задачи: ${nested.map(item => item.title).join('; ')}.`);
       if (!knownRoles.length && !workMoves(graph, child).length) unresolved = true;
       return lines.join('\n\n');
-    });
+    };
+    const plan = children.flatMap((child, index) => [overview(child, `${index + 1}`),
+      ...(target.kind === 'quest' ? childrenOf(graph, child).map((nested, nestedIndex) =>
+        overview(nested, `${index + 1}.${nestedIndex + 1}`)) : [])]);
     blocks.push('План', ...plan);
   } else {
     const work = workMoves(graph, target);

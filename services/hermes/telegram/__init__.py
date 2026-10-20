@@ -1100,7 +1100,7 @@ class TelegramPlugin:
             bold_lines = {0}
             if action.get("confirmationText") is not None:
                 bold_lines.add(2)
-            bold_lines.update(index for index, line in enumerate(text.splitlines()) if re.match(r"^\d+\.\s", line))
+            bold_lines.update(index for index, line in enumerate(text.splitlines()) if re.match(r"^\d+(?:\.\d+)*\.\s", line))
             chunks = [(text[index:index + 1800], text[:index].count("\n")) for index in range(0, len(text), 1800)]
             for index, (source_chunk, first_line) in enumerate(chunks):
                 chunk = _confirmation_html_chunk(source_chunk, first_line, bold_lines)
