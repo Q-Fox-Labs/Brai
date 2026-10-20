@@ -30,7 +30,7 @@ CONFIRMATION_DESCRIPTION = (
     "Ask the owner to confirm a human Action in the configured Telegram chat. First create "
     "the Element and Action with the available game-core structure/create tools, or use existing ones. "
     "Call elements_request_human_action for the real moveId; pass its returned moveId and revisionId here. "
-    "Never invent IDs or pass placeholder UUIDs. For integrated plans this tool accepts only decision-only confirm/final Actions with one output; human work requiring substantive results is rejected before claim. The real Action determines its stage. The tool sends the saved plan/result with one Accept button itself. Remarks and cancellation are ordinary owner messages handled by brai_telegram_submit_feedback. Do not send a separate copy. After ok=true, finish with NO_REPLY; after failure, explain it. A verified owner decision automatically resumes this session."
+    "Never invent IDs or pass placeholder UUIDs. Decision-only plan/final Actions show saved content with one Accept button. Clarification Actions show their question with no button and accept a plain owner answer. Practical human Actions show the required work without a button; after the owner performs it, save only the current real message through brai_telegram_submit_result. Remarks and cancellation are ordinary owner messages handled by brai_telegram_submit_feedback. Do not send a separate copy. After ok=true, finish with NO_REPLY; after failure, explain it. A verified owner decision automatically resumes this session."
 )
 
 
@@ -145,6 +145,8 @@ class Bridge:
                     raise BridgeError("RPC_MALFORMED")
                 if error["code"] == -32000 and isinstance(error.get("data"), dict) and error["data"].get("code") == "HUMAN_OUTPUT_REQUIRED":
                     raise BridgeError("HUMAN_OUTPUT_REQUIRED")
+                if error["code"] == -32000 and isinstance(error.get("data"), dict) and error["data"].get("code") in {"HUMAN_FINAL_DECISION_REQUIRED", "HUMAN_OUTPUT_MAPPING_REQUIRED", "STALE_ACTION"}:
+                    raise BridgeError(error["data"]["code"])
                 raise BridgeError("RPC_REJECTED")
             if not isinstance(response["result"], dict):
                 raise BridgeError("RPC_MALFORMED")
@@ -189,6 +191,12 @@ class Tokens:
             for name in ("session_key", "session_id", "thread_id", "target_id", "decision", "resume_outcome"):
                 if name not in columns:
                     db.execute(f"ALTER TABLE tokens ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            db.execute("""CREATE TABLE IF NOT EXISTS agent_attempts (
+                owner TEXT NOT NULL, session_id TEXT NOT NULL, move_id TEXT NOT NULL,
+                attempt_id TEXT NOT NULL, PRIMARY KEY(owner,session_id,move_id))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS human_results (
+                owner TEXT NOT NULL, move_id TEXT NOT NULL, revision_id TEXT NOT NULL, attempt_id TEXT NOT NULL,
+                content TEXT NOT NULL, source_json TEXT NOT NULL, PRIMARY KEY(owner,move_id))""")
         self.path.chmod(0o600)
 
     @contextmanager
@@ -231,6 +239,29 @@ class Tokens:
             db.execute("UPDATE tokens SET attempt_id=?,target_id=?,stage=COALESCE(?,stage) WHERE token=? AND resolved=0",
                        (attempt_id, target_id, stage, token))
 
+    def set_stage(self, token, stage):
+        """Зафиксировать тип ожидания по фактическому Action."""
+        with self._connect() as db:
+            db.execute("UPDATE tokens SET stage=? WHERE token=? AND resolved=0", (stage, token))
+
+    def save_human_result(self, owner, move_id, revision_id, attempt_id, content, source):
+        with self._connect() as db:
+            db.execute("INSERT INTO human_results VALUES(?,?,?,?,?,?) ON CONFLICT(owner,move_id) DO UPDATE SET revision_id=excluded.revision_id,attempt_id=excluded.attempt_id,content=excluded.content,source_json=excluded.source_json",
+                       (owner, move_id, revision_id, attempt_id, content, json.dumps(source, ensure_ascii=False)))
+
+    def human_result(self, owner, move_id):
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM human_results WHERE owner=? AND move_id=?", (owner, move_id)).fetchone()
+            return dict(row) if row else None
+
+    def clear_human_result(self, owner, move_id):
+        with self._connect() as db:
+            db.execute("DELETE FROM human_results WHERE owner=? AND move_id=?", (owner, move_id))
+
+    def resolve_attempt(self, owner, attempt_id):
+        with self._connect() as db:
+            db.execute("UPDATE tokens SET resolved=1 WHERE owner=? AND attempt_id=? AND resolved=0", (owner, attempt_id))
+
     def consume(self, token, owner=None, message_id=None, chat_id=None, thread_id=None):
         """Атомарно погасить токен перед внешним эффектом; чужой message не погашает его."""
         with self._connect() as db:
@@ -259,6 +290,41 @@ class Tokens:
         """Зафиксировать подтверждённое завершение или отмену попытки."""
         with self._connect() as db:
             db.execute("UPDATE tokens SET resolved=1 WHERE token=?", (token,))
+
+    def reserve_clarification(self, token, owner, session_id, thread_id, move_id, target_id, revision_id):
+        """Однократно закрепить ответ текущего владельца за pending clarification Action."""
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM tokens WHERE token=? AND resolved=0 AND consumed=0", (token,)).fetchone()
+            if (row is None or row["owner"] != owner or row["session_id"] != session_id
+                    or row["thread_id"] != thread_id or row["move_id"] != move_id
+                    or row["target_id"] != target_id or row["revision_id"] != revision_id
+                    or row["stage"] != "clarification" or not row["attempt_id"]):
+                return None
+            db.execute("UPDATE tokens SET consumed=1 WHERE token=? AND consumed=0", (token,))
+            return dict(row)
+
+    def track_agent_attempt(self, owner, session_id, move_id, attempt_id):
+        """Сохранить точные ID подтверждённой model-side Operation claim."""
+        if not all(isinstance(value, str) and value for value in (owner, session_id, move_id, attempt_id)):
+            return
+        with self._connect() as db:
+            db.execute("INSERT INTO agent_attempts(owner,session_id,move_id,attempt_id) VALUES(?,?,?,?) "
+                       "ON CONFLICT(owner,session_id,move_id) DO UPDATE SET attempt_id=excluded.attempt_id",
+                       (owner, session_id, move_id, attempt_id))
+
+    def clear_agent_attempt(self, owner, session_id, attempt_id):
+        with self._connect() as db:
+            db.execute("DELETE FROM agent_attempts WHERE owner=? AND session_id=? AND attempt_id=?",
+                       (owner, session_id, attempt_id))
+
+    def agent_attempts(self, owner, session_id=None):
+        with self._connect() as db:
+            if session_id is None:
+                rows = db.execute("SELECT * FROM agent_attempts WHERE owner=?", (owner,))
+            else:
+                rows = db.execute("SELECT * FROM agent_attempts WHERE owner=? AND session_id=?", (owner, session_id))
+            return [dict(row) for row in rows]
 
 
     def decide(self, token, decision):
@@ -485,6 +551,78 @@ class TelegramPlugin:
         if isinstance(user_message, str):
             self.tokens.observe_resume(session_id, user_message)
 
+    def _owner_session(self, session_id):
+        """Проверить native session id через read-only SessionStore и fixed Telegram owner."""
+        if self.session_store is None or not isinstance(session_id, str) or not session_id:
+            return None
+        entry = self.session_store.lookup_by_session_id(session_id)
+        source = getattr(entry, "origin", None)
+        if (getattr(entry, "session_id", None) != session_id
+                or _platform(getattr(source, "platform", None)) != "telegram"
+                or str(getattr(source, "user_id", "")) != self.config.owner
+                or not self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))):
+            return None
+        return entry
+
+    def observe_agent_move(self, tool_name="", args=None, result=None, session_id="", status="", **kwargs):
+        """Persist exact successful agent claims and clear observed terminal attempts."""
+        entry = self._owner_session(session_id)
+        if entry is None or status != "ok" or not isinstance(args, dict):
+            return
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except (TypeError, ValueError):
+                return
+        if not isinstance(result, dict):
+            return
+        if tool_name == "elements_move_claim":
+            attempt = result.get("attempt") if isinstance(result.get("attempt"), dict) else result
+            move_id, attempt_id = args.get("move_id"), attempt.get("id")
+            if _uuid(move_id) and _uuid(attempt_id) and attempt.get("executor_kind") == "agent" and attempt.get("status") == "running":
+                self.tokens.track_agent_attempt(self.config.owner, session_id, move_id, attempt_id)
+        elif tool_name in {"elements_move_complete", "elements_move_fail"} and _uuid(args.get("attempt_id")):
+            self.tokens.clear_agent_attempt(self.config.owner, session_id, args["attempt_id"])
+
+    async def _fail_stopped_agent_attempts(self, session_id):
+        """Fail exact running attempts observed in this owner session after native terminal stop."""
+        entry = self._owner_session(session_id)
+        if entry is None:
+            return
+        source = entry.origin
+        thread_id = str(getattr(source, "thread_id", None) or "")
+        for row in self.tokens.agent_attempts(self.config.owner, session_id):
+            try:
+                result = await asyncio.to_thread(self.bridge.call, "actions.fail_agent", {
+                    "moveId": row["move_id"], "attemptId": row["attempt_id"]})
+                attempt = result.get("attempt") if isinstance(result, dict) else None
+                if result.get("status") == "already_stopped" or (isinstance(attempt, dict)
+                        and attempt.get("id") == row["attempt_id"]
+                        and attempt.get("status") in {"failed", "succeeded", "cancelled"}):
+                    self.tokens.clear_agent_attempt(self.config.owner, session_id, row["attempt_id"])
+                else:
+                    raise BridgeError("FAIL_UNCONFIRMED")
+            except Exception:
+                # Keep the durable exact attempt for the next explicit recovery and show the failure.
+                await self._notify("Hermes остановил работу, но Brai не подтвердил завершение начатого Хода. Проверьте его состояние.",
+                                   self.config.chat, thread_id)
+
+    async def on_session_end(self, session_id="", platform=None, completed=None, failed=None, interrupted=None, **kwargs):
+        """Recover exact agent Operations after any terminal owner turn."""
+        if _platform(platform) == "telegram":
+            await self._fail_stopped_agent_attempts(session_id)
+
+    async def agent_loop_stopped(self, session_key="", platform=None, **kwargs):
+        """Recover an exact owner attempt after native /stop or replacement interruption."""
+        if _platform(platform) != "telegram" or self.session_store is None or not session_key:
+            return
+        entry = self.session_store.lookup_by_session_key(session_key)
+        source = getattr(entry, "origin", None)
+        if (entry is not None and _platform(getattr(source, "platform", None)) == "telegram"
+                and str(getattr(source, "user_id", "")) == self.config.owner
+                and self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))):
+            await self._fail_stopped_agent_attempts(entry.session_id)
+
     async def incoming(self, event, **kwargs):
         """Отсекать чужие Telegram события до auth и публиковать вложения владельца."""
         source = getattr(event, "source", None)
@@ -642,7 +780,7 @@ class TelegramPlugin:
         try:
             if (not isinstance(args, dict) or set(args) - {"moveId", "revisionId", "stage"}
                     or not _uuid(args.get("moveId")) or not _uuid(args.get("revisionId"))
-                    or args.get("stage", "planning") not in {"planning", "final", "review"}):
+                    or args.get("stage", "planning") not in {"planning", "final", "review", "clarification"}):
                 raise BridgeError("INVALID_ARGUMENT")
             context = self._tool_context(kwargs)
             result = await self._on_native_loop(self._request(args, context))
@@ -665,8 +803,8 @@ class TelegramPlugin:
         try:
             if (not isinstance(args, dict) or set(args) - {"elementId", "revisionId", "moveId", "decision"}
                     or not _uuid(args.get("elementId")) or not _uuid(args.get("revisionId"))
-                    or args.get("decision") not in {"changes", "cancelled"}
-                    or (args.get("decision") == "changes" and not _uuid(args.get("moveId")))
+                    or args.get("decision") not in {"changes", "cancelled", "clarify"}
+                    or (args.get("decision") in {"changes", "clarify"} and not _uuid(args.get("moveId")))
                     or ("moveId" in args and not _uuid(args["moveId"]))):
                 raise BridgeError("INVALID_ARGUMENT")
             context = self._tool_context(kwargs)
@@ -674,6 +812,68 @@ class TelegramPlugin:
         except Exception:
             return json.dumps({"ok": False, "code": "FEEDBACK_UNCONFIRMED",
                                "message": "Решение не подтверждено. Перечитай состояние задачи; не продолжай работу вслепую."}, ensure_ascii=False)
+
+    async def submit_result(self, args, **kwargs):
+        """Записывает практический результат из текущего реального owner MessageEvent."""
+        try:
+            if (not isinstance(args, dict) or set(args) != {"moveId", "revisionId"}
+                    or not _uuid(args.get("moveId")) or not _uuid(args.get("revisionId"))):
+                raise BridgeError("INVALID_ARGUMENT")
+            context = self._tool_context(kwargs)
+            return await self._on_native_loop(self._result(args, context))
+        except Exception as error:
+            code = str(error) if isinstance(error, BridgeError) and str(error) in {
+                "INVALID_ARGUMENT", "HUMAN_FINAL_DECISION_REQUIRED", "HUMAN_OUTPUT_MAPPING_REQUIRED",
+                "STALE_ACTION", "OWNER_MESSAGE_REQUIRED", "OUTCOME_UNKNOWN"} else "RESULT_UNCONFIRMED"
+            message = ("Напиши явно: «принимаю результат» или «нужно доработать»." if code == "HUMAN_FINAL_DECISION_REQUIRED"
+                else "Для нескольких результатов пришли JSON с точными названиями всех выходов и отдельным полем decision (success или changes)." if code == "HUMAN_OUTPUT_MAPPING_REQUIRED"
+                else "Практический результат не подтверждён. Проверь текущий Ход и его состояние.")
+            return json.dumps({"ok": False, "code": code, "message": message}, ensure_ascii=False)
+
+    async def _result(self, args, context):
+        key = (self.config.chat, context["thread_id"], context["message_id"])
+        event = self.inbound_events.get(key)
+        content = getattr(event, "text", None) if event is not None else None
+        if not isinstance(content, str) or not content.strip() or len(content) > 16000:
+            raise BridgeError("OWNER_MESSAGE_REQUIRED")
+        source = {"platform": "telegram", "chat_id": self.config.chat, "thread_id": context["thread_id"], "message_id": context["message_id"]}
+        pending = self.tokens.human_result(self.config.owner, args["moveId"])
+        if pending and (pending["revision_id"] != args["revisionId"]):
+            self.tokens.clear_human_result(self.config.owner, args["moveId"])
+            pending = None
+        signature = {**args, "content": content}
+        if key in self.feedback_results:
+            previous, result = self.feedback_results[key]
+            if previous != signature:
+                raise BridgeError("FEEDBACK_ALREADY_USED")
+            return result
+        call = {**args, "content": content, "source": source}
+        if pending:
+            if pending["attempt_id"] == "" or not re.search(r"(?:принимаю|всё принимаю|все принимаю|результат принят|всё готово|все готово|есть замечания|нужно доработать|не принимаю|не принято)", content, re.I):
+                raise BridgeError("HUMAN_FINAL_DECISION_REQUIRED")
+            call.update(content=pending["content"], source=json.loads(pending["source_json"]), decisionText=content, decisionSource=source)
+        try:
+            result = await asyncio.to_thread(self.bridge.call, "actions.result", call)
+        except BridgeError as error:
+            if str(error) == "HUMAN_FINAL_DECISION_REQUIRED" and not pending:
+                action = await asyncio.to_thread(self.bridge.call, "actions.read", {"moveId": args["moveId"]})
+                if action.get("revisionId") != args["revisionId"] or action.get("attemptStatus") != "running" or action.get("attemptExecutorKind") != "human":
+                    raise BridgeError("STALE_ACTION")
+                self.tokens.save_human_result(self.config.owner, args["moveId"], args["revisionId"], action["attemptId"], content, source)
+                return json.dumps({"ok": True, "status": "awaiting_decision", "next": "Фактический отчёт сохранён. Явно напиши: принимаю результат или нужно доработать."}, ensure_ascii=False)
+            if pending and str(error) == "STALE_ACTION":
+                self.tokens.clear_human_result(self.config.owner, args["moveId"])
+            raise
+        if result.get("attempt", {}).get("status") != "succeeded":
+            raise BridgeError("RESULT_UNCONFIRMED")
+        if pending:
+            self.tokens.clear_human_result(self.config.owner, args["moveId"])
+        attempt_id = result.get("attempt", {}).get("id")
+        if _uuid(attempt_id):
+            self.tokens.resolve_attempt(self.config.owner, attempt_id)
+        response = json.dumps({"ok": True, "moveId": args["moveId"], "next": "Практический результат и явное решение владельца сохранены в Brai."}, ensure_ascii=False)
+        self.feedback_results[key] = (signature, response)
+        return response
 
     async def _feedback(self, args, context):
         key = (self.config.chat, context["thread_id"], context["message_id"])
@@ -689,7 +889,20 @@ class TelegramPlugin:
         if key in self.feedback_inflight:
             raise BridgeError("FEEDBACK_PENDING")
         self.feedback_inflight.add(key)
+        clarification = None
         try:
+            if args["decision"] == "clarify":
+                candidates = [row for row in self.tokens.pending() if row["stage"] == "clarification"
+                    and row["move_id"] == args["moveId"] and row["target_id"] == args["elementId"]
+                    and row["revision_id"] == args["revisionId"] and row["session_id"] == context["session_id"]
+                    and row["thread_id"] == context["thread_id"] and not row["consumed"]
+                    and await asyncio.to_thread(self._session_matches, row)]
+                if len(candidates) != 1:
+                    raise BridgeError("CLARIFICATION_NOT_PENDING")
+                clarification = self.tokens.reserve_clarification(candidates[0]["token"], self.config.owner,
+                    context["session_id"], context["thread_id"], args["moveId"], args["elementId"], args["revisionId"])
+                if clarification is None:
+                    raise BridgeError("CLARIFICATION_NOT_PENDING")
             # Same actual owner message has one durable request ID, independent of model retries.
             value = sha256(json.dumps(key, ensure_ascii=False).encode()).hexdigest()
             request_id = f"{value[:8]}-{value[8:12]}-5{value[13:16]}-a{value[17:20]}-{value[20:32]}"
@@ -704,6 +917,8 @@ class TelegramPlugin:
                 if result.get("attempt", {}).get("status") != "succeeded":
                     raise BridgeError("FEEDBACK_UNCONFIRMED")
                 targets = {args["elementId"]}
+                if clarification:
+                    self.tokens.resolve(clarification["token"])
             for row in self.tokens.pending():
                 if row["target_id"] in targets:
                     self.tokens.consume(row["token"])
@@ -714,9 +929,10 @@ class TelegramPlugin:
                                 message_id=int(row["message_id"]), reply_markup=None)
                         except Exception:
                             pass  # Owner state already makes the old button invalid.
-            response = json.dumps({"ok": True, "decision": args["decision"], "elementId": args["elementId"],
-                "next": "Прочитай доступные Ходы и выполни доработку; затем покажи её на подтверждение."
-                if args["decision"] == "changes" else "Задача и невыполненное продолжение отменены. Сохрани краткий ответ пользователю."}, ensure_ascii=False)
+            next_step = ("Прочитай доступные Ходы и выполни доработку; затем покажи её на подтверждение."
+                if args["decision"] == "changes" else "Продолжи постановку по сохранённому ответу владельца."
+                if args["decision"] == "clarify" else "Задача и невыполненное продолжение отменены. Сохрани краткий ответ пользователю.")
+            response = json.dumps({"ok": True, "decision": args["decision"], "elementId": args["elementId"], "next": next_step}, ensure_ascii=False)
             self.feedback_results[key] = (signature, response)
             if len(self.feedback_results) > 128:
                 self.feedback_results.pop(next(iter(self.feedback_results)))
@@ -747,30 +963,38 @@ class TelegramPlugin:
             self.config.owner, {**args, "attemptId": ""}, stage, self.config.chat, context)
         try:
             action = await self._prepare(self.tokens.unresolved(token))
-            if action.get("confirmationStage", stage) is None:
-                raise BridgeError("HUMAN_OUTPUT_REQUIRED")
             stage = self.tokens.unresolved(token)["stage"]
+            if action.get("confirmationStage", stage) is None:
+                if not action.get("outputContracts") or action.get("decision") == "confirm":
+                    raise BridgeError("HUMAN_OUTPUT_REQUIRED")
+                stage = "work"
+                self.tokens.set_stage(token, stage)
             if not await self._current(self.tokens.unresolved(token)):
                 raise BridgeError("STALE_ACTION")
-            decision = "success" if stage == "final" else "approved"
-            buttons = [[InlineKeyboardButton("Принять", callback_data=f"brai:{token}:{decision}")]]
+            buttons = None if stage in {"clarification", "work"} else [[InlineKeyboardButton(
+                "Принять", callback_data=f"brai:{token}:{'success' if stage == 'final' else 'approved'}")]]
             context = str(action.get("targetDescription") or "")[:1400]
             title = str(action.get("targetTitle") or "")[:400]
-            stage_label = {"planning": "План работы", "review": "Проверка результата", "final": "Готовый результат"}[stage]
-            if "confirmationText" in action:
+            stage_label = {"planning": "План работы", "review": "Проверка результата", "final": "Готовый результат",
+                           "clarification": "Уточнение поручения", "work": "Практическая работа"}[stage]
+            if stage in {"review", "final"} and not isinstance(action.get("confirmationText"), str):
+                raise BridgeError("HUMAN_OUTPUT_REQUIRED")
+            if action.get("confirmationText") is not None:
                 preview = action["confirmationText"]
                 if not isinstance(preview, str) or not preview.strip():
                     raise BridgeError("HUMAN_OUTPUT_REQUIRED")
                 text = f"{stage_label}\n\n{preview}\n\n"
             else:
                 text = f"{stage_label}: {action['title'][:800]}\n{title}\n{context}\n"
-            text += "Замечания или отмену задачи напиши сообщением."
+            text += ("Выполни этот практический Ход и пришли фактический результат обычным сообщением. Если это итоговый Ход, явно добавь, принимаешь ли результат или нужны изменения."
+                     if stage == "work" else "Ответьте на уточнение обычным сообщением; замечания или отмену тоже напишите текстом."
+                     if stage == "clarification" else "Замечания или отмену задачи напиши сообщением.")
             thread_id = self.tokens.unresolved(token)["thread_id"]
             route = {"message_thread_id": int(thread_id)} if thread_id and str(thread_id) != "1" else {}
             # Не обрезаем план/результат. 1800 code points помещаются в 4096 UTF-16 units.
             chunks = [text[index:index + 1800] for index in range(0, len(text), 1800)]
             for index, chunk in enumerate(chunks):
-                keyboard = {"reply_markup": InlineKeyboardMarkup(buttons)} if index == len(chunks) - 1 else {}
+                keyboard = {"reply_markup": InlineKeyboardMarkup(buttons)} if buttons and index == len(chunks) - 1 else {}
                 if existing and len(chunks) == 1:
                     from telegram.error import BadRequest
                     try:
@@ -805,7 +1029,7 @@ class TelegramPlugin:
             raise BridgeError("RPC_MALFORMED")
         # Recovery с null сохраняет attempt для cleanup, но _request не показывает такую кнопку.
         stage = action.get("confirmationStage")
-        if stage is not None and stage not in {"planning", "final"}:
+        if stage is not None and stage not in {"planning", "final", "clarification"}:
             raise BridgeError("RPC_MALFORMED")
         self.tokens.set_attempt(row["token"], action["attemptId"], action["targetId"], stage)
         return action
@@ -926,18 +1150,27 @@ def register(ctx):
     ctx.register_hook("transform_llm_output", plugin.outgoing)
     ctx.register_hook("transform_tool_result", plugin.tool_result)
     ctx.register_hook("post_llm_call", plugin.observe_resume)
+    ctx.register_hook("post_tool_call", plugin.observe_agent_move)
+    ctx.register_hook("on_session_end", plugin.on_session_end)
+    ctx.register_hook("agent_loop_stopped", plugin.agent_loop_stopped)
     ctx.register_tool(name="brai_telegram_request_confirmation", toolset="brai_telegram",
         description=CONFIRMATION_DESCRIPTION,
         schema={"name": "brai_telegram_request_confirmation", "description": CONFIRMATION_DESCRIPTION,
                 "parameters": {"type": "object", "properties": {"moveId": {"type": "string"},
-                    "revisionId": {"type": "string"}, "stage": {"type": "string", "enum": ["planning", "final", "review"]}},
+                    "revisionId": {"type": "string"}, "stage": {"type": "string", "enum": ["planning", "final", "review", "clarification"]}},
                     "required": ["moveId", "revisionId"], "additionalProperties": False}},
         handler=plugin.request_confirmation, is_async=True)
     ctx.register_tool(name="brai_telegram_submit_feedback", toolset="brai_telegram",
-        description="Record explicit owner remarks or cancellation of a real task from the current Telegram message. Questions and discussion are not decisions. Read current graph first. Text and provenance are taken from the actual incoming owner message, never supply a comment. For changes pass the current confirmation/review moveId. Positive acceptance is only the Accept button. After changes execute the available correction and request fresh acceptance; after cancellation stop the task.",
+        description="Record explicit owner remarks, cancellation, or a plain-text answer to a current clarification Action from the current Telegram message. Questions and discussion are not decisions. Read current graph first. Text and provenance are taken from the actual incoming owner message, never supply a comment. For changes or clarification pass the exact current moveId. Positive plan/result acceptance is only the Accept button. After changes execute the available correction and request fresh acceptance; after cancellation stop the task.",
         schema={"name": "brai_telegram_submit_feedback", "parameters": {"type": "object", "additionalProperties": False,
             "properties": {"elementId": {"type": "string"}, "revisionId": {"type": "string"},
-                           "moveId": {"type": "string"}, "decision": {"enum": ["changes", "cancelled"]}},
+                           "moveId": {"type": "string"}, "decision": {"enum": ["changes", "cancelled", "clarify"]}},
             "required": ["elementId", "revisionId", "decision"]}},
         handler=plugin.submit_feedback, is_async=True)
+    ctx.register_tool(name="brai_telegram_submit_result", toolset="brai_telegram",
+        description="Record practical human work from the actual current Telegram owner message. Pass only the exact moveId and revisionId; content and provenance come from the real message and cannot be supplied by the model. For one output, the whole message is the output. For a final one-output Action, the message must explicitly say it is accepted or needs changes. For multiple outputs, send a JSON object using every exact output contract name and, for final Actions, a separate decision field with success or changes. Never use this to turn a button click into evidence of practical work.",
+        schema={"name": "brai_telegram_submit_result", "parameters": {"type": "object", "additionalProperties": False,
+            "properties": {"moveId": {"type": "string"}, "revisionId": {"type": "string"}},
+            "required": ["moveId", "revisionId"]}},
+        handler=plugin.submit_result, is_async=True)
     ctx.on_unload(plugin.close)

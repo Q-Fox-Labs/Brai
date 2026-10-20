@@ -78,7 +78,7 @@ for (const [operation, request, response] of [
   add(`local_ai_${words}`, localAi.subjects[operation], 'local-ai', 'messages', request, response, 'ownerId', !['modelsList', 'modelsGet', 'catalogSearch', 'operationsGet', 'status'].includes(operation));
 }
 
-export const elementsNames = new Set(['elements_structure_create', 'elements_element_create', 'elements_element_revise', 'elements_move_create', 'elements_move_link', 'elements_element_activate', 'elements_graph_get', 'elements_timeline_get', 'elements_moves_available', 'elements_move_claim', 'elements_move_complete', 'elements_move_fail', 'elements_planning_packet', 'elements_planning_bind', 'elements_planning_build', 'elements_planning_apply']);
+export const elementsNames = new Set(['elements_structure_create', 'elements_element_create', 'elements_element_revise', 'elements_element_reclassify', 'elements_move_create', 'elements_move_link', 'elements_element_activate', 'elements_graph_get', 'elements_timeline_get', 'elements_moves_available', 'elements_move_claim', 'elements_move_complete', 'elements_move_fail', 'elements_planning_packet', 'elements_planning_bind', 'elements_planning_build', 'elements_planning_apply', 'elements_planning_expand_repeat']);
 export const historyNames = new Set(['history_categories_list', 'history_types_list', 'history_type_get']);
 export const transcriptionNames = new Set(['transcription_request_submit', 'transcription_request_get', 'transcription_request_cancel', 'transcription_models_list', 'transcription_settings_get', 'transcription_settings_set', 'transcription_result_get']);
 

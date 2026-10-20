@@ -26,6 +26,8 @@ const tools = {
     { name: 'elements_move_claim', inputSchema: { ...schema({ move_id: { type: 'string' }, idempotency_key: { type: 'string' }, executor_kind: { enum: ['agent', 'human', 'system'] }, executor_id: { type: 'string' }, input_resource_ids: { type: 'array' } }), required: ['move_id', 'idempotency_key', 'executor_kind', 'input_resource_ids'] } },
     { name: 'elements_move_complete', inputSchema: schema({ attempt_id: { type: 'string' }, result: { type: 'object' } }) },
     { name: 'elements_move_fail', inputSchema: schema({ attempt_id: { type: 'string' }, error_code: { type: 'string' } }) },
+    { name: 'elements_element_reclassify', description: 'reclassify', inputSchema: schema({ element_id: { type: 'string' }, expected_revision_id: { type: 'string' }, target_kind: { enum: ['task', 'goal', 'quest'] }, idempotency_key: { type: 'string' }, reason: { type: 'string' } }) },
+    { name: 'elements_planning_expand_repeat', description: 'expand', inputSchema: schema({ move_id: { type: 'string' }, revision_id: { type: 'string' }, resource_id: { type: 'string' }, items: { type: 'array' }, idempotency_key: { type: 'string' } }) },
   ],
   publisher: [{ name: 'publish_file', inputSchema: schema({ path: { type: 'string' }, requestId: { type: 'string' } }) }, { name: 'fetch_file', inputSchema: schema({ artifactId: { type: 'string' } }) }],
   history: [{ name: 'history_search', inputSchema: schema({}) }, { name: 'history_append', inputSchema: schema({}) }, { name: 'history_categories_list', inputSchema: schema({}) }],
@@ -75,6 +77,24 @@ test('History читает user scope, не выставляет админис�
   await runtime.call('history_list', { filters: { object_id: 'example' } });
   assert.equal(calls[0].payload.user_id, owner);
   await assert.rejects(runtime.call('history_list', { filters: { scope_id: 'other' } }), /INVALID_ARGUMENT/);
+});
+
+test('Hermes owner catalog exposes only the reclassify and repeat expansion MCP contracts', async () => {
+  const { ports, calls } = fixture(), runtime = await createBraiTools(config, ports);
+  assert.deepEqual(runtime.tools.filter(tool => tool.name.includes('reclassify') || tool.name.includes('expand_repeat')).map(tool => tool.name).sort(), ['elements_element_reclassify', 'elements_planning_expand_repeat']);
+  await runtime.call('elements_element_reclassify', { element_id: ids[0], expected_revision_id: ids[1], target_kind: 'quest', idempotency_key: 'classify-1', reason: 'Contains multiple independently accepted goals.' });
+  await runtime.call('elements_planning_expand_repeat', { move_id: ids[2], revision_id: ids[1], resource_id: ids[3], items: [{ id: ids[4], label: 'First' }], idempotency_key: 'repeat-1' });
+  assert.deepEqual(calls.slice(-2).map(call => call.name), ['elements_element_reclassify', 'elements_planning_expand_repeat']);
+  await assert.rejects(runtime.call('elements_element_reclassify', { element_id: ids[0], expected_revision_id: ids[1], target_kind: 'level', idempotency_key: 'bad', reason: 'bad' }), /INVALID_ARGUMENT/);
+});
+
+test('reclassify and repeat expansion preserve unknown mutation outcome without automatic retry', async () => {
+  let calls = 0;
+  const { ports } = fixture({ mcp: async () => { calls++; throw fault('TIMEOUT'); } });
+  const runtime = await createBraiTools(config, ports);
+  await assert.rejects(runtime.call('elements_planning_expand_repeat', { move_id: ids[2], revision_id: ids[1], resource_id: ids[3],
+    items: [{ id: ids[4], label: 'First' }], idempotency_key: 'repeat-1' }), /OUTCOME_UNKNOWN/);
+  assert.equal(calls, 1);
 });
 
 test('модель не может claim/complete человеческую попытку; файлы проходят через publisher MCP', async () => {
@@ -152,8 +172,8 @@ test('integrated decision-only Actions derive canonical stage and write review/c
   }
 });
 
-test('human substantive outputs reject before claim; same-key claimed recovery can still cancel', async () => {
-  for (const [decision, count] of [[null, 1], ['final', 2], ['confirm', 2]]) {
+test('practical human output Actions claim only through native owner path; decision-only plan is rejected', async () => {
+  for (const [decision, count] of [[null, 1], ['final', 1], ['confirm', 2]]) {
     const { ports, graph, calls } = fixture();
     graph.moves[0].status = 'planned';
     graph.moves[0].fields = { planning: { decision, output_contracts: Array.from({ length: count }, (_, index) => ({ key: ids[6 + index] })) } };
@@ -165,19 +185,27 @@ test('human substantive outputs reject before claim; same-key claimed recovery c
     };
     const runtime = await createBraiTools(config, ports), human = createHumanActions(runtime);
     const args = { moveId: ids[2], revisionId: ids[1], idempotencyKey: 'same-key', inputResourceIds: [] };
-    assert.equal((await human.read({ moveId: ids[2] })).confirmationStage, null);
-    await assert.rejects(human.prepare(args), /HUMAN_OUTPUT_REQUIRED/);
-    assert.equal(calls.filter(call => call.name === 'elements_move_claim').length, 0);
-    const dispatch = createTrustedDispatcher(runtime);
-    const rejected = await dispatch(JSON.stringify({ jsonrpc: '2.0', id: 'unsupported', method: 'actions.prepare', params: args }));
-    assert.equal(rejected.error.data.code, 'HUMAN_OUTPUT_REQUIRED');
-    assert.equal(calls.filter(call => call.name === 'elements_move_claim').length, 0);
+    assert.equal((await human.read({ moveId: ids[2] })).confirmationStage, decision === 'final' ? 'final' : null);
+    if (decision === 'confirm') {
+      await assert.rejects(human.prepare(args), /HUMAN_OUTPUT_REQUIRED/);
+      assert.equal(calls.filter(call => call.name === 'elements_move_claim').length, 0);
+      const dispatch = createTrustedDispatcher(runtime);
+      const rejected = await dispatch(JSON.stringify({ jsonrpc: '2.0', id: 'unsupported', method: 'actions.prepare', params: args }));
+      assert.equal(rejected.error.data.code, 'HUMAN_OUTPUT_REQUIRED');
+      assert.equal(calls.filter(call => call.name === 'elements_move_claim').length, 0);
+      continue;
+    }
+    const prepared = await human.prepare(args);
+    assert.equal(prepared.status, 'running');
+    assert.equal(calls.filter(call => call.name === 'elements_move_claim').length, 1);
     graph.moves[0].status = 'claimed';
     const recovered = await human.prepare(args);
     assert.equal(recovered.attemptId, ids[3]);
-    assert.equal(recovered.confirmationStage, null);
-    await assert.rejects(human.complete({ moveId: ids[2], revisionId: ids[1], attemptId: ids[3], stage: 'final', decision: 'success' }), /HUMAN_OUTPUT_REQUIRED/);
-    assert.equal(calls.filter(call => call.name === 'elements_move_complete').length, 0);
+    assert.equal(recovered.confirmationStage, decision === 'final' ? 'final' : null);
+    if (decision === null) {
+      await assert.rejects(human.complete({ moveId: ids[2], revisionId: ids[1], attemptId: ids[3], stage: 'final', decision: 'success' }), /HUMAN_OUTPUT_REQUIRED/);
+      assert.equal(calls.filter(call => call.name === 'elements_move_complete').length, 0);
+    }
     await human.cancel({ moveId: ids[2], revisionId: ids[1], attemptId: recovered.attemptId, reason: 'cancelled' });
     assert.equal(calls.at(-1).name, 'elements_move_fail');
   }
@@ -368,6 +396,59 @@ test('trusted text feedback writes actual remarks and delegates cancellation wit
   assert.deepEqual(calls.at(-1).args, { element_id: ids[0], revision_id: ids[1], cancel: true, feedback });
   await assert.rejects(human.feedback({ ...args, decision: 'approved' }), /INVALID_ARGUMENT/);
   await assert.rejects(human.feedback({ ...args, elementId: ids[5], decision: 'cancelled' }), /NOT_FOUND/);
+});
+
+test('clarification feedback completes only the real clarification Action with answered provenance', async () => {
+  const { graph } = fixture(), calls = [];
+  graph.moves[0] = { id: ids[2], kind: 'action', targetId: ids[0], attemptId: ids[3], executor: 'human',
+    status: 'claimed', title: 'Уточнить поручение', input: [], instructions: 'Какой результат считать готовым?',
+    fields: { planning: { decision: 'clarify', output_contracts: [{ key: 'answer' }] } } };
+  graph.attempts[0] = { id: ids[3], moveId: ids[2], status: 'running' };
+  const human = createHumanActions({ graph: async () => graph, elementsCall: async (name, args) => {
+    calls.push({ name, args }); return { attempt: { id: ids[3], status: 'succeeded' } };
+  } });
+  const feedback = { id: ids[7], content: 'Письменное подтверждение от поставщика.', source: { platform: 'telegram', message_id: '43' } };
+  await human.feedback({ elementId: ids[0], revisionId: ids[1], moveId: ids[2], decision: 'clarify', feedback });
+  const result = calls[0].args.result.resources[0];
+  assert.equal(calls[0].name, 'elements_move_complete');
+  assert.equal(result.content, feedback.content);
+  assert.deepEqual(result.metadata, { element_id: ids[0], revision_id: ids[1], stage: 'clarification', outcome: 'answered', source: feedback.source });
+  await assert.rejects(human.feedback({ elementId: ids[0], revisionId: ids[1], moveId: ids[2], decision: 'changes', feedback }), /HUMAN_OUTPUT_REQUIRED/);
+});
+
+test('practical final result needs an explicit human decision and records both real message sources', async () => {
+  const { ports, graph, calls } = fixture();
+  graph.moves[0].status = 'claimed';
+  graph.moves[0].attemptId = ids[3];
+  graph.moves[0].fields = { planning: { decision: 'final', revision_id: ids[1], output_contracts: [{ key: 'result', name: 'Отчёт', content: 'Фактический отчёт' }] } };
+  graph.attempts[0] = { id: ids[3], moveId: ids[2], status: 'running', executorKind: 'human' };
+  ports.mcp = async (endpoint, name, args) => {
+    calls.push({ endpoint, name, args });
+    if (name === 'elements_graph_get') return graph;
+    return { attempt: { id: ids[3], status: 'succeeded' } };
+  };
+  const human = createHumanActions(await createBraiTools(config, ports));
+  await assert.rejects(human.result({ moveId: ids[2], revisionId: ids[1], content: 'Забрал и проверил часы.', source: { message_id: '41' } }), /HUMAN_FINAL_DECISION_REQUIRED/);
+  const result = await human.result({ moveId: ids[2], revisionId: ids[1], content: 'Забрал и проверил часы.', source: { message_id: '41' },
+    decisionText: 'Всё принимаю.', decisionSource: { message_id: '42' } });
+  assert.equal(result.attempt.status, 'succeeded');
+  const payload = calls.filter(call => call.name === 'elements_move_complete').at(-1).args.result.resources[0];
+  assert.equal(payload.content, 'Забрал и проверил часы.');
+  assert.equal(payload.output_key, 'result');
+  assert.equal(payload.metadata.outcome, 'success');
+  assert.deepEqual(payload.metadata.source, { message_id: '42' });
+  assert.deepEqual(payload.metadata.practical_source, { message_id: '41' });
+});
+
+test('native stop recovery fails only the exact running agent Operation attempt', async () => {
+  const { graph } = fixture(), calls = [];
+  graph.moves[0] = { id: ids[2], kind: 'operation', targetId: ids[0], attemptId: ids[3], executor: 'agent', status: 'claimed' };
+  graph.attempts[0] = { id: ids[3], moveId: ids[2], status: 'running', executor_kind: 'agent' };
+  const human = createHumanActions({ graph: async () => graph, elementsCall: async (name, args) => { calls.push({ name, args }); return { attempt: { id: ids[3], status: 'failed' } }; } });
+  await human.failAgent({ moveId: ids[2], attemptId: ids[3] });
+  assert.deepEqual(calls, [{ name: 'elements_move_fail', args: { attempt_id: ids[3], error_code: 'AGENT_STOPPED' } }]);
+  graph.moves[0].executor = 'human';
+  await assert.rejects(human.failAgent({ moveId: ids[2], attemptId: ids[3] }), /FORBIDDEN/);
 });
 
 

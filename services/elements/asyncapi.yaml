@@ -77,6 +77,14 @@ channels:
     publish:
       message:
         payload: { $ref: './schemas/messages.schema.json#/definitions/elements_planning_apply' }
+  brai.elements.v1.command.reclassify:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/elements_element_reclassify' }
+  brai.elements.v1.command.planning-expand-repeat:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/elements_planning_expand_repeat' }
 
 components:
   messages:

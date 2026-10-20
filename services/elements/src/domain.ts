@@ -38,6 +38,8 @@ export interface ElementsHandlers {
   planningBind?(value: unknown, context?: OperationContext): Promise<unknown>;
   planningBuild?(value: unknown, context?: OperationContext): Promise<unknown>;
   planningApply?(value: unknown, context?: OperationContext): Promise<unknown>;
+  elementReclassify?(value: unknown, context?: OperationContext): Promise<unknown>;
+  planningExpandRepeat?(value: unknown, context?: OperationContext): Promise<unknown>;
   /** Только DEV: меняет один статус и пишет аудит, не создавая результатов исполнения. */
   devStatus?(value: unknown, context?: OperationContext): Promise<unknown>;
   structureCreate(value: unknown, context?: OperationContext): Promise<unknown>;

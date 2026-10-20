@@ -768,6 +768,32 @@
         "candidate_sha256",
         "review"
       ]
+    },
+    "elements_element_reclassify": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "element_id": { "type": "string", "format": "uuid" },
+        "expected_revision_id": { "type": "string", "format": "uuid" },
+        "target_kind": { "enum": ["task", "goal", "quest"] },
+        "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "user_id": { "type": "string", "minLength": 1, "maxLength": 255 }
+      },
+      "required": ["user_id", "element_id", "expected_revision_id", "target_kind", "idempotency_key", "reason"]
+    },
+    "elements_planning_expand_repeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "move_id": { "type": "string", "format": "uuid" },
+        "revision_id": { "type": "string", "format": "uuid" },
+        "resource_id": { "type": "string", "format": "uuid" },
+        "items": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "type": "object", "additionalProperties": false, "properties": { "id": { "type": "string", "format": "uuid" }, "label": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "required": ["id", "label"] } },
+        "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "user_id": { "type": "string", "minLength": 1, "maxLength": 255 }
+      },
+      "required": ["user_id", "move_id", "revision_id", "resource_id", "items", "idempotency_key"]
     }
   }
 }

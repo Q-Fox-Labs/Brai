@@ -8,6 +8,10 @@ kind: standalone
 provides_tools:
   - brai_telegram_request_confirmation
   - brai_telegram_submit_feedback
+  - brai_telegram_submit_result
 provides_hooks:
   - pre_gateway_dispatch
   - transform_llm_output
+  - post_tool_call
+  - on_session_end
+  - agent_loop_stopped

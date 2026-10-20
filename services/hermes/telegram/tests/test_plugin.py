@@ -62,9 +62,16 @@ class FakeBridge:
                 return {"id": TARGET, "status": "cancelled", "element_ids": [TARGET]}
             self.action.update(status="succeeded", attemptStatus="succeeded")
             return {"attempt": {"id": ATTEMPT, "status": "succeeded"}}
+        if method == "actions.result":
+            if "decisionText" not in params:
+                raise mod.BridgeError("HUMAN_FINAL_DECISION_REQUIRED")
+            self.action.update(status="succeeded", attemptStatus="succeeded")
+            return {"attempt": {"id": ATTEMPT, "status": "succeeded"}}
         if method == "actions.cancel":
             self.action["attemptStatus"] = "failed"
             return {"ok": True}
+        if method == "actions.fail_agent":
+            return {"attempt": {"id": params["attemptId"], "status": "failed"}}
         return dict(self.file)
 
 
@@ -141,7 +148,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.entry = NS(session_id="native-session-1", origin=NS(platform="telegram", user_id="123",
             chat_id="123", chat_type="dm", thread_id=""))
         self.store = NS(lookup_by_session_key=lambda key: self.entry
-                        if key == self.native_context["HERMES_SESSION_KEY"] else None)
+                        if key == self.native_context["HERMES_SESSION_KEY"] else None,
+                        lookup_by_session_id=lambda sid: self.entry if sid == self.entry.session_id else None)
         self.markdown = MARKDOWN.replace(ROOT, self.config.result_root)
         self.bridge.file["markdown"] = self.markdown
         self.plugin = mod.TelegramPlugin(self.config, self.bridge, self.inject)
@@ -430,7 +438,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_integrated_stage_is_persisted_before_ui_and_changes_resumes_review(self):
         for stage, choice in (("planning", "approved"), ("final", "success")):
             for decision in (choice,):
-                self.bridge.action.update(status="claimed", attemptStatus="running", confirmationStage=stage)
+                self.bridge.action.update(status="claimed", attemptStatus="running", confirmationStage=stage,
+                                          confirmationText="План или результат для проверки владельцем.")
                 send_message = self.bot.send_message
                 async def checked_send(**kwargs):
                     if "reply_markup" in kwargs:
@@ -600,7 +609,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_final_success_changes_and_cancel_decisions(self):
         for stage, decision in (("final", "success"), ("planning", "approved")):
-            self.bridge.action.update(status="claimed", attemptStatus="running")
+            self.bridge.action.update(status="claimed", attemptStatus="running", confirmationText="План или результат для проверки владельцем.")
             data = await self.request(stage)
             data = data.rsplit(":", 1)[0] + ":" + decision
             message_id = len(self.bot.sent)
@@ -722,7 +731,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.incoming(event)
         args = {"elementId": TARGET, "revisionId": REVISION, "moveId": MOVE, "decision": "changes"}
         response = json.loads(await self.plugin.submit_feedback(args))
-        self.assertTrue(response["ok"])
+        self.assertTrue(response["ok"], {"response": response, "calls": self.bridge.calls})
         actual = [params for method, params in self.bridge.calls if method == "actions.feedback"][-1]
         self.assertEqual(actual["feedback"]["content"], event.text)
         self.assertEqual(actual["feedback"]["source"]["message_id"], "42")
@@ -732,6 +741,70 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(json.loads(await self.plugin.submit_feedback(args))["ok"])
         self.assertEqual(len(self.bridge.calls), before)
         self.assertFalse(json.loads(await self.plugin.submit_feedback({**args, "decision": "cancelled"}))["ok"])
+
+    async def test_clarification_is_plain_text_and_saves_exact_owner_answer_provenance(self):
+        self.bridge.action.update(confirmationStage="clarification", confirmationText="Какой результат считать готовым?")
+        result = json.loads(await self.plugin.request_confirmation({"moveId": MOVE, "revisionId": REVISION}))
+        self.assertTrue(result["ok"])
+        self.assertIn("Уточнение поручения", self.bot.sent[-1]["text"])
+        self.assertIn("Какой результат считать готовым?", self.bot.sent[-1]["text"])
+        self.assertNotIn("reply_markup", self.bot.sent[-1])
+        self.assertEqual(self.plugin.tokens.pending()[0]["stage"], "clarification")
+        self.native_context["HERMES_SESSION_MESSAGE_ID"] = "43"
+        event = self.event(text="Готово, когда получен письменный ответ от поставщика.", message_id="43")
+        await self.plugin.incoming(event)
+        args = {"elementId": TARGET, "revisionId": REVISION, "moveId": MOVE, "decision": "clarify"}
+        response = json.loads(await self.plugin.submit_feedback(args))
+        self.assertTrue(response["ok"], {"response": response, "calls": self.bridge.calls})
+        actual = [params for method, params in self.bridge.calls if method == "actions.feedback"][-1]
+        self.assertEqual(actual["decision"], "clarify")
+        self.assertEqual(actual["feedback"]["content"], event.text)
+        self.assertEqual(actual["feedback"]["source"]["message_id"], "43")
+        self.assertEqual(self.plugin.tokens.pending(), [])
+
+    async def test_practical_final_report_then_separate_accept_completes_same_action(self):
+        self.bridge.action.update(confirmationStage=None, decision="final", outputContracts=[{"key": "result", "name": "Отчёт"}], confirmationText=None)
+        requested = json.loads(await self.plugin.request_confirmation({"moveId": MOVE, "revisionId": REVISION}))
+        self.assertTrue(requested["ok"], requested)
+        self.assertIn("Выполни этот практический Ход", self.bot.sent[-1]["text"])
+        self.assertNotIn("reply_markup", self.bot.sent[-1])
+        self.native_context["HERMES_SESSION_MESSAGE_ID"] = "51"
+        report = self.event(text="Забрал и проверил часы.", message_id="51")
+        await self.plugin.incoming(report)
+        first = json.loads(await self.plugin.submit_result({"moveId": MOVE, "revisionId": REVISION}))
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["status"], "awaiting_decision")
+        saved = self.plugin.tokens.human_result("123", MOVE)
+        self.assertEqual(saved["content"], report.text)
+        self.assertEqual(json.loads(saved["source_json"])["message_id"], "51")
+        self.native_context["HERMES_SESSION_MESSAGE_ID"] = "52"
+        await self.plugin.incoming(self.event(text="Всё принимаю.", message_id="52"))
+        final = json.loads(await self.plugin.submit_result({"moveId": MOVE, "revisionId": REVISION}))
+        self.assertTrue(final["ok"])
+        call = [params for method, params in self.bridge.calls if method == "actions.result"][-1]
+        self.assertEqual(call["content"], report.text)
+        self.assertEqual(call["decisionText"], "Всё принимаю.")
+        self.assertEqual(call["decisionSource"]["message_id"], "52")
+        self.assertIsNone(self.plugin.tokens.human_result("123", MOVE))
+
+    async def test_terminal_session_fails_only_observed_exact_agent_attempt(self):
+        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+            result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
+            session_id="native-session-1", status="ok")
+        self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"),
+                         [{"owner": "123", "session_id": "native-session-1", "move_id": MOVE, "attempt_id": ATTEMPT}])
+        await self.plugin.on_session_end(session_id="native-session-1", platform="telegram", completed=True)
+        self.assertEqual([params for method, params in self.bridge.calls if method == "actions.fail_agent"],
+                         [{"moveId": MOVE, "attemptId": ATTEMPT}])
+        self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [])
+
+    async def test_terminal_cleanup_preserves_claims_from_other_session_or_owner(self):
+        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+            result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
+            session_id="native-session-1", status="ok")
+        await self.plugin.on_session_end(session_id="other-session", platform="telegram", completed=True)
+        self.assertFalse(any(method == "actions.fail_agent" for method, _ in self.bridge.calls))
+        self.assertEqual(len(self.plugin.tokens.agent_attempts("123", "other-session")), 0)
 
     async def test_text_cancel_invalidates_button_and_accept_cannot_resume(self):
         data = await self.request()
@@ -1198,11 +1271,16 @@ class NativeContractTests(unittest.TestCase):
                  register_tool=lambda **kw: calls.append(("tool", kw)), on_unload=lambda f: calls.append(("unload", f)))
         with patch.object(mod.Config, "from_env", return_value=NS()), patch.object(mod, "TelegramPlugin") as plugin:
             mod.register(ctx)
-            self.assertEqual([name for name, _ in calls], ["factory", "pre_gateway_dispatch", "transform_llm_output", "transform_tool_result", "post_llm_call", "tool", "tool", "unload"])
-            self.assertTrue(calls[5][1]["is_async"])
-            self.assertIs(calls[5][1]["handler"], plugin.return_value.request_confirmation)
-            self.assertIn("Never invent IDs", calls[5][1]["schema"]["description"])
-            self.assertIs(calls[6][1]["handler"], plugin.return_value.submit_feedback)
+            self.assertEqual([name for name, _ in calls], ["factory", "pre_gateway_dispatch", "transform_llm_output", "transform_tool_result", "post_llm_call", "post_tool_call", "on_session_end", "agent_loop_stopped", "tool", "tool", "tool", "unload"])
+            self.assertTrue(calls[8][1]["is_async"])
+            self.assertIs(calls[8][1]["handler"], plugin.return_value.request_confirmation)
+            self.assertIn("Never invent IDs", calls[8][1]["schema"]["description"])
+            self.assertIs(calls[9][1]["handler"], plugin.return_value.submit_feedback)
+            self.assertIs(calls[10][1]["handler"], plugin.return_value.submit_result)
+        manifest = (REPO / "services/hermes/telegram/plugin.yaml").read_text()
+        for name in ("brai_telegram_request_confirmation", "brai_telegram_submit_feedback", "brai_telegram_submit_result",
+                     "pre_gateway_dispatch", "transform_llm_output", "post_tool_call", "on_session_end", "agent_loop_stopped"):
+            self.assertIn(name, manifest)
         inject = methods["inject_message"]
         self.assertEqual([a.arg for a in inject.args.args], ["self", "content", "role"])
         self.assertEqual([a.arg for a in inject.args.kwonlyargs], ["session_key", "origin"])
