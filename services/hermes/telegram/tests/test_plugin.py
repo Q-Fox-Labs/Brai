@@ -394,6 +394,28 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         for row in self.bot.sent[-1]["reply_markup"].inline_keyboard:
             self.assertLessEqual(len(row[0].callback_data.encode()), 64)
 
+    async def test_full_saved_text_precedes_buttons_and_is_not_truncated(self):
+        preview = 'Чек-лист подготовлен\nРезультат: три пункта.\n' + '👤 Ход\n' * 900
+        self.bridge.action.update(confirmationStage='planning', confirmationText=preview)
+        await self.request()
+        self.assertGreater(len(self.bot.sent), 1)
+        text = ''.join(item['text'] for item in self.bot.sent)
+        self.assertIn(preview, text)
+        self.assertNotIn(MOVE, text)
+        for message in self.bot.sent:
+            self.assertLessEqual(len(message['text'].encode('utf-16-le')) // 2, 4096)
+        self.assertTrue(all('reply_markup' not in item for item in self.bot.sent[:-1]))
+        keyboard = self.bot.sent[-1]['reply_markup'].inline_keyboard
+        self.assertEqual([row[0].text for row in keyboard], ['Принять', 'Нужны изменения', 'Отменить'])
+        self.assertEqual(self.plugin.tokens.pending()[0]['message_id'], str(len(self.bot.sent)))
+
+    async def test_missing_reviewable_result_does_not_send_blind_approval_buttons(self):
+        self.bridge.action.update(confirmationStage='final', confirmationText=None)
+        result = json.loads(await self.plugin.request_confirmation({'moveId': MOVE, 'revisionId': REVISION}))
+        self.assertFalse(result['ok'])
+        self.assertEqual(self.bot.sent, [])
+        self.assertTrue(any(method == 'actions.cancel' for method, _ in self.bridge.calls))
+
     async def test_integrated_stage_is_persisted_before_ui_and_changes_resumes_review(self):
         for stage, choice in (("planning", "approved"), ("final", "success")):
             for decision in (choice, "changes"):

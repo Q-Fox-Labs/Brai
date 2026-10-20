@@ -197,6 +197,44 @@ test('legacy Action retains requested positive stage without a planning DTO fiel
   }
 });
 
+test('Telegram plan contains the saved result and ordered moves, without foreign task data', async () => {
+  const { ports, graph } = fixture();
+  graph.elements[0] = { ...graph.elements[0], title: 'Чек-лист подготовлен', fields: { expected_result: 'Ровно три пункта.', constraints: 'Без личных данных.' } };
+  const approval = graph.moves[0];
+  approval.title = 'Рассмотреть постановку'; approval.previousId = ids[5];
+  approval.fields = { planning: { decision: 'confirm', output_contracts: [{}] } };
+  graph.moves = [
+    { id: ids[6], targetId: ids[0], previousId: approval.id, kind: 'operation', title: 'Написать три пункта' },
+    { id: ids[7], targetId: ids[7], kind: 'operation', title: 'Чужой план' }, approval,
+    { id: ids[5], targetId: ids[0], previousId: null, kind: 'operation', title: 'Составить план', status: 'succeeded' },
+  ];
+  const action = await createHumanActions(await createBraiTools(config, ports)).read({ moveId: approval.id });
+  assert.match(action.confirmationText, /Ровно три пункта[\s\S]*Без личных данных/);
+  assert.match(action.confirmationText, /1\. 🤖 Составить план — готово\n2\. 👤 Рассмотреть постановку\n3\. 🤖 Написать три пункта/);
+  assert.doesNotMatch(action.confirmationText, /Чужой план|00000000-|https?:/);
+});
+
+test('final confirmation shows only required actual resources, not all available context', async () => {
+  const { ports, graph, calls } = fixture();
+  graph.moves[0].fields = { planning: { decision: 'final', output_contracts: [{}] } };
+  graph.resources = [
+    { id: ids[4], title: 'Чек-лист', content: '1. План.\n2. Почта.\n3. Работа.' },
+    { id: ids[6], title: 'Внутренний контекст', content: 'Не для приёмки' },
+  ];
+  ports.mcp = async (endpoint, name, args) => {
+    calls.push({ name, args });
+    if (name === 'elements_graph_get') return graph;
+    if (name === 'elements_moves_available') return { items: [{ id: ids[2], required_resource_ids: [ids[4]], available_resource_ids: [ids[4], ids[6]] }] };
+    return { attempt: { id: ids[3], executor_kind: 'human', status: 'running' } };
+  };
+  const human = createHumanActions(await createBraiTools(config, ports));
+  assert.equal((await human.read({ moveId: ids[2] })).confirmationText, null);
+  const prepared = await human.prepare({ moveId: ids[2], revisionId: ids[1], idempotencyKey: 'review' });
+  assert.deepEqual(prepared.inputResourceIds, [ids[4]]);
+  assert.match(prepared.confirmationText, /1\. План\.\n2\. Почта\.\n3\. Работа\./);
+  assert.doesNotMatch(prepared.confirmationText, /Внутренний контекст|Не для приёмки/);
+});
+
 test('trusted JSON-RPC сохраняет id, batch и notifications; не имеет произвольных методов', async () => {
   const { ports } = fixture(), dispatch = createTrustedDispatcher(await createBraiTools(config, ports));
   assert.equal((await dispatch('{')).error.code, -32700);

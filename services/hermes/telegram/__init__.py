@@ -646,14 +646,23 @@ class TelegramPlugin:
             context = str(action.get("targetDescription") or "")[:1400]
             title = str(action.get("targetTitle") or "")[:400]
             stage_label = {"planning": "План работы", "review": "Проверка результата", "final": "Готовый результат"}[stage]
-            text = (f"{stage_label}: {action['title'][:800]}\n{title}\n{context}\n"
-                    "Принять — продолжить; нужны изменения — обсудить и доработать; отменить — остановить запрос.\n"
-                    "Срок кнопки: 15 минут.")
+            if "confirmationText" in action:
+                preview = action["confirmationText"]
+                if not isinstance(preview, str) or not preview.strip():
+                    raise BridgeError("HUMAN_OUTPUT_REQUIRED")
+                text = f"{stage_label}\n\n{preview}\n\n"
+            else:
+                text = f"{stage_label}: {action['title'][:800]}\n{title}\n{context}\n"
+            text += ("Нужны изменения — обсудить и доработать; отменить — остановить запрос.\n"
+                     "Срок кнопки: 15 минут.")
             thread_id = self.tokens.unresolved(token)["thread_id"]
             route = {"message_thread_id": int(thread_id)} if thread_id else {}
-            message = await self.bot.send_message(chat_id=int(self.config.chat), text=text, **route,
-                reply_markup=InlineKeyboardMarkup(buttons), connect_timeout=5, read_timeout=10,
-                write_timeout=10, pool_timeout=5)
+            # Не обрезаем план/результат. 1800 code points помещаются в 4096 UTF-16 units.
+            chunks = [text[index:index + 1800] for index in range(0, len(text), 1800)]
+            for index, chunk in enumerate(chunks):
+                keyboard = {"reply_markup": InlineKeyboardMarkup(buttons)} if index == len(chunks) - 1 else {}
+                message = await self.bot.send_message(chat_id=int(self.config.chat), text=chunk, **route,
+                    **keyboard, connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
             self.tokens.bind(token, message.message_id)
             return json.dumps({"ok": True, "status": "awaiting_owner", "moveId": action["moveId"],
                                "attemptId": action["attemptId"], "revisionId": action["revisionId"]})
