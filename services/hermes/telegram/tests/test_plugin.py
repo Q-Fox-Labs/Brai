@@ -12,7 +12,7 @@ import sqlite3
 import sys
 import tempfile
 import time
-from types import SimpleNamespace as NS
+from types import ModuleType, SimpleNamespace as NS
 import unittest
 from unittest.mock import patch
 
@@ -812,6 +812,83 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([params for method, params in self.bridge.calls if method == "actions.fail_agent"],
                          [{"moveId": MOVE, "attemptId": ATTEMPT}])
         self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [])
+
+    async def test_successful_turn_preserves_claim_for_live_exact_session_delegation(self):
+        self.plugin.observe_agent_move(tool_name="mcp__brai__elements_move_claim", args={"move_id": MOVE},
+            result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
+            session_id="native-session-1", status="ok")
+        api = ModuleType("tools.async_delegation")
+        api.has_live_for_session = lambda **kwargs: kwargs == {"parent_session_id": "native-session-1"}
+        api.list_async_delegations = lambda: []
+        api.get_durable_delegation = lambda delegation_id: None
+        with patch.dict(sys.modules, {"tools": ModuleType("tools"), "tools.async_delegation": api}):
+            await self.plugin.on_session_end(session_id="native-session-1", platform="telegram",
+                                             completed=True, failed=False, interrupted=False)
+        self.assertFalse(any(method == "actions.fail_agent" for method, _ in self.bridge.calls))
+        self.assertEqual(len(self.plugin.tokens.agent_attempts("123", "native-session-1")), 1)
+
+    async def test_successful_turn_preserves_claim_for_exact_pending_delivery_only(self):
+        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+            result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
+            session_id="native-session-1", status="ok")
+        api = ModuleType("tools.async_delegation")
+        api.has_live_for_session = lambda **kwargs: False
+        api.list_async_delegations = lambda: [{"delegation_id": "deleg_exact", "parent_session_id": "native-session-1",
+                                                "completed_at": 123},
+                                               {"delegation_id": "deleg_foreign", "parent_session_id": "other-session",
+                                                "completed_at": 123}]
+        api.get_durable_delegation = lambda delegation_id: {"delivery_state": "pending" if delegation_id == "deleg_exact" else "pending"}
+        with patch.dict(sys.modules, {"tools": ModuleType("tools"), "tools.async_delegation": api}):
+            await self.plugin.on_session_end(session_id="native-session-1", platform="telegram",
+                                             completed=True, failed=False, interrupted=False)
+        self.assertFalse(any(method == "actions.fail_agent" for method, _ in self.bridge.calls))
+
+        api.get_durable_delegation = lambda delegation_id: {"delivery_state": "delivered"}
+        with patch.dict(sys.modules, {"tools": ModuleType("tools"), "tools.async_delegation": api}):
+            await self.plugin.on_session_end(session_id="native-session-1", platform="telegram",
+                                             completed=True, failed=False, interrupted=False)
+        self.assertEqual(sum(method == "actions.fail_agent" for method, _ in self.bridge.calls), 1)
+
+    async def test_failure_or_interruption_fails_claim_even_with_live_delegation(self):
+        for terminal in ({"completed": False, "failed": True, "interrupted": False},
+                         {"completed": False, "failed": False, "interrupted": True}):
+            with self.subTest(terminal=terminal):
+                self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+                    result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
+                    session_id="native-session-1", status="ok")
+                api = ModuleType("tools.async_delegation")
+                api.has_live_for_session = lambda **kwargs: True
+                api.list_async_delegations = lambda: []
+                api.get_durable_delegation = lambda delegation_id: None
+                with patch.dict(sys.modules, {"tools": ModuleType("tools"), "tools.async_delegation": api}):
+                    await self.plugin.on_session_end(session_id="native-session-1", platform="telegram", **terminal)
+                self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [])
+                self.bridge.calls.clear()
+
+    async def test_namespaced_claim_and_completion_are_tracked_but_foreign_prefix_is_ignored(self):
+        self.plugin.observe_agent_move(tool_name="mcp__other__elements_move_claim", args={"move_id": MOVE},
+            result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
+            session_id="native-session-1", status="ok")
+        self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [])
+        self.plugin.observe_agent_move(tool_name="mcp__brai__elements_move_claim", args={"move_id": MOVE},
+            result=json.dumps({"result": json.dumps({"attempt": {
+                "id": ATTEMPT, "status": "running", "executor_kind": "agent"}})}),
+            session_id="native-session-1", status="ok")
+        self.assertEqual(len(self.plugin.tokens.agent_attempts("123", "native-session-1")), 1)
+        self.plugin.observe_agent_move(tool_name="mcp__brai__elements_move_complete", args={"attempt_id": ATTEMPT},
+            result=json.dumps({"result": json.dumps({"attempt": {"id": ATTEMPT, "status": "succeeded"}})}),
+            session_id="native-session-1", status="ok")
+        self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [])
+
+    async def test_factory_reconnect_does_not_mark_live_claim_as_startup_orphan(self):
+        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+            result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
+            session_id="native-session-1", status="ok")
+        self.plugin.factory(self.app, object())
+        await asyncio.sleep(0)
+        self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [
+            {"owner": "123", "session_id": "native-session-1", "move_id": MOVE, "attempt_id": ATTEMPT}])
+        self.assertFalse(any(method == "actions.fail_agent" for method, _ in self.bridge.calls))
 
     async def test_durable_agent_failure_is_retried_during_startup_recovery(self):
         self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},

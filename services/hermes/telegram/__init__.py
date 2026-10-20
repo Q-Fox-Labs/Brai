@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 from dataclasses import dataclass
 from contextlib import contextmanager
 from hashlib import sha256
@@ -427,6 +428,7 @@ class TelegramPlugin:
         self.inbound_events = {}
         self.feedback_results = {}
         self.feedback_inflight = set()
+        self.startup_attempt_recovery_initialized = False
         self.descriptor = re.compile(
             r"!?\[(?:\\[^\r\n]|[^\]\\\r\n])*\]\(<" + re.escape(config.result_root.rstrip("/")) + r"/(?P<id>" + UUID
             + r")/(?P<name>[^<>/\r\n]+)>\)")
@@ -456,7 +458,9 @@ class TelegramPlugin:
                 self.tokens.consume(row["token"])
             if recover_now:
                 self._schedule_cleanup(row["token"])
-        self.tokens.mark_owner_attempts_orphaned(self.config.owner)
+        if not self.startup_attempt_recovery_initialized:
+            self.tokens.mark_owner_attempts_orphaned(self.config.owner)
+            self.startup_attempt_recovery_initialized = True
         task = self.loop.create_task(self.recover_durable_agent_attempts())
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
@@ -589,9 +593,18 @@ class TelegramPlugin:
         entry = self._owner_session(session_id)
         if entry is None or status != "ok" or not isinstance(args, dict):
             return
+        # Hermes' Tool Search bridge unwraps tool_call but keeps the registered MCP name.
+        # Accept only this connector's exact namespace; other connector names stay inert.
+        if isinstance(tool_name, str) and tool_name.startswith("mcp__brai__"):
+            tool_name = tool_name[len("mcp__brai__"):]
         if isinstance(result, str):
             try:
                 result = json.loads(result)
+            except (TypeError, ValueError):
+                return
+        if isinstance(result, dict) and isinstance(result.get("result"), str):
+            try:
+                result = json.loads(result["result"])
             except (TypeError, ValueError):
                 return
         if not isinstance(result, dict):
@@ -643,9 +656,30 @@ class TelegramPlugin:
             await self._fail_recorded_agent_attempt(row, thread_id, notify=True)
 
     async def on_session_end(self, session_id="", platform=None, completed=None, failed=None, interrupted=None, **kwargs):
-        """Recover exact agent Operations after any terminal owner turn."""
-        if _platform(platform) == "telegram":
-            await self._fail_stopped_agent_attempts(session_id)
+        """Recover stopped claims, preserving successful turns that yielded to a reviewer."""
+        if _platform(platform) != "telegram":
+            return
+        if (completed is True and failed is not True and interrupted is not True
+                and isinstance(session_id, str) and session_id):
+            try:
+                async_delegation = importlib.import_module("tools.async_delegation")
+                if async_delegation.has_live_for_session(parent_session_id=session_id):
+                    return
+                for record in async_delegation.list_async_delegations():
+                    if (not isinstance(record, dict) or record.get("parent_session_id") != session_id
+                            or not record.get("completed_at")):
+                        continue
+                    delegation_id = record.get("delegation_id")
+                    if not isinstance(delegation_id, str) or not delegation_id:
+                        continue
+                    durable = async_delegation.get_durable_delegation(delegation_id)
+                    if (isinstance(durable, dict)
+                            and durable.get("delivery_state") == "pending"):
+                        return
+            except Exception:
+                # A failed lifecycle read cannot prove a reviewer is still pending.
+                pass
+        await self._fail_stopped_agent_attempts(session_id)
 
     async def agent_loop_stopped(self, session_key="", platform=None, **kwargs):
         """Recover an exact owner attempt after native /stop or replacement interruption."""
