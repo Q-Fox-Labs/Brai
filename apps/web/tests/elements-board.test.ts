@@ -2,7 +2,7 @@
 // ABOUTME: Использует только синтетические записи и не загружает fixture или историю.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fitView, initialPositions, projectMoves, readLayout, resourceMoveLinkAnchors, resourceMoveLinks, sequenceMoves, sharedMoveLinkAnchors, taskResourceLinks, statusPresentation, wrapResourceLabel, type BoardData, type Element, type Move, type Resource } from "../app/elements/model.ts";
+import { fitView, initialPositions, projectMoves, readLayout, resourceMoveLinkAnchors, resourceMoveLinks, sequenceMoves, sharedMoveLinkAnchors, siblingResourceLinks, statusPresentation, wrapResourceLabel, type BoardData, type Element, type Move, type Resource } from "../app/elements/model.ts";
 import { presentBoard } from "../app/elements/presentation.ts";
 
 const element = (id: string, parentId: string | null): Element => ({ id, kind: parentId ? "task" : "goal", parentId, status: "active", revision: "r1", title: id, description: "", input: [], output: [] });
@@ -112,6 +112,8 @@ test("resource links retain planned required IDs through readable conditions", (
  const presented = presentBoard(raw);
  assert.deepEqual(presented.moves[0].requiredResourceIds, ["resource-id"]);
  assert.equal(presented.moves[0].conditions, "Есть ресурс");
+ const withOutputs = presentBoard({ ...raw, moves: [{ ...raw.moves[0], conditions: { required_outputs: [{ move_id: "move-id", output_key: "output-key", revision_id: "revision-id" }] } }] });
+ assert.deepEqual(withOutputs.moves[0].requiredOutputContracts, [{ moveId: "move-id", outputKey: "output-key", revisionId: "revision-id" }]);
 });
 
 test("resource arrows use facing sides or an outside gutter for overlapping rows", () => {
@@ -127,6 +129,11 @@ test("initial layout groups each parent with its children and saved manual posit
  assert.ok(defaults.goal.x > defaults["task-a"].x && defaults.goal.x < defaults["task-b"].x);
  assert.equal(defaults["task-a"].y, 1044);
  assert.equal(defaults["task-b"].y, 1044);
+ const nested = initialPositions([element("quest", null), { ...element("goal-child", "quest"), kind: "goal" }, { ...element("task-grandchild", "goal-child"), kind: "task" }], { quest: 500, "goal-child": 700 });
+ assert.equal(nested["goal-child"].y, 644);
+ assert.equal(nested["task-grandchild"].y, 1488);
+ assert.equal(nested.quest.x, nested["goal-child"].x);
+ assert.equal(nested["goal-child"].x, nested["task-grandchild"].x);
  const saved = { version: 2, positions: { ...defaults, goal: { x: -300, y: 72 } }, view: { x: 4, y: 8, zoom: 0.8 } };
  assert.deepEqual(readLayout(JSON.stringify(saved), defaults)!.positions.goal, saved.positions.goal);
  assert.deepEqual(fitView({}, 800, 600), { x: 0, y: 0, zoom: 1 });
@@ -163,7 +170,7 @@ test("child projection brackets the complete independent rework chain", () => {
 });
 
 
-test("task transfers show only proven accepted outputs into sibling start projections", () => {
+test("sibling transfers show only proven accepted outputs into sibling start projections", () => {
  const goal=element("root",null), tasks=[element("one",goal.id),element("two",goal.id),element("three",goal.id)];
  tasks[0].output=["first"];tasks[1].input=["first"];tasks[1].output=["second"];tasks[2].input=["second"];
  const accept1={...move("accept-one",goal.id,tasks[0].id,null,"accept"),attemptId:"a1",output:["first"]};
@@ -173,11 +180,20 @@ test("task transfers show only proven accepted outputs into sibling start projec
  const work={...move("internal",tasks[1].id),input:["first"]}, final={...move("final",goal.id),input:["first","second"]};
  const data:BoardData={elements:[goal,...tasks],moves:[accept1,accept2,start2,start3,work,final],resources:[{id:"first",title:"Принятый итог",content:"",attemptId:"a1"},{id:"second",title:"Следующий итог",content:"",attemptId:"a2"}],attempts:[{id:"a1",moveId:accept1.id,status:"succeeded"},{id:"a2",moveId:accept2.id,status:"succeeded"},{id:"s2",moveId:start2.id,status:"succeeded",result:{claim:{target_input_resource_ids:["first"]}}},{id:"s3",moveId:start3.id,status:"succeeded",result:{claim:{target_input_resource_ids:["second"]}}}]};
  const before=JSON.stringify(data);
- assert.deepEqual(taskResourceLinks(data).map(l=>[l.resourceId,l.producerId,l.consumerId,l.fromElementId,l.toElementId]),[["first","accept-one","start-two","one","two"],["second","accept-two","start-three","two","three"]]);
+ assert.deepEqual(siblingResourceLinks(data).map(l=>[l.resourceId,l.producerId,l.consumerId,l.fromElementId,l.toElementId]),[["first","accept-one","start-two","one","two"],["second","accept-two","start-three","two","three"]]);
  assert.equal(JSON.stringify(data),before);
- assert.equal(taskResourceLinks({...data,attempts:[]}).length,0);
- assert.equal(taskResourceLinks({...data,elements:[goal,...tasks.map(task=>({...task,input:[]}))]}).length,0);
- assert.equal(taskResourceLinks({...data,elements:[goal,...tasks.map(task=>({...task,output:[]}))]}).length,0);
- assert.equal(taskResourceLinks({...data,resources:data.resources.map(r=>({...r,attemptId:"unrelated"}))}).length,0);
- assert.equal(taskResourceLinks({...data,attempts:data.attempts!.map(a=>a.id.startsWith("s")?{...a,result:{claim:{target_input_resource_ids:[]}}}:a)}).length,0);
+ assert.equal(siblingResourceLinks({...data,attempts:[]}).length,0);
+ assert.equal(siblingResourceLinks({...data,elements:[goal,...tasks.map(task=>({...task,input:[]}))]}).length,0);
+ assert.equal(siblingResourceLinks({...data,elements:[goal,...tasks.map(task=>({...task,output:[]}))]}).length,0);
+ assert.equal(siblingResourceLinks({...data,resources:data.resources.map(r=>({...r,attemptId:"unrelated"}))}).length,0);
+ assert.equal(siblingResourceLinks({...data,attempts:data.attempts!.map(a=>a.id.startsWith("s")?{...a,result:{claim:{target_input_resource_ids:[]}}}:a)}).length,0);
+ const goalSibling = { ...tasks[1], kind: "goal" };
+ assert.equal(siblingResourceLinks({ ...data, elements: [goal, tasks[0], goalSibling, tasks[2]] }).length, 2);
+ const questSibling = { ...tasks[1], kind: "quest" };
+ assert.equal(siblingResourceLinks({ ...data, elements: [goal, tasks[0], questSibling, tasks[2]] }).length, 2);
+ const required = { ...start2, requiredOutputContracts: [{ moveId: "accept-one", outputKey: "output-key", revisionId: "plan-revision" }] };
+ const restrictedStart3 = { ...start3, requiredOutputContracts: [{ moveId: "other-move", outputKey: "other-key", revisionId: "other-revision" }] };
+ const exactResource = { ...data.resources[0], metadata: { output_key: "output-key", plan_revision_id: "plan-revision" } };
+ assert.equal(siblingResourceLinks({ ...data, moves: [accept1, accept2, required, restrictedStart3, work, final], resources: [exactResource, data.resources[1]] }).length, 1);
+ assert.equal(siblingResourceLinks({ ...data, moves: [accept1, accept2, { ...required, requiredOutputContracts: [{ moveId: "other-move", outputKey: "output-key", revisionId: "plan-revision" }] }, restrictedStart3, work, final], resources: [exactResource, data.resources[1]] }).length, 0);
 });

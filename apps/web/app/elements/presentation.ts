@@ -31,6 +31,18 @@ export function conditionText(value: unknown) {
  const prerequisite = (value as { prerequisite?: unknown }).prerequisite;
  return typeof prerequisite === "string" ? prerequisite : "";
 }
+function requiredOutputContracts(value: unknown) {
+ if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+ const contracts = (value as { required_outputs?: unknown }).required_outputs;
+ if (!Array.isArray(contracts)) return [];
+ return contracts.flatMap(item => {
+  if (!item || typeof item !== "object") return [];
+  const row = item as { move_id?: unknown; output_key?: unknown; revision_id?: unknown };
+  return typeof row.move_id === "string" && typeof row.output_key === "string" && typeof row.revision_id === "string"
+   ? [{ moveId: row.move_id, outputKey: row.output_key, revisionId: row.revision_id }]
+   : [];
+ });
+}
 function requiredResourceIds(value: unknown) {
  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
  const ids = (value as { required_resources?: unknown }).required_resources;
@@ -55,6 +67,6 @@ export function presentBoard(source: BoardData): BoardData {
  };
  return { ...source,
   elements: source.elements.map(item => ({ ...item, title: text(item.title), description: text(item.description), instructions: text(item.instructions ?? "") })),
-  moves: source.moves.map(item => ({ ...item, requiredResourceIds: item.requiredResourceIds ?? requiredResourceIds(item.conditions), title: text(item.title), instructions: text(item.instructions ?? ""), conditions: text(conditionText(item.conditions)) })),
+  moves: source.moves.map(item => ({ ...item, requiredResourceIds: item.requiredResourceIds ?? requiredResourceIds(item.conditions), requiredOutputContracts: item.requiredOutputContracts ?? requiredOutputContracts(item.conditions), title: text(item.title), instructions: text(item.instructions ?? ""), conditions: text(conditionText(item.conditions)) })),
   resources: source.resources.map(item => ({ ...item, title: text(item.title), content: resourceText(item.content).split("\n").map(text).join("\n") })) };
 }

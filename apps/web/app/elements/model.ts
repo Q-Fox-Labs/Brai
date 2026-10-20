@@ -6,7 +6,7 @@ export type Provenance = { createdBy?: string | null; createdAt?: string | null;
 export type Attempt = { id: string; moveId?: string; status: string; input?: unknown; result?: unknown; errorCode?: string | null; startedAt?: string; finishedAt?: string | null };
 export type Element = { id: string; kind: string; parentId: string | null; status: string; revision: string; title: string; description: string; input: string[]; output: string[]; instructions?: string; conditions?: unknown; fields?: unknown; provenance?: Provenance; attempts?: Attempt[] };
 /** ownerId — UUID Элемента, к которому относится Ход. */
-export type Move = { id: string; ownerId: string; targetId: string; previousId: string | null; kind: string; purpose?: string; title: string; status: string; attemptId: string; executor: string; input: string[]; output: string[]; instructions?: string; conditions?: unknown; requiredResourceIds?: string[]; fields?: unknown; provenance?: Provenance; attempts?: Attempt[] };
+export type Move = { id: string; ownerId: string; targetId: string; previousId: string | null; kind: string; purpose?: string; title: string; status: string; attemptId: string; executor: string; input: string[]; output: string[]; instructions?: string; conditions?: unknown; requiredResourceIds?: string[]; requiredOutputContracts?: { moveId: string; outputKey: string; revisionId: string }[]; fields?: unknown; provenance?: Provenance; attempts?: Attempt[] };
 export type ProjectedMove = { move: Move; order: number; shared: boolean };
 export type MoveAnchor = { x: number; y: number; width: number };
 export type ResourceMoveLink = { id: string; resourceId: string; resourceTitle: string; producerId: string; consumerId: string; fromElementId: string; toElementId: string; expected: boolean };
@@ -25,20 +25,38 @@ export function initialPositions(elements: Element[], heights: CardHeights = {})
  for (const element of elements) if (element.parentId && byId.has(element.parentId)) children.set(element.parentId, [...(children.get(element.parentId) ?? []), element]);
  const roots = elements.filter(element => !element.parentId || !byId.has(element.parentId));
  const positions: Record<string, Point> = {};
+ const subtreeWidths = new Map<string, number>();
+ function subtreeWidth(element: Element, path = new Set<string>()): number {
+  if (subtreeWidths.has(element.id)) return subtreeWidths.get(element.id)!;
+  if (path.has(element.id)) return cardWidth;
+  const nextPath = new Set(path).add(element.id);
+  const group = (children.get(element.id) ?? []).filter(child => !nextPath.has(child.id));
+  const descendantsWidth = group.reduce((sum, child) => sum + subtreeWidth(child, nextPath), 0) + Math.max(0, group.length - 1) * cardGap;
+  const width = Math.max(cardWidth, descendantsWidth);
+  subtreeWidths.set(element.id, width);
+  return width;
+ }
+ function place(element: Element, left: number, top: number, path = new Set<string>()) {
+  if (path.has(element.id)) return;
+  const width = subtreeWidth(element);
+  positions[element.id] = { x: left + (width - cardWidth) / 2, y: top };
+  const nextPath = new Set(path).add(element.id);
+  const group = (children.get(element.id) ?? []).filter(child => !nextPath.has(child.id));
+  const childrenWidth = group.reduce((sum, child) => sum + subtreeWidth(child), 0) + Math.max(0, group.length - 1) * cardGap;
+  let childLeft = left + (width - childrenWidth) / 2;
+  for (const child of group) {
+   place(child, childLeft, top + cardHeight(element.id, heights) + rowGap, nextPath);
+   childLeft += subtreeWidth(child) + cardGap;
+  }
+ }
  let cursor = 0;
  for (const root of roots) {
-  const group = children.get(root.id) ?? [];
-  const groupWidth = Math.max(cardWidth, group.length * cardWidth + Math.max(0, group.length - 1) * cardGap);
-  const rootX = cursor + (groupWidth - cardWidth) / 2;
-  positions[root.id] = { x: rootX, y: 0 };
-  const childrenWidth = group.length * cardWidth + Math.max(0, group.length - 1) * cardGap;
-  const childStart = cursor + (groupWidth - childrenWidth) / 2;
-  group.forEach((child, index) => { positions[child.id] = { x: childStart + index * (cardWidth + cardGap), y: cardHeight(root.id, heights) + rowGap }; });
-  cursor += groupWidth + cardGap;
+  place(root, cursor, 0);
+  cursor += subtreeWidth(root) + cardGap;
  }
  for (const element of elements) if (!positions[element.id]) {
-  positions[element.id] = { x: cursor, y: 0 };
-  cursor += cardWidth + cardGap;
+  place(element, cursor, 0);
+  cursor += subtreeWidth(element) + cardGap;
  }
  return positions;
 }
@@ -195,8 +213,8 @@ export function resourceMoveLinks(moves: Move[], resources: Resource[], attempts
  return links;
 }
 
-/** Показывает только реальный принятый итог между постановками соседних Задач. */
-export function taskResourceLinks(data: BoardData): ResourceMoveLink[] {
+/** Показывает реальные ресурсы, предусмотренные планом между соседними дочерними элементами. */
+export function siblingResourceLinks(data: BoardData): ResourceMoveLink[] {
  const elements = new Map(data.elements.map(element => [element.id, element]));
  const moves = new Map(data.moves.map(move => [move.id, move]));
  const resources = new Map(data.resources.map(resource => [resource.id, resource]));
@@ -205,10 +223,15 @@ export function taskResourceLinks(data: BoardData): ResourceMoveLink[] {
   const from = elements.get(link.fromElementId), to = elements.get(link.toElementId);
   const producer = moves.get(link.producerId)!, consumer = moves.get(link.consumerId)!;
   const resource = resources.get(link.resourceId)!;
-  return from?.kind === "task" && to?.kind === "task" && Boolean(from.parentId) && from.parentId === to.parentId
-   && producer.kind === "operation" && producer.purpose === "accept" && producer.ownerId === from.parentId && producer.targetId === from.id
-   && consumer.kind === "operation" && consumer.purpose === "start" && consumer.ownerId === to.parentId && consumer.targetId === to.id
-   && from.output.includes(resource.id) && to.input.includes(resource.id)
+  const childKinds = new Set(["task", "goal", "quest"]);
+  const required = consumer.requiredOutputContracts;
+  const requiredOutput = required?.find(item => item.moveId === producer.id);
+  const metadata = resource.metadata && typeof resource.metadata === "object" ? resource.metadata as Record<string, unknown> : {};
+  return childKinds.has(from?.kind ?? "") && childKinds.has(to?.kind ?? "") && Boolean(from?.parentId) && from?.parentId === to?.parentId
+   && producer.kind === "operation" && producer.purpose === "accept" && producer.ownerId === from?.parentId && producer.targetId === from.id
+   && consumer.kind === "operation" && consumer.purpose === "start" && consumer.ownerId === to?.parentId && consumer.targetId === to.id
+   && from?.output.includes(resource.id) && to?.input.includes(resource.id)
+   && (!required?.length || Boolean(requiredOutput && requiredOutput.outputKey === metadata.output_key && requiredOutput.revisionId === metadata.plan_revision_id))
    && Boolean(resource.attemptId) && attempts.get(resource.attemptId!)?.moveId === producer.id;
  });
 }

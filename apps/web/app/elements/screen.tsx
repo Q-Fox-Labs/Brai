@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Bot, Check, CircleDashed, Grip, Layers, Maximize, Play, UserRound, X, Ban } from "lucide-react";
-import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, projectMoves, readLayout, sequenceMoves, sharedMoveLinkAnchors, taskResourceLinks, statusPresentation, type BoardData, type CardHeights, type Layout, type MoveAnchor, type Point } from "./model";
+import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, projectMoves, readLayout, sequenceMoves, sharedMoveLinkAnchors, siblingResourceLinks, statusPresentation, type BoardData, type CardHeights, type Layout, type MoveAnchor, type Point } from "./model";
 import "./elements.css";
 import {NewTask,WorkflowAction} from "./workflow";
 
@@ -192,7 +192,7 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
  }
  function stopDrag() { drag.current = null; setDragging(false); }
  const resourceName = (id: string) => readable(dataset.resources.find(resource => resource.id === id)?.title) || "Ресурс";
- const transfers = taskResourceLinks(dataset);
+ const transfers = siblingResourceLinks(dataset);
  const sharedMoves = orderedMoves.filter(move => move.kind === "operation" && move.ownerId !== move.targetId && (move.purpose === "start" || move.purpose === "accept"));
  async function changeStatus(kind: "element" | "move", id: string, status: string) {
   setSavingStatus(true); setStatusError("");
@@ -212,7 +212,7 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
    onKeyDown={event => { if (event.target !== event.currentTarget) return; const shifts: Record<string, Point> = { ArrowLeft: { x: 60, y: 0 }, ArrowRight: { x: -60, y: 0 }, ArrowUp: { x: 0, y: 60 }, ArrowDown: { x: 0, y: -60 } }; const delta = shifts[event.key]; if (delta) { event.preventDefault(); setLayout(old => ({ ...old, view: { ...old.view, x: old.view.x + delta.x, y: old.view.y + delta.y } })); } if (event.key === "+" || event.key === "=") zoomAt(1.2); if (event.key === "-") zoomAt(1 / 1.2); }}>
    {!dataset.elements.length && <p className="elements-empty">На карте пока нет Элементов.</p>}
    <div className="elements-world" style={{ transform: `translate(${layout.view.x}px, ${layout.view.y}px) scale(${layout.view.zoom})`, visibility: ready ? "visible" : "hidden" }}>
-    <svg className="elements-links" aria-label="Общие Ходы и передача итогов между Задачами">
+    <svg className="elements-links" aria-label="Общие Ходы и передача результатов между связанными элементами">
      <defs><marker id="elements-resource-arrow" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#f1c56e" /></marker></defs>
      {sharedMoves.map(move => {
       const parent = moveAnchors[projectionKey(move.ownerId, move.id)], child = moveAnchors[projectionKey(move.targetId, move.id)];
