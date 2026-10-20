@@ -447,6 +447,11 @@ test('native stop recovery fails only the exact running agent Operation attempt'
   const human = createHumanActions({ graph: async () => graph, elementsCall: async (name, args) => { calls.push({ name, args }); return { attempt: { id: ids[3], status: 'failed' } }; } });
   await human.failAgent({ moveId: ids[2], attemptId: ids[3] });
   assert.deepEqual(calls, [{ name: 'elements_move_fail', args: { attempt_id: ids[3], error_code: 'AGENT_STOPPED' } }]);
+  graph.moves[0].attemptId = ids[4];
+  graph.attempts.push({ id: ids[4], moveId: ids[2], status: 'running', executor_kind: 'agent' });
+  const replaced = await human.failAgent({ moveId: ids[2], attemptId: ids[3] });
+  assert.equal(replaced.status, 'already_stopped');
+  assert.equal(calls.length, 1);
   graph.moves[0].executor = 'human';
   await assert.rejects(human.failAgent({ moveId: ids[2], attemptId: ids[3] }), /FORBIDDEN/);
 });

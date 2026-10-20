@@ -61,7 +61,7 @@ Private `actions.complete` проверяет текущую попытку, hum
 
 Отмена и восстановление незавершённой отправки используют private `actions.cancel`: только та же текущая human/running попытка завершается через owner fail; Move снова planned. Прежний reason=expired остаётся совместимым с private API, но Telegram больше не задаёт срок решения и не отменяет доставленные кнопки по таймеру. При нажатии проверяются актуальные revision/attempt и отправитель; повтор callback не создаёт новую попытку. Неизвестный исход сохраняется как unknown; он не выдаётся за отказ или успешное решение.
 
-`post_tool_call` сохраняет UUID только подтверждённых `elements_move_claim` agent Операций и удаляет запись после успешного complete/fail. Native `on_session_end` и `agent_loop_stopped` проверяют ту же owner Telegram сессию; private `actions.fail_agent` повторно читает owner graph и вызывает `elements_move_fail` только для точной всё ещё running attempt. Чужие сессии и human actions не затрагиваются. При неизвестном результате запись остаётся, а владельцу показывается, что завершение не подтверждено.
+`post_tool_call` сохраняет UUID только подтверждённых `elements_move_claim` agent Операций и удаляет запись после успешного complete/fail. Native `on_session_end` и `agent_loop_stopped` завершают только terminal attempts; при plugin startup сохранённые exact claims проходят trusted recovery. Private `actions.fail_agent` повторно читает owner graph и вызывает `elements_move_fail` только для того же всё ещё running agent attempt; уже заменённая попытка и human actions не затрагиваются. При неизвестном результате запись остаётся для следующего старта.
 
 ## Private stdio RPC
 

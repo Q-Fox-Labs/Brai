@@ -787,6 +787,21 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call["decisionSource"]["message_id"], "52")
         self.assertIsNone(self.plugin.tokens.human_result("123", MOVE))
 
+    async def test_practical_result_is_discarded_after_attempt_replaced(self):
+        self.bridge.action.update(confirmationStage=None, decision="final", outputContracts=[{"key": "result", "name": "Отчёт"}], confirmationText=None)
+        self.assertTrue(json.loads(await self.plugin.request_confirmation({"moveId": MOVE, "revisionId": REVISION}))["ok"])
+        self.native_context["HERMES_SESSION_MESSAGE_ID"] = "61"
+        await self.plugin.incoming(self.event(text="Забрал и проверил часы.", message_id="61"))
+        self.assertEqual(json.loads(await self.plugin.submit_result({"moveId": MOVE, "revisionId": REVISION}))["status"], "awaiting_decision")
+        self.bridge.action["attemptId"] = "00000000-0000-4000-8000-000000000099"
+        self.native_context["HERMES_SESSION_MESSAGE_ID"] = "62"
+        await self.plugin.incoming(self.event(text="Всё принимаю.", message_id="62"))
+        response = json.loads(await self.plugin.submit_result({"moveId": MOVE, "revisionId": REVISION}))
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["code"], "STALE_ACTION")
+        self.assertIsNone(self.plugin.tokens.human_result("123", MOVE))
+        self.assertEqual(sum(method == "actions.result" for method, _ in self.bridge.calls), 1)
+
     async def test_terminal_session_fails_only_observed_exact_agent_attempt(self):
         self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
@@ -797,6 +812,32 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([params for method, params in self.bridge.calls if method == "actions.fail_agent"],
                          [{"moveId": MOVE, "attemptId": ATTEMPT}])
         self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [])
+
+    async def test_durable_agent_failure_is_retried_during_startup_recovery(self):
+        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+            result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
+            session_id="native-session-1", status="ok")
+        self.bridge.fail = "actions.fail_agent"
+        await self.plugin.on_session_end(session_id="native-session-1", platform="telegram", completed=True)
+        self.assertEqual(len(self.plugin.tokens.agent_attempts("123", "native-session-1")), 1)
+        self.plugin.session_store = None  # Startup can reconcile through the fixed-owner trusted port alone.
+        self.bridge.fail = None
+        await self.plugin.recover_durable_agent_attempts()
+        self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [])
+        self.assertEqual(sum(method == "actions.fail_agent" for method, _ in self.bridge.calls), 2)
+
+    async def test_plugin_factory_starts_recovery_for_durable_agent_claims(self):
+        startup_config = mod.Config("123", Path(self.tmp.name) / "startup-state", "/test/trusted.mjs",
+                                    "/usr/local/bin/node", str(Path(self.tmp.name) / "results"))
+        plugin = mod.TelegramPlugin(startup_config, self.bridge, self.inject)
+        plugin.tokens.track_agent_attempt("123", "terminal-session", MOVE, ATTEMPT)
+        plugin.factory(self.app, object())
+        tasks = tuple(plugin.tasks)
+        if tasks:
+            await asyncio.gather(*tasks)
+        self.assertIn(("actions.fail_agent", {"moveId": MOVE, "attemptId": ATTEMPT}), self.bridge.calls)
+        self.assertEqual(plugin.tokens.agent_attempts("123"), [])
+        plugin.close()
 
     async def test_terminal_cleanup_preserves_claims_from_other_session_or_owner(self):
         self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},

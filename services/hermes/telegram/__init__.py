@@ -440,6 +440,9 @@ class TelegramPlugin:
                 self.tokens.consume(row["token"])
             if recover_now:
                 self._schedule_cleanup(row["token"])
+        task = self.loop.create_task(self.recover_durable_agent_attempts())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
 
     def close(self):
         """Убрать только свои handlers/tasks при native unload; SQLite сохраняет recovery."""
@@ -592,20 +595,32 @@ class TelegramPlugin:
         source = entry.origin
         thread_id = str(getattr(source, "thread_id", None) or "")
         for row in self.tokens.agent_attempts(self.config.owner, session_id):
-            try:
-                result = await asyncio.to_thread(self.bridge.call, "actions.fail_agent", {
-                    "moveId": row["move_id"], "attemptId": row["attempt_id"]})
-                attempt = result.get("attempt") if isinstance(result, dict) else None
-                if result.get("status") == "already_stopped" or (isinstance(attempt, dict)
-                        and attempt.get("id") == row["attempt_id"]
-                        and attempt.get("status") in {"failed", "succeeded", "cancelled"}):
-                    self.tokens.clear_agent_attempt(self.config.owner, session_id, row["attempt_id"])
-                else:
-                    raise BridgeError("FAIL_UNCONFIRMED")
-            except Exception:
-                # Keep the durable exact attempt for the next explicit recovery and show the failure.
+            await self._fail_recorded_agent_attempt(row, thread_id, notify=True)
+
+    async def _fail_recorded_agent_attempt(self, row, thread_id="", notify=False):
+        try:
+            result = await asyncio.to_thread(self.bridge.call, "actions.fail_agent", {
+                "moveId": row["move_id"], "attemptId": row["attempt_id"]})
+            attempt = result.get("attempt") if isinstance(result, dict) else None
+            if result.get("status") == "already_stopped" or (isinstance(attempt, dict)
+                    and attempt.get("id") == row["attempt_id"]
+                    and attempt.get("status") in {"failed", "succeeded", "cancelled"}):
+                self.tokens.clear_agent_attempt(row["owner"], row["session_id"], row["attempt_id"])
+            else:
+                raise BridgeError("FAIL_UNCONFIRMED")
+        except Exception:
+            # Keep the durable exact attempt for the next startup/owner-turn recovery.
+            if notify:
                 await self._notify("Hermes остановил работу, но Brai не подтвердил завершение начатого Хода. Проверьте его состояние.",
                                    self.config.chat, thread_id)
+
+    async def recover_durable_agent_attempts(self):
+        """Reconcile persisted claims at plugin startup; owner binding was checked on insert."""
+        for row in self.tokens.agent_attempts(self.config.owner):
+            entry = self._owner_session(row["session_id"])
+            source = getattr(entry, "origin", None)
+            thread_id = str(getattr(source, "thread_id", None) or "")
+            await self._fail_recorded_agent_attempt(row, thread_id, notify=True)
 
     async def on_session_end(self, session_id="", platform=None, completed=None, failed=None, interrupted=None, **kwargs):
         """Recover exact agent Operations after any terminal owner turn."""
@@ -636,6 +651,7 @@ class TelegramPlugin:
             return {"action": "skip", "reason": "brai-owner-route-only"}
         if kwargs.get("session_store") is not None:
             self.session_store = kwargs["session_store"]
+        await self.recover_durable_agent_attempts()
         key = (str(source.chat_id), str(getattr(source, "thread_id", None) or ""), str(event.message_id))
         self.inbound_events[key] = event
         if len(self.inbound_events) > 128:
@@ -849,6 +865,18 @@ class TelegramPlugin:
             return result
         call = {**args, "content": content, "source": source}
         if pending:
+            try:
+                action = await asyncio.to_thread(self.bridge.call, "actions.read", {"moveId": args["moveId"]})
+            except Exception:
+                # Keep the exact report if the owner graph is temporarily unavailable.
+                raise
+            if (action.get("revisionId") != args["revisionId"]
+                    or action.get("revisionId") != pending["revision_id"]
+                    or action.get("attemptId") != pending["attempt_id"]
+                    or action.get("attemptStatus") != "running"
+                    or action.get("attemptExecutorKind") != "human"):
+                self.tokens.clear_human_result(self.config.owner, args["moveId"])
+                raise BridgeError("STALE_ACTION")
             if pending["attempt_id"] == "" or not re.search(r"(?:принимаю|всё принимаю|все принимаю|результат принят|всё готово|все готово|есть замечания|нужно доработать|не принимаю|не принято)", content, re.I):
                 raise BridgeError("HUMAN_FINAL_DECISION_REQUIRED")
             call.update(content=pending["content"], source=json.loads(pending["source_json"]), decisionText=content, decisionSource=source)
