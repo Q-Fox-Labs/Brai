@@ -180,16 +180,16 @@ export function createGameHandlers(pool:Pool, legacy:ElementsStore, verifyArtifa
      else if(operation==='planningBind') {
       if(state.candidate)return fail('CONFLICT');
       if(state.baseline&&digest(state.baseline)!==digest(v.baseline))return fail('CONFLICT');
-      result=await assemble({files:state.files,baseline:object(v.baseline)});state.baseline=v.baseline;
+      result=await assemble({files:state.files,baseline:object(v.baseline)});state.baseline=v.baseline;state.baseline_json=JSON.stringify(v.baseline);
      } else if(operation==='planningBuild') {
       if(!state.baseline)return fail('INVALID_STATE');
-      result=await assemble({files:state.files,baseline:state.baseline,candidate:object(v.candidate)});
+      result=await assemble({files:state.files,baseline:JSON.parse(state.baseline_json),candidate:object(v.candidate)});
       const stage=result.stage;
       if(stage.children.length||stage.deferred.length||stage.awaiting_clarification||stage.records.some((r:Value)=>r.executable===false))return fail('INVALID_ARGUMENT');
-      state.candidate=v.candidate;state.candidate_sha256=result.candidate_sha256;
+      state.candidate=v.candidate;state.candidate_json=JSON.stringify(v.candidate);state.candidate_sha256=result.candidate_sha256;
      } else {
       if(!state.candidate||state.candidate_sha256!==v.candidate_sha256)return fail('CONFLICT');
-      const built=await assemble({files:state.files,baseline:state.baseline,candidate:state.candidate,review:object(v.review)}),stage=built.stage;
+      const built=await assemble({files:state.files,baseline:JSON.parse(state.baseline_json),candidate:JSON.parse(state.candidate_json),review:object(v.review)}),stage=built.stage;
       if(stage.children.length||stage.deferred.length||stage.awaiting_clarification||stage.records.some((r:Value)=>r.executable===false))return fail('INVALID_ARGUMENT');
       const rid=planningId(`${a.id}:${built.candidate_sha256}:revision`);
       const contracts=stage.resources.filter((r:Value)=>r.state==='expected');

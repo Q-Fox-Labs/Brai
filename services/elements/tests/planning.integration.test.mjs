@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID,createHash} from 'node:crypto';
 import {Pool} from 'pg';
+import {spawnSync} from 'node:child_process';
 import {createGameHandlers} from '../dist/game.js';
 import {fixture} from './planning-fixture.mjs';
 
@@ -16,6 +17,8 @@ test('planning PostgreSQL: apply/replay/rollback, future outputs, retry, remarks
   const a=(await h.moveClaim(req({move_id:f.move.id,idempotency_key:randomUUID(),executor_kind:'agent',input_resource_ids:[f.resource.id]}))).attempt;
   const packet=await h.planningPacket(req({attempt_id:a.id}));
   const baseline={...f.criteria,inputs:Object.fromEntries(Object.entries(packet.files).map(([k,v])=>[k,createHash('sha256').update(v).digest('hex')]))};
+  const diagnostic=spawnSync('/usr/bin/python3',['services/elements/planning/runner.py'],{input:JSON.stringify({files:packet.files,baseline,candidate:f.candidate}),encoding:'utf8'});
+  assert.equal(diagnostic.status,0,diagnostic.stdout+diagnostic.stderr);
   await h.planningBind(req({attempt_id:a.id,baseline}));
   const built=await h.planningBuild(req({attempt_id:a.id,candidate:f.candidate}));
   const review={baseline_sha256:built.baseline_sha256,candidate_sha256:built.candidate_sha256,verdict:'accept',coverage:[{requirement:'word',items:['upper']},{requirement:'signal',items:['signal']}],errors:[],notes:[]};
