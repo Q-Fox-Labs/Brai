@@ -15,7 +15,11 @@ export function createHumanActions(runtime) {
     if (move.kind !== 'action') throw fault('FORBIDDEN');
     const target = graph.elements.find(element => element.id === move.targetId);
     if (!target) throw fault('INVALID_UPSTREAM_RESPONSE');
-    return { moveId, revisionId: target.revision, targetId: target.id, title: move.title, status: move.status,
+    const planning = move.fields?.planning;
+    // AIDEV-NOTE: Кнопка записывает только решение; предметные выходы human work нельзя получить из клика.
+    const confirmationStage = planning && Array.isArray(planning.output_contracts) && planning.output_contracts.length === 1
+      ? (planning.decision === 'confirm' ? 'planning' : planning.decision === 'final' ? 'final' : null) : null;
+    return { ...(planning ? { confirmationStage } : {}), moveId, revisionId: target.revision, targetId: target.id, title: move.title, status: move.status,
       attemptId: move.attemptId || null, attemptStatus: graph.attempts.find(attempt => attempt.id === move.attemptId)?.status ?? null,
       attemptExecutorKind: move.executor ?? null, inputResourceIds: move.input ?? [], targetTitle: target.title, targetDescription: target.description };
   }
@@ -33,6 +37,8 @@ export function createHumanActions(runtime) {
       // AIDEV-NOTE: Claimed допускает только восстановление прежнего ключа после crash до записи attemptId в Telegram.
       if (action.revisionId !== args.revisionId && action.status !== 'claimed') throw fault('STALE_ACTION');
       if (!['planned', 'claimed'].includes(action.status)) throw fault('STALE_ACTION');
+      // Claimed same-key recovery остаётся доступен для отмены даже неподдерживаемой прежней кнопки.
+      if (action.status === 'planned' && action.confirmationStage === null) throw fault('HUMAN_OUTPUT_REQUIRED');
       let inputs = args.inputResourceIds;
       if (!inputs) {
         const available = await runtime.elementsCall('elements_moves_available', {}, signal);
@@ -57,8 +63,11 @@ export function createHumanActions(runtime) {
         args.comment !== undefined && (typeof args.comment !== 'string' || args.comment.length > 16_000)) throw fault('INVALID_ARGUMENT');
       const action = await lookup(args, signal);
       if (action.revisionId !== args.revisionId || action.attemptId !== args.attemptId || action.attemptStatus !== 'running' || action.attemptExecutorKind !== 'human') throw fault('STALE_ACTION');
+      if (action.confirmationStage === null) throw fault('HUMAN_OUTPUT_REQUIRED');
+      if (action.confirmationStage && ![action.confirmationStage === 'final' ? 'success' : 'approved', 'changes'].includes(args.decision)) throw fault('INVALID_ARGUMENT');
+      const stage = args.decision === 'changes' ? 'review' : action.confirmationStage ?? args.stage;
       const result = { resources: [{ title: action.title, content: args.comment?.trim() || args.decision,
-        metadata: { element_id: action.targetId, revision_id: args.revisionId, stage: args.stage, outcome: args.decision } }] };
+        metadata: { element_id: action.targetId, revision_id: args.revisionId, stage, outcome: args.decision } }] };
       try { return await runtime.elementsCall('elements_move_complete', { attempt_id: args.attemptId, result }, signal); }
       catch (error) {
         if (uncertain(error)) throw fault('OUTCOME_UNKNOWN');

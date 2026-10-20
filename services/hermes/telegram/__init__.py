@@ -25,12 +25,13 @@ MAX_ATTACHMENTS = 10
 TOKEN_TTL = 900
 RPC_TIMEOUT = 15
 OUTPUT_TIMEOUT = 20
+HUMAN_OUTPUT_REQUIRED = "Для этого действия нужны настоящие результаты работы человека. Кнопка решения их не создаёт; сначала выполните работу и сохраните её результаты штатным способом."
 FAILURE = "Операция Brai не подтверждена. Проверьте состояние и явно запросите новую кнопку."
 CONFIRMATION_DESCRIPTION = (
     "Ask the owner to confirm a human Action in the configured Telegram chat. First create "
     "the Element and Action with the available game-core structure/create tools, or use existing ones. "
     "Call elements_request_human_action for the real moveId; pass its returned moveId and revisionId here. "
-    "Never invent IDs or pass placeholder UUIDs. A verified owner decision automatically resumes this session."
+    "Never invent IDs or pass placeholder UUIDs. For integrated plans this tool accepts only decision-only confirm/final Actions with one output; human work requiring substantive results is rejected before claim. The real Action determines its stage. A verified owner decision automatically resumes this session."
 )
 
 
@@ -143,6 +144,8 @@ class Bridge:
                 if (not isinstance(error, dict) or type(error.get("code")) is not int
                         or not isinstance(error.get("message"), str)):
                     raise BridgeError("RPC_MALFORMED")
+                if error["code"] == -32000 and isinstance(error.get("data"), dict) and error["data"].get("code") == "HUMAN_OUTPUT_REQUIRED":
+                    raise BridgeError("HUMAN_OUTPUT_REQUIRED")
                 raise BridgeError("RPC_REJECTED")
             if not isinstance(response["result"], dict):
                 raise BridgeError("RPC_MALFORMED")
@@ -221,11 +224,11 @@ class Tokens:
             db.execute("UPDATE tokens SET message_id=? WHERE token=? AND consumed=0",
                        (str(message_id), token))
 
-    def set_attempt(self, token, attempt_id, target_id=""):
+    def set_attempt(self, token, attempt_id, target_id="", stage=None):
         """Сохранить результат idempotent prepare перед отправкой кнопки."""
         with self._connect() as db:
-            db.execute("UPDATE tokens SET attempt_id=?,target_id=? WHERE token=? AND resolved=0",
-                       (attempt_id, target_id, token))
+            db.execute("UPDATE tokens SET attempt_id=?,target_id=?,stage=COALESCE(?,stage) WHERE token=? AND resolved=0",
+                       (attempt_id, target_id, stage, token))
 
     def consume(self, token, owner=None, message_id=None, chat_id=None, thread_id=None):
         """Атомарно погасить токен перед внешним эффектом; чужой message не погашает его."""
@@ -259,7 +262,8 @@ class Tokens:
     def decide(self, token, decision):
         """Сохранить принятое решение до единственного complete RPC."""
         with self._connect() as db:
-            db.execute("UPDATE tokens SET decision=?,resume_outcome='completing' WHERE token=?", (decision, token))
+            db.execute("""UPDATE tokens SET decision=?,resume_outcome='completing',
+                stage=CASE WHEN ?='changes' THEN 'review' ELSE stage END WHERE token=?""", (decision, decision, token))
 
     def confirm(self, token):
         """Закрепить доказанный complete отдельно от попытки продолжения."""
@@ -618,8 +622,9 @@ class TelegramPlugin:
                     or not self._session_matches({**context, "owner": self.config.owner, "chat_id": self.config.chat})):
                 raise BridgeError("SESSION_CONTEXT_INVALID")
             return await self._on_native_loop(self._request(args, context))
-        except Exception:
-            return json.dumps({"ok": False, "message": FAILURE}, ensure_ascii=False)
+        except Exception as error:
+            message = HUMAN_OUTPUT_REQUIRED if isinstance(error, BridgeError) and str(error) == "HUMAN_OUTPUT_REQUIRED" else FAILURE
+            return json.dumps({"ok": False, "message": message}, ensure_ascii=False)
 
     async def _request(self, args, context):
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -629,6 +634,9 @@ class TelegramPlugin:
         self._schedule_expiry(token, time.time() + TOKEN_TTL)
         try:
             action = await self._prepare(self.tokens.unresolved(token))
+            if action.get("confirmationStage", stage) is None:
+                raise BridgeError("HUMAN_OUTPUT_REQUIRED")
+            stage = self.tokens.unresolved(token)["stage"]
             if not await self._current(self.tokens.unresolved(token)):
                 raise BridgeError("STALE_ACTION")
             decision = "success" if stage == "final" else "approved"
@@ -649,14 +657,15 @@ class TelegramPlugin:
             self.tokens.bind(token, message.message_id)
             return json.dumps({"ok": True, "status": "awaiting_owner", "moveId": action["moveId"],
                                "attemptId": action["attemptId"], "revisionId": action["revisionId"]})
-        except Exception:
+        except Exception as error:
             self.tokens.consume(token)
             try:
                 await self._cleanup(self.tokens.unresolved(token), "cancelled")
                 self.tokens.resolve(token)
             except Exception:
                 pass  # Native expiry/restart recovery проверит состояние перед новой отменой.
-            raise BridgeError("SEND_UNCONFIRMED") from None
+            code = "HUMAN_OUTPUT_REQUIRED" if isinstance(error, BridgeError) and str(error) == "HUMAN_OUTPUT_REQUIRED" else "SEND_UNCONFIRMED"
+            raise BridgeError(code) from None
 
     async def _prepare(self, row):
         action = await asyncio.to_thread(self.bridge.call, "actions.prepare", {
@@ -665,7 +674,11 @@ class TelegramPlugin:
                 or not _uuid(action.get("attemptId")) or not _uuid(action.get("targetId"))
                 or not isinstance(action.get("title"), str) or action.get("status") != "running"):
             raise BridgeError("RPC_MALFORMED")
-        self.tokens.set_attempt(row["token"], action["attemptId"], action["targetId"])
+        # Recovery с null сохраняет attempt для cleanup, но _request не показывает такую кнопку.
+        stage = action.get("confirmationStage")
+        if stage is not None and stage not in {"planning", "final"}:
+            raise BridgeError("RPC_MALFORMED")
+        self.tokens.set_attempt(row["token"], action["attemptId"], action["targetId"], stage)
         return action
 
     async def _current(self, row):

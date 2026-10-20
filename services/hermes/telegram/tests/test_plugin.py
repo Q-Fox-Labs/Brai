@@ -394,6 +394,61 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         for row in self.bot.sent[-1]["reply_markup"].inline_keyboard:
             self.assertLessEqual(len(row[0].callback_data.encode()), 64)
 
+    async def test_integrated_stage_is_persisted_before_ui_and_changes_resumes_review(self):
+        for stage, choice in (("planning", "approved"), ("final", "success")):
+            for decision in (choice, "changes"):
+                self.bridge.action.update(status="claimed", attemptStatus="running", confirmationStage=stage)
+                send_message = self.bot.send_message
+                async def checked_send(**kwargs):
+                    if "reply_markup" in kwargs:
+                        self.assertEqual(self.plugin.tokens.pending()[0]["stage"], stage)
+                    return await send_message(**kwargs)
+                self.bot.send_message = checked_send
+                data = await self.request("final" if stage == "planning" else "planning")
+                self.bot.send_message = send_message
+                self.assertEqual(data.rsplit(":", 1)[1], choice)
+                data = data.rsplit(":", 1)[0] + ":" + decision
+                query = FakeQuery(data, message_id=len(self.bot.sent))
+                await self.plugin.callback(NS(callback_query=query), None)
+                complete = [args for method, args in self.bridge.calls if method == "actions.complete"][-1]
+                self.assertEqual(complete["stage"], stage)  # Bridge owns canonical resource stage.
+                facts = json.loads(self.injections[-1][0].splitlines()[1])
+                self.assertEqual(facts["stage"], "review" if decision == "changes" else stage)
+                self.assertEqual(facts["decision"], decision)
+                count = len(self.injections)
+                await self.plugin.callback(NS(callback_query=query), None)
+                self.assertEqual(len(self.injections), count)
+
+    async def test_substantive_action_rejection_returns_clear_message_without_buttons_or_injection(self):
+        original = self.bridge.call
+        def reject(method, params, timeout=15):
+            if method == "actions.prepare":
+                self.bridge.calls.append((method, params))
+                raise mod.BridgeError("HUMAN_OUTPUT_REQUIRED")
+            return original(method, params, timeout)
+        self.bridge.action["status"] = "planned"
+        self.bridge.call = reject
+        result = json.loads(await self.plugin.request_confirmation({"moveId": MOVE, "revisionId": REVISION}))
+        self.assertFalse(result["ok"])
+        self.assertIn("настоящие результаты работы человека", result["message"])
+        self.assertEqual([method for method, _ in self.bridge.calls], ["actions.prepare", "actions.read"])
+        self.assertEqual(self.plugin.tokens.pending(), [])
+        self.assertEqual(self.bot.sent, [])
+        self.assertEqual(self.injections, [])
+
+    async def test_null_stage_claim_recovery_cancels_without_new_buttons_or_completion(self):
+        self.bridge.action["confirmationStage"] = None
+        token = self.plugin.tokens.create("123", {"moveId": MOVE, "revisionId": REVISION, "attemptId": ""}, "planning")
+        await asyncio.wait_for(self.plugin._expire(token, time.time() - 1), 1)
+        prepare = next(args for method, args in self.bridge.calls if method == "actions.prepare")
+        self.assertEqual(prepare["idempotencyKey"], token)
+        self.assertEqual(self.bridge.calls[-1], ("actions.cancel", {"moveId": MOVE,
+            "attemptId": ATTEMPT, "revisionId": REVISION, "reason": "expired"}))
+        self.assertFalse(any(method == "actions.complete" for method, _ in self.bridge.calls))
+        self.assertFalse(any("reply_markup" in message for message in self.bot.sent))
+        self.assertEqual(self.plugin.tokens.pending(), [])
+        self.assertEqual(self.injections, [])
+
     async def test_model_cannot_pass_completion_or_decision(self):
         result = json.loads(await self.plugin.request_confirmation({"moveId": MOVE,
                             "revisionId": REVISION, "decision": "approved"}))
@@ -898,6 +953,15 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaises(mod.BridgeError) as result:
             self.run_bridge("print('secret',file=sys.stderr)\nprint(json.dumps({'jsonrpc':'2.0','id':r['id'],'error':{'code':-32000,'message':'secret'}}))")
         self.assertNotIn("secret", str(result.exception))
+
+    def test_only_allowlisted_substantive_output_error_crosses_rpc_boundary(self):
+        response = "print(json.dumps({'jsonrpc':'2.0','id':r['id'],'error':{'code':-32000,'message':'secret','data':{'code':%r}}}))"
+        with self.assertRaises(mod.BridgeError) as result:
+            self.run_bridge(response % "HUMAN_OUTPUT_REQUIRED")
+        self.assertEqual(str(result.exception), "HUMAN_OUTPUT_REQUIRED")
+        with self.assertRaises(mod.BridgeError) as result:
+            self.run_bridge(response % "UNTRUSTED_SECRET")
+        self.assertEqual(str(result.exception), "RPC_REJECTED")
 
     def test_timeout_kills_private_descendant_process_group(self):
         marker = Path(self.tmp.name) / "orphan-marker"

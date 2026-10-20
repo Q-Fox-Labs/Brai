@@ -29,7 +29,7 @@
     },
     {
       "name":"actions.prepare",
-      "description":"Claims the human attempt before Telegram displays buttons. Retry uses the same key and selected resource IDs. If move is already claimed, recovery requires the exact current running attempt for the same key; revisionId stays bound to the request and currentRevisionId reports current revision. Recovery after revision change is for cancellation only.",
+      "description":"Claims the human attempt before Telegram displays buttons. Integrated plans allow only decision-only confirm/final Actions with one output; other human work fails HUMAN_OUTPUT_REQUIRED before a new claim. confirmationStage is canonical for the displayed buttons; null on an already claimed recovery permits cancellation only. Retry uses the same key and selected resource IDs. If move is already claimed, recovery requires the exact current running attempt for the same key; revisionId stays bound to the request and currentRevisionId reports current revision. Recovery after revision change is for cancellation only.",
       "paramStructure":"by-name",
       "params":[
         {"name":"moveId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},
@@ -41,7 +41,7 @@
     },
     {
       "name":"actions.complete",
-      "description":"Requires a consumed private-owner Telegram callback bound to the exact attempt and revision. Planning revision is checked atomically by game-core; review/final revision checks are preflight only. Repeated terminal or stale callbacks are rejected.",
+      "description":"Requires a consumed private-owner Telegram callback bound to the exact attempt and revision. Canonical positive stage is derived from the real integrated planning decision; changes always writes review/changes. Integrated plans support only decision-only confirm/final Actions with one output; unsupported work fails HUMAN_OUTPUT_REQUIRED. Game-core atomically checks the current revision and claim snapshot for integrated planning decisions and planning stage; legacy review/final checks are preflight only. Repeated terminal or stale callbacks are rejected.",
       "paramStructure":"by-name",
       "params":[
         {"name":"moveId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},
@@ -70,7 +70,7 @@
     "schemas": {
       "Uuid":{"type":"string","format":"uuid"},
       "FileResult":{"type":"object","required":["artifactId","filename","mimeType","sizeBytes","sha256","localPath","markdown"],"properties":{"artifactId":{"$ref":"#/components/schemas/Uuid"},"filename":{"type":"string"},"mimeType":{"type":"string"},"sizeBytes":{"type":"integer","minimum":0},"sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"localPath":{"type":"string"},"markdown":{"type":"string"}}},
-      "Action":{"type":"object","required":["moveId","revisionId","targetId","title","status","attemptId"],"properties":{"moveId":{"$ref":"#/components/schemas/Uuid"},"revisionId":{"$ref":"#/components/schemas/Uuid"},"targetId":{"$ref":"#/components/schemas/Uuid"},"title":{"type":"string"},"status":{"type":"string"},"attemptId":{"type":["string","null"]},"attemptStatus":{"type":["string","null"]},"attemptExecutorKind":{"type":["string","null"]},"inputResourceIds":{"type":"array","items":{"$ref":"#/components/schemas/Uuid"}},"targetTitle":{"type":"string"},"targetDescription":{"type":"string"}}}
+      "Action":{"type":"object","required":["moveId","revisionId","targetId","title","status","attemptId"],"properties":{"confirmationStage":{"enum":["planning","final",null],"description":"Canonical stage for an integrated decision-only Action. Null means substantive human outputs are required; absence preserves legacy caller stage."},"moveId":{"$ref":"#/components/schemas/Uuid"},"revisionId":{"$ref":"#/components/schemas/Uuid"},"targetId":{"$ref":"#/components/schemas/Uuid"},"title":{"type":"string"},"status":{"type":"string"},"attemptId":{"type":["string","null"]},"attemptStatus":{"type":["string","null"]},"attemptExecutorKind":{"type":["string","null"]},"inputResourceIds":{"type":"array","items":{"$ref":"#/components/schemas/Uuid"}},"targetTitle":{"type":"string"},"targetDescription":{"type":"string"}}}
     },
     "errors": {
       "ParseError":{"code":-32700,"message":"Parse error"},

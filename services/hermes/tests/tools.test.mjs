@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { natsTools } from '../catalog.mjs';
+import { compileInput, natsTools } from '../catalog.mjs';
 import { validateConfig } from '../config.mjs';
 import { createBraiTools, fault } from '../runtime.mjs';
 import { createHumanActions } from '../human-actions.mjs';
@@ -118,6 +118,83 @@ test('trusted prepare привязывает human attempt; stale revision и ч
   assert.deepEqual(calls.at(-1).args.result.resources[0].metadata, { element_id: ids[0], revision_id: ids[1], stage: 'planning', outcome: 'approved' });
   graph.attempts[0].status = 'succeeded';
   await assert.rejects(human.complete(params), /STALE_ACTION/);
+});
+
+test('integrated decision-only Actions derive canonical stage and write review/changes', async () => {
+  const document = JSON.parse(await readFile(new URL('../trusted.openrpc.json', import.meta.url), 'utf8'));
+  const validateAction = compileInput({ $ref: '#/components/schemas/Action', components: document.components });
+  for (const [decision, stage, positive] of [['confirm', 'planning', 'approved'], ['final', 'final', 'success']]) {
+    const { ports, graph, calls } = fixture();
+    graph.moves[0].fields = { planning: { decision, revision_id: ids[1], output_contracts: [{ key: ids[6] }] } };
+    ports.mcp = async (endpoint, name, args) => {
+      calls.push({ endpoint, name, args });
+      if (name === 'elements_graph_get') return graph;
+      if (name === 'elements_move_claim') return { attempt: { id: ids[3], executor_kind: 'human', status: 'running' } };
+      // Same accepted pairs as current game-core; no database or model involved.
+      const metadata = args.result.resources[0].metadata;
+      assert.ok(metadata.stage === stage && metadata.outcome === positive || metadata.stage === 'review' && metadata.outcome === 'changes');
+      return { attempt: { id: ids[3], status: 'succeeded' } };
+    };
+    const human = createHumanActions(await createBraiTools(config, ports));
+    const prepared = await human.prepare({ moveId: ids[2], revisionId: ids[1], idempotencyKey: 'decision', inputResourceIds: [] });
+    assert.equal(prepared.confirmationStage, stage);
+    assert.equal(validateAction(prepared), true);
+    const args = { moveId: ids[2], revisionId: ids[1], attemptId: ids[3], stage: stage === 'final' ? 'planning' : 'final' };
+    await human.complete({ ...args, decision: positive });
+    assert.equal(calls.at(-1).args.result.resources[0].metadata.stage, stage);
+    await human.complete({ ...args, decision: 'changes', comment: 'Исправить итог' });
+    assert.equal(calls.at(-1).args.result.resources[0].metadata.stage, 'review');
+    assert.equal(calls.at(-1).args.result.resources[0].content, 'Исправить итог');
+    const count = calls.filter(call => call.name === 'elements_move_complete').length;
+    await assert.rejects(human.complete({ ...args, decision: positive === 'approved' ? 'success' : 'approved' }), /INVALID_ARGUMENT/);
+    assert.equal(calls.filter(call => call.name === 'elements_move_complete').length, count);
+    assert.equal(validateAction({ ...prepared, confirmationStage: 'review' }), false);
+  }
+});
+
+test('human substantive outputs reject before claim; same-key claimed recovery can still cancel', async () => {
+  for (const [decision, count] of [[null, 1], ['final', 2], ['confirm', 2]]) {
+    const { ports, graph, calls } = fixture();
+    graph.moves[0].status = 'planned';
+    graph.moves[0].fields = { planning: { decision, output_contracts: Array.from({ length: count }, (_, index) => ({ key: ids[6 + index] })) } };
+    ports.mcp = async (endpoint, name, args) => {
+      calls.push({ endpoint, name, args });
+      if (name === 'elements_graph_get') return graph;
+      if (name === 'elements_move_claim') return { attempt: { id: ids[3], executor_kind: 'human', status: 'running' } };
+      return { status: 'failed' };
+    };
+    const runtime = await createBraiTools(config, ports), human = createHumanActions(runtime);
+    const args = { moveId: ids[2], revisionId: ids[1], idempotencyKey: 'same-key', inputResourceIds: [] };
+    assert.equal((await human.read({ moveId: ids[2] })).confirmationStage, null);
+    await assert.rejects(human.prepare(args), /HUMAN_OUTPUT_REQUIRED/);
+    assert.equal(calls.filter(call => call.name === 'elements_move_claim').length, 0);
+    const dispatch = createTrustedDispatcher(runtime);
+    const rejected = await dispatch(JSON.stringify({ jsonrpc: '2.0', id: 'unsupported', method: 'actions.prepare', params: args }));
+    assert.equal(rejected.error.data.code, 'HUMAN_OUTPUT_REQUIRED');
+    assert.equal(calls.filter(call => call.name === 'elements_move_claim').length, 0);
+    graph.moves[0].status = 'claimed';
+    const recovered = await human.prepare(args);
+    assert.equal(recovered.attemptId, ids[3]);
+    assert.equal(recovered.confirmationStage, null);
+    await assert.rejects(human.complete({ moveId: ids[2], revisionId: ids[1], attemptId: ids[3], stage: 'final', decision: 'success' }), /HUMAN_OUTPUT_REQUIRED/);
+    assert.equal(calls.filter(call => call.name === 'elements_move_complete').length, 0);
+    await human.cancel({ moveId: ids[2], revisionId: ids[1], attemptId: recovered.attemptId, reason: 'cancelled' });
+    assert.equal(calls.at(-1).name, 'elements_move_fail');
+  }
+});
+
+test('legacy Action retains requested positive stage without a planning DTO field', async () => {
+  const { ports, graph, calls } = fixture();
+  ports.mcp = async (endpoint, name, args) => {
+    calls.push({ endpoint, name, args });
+    return name === 'elements_graph_get' ? graph : { attempt: { id: ids[3], status: 'succeeded' } };
+  };
+  const human = createHumanActions(await createBraiTools(config, ports));
+  assert.equal(Object.hasOwn(await human.read({ moveId: ids[2] }), 'confirmationStage'), false);
+  for (const stage of ['planning', 'review', 'final']) {
+    await human.complete({ moveId: ids[2], revisionId: ids[1], attemptId: ids[3], stage, decision: stage === 'final' ? 'success' : 'approved' });
+    assert.equal(calls.at(-1).args.result.resources[0].metadata.stage, stage);
+  }
 });
 
 test('trusted JSON-RPC сохраняет id, batch и notifications; не имеет произвольных методов', async () => {
