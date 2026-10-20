@@ -14,6 +14,8 @@ spec.loader.exec_module(planner)
 
 def run(value):
     """Проверить критерии, собрать кандидат и при наличии review выдать квитанцию."""
+    if 'expand_stage' in value:
+        return {'stage': planner.expand_repeat(value['expand_stage'], value['move_id'], value['binding'])}
     with TemporaryDirectory(prefix='brai-plan-') as directory:
         root = Path(directory).resolve()
         for name, content in value['files'].items():

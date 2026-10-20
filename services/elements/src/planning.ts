@@ -34,23 +34,26 @@ export function planningRules(): Record<string,string> {
 export function planningFiles(element:Value, revision:Value, move:Value, resources:Value[], finish:Value|null):Record<string,string> {
  const fields:Value={};
  for(const key of 'title summary inputs context scope constraints preferences unknowns hypothesis expected_result result_types outputs'.split(' '))fields[key]=['inputs','outputs','result_types'].includes(key)?[]:'';
- Object.assign(fields,revision.fields?.draft??{});
+ Object.assign(fields,revision.fields?.draft??(element.parent_id?Object.fromEntries(Object.keys(fields).filter(key=>revision.fields?.[key]!==undefined).map(key=>[key,revision.fields[key]])):{}));
  fields.inputs=resources.map(r=>r.id);
  const rules=planningRules();
- const operation={id:move.id,owner:move.element_id,target:element.id,title:move.title,actor:'agent',purpose:'plan',previous:move.previous_move_id};
- const packet={element:{id:element.id,kind:'Задача',parent:element.parent_id},operation,
+ const operation={id:move.id,owner:move.element_id,target:element.id,title:move.title,actor:'agent',purpose:'plan',previous:move.previous_move_id,pending_confirmation_id:move.fields?.pending_confirmation_id??null};
+ const packet={element:{id:element.id,kind:({task:'Задача',goal:'Цель',quest:'Квест'} as Value)[element.kind??'task'],parent:element.parent_id,classification:element.provenance?.classification??null},operation,
   finish:{id:finish?.id??planningId(`${move.id}:finish`),owner:finish?.element_id??move.element_id,target:element.id},draft:fields,
-  resources:resources.map(r=>({id:r.id,name:r.title,content:r.content,state:'given',producer:null})),
-  context_files:resources.map(r=>`inputs/${r.id}.md`),rules:Object.keys(rules)};
- return {'packet.json':serialize(packet),...Object.fromEntries(resources.map(r=>[`inputs/${r.id}.md`,r.content])),...rules};
+  resources:[...resources.map(r=>({id:r.id,name:r.title,content:r.content,state:'given',producer:null})),...(revision.fields?.planning_context?.outputs??[]).filter((r:Value)=>!resources.some(x=>x.id===r.id))],
+  context_files:[...new Set([...resources.map(r=>`inputs/${r.id}.md`),...Object.keys(revision.fields?.planning_context?.files??{})])],rules:Object.keys(rules)};
+ return {'packet.json':serialize(packet),...Object.fromEntries(resources.map(r=>[`inputs/${r.id}.md`,r.content])),...(revision.fields?.planning_context?.files??{}),...rules};
 }
 /** Отдельная постановка получает новые UUID Ходов/будущих выходов; границы и реальные входы сохраняются. */
 function operationIds(result:Value,files:Record<string,string>):Value {
  if(!result.stage)return result;
- const stage=result.stage,operation=JSON.parse(files['packet.json']).operation.id;
+ const stage=result.stage,packet=JSON.parse(files['packet.json']),operation=packet.operation.id;
  const mapped=new Map<string,string>();
  for(const record of stage.records)if(record.id!==stage.finish.id)mapped.set(record.id,planningId(`${operation}:${record.id}`));
- for(const resource of stage.resources)if(resource.state==='expected')mapped.set(resource.id,planningId(`${operation}:${resource.id}`));
+ if(packet.operation.pending_confirmation_id){const confirmation=stage.records.find((r:Value)=>r.purpose==='confirm');if(confirmation)mapped.set(confirmation.id,packet.operation.pending_confirmation_id);}
+ for(const child of stage.children??[]){mapped.set(child.element.id,planningId(`${operation}:${child.element.id}`));mapped.set(child.operation.id,planningId(`${operation}:${child.operation.id}`));mapped.set(child.finish.id,planningId(`${operation}:${child.finish.id}`));}
+ const inherited=new Set(JSON.parse(files['packet.json']).resources.filter((r:Value)=>r.state==='expected').map((r:Value)=>r.id));
+ for(const resource of stage.resources)if(resource.state==='expected'&&!inherited.has(resource.id))mapped.set(resource.id,planningId(`${operation}:${resource.id}`));
  const remap=(v:any):any=>typeof v==='string'?(mapped.get(v)??v):Array.isArray(v)?v.map(remap):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).map(([k,value])=>[k,remap(value)])):v;
  result.stage=remap(stage);
  if(result.markdown)result.markdown=result.markdown.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g,(id:string)=>mapped.get(id)??id);
@@ -66,7 +69,7 @@ export function assemble(value:Value):Promise<Value> {
   child.on('error',()=>finish(new ElementsFault('INTERNAL')));
   child.stdout.on('data',chunk=>{size+=chunk.length;if(size>524288){child.kill('SIGKILL');finish(new ElementsFault('INVALID_ARGUMENT'));}else output+=chunk;});
   child.stderr.resume();
-  child.on('close',code=>{try{const result=JSON.parse(output);if(code||result.error)finish(new ElementsFault('INVALID_ARGUMENT'));else finish(undefined,operationIds(result,value.files));}catch{finish(new ElementsFault('INTERNAL'));}});
+  child.on('close',code=>{try{const result=JSON.parse(output);if(code||result.error)finish(new ElementsFault('INVALID_ARGUMENT'));else finish(undefined,value.expand_stage?result:operationIds(result,value.files));}catch{finish(new ElementsFault('INTERNAL'));}});
   child.stdin.on('error',()=>{});child.stdin.end(JSON.stringify(value));
  });
 }
