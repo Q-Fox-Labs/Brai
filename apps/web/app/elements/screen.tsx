@@ -6,6 +6,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Bot, Check, CircleDashed, Grip, Layers, Maximize, Play, UserRound, X, Ban } from "lucide-react";
 import { cardHeight, cardWidth, clampZoom, fitView, initialPositions, projectMoves, readLayout, sequenceMoves, sharedMoveLinkAnchors, taskResourceLinks, statusPresentation, type BoardData, type CardHeights, type Layout, type MoveAnchor, type Point } from "./model";
 import "./elements.css";
+import {NewTask,WorkflowAction} from "./workflow";
 
 import { readable, resourceText, conditionText, presentBoard } from "./presentation";
 
@@ -203,6 +204,7 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
   finally { setSavingStatus(false); }
  }
  return <main className="elements-screen" aria-label="Карта Элементов">
+  <NewTask dataset={dataset} onDataChange={onDataChange} />
   <button type="button" className="elements-fit" aria-label="Вся карта" title="Вся карта" onClick={showAll}><Maximize size={18} /></button>
   <div ref={canvas} className={"elements-canvas" + (dragging ? " is-dragging" : "")} tabIndex={0} role="region" aria-label="Полотно Элементов"
    onPointerDownCapture={() => { suppressClick.current = false; }} onClickCapture={event => { if (suppressClick.current && event.detail !== 0) { event.preventDefault(); event.stopPropagation(); } suppressClick.current = false; }}
@@ -279,6 +281,7 @@ function ElementsBoard({ userId, dataset, onDataChange }: { userId: string; data
     </section>
    </>}
    {selectedMove && <>
+    <WorkflowAction key={selectedMove.id} move={selectedMove} dataset={dataset} onDataChange={onDataChange} />
     {selectedMove.instructions && <section className="elements-resources"><h3>Инструкция</h3><p>{readable(selectedMove.instructions)}</p></section>}
     <ResourceDetails ids={selectedMove.input} label="Полученные ресурсы" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />
     <ResourceDetails ids={selectedMove.output} label="Результат" dataset={dataset} moves={orderedMoves} onSelectMove={selectMove} />

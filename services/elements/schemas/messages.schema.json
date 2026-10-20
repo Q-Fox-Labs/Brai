@@ -261,7 +261,8 @@
             "finish",
             "confirm",
             "review",
-            "final"
+            "final",
+            "plan"
           ]
         },
         "conditions": {
@@ -673,6 +674,99 @@
             }
           }
         }
+      ]
+    },
+    "elements_planning_packet": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "user_id",
+        "attempt_id"
+      ]
+    },
+    "elements_planning_bind": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "baseline": {
+          "type": "object"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "user_id",
+        "attempt_id",
+        "baseline"
+      ]
+    },
+    "elements_planning_build": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "candidate": {
+          "type": "object"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "user_id",
+        "attempt_id",
+        "candidate"
+      ]
+    },
+    "elements_planning_apply": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "candidate_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "review": {
+          "type": "object"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "user_id",
+        "attempt_id",
+        "candidate_sha256",
+        "review"
       ]
     }
   }

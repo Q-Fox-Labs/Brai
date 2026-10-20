@@ -22,6 +22,10 @@ test('MCP публикует полный набор инструментов El
     'elements_move_claim',
     'elements_move_complete',
     'elements_move_fail',
+    'elements_planning_packet',
+    'elements_planning_bind',
+    'elements_planning_build',
+    'elements_planning_apply',
   ]);
   for (const name of toolNames) {
     const schema = toolInputs[name];

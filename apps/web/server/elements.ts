@@ -82,7 +82,8 @@ export async function loadElementsBoard(userId: string): Promise<BoardData> {
    catch (error) { if (error instanceof GatewayError && error.status === 404) resource.artifacts.push({id,name:"Файл недоступен",available:false}); else throw error; }
   }
  }
- return Object.assign(value, { manualStatusEnabled: manualStatusEnabled() });
+ const available=await requestValue('brai.elements.v1.query.moves',{user_id:userId}) as {items:{id:string}[]};
+ return Object.assign(value, { manualStatusEnabled: manualStatusEnabled(),readyMoveIds:available.items.map(m=>m.id) });
 }
 
 /** Меняет один DEV статус; сервис проверяет владельца и записывает атомарный аудит. */
@@ -112,4 +113,55 @@ export async function readElementArtifact(userId: string, id: string, signal: Ab
  if (!upstream.ok || !upstream.body) throw new GatewayError(404,"NOT_FOUND");
  const filename = encodeURIComponent(artifact.filename).replace(/['()*]/g, char=>`%${char.charCodeAt(0).toString(16).toUpperCase()}`);
  return new Response(upstream.body,{headers:{"Cache-Control":"no-store","Content-Type":"application/octet-stream","Content-Disposition":`attachment; filename="download"; filename*=UTF-8''${filename}`,"X-Content-Type-Options":"nosniff","Cross-Origin-Resource-Policy":"same-origin"}});
+}
+
+/** Создаёт только исходный черновик и существующую Операцию; готовый план не подставляется. */
+export async function createTaskDraft(userId:string,value:unknown):Promise<BoardData> {
+ if(!object(value)||Object.keys(value).some(k=>!['title','request','request_id'].includes(k))||typeof value.title!=='string'||!value.title.trim()||value.title.length>1000||typeof value.request!=='string'||!value.request.trim()||value.request.length>16000||typeof value.request_id!=='string'||!uuid.test(value.request_id))throw new GatewayError(400,'INVALID_ARGUMENT');
+ const {createHash}=await import('node:crypto');
+ const stable=(label:string)=>{const h=createHash('sha256').update(`${userId}:${value.request_id}:${label}`).digest('hex');return `${h.slice(0,8)}-${h.slice(8,12)}-5${h.slice(13,16)}-a${h.slice(17,20)}-${h.slice(20,32)}`;};
+ const id=stable('task'),move=stable('plan'),resource=stable('input');
+ const graph=await loadElementsBoard(userId);
+ const existing=graph.elements.find(e=>e.id===id);
+ if(existing){if(existing.title!==value.title||!graph.resources.some(r=>r.id===resource&&r.content===value.request))throw new GatewayError(409,'CONFLICT');return graph;}
+ await requestValue('brai.elements.v1.command.create',{user_id:userId,elements:[{id,kind:'task',title:value.title,initial_resources:[{id:resource,title:'Поручение Игрока',content:value.request}]}],moves:[{id:move,element_id:id,kind:'operation',purpose:'plan',title:'Поставить Задачу',instructions:'Прочитать пакет входов и правил. Зафиксировать независимые критерии, собрать предметный план и пройти проверку. Решение Игрока сохраняется отдельно.'}]});
+ return loadElementsBoard(userId);
+}
+
+/** Запускает существующую постановку либо сохраняет реальный результат Action проверенного владельца. */
+export async function performElementWorkflow(userId:string,sessionId:string,value:unknown):Promise<BoardData> {
+ if(!object(value)||Object.keys(value).some(k=>!['operation','move_id','revision_id','request_id','decision','comment','values'].includes(k))||!['start','action'].includes(String(value.operation))||typeof value.move_id!=='string'||!uuid.test(value.move_id)||typeof value.revision_id!=='string'||!uuid.test(value.revision_id)||typeof value.request_id!=='string'||!uuid.test(value.request_id))throw new GatewayError(400,'INVALID_ARGUMENT');
+ const graph=await loadElementsBoard(userId),move=graph.moves.find(m=>m.id===value.move_id),target=graph.elements.find(e=>e.id===move?.targetId);
+ if(!move||!target)throw new GatewayError(404,'NOT_FOUND');
+ if(target.revision!==value.revision_id)throw new GatewayError(409,'CONFLICT');
+ const available=await requestValue('brai.elements.v1.query.moves',{user_id:userId}) as {items:{id:string;required_resource_ids:string[]}[]};
+ if(value.operation==='start'){
+  if(move.kind!=='operation'||!['plan','start'].includes(move.purpose??''))throw new GatewayError(403,'FORBIDDEN');
+  if(move.status==='claimed')return graph;
+  await requestValue('brai.elements.v1.command.claim',{user_id:userId,move_id:move.id,idempotency_key:`planning:${move.id}:${target.revision}`,executor_kind:'agent',input_resource_ids:[...new Set([...(available.items.find(m=>m.id===move.id)?.required_resource_ids??[]),...target.input])]});
+  return loadElementsBoard(userId);
+ }
+ const planning=(move.fields as {planning?:{decision?:string;output_contracts:{key:string;name:string}[]}})?.planning;
+ if(move.kind!=='action'||!planning)throw new GatewayError(403,'FORBIDDEN');
+ const stage=planning.decision==='confirm'?'planning':planning.decision==='final'?'final':null;
+ const allowed=stage==='planning'?['approved','changes','cancelled']:stage==='final'?['success','changes','cancelled']:['done'];
+ if(!allowed.includes(String(value.decision))||typeof value.comment!=='string'||value.comment.length>16000||stage&&!value.comment.trim()||!object(value.values))throw new GatewayError(400,'INVALID_ARGUMENT');
+ const resources=planning.output_contracts.map((contract,index)=>{
+  const decision=stage&&index===planning.output_contracts.length-1;
+  const content=decision?value.comment:(value.values as Record<string,unknown>)[contract.key];
+  if(typeof content!=='string'||!content.trim()||content.length>16000)throw new GatewayError(400,'RESULT_REQUIRED');
+  return {output_key:contract.key,title:contract.name,content,metadata:decision?{element_id:target.id,revision_id:target.revision,stage:value.decision==='changes'?'review':stage,outcome:value.decision,channel:'web',session_id:sessionId}:{}};
+ });
+ if(move.status==='succeeded')return graph;
+ let attemptId=move.attemptId;
+ if(move.status==='claimed'){
+  if(move.executor!=='human'||!graph.attempts?.some(a=>a.id===attemptId&&a.status==='running'))throw new GatewayError(409,'INVALID_STATE');
+ }else{
+  const required=available.items.find(m=>m.id===move.id)?.required_resource_ids;
+  if(!required)throw new GatewayError(409,'INVALID_STATE');
+  const claim=await requestValue('brai.elements.v1.command.claim',{user_id:userId,move_id:move.id,idempotency_key:`web:${sessionId}:${value.request_id}`,executor_kind:'human',input_resource_ids:required}) as {attempt:{id:string}};
+  attemptId=claim.attempt.id;
+ }
+ await requestValue('brai.elements.v1.command.complete',{user_id:userId,attempt_id:attemptId,result:{resources}});
+ return loadElementsBoard(userId);
 }
