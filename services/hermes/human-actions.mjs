@@ -10,7 +10,10 @@ const uncertain = error => typeof error.code !== 'string' || ['TIMEOUT', 'DEADLI
 function confirmationText(graph, move, target, inputs = move.input ?? []) {
   if (!move.fields?.planning) return undefined;
   if (move.fields.planning.decision === 'confirm') {
-    const pending = graph.moves.filter(item => (item.targetId === target.id || item.ownerId === target.id) && item.status !== 'cancelled');
+    const currentOperations = new Set((graph.resources ?? []).filter(resource => resource.metadata?.plan_revision_id === target.revision)
+      .map(resource => resource.metadata?.receipt?.operation).filter(Boolean));
+    const pending = graph.moves.filter(item => (item.targetId === target.id || item.ownerId === target.id) && item.status !== 'cancelled' &&
+      (!target.fields?.planning || currentOperations.has(item.id) || item.fields?.planning?.revision_id === target.revision));
     const ordered = [];
     while (pending.length) {
       const index = pending.findIndex(item => !pending.some(other => other.id === item.previousId));

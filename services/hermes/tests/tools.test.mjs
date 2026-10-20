@@ -369,3 +369,19 @@ test('trusted text feedback writes actual remarks and delegates cancellation wit
   await assert.rejects(human.feedback({ ...args, decision: 'approved' }), /INVALID_ARGUMENT/);
   await assert.rejects(human.feedback({ ...args, elementId: ids[5], decision: 'cancelled' }), /NOT_FOUND/);
 });
+
+
+test('draft acceptance displays current revision without completed earlier draft Moves', async () => {
+  const { ports, graph } = fixture();
+  graph.elements[0].title = 'Текущий результат'; graph.elements[0].fields = { planning: {}, expected_result: 'Текущий итог' };
+  graph.moves[0].fields = { planning: { decision: 'confirm', revision_id: ids[1], output_contracts: [{ key: ids[6] }] } };
+  graph.moves[0].title = 'Рассмотреть новую постановку'; graph.moves[0].previousId = ids[4];
+  graph.moves.push({ id: ids[4], ownerId: ids[0], targetId: ids[0], title: 'Доработать текущий план', status: 'succeeded' },
+    { id: ids[5], ownerId: ids[0], targetId: ids[0], title: 'Старая постановка', status: 'succeeded' },
+    { id: ids[6], ownerId: ids[0], targetId: ids[0], title: 'Старое рассмотрение', status: 'succeeded', fields: { planning: { revision_id: ids[7] } } });
+  graph.resources = [{ metadata: { plan_revision_id: ids[1], receipt: { operation: ids[4] } } }];
+  const action = await createHumanActions(await createBraiTools(config, ports)).read({ moveId: ids[2] });
+  assert.match(action.confirmationText, /Доработать текущий план/);
+  assert.match(action.confirmationText, /Рассмотреть новую постановку/);
+  assert.doesNotMatch(action.confirmationText, /Старая постановка|Старое рассмотрение/);
+});
