@@ -13,12 +13,44 @@ import {sandboxArgs} from '../codeworks/src/agent-sandbox.mjs';
 const tool=JSON.parse(await readFile(new URL('../codeworks/src/agent-tools.json',import.meta.url),'utf8'));
 const instructions='Use codeworks for ALL project reads, patches, files and commands. Native project paths are intentionally inaccessible. Do not request manual worktrees: codeworks automatically prepares one before the first code write. Use mode=read for inspection and mode=write for mutating commands. Route all subsequent reads through codeworks. Never retry a partly executed command.';
 
+/** Допускает только открытые клиентом threads и реально начавшиеся native turns. */
+export function createAdmission() {
+  const threads=new Set(),expected=new Set(),active=new Map();
+  return {
+    thread(id){if(typeof id!=='string'||!id)throw new Error('NATIVE_THREAD_INVALID');threads.add(id);},
+    expect(id){if(!threads.has(id))throw new Error('NATIVE_THREAD_NOT_ADMITTED');expected.add(id);},
+    observe(frame){
+      const p=frame.params??{};
+      if(frame.method==='turn/started') {
+        if(!expected.delete(p.threadId)||!p.turn?.id||active.has(p.threadId))throw new Error('NATIVE_TURN_NOT_ADMITTED');
+        active.set(p.threadId,{id:p.turn.id,calls:new Set()});
+      }
+      if(frame.method==='item/started'&&p.item?.type==='subAgentActivity') {
+        if(active.get(p.threadId)?.id!==p.turnId)throw new Error('NATIVE_PARENT_TURN_NOT_ADMITTED');
+        const id=p.item.agentThreadId;
+        if(typeof id!=='string'||!id)throw new Error('NATIVE_CHILD_INVALID');
+        threads.add(id);
+        if(!active.has(id)&&!p.item.id?.startsWith('subagent-completed-'))expected.add(id);
+      }
+      if(frame.method==='turn/completed') {
+        if(active.get(p.threadId)?.id!==p.turn?.id)throw new Error('NATIVE_COMPLETED_TURN_NOT_ADMITTED');
+        active.delete(p.threadId);
+      }
+    },
+    tool(frame){
+      const p=frame.params??{},turn=active.get(p.threadId);
+      if(!turn||turn.id!==p.turnId||frame.id===undefined||turn.calls.has(frame.id)||turn.calls.size>=1024)throw new Error('NATIVE_TOOL_NOT_ADMITTED');
+      turn.calls.add(frame.id);
+    },
+  };
+}
+
 /** Запускает защищённый native app-server; send получает неизменённые protocol frames. */
 export async function managedCodex(control,send) {
   const adapter=await socketCall(control,{action:'adapter',executor_id:'codex'}),e=adapter.executor;
-  const arguments_=[...sandboxArgs({cwd:adapter.project.repo_path,local:e.local_mounts??[],hidden:[adapter.state_root,...adapter.hidden_paths,adapter.project.repo_path,adapter.project.workspace_root,...(e.hidden_paths??[])],aliases:e.mounts??[],bridge:adapter.bridge,profile:{source:e.profile,target:e.profile_target??e.profile},env:{...(e.env??{}),CODEX_HOME:e.profile_target??e.profile}}),...e.command,'app-server','--listen','stdio://'];
+  const arguments_=[...sandboxArgs({cwd:adapter.project.repo_path,procExecutable:e.command[0],local:e.local_mounts??[],hidden:[adapter.state_root,...adapter.hidden_paths,adapter.project.repo_path,adapter.project.workspace_root,...(e.hidden_paths??[])],aliases:e.mounts??[],bridge:adapter.bridge,profile:{source:e.profile,target:e.profile_target??e.profile},env:{...(e.env??{}),CODEX_HOME:e.profile_target??e.profile}}),...e.command,'app-server','--listen','stdio://'];
   const child=spawn('/usr/bin/bwrap',arguments_,{stdio:['pipe','pipe','pipe']});
-  const pending=new Map();let closed=false;
+  const pending=new Map(),admission=createAdmission();let closed=false;
   child.stderr.on('data',chunk=>process.stderr.write(chunk));
   const write=frame=>{if(closed)return;const bytes=JSON.stringify(frame)+'\n';if(Buffer.byteLength(bytes)>16777216||child.stdin.writableLength>2097152){child.kill('SIGKILL');return;}child.stdin.write(bytes);};
   async function agentCall(nativeId,request) {
@@ -29,14 +61,21 @@ export async function managedCodex(control,send) {
   reader.on('line',line=>{void (async()=>{
     if(Buffer.byteLength(line)>16777216){child.kill('SIGKILL');return;}
     const frame=JSON.parse(line);
+    admission.observe(frame);
     if(frame.method==='item/tool/call'&&frame.params?.tool===tool.name) {
       try {
+        admission.tool(frame);
         const result=await agentCall(frame.params.threadId,frame.params.arguments);
         write({id:frame.id,result:{success:true,contentItems:[{type:'inputText',text:JSON.stringify(result)}]}});
       }catch(error){write({id:frame.id,result:{success:false,contentItems:[{type:'inputText',text:'Codeworks: '+error.message+'. No automatic retry.'}]}});}
       return;
     }
-    const method=pending.get(frame.id);if(method){pending.delete(frame.id);if(method!=='thread/resume'&&frame.result?.thread?.id)await agentCall(frame.result.thread.id,{action:'status'});}
+    const request=pending.get(frame.id);if(request){pending.delete(frame.id);if(frame.result?.thread?.id){
+      const id=frame.result.thread.id;
+      if(request.method==='thread/resume'&&id!==request.threadId)throw new Error('NATIVE_RESUME_ID_MISMATCH');
+      admission.thread(id);
+      if(request.method!=='thread/resume')await agentCall(id,{action:'status'});
+    }}
     send(frame);
   })().catch(()=>{child.kill('SIGKILL');});});
   child.on('error',()=>{closed=true;});child.on('close',()=>{closed=true;reader.close();});
@@ -55,7 +94,10 @@ export async function managedCodex(control,send) {
         frame.params={...p,cwd:adapter.project.repo_path,developerInstructions:[p.developerInstructions,instructions].filter(Boolean).join('\n'),sandbox:'read-only'};
         delete frame.params.permissions;
         if(frame.method==='thread/start')frame.params.dynamicTools=[...(p.dynamicTools??[]).filter(t=>t.name!==tool.name),{type:'function',...tool}];
-        pending.set(frame.id,frame.method);
+        pending.set(frame.id,{method:frame.method,threadId:p.threadId});
+      }
+      if(frame.method==='turn/start') {
+        try{admission.expect(p.threadId);}catch{send({id:frame.id,error:{code:-32602,message:'NATIVE_THREAD_NOT_ADMITTED'}});return;}
       }
       write(frame);
     },

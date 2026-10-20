@@ -21,6 +21,12 @@ try {
  const bypass=await call('command/exec',{cwd:repo,command:['/bin/sh','-c','printf bypass > CODEWORKS_NATIVE_BYPASS'],sandboxPolicy:{type:'dangerFullAccess'}});
  assert.notEqual(bypass.exitCode,0);await assert.rejects(readFile(repo+'/CODEWORKS_NATIVE_BYPASS'));
  console.log('PASS real native command/exec cannot bypass OS boundary even with dangerFullAccess');
+ const descriptors=await call('command/exec',{cwd:repo,command:['/usr/bin/python3','-c','import os,json\np=["/proc/self/fd/1","/proc/%s/fd/1"%os.getppid(),"/dev/fd/1","/dev/stdout"]\nr={}\nfor x in p:\n try:\n  f=os.open(x,os.O_WRONLY);os.close(f);r[x]="OPEN"\n except OSError as e:r[x]=e.errno\nprint(json.dumps(r))'],sandboxPolicy:{type:'dangerFullAccess'}});
+ assert.equal(descriptors.exitCode,0);assert.deepEqual(Object.values(JSON.parse(descriptors.stdout)),[2,2,2,2]);
+ console.log('PASS real native parent/self proc and dev FD aliases cannot reopen protocol IPC');
+ const kernel=await call('command/exec',{cwd:repo,command:['/usr/bin/python3','-c','import os,ctypes,json\nl=ctypes.CDLL(None,use_errno=True);p=os.getppid();r={}\nf=l.syscall(434,p,0)\nif f>=0:\n d=l.syscall(438,f,1,0);r["pidfd_getfd"]=ctypes.get_errno() if d<0 else "OPEN"\n if d>=0:os.close(d)\n os.close(f)\nelse:r["pidfd_open"]=ctypes.get_errno()\ns=l.ptrace(0x4206,p,0,0);r["ptrace_seize"]=ctypes.get_errno() if s<0 else "ATTACHED"\nprint(json.dumps(r))'],sandboxPolicy:{type:'dangerFullAccess'}});
+ assert.equal(kernel.exitCode,0);assert.deepEqual(JSON.parse(kernel.stdout),{pidfd_getfd:1,ptrace_seize:1});
+ console.log('PASS real native child pidfd_getfd and nonstopping ptrace seize of parent are denied EPERM');
  const {thread:docs}=await call('thread/start',{cwd:repo,model:'gpt-6.1-sol',approvalPolicy:'never'});
  const documentation='tmp/codeworks-agents-docs/readme-'+docs.id+'.md';
  await turn(docs.id,`Use codeworks batch write ${documentation} with exactly DOCS_REAL_OK followed by newline. Do not change any other file.`);

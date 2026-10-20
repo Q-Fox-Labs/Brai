@@ -4,11 +4,14 @@ import path from 'node:path';
 import {realpathSync} from 'node:fs';
 
 /** Аргументы bubblewrap; writable задаёт только уже проверенные канонические mounts. */
-export function sandboxArgs({cwd, writable=[], aliases=[], local=[], hidden=[], masked=[], env={}, bridge, socket, profile}) {
+export function sandboxArgs({cwd, writable=[], aliases=[], local=[], hidden=[], masked=[], env={}, bridge, socket, profile, procExecutable}) {
   const args=['--ro-bind','/','/','--unshare-user','--disable-userns','--assert-userns-disabled','--unshare-pid','--unshare-ipc','--unshare-uts','--cap-drop','ALL','--die-with-parent','--new-session','--proc','/proc','--dev','/dev','--tmpfs','/tmp','--tmpfs','/run','--clearenv'];
   // /etc/resolv.conf can point into /run; retain only that file, never host sockets.
   args.push('--ro-bind','/etc/resolv.conf',realpathSync('/etc/resolv.conf'));
   for(const target of hidden)args.push('--tmpfs',target);
+  // Native app-server needs current_exe, but its tools must never reopen the
+  // protocol pipe through /proc/{self,parent}/fd. Expose one immutable link only.
+  if(procExecutable)args.push('--tmpfs','/proc','--dir','/proc/self','--symlink',procExecutable,'/proc/self/exe','--remount-ro','/proc');
   if(profile)args.push('--bind',profile.source,profile.target);
   for(const [source,target] of writable)args.push('--bind',source,target);
   for(const [source,target] of aliases)args.push('--ro-bind',source,target);
