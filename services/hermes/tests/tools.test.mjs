@@ -225,21 +225,21 @@ test('legacy Action retains requested positive stage without a planning DTO fiel
   }
 });
 
-test('Telegram plan contains the saved result and ordered moves, without foreign task data', async () => {
+test('Telegram plan contains saved task meaning and conditions without technical boundaries', async () => {
   const { ports, graph } = fixture();
-  graph.elements[0] = { ...graph.elements[0], title: 'Чек-лист подготовлен', fields: { expected_result: 'Ровно три пункта.', constraints: 'Без личных данных.' } };
+  graph.elements[0] = { ...graph.elements[0], kind: 'task', title: 'Подготовить чек-лист', description: 'Проверенный перечень покупок.', fields: { expected_result: 'Ровно три пункта.', constraints: 'Без личных данных.' } };
   const approval = graph.moves[0];
-  approval.title = 'Рассмотреть постановку'; approval.previousId = ids[5];
-  approval.fields = { planning: { decision: 'confirm', output_contracts: [{}] } };
+  approval.title = 'Рассмотреть постановку'; approval.previousId = ids[5]; approval.purpose = 'confirm';
+  approval.fields = { planning: { decision: 'confirm', revision_id: ids[1], output_contracts: [{}] } };
   graph.moves = [
-    { id: ids[6], targetId: ids[0], previousId: approval.id, kind: 'operation', title: 'Написать три пункта' },
-    { id: ids[7], targetId: ids[7], kind: 'operation', title: 'Чужой план' }, approval,
-    { id: ids[5], targetId: ids[0], previousId: null, kind: 'operation', title: 'Составить план', status: 'succeeded' },
+    { id: ids[6], targetId: ids[0], ownerId: ids[0], previousId: approval.id, kind: 'operation', purpose: 'work', title: 'Написать три пункта', fields: { actor: 'agent', planning: { revision_id: ids[1] } } },
+    { id: ids[7], targetId: ids[7], kind: 'operation', purpose: 'work', title: 'Чужой план' }, approval,
+    { id: ids[5], targetId: ids[0], previousId: null, kind: 'operation', purpose: 'plan', title: 'Составить план', status: 'succeeded' },
   ];
   const action = await createHumanActions(await createBraiTools(config, ports)).read({ moveId: approval.id });
-  assert.match(action.confirmationText, /Ровно три пункта[\s\S]*Без личных данных/);
-  assert.match(action.confirmationText, /1\. 🤖 Составить план — готово\n2\. 👤 Рассмотреть постановку\n3\. 🤖 Написать три пункта/);
-  assert.doesNotMatch(action.confirmationText, /Чужой план|00000000-|https?:/);
+  assert.match(action.confirmationText, /Подготовить чек-лист[\s\S]*Ровно три пункта[\s\S]*Без личных данных/);
+  assert.match(action.confirmationText, /Написать три пункта/);
+  assert.doesNotMatch(action.confirmationText, /Составить план|Рассмотреть постановку|Чужой план|00000000-|https?:/);
 });
 
 test('final confirmation shows only required actual resources, not all available context', async () => {
@@ -457,9 +457,10 @@ test('native stop recovery fails only the exact running agent Operation attempt'
 });
 
 
-test('draft acceptance displays current revision without completed earlier draft Moves', async () => {
+test('draft acceptance keeps current revision meaning without lifecycle Move titles', async () => {
   const { ports, graph } = fixture();
-  graph.elements[0].title = 'Текущий результат'; graph.elements[0].fields = { planning: {}, expected_result: 'Текущий итог' };
+  graph.elements[0].kind = 'goal'; graph.elements[0].title = 'Текущий результат'; graph.elements[0].description = 'Текущий итог';
+  graph.elements[0].fields = { planning: {}, expected_result: 'Текущий итог', draft: { title: 'Подготовить документы', expected_result: 'Текущий итог' } };
   graph.moves[0].fields = { planning: { decision: 'confirm', revision_id: ids[1], output_contracts: [{ key: ids[6] }] } };
   graph.moves[0].title = 'Рассмотреть новую постановку'; graph.moves[0].previousId = ids[4];
   graph.moves.push({ id: ids[4], ownerId: ids[0], targetId: ids[0], title: 'Доработать текущий план', status: 'succeeded' },
@@ -467,7 +468,8 @@ test('draft acceptance displays current revision without completed earlier draft
     { id: ids[6], ownerId: ids[0], targetId: ids[0], title: 'Старое рассмотрение', status: 'succeeded', fields: { planning: { revision_id: ids[7] } } });
   graph.resources = [{ metadata: { plan_revision_id: ids[1], receipt: { operation: ids[4] } } }];
   const action = await createHumanActions(await createBraiTools(config, ports)).read({ moveId: ids[2] });
-  assert.match(action.confirmationText, /Доработать текущий план/);
-  assert.match(action.confirmationText, /Рассмотреть новую постановку/);
+  assert.match(action.confirmationText, /Текущий итог/);
+  assert.match(action.confirmationText, /Принять этот план/);
+  assert.doesNotMatch(action.confirmationText, /Доработать текущий план|Рассмотреть новую постановку/);
   assert.doesNotMatch(action.confirmationText, /Старая постановка|Старое рассмотрение/);
 });

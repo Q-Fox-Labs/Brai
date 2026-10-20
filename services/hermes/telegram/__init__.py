@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import importlib
 from dataclasses import dataclass
 from contextlib import contextmanager
@@ -407,6 +408,20 @@ def _platform(value):
 
 def _uuid(value):
     return isinstance(value, str) and re.fullmatch(UUID, value) is not None
+
+
+def _confirmation_html_chunk(chunk, first_line, bold_lines):
+    """Escape one original-text chunk and add only trusted Telegram bold tags."""
+    rendered = []
+    for offset, line in enumerate(chunk.splitlines(keepends=True)):
+        body = line[:-1] if line.endswith("\n") else line
+        newline = "\n" if line.endswith("\n") else ""
+        number = first_line + offset
+        bold = number in bold_lines
+        escaped = html.escape(body, quote=False)
+        rendered.append(f"<b>{escaped}</b>" if bold else escaped)
+        rendered.append(newline)
+    return "".join(rendered)
 
 
 class TelegramPlugin:
@@ -1065,30 +1080,43 @@ class TelegramPlugin:
                 preview = action["confirmationText"]
                 if not isinstance(preview, str) or not preview.strip():
                     raise BridgeError("HUMAN_OUTPUT_REQUIRED")
-                text = f"{stage_label}\n\n{preview}\n\n"
+                text = f"{stage_label}\n\n{preview}"
             else:
                 text = f"{stage_label}: {action['title'][:800]}\n{title}\n{context}\n"
-            text += ("Выполни этот практический Ход и пришли фактический результат обычным сообщением. Если это итоговый Ход, явно добавь, принимаешь ли результат или нужны изменения."
-                     if stage == "work" else "Ответьте на уточнение обычным сообщением; замечания или отмену тоже напишите текстом."
-                     if stage == "clarification" else "Замечания или отмену задачи напиши сообщением.")
+            if stage == "work":
+                footer = ("Выполни это практическое действие и пришли фактический результат обычным сообщением. "
+                          "Если это итоговое действие, явно укажи, принимаешь ли результат или нужны изменения.")
+            elif stage == "clarification":
+                footer = "Ответь на уточнение обычным сообщением; замечания или отмену тоже напиши текстом."
+            elif action.get("confirmationText") is None:
+                footer = "Замечания или отмену задачи напиши сообщением."
+            else:
+                footer = ""
+            if footer:
+                text += ("\n\n" if action.get("confirmationText") is not None else "") + footer
             thread_id = self.tokens.unresolved(token)["thread_id"]
             route = {"message_thread_id": int(thread_id)} if thread_id and str(thread_id) != "1" else {}
             # Не обрезаем план/результат. 1800 code points помещаются в 4096 UTF-16 units.
-            chunks = [text[index:index + 1800] for index in range(0, len(text), 1800)]
-            for index, chunk in enumerate(chunks):
+            bold_lines = {0}
+            if action.get("confirmationText") is not None:
+                bold_lines.add(2)
+            bold_lines.update(index for index, line in enumerate(text.splitlines()) if re.match(r"^\d+\.\s", line))
+            chunks = [(text[index:index + 1800], text[:index].count("\n")) for index in range(0, len(text), 1800)]
+            for index, (source_chunk, first_line) in enumerate(chunks):
+                chunk = _confirmation_html_chunk(source_chunk, first_line, bold_lines)
                 keyboard = {"reply_markup": InlineKeyboardMarkup(buttons)} if buttons and index == len(chunks) - 1 else {}
                 if existing and len(chunks) == 1:
                     from telegram.error import BadRequest
                     try:
                         await self.bot.edit_message_text(chat_id=int(self.config.chat),
-                            message_id=int(existing["message_id"]), text=chunk, **keyboard,
+                            message_id=int(existing["message_id"]), text=chunk, parse_mode="HTML", **keyboard,
                             connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
                     except BadRequest as error:
                         if "message is not modified" not in str(error).lower():
                             raise
                 else:
                     message = await self.bot.send_message(chat_id=int(self.config.chat), text=chunk, **route,
-                        **keyboard, connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
+                        parse_mode="HTML", **keyboard, connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
                     self.tokens.bind(token, message.message_id)
             return json.dumps({"ok": True, "status": "awaiting_owner", "moveId": action["moveId"],
                                "attemptId": action["attemptId"], "revisionId": action["revisionId"]})

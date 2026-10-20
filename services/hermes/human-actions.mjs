@@ -1,43 +1,11 @@
 // ABOUTME: Связывает доверенный Telegram callback с человеческой попыткой game-core.
 // ABOUTME: Этот порт не регистрируется в обычном MCP и не удостоверяет Telegram пользователя.
 import { fault } from './runtime.mjs';
+import { confirmationText } from './confirmation.mjs';
 
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
 const uncertain = error => typeof error.code !== 'string' || ['TIMEOUT', 'DEADLINE_EXCEEDED', 'CONNECTION_CLOSED', 'INVALID_UPSTREAM_RESPONSE'].includes(error.code);
-
-/** Текст решения из текущей ревизии; порядок не зависит от порядка строк graph. */
-function confirmationText(graph, move, target, inputs = move.input ?? []) {
-  if (!move.fields?.planning) return undefined;
-  if (move.fields.planning.decision === 'clarify') {
-    const question = move.fields.question ?? move.fields.expected_answer ?? move.instructions ?? move.title;
-    return [target.title, 'Нужно уточнить поручение:', String(question), 'Ответьте обычным сообщением.'].join('\n\n');
-  }
-  if (move.fields.planning.decision === 'confirm') {
-    const currentOperations = new Set((graph.resources ?? []).filter(resource => resource.metadata?.plan_revision_id === target.revision)
-      .map(resource => resource.metadata?.receipt?.operation).filter(Boolean));
-    const pending = graph.moves.filter(item => (item.targetId === target.id || item.ownerId === target.id) && item.status !== 'cancelled' &&
-      (!target.fields?.planning || currentOperations.has(item.id) || item.fields?.planning?.revision_id === target.revision));
-    const ordered = [];
-    while (pending.length) {
-      const index = pending.findIndex(item => !pending.some(other => other.id === item.previousId));
-      if (index < 0) throw fault('INVALID_UPSTREAM_RESPONSE');
-      ordered.push(...pending.splice(index, 1));
-    }
-    const fields = target.fields ?? {};
-    return [target.title, `Результат: ${fields.expected_result || target.description || target.title}`,
-      fields.constraints ? `Условия: ${fields.constraints}` : '', 'Ходы:',
-      ...ordered.map((item, index) => `${index + 1}. ${item.kind === 'action' ? '👤' : '🤖'} ${item.title}${item.status === 'succeeded' ? ' — готово' : ''}`),
-      'Принять — согласовать этот план. Работа начнётся после подтверждения.'].filter(Boolean).join('\n');
-  }
-  if (move.fields.planning.decision === 'final') {
-    const resources = (graph.resources ?? []).filter(resource => inputs.includes(resource.id) && !resource.metadata?.stage);
-    if (!resources.length) return null;
-    return [target.title, ...resources.map(resource => `${resource.title}\n${resource.content}`),
-      'Принять — принять показанный результат.'].join('\n\n');
-  }
-  return undefined;
-}
 
 /** Создаёт private порт; вызывающий обязан проверить owner-private chat и одноразовый callback token. */
 export function createHumanActions(runtime) {

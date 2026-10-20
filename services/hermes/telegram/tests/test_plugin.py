@@ -3,6 +3,7 @@
 import ast
 import asyncio
 from dataclasses import replace
+import html
 import importlib.util
 import json
 import os
@@ -419,14 +420,40 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.request()
         self.assertGreater(len(self.bot.sent), 1)
         text = ''.join(item['text'] for item in self.bot.sent)
-        self.assertIn(preview, text)
-        self.assertNotIn(MOVE, text)
+        plain = html.unescape(re.sub(r'</?b>', '', text))
+        self.assertIn(preview, plain)
+        self.assertNotIn(MOVE, plain)
         for message in self.bot.sent:
             self.assertLessEqual(len(message['text'].encode('utf-16-le')) // 2, 4096)
+            self.assertEqual(message['parse_mode'], 'HTML')
         self.assertTrue(all('reply_markup' not in item for item in self.bot.sent[:-1]))
         keyboard = self.bot.sent[-1]['reply_markup'].inline_keyboard
         self.assertEqual([row[0].text for row in keyboard], ['Принять'])
         self.assertEqual(self.plugin.tokens.pending()[0]['message_id'], str(len(self.bot.sent)))
+
+    async def test_confirmation_html_escapes_owner_text_and_keeps_format_after_edit(self):
+        preview = 'Проверить <камера> & объектив\n\nПлан\n\n1. Сверить A&B < C\n2. Осмотреть < корпус >'
+        self.bridge.action.update(confirmationStage='planning', confirmationText=preview)
+        await self.request()
+        original = self.bot.sent[0]
+        self.assertEqual(original['parse_mode'], 'HTML')
+        self.assertIn('<b>План работы</b>', original['text'])
+        self.assertIn('<b>Проверить &lt;камера&gt; &amp; объектив</b>', original['text'])
+        self.assertIn('<b>1. Сверить A&amp;B &lt; C</b>', original['text'])
+        self.assertIn('<b>2. Осмотреть &lt; корпус &gt;</b>', original['text'])
+        self.assertNotIn('<камера>', original['text'])
+        self.assertNotIn('Замечания или отмену задачи напиши сообщением.', original['text'])
+        self.assertEqual([button.text for row in original['reply_markup'].inline_keyboard for button in row], ['Принять'])
+
+        result = json.loads(await self.plugin.request_confirmation({'moveId': MOVE, 'revisionId': REVISION}))
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(self.bot.sent), 1)
+        self.assertEqual(len(self.bot.edited), 1)
+        edited = self.bot.edited[0]
+        self.assertEqual(edited['parse_mode'], 'HTML')
+        self.assertIn('<b>План работы</b>', edited['text'])
+        self.assertIn('<b>1. Сверить A&amp;B &lt; C</b>', edited['text'])
+        self.assertEqual([button.text for row in edited['reply_markup'].inline_keyboard for button in row], ['Принять'])
 
     async def test_missing_reviewable_result_does_not_send_blind_approval_buttons(self):
         self.bridge.action.update(confirmationStage='final', confirmationText=None)
@@ -766,7 +793,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.action.update(confirmationStage=None, decision="final", outputContracts=[{"key": "result", "name": "Отчёт"}], confirmationText=None)
         requested = json.loads(await self.plugin.request_confirmation({"moveId": MOVE, "revisionId": REVISION}))
         self.assertTrue(requested["ok"], requested)
-        self.assertIn("Выполни этот практический Ход", self.bot.sent[-1]["text"])
+        self.assertIn("Выполни это практическое действие", self.bot.sent[-1]["text"])
         self.assertNotIn("reply_markup", self.bot.sent[-1])
         self.native_context["HERMES_SESSION_MESSAGE_ID"] = "51"
         report = self.event(text="Забрал и проверил часы.", message_id="51")
