@@ -138,3 +138,13 @@ test('Subject fields preserve every saved condition and work phrase without lexi
   const result = confirmationText({ elements: [task], moves: [] }, { fields: { planning: { decision: 'confirm' } } }, task);
   for (const phrase of phrases) assert.ok(result.includes(phrase), phrase);
 });
+
+test('Disclosed child work takes priority over scope role drafts on the same Task', () => {
+  const goal = target('goal');
+  const child = { id: 'child', parentId: goal.id, kind: 'task', title: 'Проверить бумаги', fields: { scope: 'Я: составлю старый черновик.\nТы: проверишь старый черновик.' } };
+  const graph = { elements: [goal, child], resources: [], moves: [move('current-work', 'work', 'Сверю подписи в оригинале', { actor: 'agent' }, { targetId: child.id })] };
+  const result = confirmationText(graph, { fields: { planning: { decision: 'confirm' } } }, goal);
+  assert.ok(result.includes('Я: Сверю подписи в оригинале'));
+  assert.ok(!result.includes('Я: составлю старый черновик'));
+  assert.ok(!result.includes('Ты: проверишь старый черновик'));
+});

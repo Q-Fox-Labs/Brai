@@ -31,10 +31,12 @@ function actorOf(move) {
   return actor === 'agent' ? 'Я' : ['human', 'player'].includes(actor) ? 'Ты' : null;
 }
 function savedRoles(graph, element) {
-  const explicit = roles(fieldsOf(element));
-  if (explicit.length) return explicit.map(item => `${item.actor}: ${item.work}`);
-  return workMoves(graph, element).filter(item => actorOf(item)).map(item =>
-    `${actorOf(item)}: ${readable(item.title)}${item.status === 'succeeded' ? ' — готово' : ''}`).filter(line => !line.endsWith(': '));
+  const work = workMoves(graph, element);
+  if (work.length) return work.map(item => {
+    const actor = actorOf(item);
+    return `${actor ? `${actor}: ` : ''}${readable(item.title)}${item.status === 'succeeded' ? ' — готово' : ''}`;
+  });
+  return roles(fieldsOf(element)).map(item => `${item.actor}: ${item.work}`);
 }
 function childrenOf(graph, element) {
   const children = (graph.elements ?? []).filter(child => child.parentId === element.id && child.status !== 'cancelled');
