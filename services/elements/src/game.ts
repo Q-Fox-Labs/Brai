@@ -98,14 +98,20 @@ async function ready(c: PoolClient, owner: string, move: Value, selected?: strin
  return ids;
 }
 /** Machine snapshots stay in PostgreSQL; graph carries cards and real results, packet exposes scoped rules. */
-function publicFields(fields:Value):Value{if(!fields?.planning?.stage)return fields;const {stage,...planning}=fields.planning;return {...fields,planning};}
-function publicResult(result:Value|null):Value|null{if(!result?.planning)return result;const p=result.planning;return {...result,planning:{source_revision:p.source_revision,candidate_sha256:p.candidate_sha256,applied:p.applied}};}
+function publicFields(fields:Value):Value{
+ const {planning_context,...visible}=fields??{};
+ if(!fields?.planning)return visible;
+ const {stage,criteria,expected_resources,...planning}=fields.planning;
+ return {...visible,planning:{...planning,...(criteria?{criteria:criteria.map((r:Value)=>{const {quote,...criterion}=r;return criterion;})}:{})}};
+}
+function publicMoveFields(fields:Value):Value{const {id,owner,target,previous,status,purpose,instruction,title,...visible}=fields;return visible;}
+function publicResult(result:Value|null,resourceIds:string[]):Value|null{if(!result)return result;const {resources,...visible}=result;const p=result.planning;return {...visible,...(resources?{resource_ids:resourceIds}:{}),...(p?{planning:{source_revision:p.source_revision,candidate_sha256:p.candidate_sha256,applied:p.applied}}:{})};}
 async function graph(c: PoolClient, owner: string): Promise<Value> {
  const rows=async(table:string)=>(await c.query(`SELECT * FROM game_core.${table} WHERE owner_id=$1`,[owner])).rows;
  const [els,revs,mvs,ats,res,ars,ers]=await Promise.all(['elements','element_revisions','moves','move_attempts','resources','attempt_resources','element_resources'].map(rows));
  const elements=els!.map(e=>{const r=revs!.find(r=>r.id===e.current_revision_id)!; return {id:e.id,kind:e.kind,parentId:e.parent_id,status:e.status,revision:r.id,title:r.title,description:r.description,fields:publicFields(r.fields),provenance:e.provenance,input:ers!.filter(x=>x.element_id===e.id&&x.role==='input').map(x=>x.resource_id),output:ers!.filter(x=>x.element_id===e.id&&x.role==='output').map(x=>x.resource_id)};});
- const moves=mvs!.map(m=>{const a=ats!.filter(a=>a.move_id===m.id).sort((a,b)=>String(b.recorded_at).localeCompare(String(a.recorded_at)))[0]; return {id:m.id,ownerId:m.element_id,targetId:m.target_element_id,previousId:m.previous_move_id,kind:m.kind,title:m.title,status:m.status,attemptId:a?.id??'',executor:a?.executor_kind??(m.kind==='action'?'human':'agent'),instructions:m.instructions,conditions:m.conditions,fields:m.fields,purpose:m.purpose,input:a?ars!.filter(x=>x.attempt_id===a.id).map(x=>x.resource_id):[],output:a?res!.filter(x=>x.created_by_attempt_id===a.id).map(x=>x.id):[]};});
- return {elements,moves,resources:res!.map(r=>({id:r.id,attemptId:r.created_by_attempt_id,title:r.title,content:r.content,metadata:r.metadata,artifactIds:r.artifact_ids})),attempts:ats!.map(a=>({id:a.id,moveId:a.move_id,status:a.status,result:publicResult(a.result),errorCode:a.error_code,startedAt:a.started_at,finishedAt:a.finished_at})),revisions:revs!.map(r=>({...r,fields:publicFields(r.fields)})),links:[]};
+ const moves=mvs!.map(m=>{const a=ats!.filter(a=>a.move_id===m.id).sort((a,b)=>String(b.recorded_at).localeCompare(String(a.recorded_at)))[0]; return {id:m.id,ownerId:m.element_id,targetId:m.target_element_id,previousId:m.previous_move_id,kind:m.kind,title:m.title,status:m.status,attemptId:a?.id??'',executor:a?.executor_kind??(m.kind==='action'?'human':'agent'),instructions:m.instructions,conditions:m.conditions,fields:publicMoveFields(m.fields),purpose:m.purpose,input:a?ars!.filter(x=>x.attempt_id===a.id).map(x=>x.resource_id):[],output:a?res!.filter(x=>x.created_by_attempt_id===a.id).map(x=>x.id):[]};});
+ return {elements,moves,resources:res!.map(r=>({id:r.id,attemptId:r.created_by_attempt_id,title:r.title,content:r.content,metadata:r.metadata,artifactIds:r.artifact_ids})),attempts:ats!.map(a=>({id:a.id,moveId:a.move_id,status:a.status,result:publicResult(a.result,res!.filter(r=>r.created_by_attempt_id===a.id).map(r=>r.id)),errorCode:a.error_code,startedAt:a.started_at,finishedAt:a.finished_at})),revisions:revs!.map(r=>({...r,fields:publicFields(r.fields)})),links:[]};
 }
 async function createElement(c:PoolClient,owner:string,v:Value) {
  const id=v.id?uuid(v.id):randomUUID(), revision=v.revision?uuid(v.revision):randomUUID();

@@ -45,5 +45,13 @@ test('planning PostgreSQL: clarification and deferred continuation preserve know
   const review=stage.records.find(x=>x.purpose==='review');
   await done(review.id,'TEST общий итог принят',{stage:'final',outcome:'success'});await done(stage.finish.id,'Сигнал: МАЯК + TEST принятая обработка');
   const g=await graph();assert.equal(g.elements.find(x=>x.id===f.element.id).status,'completed');assert.ok(g.resources.some(x=>x.content==='Сигнал: МАЯК + TEST принятая обработка'));
+  const outputAttempt=g.attempts.find(a=>a.moveId===stage.finish.id),outputResources=g.resources.filter(r=>r.attemptId===outputAttempt.id);
+  assert.deepEqual(outputAttempt.result.resource_ids,outputResources.map(r=>r.id),'graph outputs reference canonical resource UUIDs');
+  assert.equal(outputAttempt.result.resources,undefined,'graph avoids duplicate actual result content');
+  const stored=(await h.timelineGet(req({element_id:f.element.id,limit:100}))).items.find(a=>a.id===outputAttempt.id);
+  assert.equal(stored.result.resources[0].content,outputResources[0].content,'scoped history retains complete actual result');
+  assert.ok(g.elements.every(e=>!e.fields.planning_context&&!e.fields.planning?.stage&&!e.fields.planning?.expected_resources));
+  assert.ok(g.moves.find(m=>m.id===known.id).instructions,'Move instructions remain visible');
+  assert.ok(g.moves.find(m=>m.id===known.id).fields.planning.output_contracts.length,'output contracts remain visible on producer');
  }finally{const c=await admin.connect();try{await c.query('BEGIN');await c.query('SET CONSTRAINTS ALL DEFERRED');for(const table of ['outbox','element_resources','attempt_resources','resources','move_attempts','moves','element_revisions','elements'])await c.query(`DELETE FROM game_core.${table} WHERE owner_id=$1`,[owner]);await c.query('COMMIT');}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();await app.end();await admin.end();}}
 });
