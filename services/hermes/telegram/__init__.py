@@ -237,7 +237,8 @@ class Tokens:
             row = db.execute("SELECT * FROM tokens WHERE token=? AND consumed=0", (token,)).fetchone()
             if (row is None or (owner is not None and
                     (row["owner"] != owner or row["message_id"] != str(message_id) or row["chat_id"] != chat_id))
-                    or (thread_id is not None and row["thread_id"] != thread_id)):
+                    or (thread_id is not None and row["thread_id"] != thread_id
+                        and not (row["thread_id"] == "1" and thread_id == ""))):
                 return None
             db.execute("UPDATE tokens SET consumed=1 WHERE token=?", (token,))
             return dict(row)
@@ -423,9 +424,10 @@ class TelegramPlugin:
             raise ApplicationHandlerStop
 
     async def _notify(self, text, chat_id=None, thread_id=""):
+        # Telegram sendMessage rejects the canonical forum General thread ID 1.
         if self.bot is None:
             raise BridgeError("TELEGRAM_UNAVAILABLE")
-        route = {"message_thread_id": int(thread_id)} if thread_id else {}
+        route = {"message_thread_id": int(thread_id)} if thread_id and str(thread_id) != "1" else {}
         await self.bot.send_message(chat_id=int(chat_id or self.config.chat), text=text, **route,
                                     connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
 
@@ -666,7 +668,7 @@ class TelegramPlugin:
             text += ("Нужны изменения — обсудить и доработать; отменить — остановить запрос.\n"
                      "Срок кнопки: 15 минут.")
             thread_id = self.tokens.unresolved(token)["thread_id"]
-            route = {"message_thread_id": int(thread_id)} if thread_id else {}
+            route = {"message_thread_id": int(thread_id)} if thread_id and str(thread_id) != "1" else {}
             # Не обрезаем план/результат. 1800 code points помещаются в 4096 UTF-16 units.
             chunks = [text[index:index + 1800] for index in range(0, len(text), 1800)]
             for index, chunk in enumerate(chunks):

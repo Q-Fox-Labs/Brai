@@ -774,12 +774,41 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                 result = json.loads(await self.plugin.request_confirmation(
                     {"moveId": MOVE, "revisionId": REVISION}, session_id=self.entry.session_id))
             self.assertTrue(result["ok"], result)
-            self.assertEqual(self.bot.sent[-1]["message_thread_id"], 1)
+            self.assertNotIn("message_thread_id", self.bot.sent[-1])
             row = self.plugin.tokens.pending()[0]
             self.assertEqual(row["session_id"], self.entry.session_id)
             self.assertEqual(row["session_key"], self.native_context["HERMES_SESSION_KEY"])
         finally:
             native.clear_session_vars(tokens)
+
+    async def test_general_topic_sends_without_thread_and_accepts_only_its_bound_callback(self):
+        """Telegram General rejects send thread=1 and omits it on callbacks."""
+        await self.set_group_route()
+        self.native_context["HERMES_SESSION_THREAD_ID"] = self.entry.origin.thread_id = "1"
+        original_send = self.bot.send_message
+        async def telegram_send(**kwargs):
+            if kwargs.get("message_thread_id") == 1:
+                raise RuntimeError("Bad Request: message thread not found")
+            return await original_send(**kwargs)
+        self.bot.send_message = telegram_send
+        data = await self.request()
+        self.assertNotIn("message_thread_id", self.bot.sent[-1])
+        row = self.plugin.tokens.pending()[0]
+        self.assertEqual(row["thread_id"], "1")
+        # Another topic and another message must not consume the real button.
+        wrong_topic = FakeQuery(data, chat=int(GROUP), chat_type="supergroup")
+        wrong_topic.message.message_thread_id = 37
+        wrong_message = FakeQuery(data, chat=int(GROUP), chat_type="supergroup", message_id=99)
+        for query in (wrong_topic, wrong_message):
+            await self.plugin.callback(NS(callback_query=query), None)
+            self.assertFalse(self.plugin.tokens.pending()[0]["consumed"])
+            self.assertEqual(self.injections, [])
+        query = FakeQuery(data, chat=int(GROUP), chat_type="supergroup")
+        await self.plugin.callback(NS(callback_query=query), None)
+        self.assertEqual(sum(method == "actions.complete" for method, _ in self.bridge.calls), 1)
+        self.assertEqual(len(self.injections), 1)
+        self.assertEqual(len(self.bot.sent), 2)
+        self.assertTrue(all("message_thread_id" not in message for message in self.bot.sent))
 
     async def test_dispatch_session_id_cannot_override_another_or_missing_session(self):
         cases = (("native-session-1", "wrong-session"), ("", "wrong-session"), ("", ""))
