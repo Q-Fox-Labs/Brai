@@ -99,6 +99,24 @@ test('real PostgreSQL/Git acceptance',{skip:!configured,timeout:120000},async t=
     assert.equal((await op(p,a.operation_id)).error.code,'OWNERSHIP_CONFLICT');
     assert.equal((await command('git',['-C',w.path,'symbolic-ref','--short','HEAD'])).stdout,'foreign');
   });
+  await t.test('new workspace metadata uses prepared packages without changing the source checkout',async()=>{
+    const p=await f.project(),base=(await command('git',['-C',p.repo_path,'rev-parse','HEAD'])).stdout;
+    const manifest={name:'@fixture/new',version:'1.0.0'};
+    await mkdir(path.join(p.repo_path,'packages/new'));
+    await writeFile(path.join(p.repo_path,'packages/new/package.json'),JSON.stringify(manifest)+'\n');
+    const file=path.join(p.repo_path,'package-lock.json'),lock=JSON.parse(await readFile(file,'utf8'));
+    lock.packages['packages/new']=manifest;lock.packages['node_modules/@fixture/new']={resolved:'packages/new',link:true};
+    await writeFile(file,JSON.stringify(lock)+'\n');
+    await command('git',['-C',p.repo_path,'add','.']);await command('git',['-C',p.repo_path,'commit','-m','Add local workspace']);
+    const newer=(await command('git',['-C',p.repo_path,'rev-parse','HEAD'])).stdout;
+    await command('git',['-C',p.repo_path,'update-ref','refs/remotes/origin/dev',newer]);
+    await command('git',['-C',p.repo_path,'reset','--hard',base]);
+    const a=await f.h.call('prepare-write',prepare(p),'codex');await f.worker(p,a.operation_id);
+    assert.equal((await op(p,a.operation_id)).status,'succeeded');const w=await area(a.workspace_id);
+    assert.equal(await realpath(path.join(w.path,'node_modules/@fixture/new')),path.join(w.path,'packages/new'));
+    assert.equal((await command('git',['-C',p.repo_path,'rev-parse','HEAD'])).stdout,base);
+    assert.equal((await command(p.preparer_path,['--check',w.path])).code,0);
+  });
   await t.test('dependency mismatch leaves intent and owned checkout; retry needs a new key',async()=>{
     const p=await f.project(),a=await f.h.call('prepare-write',prepare(p),'codex');
     await f.worker(p,a.operation_id,'after-checkout');

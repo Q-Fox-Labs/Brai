@@ -110,12 +110,11 @@ export function createGit() {
     async dependencies(project,w) {
       requireLock();await this.inspect(project,w);
       if(process.version.slice(1)!==project.node_version||process.platform+'-'+process.arch!==project.platform)throw new Fault('DEPENDENCIES_INCOMPATIBLE','Node/platform mismatch; no installation was attempted.');
-      const [sourceLock,areaLock]=await Promise.all([readFile(path.join(project.repo_path,'package-lock.json')),readFile(path.join(w.path,'package-lock.json'))]).catch(()=>{throw new Fault('DEPENDENCIES_INCOMPATIBLE','MISSING_LOCKFILE; no installation was attempted.');});
-      if(!sourceLock.equals(areaLock))throw new Fault('DEPENDENCIES_INCOMPATIBLE','Lockfile differs from the prepared source checkout; no installation was attempted.');
+      await Promise.all([readFile(path.join(project.repo_path,'package-lock.json')),readFile(path.join(w.path,'package-lock.json'))]).catch(()=>{throw new Fault('DEPENDENCIES_INCOMPATIBLE','MISSING_LOCKFILE; no installation was attempted.');});
       for(const args of [[w.path],['--check',w.path]]) {
         const result=await command(project.preparer_path,args,{allowFailure:true});
         if(result.code!==0) {
-          const reason=result.stderr.match(/(?:LOCKFILE_MISMATCH|NODE_VERSION_MISMATCH|NPM_VERSION_MISMATCH|MANIFEST_MISMATCH|PACKAGE_VERSION_MISMATCH|MISSING_PACKAGE|WORKSPACE_OUTSIDE_WORKTREE|UNMANAGED_[A-Z_]+|MISSING_OR_UNLOADABLE_NEXT_NATIVE_PACKAGE|MISSING_[A-Z_]+)/)?.[0]??'PREPARER_REJECTED';
+          const reason=result.stderr.match(/(?:UNPREPARED_WORKSPACE_DEPENDENCY|LOCKFILE_MISMATCH|NODE_VERSION_MISMATCH|NPM_VERSION_MISMATCH|MANIFEST_MISMATCH|PACKAGE_VERSION_MISMATCH|MISSING_PACKAGE|WORKSPACE_OUTSIDE_WORKTREE|UNMANAGED_[A-Z_]+|MISSING_OR_UNLOADABLE_NEXT_NATIVE_PACKAGE|MISSING_[A-Z_]+)/)?.[0]??'PREPARER_REJECTED';
           throw new Fault('DEPENDENCIES_INCOMPATIBLE',reason+'; dependencies were not installed.');
         }
       }
