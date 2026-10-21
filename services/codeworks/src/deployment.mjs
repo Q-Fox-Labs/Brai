@@ -46,6 +46,23 @@ export function createDeploymentAdapter(configFile=process.env.CODEWORKS_DEPLOYM
     return JSON.parse(result.stdout);
   };
 }
+/** Binds the actual active subset to exact owner-verified component objects; disabled refs stay provenance only. */
+export function installedComposition(composition,receipt) {
+  if(receipt.installed_components===undefined&&receipt.inactive===undefined)return composition;
+  const active=receipt.installed_components,inactive=receipt.inactive;
+  if(!Array.isArray(active)||!Array.isArray(inactive))throw Error('INSTALLED_SUBSET_INVALID');
+  const trusted=new Map(composition.components.map(item=>[item.id,item])),seen=new Set();
+  for(const item of active){
+    if(seen.has(item.id)||!equal(item,trusted.get(item.id)))throw Error('INSTALLED_SUBSET_INVALID');
+    seen.add(item.id);
+  }
+  for(const item of inactive){
+    if(seen.has(item.id)||!trusted.has(item.id)||!equal(item.artifact,trusted.get(item.id).artifact)||item.reason!=='disabled-in-production')throw Error('INSTALLED_SUBSET_INVALID');
+    seen.add(item.id);
+  }
+  if(seen.size!==trusted.size)throw Error('INSTALLED_SUBSET_INVALID');
+  return {...composition,components:active};
+}
 /** Bounded poll starts/reconciles one managed Ansible operation; success atomically records installed + evidence. */
 export async function advanceDeployment(db,op,adapter) {
   if(!adapter)return {status:'awaiting_deployment',reason:'DEPLOYMENT_ADAPTER_REQUIRED'};
@@ -58,10 +75,11 @@ export async function advanceDeployment(db,op,adapter) {
   }
   const r=result.receipt;
   if(result.status!=='succeeded'||r?.operation_id!==op.id||r.project_id!==d.project_id||r.target!==d.target||r.commit_sha!==d.commit_sha||r.composition_digest!==d.composition_digest||!equal(r.composition,d.composition)||r.verified!==true)throw Error('DEPLOYMENT_RECEIPT_MISMATCH');
+  const installed=installedComposition(d.composition,r);
   await db.query('BEGIN');
   try {
     await db.query('UPDATE codeworks.deployments SET receipt=$2 WHERE operation_id=$1',[op.id,r]);
-    await db.query('INSERT INTO codeworks.installed(project_id,target,operation_id,composition) VALUES($1,$2,$3,$4) ON CONFLICT(project_id,target) DO UPDATE SET previous_composition=codeworks.installed.composition,composition=excluded.composition,operation_id=excluded.operation_id,updated_at=clock_timestamp() WHERE codeworks.installed.operation_id<>excluded.operation_id',[d.project_id,d.target,op.id,d.composition]);
+    await db.query('INSERT INTO codeworks.installed(project_id,target,operation_id,composition) VALUES($1,$2,$3,$4) ON CONFLICT(project_id,target) DO UPDATE SET previous_composition=codeworks.installed.composition,composition=excluded.composition,operation_id=excluded.operation_id,updated_at=clock_timestamp() WHERE codeworks.installed.operation_id<>excluded.operation_id',[d.project_id,d.target,op.id,installed]);
     await db.query('INSERT INTO codeworks.deployment_evidence(id,project_id,target,commit_sha,evidence_url) VALUES($1,$2,$3,$4,$5) ON CONFLICT(project_id,target,evidence_url) DO NOTHING',[randomUUID(),d.project_id,d.target,d.commit_sha,r.evidence_url]);
     await db.query('COMMIT');
   }catch(error){await db.query('ROLLBACK');throw error;}

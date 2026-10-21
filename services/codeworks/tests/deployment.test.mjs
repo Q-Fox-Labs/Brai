@@ -2,7 +2,7 @@
 // ABOUTME: Не подменяет реальную приёмку Ansible, PostgreSQL или установленного DEV.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {deploymentDiff,enqueueDeployment,advanceDeployment} from '../src/deployment.mjs';
+import {deploymentDiff,enqueueDeployment,advanceDeployment,installedComposition} from '../src/deployment.mjs';
 const component=(id,digest)=>({id,artifact:{digest}});
 const composition={source:'a'.repeat(40),recipe:'b'.repeat(64),components:[component('a','x'),component('b','y')]};
 test('unknown bootstrap explicit; unchanged compares actual installed, never failed previous candidate',()=>{
@@ -23,4 +23,13 @@ test('running and failed adapter outcomes never record installed/evidence; misma
  assert.equal((await advanceDeployment(db,{id:'id'},async()=>({status:'failed',phase:'download'}))).status,'failed');
  await assert.rejects(advanceDeployment(db,{id:'id'},async()=>({status:'succeeded',receipt:{operation_id:'wrong'}})),/RECEIPT_MISMATCH/);
  assert.equal(queries.some(q=>q.includes('INSERT INTO codeworks.installed')),false);
+});
+
+test('installed subset retains exact trusted refs; inactive refs never become installed',()=>{
+ const inactive=[{id:'b',artifact:composition.components[1].artifact,reason:'disabled-in-production'}];
+ assert.deepEqual(installedComposition(composition,{installed_components:composition.components,inactive:[]}),composition);
+ assert.deepEqual(installedComposition(composition,{installed_components:[composition.components[0]],inactive}).components,[composition.components[0]]);
+ assert.throws(()=>installedComposition(composition,{installed_components:[component('a','unknown')],inactive}),/INSTALLED_SUBSET_INVALID/);
+ assert.throws(()=>installedComposition(composition,{installed_components:[component('unknown','x')],inactive}),/INSTALLED_SUBSET_INVALID/);
+ assert.throws(()=>installedComposition(composition,{installed_components:[composition.components[0]],inactive:[]}),/INSTALLED_SUBSET_INVALID/);
 });
