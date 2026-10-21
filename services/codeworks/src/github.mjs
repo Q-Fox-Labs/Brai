@@ -5,13 +5,27 @@ import { Fault } from './errors.mjs';
 import { verifyCI,downloadProof } from './ci-verifier.mjs';
 import { createRegistry } from '../ci/registry.mjs';
 import {readCatalogKey,publishCatalog} from './ci-evidence.mjs';
+const transientReadFailure=stderr=>{
+  const status=String(stderr??'').match(/\bHTTP ([1-5][0-9]{2})\b/i);
+  if(status)return ['502','503','504'].includes(status[1]);
+  return /TLS handshake timeout|\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN)\b|i\/o timeout|connection reset by peer|temporary failure in name resolution|unexpected EOF/i.test(stderr??'');
+};
 /** Подключает gh с существующей operator auth; stdout/stderr с секретами наружу не передаются. */
 export function createGitHub({run=command,registryFactory=createRegistry,evidenceStore,catalogKeyFile=process.env.CODEWORKS_REUSE_PRIVATE_KEY_FILE}={}) {
   async function api(project,endpoint,{method='GET',body}={}) {
     const args=['api','--method',method,'-H','Accept: application/vnd.github+json','repos/'+project.github.repository+'/'+endpoint];
     if(body)args.push('--input','-');
     let result;
-    try{result=await run('gh',args,{input:body?JSON.stringify(body):undefined});}
+    try{
+      const deadline=Date.now()+120000;
+      for(let attempt=0;attempt<2;attempt++) {
+        const remaining=deadline-Date.now();
+        if(remaining<=0)throw Error('READ_BUDGET_EXHAUSTED');
+        result=await run('gh',args,{input:body?JSON.stringify(body):undefined,...(method==='GET'?{allowFailure:true,timeout:remaining}:{})});
+        if(result.code===undefined||result.code===0)break;
+        if(method!=='GET'||attempt===1||!transientReadFailure(result.stderr))throw Error('READ_UNAVAILABLE');
+      }
+    }
     catch{throw new Fault('GITHUB_UNAVAILABLE','GitHub response unavailable; reconcile the recorded intent.');}
     try{return JSON.parse(result.stdout);}catch{throw new Fault('GITHUB_UNAVAILABLE');}
   }
@@ -37,7 +51,12 @@ export function createGitHub({run=command,registryFactory=createRegistry,evidenc
           // AIDEV-NOTE: Токен остаётся в памяти owner process; не аргумент команды и не часть результата.
           const auth=await run('gh',['auth','token']);
           const registry=registryFactory({repository:project.github.repository,username:project.github.repository.split('/')[0],token:auth.stdout.trim()});
-          verification=await verifyCI(project,sha,doc.check_runs,{api:endpoint=>api(project,endpoint),registry,readProof:artifact=>downloadProof({repository:project.github.repository,token:auth.stdout.trim()},artifact),readVerified:(id,attempt)=>evidenceStore?.read(project,id,attempt)??null,saveVerified:proof=>evidenceStore?.save(project,proof)});
+          const files=new Map(),read=endpoint=>{
+            if(!/^contents\/.+\?ref=[0-9a-f]{40}$/.test(endpoint))return api(project,endpoint);
+            if(!files.has(endpoint))files.set(endpoint,api(project,endpoint));
+            return files.get(endpoint);
+          };
+          verification=await verifyCI(project,sha,doc.check_runs,{api:read,registry,readProof:artifact=>downloadProof({repository:project.github.repository,token:auth.stdout.trim()},artifact),readVerified:(id,attempt)=>evidenceStore?.read(project,id,attempt)??null,saveVerified:proof=>evidenceStore?.save(project,proof)});
           if(verification.verified&&evidenceStore&&project.github.ci.reuse_public_key) {
             const key=readCatalogKey(catalogKeyFile,project.github.ci.reuse_public_key);
             await publishCatalog(project,evidenceStore,registry,key);
