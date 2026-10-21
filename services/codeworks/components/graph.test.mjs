@@ -1,10 +1,11 @@
 // ABOUTME: Acceptance fixtures exercise discovery, graph, lifecycle and separate build/check identities.
+// ABOUTME: Изолированные Git fixtures не читают live-данные основной копии.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, rmSync, chmodSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { discover, fingerprints } from './graph.mjs';
+import { discover, fingerprints, sourceFiles } from './graph.mjs';
 import { execute } from './cli.mjs';
 const repository=resolve(import.meta.dirname,'../../..');
 function put(root,path,text) {mkdirSync(dirname(join(root,path)),{recursive:true});writeFileSync(join(root,path),text);}
@@ -16,6 +17,7 @@ function fixture(t) {
  mkdirSync(join(repository,'tmp'),{recursive:true});
  const root=mkdtempSync(join(repository,'tmp','component-fixture-'));
  t.after(()=>rmSync(root,{recursive:true,force:true}));
+ execFileSync('git',['init','-q',root],{stdio:'pipe'});
  put(root,'services/codeworks/schemas/component.schema.json',readFileSync(join(repository,'services/codeworks/schemas/component.schema.json')));
  return root;
 }
@@ -27,6 +29,26 @@ function add(root,id,edit=()=>{}) {
  put(root,'services/'+id+'/tests.mjs',"import assert from 'node:assert/strict';assert.equal(1,1);\n");return d;
 }
 function save(root,id,d){put(root,'services/'+id+'/component.json',JSON.stringify(d));}
+test('Git source boundary excludes unreadable ignored live directories and keeps tracked and new executable gates',t=>{
+ const root=fixture(t);add(root,'probe');
+ put(root,'.gitignore','.private-live/\nservices/probe/generated/\n');
+ put(root,'.private-live/main.py','#!/usr/bin/env python3\n');
+ put(root,'services/probe/generated/main.mjs','throw Error("live data");');
+ for(const path of ['.private-live','services/probe/generated']) {
+  chmodSync(join(root,path),0o000);
+ }
+ try {
+  assert.deepEqual(discover(root).order,['probe']);
+  assert.ok(!sourceFiles(root).some(path=>path.includes('private-live')||path.includes('generated')));
+  put(root,'tools/new-worker.py','#!/usr/bin/env python3\nprint(42)\n');chmodSync(join(root,'tools/new-worker.py'),0o755);
+  assert.throws(()=>discover(root),/MISSING_EXECUTABLE/);
+  execFileSync('git',['-C',root,'add','tools/new-worker.py']);
+  put(root,'.gitignore','tools/\n.private-live/\nservices/probe/generated/\n');
+  assert.throws(()=>discover(root),/MISSING_EXECUTABLE/);
+  rmSync(join(root,'tools'),{recursive:true});
+  assert.deepEqual(discover(root).order,['probe']);
+ } finally {for(const path of ['.private-live','services/probe/generated'])chmodSync(join(root,path),0o700);}
+});
 test('new described component enters pipeline without workflow editing; build once across build/check/package',async t=>{
  const root=fixture(t);add(root,'probe');
  assert.deepEqual(discover(root).order,['probe']);

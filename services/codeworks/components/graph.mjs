@@ -1,4 +1,5 @@
 // ABOUTME: Discovers owner descriptors, checks build edges and compares component lifecycle with Git.
+// ABOUTME: Git задаёт границу исходников; ignored live-каталоги не читаются.
 import { existsSync, globSync, readFileSync, readdirSync, lstatSync } from 'node:fs';
 import { dirname, join, relative, resolve, posix } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -8,15 +9,13 @@ import Ajv from 'ajv';
 
 const ignored = new Set(['.git', 'node_modules', '.next', 'dist', 'tmp', '__pycache__', '.venv']);
 export const json = path => JSON.parse(readFileSync(path, 'utf8'));
-export function sourceFiles(root, directory = '') {
-  const files = [];
-  for (const item of readdirSync(join(root, directory), {withFileTypes:true})) {
-    if (ignored.has(item.name) || item.isSymbolicLink()) continue;
-    const path = posix.join(directory, item.name);
-    if (item.isDirectory()) files.push(...sourceFiles(root, path));
-    else if (item.isFile()) files.push(path);
-  }
-  return files.sort();
+/** Возвращает существующие tracked и новые non-ignored исходники без обхода live-каталогов. */
+export function sourceFiles(root) {
+  const paths = git(root,['ls-files','--cached','--others','--exclude-standard','-z']).split('\0').filter(Boolean);
+  return [...new Set(paths)].filter(path => {
+    if (path.split('/').some(part=>ignored.has(part)) || !existsSync(join(root,path))) return false;
+    return lstatSync(join(root,path)).isFile();
+  }).sort();
 }
 export function expand(root, patterns) {
   const paths = new Set();
