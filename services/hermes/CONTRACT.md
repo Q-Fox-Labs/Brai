@@ -99,3 +99,7 @@ JSON-сопоставления по точным названиям и отде
 свидетельств практической работы.
 Параметр feedback у elements_element_activate запрещён обычному MCP модели;
 его передаёт только private порт. Подробности — в telegram/CONTRACT.md.
+
+## Ограниченное чтение пакета постановки
+
+`elements_planning_packet_read({attempt_id,file_name?,offset?,limit?})` без file_name возвращает manifest с `file_sha256` каждого точного UTF-8 файла. Aggregate `inputs_sha256` сохраняет прежний смысл. Имя выбирается только среди ключей текущего owner `elements_planning_packet`, не является путём файловой системы. Offset считает Unicode code points; limit 1–12000, next_offset=null означает конец. Каждый slice содержит тот же полный хеш, source revision и manifest. Читатель не выполняет код, не пишет файлы, не фиксирует baseline и не подтверждает план. Существующие owner/attempt/revision проверки выполняет upstream packet. Проверяющий читает весь пакет и записывает per-file map в baseline.inputs; bind/build/apply и проверка квитанции остаются штатными.

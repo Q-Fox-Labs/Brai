@@ -31,14 +31,16 @@
       "services/hermes/voice.mjs",
       "services/hermes/memos/embedding/adapter.mjs",
       "services/hermes/memos/bridge/codex_bridge.py",
-      "services/hermes/memos/bridge/requirements.txt"
+      "services/hermes/memos/bridge/requirements.txt",
+      "services/hermes/planning-read.mjs"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
       "services/hermes/telegram/tests/test_plugin.py",
       "services/hermes/tests/confirmation.test.mjs",
       "services/hermes/tests/tools.test.mjs",
-      "services/hermes/tests/transcribe.test.mjs"
+      "services/hermes/tests/transcribe.test.mjs",
+      "services/hermes/tests/planning-read.test.mjs"
     ]
   },
   "dependencies": [
@@ -138,7 +140,8 @@
       "services/hermes/voice.mjs",
       "services/hermes/memos/embedding/adapter.mjs",
       "services/hermes/memos/bridge/codex_bridge.py",
-      "services/hermes/memos/bridge/requirements.txt"
+      "services/hermes/memos/bridge/requirements.txt",
+      "services/hermes/planning-read.mjs"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",
