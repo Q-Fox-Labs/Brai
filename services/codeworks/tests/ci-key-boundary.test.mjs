@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {spawnSync} from 'node:child_process';
 import {randomBytes} from 'node:crypto';
-import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs';
+import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createAgentHost, socketCall} from '../src/agent-host.mjs';
@@ -57,15 +57,33 @@ test('CI key stays unreadable to native and broker commands under the same UID',
     let session;
     try{session=await control({action:'open',project_id:project.id,executor_id:'codex'});}catch(error){throw Error(`${error.message}: ${hostErrors.join('; ')}`);}
     const call=request=>socketCall(session.socket,request);
-    const read=await call({action:'command',mode:'read',argv:shell});
+    // Command возвращает pending после короткого ожидания; poll не запускает его повторно.
+    const completed=async result=>{
+      const commandId=result.command_id;
+      while(!result.done){
+        t.signal.throwIfAborted();
+        result=await call({action:'poll',command_id:commandId});
+        assert.equal(result.command_id,commandId,'poll must follow the same command');
+      }
+      return result;
+    };
+    const read=await completed(await call({action:'command',mode:'read',argv:shell}));
     assert.equal(read.exit_code,0,'read_command must hide the key and preserve the owner UID');
     assert.equal(read.stdout,'','read_command must not print file contents');
 
     await assert.rejects(call({action:'read',path:keyPath}),/PATH_DENIED/,'absolute filetool access to the key must be denied');
 
-    const write=await call({action:'command',mode:'write',argv:shell});
+    // stdin удерживает настоящий command в pending; append считает фактические запуски.
+    const gatedShell=[...shell];
+    gatedShell[2]='printf x >> boundary-launches; cat >/dev/null; '+shell[2];
+    const started=await call({action:'command',mode:'write',argv:gatedShell});
+    assert.equal(started.done,false,'stdin-gated command must be pending');
+    assert.equal(started.exit_code,null,'pending is not a failed exit');
+    await call({action:'stdin',command_id:started.command_id,input:'complete\n',eof:true});
+    const write=await completed(started);
     assert.equal(write.exit_code,0,`write_command must hide the key and preserve the owner UID: ${write.stderr}`);
     assert.equal(write.stdout,'','write_command must not print file contents');
-    assert.equal(write.root,workspace);
+    assert.equal(started.root,workspace);
+    assert.equal(readFileSync(path.join(workspace,'boundary-launches'),'utf8'),'x','poll and stdin must not repeat the command');
   } finally {await host.close();}
 });
