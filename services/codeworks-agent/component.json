@@ -52,6 +52,7 @@
         "services/hermes/catalog.mjs",
         "services/hermes/config.mjs",
         "services/hermes/human-actions.mjs",
+        "services/hermes/planning-read.mjs",
         "services/hermes/runtime.mjs",
         "services/hermes/trusted.mjs",
         "services/hermes/telegram/__init__.py",
