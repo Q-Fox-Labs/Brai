@@ -3,22 +3,55 @@
 import { Pool } from 'pg';
 import { pathToFileURL } from 'node:url';
 import { createGit } from './git.mjs';
+import { createFlowGit } from './git-flow.mjs';
+import { createGitHub } from './github.mjs';
+import { advanceRelease } from './release.mjs';
 import { Fault,safeFault } from './errors.mjs';
 /** Исполняет одну незавершённую подготовку; checkpoint нужен также для fault-injection теста. */
-export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[]}={}) {
+export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[],flowGit=createFlowGit(),github=createGitHub()}={}) {
   const db=await pool.connect();
   let locked=false;
   try {
     const operation=(await db.query('SELECT * FROM codeworks.operations WHERE id=$1',[operationId])).rows[0];
-    if(!operation||operation.kind!=='prepare-write')return;
+    if(!operation||!['prepare-write','request-release'].includes(operation.kind))return;
     await db.query('SELECT pg_advisory_lock(hashtextextended($1,0))',[operation.project_id]);locked=true;
     const op=(await db.query('SELECT * FROM codeworks.operations WHERE id=$1',[operationId])).rows[0];
-    if(!['pending','running'].includes(op.status))return;
+    if(!['pending','running',...(op.kind==='request-release'?['awaiting_ci','awaiting_deployment','awaiting_reconciliation']:[])].includes(op.status))return;
     const project=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1',[op.project_id])).rows[0].config;
     const w=(await db.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[op.workspace_id])).rows[0];
     await db.query("UPDATE codeworks.operations SET status='running',updated_at=now() WHERE id=$1",[op.id]);
     try {
       if(!allowedRepositories.includes(project.repo_path))throw new Fault('FORBIDDEN');
+      if(op.kind==='request-release') {
+        const release=(await db.query('SELECT * FROM codeworks.releases WHERE operation_id=$1',[op.id])).rows[0];
+        const save=async details=>{
+          await db.query('BEGIN');
+          try{
+            await db.query('UPDATE codeworks.releases SET details=$2 WHERE id=$1',[release.id,details]);
+            await db.query('UPDATE codeworks.operations SET result=$2,updated_at=now() WHERE id=$1',[op.id,{release_id:release.id,state:'running',details}]);
+            await db.query('COMMIT');
+          }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}
+        };
+        const evidence=async(target,sha)=>{
+          const record=(await db.query('SELECT * FROM codeworks.deployment_evidence WHERE project_id=$1 AND target=$2 ORDER BY created_at DESC,id DESC LIMIT 1',[project.id,target])).rows[0];
+          return record&&(!sha||record.commit_sha===sha)?record:null;
+        };
+        let outcome;
+        try{
+          outcome=await advanceRelease({project,workspace:w,operation:op,release},{git:flowGit,github,inspect:(...args)=>git.inspect(...args),save,evidence,checkpoint});
+        }catch(error){
+          if(error?.code==='TEST_INTERRUPTION')throw error;
+          if(['GITHUB_UNAVAILABLE','GIT_FAILED'].includes(error?.code))outcome={status:'awaiting_reconciliation',reason:error.code};
+          else throw error;
+        }
+        await db.query('BEGIN');
+        try{
+          await db.query('UPDATE codeworks.releases SET state=$2,details=$3 WHERE id=$1',[release.id,outcome.status,release.details]);
+          await db.query('UPDATE codeworks.operations SET status=$2,step=$3,result=$4,error=NULL,updated_at=now() WHERE id=$1',[op.id,outcome.status,outcome.reason,{release_id:release.id,state:outcome.status,details:release.details}]);
+          await db.query('COMMIT');
+        }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}
+        return;
+      }
       // Каждый шаг идемпотентен по реальному Git, а не только по последнему флагу в БД.
       for(const step of ['branch','checkout','dependencies']) {
         await checkpoint('before-'+step);
@@ -43,7 +76,8 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
       const fault=safeFault(error);
       await db.query('BEGIN');
       try {
-        await db.query("UPDATE codeworks.workspaces SET preparation_state='failed' WHERE id=$1",[w.id]);
+        if(op.kind==='prepare-write')await db.query("UPDATE codeworks.workspaces SET preparation_state='failed' WHERE id=$1",[w.id]);
+        else await db.query("UPDATE codeworks.releases SET state='failed' WHERE operation_id=$1",[op.id]);
         await db.query("UPDATE codeworks.operations SET status='failed',error=$2,updated_at=now() WHERE id=$1",[op.id,fault.dto()]);
         await db.query('COMMIT');
       }catch(failure){await db.query('ROLLBACK').catch(()=>{});throw failure;}

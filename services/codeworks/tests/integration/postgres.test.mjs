@@ -8,6 +8,7 @@ import path from 'node:path';
 import {configured,setup} from './fixture.mjs';
 import {command,createGit} from '../../src/git.mjs';
 import {migrate} from '../../src/migrate.mjs';
+import {recordDeployment} from '../../src/deployment-evidence.mjs';
 import {startRuntime} from '../../src/runtime.mjs';
 const prepare=(p,key='area',extra={})=>({project_id:p.id,idempotency_key:key,workspace_key:key,kind:'feature',session_id:'first',...extra});
 test('real PostgreSQL/Git acceptance',{skip:!configured,timeout:120000},async t=>{
@@ -69,6 +70,8 @@ test('real PostgreSQL/Git acceptance',{skip:!configured,timeout:120000},async t=
     await command('git',['-C',p.repo_path,'update-ref','refs/remotes/origin/dev',newer]);
     await f.worker(p,a.operation_id);assert.equal((await op(p,a.operation_id)).status,'succeeded');
     assert.equal((await createGit().inspect(p,await area(w.id))).head,w.base_sha);assert.notEqual(newer,w.base_sha);
+    await assert.rejects(f.h.call('prepare-write',prepare(p,'missing-prod',{kind:'hotfix'}),'codex'),{code:'PRODUCTION_BASE_MISMATCH'});
+    await recordDeployment(f.app,{project_id:p.id,target:'prod',commit_sha:w.base_sha,evidence_url:'https://fixture.invalid/installed'},{allowedRepositories:[p.repo_path]});
     const hotfix=await f.h.call('prepare-write',prepare(p,'hotfix',{kind:'hotfix'}),'codex');
     await f.worker(p,hotfix.operation_id);const hw=await area(hotfix.workspace_id);
     assert.equal(hw.base_ref,'refs/remotes/origin/main');assert.equal(hw.base_sha,w.base_sha);assert.match(hw.branch,/^hotfix\//);

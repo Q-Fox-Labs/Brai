@@ -12,7 +12,7 @@ import { migrate } from '../../src/migrate.mjs';
 import { launchWorker } from '../../src/runtime.mjs';
 export const configured=!!process.env.CODEWORKS_TEST_CONFIG_FILE;
 /** Принимает только две конкретные disposable DB; credentials не логируются. */
-export async function setup() {
+export async function setup({git=createGit()}={}) {
   const config=JSON.parse(await readFile(process.env.CODEWORKS_TEST_CONFIG_FILE,'utf8'));
   for(const [key,name] of [['owner_url','brai_codeworks_test'],['app_url','brai_codeworks_test'],['restore_owner_url','brai_codeworks_restore_test'],['restore_app_url','brai_codeworks_restore_test']]) {
     const url=new URL(config[key]);
@@ -23,11 +23,11 @@ export async function setup() {
   await migrate(owner,config.app_role);
   await owner.query('TRUNCATE codeworks.requests,codeworks.attachments,codeworks.releases,codeworks.operations,codeworks.workspaces,codeworks.projects CASCADE');
   const allowedRepositories=[];
-  const h=createHandlers(createStore(app),createGit(),{allowedRepositories});
+  const h=createHandlers(createStore(app),git,{allowedRepositories});
   const temporary=[];
   return {config,owner,app,h,
     /** Реальный минимальный monorepo использует установленный подготовщик с package/workspace проверками. */
-    async project({documentationPaths=[],sharedFixture=false}={}) {
+    async project({documentationPaths=[],sharedFixture=false,github}={}) {
       const temporaryRoot=fileURLToPath(new URL('../../../../tmp/',import.meta.url));
       await mkdir(temporaryRoot,{recursive:true});
       const root=await realpath(await mkdtemp(path.join(temporaryRoot,'codeworks-test-')));temporary.push(root);
@@ -64,6 +64,12 @@ export async function setup() {
       const preparer=path.join(common,'hooks/prepare-brai-worktree');
       await copyFile(process.env.CODEWORKS_TEST_PREPARER??path.join(sourceCommon,'hooks/prepare-brai-worktree'),preparer);await chmod(preparer,0o755);
       const project={id:'test_'+randomUUID(),repo_path:repo,common_dir:common,workspace_root:areas,allowed_paths:['.'],excluded_paths:['.git','node_modules','.env'],executors:['codex','hermes'],git_flow:{feature_base:'refs/remotes/origin/dev',hotfix_base:'refs/remotes/origin/main',feature_prefix:'feature/',hotfix_prefix:'hotfix/'},preparer_path:preparer,node_version:'24.21.0',platform:process.platform+'-'+process.arch};
+      if(github){
+        project.github=github;
+        const remote=path.join(root,'origin.git');
+        await command('git',['init','--bare',remote]);await command('git',['-C',repo,'remote','add','origin',remote]);
+        await command('git',['-C',repo,'push','origin','dev',base+':refs/heads/main']);
+      }
       if(documentationPaths.length)project.documentation_paths=documentationPaths;
       allowedRepositories.push(repo);
       await h.call('project.register',{project},'codeworks_admin');

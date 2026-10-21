@@ -11,7 +11,8 @@
     "services/codeworks/src/main.mjs",
     "services/codeworks/src/mcp.mjs",
     "services/codeworks/src/migrate.mjs",
-    "services/codeworks/src/worker.mjs"
+    "services/codeworks/src/worker.mjs",
+    "services/codeworks/src/deployment-evidence.mjs"
   ],
   "inputs": {
     "build": [
@@ -21,6 +22,7 @@
     "runtime": [
       "services/codeworks/asyncapi.json",
       "services/codeworks/migrations/001.sql",
+      "services/codeworks/migrations/002.sql",
       "services/codeworks/package.json",
       "services/codeworks/schemas/api.schema.json",
       "services/codeworks/schemas/component.schema.json",
@@ -32,13 +34,17 @@
       "services/codeworks/src/agent-tools.json",
       "services/codeworks/src/client.mjs",
       "services/codeworks/src/contracts.mjs",
+      "services/codeworks/src/deployment-evidence.mjs",
       "services/codeworks/src/domain.mjs",
       "services/codeworks/src/errors.mjs",
+      "services/codeworks/src/git-flow.mjs",
       "services/codeworks/src/git.mjs",
+      "services/codeworks/src/github.mjs",
       "services/codeworks/src/main.mjs",
       "services/codeworks/src/mcp.mjs",
       "services/codeworks/src/migrate.mjs",
       "services/codeworks/src/nats.mjs",
+      "services/codeworks/src/release.mjs",
       "services/codeworks/src/runtime.mjs",
       "services/codeworks/src/storage.mjs",
       "services/codeworks/src/worker.mjs"
@@ -51,8 +57,10 @@
       "services/codeworks/components/package-runtime.test.mjs",
       "services/codeworks/tests/agent-files.test.mjs",
       "services/codeworks/tests/contracts.test.mjs",
+      "services/codeworks/tests/git-flow.test.mjs",
       "services/codeworks/tests/integration/agent-host.test.mjs",
       "services/codeworks/tests/integration/fixture.mjs",
+      "services/codeworks/tests/integration/git-flow.test.mjs",
       "services/codeworks/tests/integration/postgres.test.mjs",
       "services/codeworks/tests/integration/recovery.mjs"
     ]
@@ -74,13 +82,20 @@
       "services/codeworks/src/main.mjs",
       "services/codeworks/src/mcp.mjs",
       "services/codeworks/src/migrate.mjs",
-      "services/codeworks/src/worker.mjs"
+      "services/codeworks/src/worker.mjs",
+      "services/codeworks/src/deployment-evidence.mjs"
     ],
     "smokeImports": [
-      "services/codeworks/src/contracts.mjs"
+      "services/codeworks/src/contracts.mjs",
+      "services/codeworks/src/git-flow.mjs",
+      "services/codeworks/src/github.mjs",
+      "services/codeworks/src/release.mjs",
+      "services/codeworks/src/deployment-evidence.mjs"
     ],
     "systemRequirements": [
-      "Node.js 24.21.0"
+      "Node.js 24.21.0",
+      "Git with merge-tree --write-tree; flock (util-linux)",
+      "GitHub CLI (gh), operator authentication; origin HTTPS matches registered repository"
     ]
   },
   "deploy": {

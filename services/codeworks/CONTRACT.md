@@ -8,6 +8,8 @@ Codeworks — один сервис Brai с собственной БД PostgreS
 
 `NATS / MCP → call → ядро domain → предметные порты storage / Git`.
 
+`request-release → COMMIT intent → worker под flock → release → Git / GitHub → awaiting_ci → awaiting_deployment`. `release` принимает явные порты, не импортирует PostgreSQL или транспорт.
+
 `prepare-write → COMMIT intent → worker под flock → Git branch → checkout → preparer → COMMIT ready`.
 
 MCP stdio и локальный CLI — клиенты единственного NATS API, не отдельные экземпляры сервиса. `main.mjs` собирает PostgreSQL, ядро, NATS и восстановление. Прямой SQL находится в storage, миграции и worker; ядро не импортирует pg/NATS/MCP. Очередь — строки собственной БД, без дополнительного брокера, движка или фреймворка. Node 24.21.0 запускает исходные `.mjs`, отдельная компиляция не требуется.
@@ -20,7 +22,7 @@ Runtime требует явный `CODEWORKS_ALLOWED_REPOSITORIES` — JSON-ма
 
 Все операции проверяют executor по `project.executors`. Регистрацию выполняет только `CODEWORKS_ADMIN_EXECUTOR` (по умолчанию `codeworks_admin`); отдельные admin credentials не выдаются обычным исполнителям. `actor_id` необязателен и заявлен вызывающим; `operations.executor_id` всегда содержит транспортного исполнителя. Это внутренний доверенный интерфейс без пользовательского HTTP endpoint.
 
-`project.register({project})` проверяет канонические `repo_path`, `common_dir`, существующий `workspace_root`, исполняемый файл подготовщика, Node/platform, нормализованные префиксы разрешённых и исключённых путей. Git flow первого этапа: feature от `refs/remotes/origin/dev`, hotfix от `refs/remotes/origin/main`, префиксы `feature/` и `hotfix/`. База читается из текущего локального remote ref; Codeworks не делает fetch. Обновление remote refs — обязанность оператора перед созданием новой области. Запасной переход на main запрещён.
+`project.register({project})` проверяет канонические `repo_path`, `common_dir`, существующий `workspace_root`, исполняемый файл подготовщика, Node/platform, нормализованные префиксы разрешённых и исключённых путей. Git flow: feature от `refs/remotes/origin/dev`, hotfix от `refs/remotes/origin/main`, префиксы `feature/` и `hotfix/`. При заданном `github` база сверяется с фактическим origin через ls-remote; устаревший локальный remote ref отвергается. Обновление remote refs перед подготовкой остаётся обязанностью оператора. Запасной переход на main запрещён. Hotfix дополнительно требует доверенное подтверждение установленного PROD на этом exact main SHA. Без подтверждения подготовка запрещена. Promotion использует `kind:promotion, commit_sha, evidence_id`: историческое доверенное подтверждение проверенного DEV должно точно соответствовать SHA и оставаться предком origin/dev. Последующая версия dev не подменяет выбранную базу. Ветка promotion — `release/codeworks-<UUID>`; изменять её проверенное содержимое запрещено.
 
 Повтор идентичной регистрации возвращает прежнюю конфигурацию. Изменение политики в этой версии не поддержано. У одного Git common directory и корня областей только один проект. `project.get({project_id})` читает политику для разрешённого исполнителя. Необязательный `documentation_paths` задаёт нормализованные разрешённые префиксы документации без symlink. Регистрировать исключения может только администратор проекта; обычные инструменты агента не меняют реестр. Для managed agents префиксы применяет доверенный executor ниже.
 
@@ -28,15 +30,15 @@ Runtime требует явный `CODEWORKS_ALLOWED_REPOSITORIES` — JSON-ма
 
 | Метод | Вход | Результат и эффект |
 | --- | --- | --- |
-| `prepare-write` | `project_id, idempotency_key, workspace_key, kind, session_id`; необязательно `actor_id, element_id, move_id, attempt_id` | `{operation_id,workspace_id}` после commit намерения. Создаёт область или продолжает прежнюю, не создавая новую ветку для новой attempt. |
+| `prepare-write` | `project_id, idempotency_key, workspace_key, kind, session_id`; для promotion `commit_sha,evidence_id`; необязательно `actor_id, element_id, move_id, attempt_id` | `{operation_id,workspace_id}` после commit намерения. Создаёт область или продолжает прежнюю, не создавая новую ветку для новой attempt. |
 | `status` | `project_id,workspace_id` | `{workspace,attachments,git}`. Последние 100 подключений; `git=null` до ready/при failed. Ready проверяет фактическое владение, HEAD и dirty. |
 | `attach-or-transfer` | `project_id,idempotency_key,workspace_id,session_id,expected_epoch,mode`; для quiesce обязательно `writes_stopped:true`; ссылки attempt/move и actor необязательны | `{operation_id,workspace_id}`. Короткая завершённая операция с итоговым writer в operation-status. |
-| `request-release` | `project_id,idempotency_key,workspace_id,session_id,expected_epoch,target,commit_sha`; actor необязателен | `{operation_id,workspace_id}`. Регистрирует запрос для текущего чистого commit. |
+| `request-release` | `project_id,idempotency_key,workspace_id,session_id,expected_epoch,target,commit_sha`; actor необязателен | `{operation_id,workspace_id}`. Закрепляет текущий чистый commit и маршрут; создаёт durable Git flow при настроенном github. Незавершённый release области запрещает второй запрос с другим ключом. |
 | `operation-status` | `project_id,operation_id` | `{operation}` с исходным запросом, исполнителем, actor, status, step, result/error и временем. |
 
 MCP имена: `codeworks_project_register`, `codeworks_project_get`, `codeworks_prepare_write`, `codeworks_status`, `codeworks_attach_or_transfer`, `codeworks_request_release`, `codeworks_operation_status`. Параметры и результаты совпадают с NATS. CLI `node services/codeworks/src/client.mjs <method>` читает один объект параметров из stdin, печатает один JSON результата; stderr предназначен для безопасных ошибок.
 
-`workspace_key` задаёт собственную идентичность области внутри проекта; он не равен attempt, Move или Element. Первое создание закрепляет UUID области, Element ID, kind, base ref/SHA, ветку и путь. Имена веток: `<kind>/codeworks-<workspace UUID>`. Путь: `<workspace_root>/<workspace UUID>`. Изменение kind/Element для прежней области отвергается. Несколько разных workspace_key могут ссылаться на один Element.
+`workspace_key` задаёт собственную идентичность области внутри проекта; он не равен attempt, Move или Element. Первое создание закрепляет UUID области, Element ID, kind, base ref/SHA, ветку и путь. Имена веток: `feature/codeworks-<workspace UUID>`, `hotfix/codeworks-<workspace UUID>`, `release/codeworks-<workspace UUID>`. Путь: `<workspace_root>/<workspace UUID>`. Изменение kind/Element для прежней области отвергается. Несколько разных workspace_key могут ссылаться на один Element.
 
 ## Единственный writer
 
@@ -94,13 +96,29 @@ Host допускает 32 активных процесса, удерживае
 
 ## Выпуски и история
 
-На этом этапе выпуск **не исполняется**. Запрос для clean HEAD сохраняет release и операцию со статусом `awaiting_execution`, результатом `{release_id,reason:"RELEASE_EXECUTION_NOT_AVAILABLE"}`. Merge, push, сборка, rollout и проверка окружения не выполняются. Такой ответ нельзя показывать как успешный выпуск.
+При отсутствии `project.github` прежние запросы остаются `awaiting_execution` с причиной `RELEASE_EXECUTION_NOT_AVAILABLE`; автоматического переключения существующих проектов нет. Оператор регистрирует новую политику с `github:{repository:"owner/repo",required_checks:[{name,app_id}]}`. Список checks непустой: принимаются только успешные `completed/success` checks конкретного GitHub App на точном SHA; отсутствие, pending, failure, skipped, другой App/SHA или неоднозначные дубликаты запрещают продолжение. Обычные commit statuses не заменяют этот контракт. `origin` для чтения и записи должен быть единственным HTTPS URL `https://github.com/<repository>.git`; несовпадение запрещает работу. Нужны существующие Git с `merge-tree --write-tree`, `flock`, `gh` и operator GitHub authentication. Загрузок и установок runtime не делает.
 
-События глобальной истории сейчас не нужны: технические намерения и writer-переходы доступны в собственных operations/attachments. Категории и типы service_history проверены через MCP при создании сервиса. Событие release не отправляется, поскольку выпуска нет. Для будущего фактического выпуска гарантию доставки следует определить вместе с исполнителем, не заменяя её Core NATS publish после commit.
+Маршруты:
+
+- Feature: точный origin/dev → своя feature ветка → PR в dev → merge → CI итогового SHA → запрос DEV установки → доверенное подтверждение установки.
+- Promotion: исторический проверенный DEV SHA → своя release ветка без правок → PR в main → merge → CI итогового SHA → PROD установка. Latest dev не подменяет закреплённую версию.
+- Hotfix: origin/main, равный фактически установленному PROD → линейная hotfix ветка (merge unreleased dev запрещён) → PR в main → CI и подтверждённая PROD установка → отдельный PR исходного исправления в dev → CI и DEV установка. Hotfix не завершён до обоих путей и подтверждений. Перед первым PR установленная версия и main повторно должны совпасть с frozen base.
+
+Один worker под общим project flock/session advisory lock сериализует слияния; checkout основной/чужой ветки не меняется. Target SHA закрепляется до публикации. Каждый шаг сначала сохраняет намерение в `releases.details` и `operations.result`, затем изменяет внешнюю систему. Публикуется только закреплённый head; PR проверяется по repository, branch, head и target. PR body содержит идентификатор своей области; сторонний PR не присваивается.
+
+Git создаёт детерминированный merge commit с точными parents `[target_sha,head]` через merge-tree/commit-tree. Конфликт сохраняет обе ветки и область. Последнее чтение PR/head/checks/target предшествует обычному non-force push candidate в target. Divergent конкурентное изменение атомарно отвергается сервером Git; чужой commit сохраняется. Изменившийся target требует нового намерения/проверки; worker не пересобирает и не выпускает latest автоматически. Защита веток может запретить прямой push: это блокировка, настройки/merge queue не обходятся. Удаления remote refs, force, rebase и cleanup здесь отсутствуют.
+
+При потерянном ответе worker сначала читает реальный remote ref и PR, включая закрытые. Merge принимается только после проверки точных parents, containment в фактическом target и `PR.merged/merge_commit_sha` GitHub. Неопределённый create/push не повторяется вслепую: если результат чтением не подтверждён, сохраняется `awaiting_reconciliation`; оператор разбирает исходную публикацию. Ветка и незавершённая область остаются. Отмена транспорта не отменяет операцию. Waiting состояния опрашиваются не чаще 30 секунд; предел workers остаётся четыре.
+
+Git merge сам по себе не завершает release. `awaiting_ci/HEAD_CHECKS_REQUIRED` означает проверки исходного head, `awaiting_ci/MERGE_CHECKS_REQUIRED` — проверки **точного итогового merge SHA**. Только затем `awaiting_deployment/EXACT_MERGE_DEPLOYMENT_REQUIRED` передаёт этапам CI/deployment `{release_id,state,details:{primary,backport?}}`; leg содержит `target,head,target_sha,merge_sha,pr_number,pr_url`. Runtime не запускает CI, сборку или rollout, не создаёт искусственные статусы. `succeeded` появляется лишь после успешных exact merge checks и доверенного подтверждения установки каждого необходимого leg. Workspace должен оставаться clean на закреплённом HEAD до завершения намерения.
+
+Отдельный owner-вход `src/deployment-evidence.mjs` принимает один JSON из stdin: `{project_id,target:"dev"|"prod",commit_sha,evidence_url}`. Он предназначен **только** для доверенного deployment verifier после фактической установки и проверки окружения, включая исходную регистрацию установленного PROD. Это не метод NATS/MCP, agent tools или обычный параметр release. Credentials `CODEWORKS_EVIDENCE_DATABASE_URL` и allowlist передаются только verifier, вне агентских профилей и writable checkout. Порт `recordDeployment` пишет собственный append-only журнал `deployment_evidence`; точный повтор текущего отчёта идемпотентен. Последний отчёт определяет фактически установленную версию; URL — ссылка на подлинный отчёт verifier, не проверка HTTP-строки вместо установки. Без подключённого доверенного verifier Codeworks остаётся в ожидании. Вход доверяет аттестующему verifier, сам не исполняет rollout и не проверяет окружение. Этапы 5–6 реализуют этот адаптер; Stage 4 не создаёт реальных installed records.
+
+События глобальной истории сейчас не нужны: технические намерения и writer-переходы доступны в собственных operations/attachments. Категории и типы service_history проверены через MCP при создании сервиса. Событие release не отправляется, пока фактический deployment-адаптер не подключён. Для будущего фактического выпуска гарантию доставки следует определить вместе с исполнителем, не заменяя её Core NATS publish после commit.
 
 ## Ошибки и пределы
 
-NATS ошибки возвращаются заголовками `Nats-Service-Error` (owner code), `Nats-Service-Error-Code` (HTTP-подобный статус) и DTO `{code,message,retryable}`. INVALID_ARGUMENT 400; FORBIDDEN 403; NOT_FOUND 404; CONFLICT/WRITER_BUSY/OWNERSHIP_CONFLICT 409; DEPENDENCIES_INCOMPATIBLE/GIT_FAILED 422; BUSY 503; INTERNAL 500. Только BUSY объявлен retryable. Внутренние stderr, SQL и credentials не выдаются.
+NATS ошибки возвращаются заголовками `Nats-Service-Error` (owner code), `Nats-Service-Error-Code` (HTTP-подобный статус) и DTO `{code,message,retryable}`. INVALID_ARGUMENT 400; FORBIDDEN 403; NOT_FOUND 404; CONFLICT/WRITER_BUSY/OWNERSHIP_CONFLICT 409; DEPENDENCIES_INCOMPATIBLE/GIT_FAILED 422; BUSY 503; INTERNAL 500. Git flow также возвращает GITHUB_UNAVAILABLE, CHECKS_BLOCKED, TARGET_CHANGED, MERGE_CONFLICT, PRODUCTION_BASE_MISMATCH, VERIFIED_DEV_REQUIRED. Только BUSY объявлен retryable; waiting операции продолжаются по собственному расписанию. Внутренние stderr, SQL и credentials не выдаются.
 
 Вход ограничен 65 536 байтами; NATS одновременно обслуживает восемь коротких запросов, остальные получают BUSY. Пул API: восемь соединений, connect 3 секунды, SQL 10 секунд, ожидание проектного lock 1 секунда. Опрос статуса и точный повтор уже принятого ключа не ждут долгой подготовки. Клиент NATS/MCP ждёт ответ 10 секунд. Тайм-аут связи не отменяет intent: проверяйте operation-status или повторяйте тот же ключ. Git/preparer команда ограничена 120 секундами, stdout 1 MiB; исходный intent остаётся при остановке.
 
@@ -110,7 +128,7 @@ NATS ошибки возвращаются заголовками `Nats-Service-
 
 Миграция: `CODEWORKS_OWNER_DATABASE_URL`, `CODEWORKS_APP_ROLE`, затем `npm run migrate --workspace=@brai/codeworks`. Owner должен владеть отдельной БД и отличаться от app. App без elevated flags/memberships получает SELECT/INSERT/UPDATE только `codeworks.*`, без DDL/DELETE и доступа к журналу миграций. Повтор миграции проверяет SHA256 исходного SQL; несовпадение даёт MIGRATION_CHECKSUM_MISMATCH. Runtime не запускает миграции.
 
-Для восстановления нужны согласованный dump собственной БД **и** исходный Git common directory/workspaces с постоянным ownership ref и native locked reason. База без Git доказательств не присваивает найденные каталоги. Восстанавливать поверх активного исполнителя нельзя: остановите один сервис, верните БД/его Git ресурсы, запустите; pending/running проверяются и продолжаются. Выполненные операции не повторяются.
+Для восстановления нужны согласованный dump собственной БД **и** исходный Git common directory/workspaces с постоянным ownership ref и native locked reason. База без Git доказательств не присваивает найденные каталоги. Восстанавливать поверх активного исполнителя нельзя: остановите один сервис, верните БД/его Git ресурсы, запустите; pending/running и waiting Git flow проверяются и продолжаются. Выполненные операции не повторяются.
 
 ## Приёмка
 
@@ -131,3 +149,5 @@ ID, вид компонента, проверяемые входы, build edges,
 [`components/README.md`](components/README.md). Отсутствие описания нового workspace
 или executable, неверная схема, неизвестная зависимость и цикл — ошибки. Проверка
 относительно Git-базы сохраняет удалённый ID только через явный retirement.
+
+Изолированные Git flow проверки: `node --test --test-isolation=none services/codeworks/tests/git-flow.test.mjs`. Изменённые PostgreSQL/API пути: `CODEWORKS_TEST_CONFIG_FILE=<protected JSON> node --test --test-isolation=none --test-concurrency=1 services/codeworks/tests/integration/postgres.test.mjs services/codeworks/tests/integration/git-flow.test.mjs`. Реальные GitHub push/PR и exact checks проверяются отдельно: отсутствие CI сохраняет awaiting_ci, не считается успешной проверкой кода. В тестах GitHub и deployment verifier — явные doubles; они не подтверждают реальный rollout.

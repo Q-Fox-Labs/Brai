@@ -84,15 +84,27 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',assert
           let w=await db.workspaceByKey(args.project_id,args.workspace_key);
           if (!w) {
             const id=randomUUID(),kind=args.kind;
-            const base_ref=project.git_flow[kind+'_base'];
-            const base_sha=await git.readBase(project,kind);
-            const branch=project.git_flow[kind+'_prefix']+'codeworks-'+id;
+            let base_ref=project.git_flow[kind+'_base'];
+            let base_sha;
+            if(kind==='promotion'){
+              const proof=await db.evidenceById(project.id,args.evidence_id);
+              if(!proof||proof.target!=='dev'||proof.commit_sha!==args.commit_sha)throw new Fault('VERIFIED_DEV_REQUIRED');
+              base_sha=args.commit_sha;base_ref='verified-dev:'+proof.id;
+              await git.readPinned(project,base_sha);
+            }else{
+              base_sha=await git.readBase(project,kind);
+              if(kind==='hotfix'){
+                const installed=await db.currentEvidence(project.id,'prod');
+                if(!installed||installed.commit_sha!==base_sha)throw new Fault('PRODUCTION_BASE_MISMATCH');
+              }
+            }
+            const branch=(kind==='promotion'?'release/':project.git_flow[kind+'_prefix'])+'codeworks-'+id;
             const areaPath=path.join(project.workspace_root,id);
             const writer={executor_id:executorId,session_id:args.session_id,epoch:1,state:'active'};
             w={id,project_id:args.project_id,workspace_key:args.workspace_key,element_id:args.element_id??null,kind,base_ref,base_sha,branch,path:areaPath,ownership_token:randomUUID(),writer};
             await db.insertWorkspace(w);
           } else {
-            if (w.kind!==args.kind || (args.element_id!==undefined&&w.element_id!==args.element_id)) throw new Fault('CONFLICT');
+            if (w.kind!==args.kind || (args.element_id!==undefined&&w.element_id!==args.element_id)||(w.kind==='promotion'&&(w.base_sha!==args.commit_sha||w.base_ref!=='verified-dev:'+args.evidence_id))) throw new Fault('CONFLICT');
             assertWriter(w,executorId,{...args,expected_epoch:w.writer.epoch});
             if(w.preparation_state==='ready')await git.inspect(project,w);
           }
@@ -124,9 +136,11 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',assert
             assertWriter(w,executorId,args);
             const current=await git.inspect(project,w);
             if (current.head!==args.commit_sha||current.dirty) throw new Fault('CONFLICT','Release requires the current clean workspace commit.');
+            if((w.kind==='feature'&&args.target!=='dev')||(w.kind!=='feature'&&args.target!=='prod'))throw new Fault('INVALID_ARGUMENT','Release target does not match workspace route.');
+            if(await db.activeRelease(w.id))throw new Fault('CONFLICT','Workspace already has an unfinished release.');
             const releaseId=randomUUID();
-            accepted=await operation(db,w,executorId,method,args,'awaiting_execution',{release_id:releaseId,reason:'RELEASE_EXECUTION_NOT_AVAILABLE'});
-            await db.release({id:releaseId,workspace_id:w.id,operation_id:accepted.operation_id,target:args.target,requested_sha:args.commit_sha});
+            accepted=await operation(db,w,executorId,method,args,project.github?'pending':'awaiting_execution',project.github?{release_id:releaseId,state:'pending',details:{}}:{release_id:releaseId,reason:'RELEASE_EXECUTION_NOT_AVAILABLE'});
+            await db.release({id:releaseId,workspace_id:w.id,operation_id:accepted.operation_id,target:args.target,requested_sha:args.commit_sha,state:project.github?'pending':'awaiting_execution'});
           }
         }
         await db.insertRequest({project_id:args.project_id,executor_id:executorId,key:args.idempotency_key,digest,operation_id:accepted.operation_id});

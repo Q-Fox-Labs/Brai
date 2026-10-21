@@ -75,7 +75,11 @@
         },
         "documentation_paths": {
           "type": "array",
-          "items": {"type": "string", "minLength": 1, "maxLength": 512},
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
           "uniqueItems": true,
           "maxItems": 128
         },
@@ -139,6 +143,45 @@
             "linux-x64",
             "linux-arm64"
           ]
+        },
+        "github": {
+          "type": "object",
+          "properties": {
+            "repository": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            },
+            "required_checks": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255
+                  },
+                  "app_id": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "name",
+                  "app_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "repository",
+            "required_checks"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -213,7 +256,8 @@
         "kind": {
           "enum": [
             "feature",
-            "hotfix"
+            "hotfix",
+            "promotion"
           ]
         },
         "session_id": {
@@ -233,6 +277,14 @@
         "attempt_id": {
           "type": "string",
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
         }
       },
       "required": [
@@ -242,7 +294,40 @@
         "kind",
         "session_id"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "promotion"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "commit_sha",
+              "evidence_id"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "commit_sha"
+                  ]
+                },
+                {
+                  "required": [
+                    "evidence_id"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
     },
     "status": {
       "type": "object",
@@ -436,7 +521,13 @@
             "DEPENDENCIES_INCOMPATIBLE",
             "GIT_FAILED",
             "BUSY",
-            "INTERNAL"
+            "INTERNAL",
+            "GITHUB_UNAVAILABLE",
+            "CHECKS_BLOCKED",
+            "TARGET_CHANGED",
+            "MERGE_CONFLICT",
+            "PRODUCTION_BASE_MISMATCH",
+            "VERIFIED_DEV_REQUIRED"
           ]
         },
         "message": {
@@ -489,7 +580,8 @@
         "kind": {
           "enum": [
             "feature",
-            "hotfix"
+            "hotfix",
+            "promotion"
           ]
         },
         "base_ref": {
@@ -670,7 +762,10 @@
             "running",
             "succeeded",
             "failed",
-            "awaiting_execution"
+            "awaiting_execution",
+            "awaiting_ci",
+            "awaiting_deployment",
+            "awaiting_reconciliation"
           ]
         },
         "step": {
@@ -702,6 +797,9 @@
             },
             {
               "$ref": "#/definitions/releaseResult"
+            },
+            {
+              "$ref": "#/definitions/gitReleaseResult"
             },
             {
               "type": "null"
@@ -863,6 +961,104 @@
       "required": [
         "release_id",
         "reason"
+      ],
+      "additionalProperties": false
+    },
+    "releaseLeg": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "target": {
+          "enum": [
+            "dev",
+            "main"
+          ]
+        },
+        "target_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "push_attempted": {
+          "const": true
+        },
+        "pr_attempted": {
+          "const": true
+        },
+        "pr_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pr_url": {
+          "type": "string"
+        },
+        "merge_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "merge_push_attempted": {
+          "const": true
+        },
+        "merged": {
+          "const": true
+        },
+        "deployment_evidence_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "branch",
+        "head",
+        "target",
+        "target_sha"
+      ],
+      "additionalProperties": false
+    },
+    "releaseFlow": {
+      "type": "object",
+      "properties": {
+        "primary": {
+          "$ref": "#/definitions/releaseLeg"
+        },
+        "backport": {
+          "$ref": "#/definitions/releaseLeg"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "gitReleaseResult": {
+      "type": "object",
+      "properties": {
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "running",
+            "succeeded",
+            "awaiting_execution",
+            "awaiting_ci",
+            "awaiting_deployment",
+            "awaiting_reconciliation"
+          ]
+        },
+        "details": {
+          "$ref": "#/definitions/releaseFlow"
+        }
+      },
+      "required": [
+        "release_id",
+        "state",
+        "details"
       ],
       "additionalProperties": false
     }

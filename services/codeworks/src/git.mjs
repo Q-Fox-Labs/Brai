@@ -7,11 +7,11 @@ import { Fault } from './errors.mjs';
 const relative=value=>value==='.'||(!path.isAbsolute(value)&&!value.split('/').some(p=>!p||p==='.'||p==='..')&&!value.includes('\\'));
 async function exists(file) { try { return await lstat(file); } catch(error) { if(error.code==='ENOENT') return null; throw error; } }
 /** Запускает фиксированный executable без shell; наследует flock FD только в worker. */
-export async function command(executable,args,{cwd,allowFailure=false,timeout=120000,input}={}) {
+export async function command(executable,args,{cwd,allowFailure=false,timeout=120000,input,env={}}={}) {
   return new Promise((resolve,reject)=>{
     let stdout='',stderr='',overflow=false;
     const inherited=process.env.CODEWORKS_LOCK_HELD==='1';
-    const child=spawn(executable,args,{cwd,env:{...process.env,GIT_TERMINAL_PROMPT:'0'},stdio:inherited?[input===undefined?'ignore':'pipe','pipe','pipe',3]:[input===undefined?'ignore':'pipe','pipe','pipe']});
+    const child=spawn(executable,args,{cwd,env:{...process.env,...env,GIT_TERMINAL_PROMPT:'0'},stdio:inherited?[input===undefined?'ignore':'pipe','pipe','pipe',3]:[input===undefined?'ignore':'pipe','pipe','pipe']});
     if(input!==undefined){child.stdin.on('error',()=>{});child.stdin.end(input);}
     const timer=setTimeout(()=>child.kill('SIGTERM'),timeout);
     const killTimer=setTimeout(()=>child.kill('SIGKILL'),timeout+5000);
@@ -22,7 +22,7 @@ export async function command(executable,args,{cwd,allowFailure=false,timeout=12
   });
 }
 /** Адаптер Git/preparer; изменение вызывается только worker под проектным flock. */
-export function createGit() {
+export function createGit({flowGit}={}) {
   const git=(project,args,options={})=>command('git',['-C',project.repo_path,...args],options);
   const local=(w,args,options={})=>command('git',['-C',w.path,...args],options);
   function requireLock() { if(process.env.CODEWORKS_LOCK_HELD!=='1')throw new Fault('INTERNAL','Git mutation requires the project lock.'); }
@@ -73,7 +73,21 @@ export function createGit() {
       if(project.node_version!==process.version.slice(1)||project.platform!==process.platform+'-'+process.arch)throw new Fault('DEPENDENCIES_INCOMPATIBLE','Node version or platform differs from the registered project.');
     },
     /** Закрепляет существующий remote ref; не выполняет fetch и не переходит на другую базу. */
-    async readBase(project,kind) { await topology(project); return (await git(project,['rev-parse','--verify',project.git_flow[kind+'_base']+'^{commit}'])).stdout; },
+    async readBase(project,kind) {
+      await topology(project);
+      const ref=project.git_flow[kind+'_base'];
+      const base=(await git(project,['rev-parse','--verify',ref+'^{commit}'])).stdout;
+      if(project.github){
+        const {createFlowGit}=await import('./git-flow.mjs');
+        if(await (flowGit??createFlowGit()).remote(project,kind==='hotfix'?'main':'dev')!==base)throw new Fault('TARGET_CHANGED','Refresh origin refs before preparing a workspace.');
+      }
+      return base;
+    },
+    /** Promotion использует исторический проверенный SHA dev, даже если latest dev уже другой. */
+    async readPinned(project,head) {
+      const current=await this.readBase(project,'feature');
+      if(!/^[0-9a-f]{40}$/.test(head)||(await git(project,['merge-base','--is-ancestor',head,current],{allowFailure:true})).code!==0)throw new Fault('VERIFIED_DEV_REQUIRED');
+    },
     /** Проверяет ветку, worktree registration и ownership; никогда не принимает стороннюю область. */
     async inspect(project,w) {
       await topology(project);
