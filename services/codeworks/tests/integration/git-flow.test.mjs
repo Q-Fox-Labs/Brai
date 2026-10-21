@@ -6,7 +6,8 @@ import {randomUUID} from 'node:crypto';
 import {writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {configured,setup} from './fixture.mjs';
-import {command,createGit} from '../../src/git.mjs';
+import {fixtureLifecycle,fixtureTimeout} from './fixture-lifecycle.mjs';
+import {command as runCommand,createGit} from '../../src/git.mjs';
 import {createFlowGit} from '../../src/git-flow.mjs';
 import {runOperation} from '../../src/worker.mjs';
 import {recordDeployment} from '../../src/deployment-evidence.mjs';
@@ -14,13 +15,20 @@ import {createStore} from '../../src/storage.mjs';
 const required_checks=[{name:'Codeworks components',app_id:42}];
 const ci={check_name:'Codeworks components',app_id:42,workflow_sha256:'a'.repeat(64),recipe_sha256:'b'.repeat(64)};
 const good=sha=>[{name:'Codeworks components',app_id:42,sha,status:'completed',conclusion:'success',ci_verified:true,ci_evidence:{head_sha:sha,run_id:'123',attempt:1,workflow:'.github/workflows/codeworks.yml',recipe:ci.recipe_sha256,composition_digest:'sha256:'+'c'.repeat(64),composition_reference:'ghcr.io/fixture/repository-components/release@sha256:'+'c'.repeat(64),url:'https://github.com/fixture/repository/actions/runs/123'}}];
-test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:120000},async t=>{
-  const flowGit=createFlowGit({localRemote:true,requireLock:()=>{}}),git=createGit({flowGit});
-  const f=await setup({git});t.after(()=>f.close());
+test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fixtureTimeout(process.env.CODEWORKS_TEST_TIMEOUT_MS)},async t=>{
+  const own=fixtureLifecycle(t.signal);let fixture;
+  // Timeout отменяет node:test wrapper, а cleanup ждёт настоящие setup/body/worker promises.
+  t.after(()=>own.close(async()=>{if(fixture)await fixture.close();}));
+  return own.run(async()=>{
+  const command=own.guard(runCommand);
+  const flowGit=createFlowGit({run:command,localRemote:true,requireLock:()=>{}}),git=own.port(createGit({flowGit}));
+  fixture=await setup({git,command});
+  const f={...fixture,project:own.guard(fixture.project),worker:own.guard(fixture.worker),h:own.port(fixture.h),app:{query:own.guard(fixture.app.query.bind(fixture.app)),connect:fixture.app.connect.bind(fixture.app)}};
+  const subtest=(name,body)=>{t.signal.throwIfAborted();return t.test(name,()=>own.run(body));};
   const op=async(p,id)=>(await f.h.call('operation-status',{project_id:p.id,operation_id:id},'codex')).operation;
   const area=async id=>(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[id])).rows[0];
-  const evidence=(p,target,commit_sha)=>recordDeployment(f.app,{project_id:p.id,target,commit_sha,evidence_url:'https://fixture.invalid/'+commit_sha},{allowedRepositories:[p.repo_path]});
-  for(const kind of ['feature','promotion','hotfix'])await t.test(kind+' durable route/check/installed gates survive recovery',async()=>{
+  const evidence=own.guard((p,target,commit_sha)=>recordDeployment(f.app,{project_id:p.id,target,commit_sha,evidence_url:'https://fixture.invalid/'+commit_sha},{allowedRepositories:[p.repo_path]}));
+  for(const kind of ['feature','promotion','hotfix'])await subtest(kind+' durable route/check/installed gates survive recovery',async()=>{
     const p=await f.project({github:{repository:'fixture/repository',required_checks,ci}});
     let base=(await command('git',['-C',p.repo_path,'rev-parse','HEAD'])).stdout;
     const args={project_id:p.id,idempotency_key:'prepare',workspace_key:'route',kind,session_id:'s'};
@@ -57,7 +65,7 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:120
       },
       checks:async(_,sha)=>checks.get(sha)??[],
     };
-    const run=extra=>runOperation(f.app,accepted.operation_id,git,{allowedRepositories:[p.repo_path],flowGit,github,...extra});
+    const run=own.guard(extra=>runOperation(f.app,accepted.operation_id,git,{allowedRepositories:[p.repo_path],flowGit,github,...extra}));
     // Потерянный ответ create после реального сохранения intent в PostgreSQL.
     let crashed=false;
     await assert.rejects(run({checkpoint:async point=>{if(point==='after-pr_attempted'&&!crashed){crashed=true;throw Object.assign(new Error('crash'),{code:'TEST_INTERRUPTION'});}}}),{code:'TEST_INTERRUPTION'});
@@ -86,15 +94,15 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:120
     if(kind!=='feature')assert.equal((await command('git',['-C',p.repo_path,'ls-tree','--name-only',merged])).stdout.includes(kind==='hotfix'?'unreleased':'later'),false);
     assert.equal((await git.inspect(p,w)).head,head);assert.equal(createCount,kind==='hotfix'?2:1);
   });
-  await t.test('no-op release fails safely without changing workspace readiness',async()=>{
+  await subtest('no-op release fails safely without changing workspace readiness',async()=>{
     const p=await f.project({github:{repository:'fixture/repository',required_checks,ci}});
     const prepared=await f.h.call('prepare-write',{project_id:p.id,idempotency_key:'noop-prepare',workspace_key:'noop',kind:'feature',session_id:'s'},'codex');await f.worker(p,prepared.operation_id);
     const w=await area(prepared.workspace_id);
     const accepted=await f.h.call('request-release',{project_id:p.id,idempotency_key:'noop-release',workspace_id:w.id,session_id:'s',expected_epoch:1,target:'dev',commit_sha:w.base_sha},'codex');
-    await runOperation(f.app,accepted.operation_id,git,{allowedRepositories:[p.repo_path],flowGit,github:{}});
+    await own.run(()=>runOperation(f.app,accepted.operation_id,git,{allowedRepositories:[p.repo_path],flowGit,github:{}}));
     const failed=await op(p,accepted.operation_id);assert.equal(failed.status,'failed');assert.equal(failed.result.state,'failed');assert.equal(failed.error.code,'CONFLICT');assert.equal((await area(w.id)).preparation_state,'ready');
   });
-  await t.test('retrying an old trusted deployment report cannot replace the current installed version',async()=>{
+  await subtest('retrying an old trusted deployment report cannot replace the current installed version',async()=>{
     const p=await f.project(),a='a'.repeat(40),b='b'.repeat(40);
     const before=await evidence(p,'prod',a),current=await evidence(p,'prod',b);
     assert.deepEqual(await evidence(p,'prod',a),before);
@@ -102,7 +110,8 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:120
     const latest=(await f.app.query('SELECT id,commit_sha FROM codeworks.deployment_evidence WHERE project_id=$1 AND target=$2 ORDER BY created_at DESC,id DESC LIMIT 1',[p.id,'prod'])).rows[0];
     assert.equal(latest.id,current.id);assert.equal(latest.commit_sha,b);
   });
-  await t.test('untrusted evidence caller and invalid reports fail before owner writes',async()=>{
+  await subtest('untrusted evidence caller and invalid reports fail before owner writes',async()=>{
     await assert.rejects(recordDeployment({}, {project_id:'p',target:'prod',commit_sha:'a'.repeat(40),evidence_url:'https://fixture.invalid',executor_id:'agent'}),/INVALID_DEPLOYMENT_REPORT/);
+  });
   });
 });

@@ -81,7 +81,9 @@
       "services/codeworks/ci/*.test.mjs",
       "services/codeworks/tests/ci-evidence.test.mjs",
       "services/codeworks/tests/integration/ci-evidence.test.mjs",
-      "services/codeworks/tests/ci-key-boundary.test.mjs"
+      "services/codeworks/tests/ci-key-boundary.test.mjs",
+      "services/codeworks/tests/integration/fixture-lifecycle.mjs",
+      "services/codeworks/tests/fixture-lifecycle.test.mjs"
     ]
   },
   "dependencies": [],
