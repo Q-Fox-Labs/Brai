@@ -124,6 +124,41 @@ test('hotfix rejects stale installed base and importing unreleased dev merge',as
   await f.g('merge','--no-edit',f.dev);const head=(await f.g('rev-parse','HEAD')).stdout;
   await assert.rejects(f.git.validateHead(f.project,f.workspace,head),{code:'CONFLICT'});
 });
+test('hotfix rejects linear dev ancestry and descendants even with a stale local dev ref',async t=>{
+  for(const extraCommit of [false,true])await t.test(extraCommit?'dev plus another fix':'fast-forward dev',async t=>{
+    const f=await fixture(t,'hotfix');
+    await f.g('reset','--hard',f.base);await f.g('merge','--ff-only',f.dev);
+    if(extraCommit){await writeFile(path.join(f.repo,'another-fix'),'fix\n');await f.g('add','.');await f.g('commit','-m','Fix after dev import');}
+    const head=(await f.g('rev-parse','HEAD')).stdout;
+    await f.g('update-ref','refs/remotes/origin/dev',f.base);
+    f.release.requested_sha=head;f.good(head);
+    await assert.rejects(f.advance({inspect:async()=>({head,dirty:false})}),{code:'CONFLICT'});
+    assert.equal(await f.git.remote(f.project,'main'),f.base);
+    assert.equal(await f.git.remote(f.project,f.branch),null);assert.equal(f.creations,0);
+  });
+});
+test('hotfix refreshes dev ancestry after candidate preparation before main publication',async t=>{
+  const f=await fixture(t,'hotfix');f.good(f.head);
+  const git={...f.git,candidate:async(...args)=>{
+    const candidate=await f.git.candidate(...args);
+    await f.g('checkout','dev');await f.g('merge','--no-edit',f.head);await f.g('push','origin','dev');
+    return candidate;
+  }};
+  await assert.rejects(f.advance({git}),{code:'CONFLICT'});
+  assert.equal(await f.git.remote(f.project,'main'),f.base);
+  assert.equal(f.release.details.primary.merge_push_attempted,undefined);
+});
+test('hotfix reconciles a lost main push before considering a subsequent dev backport',async t=>{
+  const f=await fixture(t,'hotfix');f.good(f.head);let lost=false;
+  const git={...f.git,push:async(p,b,head)=>{
+    await f.git.push(p,b,head);
+    if(b==='main'&&!lost){lost=true;throw Error('main response lost');}
+  }};
+  await assert.rejects(f.advance({git}),/main response lost/);
+  await f.g('checkout','dev');await f.g('merge','--no-edit',f.head);await f.g('push','origin','dev');
+  assert.equal((await f.advance({git})).reason,'MERGE_CHECKS_REQUIRED');
+  assert.equal(f.release.details.primary.merged,true);assert.equal(f.creations,1);
+});
 test('promotion remains pinned while later dev advances',async t=>{
   const f=await fixture(t,'promotion');await f.advance();
   await f.g('checkout','dev');await writeFile(path.join(f.repo,'later'),'not approved\n');await f.g('add','.');await f.g('commit','-m','Later dev');await f.g('push','origin','dev');
@@ -135,6 +170,23 @@ test('ownership and exact PR checks reject changed head/repository and closed PR
     const f=await fixture(t);await f.advance();alter(f.prs[0]);f.good(f.head);await assert.rejects(f.advance(),{code:'CONFLICT'});
     assert.equal(await f.git.remote(f.project,'dev'),f.dev);
   }
+});
+test('final fresh PR read revalidates every pinned identity before target mutation',async t=>{
+  const changes={
+    target:p=>p.base.ref='main',source:p=>p.head.ref='feature/codeworks-'+randomUUID(),
+    head:p=>p.head.sha='f'.repeat(40),headRepository:p=>p.head.repo.full_name='foreign/repository',
+    baseRepository:p=>p.base.repo.full_name='foreign/repository',ownership:p=>p.body='foreign',
+    number:p=>p.number++,closed:p=>p.state='closed',merged:p=>p.merged=true,
+  };
+  for(const [name,alter] of Object.entries(changes))await t.test(name,async t=>{
+    const f=await fixture(t);f.good(f.head);let gets=0;
+    const github={...f.gh,get:async(...args)=>{
+      const pr=structuredClone(await f.gh.get(...args));if(++gets===1)alter(pr);return pr;
+    }};
+    await assert.rejects(f.advance({github}),{code:'CONFLICT'});
+    assert.equal(gets,1);assert.equal(await f.git.remote(f.project,'dev'),f.dev);
+    assert.equal(f.release.details.primary.merge_push_attempted,undefined);
+  });
 });
 test('production proof has no agent/NATS method and promotion requires exact recorded dev evidence',async()=>{
   assert.equal(methods.some(m=>/evidence|deployment/.test(m)),false);

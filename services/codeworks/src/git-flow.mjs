@@ -23,19 +23,28 @@ export function createFlowGit({run=command,localRemote=false,requireLock=()=>{if
     return head;
   }
   async function ancestor(p,a,b){if(!sha(a)||!sha(b))throw new Fault('INVALID_ARGUMENT');return (await git(p,['merge-base','--is-ancestor',a,b],{allowFailure:true})).code===0;}
+  async function fetch(p,b,expected) {
+    locked();await origin(p);if(!branch(b)||!sha(expected))throw new Fault('INVALID_ARGUMENT');
+    await git(p,['fetch','--no-tags','origin','refs/heads/'+b]);
+    if((await git(p,['rev-parse','FETCH_HEAD'])).stdout!==expected)throw new Fault('TARGET_CHANGED');
+  }
   return {
     remote,ancestor,
     /** Fetch не меняет checkout; результат должен совпасть с закреплённой remote версией. */
-    async fetch(p,b,expected) {
-      locked();await origin(p);if(!branch(b)||!sha(expected))throw new Fault('INVALID_ARGUMENT');
-      await git(p,['fetch','--no-tags','origin','refs/heads/'+b]);
-      if((await git(p,['rev-parse','FETCH_HEAD'])).stdout!==expected)throw new Fault('TARGET_CHANGED');
-    },
+    fetch,
     /** Требует происхождение от frozen base; hotfix не может импортировать merge dev. */
     async validateHead(p,w,head) {
       if(!await ancestor(p,w.base_sha,head))throw new Fault('CONFLICT');
       if(w.kind==='promotion'&&head!==w.base_sha)throw new Fault('CONFLICT','Promotion must preserve the verified dev commit.');
       if(w.kind==='hotfix'&&(await git(p,['rev-list','--min-parents=2',w.base_sha+'..'+head])).stdout)throw new Fault('CONFLICT','Hotfix must be linear from the installed production base.');
+    },
+    /** Сверяет commit ancestry со свежим dev до публикации main; copied/cherry-picked строки этим не определяются. */
+    async validateHotfixSource(p,w,head) {
+      const dev=await remote(p,'dev');if(!dev)throw new Fault('CONFLICT','Hotfix requires the current dev ancestry.');
+      await fetch(p,'dev',dev);
+      const added=(await git(p,['rev-list','--count',head,'^'+w.base_sha])).stdout;
+      const independent=(await git(p,['rev-list','--count',head,'^'+w.base_sha,'^'+dev])).stdout;
+      if(added!==independent)throw new Fault('CONFLICT','Hotfix contains unreleased dev commits.');
     },
     /** Создаёт детерминированный commit с ровно двумя закреплёнными parents; конфликт не меняет ветки. */
     async candidate(p,leg,date,operationId) {

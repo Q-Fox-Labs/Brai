@@ -2,6 +2,9 @@
 // ABOUTME: Merge не означает CI или установленный выпуск; неопределённую публикацию сначала сверяет чтением.
 import { Fault } from './errors.mjs';
 const waiting=(status,reason)=>({status,reason});
+function validatePR(p,w,leg,pr) {
+  if(!pr||!pr.body?.includes('Codeworks workspace '+w.id+';')||pr.head?.sha!==leg.head||pr.head?.ref!==leg.branch||pr.base?.ref!==leg.target||pr.head?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||pr.base?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||(leg.pr_number&&pr.number!==leg.pr_number))throw new Fault('CONFLICT','PR identity differs from pinned intent.');
+}
 /** Один ограниченный проход. save фиксирует все намерения ДО Git/GitHub мутаций; evidence — доверенный owner state. */
 export async function advanceRelease({project:p,workspace:w,operation:op,release}, {git,github,inspect,save,evidence,checkpoint=async()=>{}}) {
   const flow=release.details;
@@ -14,6 +17,8 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
   const current=await inspect(p,w);
   if(current.dirty||current.head!==release.requested_sha)throw new Fault('CONFLICT','Workspace differs from the pinned release request.');
   await git.validateHead(p,w,release.requested_sha);
+  // После попытки main push сначала сверяется её исход; backport вправе добавить этот hotfix в dev.
+  if(w.kind==='hotfix'&&!flow.primary?.merge_push_attempted)await git.validateHotfixSource(p,w,release.requested_sha);
   if(!flow.primary){
     const target=w.kind==='feature'?'dev':'main';
     const target_sha=await git.remote(p,target);
@@ -43,7 +48,7 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
         const marker='Запрос слияния отдельной области Codeworks. Проверки относятся к закреплённому head; выпуск ждёт CI итогового merge commit и независимое подтверждение установки.\n\nCodeworks workspace '+w.id+'; pinned '+leg.head+'; target '+leg.target+'; base '+leg.target_sha+'.';
         await mutation(leg,'pr_attempted',async()=>{pr=await github.create(p,leg,marker);});
       }
-      if(!pr.body?.includes('Codeworks workspace '+w.id+';')||pr.head?.sha!==leg.head||pr.head?.ref!==leg.branch||pr.base?.ref!==leg.target||pr.head?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||pr.base?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase())throw new Fault('CONFLICT','PR head, repository or target differs from pinned intent.');
+      validatePR(p,w,leg,pr);
       leg.pr_number=pr.number;leg.pr_url=pr.html_url;await persist();
       if(leg.merge_sha&&await git.verifyMerge(p,leg)){
         if(!pr.merged||pr.merge_commit_sha!==leg.merge_sha)return waiting('awaiting_reconciliation','GITHUB_MERGE_NOT_CONFIRMED');
@@ -55,14 +60,17 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
         if(!checksPassed(p.github.required_checks,await github.checks(p,leg.head),leg.head))return waiting('awaiting_ci','HEAD_CHECKS_REQUIRED');
         await git.fetch(p,leg.target,leg.target_sha);
         if(!leg.merge_sha){leg.merge_sha=await git.candidate(p,leg,op.created_at,op.id);await persist();}
+        if(w.kind==='hotfix'&&name==='primary')await git.validateHotfixSource(p,w,leg.head);
         // AIDEV-NOTE: Повторное чтение закрывает обычные races; no-force push атомарно защищает последний промежуток.
         const fresh=await github.get(p,leg.pr_number);
-        if(fresh.head?.sha!==leg.head||fresh.state!=='open')throw new Fault('CONFLICT');
+        validatePR(p,w,leg,fresh);
+        if(fresh.merged||fresh.state!=='open')throw new Fault('CONFLICT');
         if(!checksPassed(p.github.required_checks,await github.checks(p,leg.head),leg.head))return waiting('awaiting_ci','HEAD_CHECKS_REQUIRED');
         if(await git.remote(p,leg.target)!==leg.target_sha)throw new Fault('TARGET_CHANGED');
         await mutation(leg,'merge_push_attempted',()=>git.push(p,leg.target,leg.merge_sha));
         if(!await git.verifyMerge(p,leg))return waiting('awaiting_reconciliation','MERGE_PUSH_UNCERTAIN');
         const merged=await github.get(p,leg.pr_number);
+        validatePR(p,w,leg,merged);
         if(!merged.merged||merged.merge_commit_sha!==leg.merge_sha)return waiting('awaiting_reconciliation','GITHUB_MERGE_NOT_CONFIRMED');
         leg.merged=true;await persist();
       }
