@@ -12,11 +12,12 @@
     "services/codeworks/src/mcp.mjs",
     "services/codeworks/src/migrate.mjs",
     "services/codeworks/src/worker.mjs",
-    "services/codeworks/src/deployment-evidence.mjs"
+    "services/codeworks/src/deployment-evidence.mjs",
+    "services/codeworks/ci/pipeline.mjs",
+    "services/codeworks/src/verify-ci.mjs"
   ],
   "inputs": {
     "build": [
-      "package-lock.json",
       "services/codeworks/schemas/component.schema.json"
     ],
     "runtime": [
@@ -47,7 +48,15 @@
       "services/codeworks/src/release.mjs",
       "services/codeworks/src/runtime.mjs",
       "services/codeworks/src/storage.mjs",
-      "services/codeworks/src/worker.mjs"
+      "services/codeworks/src/worker.mjs",
+      "services/codeworks/src/ci-verifier.mjs",
+      "services/codeworks/ci/registry.mjs",
+      "services/codeworks/components/descriptor-validation.mjs",
+      "services/codeworks/schemas/ci-composition.schema.json",
+      "services/codeworks/migrations/003.sql",
+      "services/codeworks/src/ci-evidence.mjs",
+      "services/codeworks/ci/catalog.mjs",
+      "services/codeworks/src/verify-ci.mjs"
     ],
     "checks": [
       "services/codeworks/components/cli.mjs",
@@ -62,13 +71,25 @@
       "services/codeworks/tests/integration/fixture.mjs",
       "services/codeworks/tests/integration/git-flow.test.mjs",
       "services/codeworks/tests/integration/postgres.test.mjs",
-      "services/codeworks/tests/integration/recovery.mjs"
+      "services/codeworks/tests/integration/recovery.mjs",
+      ".github/workflows/codeworks.yml",
+      "services/codeworks/components/lock-inputs.mjs",
+      "services/codeworks/components/descriptor-validation.mjs",
+      "services/codeworks/ci/pipeline.mjs",
+      "services/codeworks/ci/toolchain.json",
+      "services/codeworks/tests/ci-verifier.test.mjs",
+      "services/codeworks/ci/*.test.mjs",
+      "services/codeworks/tests/ci-evidence.test.mjs",
+      "services/codeworks/tests/integration/ci-evidence.test.mjs",
+      "services/codeworks/tests/ci-key-boundary.test.mjs",
+      "services/codeworks/tests/integration/fixture-lifecycle.mjs",
+      "services/codeworks/tests/fixture-lifecycle.test.mjs"
     ]
   },
   "dependencies": [],
   "commands": {
     "build": null,
-    "check": "node --test tests/*.test.mjs components/*.test.mjs"
+    "check": "node --test --test-isolation=none tests/*.test.mjs components/*.test.mjs ci/*.test.mjs"
   },
   "delivery": {
     "kind": "ready-files",
@@ -76,26 +97,33 @@
       "services/codeworks/migrations",
       "services/codeworks/package.json",
       "services/codeworks/schemas",
-      "services/codeworks/src"
+      "services/codeworks/src",
+      "services/codeworks/ci/registry.mjs",
+      "services/codeworks/components/descriptor-validation.mjs",
+      "services/codeworks/ci/catalog.mjs"
     ],
     "entrypoints": [
       "services/codeworks/src/main.mjs",
       "services/codeworks/src/mcp.mjs",
       "services/codeworks/src/migrate.mjs",
       "services/codeworks/src/worker.mjs",
-      "services/codeworks/src/deployment-evidence.mjs"
+      "services/codeworks/src/deployment-evidence.mjs",
+      "services/codeworks/src/verify-ci.mjs"
     ],
     "smokeImports": [
       "services/codeworks/src/contracts.mjs",
       "services/codeworks/src/git-flow.mjs",
       "services/codeworks/src/github.mjs",
       "services/codeworks/src/release.mjs",
-      "services/codeworks/src/deployment-evidence.mjs"
+      "services/codeworks/src/deployment-evidence.mjs",
+      "services/codeworks/src/ci-verifier.mjs"
     ],
     "systemRequirements": [
       "Node.js 24.21.0",
       "Git with merge-tree --write-tree; flock (util-linux)",
-      "GitHub CLI (gh), operator authentication; origin HTTPS matches registered repository"
+      "GitHub CLI (gh), operator authentication; origin HTTPS matches registered repository",
+      "Existing GitHub OAuth operator identity with repo, workflow, read:packages/write:packages; owner-only Ed25519 identity outside agent namespaces; durable Codeworks PG evidence backup; first owner catalog-v1 publication links the repository and inherits its Actions read access",
+      "Python 3 with prepared bridge dependencies; bubblewrap and util-linux; trusted immutable adapter launcher (not bundled external engines)"
     ]
   },
   "deploy": {

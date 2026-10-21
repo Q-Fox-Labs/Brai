@@ -1,0 +1,8 @@
+{
+  "node": "24.21.0",
+  "npm": "11.19.0",
+  "platform": "linux/amd64",
+  "runner": "ubuntu-24.04",
+  "nodeBase": "node:24.21.0-bookworm-slim@sha256:51b1100cc2a83d370c6a60952e3f2989c8a43159d0e38586e090f3b3326efefd",
+  "pythonBase": "python:3.13-slim-bookworm@sha256:f040863673aea2570c3ff6a5c3fb4c673a016cbc5375005ad145915922b6b78a"
+}

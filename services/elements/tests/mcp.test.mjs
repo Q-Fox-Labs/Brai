@@ -23,6 +23,7 @@ test('MCP публикует полный набор инструментов El
     'elements_structure_create',
     'elements_element_create',
     'elements_element_revise',
+    'elements_element_reclassify',
     'elements_move_create',
     'elements_move_link',
     'elements_element_activate',
@@ -36,6 +37,7 @@ test('MCP публикует полный набор инструментов El
     'elements_planning_bind',
     'elements_planning_build',
     'elements_planning_apply',
+    'elements_planning_expand_repeat',
   ]);
   for (const name of toolNames) {
     const schema = toolInputs[name];

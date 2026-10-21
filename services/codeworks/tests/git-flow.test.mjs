@@ -21,6 +21,8 @@ async function fixture(t,kind='feature') {
   await command('git',['init','--bare','--initial-branch=dev',bare]);
   await command('git',['clone',bare,repo]);
   const g=(...args)=>command('git',['-C',repo,...args]);
+  await g('config','user.name','Codeworks fixture');
+  await g('config','user.email','fixture@example.invalid');
   await writeFile(path.join(repo,'common'),'base\n');await g('add','.');await g('commit','-m','Initial');
   const base=(await g('rev-parse','HEAD')).stdout;await g('branch','main');await g('push','origin','dev','main');
   await writeFile(path.join(repo,'unreleased'),'not in production\n');await g('add','.');await g('commit','-m','Unreleased dev');

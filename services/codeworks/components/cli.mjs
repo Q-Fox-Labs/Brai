@@ -1,4 +1,5 @@
-// ABOUTME: Descriptor-driven build/check/package with one compilation for unchanged build inputs.
+// ABOUTME: Выполняет descriptor-driven build/check/package без повторной компиляции прежних входов.
+// ABOUTME: Проверяет prepared output seal перед проверкой и упаковкой.
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, lstatSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -38,7 +39,7 @@ function command(root,c,text) {
   if (result.error) throw result.error;
   if (result.status!==0) throw Error(`COMMAND_FAILED: ${c.id}: ${text}: ${result.status}`);
 }
-export async function execute(root, action, ids=[], {base}={}) {
+export async function execute(root, action, ids=[], {base,includeDependencies=true}={}) {
   const graph=discover(root,{base,allowMissingBuildOutputs:action!=='validate'});
   const selected=new Set();
   function include(id) {
@@ -46,7 +47,7 @@ export async function execute(root, action, ids=[], {base}={}) {
     if (!c || c.status!=='active') throw Error(`UNKNOWN_COMPONENT: ${id}`);
     if (selected.has(id)) return;
     selected.add(id);
-    for (const dep of c.dependencies) include(dep.id);
+    if(includeDependencies)for (const dep of c.dependencies) include(dep.id);
   }
   for (const id of ids.length?ids:graph.order) include(id);
   if (action==='validate') return {components:graph.order};
@@ -93,12 +94,13 @@ export async function execute(root, action, ids=[], {base}={}) {
 }
 export async function main(args=process.argv.slice(2)) {
   const action=args.shift()??'validate';
-  let base="refs/remotes/origin/dev",root=defaultRoot; const ids=[];
+  let base="refs/remotes/origin/dev",root=defaultRoot,includeDependencies=true; const ids=[];
   for (let i=0;i<args.length;i++) {
     if (args[i]==='--base') {base=args[++i];if(!base)throw Error('BASE_REF_REQUIRED');}
     else if(args[i]==='--root') {root=resolve(args[++i]);}
+    else if(args[i]==='--only') {includeDependencies=false;}
     else ids.push(args[i]);
   }
-  console.log(JSON.stringify(await execute(root,action,ids,{base}),null,2));
+  console.log(JSON.stringify(await execute(root,action,ids,{base,includeDependencies}),null,2));
 }
 if (process.argv[1] && import.meta.url===pathToFileURL(resolve(process.argv[1])).href) main().catch(error=>{console.error(error.message);process.exitCode=1;});

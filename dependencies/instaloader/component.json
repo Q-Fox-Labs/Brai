@@ -25,13 +25,14 @@
     "kind": "ready-files",
     "files": [
       "dependencies/instaloader/compose.yml",
-      "dependencies/instaloader/requirements.txt"
+      "dependencies/instaloader/requirements.txt",
+      "dependencies/instaloader/Dockerfile"
     ],
     "entrypoints": [],
     "smokeImports": [],
     "systemRequirements": [
-      "External OCI image brai-instaloader:4.15.3 built by its operator from Dockerfile and pinned requirements.txt; not installed or bundled by this app pipeline",
-      "Python3.13 and Instaloader4.15.3 owned by that external image; network-free --help can run once image is available"
+      "External Python OCI CLI built in the common CI from hash-locked requirements and immutable Python base; exact GHCR digest is recorded by release composition",
+      "Python3.13 and Instaloader4.15.3 belong to the CI-built external OCI image; offline --help is required before publication"
     ],
     "command": [
       "instaloader"
@@ -47,5 +48,5 @@
   "npm": {
     "workspaces": []
   },
-  "reason": "Pinned recipe and configuration for an external on-demand CLI; no first-party executable or installed runtime is delivered"
+  "reason": "Pinned external on-demand CLI recipe; CI supplies its real Python runtime image, while ordinary library files alone are not runnable"
 }

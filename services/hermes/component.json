@@ -15,9 +15,7 @@
     "services/hermes/memos/bridge/codex_bridge.py"
   ],
   "inputs": {
-    "build": [
-      "package-lock.json"
-    ],
+    "build": [],
     "runtime": [
       "services/hermes/catalog.mjs",
       "services/hermes/config.mjs",
@@ -159,7 +157,8 @@
       "Node.js 24.21.0",
       "Python 3.12 with pinned memos/bridge/requirements.txt in the existing Hermes bridge-venv; no Python dependencies are bundled",
       "Operator-owned bridge_runtime.py single-owner launcher and codex_cli_owner.py from the existing Hermes runtime; installed absolute Codex executable and protected worker/configuration",
-      "Existing external Hermes gateway, MemOS, browser, AWG2 and intake runtimes are installed and operated through Admin; not bundled"
+      "Existing external Hermes gateway, MemOS, browser, AWG2 and intake runtimes are installed and operated through Admin; not bundled",
+      "External Hermes engine pinned at 517b5e10febd619ce30bb22580e29b160266eb43; external MemOS engine pinned at a7367d07e55db61099f7b4e2c1108bc5831a24f3; preinstalled through the existing operator lifecycle, not bundled or installed by CI"
     ]
   },
   "deploy": {

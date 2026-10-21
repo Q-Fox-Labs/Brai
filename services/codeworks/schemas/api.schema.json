@@ -175,6 +175,38 @@
                 ],
                 "additionalProperties": false
               }
+            },
+            "ci": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "check_name",
+                "app_id",
+                "workflow_sha256",
+                "recipe_sha256"
+              ],
+              "properties": {
+                "check_name": {
+                  "const": "Codeworks components"
+                },
+                "app_id": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "workflow_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "recipe_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "reuse_public_key": {
+                  "type": "string",
+                  "minLength": 40,
+                  "maxLength": 256
+                }
+              }
             }
           },
           "required": [
@@ -1010,6 +1042,12 @@
         "deployment_evidence_id": {
           "type": "string",
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "head_ci": {
+          "$ref": "#/definitions/ciEvidence"
+        },
+        "merge_ci": {
+          "$ref": "#/definitions/ciEvidence"
         }
       },
       "required": [
@@ -1060,6 +1098,53 @@
         "release_id",
         "state",
         "details"
+      ],
+      "additionalProperties": false
+    },
+    "ciEvidence": {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "workflow": {
+          "const": ".github/workflows/codeworks.yml"
+        },
+        "recipe": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "composition_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "composition_reference": {
+          "type": "string",
+          "pattern": "^ghcr\\.io/[a-z0-9_./-]+@sha256:[0-9a-f]{64}$"
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[^/]+/[^/]+/actions/runs/[0-9]+$"
+        }
+      },
+      "required": [
+        "run_id",
+        "attempt",
+        "head_sha",
+        "workflow",
+        "recipe",
+        "composition_digest",
+        "composition_reference",
+        "url"
       ],
       "additionalProperties": false
     }

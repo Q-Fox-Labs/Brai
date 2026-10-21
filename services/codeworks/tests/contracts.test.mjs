@@ -68,3 +68,11 @@ test('AsyncAPI request/reply includes exactly the seven real methods and owner s
     assert.equal(doc.operations[key].reply.messages.length,2);
   }
 });
+
+test('durable release response carries the exact verified CI identity without accepting unknown proof fields',()=>{
+  const proof={run_id:'123',attempt:1,head_sha:'a'.repeat(40),workflow:'.github/workflows/codeworks.yml',recipe:'b'.repeat(64),composition_digest:'sha256:'+'c'.repeat(64),composition_reference:'ghcr.io/owner/repo-components/release@sha256:'+'c'.repeat(64),url:'https://github.com/owner/repo/actions/runs/123'};
+  const leg={branch:'feature/codeworks-'+id,head:proof.head_sha,target:'dev',target_sha:'d'.repeat(40),head_ci:proof,merge_ci:{...proof,head_sha:'e'.repeat(40)}};
+  validate('gitReleaseResult',{release_id:id,state:'awaiting_deployment',details:{primary:leg}});
+  assert.throws(()=>validate('releaseLeg',{...leg,head_ci:{...proof,agent_verified:true}}));
+  assert.throws(()=>validate('releaseLeg',{...leg,head_ci:{...proof,composition_digest:'mutable-tag'}}));
+});

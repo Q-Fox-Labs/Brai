@@ -6,6 +6,7 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import {Pool} from 'pg';
 import {setup} from './fixture.mjs';
+import {createCIEvidence} from '../../src/ci-evidence.mjs';
 import {migrate} from '../../src/migrate.mjs';
 import {createStore} from '../../src/storage.mjs';
 import {createHandlers} from '../../src/domain.mjs';
@@ -18,6 +19,9 @@ if(process.argv[2]==='prepare') {
   const f=await setup();
   try {
     const project=await f.project();
+    const ciProject={...project,github:{repository:'fixture/repository',ci:{recipe_sha256:'a'.repeat(64)}}};
+    const ciProof={published:{digest:'sha256:'+'b'.repeat(64)},composition:{runId:'123',attempt:'1',components:[]}};
+    await createCIEvidence(f.app).save(ciProject,ciProof);
     const request=key=>({project_id:project.id,idempotency_key:key,workspace_key:key,kind:'feature',session_id:'recovery'});
     const ready=await f.h.call('prepare-write',request('ready'),'codex');await f.worker(project,ready.operation_id);
     const status=await f.h.call('status',{project_id:project.id,workspace_id:ready.workspace_id},'codex');
@@ -25,7 +29,7 @@ if(process.argv[2]==='prepare') {
     const pending=await f.h.call('prepare-write',request('pending'),'codex');
     assert.equal((await f.worker(project,pending.operation_id,'after-branch')).signal,'SIGKILL');
     await mkdir(temporaryRoot,{recursive:true});
-    await writeFile(stateFile,JSON.stringify({project,ready,release,pending,base_sha:status.git.head})+'\n',{mode:0o600});
+    await writeFile(stateFile,JSON.stringify({project,ciProject,ciProof,ready,release,pending,base_sha:status.git.head})+'\n',{mode:0o600});
     console.log('Recovery fixture prepared: ready workspace, queued release and interrupted Git intent; run operator backup/restore next.');
   }finally{await Promise.all([f.owner.end(),f.app.end()]);}
 } else if(process.argv[2]==='verify') {
@@ -39,6 +43,9 @@ if(process.argv[2]==='prepare') {
   const h=createHandlers(createStore(app),createGit(),{allowedRepositories:[project.repo_path]});
   try {
     await migrate(owner,config.app_role);
+    assert.deepEqual(await createCIEvidence(app).read(state.ciProject,'123','1'),state.ciProof);
+    await createCIEvidence(app).save(state.ciProject,state.ciProof);
+    await assert.rejects(app.query("UPDATE codeworks.verified_ci SET proof='{}'::jsonb"),{code:'42501'});
     const op=async id=>(await h.call('operation-status',{project_id:project.id,operation_id:id},'codex')).operation;
     assert.equal((await op(ready.operation_id)).status,'succeeded');
     assert.equal((await op(release.operation_id)).status,'awaiting_execution');
@@ -53,7 +60,7 @@ if(process.argv[2]==='prepare') {
     assert.equal((await op(pending.operation_id)).status,'succeeded');
     assert.equal((await source.query('SELECT status FROM codeworks.operations WHERE id=$1',[pending.operation_id])).rows[0].status,'running');
     assert.equal((await h.call('status',{project_id:project.id,workspace_id:pending.workspace_id},'codex')).git.head,state.base_sha);
-    console.log('Restored DB accepted: migration checksum, writer/attempt links, ready Git, queued release and interrupted intent recovered; source DB unchanged.');
+    console.log('Restored DB accepted: durable CI proof replay/append-only, migration checksum, writer/attempt links, ready Git, queued release and interrupted intent recovered; source DB unchanged.');
     await source.query('TRUNCATE codeworks.requests,codeworks.attachments,codeworks.releases,codeworks.operations,codeworks.workspaces,codeworks.projects CASCADE');
     await owner.query('DROP SCHEMA codeworks CASCADE; DROP TABLE public.codeworks_migrations');
     await rm(root,{recursive:true,force:true});await rm(stateFile);

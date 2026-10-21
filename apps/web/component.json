@@ -10,8 +10,7 @@
   "executableSources": [],
   "inputs": {
     "build": [
-      "apps/web/tsconfig.json",
-      "package-lock.json"
+      "apps/web/tsconfig.json"
     ],
     "runtime": [
       "apps/web/AGENTS.md",

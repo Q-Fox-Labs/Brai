@@ -5,14 +5,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
-import { command,createGit } from '../../src/git.mjs';
+import { command as runCommand,createGit } from '../../src/git.mjs';
 import { createStore } from '../../src/storage.mjs';
 import { createHandlers } from '../../src/domain.mjs';
 import { migrate } from '../../src/migrate.mjs';
 import { launchWorker } from '../../src/runtime.mjs';
 export const configured=!!process.env.CODEWORKS_TEST_CONFIG_FILE;
 /** Принимает только две конкретные disposable DB; credentials не логируются. */
-export async function setup({git=createGit()}={}) {
+export async function setup({git=createGit(),command=runCommand}={}) {
   const config=JSON.parse(await readFile(process.env.CODEWORKS_TEST_CONFIG_FILE,'utf8'));
   for(const [key,name] of [['owner_url','brai_codeworks_test'],['app_url','brai_codeworks_test'],['restore_owner_url','brai_codeworks_restore_test'],['restore_app_url','brai_codeworks_restore_test']]) {
     const url=new URL(config[key]);
@@ -79,7 +79,7 @@ export async function setup({git=createGit()}={}) {
     async worker(project,operationId,crashAfter) {
       const child=launchWorker(project.common_dir,operationId,{...process.env,CODEWORKS_DATABASE_URL:config.app_url,CODEWORKS_ALLOWED_REPOSITORIES:JSON.stringify([project.repo_path]),CODEWORKS_TEST_MODE:'1',CODEWORKS_TEST_CRASH_AFTER:crashAfter??''});
       let stderr='';child.stderr.on('data',b=>stderr+=b);
-      const result=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}));});
+      const result=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>resolve({code,signal}));});
       if(result.code!==0&&result.code!==75&&result.signal!=='SIGKILL')throw new Error('FIXTURE_WORKER_FAILED '+result.code+' '+stderr);
       return result;
     },

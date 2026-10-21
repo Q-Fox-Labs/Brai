@@ -13,7 +13,6 @@
   ],
   "inputs": {
     "build": [
-      "package-lock.json",
       "services/providers/tsconfig.json"
     ],
     "runtime": [

@@ -15,7 +15,6 @@
   ],
   "inputs": {
     "build": [
-      "package-lock.json",
       "services/elements/tsconfig.json"
     ],
     "runtime": [
