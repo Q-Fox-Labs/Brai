@@ -60,7 +60,8 @@
       "services/codeworks/src/deployment.mjs",
       "services/codeworks/migrations/004.sql",
       "services/codeworks/components/package-runtime.mjs",
-      "services/codeworks/components/lock-inputs.mjs"
+      "services/codeworks/components/lock-inputs.mjs",
+      "services/codeworks/migrations/005.sql"
     ],
     "checks": [
       "services/codeworks/components/cli.mjs",

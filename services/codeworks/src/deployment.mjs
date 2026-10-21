@@ -12,17 +12,24 @@ export function deploymentDiff(composition,actual) {
   return {bootstrap:!actual,changed:composition.components.filter(c=>known.get(c.id)!==c.artifact.digest).map(c=>c.id),unchanged:composition.components.filter(c=>known.get(c.id)===c.artifact.digest).map(c=>c.id)};
 }
 /** Вызывается worker после exact CI gate; proof загружается из owner store, не из запроса. */
-export async function enqueueDeployment(db,project,target,sha,evidence,evidenceDB=db) {
+export async function enqueueDeployment(db,project,target,sha,evidence,evidenceDB=db,{retryOf=null}={}) {
   if(!['dev','prod'].includes(target)||evidence?.head_sha!==sha)throw Error('DEPLOYMENT_CI_REQUIRED');
   const proof=await createCIEvidence(evidenceDB).read(project,evidence.run_id,evidence.attempt),c=proof?.composition;
   if(!c||c.source!==sha||c.recipe!==project.github.ci.recipe_sha256||proof.published?.digest!==evidence.composition_digest)throw Error('DEPLOYMENT_OWNER_PROOF_REQUIRED');
-  const old=(await db.query('SELECT operation_id FROM codeworks.deployments WHERE project_id=$1 AND target=$2 AND run_id=$3 AND attempt=$4',[project.id,target,String(evidence.run_id),String(evidence.attempt)])).rows[0];
-  if(old)return old.operation_id;
-  const id=randomUUID();
   await db.query('BEGIN');
   try {
+    // Serialize admission per target, including concurrent explicit retries. No external action occurs here.
+    await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',['rollout:'+project.id+':'+target]);
+    let old;
+    if(retryOf){
+      const previous=(await db.query('SELECT d.*,o.status FROM codeworks.deployments d JOIN codeworks.operations o ON o.id=d.operation_id WHERE d.operation_id=$1',[retryOf])).rows[0];
+      if(previous?.status!=='failed'||previous.project_id!==project.id||previous.target!==target||previous.commit_sha!==sha||previous.run_id!==String(evidence.run_id)||previous.attempt!==String(evidence.attempt)||previous.composition_digest!==evidence.composition_digest||!equal(previous.composition,c))throw Error('FAILED_EXACT_ROLLOUT_REQUIRED');
+      old=(await db.query('SELECT operation_id FROM codeworks.deployments WHERE retry_of=$1',[retryOf])).rows[0];
+    }else old=(await db.query('SELECT operation_id FROM codeworks.deployments WHERE project_id=$1 AND target=$2 AND run_id=$3 AND attempt=$4 ORDER BY created_at DESC,operation_id DESC LIMIT 1',[project.id,target,String(evidence.run_id),String(evidence.attempt)])).rows[0];
+    if(old){await db.query('COMMIT');return old.operation_id;}
+    const id=randomUUID();
     await db.query("INSERT INTO codeworks.operations(id,project_id,executor_id,kind,status,step,request) VALUES($1,$2,'codeworks_owner','rollout','pending','verified-ci',$3)",[id,project.id,{target,commit_sha:sha,ci:evidence}]);
-    await db.query('INSERT INTO codeworks.deployments(operation_id,project_id,target,commit_sha,run_id,attempt,composition_digest,composition) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[id,project.id,target,sha,String(evidence.run_id),String(evidence.attempt),evidence.composition_digest,c]);
+    await db.query('INSERT INTO codeworks.deployments(operation_id,project_id,target,commit_sha,run_id,attempt,composition_digest,composition,retry_of) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',[id,project.id,target,sha,String(evidence.run_id),String(evidence.attempt),evidence.composition_digest,c,retryOf]);
     await db.query('COMMIT');return id;
   }catch(error){await db.query('ROLLBACK');throw error;}
 }
