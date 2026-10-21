@@ -7,23 +7,35 @@ import { createFlowGit } from './git-flow.mjs';
 import { createGitHub } from './github.mjs';
 import { advanceRelease } from './release.mjs';
 import { Fault,safeFault } from './errors.mjs';
+import {enqueueDeployment,advanceDeployment,createDeploymentAdapter} from './deployment.mjs';
 import {createCIEvidence} from './ci-evidence.mjs';
 /** Исполняет одну незавершённую подготовку; checkpoint нужен также для fault-injection теста. */
-export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[],flowGit=createFlowGit(),github}={}) {
+export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[],flowGit=createFlowGit(),github,deploymentAdapter=createDeploymentAdapter()}={}) {
   const db=await pool.connect();
-  github??=createGitHub({evidenceStore:createCIEvidence(db)});
+  const verifierPool=process.env.CODEWORKS_VERIFIER_DATABASE_URL?new Pool({connectionString:process.env.CODEWORKS_VERIFIER_DATABASE_URL,max:1,connectionTimeoutMillis:3000}):null;
+  const verifier=verifierPool?await verifierPool.connect():db;
+  github??=createGitHub({evidenceStore:createCIEvidence(verifier)});
   let locked=false;
   try {
     const operation=(await db.query('SELECT * FROM codeworks.operations WHERE id=$1',[operationId])).rows[0];
-    if(!operation||!['prepare-write','request-release'].includes(operation.kind))return;
+    if(!operation||!['prepare-write','request-release','rollout'].includes(operation.kind))return;
     await db.query('SELECT pg_advisory_lock(hashtextextended($1,0))',[operation.project_id]);locked=true;
     const op=(await db.query('SELECT * FROM codeworks.operations WHERE id=$1',[operationId])).rows[0];
-    if(!['pending','running',...(op.kind==='request-release'?['awaiting_ci','awaiting_deployment','awaiting_reconciliation']:[])].includes(op.status))return;
+    if(!['pending','running',...(['request-release','rollout'].includes(op.kind)?['awaiting_ci','awaiting_deployment','awaiting_reconciliation']:[])].includes(op.status))return;
     const project=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1',[op.project_id])).rows[0].config;
     const w=(await db.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[op.workspace_id])).rows[0];
     await db.query("UPDATE codeworks.operations SET status='running',updated_at=now() WHERE id=$1",[op.id]);
     try {
       if(!allowedRepositories.includes(project.repo_path))throw new Fault('FORBIDDEN');
+      if(op.kind==='rollout') {
+        let outcome;
+        try{outcome=await advanceDeployment(verifier,op,deploymentAdapter);}catch(error){
+          if(error.code!=='GIT_FAILED')throw error;
+          outcome={status:'awaiting_deployment',reason:'ANSIBLE_ROLLOUT_RECONCILIATION_REQUIRED'};
+        }
+        await db.query('UPDATE codeworks.operations SET status=$2,step=$3,error=NULL,result=$4,updated_at=now() WHERE id=$1',[op.id,outcome.status,outcome.reason,outcome]);
+        return;
+      }
       if(op.kind==='request-release') {
         const release=(await db.query('SELECT * FROM codeworks.releases WHERE operation_id=$1',[op.id])).rows[0];
         const save=async details=>{
@@ -40,7 +52,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
         };
         let outcome;
         try{
-          outcome=await advanceRelease({project,workspace:w,operation:op,release},{git:flowGit,github,inspect:(...args)=>git.inspect(...args),save,evidence,checkpoint});
+          outcome=await advanceRelease({project,workspace:w,operation:op,release},{git:flowGit,github,inspect:(...args)=>git.inspect(...args),save,evidence,checkpoint,deploy:deploymentAdapter?(target,sha,proof)=>enqueueDeployment(db,project,target,sha,proof,verifier):undefined});
         }catch(error){
           if(error?.code==='TEST_INTERRUPTION')throw error;
           if(['GITHUB_UNAVAILABLE','GIT_FAILED'].includes(error?.code))outcome={status:'awaiting_reconciliation',reason:error.code};
@@ -79,7 +91,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
       await db.query('BEGIN');
       try {
         if(op.kind==='prepare-write')await db.query("UPDATE codeworks.workspaces SET preparation_state='failed' WHERE id=$1",[w.id]);
-        else {
+        else if(op.kind==='request-release') {
           const failed=(await db.query("UPDATE codeworks.releases SET state='failed' WHERE operation_id=$1 RETURNING id,details",[op.id])).rows[0];
           if(failed)await db.query('UPDATE codeworks.operations SET result=$2 WHERE id=$1',[op.id,{release_id:failed.id,state:'failed',details:failed.details}]);
         }
@@ -89,6 +101,8 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
     }
   } finally {
     if(locked)await db.query('SELECT pg_advisory_unlock_all()').catch(()=>{});
+    if(verifier!==db)verifier.release();
+    await verifierPool?.end();
     db.release();
   }
 }

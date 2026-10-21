@@ -785,7 +785,8 @@
           "enum": [
             "prepare-write",
             "attach-or-transfer",
-            "request-release"
+            "request-release",
+            "rollout"
           ]
         },
         "status": {
@@ -816,6 +817,9 @@
             },
             {
               "$ref": "#/definitions/request-release"
+            },
+            {
+              "$ref": "#/definitions/rolloutRequest"
             }
           ]
         },
@@ -835,6 +839,9 @@
             },
             {
               "type": "null"
+            },
+            {
+              "$ref": "#/definitions/rolloutResult"
             }
           ]
         },
@@ -1048,6 +1055,10 @@
         },
         "merge_ci": {
           "$ref": "#/definitions/ciEvidence"
+        },
+        "deployment_operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
         }
       },
       "required": [
@@ -1145,6 +1156,50 @@
         "composition_digest",
         "composition_reference",
         "url"
+      ],
+      "additionalProperties": false
+    },
+    "rolloutRequest": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "enum": [
+            "dev",
+            "prod"
+          ]
+        },
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "ci": {
+          "$ref": "#/definitions/ciEvidence"
+        }
+      },
+      "required": [
+        "target",
+        "commit_sha",
+        "ci"
+      ],
+      "additionalProperties": false
+    },
+    "rolloutResult": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "awaiting_deployment",
+            "succeeded",
+            "failed"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "reason"
       ],
       "additionalProperties": false
     }

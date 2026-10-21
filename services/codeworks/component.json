@@ -56,7 +56,11 @@
       "services/codeworks/migrations/003.sql",
       "services/codeworks/src/ci-evidence.mjs",
       "services/codeworks/ci/catalog.mjs",
-      "services/codeworks/src/verify-ci.mjs"
+      "services/codeworks/src/verify-ci.mjs",
+      "services/codeworks/src/deployment.mjs",
+      "services/codeworks/migrations/004.sql",
+      "services/codeworks/components/package-runtime.mjs",
+      "services/codeworks/components/lock-inputs.mjs"
     ],
     "checks": [
       "services/codeworks/components/cli.mjs",
@@ -83,7 +87,8 @@
       "services/codeworks/tests/integration/ci-evidence.test.mjs",
       "services/codeworks/tests/ci-key-boundary.test.mjs",
       "services/codeworks/tests/integration/fixture-lifecycle.mjs",
-      "services/codeworks/tests/fixture-lifecycle.test.mjs"
+      "services/codeworks/tests/fixture-lifecycle.test.mjs",
+      "services/codeworks/tests/deployment.test.mjs"
     ]
   },
   "dependencies": [],
@@ -100,7 +105,9 @@
       "services/codeworks/src",
       "services/codeworks/ci/registry.mjs",
       "services/codeworks/components/descriptor-validation.mjs",
-      "services/codeworks/ci/catalog.mjs"
+      "services/codeworks/ci/catalog.mjs",
+      "services/codeworks/components/package-runtime.mjs",
+      "services/codeworks/components/lock-inputs.mjs"
     ],
     "entrypoints": [
       "services/codeworks/src/main.mjs",
@@ -128,6 +135,7 @@
   },
   "deploy": {
     "units": [
+      "brai-codeworks.service",
       "brai-codeworks-agents-test.service"
     ],
     "migrations": [

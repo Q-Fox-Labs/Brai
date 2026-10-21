@@ -44,6 +44,6 @@ export function createStore(pool) {
     /** Читает состояние без ожидания Git worker и без мутаций. */
     async read(projectId,work) {const db=await pool.connect();try{return await work(session(db));}finally{db.release();}},
     /** Читает ограниченный набор незавершённых операций для восстановления. */
-    async pending(limit=4) {return (await pool.query("SELECT o.id,p.config->>'common_dir' AS common_dir FROM codeworks.operations o JOIN codeworks.projects p ON p.id=o.project_id WHERE (o.kind='prepare-write' AND o.status IN ('pending','running')) OR (o.kind='request-release' AND (o.status IN ('pending','running') OR (o.status IN ('awaiting_ci','awaiting_deployment','awaiting_reconciliation') AND o.updated_at<now()-interval '30 seconds'))) ORDER BY o.created_at LIMIT $1",[limit])).rows;},
+    async pending(limit=4) {return (await pool.query("SELECT o.id,p.config->>'common_dir' AS common_dir FROM codeworks.operations o JOIN codeworks.projects p ON p.id=o.project_id WHERE (o.kind='rollout' AND (o.status IN ('pending','running') OR (o.status='awaiting_deployment' AND o.updated_at<now()-interval '5 seconds'))) OR (o.kind='prepare-write' AND o.status IN ('pending','running')) OR (o.kind='request-release' AND (o.status IN ('pending','running') OR (o.status IN ('awaiting_ci','awaiting_deployment','awaiting_reconciliation') AND o.updated_at<now()-interval '30 seconds'))) ORDER BY o.created_at LIMIT $1",[limit])).rows;},
   };
 }

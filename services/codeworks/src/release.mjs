@@ -6,7 +6,7 @@ function validatePR(p,w,leg,pr) {
   if(!pr||!pr.body?.includes('Codeworks workspace '+w.id+';')||pr.head?.sha!==leg.head||pr.head?.ref!==leg.branch||pr.base?.ref!==leg.target||pr.head?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||pr.base?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||(leg.pr_number&&pr.number!==leg.pr_number))throw new Fault('CONFLICT','PR identity differs from pinned intent.');
 }
 /** Один ограниченный проход. save фиксирует все намерения ДО Git/GitHub мутаций; evidence — доверенный owner state. */
-export async function advanceRelease({project:p,workspace:w,operation:op,release}, {git,github,inspect,save,evidence,checkpoint=async()=>{}}) {
+export async function advanceRelease({project:p,workspace:w,operation:op,release}, {git,github,inspect,save,evidence,deploy,checkpoint=async()=>{}}) {
   const flow=release.details;
   const persist=async()=>save(flow);
   const checkGate=async(leg,sha,stage,fallback)=>{
@@ -88,7 +88,10 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
     const mergeGate=await checkGate(leg,leg.merge_sha,'merge','MERGE_CHECKS_REQUIRED');if(mergeGate)return mergeGate;
     const target=leg.target==='main'?'prod':'dev';
     const installed=await evidence(target,leg.merge_sha);
-    if(!installed)return waiting('awaiting_deployment','EXACT_MERGE_DEPLOYMENT_REQUIRED');
+    if(!installed){
+      if(deploy&&leg.merge_ci){leg.deployment_operation_id=await deploy(target,leg.merge_sha,leg.merge_ci);await persist();}
+      return waiting('awaiting_deployment','EXACT_MERGE_DEPLOYMENT_REQUIRED');
+    }
     leg.deployment_evidence_id=installed.id;await persist();
   }
   return waiting('succeeded','VERIFIED_RELEASE_COMPLETED');

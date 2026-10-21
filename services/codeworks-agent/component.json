@@ -68,6 +68,7 @@
   },
   "deploy": {
     "units": [
+      "brai-codeworks-codex.service",
       "brai-codeworks-codex-test.service"
     ],
     "migrations": [],

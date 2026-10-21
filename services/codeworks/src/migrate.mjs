@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { Pool } from 'pg';
 const quote = value => '"' + value.replaceAll('"', '""') + '"';
 /** Применяет миграции владельцем отдельной БД и выдаёт ограниченные права appRole. */
-export async function migrate(pool, appRole) {
+export async function migrate(pool, appRole, verifierRole) {
   if (!appRole) throw new Error('APP_ROLE_REQUIRED');
   const db = await pool.connect();
   try {
@@ -19,7 +19,7 @@ export async function migrate(pool, appRole) {
     const { rowCount } = await db.query('SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=$1)', [appRole]);
     if (rowCount) throw new Error('APP_ROLE_MEMBERSHIP_FORBIDDEN');
     await db.query('CREATE TABLE IF NOT EXISTS public.codeworks_migrations(version integer PRIMARY KEY, sha256 text NOT NULL)');
-    for(const version of [1,2,3]) {
+    for(const version of [1,2,3,4]) {
       const sql=await readFile(new URL('../migrations/'+String(version).padStart(3,'0')+'.sql',import.meta.url),'utf8');
       const sha=createHash('sha256').update(sql).digest('hex');
       const applied=(await db.query('SELECT sha256 FROM public.codeworks_migrations WHERE version=$1',[version])).rows[0];
@@ -37,8 +37,17 @@ export async function migrate(pool, appRole) {
     await db.query(`GRANT USAGE ON SCHEMA codeworks TO ${quote(appRole)}`);
     await db.query(`GRANT SELECT,INSERT,UPDATE ON ALL TABLES IN SCHEMA codeworks TO ${quote(appRole)}`);
     await db.query(`REVOKE UPDATE ON codeworks.verified_ci FROM ${quote(appRole)}`);
+    if(verifierRole){
+      const v=(await db.query('SELECT rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=$1',[verifierRole])).rows[0];
+      if(!v||Object.values(v).some(Boolean)||[appRole,owner.role].includes(verifierRole)||(await db.query('SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=$1)',[verifierRole])).rowCount)throw Error('UNSAFE_VERIFIER_ROLE');
+      await db.query(`GRANT USAGE ON SCHEMA codeworks TO ${quote(verifierRole)}`);
+      await db.query(`GRANT SELECT ON ALL TABLES IN SCHEMA codeworks TO ${quote(verifierRole)}`);
+      await db.query(`GRANT INSERT ON codeworks.verified_ci,codeworks.deployment_evidence,codeworks.installed TO ${quote(verifierRole)}`);
+      await db.query(`GRANT UPDATE ON codeworks.installed,codeworks.deployments TO ${quote(verifierRole)}`);
+      await db.query(`REVOKE INSERT,UPDATE ON codeworks.verified_ci,codeworks.deployment_evidence,codeworks.installed FROM ${quote(appRole)}`);
+    }
     await db.query(`REVOKE ALL ON public.codeworks_migrations FROM PUBLIC,${quote(appRole)}`);
-    const comments = { run_id:'Точный удостоверенный GitHub Actions run.', attempt:'Номер удостоверенной попытки Actions.', policy_sha256:'Fingerprint принятой owner policy.', proof:'Однократно проверенное CI evidence; не agent report.', id:'Стабильный ID записи.', project_id:'Ссылка на собственный реестр проектов.', config:'Политика репозитория, путей, Git flow и доступа.', workspace_key:'Внешний ключ продолжения области без привязки к попытке.', element_id:'Необязательный стабильный Element ID game-core.', kind:'Вид операции или ветки.', base_ref:'Исходная ссылка Git; фиксируется при создании.', base_sha:'Неизменяемая база Git.', branch:'Зарезервированное имя ветки.', path:'Канонический путь рабочей области.', ownership_token:'Случайное доказательство владения внешними ресурсами.', preparation_state:'Последний подтверждённый этап подготовки.', writer:'Исполнитель, сессия, эпоха и active/quiesced права записи.', executor_id:'Удостоверенный транспортом исполнитель.', actor_id:'Необязательный заявленный инициатор.', workspace_id:'ID собственной рабочей области.', status:'Состояние durable операции.', step:'Последний сохранённый шаг.', request:'Исходные параметры операции.', result:'Фактический результат операции.', error:'Безопасная ошибка без инфраструктурных секретов.', created_at:'Время создания UTC.', updated_at:'Время последнего подтверждения UTC.', idempotency_key:'Ключ безопасного повтора в области проекта и исполнителя.', payload_sha256:'Хеш нормализованных параметров и имени операции.', operation_id:'ID первоначальной durable операции.', session_id:'Внешний ID сессии; не удостоверяет исполнителя.', move_id:'Отдельная ссылка на Move game-core.', attempt_id:'Отдельная ссылка на attempt game-core.', writer_epoch:'Версия права записи при подключении.', target:'Запрошенный контур выпуска.', requested_sha:'Точный commit запрошенного выпуска.', state:'Подтверждённое состояние запроса выпуска.', details:'Закреплённые Git/GitHub намерения и фактические результаты шагов.', commit_sha:'Точный commit проверенной установленной версии.', evidence_url:'Ссылка на доверенный отчёт rollout и проверки окружения.' };
+    const comments = { receipt:'Доверенный результат Ansible rollout.', composition_digest:'Immutable digest удостоверенного состава OCI.', composition:'Проверенный состав отдельных OCI компонентов.', previous_composition:'Предыдущая успешная поставка для защиты от cleanup.', run_id:'Точный удостоверенный GitHub Actions run.', run_id:'Точный удостоверенный GitHub Actions run.', attempt:'Номер удостоверенной попытки Actions.', policy_sha256:'Fingerprint принятой owner policy.', proof:'Однократно проверенное CI evidence; не agent report.', id:'Стабильный ID записи.', project_id:'Ссылка на собственный реестр проектов.', config:'Политика репозитория, путей, Git flow и доступа.', workspace_key:'Внешний ключ продолжения области без привязки к попытке.', element_id:'Необязательный стабильный Element ID game-core.', kind:'Вид операции или ветки.', base_ref:'Исходная ссылка Git; фиксируется при создании.', base_sha:'Неизменяемая база Git.', branch:'Зарезервированное имя ветки.', path:'Канонический путь рабочей области.', ownership_token:'Случайное доказательство владения внешними ресурсами.', preparation_state:'Последний подтверждённый этап подготовки.', writer:'Исполнитель, сессия, эпоха и active/quiesced права записи.', executor_id:'Удостоверенный транспортом исполнитель.', actor_id:'Необязательный заявленный инициатор.', workspace_id:'ID собственной рабочей области.', status:'Состояние durable операции.', step:'Последний сохранённый шаг.', request:'Исходные параметры операции.', result:'Фактический результат операции.', error:'Безопасная ошибка без инфраструктурных секретов.', created_at:'Время создания UTC.', updated_at:'Время последнего подтверждения UTC.', idempotency_key:'Ключ безопасного повтора в области проекта и исполнителя.', payload_sha256:'Хеш нормализованных параметров и имени операции.', operation_id:'ID первоначальной durable операции.', session_id:'Внешний ID сессии; не удостоверяет исполнителя.', move_id:'Отдельная ссылка на Move game-core.', attempt_id:'Отдельная ссылка на attempt game-core.', writer_epoch:'Версия права записи при подключении.', target:'Запрошенный контур выпуска.', requested_sha:'Точный commit запрошенного выпуска.', state:'Подтверждённое состояние запроса выпуска.', details:'Закреплённые Git/GitHub намерения и фактические результаты шагов.', commit_sha:'Точный commit проверенной установленной версии.', evidence_url:'Ссылка на доверенный отчёт rollout и проверки окружения.' };
     const columns = (await db.query("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema='codeworks'")).rows;
     for (const column of columns) {
       if (!comments[column.column_name]) throw new Error('COLUMN_COMMENT_REQUIRED');
@@ -50,7 +59,7 @@ export async function migrate(pool, appRole) {
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const pool = new Pool({ connectionString: process.env.CODEWORKS_OWNER_DATABASE_URL });
-  try { if (!process.env.CODEWORKS_OWNER_DATABASE_URL) throw new Error('OWNER_DATABASE_URL_REQUIRED'); await migrate(pool, process.env.CODEWORKS_APP_ROLE); console.log('codeworks migration complete'); }
+  try { if (!process.env.CODEWORKS_OWNER_DATABASE_URL) throw new Error('OWNER_DATABASE_URL_REQUIRED'); await migrate(pool, process.env.CODEWORKS_APP_ROLE,process.env.CODEWORKS_VERIFIER_ROLE); console.log('codeworks migration complete'); }
   catch (error) { console.error(error.message?.startsWith('MIGRATION_') ? error.message : 'codeworks migration failed'); process.exitCode=1; }
   finally { await pool.end(); }
 }
