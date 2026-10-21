@@ -10,7 +10,9 @@
     "services/hermes/runtime.mjs",
     "services/hermes/telegram/__init__.py",
     "services/hermes/tools.mjs",
-    "services/hermes/trusted.mjs"
+    "services/hermes/trusted.mjs",
+    "services/hermes/memos/embedding/adapter.mjs",
+    "services/hermes/memos/bridge/codex_bridge.py"
   ],
   "inputs": {
     "build": [
@@ -28,7 +30,10 @@
       "services/hermes/transcribe.mjs",
       "services/hermes/trusted.mjs",
       "services/hermes/trusted.openrpc.json",
-      "services/hermes/voice.mjs"
+      "services/hermes/voice.mjs",
+      "services/hermes/memos/embedding/adapter.mjs",
+      "services/hermes/memos/bridge/codex_bridge.py",
+      "services/hermes/memos/bridge/requirements.txt"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
@@ -117,7 +122,7 @@
   ],
   "commands": {
     "build": null,
-    "check": "node --test --test-isolation=none tests/*.test.mjs"
+    "check": "node --test --test-isolation=none tests/*.test.mjs memos/embedding/*.test.mjs"
   },
   "delivery": {
     "kind": "ready-files",
@@ -132,26 +137,37 @@
       "services/hermes/tools.mjs",
       "services/hermes/transcribe.mjs",
       "services/hermes/trusted.mjs",
-      "services/hermes/voice.mjs"
+      "services/hermes/voice.mjs",
+      "services/hermes/memos/embedding/adapter.mjs",
+      "services/hermes/memos/bridge/codex_bridge.py",
+      "services/hermes/memos/bridge/requirements.txt"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",
       "services/hermes/runtime.mjs",
       "services/hermes/telegram/__init__.py",
-      "services/hermes/trusted.mjs"
+      "services/hermes/trusted.mjs",
+      "services/hermes/memos/embedding/adapter.mjs",
+      "services/hermes/memos/bridge/codex_bridge.py"
     ],
     "smokeImports": [
       "services/hermes/catalog.mjs",
-      "services/hermes/trusted.mjs"
+      "services/hermes/trusted.mjs",
+      "services/hermes/memos/embedding/adapter.mjs"
     ],
     "systemRequirements": [
-      "Node.js 24.21.0"
+      "Node.js 24.21.0",
+      "Python 3.12 with pinned memos/bridge/requirements.txt in the existing Hermes bridge-venv; no Python dependencies are bundled",
+      "Operator-owned bridge_runtime.py single-owner launcher and codex_cli_owner.py from the existing Hermes runtime; installed absolute Codex executable and protected worker/configuration",
+      "Existing external Hermes gateway, MemOS, browser, AWG2 and intake runtimes are installed and operated through Admin; not bundled"
     ]
   },
   "deploy": {
     "units": [
       "brai-hermes-dev.service",
-      "brai-hermes-dev-intake.service"
+      "brai-hermes-dev-intake.service",
+      "brai-hermes-dev-embeddings.service",
+      "brai-hermes-dev-codex-bridge.service"
     ],
     "migrations": [],
     "health": null

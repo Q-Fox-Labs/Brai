@@ -1,7 +1,7 @@
 // ABOUTME: Acceptance fixtures exercise discovery, graph, lifecycle and separate build/check identities.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, rmSync, chmodSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { discover, fingerprints } from './graph.mjs';
@@ -73,4 +73,57 @@ test('removal requires retirement; rename retains explicit tombstone and prevent
  a.status='retired';a.reason='Replaced explicitly';a.renamedTo='b';a.inputs={build:[],runtime:[],checks:[]};a.executableSources=[];save(root,'a',a);add(root,'b');assert.deepEqual(discover(root,{base:'HEAD'}).order,['b']);
  a.renamedTo='unknown';save(root,'a',a);assert.throws(()=>discover(root,{base:'HEAD'}),/INVALID_RENAME/);
  a.renamedTo='b';save(root,'a',a);git('add','.');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','retire');a.status='active';delete a.renamedTo;save(root,'a',a);assert.throws(()=>discover(root,{base:'HEAD'}),/RETIRED_ID_REUSED/);
+});
+
+// These are executable behavior regressions: assert delivered bytes, not only key inequality.
+test('build config and effective dependency delivery cannot reuse stale payload',async t=>{
+ const root=fixture(t);
+ const d=add(root,'probe',d=>{
+  d.inputs.build.push('services/probe/config.json');
+  d.delivery.files=['services/probe/dist'];d.delivery.entrypoints=['services/probe/dist/main.mjs'];
+ });
+ put(root,'services/probe/config.json','{"value":1}');
+ put(root,'services/probe/build.mjs',"import{mkdirSync,readFileSync,writeFileSync,appendFileSync}from'node:fs';mkdirSync('dist',{recursive:true});writeFileSync('dist/main.mjs','export const value='+JSON.parse(readFileSync('config.json')).value+';');appendFileSync('build-count','1');");
+ const first=(await execute(root,'package',['probe']))[0];
+ put(root,'services/probe/config.json','{"value":2}');
+ const second=(await execute(root,'package',['probe']))[0];
+ assert.equal(second.compiled,true);assert.equal(second.packaged,true);
+ assert.notEqual(first.artifact.payloadHash,second.artifact.payloadHash);
+ assert.equal(readFileSync(join(second.artifact.path,'services/probe/dist/main.mjs'),'utf8'),'export const value=2;');
+ add(root,'neighbor');put(root,'services/neighbor/extra.json','{"revision":1}');
+ d.dependencies=[{id:'neighbor',inputs:[],delivery:[]}];save(root,'probe',d);
+ const before=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');
+ d.dependencies[0].delivery=['services/neighbor/extra.json'];save(root,'probe',d);
+ const added=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');
+ assert.notEqual(before.runtime,added.runtime);assert.equal(added.packaged,true);
+ assert.equal(readFileSync(join(added.artifact.path,'services/neighbor/extra.json'),'utf8'),'{"revision":1}');
+ put(root,'services/neighbor/extra.json','{"revision":2}');
+ const changed=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');
+ assert.equal(changed.compiled,false);assert.equal(changed.packaged,true);
+ assert.equal(readFileSync(join(changed.artifact.path,'services/neighbor/extra.json'),'utf8'),'{"revision":2}');
+ const repeat=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');assert.equal(repeat.packaged,false);
+ chmodSync(join(root,'services/neighbor/extra.json'),0o600);
+ const modeChanged=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');assert.equal(modeChanged.packaged,true);assert.notEqual(modeChanged.artifact.payloadHash,repeat.artifact.payloadHash);
+});
+test('executable admission covers package bins, runtime flags and executable shebang files',t=>{
+ const root=fixture(t),d=add(root,'probe');put(root,'services/probe/extra.mjs','export {};');
+ for(const manifest of [
+  {bin:{probe:'extra.mjs'}},{bin:'extra.mjs'},
+  {scripts:{start:'node --enable-source-maps "extra.mjs"'}},
+  {scripts:{'start:worker':"node --require init.cjs --conditions=production extra.mjs"}},
+  {scripts:{start:'python3 -B helper.py'}},
+ ]){put(root,'services/probe/package.json',JSON.stringify(manifest));assert.throws(()=>discover(root),/UNDECLARED_EXECUTABLE_(BIN|SCRIPT)/);}
+ rmSync(join(root,'services/probe/package.json'));
+ put(root,'tools/package.json',JSON.stringify({bin:{worker:'worker.py'}}));assert.throws(()=>discover(root),/MISSING_COMPONENT/);rmSync(join(root,'tools'),{recursive:true});
+ put(root,'tools/arbitrary-name.py','#!/usr/bin/env python3\nprint(42)\n');chmodSync(join(root,'tools/arbitrary-name.py'),0o755);
+ assert.throws(()=>discover(root),/MISSING_EXECUTABLE/);rmSync(join(root,'tools'),{recursive:true});
+ put(root,'services/probe/helper.py','#!/usr/bin/env python3\nprint(42)\n');chmodSync(join(root,'services/probe/helper.py'),0o755);
+ assert.throws(()=>discover(root),/MISSING_EXECUTABLE/);
+ d.executableSources.push('services/probe/helper.py');d.inputs.runtime.push('services/probe/helper.py');save(root,'probe',d);assert.deepEqual(discover(root).order,['probe']);
+});
+test('validation rejects missing own and dependency delivery files before execution',t=>{
+ const root=fixture(t),d=add(root,'probe');d.delivery.files.push('services/probe/missing.json');save(root,'probe',d);
+ assert.throws(()=>discover(root),/DELIVERY_NOT_FOUND/);d.delivery.files.pop();add(root,'neighbor');
+ d.dependencies=[{id:'neighbor',inputs:[],delivery:['services/neighbor/missing.json']}];save(root,'probe',d);
+ assert.throws(()=>discover(root),/DELIVERY_NOT_FOUND/);
 });

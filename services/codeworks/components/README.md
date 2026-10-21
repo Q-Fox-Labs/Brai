@@ -35,7 +35,10 @@ checks, `package` использует ту же сборку и упаковы�
 
 Build receipt находится в `tmp/component-state`; его можно удалить для полной
 сборки. Пропавший dist/.next заставляет пересобрать компонент. Изменение только
-теста меняет check key, сохраняя build/runtime keys. Runtime package ID — SHA-256
+теста меняет check key, сохраняя build/runtime keys. Runtime key учитывает build identity
+и фактические выбранные файлы поставки, включая delivery зависимостей; после сборки
+он вычисляется заново по готовым outputs. Validate требует наличия delivery files;
+только build/check/package допускают ещё не созданные dist/.next до сборки. Runtime package ID — SHA-256
 фактических файлов, modes, launch contract и locked package identity, поэтому тест и время проверки не меняют ID поставки.
 
 Готовая поставка находится в `tmp/component-packages/<id>-<sha256>` и содержит
@@ -98,10 +101,10 @@ node --test --test-isolation=none services/codeworks/components/*.test.mjs
 | local-ai | local-ai, local-ai-migrate | brai-local-ai-operation3-production.service |
 | agent | общий brai-agent.service | общий brai-agent.service |
 | supabase-mcp | supabase-mcp | brai-supabase-mcp.service, supabase-mcp |
-| hermes | brai-hermes-dev.service, brai-hermes-dev-intake.service | нет отдельного unit |
+| hermes | brai-hermes-dev.service, brai-hermes-dev-intake.service, brai-hermes-dev-embeddings.service, brai-hermes-dev-codex-bridge.service | нет отдельного unit |
 | codeworks | brai-codeworks-agents-test.service (staged) | endpoint ещё не включён |
 | codeworks-agent | brai-codeworks-codex-test.service (staged) | endpoint ещё не включён |
-| providers | отдельного действующего unit нет | отдельного действующего unit нет |
+| providers | Compose providers / brai-dev-providers; внешний proxy litellm / brai-dev-providers-litellm | отдельного действующего unit нет |
 | instaloader | внешний on-demand рецепт, service instaloader | отдельного действующего unit нет |
 
 Это 15 first-party компонентов и один внешний рецепт. Корень npm workspaces —
@@ -109,3 +112,17 @@ node --test --test-isolation=none services/codeworks/components/*.test.mjs
 компонентов в исходной принятой базе нет. Внутренние workers, MCP endpoints и
 четыре Transcription executable перечислены у своих владельцев, без копий задач
 или состояния Element/Move/Attempt.
+
+Hermes payload включает собственные MemOS embedding adapter и codex_bridge.py,
+а также pinned bridge requirements. Python bridge-venv, operator bridge_runtime.py
+с single-owner binding, codex_cli_owner.py и установленный Codex остаются явными
+внешними prerequisites существующего Hermes lifecycle. Без них Python bridge
+не считается готовым runtime. Gateway, MemOS engine, browser, AWG2 и intake
+предоставляет оператор; first-party adapters находятся в этом описании.
+Providers действует в DEV; отдельный внешний LiteLLM proxy закреплён digest
+в systemRequirements, его конфигурация litellm.yaml входит в поставку.
+
+Executable gate проверяет объявленные package bin, runtime scripts с флагами Node/Python,
+conventional main/runner и файлы с shebang и executable mode независимо от имени/каталога.
+Новый такой файл требует executableSources владельца; bin/runtime scripts также
+требуют delivery.entrypoints. Generated outputs проверяются после сборки.

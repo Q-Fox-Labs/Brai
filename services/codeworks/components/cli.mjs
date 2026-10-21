@@ -12,7 +12,7 @@ function command(root,c,text) {
   if (result.status!==0) throw Error(`COMMAND_FAILED: ${c.id}: ${text}: ${result.status}`);
 }
 export async function execute(root, action, ids=[], {base}={}) {
-  const graph=discover(root,{base});
+  const graph=discover(root,{base,allowMissingBuildOutputs:action!=='validate'});
   const selected=new Set();
   function include(id) {
     const c=graph.components.get(id);
@@ -28,7 +28,7 @@ export async function execute(root, action, ids=[], {base}={}) {
   if (!['build','check','package','run'].includes(action)) throw Error('USAGE: cli.mjs validate|plan|build|check|package|run [component IDs] [--base Git-ref]');
   const stateRoot=join(root,'tmp','component-state'); mkdirSync(stateRoot,{recursive:true});
   const results=[];
-  for (const item of plan) {
+  for (let item of plan) {
     const c=graph.components.get(item.id), statePath=join(stateRoot,item.id+'.json');
     const state=existsSync(statePath)?json(statePath):{};
     let compiled=false;
@@ -37,6 +37,8 @@ export async function execute(root, action, ids=[], {base}={}) {
     if (c.commands.build && (state.build!==item.build || !outputsPresent)) {
       command(root,c,c.commands.build); compiled=true;
     }
+    // Generated payload and dependency outputs are fingerprinted after this compilation.
+    item={id:item.id,...fingerprints(root,c)};
     state.build=item.build;
     writeFileSync(statePath,JSON.stringify(state)+'\n');
     let checked=false;

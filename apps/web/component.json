@@ -358,6 +358,7 @@
       "apps/web/.next/BUILD_ID",
       "apps/web/.next/app-path-routes-manifest.json",
       "apps/web/.next/build-manifest.json",
+      "apps/web/.next/package.json",
       "apps/web/.next/prerender-manifest.json",
       "apps/web/.next/required-server-files.json",
       "apps/web/.next/routes-manifest.json",

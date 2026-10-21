@@ -105,11 +105,15 @@
       "services/providers/dist/artifacts.js"
     ],
     "systemRequirements": [
-      "Node.js 24.21.0"
+      "Node.js 24.21.0",
+      "External LiteLLM proxy docker.litellm.ai/berriai/litellm@sha256:3d88bd757134a00e8c00237b85a021ab1f6d54abb9c1df750f411dbe7256a500, Compose service litellm / container brai-dev-providers-litellm; operator supplies secrets and networking"
     ]
   },
   "deploy": {
-    "units": [],
+    "units": [
+      "providers",
+      "brai-dev-providers"
+    ],
     "migrations": [
       "services/providers/migrations"
     ],
