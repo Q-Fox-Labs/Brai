@@ -25,7 +25,7 @@ test('real agent executor: lazy workspace, whole batch, kernel RO and dirty hand
     });
     const control=request=>socketCall(path.join(state,'control.sock'),request);
     await assert.rejects(socketCall(path.join(state,'codex.adapter.sock'),{payload:'{}',signature:'00'}),/ADAPTER_DENIED/);
-    const codex=await control({action:'open',project_id:project.id,executor_id:'codex'});
+    let codex=await control({action:'open',project_id:project.id,executor_id:'codex'});
     const call=request=>socketCall(codex.socket,request);
     assert.equal((await call({action:'read',path:'hello.txt'})).content,'frozen base\n');
     assert.equal((await call({action:'status'})).workspace,null);
@@ -45,6 +45,9 @@ test('real agent executor: lazy workspace, whole batch, kernel RO and dirty hand
     assert.equal((await call({action:'status'})).workspace,null);
     await assert.rejects(call({action:'batch',operations:[{op:'write',path:'docs/readme.md',content:'partial'},{op:'write',path:'/tmp/escape.js',content:'escape'}]}),/PATH_DENIED/);
     assert.equal(await readFile(path.join(project.repo_path,'docs/readme.md'),'utf8'),'documented\n');
+    await assert.rejects(call({action:'command',mode:'write',argv:['/bin/true']}),/DOCUMENTATION_COMMIT_REQUIRED/);
+    // A separate first mixed batch uses a WT; the prior docs session retains its own journal.
+    codex=await control({action:'open',project_id:project.id,executor_id:'codex'});
     await call({action:'batch',operations:[{op:'write',path:'docs/readme.md',content:'workspace docs\n'},{op:'write',path:path.join(project.repo_path,'new.js'),content:'export default 1;\n'}]});
     const status=await call({action:'status'}),area=status.workspace.path;
     assert.notEqual(area,project.repo_path);

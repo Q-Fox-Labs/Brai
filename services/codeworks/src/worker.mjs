@@ -9,6 +9,7 @@ import { advanceRelease } from './release.mjs';
 import { Fault,safeFault } from './errors.mjs';
 import {enqueueDeployment,advanceDeployment,createDeploymentAdapter} from './deployment.mjs';
 import {createCIEvidence} from './ci-evidence.mjs';
+import {planDocumentation,finishDocumentation} from './documentation.mjs';
 /** Исполняет одну незавершённую подготовку; checkpoint нужен также для fault-injection теста. */
 export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[],flowGit=createFlowGit(),github,deploymentAdapter=createDeploymentAdapter()}={}) {
   const db=await pool.connect();
@@ -27,6 +28,14 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
     await db.query("UPDATE codeworks.operations SET status='running',updated_at=now() WHERE id=$1",[op.id]);
     try {
       if(!allowedRepositories.includes(project.repo_path))throw new Fault('FORBIDDEN');
+      if(op.kind==='commit'&&op.request.documentation){
+        const save=async plan=>db.query('UPDATE codeworks.operations SET result=$2,step=$3,updated_at=now() WHERE id=$1',[op.id,plan,'documentation-planned']);
+        const plan=op.result??await planDocumentation(project,op);if(!op.result)await save(plan);
+        await checkpoint('before-commit');
+        const result=await finishDocumentation(project,op,plan,save);
+        await checkpoint('after-commit');
+        await db.query("UPDATE codeworks.operations SET status='succeeded',step='documentation-pushed',error=NULL,result=$2,updated_at=now() WHERE id=$1",[op.id,result]);return;
+      }
       if(op.kind==='commit') {
         if(w.writer.state!=='committing'||w.writer.executor_id!==op.executor_id||w.writer.session_id!==op.request.session_id||w.writer.epoch!==op.request.expected_epoch)throw new Fault('WRITER_BUSY');
         const plan=op.result??await git.planCommit(project,w,op);
@@ -110,7 +119,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
       const fault=safeFault(error);
       await db.query('BEGIN');
       try {
-        if(op.kind==='commit')await db.query("UPDATE codeworks.workspaces SET writer=jsonb_set(writer,'{state}','\"active\"') WHERE id=$1 AND writer=$2",[w.id,w.writer]);
+        if(op.kind==='commit'&&w)await db.query("UPDATE codeworks.workspaces SET writer=jsonb_set(writer,'{state}','\"active\"') WHERE id=$1 AND writer=$2",[w.id,w.writer]);
         if(op.kind==='prepare-write')await db.query("UPDATE codeworks.workspaces SET preparation_state='failed' WHERE id=$1",[w.id]);
         else if(op.kind==='request-release') {
           const failed=(await db.query("UPDATE codeworks.releases SET state='failed' WHERE operation_id=$1 RETURNING id,details",[op.id])).rows[0];

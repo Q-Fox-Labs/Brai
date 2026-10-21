@@ -2,11 +2,12 @@
 // ABOUTME: Одна реализация обслуживает Codex/Hermes; модели не получают control socket или БД.
 import {createServer,createConnection} from 'node:net';
 import {spawn} from 'node:child_process';
-import {randomUUID,randomBytes,createHmac,timingSafeEqual} from 'node:crypto';
+import {randomUUID,randomBytes,createHmac,timingSafeEqual,createHash} from 'node:crypto';
 import {mkdir,readFile,writeFile,rename,chmod,lstat,realpath,readdir,unlink} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {sandboxArgs,workspaceMounts} from './agent-sandbox.mjs';
+import {beginDocumentation,checkDocumentation} from './documentation.mjs';
 import Ajv from 'ajv';
 const bridge=fileURLToPath(new URL('.',import.meta.url));
 const forbidden=new Set(['.git','node_modules','.env','.secrets','.agents','.codex']);
@@ -67,6 +68,7 @@ export async function createAgentHost(config,call) {
   const tool=JSON.parse(await readFile(path.join(bridge,'agent-tools.json'),'utf8'));
   const valid=new Ajv({strict:false}).compile(tool.inputSchema);
   const sessions=new Map(),servers=[],processes=new Map();let closing=false;
+  let documentationQueue=Promise.resolve();
   async function persist(session) {
     const file=path.join(config.state_root,session.id+'.json'),temporary=file+'.pending';
     await writeFile(temporary,JSON.stringify(session),{mode:0o600});await rename(temporary,file);
@@ -87,6 +89,7 @@ export async function createAgentHost(config,call) {
     if(session.pending_commit){
       const {operation}=await call('operation-status',{project_id:session.project_id,operation_id:session.pending_commit},session.executor_id);
       if(!['succeeded','failed'].includes(operation.status))fail('WRITER_BUSY');
+      if(operation.status==='succeeded'&&session.documentation){delete session.documentation;}
       delete session.pending_commit;await persist(session);
     }
     const p=await project(session);
@@ -97,6 +100,7 @@ export async function createAgentHost(config,call) {
       return {project:p,root:w.path,workspace:w};
     }
     if(!write)return {project:p,root:p.repo_path,workspace:null};
+    if(session.documentation)fail('DOCUMENTATION_COMMIT_REQUIRED');
     const accepted=await call('prepare-write',{project_id:session.project_id,idempotency_key:'agent-prepare-'+session.id,workspace_key:session.workspace_key,kind:session.kind,session_id:session.id,...session.context},session.executor_id);
     session.workspace_id=accepted.workspace_id;await persist(session);
     const until=Date.now()+150000;
@@ -170,11 +174,12 @@ export async function createAgentHost(config,call) {
   async function action(session,request) {
     if(!valid(request))fail('INVALID_ARGUMENT');
     if(request.action==='request-release'&&session.release_request&&request.request_key===session.release_request.key){
-      return call('request-release',session.release_request.args,session.executor_id);
+      const accepted=await call('request-release',session.release_request.args,session.executor_id);
+      return call('operation-status',{project_id:session.project_id,operation_id:accepted.operation_id},session.executor_id);
     }
     live(session);
     if(request.action==='kind'){
-      if(session.workspace_id||!['feature','hotfix'].includes(request.kind))fail('KIND_ALREADY_FIXED');
+      if(session.workspace_id||session.documentation||!['feature','hotfix'].includes(request.kind))fail('KIND_ALREADY_FIXED');
       session.kind=request.kind;session.context=Object.fromEntries(['element_id','move_id','attempt_id'].filter(k=>request[k]!==undefined).map(k=>[k,request[k]]));
       await persist(session);return {kind:session.kind,...session.context};
     }
@@ -195,6 +200,11 @@ export async function createAgentHost(config,call) {
       return {command_id:entry.id,done:entry.closed,exit_code:entry.code,stdout:entry.stdout(),stderr:entry.stderr()};
     }
     let context=await root(session);
+    if(request.action==='commit'&&!context.workspace&&session.documentation){
+      if(!request.request_key||!request.message)fail('INVALID_ARGUMENT');
+      const accepted=await call('commit',{project_id:session.project_id,session_id:session.id,documentation_journal:session.documentation.id,idempotency_key:'agent-commit-'+session.id+'-'+request.request_key,message:request.message},session.executor_id);
+      session.commit_request={key:request.request_key,message:request.message,operation_id:accepted.operation_id};await persist(session);return accepted;
+    }
     if(['commit','request-release'].includes(request.action)){
       if(!request.request_key||!context.workspace)fail('WORKSPACE_NOT_READY');
       const w=context.workspace,args={project_id:session.project_id,workspace_id:w.id,session_id:session.id,expected_epoch:w.writer.epoch,idempotency_key:'agent-'+request.action+'-'+session.id+'-'+request.request_key};
@@ -235,6 +245,22 @@ export async function createAgentHost(config,call) {
     const docs=(context.project.documentation_paths??[]).filter(prefix=>paths.some(file=>under(prefix,file)));
     const docsOnly=!session.workspace_id&&operations.every(op=>op.op!=='symlink')&&paths.every(file=>/\.(md|txt|rst|adoc)$/.test(file)&&docs.some(prefix=>under(prefix,file)));
     if(!docsOnly)context=await root(session,true);
+    if(docsOnly){
+      const perform=async()=>{
+        if(session.kind!=='feature')fail('DOCUMENTATION_REQUIRES_DEV');
+        for(const other of sessions.values())if(other.id!==session.id&&other.project_id===session.project_id&&paths.some(file=>other.documentation?.entries?.[file]))fail('DOCUMENTATION_OWNED');
+        const journal=await beginDocumentation(context.project,session.documentation,paths);
+        const plan=await worker(session,{action:'batch',operations,check_only:true,documentation_plan:true});
+        for(const [file,content]of Object.entries(plan.files))journal.entries[file].after=content===null?null:{bytes:Buffer.from(content).toString('base64'),sha256:createHash('sha256').update(content).digest('hex'),mode:journal.entries[file].before?.mode??'100644'};
+        if(Object.keys(journal.entries).length>128||Buffer.byteLength(JSON.stringify(journal))>4194304)fail('OUTPUT_LIMIT');
+        session.documentation={...journal,id:journal.id??randomUUID(),phase:'applying'};await persist(session);
+        const changed=await worker(session,{action:'batch',operations},{docs});
+        await checkDocumentation(context.project,session.documentation);
+        session.documentation.phase='ready';await persist(session);
+        return {...changed,root:context.root,workspace_id:null};
+      };
+      const result=documentationQueue.then(perform);documentationQueue=result.catch(()=>{});return result;
+    }
     // До первой мутации проверяется весь batch, включая destinations и patch context.
     await worker(session,{action:'batch',operations,check_only:true});
     return {...await worker(session,{action:'batch',operations},{write:!docsOnly,docs:docsOnly?docs:[]}),root:context.root,workspace_id:session.workspace_id??null};
@@ -335,6 +361,14 @@ export async function createAgentHost(config,call) {
   });
   return {
     quiesce,
+    /** Снимок доступен только ядру; caller передаёт лишь непрозрачный ID собственной сессии. */
+    async documentation({project,executorId,sessionId,journalId,operationId}){
+      const session=sessions.get(sessionId);if(!session||session.project_id!==project.id||session.executor_id!==executorId)fail('WRITER_FENCED');
+      live(session);if(session.workspace_id||session.documentation?.id!==journalId||session.documentation.phase!=='ready')fail('DOCUMENTATION_NOT_READY');
+      await checkDocumentation(project,session.documentation);
+      session.pending_commit=operationId;await persist(session);
+      return JSON.parse(JSON.stringify(session.documentation));
+    },
     /** Закрывает admission и останавливает всех собственных детей перед остановкой core. */
     async close() {
       closing=true;for(const entry of processes.values())if(!entry.closed)entry.child.kill('SIGKILL');

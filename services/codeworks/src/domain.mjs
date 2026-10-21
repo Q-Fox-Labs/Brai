@@ -11,7 +11,7 @@ function assertWriter(workspace,executor,args) {
   if (w.state!=='active'||w.executor_id!==executor||w.session_id!==args.session_id||w.epoch!==args.expected_epoch) throw new Fault('WRITER_BUSY');
 }
 /** Создаёт общие операции. executorId поступает только от доверенного адаптера. */
-export function createHandlers(store,git,{adminExecutor='codeworks_admin',assertQuiescent=async()=>{},allowedRepositories=[]}={}) {
+export function createHandlers(store,git,{adminExecutor='codeworks_admin',assertQuiescent=async()=>{},assertDocumentation=async()=>{throw new Fault('FORBIDDEN');},allowedRepositories=[]}={}) {
   async function authorized(db,projectId,executorId) {
     const project=await db.project(projectId);
     if(!project)throw new Fault('NOT_FOUND');
@@ -110,6 +110,11 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',assert
           const existing=await db.latestPreparation(w.id);
           accepted=existing&&existing.status!=='failed'?{operation_id:existing.id,workspace_id:w.id}:await operation(db,w,executorId,method,args);
           await attach(db,w,executorId,args);
+        } else if(method==='commit'&&args.documentation_journal){
+          const id=randomUUID();
+          const documentation=await assertDocumentation({project,executorId,sessionId:args.session_id,journalId:args.documentation_journal,operationId:id});
+          await db.insertOperation({id,project_id:project.id,workspace_id:null,executor_id:executorId,actor_id:null,kind:'commit',status:'pending',step:'intent',request:{...args,documentation},result:null});
+          accepted={operation_id:id,workspace_id:null};
         } else {
           const w=await workspace(db,args.project_id,args.workspace_id);
           if (w.preparation_state!=='ready') throw new Fault('CONFLICT','Workspace preparation must succeed first.');

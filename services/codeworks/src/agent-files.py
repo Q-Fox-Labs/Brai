@@ -145,7 +145,20 @@ def run(request):
             raise ValueError('OPERATION_INVALID')
         plan.append((op, target, destination, content))
     if request.get('check_only'):
-        return {'validated': True}
+        result = {'validated': True}
+        if request.get('documentation_plan'):
+            files = {}
+            for op, target, destination, content in plan:
+                if op['op'] == 'symlink':
+                    raise ValueError('PATH_DENIED')
+                if op['op'] in ('write', 'patch'):
+                    files[str((destination or target).relative_to(root))] = content
+                elif op['op'] == 'rename':
+                    files[str(destination.relative_to(root))] = target.read_text()
+                if op['op'] in ('delete', 'rename') or destination:
+                    files[str(target.relative_to(root))] = None
+            result['files'] = files
+        return result
     for op, target, destination, content in plan:
         if op['op'] in ('write', 'patch'):
             output = destination or target

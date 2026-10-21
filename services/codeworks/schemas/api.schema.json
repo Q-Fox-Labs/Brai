@@ -530,8 +530,15 @@
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
         },
         "workspace_id": {
-          "type": "string",
-          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1263,17 +1270,56 @@
           "minLength": 1,
           "maxLength": 1000,
           "pattern": "^[^\\u0000]+$"
+        },
+        "documentation_journal": {
+          "type": "string",
+          "pattern": "^[0-9a-f-]{36}$"
         }
       },
       "required": [
         "project_id",
         "idempotency_key",
-        "workspace_id",
         "session_id",
-        "expected_epoch",
         "message"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "workspace_id",
+            "expected_epoch"
+          ],
+          "not": {
+            "required": [
+              "documentation_journal"
+            ]
+          }
+        },
+        {
+          "required": [
+            "documentation_journal"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "workspace_id"
+                ]
+              },
+              {
+                "required": [
+                  "expected_epoch"
+                ]
+              },
+              {
+                "required": [
+                  "parent_sha"
+                ]
+              }
+            ]
+          }
+        }
+      ]
     },
     "commitIntent": {
       "type": "object",
@@ -1319,18 +1365,87 @@
         "parent_sha": {
           "type": "string",
           "pattern": "^[0-9a-f]{40}$"
+        },
+        "documentation_journal": {
+          "type": "string",
+          "pattern": "^[0-9a-f-]{36}$"
+        },
+        "documentation": {
+          "type": "object",
+          "required": [
+            "id",
+            "entries",
+            "phase"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "phase": {
+              "const": "ready"
+            },
+            "entries": {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 256,
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "before",
+                  "after",
+                  "index"
+                ]
+              }
+            }
+          },
+          "additionalProperties": false
         }
       },
       "required": [
         "project_id",
         "idempotency_key",
-        "workspace_id",
         "session_id",
-        "expected_epoch",
-        "message",
-        "parent_sha"
+        "message"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "workspace_id",
+            "expected_epoch",
+            "parent_sha"
+          ],
+          "not": {
+            "required": [
+              "documentation_journal"
+            ]
+          }
+        },
+        {
+          "required": [
+            "documentation_journal"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "workspace_id"
+                ]
+              },
+              {
+                "required": [
+                  "expected_epoch"
+                ]
+              },
+              {
+                "required": [
+                  "parent_sha"
+                ]
+              }
+            ]
+          }
+        }
+      ]
     },
     "commitResult": {
       "type": "object",
@@ -1351,6 +1466,9 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 2048
+        },
+        "push_attempted": {
+          "type": "boolean"
         }
       },
       "required": [
