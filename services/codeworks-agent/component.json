@@ -20,7 +20,8 @@
     "checks": [
       "services/codeworks-agent/tests/admission.test.mjs",
       "services/codeworks-agent/tests/codex-real.mjs",
-      "services/codeworks-agent/tests/native-client.mjs"
+      "services/codeworks-agent/tests/native-client.mjs",
+      "services/codeworks-agent/tests/hermes-private.py"
     ]
   },
   "dependencies": [
@@ -44,6 +45,19 @@
         "services/codeworks/ci/catalog.mjs",
         "services/codeworks/components/descriptor-validation.mjs"
       ]
+    },
+    {
+      "id": "hermes",
+      "inputs": [
+        "services/hermes/catalog.mjs",
+        "services/hermes/config.mjs",
+        "services/hermes/human-actions.mjs",
+        "services/hermes/runtime.mjs",
+        "services/hermes/trusted.mjs",
+        "services/hermes/telegram/__init__.py",
+        "services/hermes/package.json"
+      ],
+      "delivery": []
     }
   ],
   "commands": {
@@ -69,7 +83,8 @@
   "deploy": {
     "units": [
       "brai-codeworks-codex.service",
-      "brai-codeworks-codex-test.service"
+      "brai-codeworks-codex-test.service",
+      "brai-hermes-dev.service"
     ],
     "migrations": [],
     "health": null

@@ -95,6 +95,17 @@ class Bridge:
             self.slots.release()
 
     def _call(self, method, params, timeout):
+        # The managed bootstrap provides this in-memory port only to this exact plugin.
+        # Legacy gateway launches retain the existing trusted stdio subprocess below.
+        import sys
+        private = sys.modules.get('_brai_codeworks_gateway')
+        if private is not None:
+            try:
+                return private.call_plugin(method, params, timeout)
+            except Exception as error:
+                code = str(error)
+                allowed = {'HUMAN_OUTPUT_REQUIRED', 'HUMAN_FINAL_DECISION_REQUIRED', 'HUMAN_OUTPUT_MAPPING_REQUIRED', 'STALE_ACTION', 'NOT_FOUND'}
+                raise BridgeError(code if code in allowed else 'RPC_REJECTED') from None
         request_id = secrets.token_hex(16)
         request = (json.dumps({"jsonrpc": "2.0", "id": request_id,
                                "method": method, "params": params}, ensure_ascii=False) + "\n").encode()
