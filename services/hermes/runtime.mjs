@@ -6,6 +6,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { connect, ServiceErrorHeader, ServiceErrorCodeHeader } from 'nats';
 import { compileInput, natsTools, elementsNames, historyNames, transcriptionNames } from './catalog.mjs';
+import { planningReadTool, readPlanningPacket } from './planning-read.mjs';
 
 const MAX_REQUEST_BYTES = 65_536, MAX_RESPONSE_BYTES = 1_048_576;
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -114,6 +115,8 @@ export async function createBraiTools(config, ports) {
     inputSchema: { type: 'object', additionalProperties: false, required: ['moveId'], properties: { moveId: { type: 'string', format: 'uuid' } } } };
   const validateHumanRequest = compileInput(humanRequest.inputSchema);
   tools.push(humanRequest);
+  const validatePlanningRead = compileInput(planningReadTool.inputSchema);
+  if (remote.has('elements_planning_packet')) tools.push(planningReadTool);
   let active = 0;
   async function elementsCall(name, args, signal) { return ports.mcp('elements', name, args, signal); }
   async function graph(signal) {
@@ -133,6 +136,11 @@ export async function createBraiTools(config, ports) {
       let mutation = false;
       try {
         signal?.throwIfAborted();
+        if (name === planningReadTool.name && remote.has('elements_planning_packet')) {
+          if (!validatePlanningRead(args)) throw fault('INVALID_ARGUMENT');
+          const packet = await elementsCall('elements_planning_packet', { attempt_id: args.attempt_id }, signal);
+          return readPlanningPacket(packet, args, fault);
+        }
         if (name === humanRequest.name) {
           if (!validateHumanRequest(args)) throw fault('INVALID_ARGUMENT');
           const value = await graph(signal), move = value.moves.find(move => move.id === args.moveId);
