@@ -13,8 +13,9 @@ CREATE TABLE codeworks.deployment_evidence (
   target text NOT NULL CHECK(target IN ('dev','prod')),
   commit_sha text NOT NULL CHECK(commit_sha ~ '^[0-9a-f]{40}$'),
   evidence_url text NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+CREATE UNIQUE INDEX deployment_evidence_report ON codeworks.deployment_evidence(project_id,target,evidence_url);
 CREATE INDEX deployment_evidence_current ON codeworks.deployment_evidence(project_id,target,created_at DESC);
 CREATE UNIQUE INDEX one_active_release ON codeworks.operations(workspace_id) WHERE kind='request-release' AND status IN ('pending','running','awaiting_ci','awaiting_deployment','awaiting_reconciliation');
 COMMENT ON TABLE codeworks.deployment_evidence IS 'Доверенные отчёты verifier: проверенная фактически установленная версия, не факт merge.';

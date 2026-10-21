@@ -77,7 +77,10 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
       await db.query('BEGIN');
       try {
         if(op.kind==='prepare-write')await db.query("UPDATE codeworks.workspaces SET preparation_state='failed' WHERE id=$1",[w.id]);
-        else await db.query("UPDATE codeworks.releases SET state='failed' WHERE operation_id=$1",[op.id]);
+        else {
+          const failed=(await db.query("UPDATE codeworks.releases SET state='failed' WHERE operation_id=$1 RETURNING id,details",[op.id])).rows[0];
+          if(failed)await db.query('UPDATE codeworks.operations SET result=$2 WHERE id=$1',[op.id,{release_id:failed.id,state:'failed',details:failed.details}]);
+        }
         await db.query("UPDATE codeworks.operations SET status='failed',error=$2,updated_at=now() WHERE id=$1",[op.id,fault.dto()]);
         await db.query('COMMIT');
       }catch(failure){await db.query('ROLLBACK').catch(()=>{});throw failure;}

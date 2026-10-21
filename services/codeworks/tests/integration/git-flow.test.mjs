@@ -83,6 +83,22 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:120
     if(kind!=='feature')assert.equal((await command('git',['-C',p.repo_path,'ls-tree','--name-only',merged])).stdout.includes(kind==='hotfix'?'unreleased':'later'),false);
     assert.equal((await git.inspect(p,w)).head,head);assert.equal(createCount,kind==='hotfix'?2:1);
   });
+  await t.test('no-op release fails safely without changing workspace readiness',async()=>{
+    const p=await f.project({github:{repository:'fixture/repository',required_checks}});
+    const prepared=await f.h.call('prepare-write',{project_id:p.id,idempotency_key:'noop-prepare',workspace_key:'noop',kind:'feature',session_id:'s'},'codex');await f.worker(p,prepared.operation_id);
+    const w=await area(prepared.workspace_id);
+    const accepted=await f.h.call('request-release',{project_id:p.id,idempotency_key:'noop-release',workspace_id:w.id,session_id:'s',expected_epoch:1,target:'dev',commit_sha:w.base_sha},'codex');
+    await runOperation(f.app,accepted.operation_id,git,{allowedRepositories:[p.repo_path],flowGit,github:{}});
+    const failed=await op(p,accepted.operation_id);assert.equal(failed.status,'failed');assert.equal(failed.result.state,'failed');assert.equal(failed.error.code,'CONFLICT');assert.equal((await area(w.id)).preparation_state,'ready');
+  });
+  await t.test('retrying an old trusted deployment report cannot replace the current installed version',async()=>{
+    const p=await f.project(),a='a'.repeat(40),b='b'.repeat(40);
+    const before=await evidence(p,'prod',a),current=await evidence(p,'prod',b);
+    assert.deepEqual(await evidence(p,'prod',a),before);
+    await assert.rejects(recordDeployment(f.app,{project_id:p.id,target:'prod',commit_sha:'c'.repeat(40),evidence_url:'https://fixture.invalid/'+a},{allowedRepositories:[p.repo_path]}),/DEPLOYMENT_REPORT_CONFLICT/);
+    const latest=(await f.app.query('SELECT id,commit_sha FROM codeworks.deployment_evidence WHERE project_id=$1 AND target=$2 ORDER BY created_at DESC,id DESC LIMIT 1',[p.id,'prod'])).rows[0];
+    assert.equal(latest.id,current.id);assert.equal(latest.commit_sha,b);
+  });
   await t.test('untrusted evidence caller and invalid reports fail before owner writes',async()=>{
     await assert.rejects(recordDeployment({}, {project_id:'p',target:'prod',commit_sha:'a'.repeat(40),evidence_url:'https://fixture.invalid',executor_id:'agent'}),/INVALID_DEPLOYMENT_REPORT/);
   });

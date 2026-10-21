@@ -1048,7 +1048,8 @@
             "awaiting_execution",
             "awaiting_ci",
             "awaiting_deployment",
-            "awaiting_reconciliation"
+            "awaiting_reconciliation",
+            "failed"
           ]
         },
         "details": {

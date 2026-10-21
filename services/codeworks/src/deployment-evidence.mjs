@@ -12,8 +12,9 @@ export async function recordDeployment(pool,report,{allowedRepositories=[]}={}) 
     await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[report.project_id]);
     const project=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1',[report.project_id])).rows[0]?.config;
     if(!project||!allowedRepositories.includes(project.repo_path))throw new Error('FORBIDDEN_DEPLOYMENT_REPORT');
-    const previous=(await db.query('SELECT * FROM codeworks.deployment_evidence WHERE project_id=$1 AND target=$2 ORDER BY created_at DESC,id DESC LIMIT 1',[report.project_id,report.target])).rows[0];
-    if(previous?.commit_sha===report.commit_sha&&previous.evidence_url===report.evidence_url){await db.query('COMMIT');return {id:previous.id};}
+    const previous=(await db.query('SELECT * FROM codeworks.deployment_evidence WHERE project_id=$1 AND target=$2 AND evidence_url=$3',[report.project_id,report.target,report.evidence_url])).rows[0];
+    if(previous&&previous.commit_sha!==report.commit_sha)throw new Error('DEPLOYMENT_REPORT_CONFLICT');
+    if(previous){await db.query('COMMIT');return {id:previous.id};}
     const id=randomUUID();
     await db.query('INSERT INTO codeworks.deployment_evidence(id,project_id,target,commit_sha,evidence_url) VALUES($1,$2,$3,$4,$5)',[id,report.project_id,report.target,report.commit_sha,report.evidence_url]);
     await db.query('COMMIT');return {id};
