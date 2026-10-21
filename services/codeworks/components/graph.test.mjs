@@ -1,0 +1,76 @@
+// ABOUTME: Acceptance fixtures exercise discovery, graph, lifecycle and separate build/check identities.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync, rmSync } from 'node:fs';
+import { join, dirname, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { discover, fingerprints } from './graph.mjs';
+import { execute } from './cli.mjs';
+const repository=resolve(import.meta.dirname,'../../..');
+function put(root,path,text) {mkdirSync(dirname(join(root,path)),{recursive:true});writeFileSync(join(root,path),text);}
+function descriptor(id) {
+ const dir='services/'+id;
+ return {formatVersion:1,id,type:'program',status:'active',environments:['dev','prod'],executableSources:[dir+'/main.mjs'],inputs:{build:[dir+'/build.mjs'],runtime:[dir+'/main.mjs'],checks:[dir+'/tests.mjs']},dependencies:[],commands:{build:'node build.mjs',check:'node tests.mjs'},delivery:{kind:'ready-files',files:[dir+'/main.mjs'],entrypoints:[dir+'/main.mjs'],smokeImports:[],systemRequirements:['node:24.21.0']},deploy:{units:[id],migrations:[],health:null},npm:{workspaces:[]}};
+}
+function fixture(t) {
+ mkdirSync(join(repository,'tmp'),{recursive:true});
+ const root=mkdtempSync(join(repository,'tmp','component-fixture-'));
+ t.after(()=>rmSync(root,{recursive:true,force:true}));
+ put(root,'services/codeworks/schemas/component.schema.json',readFileSync(join(repository,'services/codeworks/schemas/component.schema.json')));
+ return root;
+}
+function add(root,id,edit=()=>{}) {
+ const d=descriptor(id);edit(d);
+ put(root,'services/'+id+'/component.json',JSON.stringify(d));
+ put(root,'services/'+id+'/main.mjs','export const value=1;\n');
+ put(root,'services/'+id+'/build.mjs',"import{appendFileSync}from'node:fs';appendFileSync('build-count','1');\n");
+ put(root,'services/'+id+'/tests.mjs',"import assert from 'node:assert/strict';assert.equal(1,1);\n");return d;
+}
+function save(root,id,d){put(root,'services/'+id+'/component.json',JSON.stringify(d));}
+test('new described component enters pipeline without workflow editing; build once across build/check/package',async t=>{
+ const root=fixture(t);add(root,'probe');
+ assert.deepEqual(discover(root).order,['probe']);
+ await execute(root,'build',['probe']);await execute(root,'check',['probe']);
+ const result=await execute(root,'package',['probe']);
+ assert.equal(readFileSync(join(root,'services/probe/build-count'),'utf8'),'1');
+ assert.ok(result[0].artifact.payloadHash);assert.equal(result[0].compiled,false);
+ put(root,'services/probe/tests.mjs','// changed tests only\n');
+ const second=await execute(root,'package',['probe']);assert.equal(second[0].artifact.payloadHash,result[0].artifact.payloadHash);assert.equal(second[0].compiled,false);assert.equal(second[0].packaged,false);
+ put(result[0].artifact.path,'services/probe/main.mjs','export const value=9;');await assert.rejects(execute(root,'package',['probe']),/IMMUTABLE_OUTPUT_MISMATCH/);
+});
+test('strict schema, missing npm owner and missing executable are rejected',t=>{
+ const root=fixture(t),d=add(root,'probe');d.typo=true;save(root,'probe',d);
+ assert.throws(()=>discover(root),/COMPONENT_SCHEMA/);delete d.typo;save(root,'probe',d);
+ put(root,'services/new/package.json','{}');assert.throws(()=>discover(root),/MISSING_COMPONENT/);
+ rmSync(join(root,'services/new'),{recursive:true});put(root,'services/probe/sub/main.mjs','export{};');assert.throws(()=>discover(root),/MISSING_EXECUTABLE/);
+ rmSync(join(root,'services/probe/sub'),{recursive:true});put(root,'services/probe/package.json',JSON.stringify({scripts:{start:'node extra.mjs'}}));assert.throws(()=>discover(root),/UNDECLARED_EXECUTABLE_SCRIPT/);
+});
+test('unknown dependencies and cycles are rejected',t=>{
+ const root=fixture(t),a=add(root,'a',d=>d.dependencies=[{id:'missing',inputs:[],delivery:[]}]);
+ assert.throws(()=>discover(root),/UNKNOWN_DEPENDENCY/);
+ const b=add(root,'b',d=>d.dependencies=[{id:'a',inputs:[],delivery:[]}]);
+ a.dependencies[0].id='b';save(root,'a',a);assert.throws(()=>discover(root),/COMPONENT_CYCLE/);
+});
+test('literal neighbor imports require declared exact build input',t=>{
+ const root=fixture(t),a=add(root,'a');add(root,'b');
+ put(root,'services/a/main.mjs',"import{value}from'../b/main.mjs';export{value};\n");
+ assert.throws(()=>discover(root),/UNDECLARED_IMPORT/);
+ a.dependencies=[{id:'b',inputs:['services/b/main.mjs'],delivery:['services/b/main.mjs']}];save(root,'a',a);
+ assert.deepEqual(discover(root).order,['b','a']);
+});
+test('shared contract touches consumer while test-only edits preserve build/runtime fingerprint',t=>{
+ const root=fixture(t);add(root,'b');const a=add(root,'a',d=>d.dependencies=[{id:'b',inputs:['services/b/contract.json'],delivery:['services/b/contract.json']}]);put(root,'services/b/contract.json','{}');
+ let before=fingerprints(root,a);put(root,'services/a/tests.mjs','// changed test\n');let after=fingerprints(root,a);
+ assert.equal(before.build,after.build);assert.equal(before.runtime,after.runtime);assert.notEqual(before.checks,after.checks);
+ put(root,'services/b/contract.json','{"revision":2}');const changed=fingerprints(root,a);assert.notEqual(changed.build,after.build);assert.notEqual(changed.runtime,after.runtime);
+});
+test('removal requires retirement; rename retains explicit tombstone and prevents ID reuse',t=>{
+ const root=fixture(t),a=add(root,'a');
+ const git=(...args)=>execFileSync('git',['-C',root,...args],{stdio:'pipe'});
+ git('init','-q');git('add','.');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture');
+ a.deploy.units=[];save(root,'a',a);assert.throws(()=>discover(root,{base:'HEAD'}),/DEPLOY_UNIT_REMOVED_WITHOUT_RETIREMENT/);a.deploy.units=['a'];
+ rmSync(join(root,'services/a'),{recursive:true});assert.throws(()=>discover(root,{base:'HEAD'}),/REMOVED_WITHOUT_RETIREMENT/);
+ a.status='retired';a.reason='Replaced explicitly';a.renamedTo='b';a.inputs={build:[],runtime:[],checks:[]};a.executableSources=[];save(root,'a',a);add(root,'b');assert.deepEqual(discover(root,{base:'HEAD'}).order,['b']);
+ a.renamedTo='unknown';save(root,'a',a);assert.throws(()=>discover(root,{base:'HEAD'}),/INVALID_RENAME/);
+ a.renamedTo='b';save(root,'a',a);git('add','.');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','retire');a.status='active';delete a.renamedTo;save(root,'a',a);assert.throws(()=>discover(root,{base:'HEAD'}),/RETIRED_ID_REUSED/);
+});

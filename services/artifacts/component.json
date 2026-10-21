@@ -1,0 +1,101 @@
+{
+  "formatVersion": 1,
+  "id": "artifacts",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev",
+    "prod"
+  ],
+  "executableSources": [
+    "services/artifacts/src/health.ts",
+    "services/artifacts/src/main.ts",
+    "services/artifacts/src/mcp.ts",
+    "services/artifacts/src/migrate.ts"
+  ],
+  "inputs": {
+    "build": [
+      "package-lock.json",
+      "services/artifacts/tsconfig.json"
+    ],
+    "runtime": [
+      "services/artifacts/contracts/index.mjs",
+      "services/artifacts/migrations/001.sql",
+      "services/artifacts/migrations/002.sql",
+      "services/artifacts/package.json",
+      "services/artifacts/schemas/messages.schema.json",
+      "services/artifacts/src/config.ts",
+      "services/artifacts/src/core.ts",
+      "services/artifacts/src/errors.ts",
+      "services/artifacts/src/files.ts",
+      "services/artifacts/src/health.ts",
+      "services/artifacts/src/http.ts",
+      "services/artifacts/src/main.ts",
+      "services/artifacts/src/mcp.ts",
+      "services/artifacts/src/migrate.ts",
+      "services/artifacts/src/nats.ts",
+      "services/artifacts/src/ports.ts",
+      "services/artifacts/src/postgres.ts"
+    ],
+    "checks": [
+      "services/artifacts/tests/config.test.mjs",
+      "services/artifacts/tests/contracts.test.mjs",
+      "services/artifacts/tests/core-files.test.mjs",
+      "services/artifacts/tests/core.test.mjs",
+      "services/artifacts/tests/integration/core-postgres.test.mjs",
+      "services/artifacts/tests/integration/core-worker.mjs",
+      "services/artifacts/tests/integration/fixture-pool.mjs",
+      "services/artifacts/tests/integration/mcp-runtime.test.mjs",
+      "services/artifacts/tests/integration/transport-runtime.test.mjs",
+      "services/artifacts/tests/mcp.test.mjs",
+      "services/artifacts/tests/runtime-cli.test.mjs",
+      "services/artifacts/tests/transport-runtime.test.mjs"
+    ]
+  },
+  "dependencies": [],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/artifacts/contracts",
+      "services/artifacts/dist",
+      "services/artifacts/migrations",
+      "services/artifacts/package.json",
+      "services/artifacts/schemas"
+    ],
+    "entrypoints": [
+      "services/artifacts/dist/main.js",
+      "services/artifacts/dist/migrate.js",
+      "services/artifacts/dist/health.js",
+      "services/artifacts/dist/mcp.js"
+    ],
+    "smokeImports": [
+      "services/artifacts/contracts/index.mjs"
+    ],
+    "systemRequirements": [
+      "Node.js 24.21.0"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "brai-dev-artifacts",
+      "artifacts",
+      "artifacts-migrate",
+      "artifacts-mcp",
+      "brai-artifacts.service",
+      "brai-artifacts-mcp.service"
+    ],
+    "migrations": [
+      "services/artifacts/migrations"
+    ],
+    "health": "node services/artifacts/dist/health.js"
+  },
+  "npm": {
+    "workspaces": [
+      "services/artifacts"
+    ]
+  }
+}

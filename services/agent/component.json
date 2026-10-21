@@ -1,0 +1,116 @@
+{
+  "formatVersion": 1,
+  "id": "agent",
+  "type": "program",
+  "status": "active",
+  "environments": [
+    "dev",
+    "prod"
+  ],
+  "executableSources": [
+    "services/agent/src/health.ts",
+    "services/agent/src/main.ts",
+    "services/agent/src/publisher-mcp.ts"
+  ],
+  "inputs": {
+    "build": [
+      "package-lock.json",
+      "services/agent/tsconfig.json"
+    ],
+    "runtime": [
+      "services/agent/ARCHITECTURE.md",
+      "services/agent/PUBLISHER.md",
+      "services/agent/SCENARIOS.md",
+      "services/agent/asyncapi.json",
+      "services/agent/contracts/codex/manifest.json",
+      "services/agent/contracts/codex/openrpc.json",
+      "services/agent/contracts/codex/schema.json",
+      "services/agent/contracts/index.mjs",
+      "services/agent/package.json",
+      "services/agent/schemas/messages.schema.json",
+      "services/agent/src/application.ts",
+      "services/agent/src/async-questions.ts",
+      "services/agent/src/attachments.ts",
+      "services/agent/src/codex.ts",
+      "services/agent/src/display.ts",
+      "services/agent/src/health.ts",
+      "services/agent/src/limits.ts",
+      "services/agent/src/main.ts",
+      "services/agent/src/publisher-http.ts",
+      "services/agent/src/publisher-mcp.ts",
+      "services/agent/src/publisher.ts",
+      "services/agent/src/read-state.ts",
+      "services/agent/src/results.ts",
+      "services/agent/src/title.ts"
+    ],
+    "checks": [
+      "services/agent/tests/activities.test.mjs",
+      "services/agent/tests/activity-status.test.mjs",
+      "services/agent/tests/archive.test.mjs",
+      "services/agent/tests/async-questions.test.mjs",
+      "services/agent/tests/core.test.mjs",
+      "services/agent/tests/images.test.mjs",
+      "services/agent/tests/limits.test.mjs",
+      "services/agent/tests/modes.test.mjs",
+      "services/agent/tests/publisher.test.mjs",
+      "services/agent/tests/read-state.test.mjs",
+      "services/agent/tests/recovery.test.mjs",
+      "services/agent/tests/results.test.mjs",
+      "services/agent/tests/settings.test.mjs",
+      "services/agent/tests/shared-runtime.test.mjs",
+      "services/agent/tests/smoke.test.mjs",
+      "services/agent/tests/submission.test.mjs",
+      "services/agent/tests/threads.test.mjs",
+      "services/agent/tests/title.test.mjs"
+    ]
+  },
+  "dependencies": [
+    {
+      "id": "artifacts",
+      "inputs": [
+        "services/artifacts/contracts/**",
+        "services/artifacts/schemas/**"
+      ],
+      "delivery": [
+        "services/artifacts/contracts",
+        "services/artifacts/schemas"
+      ]
+    }
+  ],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "ready-files",
+    "files": [
+      "services/agent/contracts",
+      "services/agent/dist",
+      "services/agent/package.json"
+    ],
+    "entrypoints": [
+      "services/agent/dist/main.js",
+      "services/agent/dist/health.js",
+      "services/agent/dist/publisher-mcp.js"
+    ],
+    "smokeImports": [
+      "services/agent/contracts/index.mjs"
+    ],
+    "systemRequirements": [
+      "Node.js 24.21.0"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "brai-agent.service"
+    ],
+    "migrations": [],
+    "health": "node services/agent/dist/health.js"
+  },
+  "npm": {
+    "workspaces": [
+      "services/agent",
+      "services/artifacts"
+    ]
+  }
+}

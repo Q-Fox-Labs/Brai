@@ -1,0 +1,100 @@
+{
+  "formatVersion": 1,
+  "id": "codeworks",
+  "type": "program",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [
+    "services/codeworks/components/cli.mjs",
+    "services/codeworks/src/main.mjs",
+    "services/codeworks/src/mcp.mjs",
+    "services/codeworks/src/migrate.mjs",
+    "services/codeworks/src/worker.mjs"
+  ],
+  "inputs": {
+    "build": [
+      "package-lock.json",
+      "services/codeworks/schemas/component.schema.json"
+    ],
+    "runtime": [
+      "services/codeworks/asyncapi.json",
+      "services/codeworks/migrations/001.sql",
+      "services/codeworks/package.json",
+      "services/codeworks/schemas/api.schema.json",
+      "services/codeworks/schemas/component.schema.json",
+      "services/codeworks/src/agent-files.py",
+      "services/codeworks/src/agent-hermes.py",
+      "services/codeworks/src/agent-host.mjs",
+      "services/codeworks/src/agent-proxy.py",
+      "services/codeworks/src/agent-sandbox.mjs",
+      "services/codeworks/src/agent-tools.json",
+      "services/codeworks/src/client.mjs",
+      "services/codeworks/src/contracts.mjs",
+      "services/codeworks/src/domain.mjs",
+      "services/codeworks/src/errors.mjs",
+      "services/codeworks/src/git.mjs",
+      "services/codeworks/src/main.mjs",
+      "services/codeworks/src/mcp.mjs",
+      "services/codeworks/src/migrate.mjs",
+      "services/codeworks/src/nats.mjs",
+      "services/codeworks/src/runtime.mjs",
+      "services/codeworks/src/storage.mjs",
+      "services/codeworks/src/worker.mjs"
+    ],
+    "checks": [
+      "services/codeworks/components/cli.mjs",
+      "services/codeworks/components/graph.mjs",
+      "services/codeworks/components/graph.test.mjs",
+      "services/codeworks/components/package-runtime.mjs",
+      "services/codeworks/components/package-runtime.test.mjs",
+      "services/codeworks/tests/agent-files.test.mjs",
+      "services/codeworks/tests/contracts.test.mjs",
+      "services/codeworks/tests/integration/agent-host.test.mjs",
+      "services/codeworks/tests/integration/fixture.mjs",
+      "services/codeworks/tests/integration/postgres.test.mjs",
+      "services/codeworks/tests/integration/recovery.mjs"
+    ]
+  },
+  "dependencies": [],
+  "commands": {
+    "build": null,
+    "check": "node --test tests/*.test.mjs components/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "ready-files",
+    "files": [
+      "services/codeworks/migrations",
+      "services/codeworks/package.json",
+      "services/codeworks/schemas",
+      "services/codeworks/src"
+    ],
+    "entrypoints": [
+      "services/codeworks/src/main.mjs",
+      "services/codeworks/src/mcp.mjs",
+      "services/codeworks/src/migrate.mjs",
+      "services/codeworks/src/worker.mjs"
+    ],
+    "smokeImports": [
+      "services/codeworks/src/contracts.mjs"
+    ],
+    "systemRequirements": [
+      "Node.js 24.21.0"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "brai-codeworks-agents-test.service"
+    ],
+    "migrations": [
+      "services/codeworks/migrations"
+    ],
+    "health": null
+  },
+  "npm": {
+    "workspaces": [
+      "services/codeworks"
+    ]
+  }
+}

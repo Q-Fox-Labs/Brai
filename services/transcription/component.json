@@ -1,0 +1,178 @@
+{
+  "formatVersion": 1,
+  "id": "transcription",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev",
+    "prod"
+  ],
+  "executableSources": [
+    "services/transcription/coordinator/main.ts",
+    "services/transcription/executors/external/main.ts",
+    "services/transcription/executors/local/main.ts",
+    "services/transcription/helper/main.ts",
+    "services/transcription/helper/migrate.ts"
+  ],
+  "inputs": {
+    "build": [
+      "package-lock.json",
+      "services/transcription/tsconfig.json"
+    ],
+    "runtime": [
+      "services/transcription/contracts/asyncapi.json",
+      "services/transcription/contracts/external.openrpc.json",
+      "services/transcription/contracts/helper.openrpc.json",
+      "services/transcription/contracts/http.openapi.json",
+      "services/transcription/contracts/index.mjs",
+      "services/transcription/contracts/local.openrpc.json",
+      "services/transcription/contracts/mcp.json",
+      "services/transcription/contracts/methods.json",
+      "services/transcription/coordinator/childspawn.ts",
+      "services/transcription/coordinator/config.ts",
+      "services/transcription/coordinator/domain/core.ts",
+      "services/transcription/coordinator/main.ts",
+      "services/transcription/coordinator/recovery/alerts.ts",
+      "services/transcription/coordinator/recovery/controller.ts",
+      "services/transcription/coordinator/transport/alerts.ts",
+      "services/transcription/coordinator/transport/boundary.ts",
+      "services/transcription/coordinator/transport/dependencies.ts",
+      "services/transcription/coordinator/transport/http.ts",
+      "services/transcription/coordinator/transport/nats.ts",
+      "services/transcription/executors/external/main.ts",
+      "services/transcription/executors/local/adapter.ts",
+      "services/transcription/executors/local/config.ts",
+      "services/transcription/executors/local/main.ts",
+      "services/transcription/executors/local/nats.ts",
+      "services/transcription/helper/config.ts",
+      "services/transcription/helper/handlers.ts",
+      "services/transcription/helper/main.ts",
+      "services/transcription/helper/migrate.ts",
+      "services/transcription/helper/migrations/001.sql",
+      "services/transcription/helper/migrations/002.sql",
+      "services/transcription/helper/storage/alerts.ts",
+      "services/transcription/helper/storage/index.ts",
+      "services/transcription/notifications.ts",
+      "services/transcription/package.json",
+      "services/transcription/runtime/stdio-rpc.ts",
+      "services/transcription/schemas/messages.schema.json"
+    ],
+    "checks": [
+      "services/transcription/helper/tests/config.test.mjs",
+      "services/transcription/helper/tests/delivery-postgres.test.mjs",
+      "services/transcription/helper/tests/handlers.test.mjs",
+      "services/transcription/helper/tests/live-rpc-postgres.test.mjs",
+      "services/transcription/helper/tests/main-process.test.mjs",
+      "services/transcription/helper/tests/storage-postgres.test.mjs",
+      "services/transcription/helper/tests/storage.test.mjs",
+      "services/transcription/tests/contracts/descriptors.test.mjs",
+      "services/transcription/tests/contracts/executors.test.mjs",
+      "services/transcription/tests/contracts/metadata.test.mjs",
+      "services/transcription/tests/coordinator/alerts.test.mjs",
+      "services/transcription/tests/coordinator/domain-core.test.mjs",
+      "services/transcription/tests/coordinator/recovery-controller.test.mjs",
+      "services/transcription/tests/coordinator/transport-assembly.test.mjs",
+      "services/transcription/tests/coordinator/transport-nats.test.mjs",
+      "services/transcription/tests/coordinator/transport.test.mjs",
+      "services/transcription/tests/executors/external/fixtures/no-side-effects.mjs",
+      "services/transcription/tests/executors/external/process.test.mjs",
+      "services/transcription/tests/integration/alerts.test.mjs",
+      "services/transcription/tests/integration/cleanup-only.test.mjs",
+      "services/transcription/tests/integration/fixtures/coordinator-process.mjs",
+      "services/transcription/tests/integration/fixtures/restart-process.mjs",
+      "services/transcription/tests/integration/local-route.test.mjs",
+      "services/transcription/tests/integration/metadata.test.mjs",
+      "services/transcription/tests/integration/restart.test.mjs",
+      "services/transcription/tests/local/adapter.test.mjs",
+      "services/transcription/tests/local/stdio-child.mjs",
+      "services/transcription/tests/runtime/stdio-rpc.test.mjs"
+    ]
+  },
+  "dependencies": [
+    {
+      "id": "history",
+      "inputs": [
+        "services/history/schemas/**"
+      ],
+      "delivery": [
+        "services/history/schemas"
+      ]
+    },
+    {
+      "id": "alerts",
+      "inputs": [
+        "services/alerts/contracts/**",
+        "services/alerts/schemas/**"
+      ],
+      "delivery": [
+        "services/alerts/contracts",
+        "services/alerts/schemas"
+      ]
+    },
+    {
+      "id": "artifacts",
+      "inputs": [
+        "services/artifacts/contracts/**",
+        "services/artifacts/schemas/**"
+      ],
+      "delivery": [
+        "services/artifacts/contracts",
+        "services/artifacts/schemas"
+      ]
+    },
+    {
+      "id": "local-ai",
+      "inputs": [
+        "services/local-ai/contracts/**",
+        "services/local-ai/schemas/**"
+      ],
+      "delivery": [
+        "services/local-ai/contracts",
+        "services/local-ai/schemas"
+      ]
+    }
+  ],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test helper/tests/config.test.mjs helper/tests/handlers.test.mjs helper/tests/main-process.test.mjs helper/tests/storage.test.mjs tests/contracts/descriptors.test.mjs tests/contracts/executors.test.mjs tests/contracts/metadata.test.mjs tests/coordinator/domain-core.test.mjs tests/coordinator/recovery-controller.test.mjs tests/coordinator/transport-assembly.test.mjs tests/coordinator/transport.test.mjs tests/executors/external/process.test.mjs tests/local/adapter.test.mjs tests/runtime/stdio-rpc.test.mjs tests/coordinator/alerts.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/transcription/contracts",
+      "services/transcription/dist",
+      "services/transcription/helper/migrations",
+      "services/transcription/package.json",
+      "services/transcription/schemas"
+    ],
+    "entrypoints": [
+      "services/transcription/dist/coordinator/main.js",
+      "services/transcription/dist/helper/main.js",
+      "services/transcription/dist/executors/local/main.js",
+      "services/transcription/dist/executors/external/main.js",
+      "services/transcription/dist/helper/migrate.js"
+    ],
+    "smokeImports": [
+      "services/transcription/contracts/index.mjs"
+    ],
+    "systemRequirements": [
+      "Node.js 24.21.0"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "transcription",
+      "transcription-migrate",
+      "brai-transcription.service"
+    ],
+    "migrations": [
+      "services/transcription/helper/migrations"
+    ],
+    "health": "Owner NATS status and JSON-RPC health on helper/local/external; no rollout-specific helper is bundled"
+  },
+  "npm": {
+    "workspaces": [
+      "services/transcription"
+    ]
+  }
+}

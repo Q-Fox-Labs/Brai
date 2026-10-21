@@ -1,0 +1,78 @@
+{
+  "formatVersion": 1,
+  "id": "codeworks-agent",
+  "type": "library",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [
+    "services/codeworks-agent/codex.mjs",
+    "services/codeworks-agent/hermes.mjs"
+  ],
+  "inputs": {
+    "build": [
+      "package-lock.json"
+    ],
+    "runtime": [
+      "services/codeworks-agent/codex.mjs",
+      "services/codeworks-agent/hermes.mjs",
+      "services/codeworks-agent/package.json"
+    ],
+    "checks": [
+      "services/codeworks-agent/tests/admission.test.mjs",
+      "services/codeworks-agent/tests/codex-real.mjs",
+      "services/codeworks-agent/tests/native-client.mjs"
+    ]
+  },
+  "dependencies": [
+    {
+      "id": "codeworks",
+      "inputs": [
+        "services/codeworks/src/**",
+        "services/codeworks/package.json",
+        "services/codeworks/schemas/**",
+        "services/codeworks/migrations/**"
+      ],
+      "delivery": [
+        "services/codeworks/src",
+        "services/codeworks/package.json",
+        "services/codeworks/schemas",
+        "services/codeworks/migrations"
+      ]
+    }
+  ],
+  "commands": {
+    "build": null,
+    "check": "node --test tests/admission.test.mjs"
+  },
+  "delivery": {
+    "kind": "ready-files",
+    "files": [
+      "services/codeworks-agent/codex.mjs",
+      "services/codeworks-agent/hermes.mjs",
+      "services/codeworks-agent/package.json"
+    ],
+    "entrypoints": [
+      "services/codeworks-agent/codex.mjs",
+      "services/codeworks-agent/hermes.mjs"
+    ],
+    "smokeImports": [],
+    "systemRequirements": [
+      "Node.js 24.21.0"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "brai-codeworks-codex-test.service"
+    ],
+    "migrations": [],
+    "health": null
+  },
+  "npm": {
+    "workspaces": [
+      "services/codeworks-agent",
+      "services/codeworks"
+    ]
+  }
+}

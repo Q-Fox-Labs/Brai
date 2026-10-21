@@ -117,3 +117,17 @@ NATS ошибки возвращаются заголовками `Nats-Service-
 `npm test --workspace=@brai/codeworks` проверяет схемы, transport DTO и независимое ядро writer/guard. `CODEWORKS_TEST_CONFIG_FILE=<protected JSON> npm run test:integration --workspace=@brai/codeworks` использует реальные PostgreSQL/Git/flock/штатный preparer и SIGKILL. Явный fixture JSON содержит `owner_url,app_url,restore_owner_url,restore_app_url,owner_role,app_role`; тест принимает только DB `brai_codeworks_test` и `brai_codeworks_restore_test`, не читает .env. Для установленного подготовщика используется common Git hook текущей копии либо явный `CODEWORKS_TEST_PREPARER`. Все disposable репозитории находятся в корневом `tmp/` и убираются после теста.
 
 Для проверки настоящего backup/restore выполните `node services/codeworks/tests/integration/recovery.mjs prepare` с тем же защищённым config. Fixture оставит в первой test DB ready область, ожидающий release и намерение, оборванное SIGKILL после создания ветки. Оператор сохраняет `pg_dump` и восстанавливает его во вторую пустую test DB. Затем `node services/codeworks/tests/integration/recovery.mjs verify` проверяет восстановленные данные/миграцию, продолжает Git операцию через app credentials восстановленной БД и доказывает неизменность исходной операции. После успеха fixture очищает только свои test rows, restore schema и disposable Git. Во время этой последовательности не запускайте параллельно обычную integration suite, которая очищает те же test rows.
+
+## Описания и независимые поставки компонентов
+
+Codeworks владеет форматом [`component.json`](schemas/component.schema.json), версия 1.
+Локальный CLI [`components/cli.mjs`](components/cli.mjs) читает описания из дерева
+Brai; отдельный реестр имён и список сборок не нужны. Это инструмент подготовки
+поставки, без NATS API выпуска и без доступа к Admin. Описание содержит стабильный
+ID, вид компонента, проверяемые входы, build edges, команды, runtime closure,
+миграции, health и логические deploy unit IDs. Параметры хоста задаёт оператор.
+
+Порядок изменения, retirement/rename и воспроизводимые команды описаны в
+[`components/README.md`](components/README.md). Отсутствие описания нового workspace
+или executable, неверная схема, неизвестная зависимость и цикл — ошибки. Проверка
+относительно Git-базы сохраняет удалённый ID только через явный retirement.

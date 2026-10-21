@@ -1,0 +1,165 @@
+{
+  "formatVersion": 1,
+  "id": "hermes",
+  "type": "program",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [
+    "services/hermes/runtime.mjs",
+    "services/hermes/telegram/__init__.py",
+    "services/hermes/tools.mjs",
+    "services/hermes/trusted.mjs"
+  ],
+  "inputs": {
+    "build": [
+      "package-lock.json"
+    ],
+    "runtime": [
+      "services/hermes/catalog.mjs",
+      "services/hermes/config.mjs",
+      "services/hermes/confirmation.mjs",
+      "services/hermes/human-actions.mjs",
+      "services/hermes/package.json",
+      "services/hermes/runtime.mjs",
+      "services/hermes/telegram/__init__.py",
+      "services/hermes/tools.mjs",
+      "services/hermes/transcribe.mjs",
+      "services/hermes/trusted.mjs",
+      "services/hermes/trusted.openrpc.json",
+      "services/hermes/voice.mjs"
+    ],
+    "checks": [
+      "services/hermes/memos/embedding/adapter.test.mjs",
+      "services/hermes/telegram/tests/test_plugin.py",
+      "services/hermes/tests/confirmation.test.mjs",
+      "services/hermes/tests/tools.test.mjs",
+      "services/hermes/tests/transcribe.test.mjs"
+    ]
+  },
+  "dependencies": [
+    {
+      "id": "alerts",
+      "inputs": [
+        "services/alerts/contracts/**",
+        "services/alerts/schemas/**"
+      ],
+      "delivery": [
+        "services/alerts/contracts",
+        "services/alerts/schemas"
+      ]
+    },
+    {
+      "id": "local-ai",
+      "inputs": [
+        "services/local-ai/contracts/**",
+        "services/local-ai/schemas/**"
+      ],
+      "delivery": [
+        "services/local-ai/contracts",
+        "services/local-ai/schemas"
+      ]
+    },
+    {
+      "id": "timer",
+      "inputs": [
+        "services/timer/schemas/**"
+      ],
+      "delivery": [
+        "services/timer/schemas"
+      ]
+    },
+    {
+      "id": "history",
+      "inputs": [
+        "services/history/schemas/**"
+      ],
+      "delivery": [
+        "services/history/schemas"
+      ]
+    },
+    {
+      "id": "agent",
+      "inputs": [
+        "services/agent/src/publisher*.ts",
+        "services/agent/package.json"
+      ],
+      "delivery": [
+        "services/agent/dist/publisher-mcp.js",
+        "services/agent/dist/publisher.js",
+        "services/agent/dist/publisher-http.js",
+        "services/agent/package.json"
+      ]
+    },
+    {
+      "id": "artifacts",
+      "inputs": [
+        "services/artifacts/contracts/**",
+        "services/artifacts/schemas/**"
+      ],
+      "delivery": [
+        "services/artifacts/contracts",
+        "services/artifacts/schemas"
+      ]
+    },
+    {
+      "id": "transcription",
+      "inputs": [
+        "services/transcription/contracts/**",
+        "services/transcription/schemas/**"
+      ],
+      "delivery": [
+        "services/transcription/contracts",
+        "services/transcription/schemas"
+      ]
+    }
+  ],
+  "commands": {
+    "build": null,
+    "check": "node --test --test-isolation=none tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "ready-files",
+    "files": [
+      "services/hermes/catalog.mjs",
+      "services/hermes/config.mjs",
+      "services/hermes/confirmation.mjs",
+      "services/hermes/human-actions.mjs",
+      "services/hermes/package.json",
+      "services/hermes/runtime.mjs",
+      "services/hermes/telegram/__init__.py",
+      "services/hermes/tools.mjs",
+      "services/hermes/transcribe.mjs",
+      "services/hermes/trusted.mjs",
+      "services/hermes/voice.mjs"
+    ],
+    "entrypoints": [
+      "services/hermes/tools.mjs",
+      "services/hermes/runtime.mjs",
+      "services/hermes/telegram/__init__.py",
+      "services/hermes/trusted.mjs"
+    ],
+    "smokeImports": [
+      "services/hermes/catalog.mjs",
+      "services/hermes/trusted.mjs"
+    ],
+    "systemRequirements": [
+      "Node.js 24.21.0"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "brai-hermes-dev.service",
+      "brai-hermes-dev-intake.service"
+    ],
+    "migrations": [],
+    "health": null
+  },
+  "npm": {
+    "workspaces": [
+      "services/hermes",
+      "services/agent"
+    ]
+  }
+}

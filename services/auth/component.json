@@ -1,0 +1,79 @@
+{
+  "formatVersion": 1,
+  "id": "auth",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev",
+    "prod"
+  ],
+  "executableSources": [
+    "services/auth/src/health.ts",
+    "services/auth/src/main.ts",
+    "services/auth/src/migrate.ts"
+  ],
+  "inputs": {
+    "build": [
+      "package-lock.json",
+      "services/auth/tsconfig.json"
+    ],
+    "runtime": [
+      "services/auth/package.json",
+      "services/auth/schemas/messages.schema.json",
+      "services/auth/src/auth.ts",
+      "services/auth/src/bridge.ts",
+      "services/auth/src/config.ts",
+      "services/auth/src/email.ts",
+      "services/auth/src/health.ts",
+      "services/auth/src/main.ts",
+      "services/auth/src/migrate.ts",
+      "services/auth/src/nats.ts",
+      "services/auth/src/schema.ts"
+    ],
+    "checks": [
+      "services/auth/tests/bridge.test.mjs",
+      "services/auth/tests/engine.test.mjs",
+      "services/auth/tests/integration/auth.test.mjs",
+      "services/auth/tests/integration/compose.yml",
+      "services/auth/tests/integration/init.sql",
+      "services/auth/tests/integration/migration.test.mjs"
+    ]
+  },
+  "dependencies": [],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/auth/dist",
+      "services/auth/package.json",
+      "services/auth/schemas"
+    ],
+    "entrypoints": [
+      "services/auth/dist/main.js",
+      "services/auth/dist/migrate.js",
+      "services/auth/dist/health.js"
+    ],
+    "smokeImports": [],
+    "systemRequirements": [
+      "Node.js 24.21.0"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "auth",
+      "auth-migrate"
+    ],
+    "migrations": [
+      "services/auth/migrations"
+    ],
+    "health": "node services/auth/dist/health.js"
+  },
+  "npm": {
+    "workspaces": [
+      "services/auth"
+    ]
+  }
+}

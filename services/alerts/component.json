@@ -1,0 +1,87 @@
+{
+  "formatVersion": 1,
+  "id": "alerts",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev",
+    "prod"
+  ],
+  "executableSources": [
+    "services/alerts/src/health.ts",
+    "services/alerts/src/main.ts",
+    "services/alerts/src/migrate.ts"
+  ],
+  "inputs": {
+    "build": [
+      "package-lock.json",
+      "services/alerts/tsconfig.json"
+    ],
+    "runtime": [
+      "services/alerts/DEPLOYMENT.md",
+      "services/alerts/contracts/index.mjs",
+      "services/alerts/migrations/001.sql",
+      "services/alerts/package.json",
+      "services/alerts/schemas/messages.schema.json",
+      "services/alerts/src/config.ts",
+      "services/alerts/src/domain.ts",
+      "services/alerts/src/health.ts",
+      "services/alerts/src/load.ts",
+      "services/alerts/src/main.ts",
+      "services/alerts/src/migrate.ts",
+      "services/alerts/src/nats.ts",
+      "services/alerts/src/storage.ts"
+    ],
+    "checks": [
+      "services/alerts/tests/config.test.mjs",
+      "services/alerts/tests/contracts.test.mjs",
+      "services/alerts/tests/domain.test.mjs",
+      "services/alerts/tests/integration/fixture.mjs",
+      "services/alerts/tests/integration/nats.test.mjs",
+      "services/alerts/tests/integration/storage.test.mjs",
+      "services/alerts/tests/load.test.mjs"
+    ]
+  },
+  "dependencies": [],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/alerts/contracts",
+      "services/alerts/dist",
+      "services/alerts/migrations",
+      "services/alerts/package.json",
+      "services/alerts/schemas"
+    ],
+    "entrypoints": [
+      "services/alerts/dist/main.js",
+      "services/alerts/dist/migrate.js",
+      "services/alerts/dist/health.js"
+    ],
+    "smokeImports": [
+      "services/alerts/contracts/index.mjs"
+    ],
+    "systemRequirements": [
+      "Node.js 24.21.0"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "alerts",
+      "alerts-migrate",
+      "brai-alerts.service"
+    ],
+    "migrations": [
+      "services/alerts/migrations"
+    ],
+    "health": "node services/alerts/dist/health.js"
+  },
+  "npm": {
+    "workspaces": [
+      "services/alerts"
+    ]
+  }
+}
