@@ -5,6 +5,7 @@ import {realpathSync} from 'node:fs';
 
 /** Аргументы bubblewrap; writable задаёт только уже проверенные канонические mounts. */
 export function sandboxArgs({cwd, writable=[], aliases=[], local=[], hidden=[], masked=[], env={}, bridge, socket, profile, procExecutable}) {
+  hidden=[...new Set(hidden)].filter(target=>!hidden.some(parent=>parent!==target&&target.startsWith(parent+'/')));
   const args=['--ro-bind','/','/','--unshare-user','--disable-userns','--assert-userns-disabled','--unshare-pid','--unshare-ipc','--unshare-uts','--cap-drop','ALL','--die-with-parent','--new-session','--proc','/proc','--dev','/dev','--tmpfs','/tmp','--tmpfs','/run','--clearenv'];
   // /etc/resolv.conf can point into /run; retain only that file, never host sockets.
   args.push('--ro-bind','/etc/resolv.conf',realpathSync('/etc/resolv.conf'));

@@ -22,7 +22,8 @@
         "state": {
           "enum": [
             "active",
-            "quiesced"
+            "quiesced",
+            "committing"
           ]
         }
       },
@@ -786,7 +787,8 @@
             "prepare-write",
             "attach-or-transfer",
             "request-release",
-            "rollout"
+            "rollout",
+            "commit"
           ]
         },
         "status": {
@@ -820,6 +822,9 @@
             },
             {
               "$ref": "#/definitions/rolloutRequest"
+            },
+            {
+              "$ref": "#/definitions/commitIntent"
             }
           ]
         },
@@ -842,6 +847,9 @@
             },
             {
               "$ref": "#/definitions/rolloutResult"
+            },
+            {
+              "$ref": "#/definitions/commitResult"
             }
           ]
         },
@@ -1212,6 +1220,141 @@
       "required": [
         "status",
         "reason"
+      ],
+      "additionalProperties": false
+    },
+    "commit": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "expected_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "^[^\\u0000]+$"
+        }
+      },
+      "required": [
+        "project_id",
+        "idempotency_key",
+        "workspace_id",
+        "session_id",
+        "expected_epoch",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "commitIntent": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "expected_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "parent_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "required": [
+        "project_id",
+        "idempotency_key",
+        "workspace_id",
+        "session_id",
+        "expected_epoch",
+        "message",
+        "parent_sha"
+      ],
+      "additionalProperties": false
+    },
+    "commitResult": {
+      "type": "object",
+      "properties": {
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "parent_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "tree": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "index": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "commit_sha"
       ],
       "additionalProperties": false
     }

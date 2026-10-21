@@ -18,7 +18,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
   let locked=false;
   try {
     const operation=(await db.query('SELECT * FROM codeworks.operations WHERE id=$1',[operationId])).rows[0];
-    if(!operation||!['prepare-write','request-release','rollout'].includes(operation.kind))return;
+    if(!operation||!['prepare-write','commit','request-release','rollout'].includes(operation.kind))return;
     await db.query('SELECT pg_advisory_lock(hashtextextended($1,0))',[operation.project_id]);locked=true;
     const op=(await db.query('SELECT * FROM codeworks.operations WHERE id=$1',[operationId])).rows[0];
     if(!['pending','running',...(['request-release','rollout'].includes(op.kind)?['awaiting_ci','awaiting_deployment','awaiting_reconciliation']:[])].includes(op.status))return;
@@ -27,6 +27,21 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
     await db.query("UPDATE codeworks.operations SET status='running',updated_at=now() WHERE id=$1",[op.id]);
     try {
       if(!allowedRepositories.includes(project.repo_path))throw new Fault('FORBIDDEN');
+      if(op.kind==='commit') {
+        if(w.writer.state!=='committing'||w.writer.executor_id!==op.executor_id||w.writer.session_id!==op.request.session_id||w.writer.epoch!==op.request.expected_epoch)throw new Fault('WRITER_BUSY');
+        const plan=op.result??await git.planCommit(project,w,op);
+        if(!op.result)await db.query('UPDATE codeworks.operations SET result=$2,step=$3,updated_at=now() WHERE id=$1',[op.id,plan,'commit-planned']);
+        await checkpoint('before-commit');
+        const result=await git.finishCommit(project,w,plan);
+        await checkpoint('after-commit');
+        await db.query('BEGIN');
+        try{
+          await db.query("UPDATE codeworks.workspaces SET writer=jsonb_set(writer,'{state}','\"active\"') WHERE id=$1 AND writer=$2",[w.id,w.writer]);
+          await db.query("UPDATE codeworks.operations SET status='succeeded',step='committed',error=NULL,result=$2,updated_at=now() WHERE id=$1",[op.id,result]);
+          await db.query('COMMIT');
+        }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}
+        return;
+      }
       if(op.kind==='rollout') {
         let outcome;
         try{outcome=await advanceDeployment(verifier,op,deploymentAdapter);}catch(error){
@@ -95,6 +110,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
       const fault=safeFault(error);
       await db.query('BEGIN');
       try {
+        if(op.kind==='commit')await db.query("UPDATE codeworks.workspaces SET writer=jsonb_set(writer,'{state}','\"active\"') WHERE id=$1 AND writer=$2",[w.id,w.writer]);
         if(op.kind==='prepare-write')await db.query("UPDATE codeworks.workspaces SET preparation_state='failed' WHERE id=$1",[w.id]);
         else if(op.kind==='request-release') {
           const failed=(await db.query("UPDATE codeworks.releases SET state='failed' WHERE operation_id=$1 RETURNING id,details",[op.id])).rows[0];

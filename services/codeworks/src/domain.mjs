@@ -27,8 +27,7 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',assert
   async function attach(db,w,executor,args) {
     await db.attach({id:randomUUID(),workspace_id:w.id,executor_id:executor,session_id:args.session_id,move_id:args.move_id??null,attempt_id:args.attempt_id??null,writer_epoch:w.writer.epoch});
   }
-  async function operation(db,w,executor,kind,args,status='pending',result=null) {
-    const id=randomUUID();
+  async function operation(db,w,executor,kind,args,status='pending',result=null,id=randomUUID()) {
     await db.insertOperation({id,project_id:w.project_id,workspace_id:w.id,executor_id:executor,actor_id:args.actor_id??null,kind,status,step:status==='pending'?'intent':status,request:args,result});
     return {operation_id:id,workspace_id:w.id};
   }
@@ -115,7 +114,15 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',assert
           const w=await workspace(db,args.project_id,args.workspace_id);
           if (w.preparation_state!=='ready') throw new Fault('CONFLICT','Workspace preparation must succeed first.');
           await git.inspect(project,w);
-          if (method==='attach-or-transfer') {
+          if (method==='commit') {
+            assertWriter(w,executorId,args);
+            if(await db.activeRelease(w.id))throw new Fault('CONFLICT');
+            const commitId=randomUUID();
+            await assertQuiescent({workspace:workspaceDTO(w),executorId,sessionId:args.session_id,temporary:commitId});
+            w.writer={...w.writer,state:'committing'};await db.updateWriter(w);
+            accepted=await operation(db,w,executorId,method,{...args,parent_sha:(await git.inspect(project,w)).head},'pending',null,commitId);
+          } else if (method==='attach-or-transfer') {
+            if(w.writer.state==='committing')throw new Fault('WRITER_BUSY');
             if (args.mode==='quiesce') {
               assertWriter(w,executorId,args);
               if (args.writes_stopped!==true) throw new Fault('INVALID_ARGUMENT','Previous writer must explicitly confirm that writes have stopped.');

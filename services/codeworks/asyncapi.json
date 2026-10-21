@@ -33,6 +33,9 @@
         },
         "operation_statusResponse": {
           "$ref": "#/components/messages/operation_statusResponse"
+        },
+        "commitResponse": {
+          "$ref": "#/components/messages/commitResponse"
         }
       }
     },
@@ -124,6 +127,19 @@
       "messages": {
         "operation_statusRequest": {
           "$ref": "#/components/messages/operation_statusRequest"
+        }
+      }
+    },
+    "commit": {
+      "address": "brai.codeworks.v1.{executor}.commit",
+      "parameters": {
+        "executor": {
+          "description": "ACL-protected transport identity, never taken from request payload."
+        }
+      },
+      "messages": {
+        "commitRequest": {
+          "$ref": "#/components/messages/commitRequest"
         }
       }
     }
@@ -359,6 +375,39 @@
           "bindingVersion": "0.1.0"
         }
       }
+    },
+    "commit": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/commit"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/commit/messages/commitRequest"
+        }
+      ],
+      "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/serviceReply"
+        },
+        "description": "Native NATS reply subject.",
+        "x-nats-reply-subject": "message.reply",
+        "messages": [
+          {
+            "$ref": "#/channels/serviceReply/messages/commitResponse"
+          },
+          {
+            "$ref": "#/channels/serviceReply/messages/ServiceError"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "service_codeworks",
+          "bindingVersion": "0.1.0"
+        }
+      }
     }
   },
   "components": {
@@ -467,6 +516,18 @@
         "name": "operation_statusResponse",
         "payload": {
           "$ref": "./schemas/api.schema.json#/definitions/operationResponse"
+        }
+      },
+      "commitRequest": {
+        "name": "commitRequest",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/commit"
+        }
+      },
+      "commitResponse": {
+        "name": "commitResponse",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/accepted"
         }
       }
     }

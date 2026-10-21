@@ -48,3 +48,11 @@ test('Unix restart reclaims only own stale socket, preserving live endpoints and
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(file,resolve);});
  }finally{if(child?.exitCode===null&&!child?.signalCode)child.kill('SIGKILL');if(server.listening)await new Promise(resolve=>server.close(resolve));await rm(root,{recursive:true,force:true});}
 });
+
+test('parent hidden mount covers nested secrets and workspaces without unreachable child remounts',async()=>{
+ const {sandboxArgs}=await import('../src/agent-sandbox.mjs');
+ const args=sandboxArgs({cwd:'/srv/repo',hidden:['/srv/admin/.secrets','/srv/admin','/state','/state/workspaces','/srv/admin']});
+ const hidden=args.flatMap((arg,i)=>arg==='--tmpfs'?[args[i+1]]:[]);
+ assert(hidden.includes('/srv/admin'));assert(hidden.includes('/state'));assert(!hidden.includes('/srv/admin/.secrets'));assert(!hidden.includes('/state/workspaces'));
+ assert.equal(hidden.filter(p=>p==='/srv/admin').length,1);
+});

@@ -1,6 +1,7 @@
 // ABOUTME: Добавляет доверенный Codeworks tool к настоящему Codex app-server protocol.
 // ABOUTME: Native threadId задаёт identity; процессы Codex видят host только readonly.
 import {spawn} from 'node:child_process';
+import {existsSync,realpathSync} from 'node:fs';
 import {createInterface} from 'node:readline';
 import {readFile,chmod,unlink} from 'node:fs/promises';
 import {createServer} from 'node:http';
@@ -133,4 +134,4 @@ export async function main() {
   async function stop(){for(const client of wss.clients)client.terminate();wss.close();server.close();await unlink(file).catch(()=>{});}
   process.once('SIGTERM',()=>void stop());process.once('SIGINT',()=>void stop());
 }
-if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main().catch(()=>{console.error('Codeworks Codex adapter failed');process.exitCode=1;});
+if(process.argv[1]&&existsSync(process.argv[1])&&import.meta.url===pathToFileURL(realpathSync(process.argv[1])).href)main().catch(()=>{console.error('Codeworks Codex adapter failed');process.exitCode=1;});

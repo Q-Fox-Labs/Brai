@@ -19,7 +19,7 @@ export async function migrate(pool, appRole, verifierRole) {
     const { rowCount } = await db.query('SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=$1)', [appRole]);
     if (rowCount) throw new Error('APP_ROLE_MEMBERSHIP_FORBIDDEN');
     await db.query('CREATE TABLE IF NOT EXISTS public.codeworks_migrations(version integer PRIMARY KEY, sha256 text NOT NULL)');
-    for(const version of [1,2,3,4,5]) {
+    for(const version of [1,2,3,4,5,6]) {
       const sql=await readFile(new URL('../migrations/'+String(version).padStart(3,'0')+'.sql',import.meta.url),'utf8');
       const sha=createHash('sha256').update(sql).digest('hex');
       const applied=(await db.query('SELECT sha256 FROM public.codeworks_migrations WHERE version=$1',[version])).rows[0];

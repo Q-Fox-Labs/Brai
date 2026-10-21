@@ -84,6 +84,11 @@ export async function createAgentHost(config,call) {
   }
   async function root(session,write=false) {
     live(session);
+    if(session.pending_commit){
+      const {operation}=await call('operation-status',{project_id:session.project_id,operation_id:session.pending_commit},session.executor_id);
+      if(!['succeeded','failed'].includes(operation.status))fail('WRITER_BUSY');
+      delete session.pending_commit;await persist(session);
+    }
     const p=await project(session);
     if(session.workspace_id) {
       const result=await status(session),w=result.workspace;
@@ -92,7 +97,7 @@ export async function createAgentHost(config,call) {
       return {project:p,root:w.path,workspace:w};
     }
     if(!write)return {project:p,root:p.repo_path,workspace:null};
-    const accepted=await call('prepare-write',{project_id:session.project_id,idempotency_key:'agent-prepare-'+session.id,workspace_key:session.workspace_key,kind:session.kind,session_id:session.id},session.executor_id);
+    const accepted=await call('prepare-write',{project_id:session.project_id,idempotency_key:'agent-prepare-'+session.id,workspace_key:session.workspace_key,kind:session.kind,session_id:session.id,...session.context},session.executor_id);
     session.workspace_id=accepted.workspace_id;await persist(session);
     const until=Date.now()+150000;
     while(Date.now()<until) {
@@ -163,8 +168,20 @@ export async function createAgentHost(config,call) {
     return JSON.parse(entry.stdout());
   }
   async function action(session,request) {
-    live(session);
     if(!valid(request))fail('INVALID_ARGUMENT');
+    if(request.action==='request-release'&&session.release_request&&request.request_key===session.release_request.key){
+      return call('request-release',session.release_request.args,session.executor_id);
+    }
+    live(session);
+    if(request.action==='kind'){
+      if(session.workspace_id||!['feature','hotfix'].includes(request.kind))fail('KIND_ALREADY_FIXED');
+      session.kind=request.kind;session.context=Object.fromEntries(['element_id','move_id','attempt_id'].filter(k=>request[k]!==undefined).map(k=>[k,request[k]]));
+      await persist(session);return {kind:session.kind,...session.context};
+    }
+    if(request.action==='commit'&&session.commit_request?.key===request.request_key){
+      if(session.commit_request.message!==request.message)fail('INVALID_ARGUMENT');
+      return call('operation-status',{project_id:session.project_id,operation_id:session.commit_request.operation_id},session.executor_id);
+    }
     if(request.action==='status')return status(session);
     if(request.action==='poll'||request.action==='stdin') {
       const entry=processes.get(request.command_id);
@@ -178,6 +195,18 @@ export async function createAgentHost(config,call) {
       return {command_id:entry.id,done:entry.closed,exit_code:entry.code,stdout:entry.stdout(),stderr:entry.stderr()};
     }
     let context=await root(session);
+    if(['commit','request-release'].includes(request.action)){
+      if(!request.request_key||!context.workspace)fail('WORKSPACE_NOT_READY');
+      const w=context.workspace,args={project_id:session.project_id,workspace_id:w.id,session_id:session.id,expected_epoch:w.writer.epoch,idempotency_key:'agent-'+request.action+'-'+session.id+'-'+request.request_key};
+      if(request.action==='commit'){
+        if(!request.message)fail('INVALID_ARGUMENT');
+        const accepted=await call('commit',{...args,message:request.message},session.executor_id);
+        session.commit_request={key:request.request_key,message:request.message,operation_id:accepted.operation_id};await persist(session);return accepted;
+      }
+      const current=await status(session);
+      session.release_request={key:request.request_key,args:{...args,target:w.kind==='feature'?'dev':'prod',commit_sha:current.git.head}};await persist(session);
+      return call('request-release',session.release_request.args,session.executor_id);
+    }
     if(request.action==='read') {
       const file=await relative(context.project,context.root,request.path);
       return {...await worker(session,{action:'read',path:file}),root:context.root};
@@ -229,9 +258,9 @@ export async function createAgentHost(config,call) {
     });
   }
   /** Перекрывает admission до сигнала, убивает namespace init и ждёт закрытия всех pipe/FD. */
-  async function quiesce({workspace,executorId,sessionId}) {
+  async function quiesce({workspace,executorId,sessionId,temporary}) {
     const affected=[...sessions.values()].filter(s=>s.workspace_id===workspace.id&&s.executor_id===executorId&&s.id===sessionId);
-    for(const session of affected){session.revoked=true;await persist(session);}
+    for(const session of affected){if(temporary)session.pending_commit=temporary;else session.revoked=true;await persist(session);}
     const active=[...processes.values()].filter(p=>affected.some(s=>s.id===p.session)&&!p.closed);
     for(const entry of active)entry.child.kill('SIGKILL');
     await Promise.all(active.map(entry=>entry.done));

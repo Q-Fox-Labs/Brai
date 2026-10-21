@@ -2,6 +2,7 @@
 // ABOUTME: Полномочия передаются одноразовым FD, не env, profile или model arguments.
 import {readFile} from 'node:fs/promises';
 import {spawn} from 'node:child_process';
+import {existsSync,realpathSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import {socketCall} from '../codeworks/src/agent-host.mjs';
 import {sandboxArgs} from '../codeworks/src/agent-sandbox.mjs';
@@ -22,4 +23,4 @@ export async function launchHermes(args=process.argv.slice(2)) {
   const stop=()=>child.kill('SIGKILL');process.once('SIGTERM',stop);process.once('SIGINT',stop);
   return new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',code=>{process.off('SIGTERM',stop);process.off('SIGINT',stop);resolve(code??1);});});
 }
-if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)launchHermes().then(code=>{process.exitCode=code;}).catch(()=>{console.error('Codeworks Hermes adapter failed');process.exitCode=1;});
+if(process.argv[1]&&existsSync(process.argv[1])&&import.meta.url===pathToFileURL(realpathSync(process.argv[1])).href)launchHermes().then(code=>{process.exitCode=code;}).catch(()=>{console.error('Codeworks Hermes adapter failed');process.exitCode=1;});

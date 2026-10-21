@@ -1,24 +1,120 @@
 {
   "name": "codeworks",
-  "description": "Read project files, apply patches, change files, and run commands. Use this tool for ALL project access. Read/discussion creates no worktree. First non-documentation write automatically prepares the workspace; all later access uses it. Commands MUST explicitly choose read or write; read has an OS readonly source view, write grants only this workspace. Never retry a partially executed command. poll/stdin address only your own command_id. batch operations: write(path,content), delete(path), rename(path,to), symlink(path,target); patch accepts Codex Begin/End Patch framing. Paths can be repository-relative or absolute base/workspace paths. Identity comes from the runtime, never arguments.",
+  "description": "Read project files, apply patches, change files, and run commands. Use this tool for ALL project access. Read/discussion creates no worktree. First non-documentation write automatically prepares the workspace; all later access uses it. Commands MUST explicitly choose read or write; read has an OS readonly source view, write grants only this workspace. Never retry a partially executed command. poll/stdin address only your own command_id. batch operations: write(path,content), delete(path), rename(path,to), symlink(path,target); patch accepts Codex Begin/End Patch framing. Paths can be repository-relative or absolute base/workspace paths. Identity comes from the runtime, never arguments. Before the first write select kind=feature or hotfix with action=kind; optional element_id/move_id/attempt_id link game-core without changing task state. action=commit requires message and stable request_key; action=request-release requires stable request_key and uses only your current clean HEAD. Git metadata remains inaccessible to commands. Repeat the same request_key after interruption; never substitute a new key blindly.",
   "inputSchema": {
     "type": "object",
     "properties": {
-      "action": {"enum": ["read", "batch", "patch", "command", "poll", "stdin", "status"]},
-      "path": {"type": "string", "maxLength": 2048},
-      "operations": {"type": "array", "minItems": 1, "maxItems": 128, "items": {
-        "type": "object", "properties": {
-          "op": {"enum": ["write", "delete", "rename", "symlink"]},
-          "path": {"type": "string"}, "to": {"type": "string"},
-          "target": {"type": "string"}, "content": {"type": "string"}
-        }, "required": ["op", "path"], "additionalProperties": false
-      }},
-      "patch": {"type": "string"},
-      "mode": {"enum": ["read", "write"]},
-      "argv": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"type": "string"}},
-      "input": {"type": "string"}, "eof": {"type": "boolean"},
-      "command_id": {"type": "string"}
+      "action": {
+        "enum": [
+          "read",
+          "batch",
+          "patch",
+          "command",
+          "poll",
+          "stdin",
+          "status",
+          "kind",
+          "commit",
+          "request-release"
+        ]
+      },
+      "path": {
+        "type": "string",
+        "maxLength": 2048
+      },
+      "operations": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 128,
+        "items": {
+          "type": "object",
+          "properties": {
+            "op": {
+              "enum": [
+                "write",
+                "delete",
+                "rename",
+                "symlink"
+              ]
+            },
+            "path": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "patch": {
+        "type": "string"
+      },
+      "mode": {
+        "enum": [
+          "read",
+          "write"
+        ]
+      },
+      "argv": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 256,
+        "items": {
+          "type": "string"
+        }
+      },
+      "input": {
+        "type": "string"
+      },
+      "eof": {
+        "type": "boolean"
+      },
+      "command_id": {
+        "type": "string"
+      },
+      "kind": {
+        "enum": [
+          "feature",
+          "hotfix"
+        ]
+      },
+      "message": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1000
+      },
+      "request_key": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "element_id": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+      },
+      "move_id": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+      },
+      "attempt_id": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+      }
     },
-    "required": ["action"], "additionalProperties": false
+    "required": [
+      "action"
+    ],
+    "additionalProperties": false
   }
 }

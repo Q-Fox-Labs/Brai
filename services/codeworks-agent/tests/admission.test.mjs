@@ -20,3 +20,14 @@ test('native admission fences unknown, completed and replayed calls while admitt
   a.observe({method:'turn/completed',params:{threadId:'parent',turn:{id:'p1'}}});
   assert.throws(()=>a.tool(tool('parent','p1',4)),/NOT_ADMITTED/);
 });
+
+test('CLI main runs through immutable OCI symlinks and fails closed without managed configuration',async()=>{
+ const {mkdtemp,symlink,rm}=await import('node:fs/promises');const {spawnSync}=await import('node:child_process');const {tmpdir}=await import('node:os');const {fileURLToPath}=await import('node:url');
+ const root=await mkdtemp(tmpdir()+'/cw-entry-');
+ try{for(const name of ['codex','hermes']){
+  const alias=root+'/'+name+'.mjs';await symlink(fileURLToPath(new URL('../'+name+'.mjs',import.meta.url)),alias);
+  const env={...process.env};for(const key of Object.keys(env))if(key.startsWith('CODEWORKS_'))delete env[key];
+  const result=spawnSync(process.execPath,[alias],{env,encoding:'utf8',timeout:5000});
+  assert.equal(result.status,1);assert.match(result.stderr,/Codeworks .* adapter failed/);
+ }}finally{await rm(root,{recursive:true,force:true});}
+});
