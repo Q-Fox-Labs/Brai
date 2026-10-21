@@ -141,7 +141,7 @@ export async function executePlan(cfg,registry,plan,{repositoryRoot=root,command
         entry.externalImage=registry.reference(item.id,'smoke-'+cfg.runId+'-'+cfg.attempt);entry.context=context;
         const metadata={...provenance('runtime',item.keys.artifact),payloadHash:null,componentType:c.type,deliveryKind:'external-cli'};
         const buildArgs=['buildx','build','--load','--provenance=false','--platform','linux/amd64','--label','app.brai.codeworks='+JSON.stringify(metadata),'-t',entry.externalImage];
-        if(process.env.CODEWORKS_DISABLE_CACHE!=='1')buildArgs.push('--cache-from',`type=registry,ref=${registry.reference(item.id,'layers')}`,'--cache-to','type=inline','--build-arg','BUILDKIT_INLINE_CACHE=1');
+        if(process.env.CODEWORKS_DISABLE_CACHE!=='1')buildArgs.push('--cache-from',`type=registry,ref=${registry.reference(item.id,'layers')}`,'--cache-to','type=inline');
         const t=Date.now();const output=await run('docker',[...buildArgs,context]);entry.buildMs=Date.now()-t;entry.layerCacheHits=(output.stdout+'\n'+output.stderr).match(/\bCACHED\b/g)?.length??0;
         const checkStarted=Date.now();await run('docker',['run','--rm','--pull','never','--network','none','--read-only',entry.externalImage,'--help']);entry.checkMs=Date.now()-checkStarted;
       }
@@ -152,7 +152,7 @@ export async function executePlan(cfg,registry,plan,{repositoryRoot=root,command
           entry.context=runtimeContext(root,c,entry.payload);entry.externalImage=registry.reference(item.id,'smoke-'+cfg.runId+'-'+cfg.attempt);
           const metadata={...provenance('runtime',item.keys.artifact),payloadHash:entry.payload.payloadHash,componentType:c.type,deliveryKind:c.delivery.kind};
           const args=['buildx','build','--load','--provenance=false','--platform','linux/amd64','--label','app.brai.codeworks='+JSON.stringify(metadata),'-t',entry.externalImage];
-          if(process.env.CODEWORKS_DISABLE_CACHE!=='1')args.push('--cache-from',`type=registry,ref=${registry.reference(item.id,'layers')}`,'--cache-to','type=inline','--build-arg','BUILDKIT_INLINE_CACHE=1');
+          if(process.env.CODEWORKS_DISABLE_CACHE!=='1')args.push('--cache-from',`type=registry,ref=${registry.reference(item.id,'layers')}`,'--cache-to','type=inline');
           const t=Date.now(),built=await commands('docker',[...args,entry.context]);entry.packageMs+=Date.now()-t;entry.layerCacheHits=(built.stdout+'\n'+built.stderr).match(/\bCACHED\b/g)?.length??0;
           const script="import{execFileSync}from'node:child_process';\n"+c.delivery.entrypoints.filter(p=>/\.(?:mjs|cjs|js)$/.test(p)).map(p=>`execFileSync(process.execPath,['--check',${JSON.stringify('/payload/'+p)}]);`).join('\n')+'\n'+c.delivery.smokeImports.map(p=>`await import(${JSON.stringify('file:///payload/'+p)}${p.endsWith('.json')?",{with:{type:'json'}}":''});`).join('\n');
           const checked=Date.now();await commands('docker',['run','--rm','--pull','never','--network','none','--read-only','--entrypoint','node',entry.externalImage,'--input-type=module','--eval',script]);entry.checkMs+=Date.now()-checked;

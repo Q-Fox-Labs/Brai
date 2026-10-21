@@ -107,7 +107,7 @@ export function createRegistry({repository,username,token,fetcher=fetch}) {
       const started=Date.now();let layerCacheHits=0;
       const ref=`${prefix}/${id}:${tag}`;
       const args=['buildx','build','--platform','linux/amd64','--provenance=false','--load','--tag',ref,'--label','app.brai.codeworks='+JSON.stringify(metadata)];
-      if(layers)args.push('--cache-from',`type=registry,ref=${prefix}/${id}:layers`,'--cache-to','type=inline','--build-arg','BUILDKIT_INLINE_CACHE=1');
+      if(layers)args.push('--cache-from',`type=registry,ref=${prefix}/${id}:layers`,'--cache-to','type=inline');
       if(existingImage)await run('docker',['tag',existingImage,ref]);
       else {const output=await run('docker',[...args,context]);layerCacheHits=(output.stdout+'\n'+output.stderr).match(/\bCACHED\b/g)?.length??0;}
       await run('docker',['push',ref]);
