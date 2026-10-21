@@ -112,7 +112,7 @@ async function validateRuntime(stage, component) {
   // AIDEV-NOTE: Внутри root/tmp Node мог бы найти исходные node_modules выше поставки и скрыть недостающую зависимость.
   const isolated = mkdtempSync(join(tmpdir(), 'brai-component-smoke-'));
   try {
-    cpSync(stage, isolated, { recursive: true, dereference: false });
+    cpSync(stage, isolated, { recursive: true, dereference: false, verbatimSymlinks: true });
     const env = { PATH: process.env.PATH ?? '', NODE_PATH: '', NODE_OPTIONS: '' };
     const options = { cwd: isolated, env, timeout: 30_000, maxBuffer: 1024 * 1024 };
     for (const key of component.delivery.entrypoints.filter(key => /\.(?:mjs|cjs|js)$/.test(key))) {

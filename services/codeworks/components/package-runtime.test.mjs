@@ -106,6 +106,27 @@ test('smoke cannot resolve an omitted dependency from repository node_modules', 
   await assert.rejects(build(), /ARTIFACT_SMOKE_FAILED.*|ERR_MODULE_NOT_FOUND/s);
 });
 
+test('isolated smoke follows workspace links inside the payload, not the original stage', async t => {
+  const { root, write, component, build } = fixture(t);
+  const app = { name: '@brai/example', version: '1.0.0', type: 'module', dependencies: { '@brai/contracts': '1.0.0' } };
+  const contracts = { name: '@brai/contracts', version: '1.0.0', type: 'module', exports: './index.mjs' };
+  write('services/example/package.json', app);
+  write('services/contracts/package.json', contracts);
+  write('services/contracts/index.mjs', "import 'omitted';\n");
+  write('services/example/main.mjs', "import '@brai/contracts';\n");
+  write('node_modules/omitted/package.json', { name: 'omitted', version: '1.0.0', type: 'module', exports: './index.mjs' });
+  write('node_modules/omitted/index.mjs', 'export {};\n');
+  mkdirSync(join(root, 'node_modules/@brai'), { recursive: true });
+  symlinkSync('../../services/contracts', join(root, 'node_modules/@brai/contracts'));
+  write('package-lock.json', { lockfileVersion: 3, packages: {
+    'services/example': app, 'services/contracts': contracts,
+    'node_modules/@brai/contracts': { link: true, resolved: 'services/contracts' },
+  } });
+  component.npm = { workspaces: ['services/example'] };
+  component.delivery.files.push('services/example/package.json', 'services/contracts/package.json', 'services/contracts/index.mjs');
+  await assert.rejects(build(), /ARTIFACT_SMOKE_FAILED.*ERR_MODULE_NOT_FOUND/s);
+});
+
 test('delivery rejects secrets, model weights, tests, unbuilt source and symlink escapes', async t => {
   const { root, write, component, build } = fixture(t);
   for (const key of ['services/example/.env.local', 'services/example/credentials.json', 'services/example/model.gguf', 'services/example/model.bin', 'services/example/tests/example.mjs', 'services/example/source.ts']) {
