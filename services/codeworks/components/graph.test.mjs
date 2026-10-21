@@ -127,3 +127,24 @@ test('validation rejects missing own and dependency delivery files before execut
  d.dependencies=[{id:'neighbor',inputs:[],delivery:['services/neighbor/missing.json']}];save(root,'probe',d);
  assert.throws(()=>discover(root),/DELIVERY_NOT_FOUND/);
 });
+test('generated output corruption is rejected until explicit build restores source bytes; legacy is not adopted',async t=>{
+ const root=fixture(t);add(root,'probe',d=>{d.delivery.files=['services/probe/dist'];d.delivery.entrypoints=['services/probe/dist/main.mjs'];});
+ put(root,'services/probe/build.mjs',"import{mkdirSync,copyFileSync,appendFileSync}from'node:fs';mkdirSync('dist',{recursive:true});copyFileSync('main.mjs','dist/main.mjs');appendFileSync('build-count','1');");
+ const first=(await execute(root,'package',['probe']))[0],statePath=join(root,'tmp/component-state/probe.json');
+ const trusted=readFileSync(statePath,'utf8');
+ put(root,'services/probe/dist/main.mjs','export const value=999;');
+ await assert.rejects(execute(root,'package',['probe']),/BUILD_OUTPUT_MISMATCH/);
+ assert.equal(readFileSync(statePath,'utf8'),trusted);assert.equal(readFileSync(join(root,'services/probe/build-count'),'utf8'),'1');
+ assert.equal(readFileSync(join(first.artifact.path,'services/probe/dist/main.mjs'),'utf8'),'export const value=1;\n');
+ const restored=(await execute(root,'build',['probe']))[0];assert.equal(restored.compiled,true);assert.equal(restored.build,first.build);
+ assert.equal(readFileSync(join(root,'services/probe/dist/main.mjs'),'utf8'),'export const value=1;\n');
+ const repeated=(await execute(root,'package',['probe']))[0];assert.equal(repeated.compiled,false);assert.equal(repeated.packaged,false);assert.equal(repeated.artifact.payloadHash,first.artifact.payloadHash);
+ const legacy=JSON.parse(readFileSync(statePath));delete legacy.outputDigest;writeFileSync(statePath,JSON.stringify(legacy));
+ await assert.rejects(execute(root,'package',['probe']),/BUILD_OUTPUT_UNVERIFIED/);
+ assert.equal(readFileSync(join(root,'services/probe/build-count'),'utf8'),'11');
+ assert.equal((await execute(root,'build',['probe']))[0].compiled,true);
+ // A check must not mutate trusted output and then have run/package attest it.
+ put(root,'services/probe/tests.mjs',"import{writeFileSync}from'node:fs';writeFileSync('dist/main.mjs','export const value=999;');");
+ await assert.rejects(execute(root,'run',['probe']),/BUILD_OUTPUT_MISMATCH/);
+ assert.equal(readFileSync(join(first.artifact.path,'services/probe/dist/main.mjs'),'utf8'),'export const value=1;\n');
+});

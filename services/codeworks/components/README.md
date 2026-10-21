@@ -34,11 +34,16 @@ checks, `package` использует ту же сборку и упаковы�
 свой прежний самостоятельный build; общий pipeline использует raw check из описания.
 
 Build receipt находится в `tmp/component-state`; его можно удалить для полной
-сборки. Пропавший dist/.next заставляет пересобрать компонент. Изменение только
+сборки. После успешной команды build он сохраняет digest выбранных prepared
+delivery files: paths, bytes и modes. Check/package сверяют этот digest, включая
+повторную сверку после checks. Изменённый или пропавший output отвергается;
+явный build/run восстанавливает его настоящей сборкой. Старый receipt без digest
+требует явный build, автоматического принятия существующих outputs нет.
+Verification/packaging code не входит в compiler key и сам по себе не сбрасывает сборку. Изменение только
 теста меняет check key, сохраняя build/runtime keys. Runtime key учитывает build identity
 и фактические выбранные файлы поставки, включая delivery зависимостей; после сборки
 он вычисляется заново по готовым outputs. Validate требует наличия delivery files;
-только build/check/package допускают ещё не созданные dist/.next до сборки. Runtime package ID — SHA-256
+планирование и pipeline допускают ещё не созданные dist/.next до первой сборки. Runtime package ID — SHA-256
 фактических файлов, modes, launch contract и locked package identity, поэтому тест и время проверки не меняют ID поставки.
 
 Готовая поставка находится в `tmp/component-packages/<id>-<sha256>` и содержит
@@ -51,7 +56,7 @@ manifest с SHA-256/размерами каждого файла и точным
 не устанавливает зависимости. Registry, Actions и реальный rollout сюда не входят.
 
 Скрипты History/Alerts `scripts/package-runtime.mjs` используют тот же упаковщик,
-принимают только prebuilt outputs и печатают точный immutable каталог. Их `--output`
+принимают только prebuilt outputs с проверенным build receipt и печатают точный immutable каталог. Их `--output`
 теперь задаёт родительский каталог под корневым `tmp`, а не изменяемую поставку.
 
 CLI по умолчанию сравнивает с `refs/remotes/origin/dev`; для другой принятой базы
