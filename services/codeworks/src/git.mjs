@@ -1,5 +1,5 @@
 // ABOUTME: Создаёт и проверяет только доказанно принадлежащие Codeworks Git worktree.
-// ABOUTME: Не присваивает существующие ветки/пути, не удаляет файлы и не устанавливает пакеты.
+// ABOUTME: Не присваивает существующие ветки/пути, сохраняет чужие/активные/dirty области и не устанавливает пакеты.
 import { spawn } from 'node:child_process';
 import { lstat, realpath, readFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -95,6 +95,21 @@ export function createGit({flowGit}={}) {
       if(!head||!await registration(project,w))throw new Fault('OWNERSHIP_CONFLICT');
       if((await local(w,['symbolic-ref','--short','HEAD'])).stdout!==w.branch)throw new Fault('OWNERSHIP_CONFLICT');
       return {head:(await local(w,['rev-parse','HEAD'])).stdout,branch:w.branch,dirty:!!(await local(w,['status','--porcelain=v1','--untracked-files=all'])).stdout};
+    },
+    /** Убирает только quiesced clean own worktree после доказанного слияния всех release legs. */
+    async cleanup(project,w,heads) {
+      requireLock();await topology(project);
+      if(!heads.length||w.writer?.state!=='quiesced'||!w.path.startsWith(project.workspace_root+'/')||w.path===project.repo_path)return false;
+      const head=await branches(project,w);if(!head)return true;
+      for(const target of heads)if(!/^[0-9a-f]{40}$/.test(target)||(await git(project,['merge-base','--is-ancestor',head,target],{allowFailure:true})).code!==0)return false;
+      if(await registration(project,w)){
+        if((await this.inspect(project,w)).dirty)return false;
+        await git(project,['worktree','unlock',w.path]);
+        try{await git(project,['worktree','remove',w.path]);}catch(error){await git(project,['worktree','lock','--reason','codeworks:'+w.ownership_token,w.path],{allowFailure:true});throw error;}
+      }else if(await exists(w.path))return false;
+      const proof=(await git(project,['rev-parse',ownershipRef(w)])).stdout;
+      await git(project,['update-ref','--stdin'],{input:'start\ndelete refs/heads/'+w.branch+' '+head+'\ndelete '+ownershipRef(w)+' '+proof+'\nprepare\ncommit\n'});
+      return true;
     },
     /** Атомарно создаёт ветку и постоянный ownership ref; intent уже сохранён в БД. */
     async branch(project,w) {

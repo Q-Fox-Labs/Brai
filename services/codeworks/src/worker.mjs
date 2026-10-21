@@ -47,7 +47,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
           }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}
         };
         const evidence=async(target,sha)=>{
-          const record=(await db.query('SELECT * FROM codeworks.deployment_evidence WHERE project_id=$1 AND target=$2 ORDER BY created_at DESC,id DESC LIMIT 1',[project.id,target])).rows[0];
+          const record=(await db.query(`SELECT * FROM codeworks.deployment_evidence WHERE project_id=$1 AND target=$2 AND NOT EXISTS (SELECT 1 FROM codeworks.deployments d WHERE d.project_id=$1 AND d.target=$2 AND d.created_at>codeworks.deployment_evidence.created_at AND (d.receipt->>'verified') IS DISTINCT FROM 'true') ORDER BY created_at DESC,id DESC LIMIT 1`,[project.id,target])).rows[0];
           return record&&(!sha||record.commit_sha===sha)?record:null;
         };
         let outcome;
@@ -64,6 +64,11 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
           await db.query('UPDATE codeworks.operations SET status=$2,step=$3,result=$4,error=NULL,updated_at=now() WHERE id=$1',[op.id,outcome.status,outcome.reason,{release_id:release.id,state:outcome.status,details:release.details}]);
           await db.query('COMMIT');
         }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}
+        if(outcome.status==='succeeded'&&git.cleanup){
+          // Terminal release is durable before optional cleanup; interruption preserves completed deployment.
+          const heads=Object.values(release.details).filter(x=>x?.merge_sha).map(x=>x.merge_sha);
+          try{release.details.cleanup={removed:await git.cleanup(project,w,heads)};await db.query('UPDATE codeworks.releases SET details=$2 WHERE id=$1',[release.id,release.details]);await db.query('UPDATE codeworks.operations SET result=$2 WHERE id=$1',[op.id,{release_id:release.id,state:outcome.status,details:release.details}]);}catch{}
+        }
         return;
       }
       // Каждый шаг идемпотентен по реальному Git, а не только по последнему флагу в БД.

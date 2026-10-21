@@ -138,6 +138,8 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',assert
             if (current.head!==args.commit_sha||current.dirty) throw new Fault('CONFLICT','Release requires the current clean workspace commit.');
             if((w.kind==='feature'&&args.target!=='dev')||(w.kind!=='feature'&&args.target!=='prod'))throw new Fault('INVALID_ARGUMENT','Release target does not match workspace route.');
             if(await db.activeRelease(w.id))throw new Fault('CONFLICT','Workspace already has an unfinished release.');
+            await assertQuiescent({workspace:workspaceDTO(w),executorId,sessionId:args.session_id});
+            w.writer={...w.writer,state:'quiesced'};await db.updateWriter(w);
             const releaseId=randomUUID();
             accepted=await operation(db,w,executorId,method,args,project.github?'pending':'awaiting_execution',project.github?{release_id:releaseId,state:'pending',details:{}}:{release_id:releaseId,reason:'RELEASE_EXECUTION_NOT_AVAILABLE'});
             await db.release({id:releaseId,workspace_id:w.id,operation_id:accepted.operation_id,target:args.target,requested_sha:args.commit_sha,state:project.github?'pending':'awaiting_execution'});

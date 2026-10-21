@@ -1077,6 +1077,18 @@
         },
         "backport": {
           "$ref": "#/definitions/releaseLeg"
+        },
+        "cleanup": {
+          "type": "object",
+          "properties": {
+            "removed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "removed"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [],
