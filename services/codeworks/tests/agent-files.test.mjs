@@ -28,3 +28,23 @@ test('batch preflight rejects invalid late operations before writing earlier fil
     }
   } finally {await rm(root,{recursive:true,force:true});}
 });
+
+test('Unix restart reclaims only own stale socket, preserving live endpoints and ordinary files',async()=>{
+ const {reclaimSocket}=await import('../src/agent-host.mjs');
+ const {createServer}=await import('node:net');
+ const {spawn}=await import('node:child_process');
+ const root=await mkdtemp(path.join(tmpdir(),'codeworks-socket-')),file=path.join(root,'endpoint.sock');
+ const server=createServer(stream=>stream.destroy());let child;
+ try{
+  await writeFile(file,'foreign ordinary file');
+  await assert.rejects(reclaimSocket(file),/SOCKET_OCCUPIED/);assert.equal(await readFile(file,'utf8'),'foreign ordinary file');await rm(file);
+  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(file,resolve);});
+  await assert.rejects(reclaimSocket(file),/SOCKET_OCCUPIED/);
+  await new Promise(resolve=>server.close(resolve));
+  child=spawn(process.execPath,['--input-type=module','-e',"import{createServer}from'node:net';createServer().listen(process.argv[1],()=>process.stdout.write('ready'));",file],{stdio:['ignore','pipe','pipe']});
+  await new Promise((resolve,reject)=>{child.stdout.once('data',resolve);child.once('error',reject);child.once('exit',()=>reject(Error('SOCKET_FIXTURE_EXITED')));});
+  const dead=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGKILL');await dead;
+  await reclaimSocket(file);await reclaimSocket(file);
+  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(file,resolve);});
+ }finally{if(child?.exitCode===null&&!child?.signalCode)child.kill('SIGKILL');if(server.listening)await new Promise(resolve=>server.close(resolve));await rm(root,{recursive:true,force:true});}
+});

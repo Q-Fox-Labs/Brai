@@ -8,7 +8,7 @@ import {createHmac} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import path from 'node:path';
 import {WebSocketServer} from 'ws';
-import {socketCall} from '../codeworks/src/agent-host.mjs';
+import {socketCall,reclaimSocket} from '../codeworks/src/agent-host.mjs';
 import {sandboxArgs} from '../codeworks/src/agent-sandbox.mjs';
 const tool=JSON.parse(await readFile(new URL('../codeworks/src/agent-tools.json',import.meta.url),'utf8'));
 const instructions='Use codeworks for ALL project reads, patches, files and commands. Native project paths are intentionally inaccessible. Do not request manual worktrees: codeworks automatically prepares one before the first code write. Use mode=read for inspection and mode=write for mutating commands. Route all subsequent reads through codeworks. Never retry a partly executed command.';
@@ -128,6 +128,7 @@ export async function main() {
     ws.on('message',data=>{queue=queue.then(async()=>{const proxy=await started;await proxy.receive(JSON.parse(data.toString()));}).catch(()=>ws.terminate());});
     ws.on('close',()=>void started.then(proxy=>proxy.close()).catch(()=>{}));ws.on('error',()=>void started.then(proxy=>proxy.close()).catch(()=>{}));
   });
+  await reclaimSocket(file);
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(file,resolve);});await chmod(file,0o600);
   async function stop(){for(const client of wss.clients)client.terminate();wss.close();server.close();await unlink(file).catch(()=>{});}
   process.once('SIGTERM',()=>void stop());process.once('SIGINT',()=>void stop());

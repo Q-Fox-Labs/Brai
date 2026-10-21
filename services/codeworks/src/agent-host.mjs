@@ -32,6 +32,24 @@ export async function socketCall(socket,request) {
   });
 }
 
+/** Восстанавливает только свой мёртвый Unix socket; живой endpoint и чужие файлы сохраняет. */
+export async function reclaimSocket(file) {
+  let before;
+  try{before=await lstat(file);}catch(error){if(error.code==='ENOENT')return;throw error;}
+  if(!before.isSocket()||before.uid!==process.getuid())fail('SOCKET_OCCUPIED');
+  const stale=await new Promise((resolve,reject)=>{
+    const probe=createConnection(file);
+    probe.once('connect',()=>{probe.destroy();resolve(false);});
+    probe.once('error',error=>{probe.destroy();error.code==='ECONNREFUSED'?resolve(true):reject(error);});
+    probe.setTimeout(1000,()=>{probe.destroy();reject(new Error('SOCKET_OCCUPIED'));});
+  });
+  if(!stale)fail('SOCKET_OCCUPIED');
+  let current;
+  try{current=await lstat(file);}catch(error){if(error.code==='ENOENT')return;throw error;}
+  if(current.dev!==before.dev||current.ino!==before.ino)fail('SOCKET_OCCUPIED');
+  await unlink(file);
+}
+
 /** Создаёт host с явным runtime.call; запуск разрешён только в управляемом immutable install. */
 export async function createAgentHost(config,call) {
   if(!path.isAbsolute(config.state_root)||!Array.isArray(config.projects)||!config.projects.length)fail('AGENT_HOST_CONFIGURATION');
@@ -193,10 +211,7 @@ export async function createAgentHost(config,call) {
     return {...await worker(session,{action:'batch',operations},{write:!docsOnly,docs:docsOnly?docs:[]}),root:context.root,workspace_id:session.workspace_id??null};
   }
   async function listen(file,handler) {
-    try {
-      const item=await lstat(file);if(!item.isSocket()||item.uid!==process.getuid())fail('SOCKET_OCCUPIED');
-      await unlink(file);
-    }catch(error){if(error.code!=='ENOENT')throw error;}
+    await reclaimSocket(file);
     const server=createServer({allowHalfOpen:true},stream=>{
       let input='';stream.setTimeout(180000,()=>stream.destroy());
       stream.on('data',chunk=>{input+=chunk;if(Buffer.byteLength(input)>1048576)stream.destroy();});
