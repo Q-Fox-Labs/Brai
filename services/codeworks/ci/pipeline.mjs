@@ -127,7 +127,11 @@ export async function executePlan(cfg,registry,plan,{repositoryRoot=root,command
         const source=plan.items.find(x=>x.id===d.id);if(source?.artifactHit)await ensureOutputs(source);
       }
       const env={...process.env,BRAI_WEB_VARIANT:plan.variant,BRAI_WEB_STANDALONE_OUTPUT:'0',CI:'1',NEXT_TELEMETRY_DISABLED:'1'};
-      const cli=async action=>commands(process.execPath,['services/codeworks/components/cli.mjs',action,item.id,'--only','--base',cfg.source],{cwd:root,env});
+      const cli=async action=>{
+        // CI check/package не вправе использовать convenience CLI и скрыто пересобирать компонент.
+        if(action==='check'||action==='package')verifyBuildReceipt(root,c,undefined,item.keys.build);
+        return commands(process.execPath,['services/codeworks/components/cli.mjs',action,item.id,'--only','--base',cfg.source],{cwd:root,env});
+      };
       if(!item.artifactHit&&!item.buildHit&&c.commands.build){const t=Date.now();await cli('build');entry.buildMs=Date.now()-t;}
       if(!item.checkHit&&c.commands.check){const t=Date.now();await cli('check');entry.checkMs=Date.now()-t;}
       if(!item.artifactHit&&item.id==='instaloader') {

@@ -60,6 +60,8 @@ sources/node_modules и не принимает dist без sealed build receipt
 во время checks ничего не публикуют. Сбой публикации может оставить отдельные
 OCI objects, но failed run не становится успешным выпуском. При всех hits нет
 npm ci и component build/check/package, публикуется только новый маленький состав.
+Перед каждым CI check/package проверяется готовый build receipt: потеря receipt
+останавливает run и не запускает скрытую компиляцию через обычный CLI.
 `CODEWORKS_DISABLE_CACHE=1` отключает `~/.npm` и Docker layer cache; immutable
 GHCR reuse сохраняется. Download cache не содержит готовые поставки.
 

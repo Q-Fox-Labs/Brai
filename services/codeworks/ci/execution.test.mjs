@@ -48,7 +48,7 @@ function makePlan(root,source,{artifactHit=false,checkHit=false,buildHit=false,a
 }
 
 function ports(root,{mutateAfterCheck,snapshotPayload}={}) {
-  const actions=[],dockerActions=[];
+  const actions=[],dockerActions=[],results=[];
   const commands=async(executable,args)=>{
     if(executable==='docker') {
       const action=args[0];dockerActions.push(action);
@@ -64,6 +64,7 @@ function ports(root,{mutateAfterCheck,snapshotPayload}={}) {
     }
     const action=args[1],id=args[2];actions.push(action);
     const result=await execute(root,action,[id],{includeDependencies:false});
+    results.push({action,result});
     if(action==='check')mutateAfterCheck?.();
     return result;
   };
@@ -72,7 +73,7 @@ function ports(root,{mutateAfterCheck,snapshotPayload}={}) {
     const result={reference:`fake://${id}/${tag}`,digest:'sha256:'+sha256(`${id}:${tag}`),bytes:id==='release'?0:128,metadata};
     publications.push({id,tag,context,metadata,result});return result;
   }};
-  return {actions,dockerActions,commands,publications,registry};
+  return {actions,dockerActions,commands,publications,registry,results};
 }
 
 function config(source,runId='42') {return {repository:'owner/repo',source,runId,attempt:'1'};}
@@ -105,6 +106,8 @@ test('build snapshot reuse restores its seal and packages without rebuilding',as
   assert.deepEqual(coldPlan.sets.build,['probe']);
   await executePlan(config(f.source),cold.registry,coldPlan,{repositoryRoot:f.root,commands:cold.commands});
   assert.deepEqual(cold.actions,['build','check','package']);
+  assert.equal(cold.results.flatMap(x=>x.result).filter(x=>x.compiled).length,1);
+  assert.equal(cold.results.flatMap(x=>x.result).filter(x=>x.packaged).length,1);
   const snapshot=cold.publications.find(x=>x.tag.startsWith('build-'));
   assert.ok(snapshot,'cold build publishes its generated output snapshot');
   const snapshotPayload=join(snapshot.context,'payload');
@@ -121,11 +124,32 @@ test('build snapshot reuse restores its seal and packages without rebuilding',as
   await executePlan(config(f.source,'44'),restored.registry,reusedPlan,{repositoryRoot:f.root,commands:restored.commands});
   assert.deepEqual(restored.dockerActions,['pull','create','cp','rm']);
   assert.deepEqual(restored.actions,['package'],'restored build output passes its receipt without rebuilding');
+  assert.equal(restored.results.flatMap(x=>x.result).filter(x=>x.compiled).length,0);
+  assert.equal(restored.results.flatMap(x=>x.result).filter(x=>x.packaged).length,1);
   assert.equal(readFileSync(join(f.root,'services/probe/dist/main.mjs'),'utf8'),'export const value=1;\n');
   assert.equal(restored.publications.filter(x=>x.tag.startsWith('build-')).length,0);
   assert.equal(restored.publications.filter(x=>x.tag.startsWith('input-')).length,1);
   const runtimeContext=restored.publications.find(x=>x.tag.startsWith('input-')).context;
   assert.equal(readFileSync(join(runtimeContext,'payload/services/probe/dist/main.mjs'),'utf8'),'export const value=1;\n');
+});
+
+test('CI refuses a lost receipt before check or package instead of implicitly compiling again',async t=>{
+  for(const loseAfter of ['build','check'])await t.test(loseAfter,async t=>{
+    const f=fixture(t,{build:true});
+    f.put('services/probe/build.mjs',"import{mkdirSync,writeFileSync,appendFileSync}from'node:fs';mkdirSync('dist',{recursive:true});writeFileSync('dist/main.mjs','export const value=1;\\n');appendFileSync('compile-count','1');\n");
+    const p=makePlan(f.root,f.source),io=ports(f.root);
+    const commands=async(executable,args,options)=>{
+      const result=await io.commands(executable,args,options);
+      if(args[1]===loseAfter)rmSync(join(f.root,'tmp/component-state/probe.json'));
+      return result;
+    };
+    await assert.rejects(executePlan(config(f.source),io.registry,p,{repositoryRoot:f.root,commands}),/ENOENT/);
+    assert.deepEqual(io.actions,loseAfter==='build'?['build']:['build','check']);
+    assert.equal(readFileSync(join(f.root,'services/probe/compile-count'),'utf8'),'1');
+    assert.equal(io.results.flatMap(x=>x.result).filter(x=>x.compiled).length,1);
+    assert.equal(io.results.flatMap(x=>x.result).filter(x=>x.packaged).length,0);
+    assert.deepEqual(io.publications,[]);
+  });
 });
 
 test('source changes made by a check reject the plan before publication',async t=>{
