@@ -16,7 +16,6 @@
   ],
   "inputs": {
     "build": [
-      "package-lock.json",
       "services/local-ai/tsconfig.json"
     ],
     "runtime": [

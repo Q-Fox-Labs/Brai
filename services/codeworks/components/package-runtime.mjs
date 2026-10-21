@@ -7,6 +7,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep, posix } fr
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import { lockInputs } from './lock-inputs.mjs';
 
 const run = promisify(execFile);
 const format = 'brai-component-runtime-v1';
@@ -17,7 +18,6 @@ const hash = data => createHash('sha256').update(data).digest('hex');
 const inside = (parent, child) => child === parent || child.startsWith(`${parent}${sep}`);
 const fail = message => { throw new Error(message); };
 const present = path => lstatSync(path, { throwIfNoEntry: false }) !== undefined;
-let detectedLibc;
 
 function repositoryPath(value) {
   if (typeof value !== 'string' || !value || value.includes('\\') || value.includes('\0') || isAbsolute(value) || value === '.' || value !== posix.normalize(value) || value.startsWith('../')) fail(`INVALID_REPOSITORY_PATH: ${value}`);
@@ -49,98 +49,23 @@ function copyDelivery(root, stage, key) {
   } else fail(`UNSUPPORTED_DELIVERY_FILE: ${key}`);
 }
 
-function dependencyRequests(from, entry) {
-  const optional = entry.optionalDependencies ?? {};
-  const requests = Object.keys(entry.dependencies ?? {}).filter(name => !(name in optional)).map(name => ({ from, name, optional: false }));
-  requests.push(...Object.keys(optional).map(name => ({ from, name, optional: true })));
-  // Optional peers are consumer opt-ins, not dependencies of this package.
-  // If used, the consuming workspace declares them directly (e.g. web -> next/react).
-  requests.push(...Object.keys(entry.peerDependencies ?? {}).filter(name => entry.peerDependenciesMeta?.[name]?.optional !== true).map(name => ({ from, name, optional: false })));
-  return requests;
-}
-
-function lockCandidates(from, name) {
-  if (!/^(?:@[^/]+\/)?[^/]+$/.test(name) || name.includes('..') || name.includes('\\')) fail(`INVALID_DEPENDENCY_NAME: ${name}`);
-  const candidates = [];
-  let cursor = from;
-  while (cursor && cursor !== '.') {
-    if (basename(cursor) !== 'node_modules') candidates.push(`${cursor}/node_modules/${name}`);
-    cursor = posix.dirname(cursor);
-  }
-  candidates.push(`node_modules/${name}`);
-  return [...new Set(candidates)];
-}
-
-function verifyWorkspace(root, lock, key) {
-  repositoryPath(key);
-  const directory = join(root, key);
-  if (!inside(root, realpathSync(directory))) fail(`WORKSPACE_OUTSIDE_REPOSITORY: ${key}`);
-  const manifest = json(join(directory, 'package.json'));
-  const entry = lock.packages?.[key];
-  if (!entry || entry.link) fail(`LOCK_WORKSPACE_ENTRY_MISSING: ${key}`);
-  const canonical = value => JSON.stringify(Object.fromEntries(Object.entries(value ?? {}).sort(([a], [b]) => compare(a, b))));
-  for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies', 'peerDependenciesMeta']) {
-    if (canonical(manifest[field]) !== canonical(entry[field])) fail(`WORKSPACE_LOCK_MISMATCH: ${key}: ${field}`);
-  }
-  if (manifest.version !== entry.version || (entry.name && manifest.name !== entry.name)) fail(`WORKSPACE_LOCK_MISMATCH: ${key}: identity`);
-  return manifest;
-}
-
-function supportsPlatform(entry) {
-  const matches = (values, actual) => !values || (!values.includes(`!${actual}`) && (values.every(value => value.startsWith('!')) || values.includes(actual) || values.includes('any')));
-  if (!matches(entry.os, process.platform) || !matches(entry.cpu, process.arch)) return false;
-  if (!entry.libc || process.platform !== 'linux') return true;
-  detectedLibc ??= process.report.getReport().header.glibcVersionRuntime ? 'glibc' : 'musl';
-  return matches(entry.libc, detectedLibc);
-}
-
 function collectPackages(root, workspaces) {
-  if (!workspaces.length) return new Map();
-  const lock = json(join(root, 'package-lock.json'));
-  if (!lock.packages || lock.lockfileVersion < 2) fail('UNSUPPORTED_PACKAGE_LOCK');
-  const pending = [];
-  const visitedWorkspaces = new Set();
   const packages = new Map();
-  const addWorkspace = key => {
-    if (visitedWorkspaces.has(key)) return;
-    const manifest = verifyWorkspace(root, lock, key);
-    visitedWorkspaces.add(key);
-    pending.push(...dependencyRequests(key, manifest));
-  };
-  workspaces.forEach(addWorkspace);
-  while (pending.length) {
-    const request = pending.pop();
-    const key = lockCandidates(request.from, request.name).find(candidate => lock.packages[candidate]);
-    if (!key) {
-      if (request.optional) continue;
-      fail(`LOCK_ENTRY_MISSING: ${request.from} -> ${request.name}`);
-    }
-    if (packages.has(key)) continue;
-    repositoryPath(key);
-    const entry = lock.packages[key];
-    if (!supportsPlatform(entry)) {
-      if (request.optional) continue;
-      fail(`UNSUPPORTED_PACKAGE_PLATFORM: ${key}`);
-    }
-    const installed = join(root, key);
-    if (!existsSync(installed)) {
-      if (request.optional) continue;
-      fail(`MISSING_INSTALLED_PACKAGE: ${key}`);
-    }
-    if (entry.link) {
-      const target = repositoryPath(entry.resolved);
-      if (!inside(root, realpathSync(installed)) || realpathSync(installed) !== realpathSync(join(root, target))) fail(`WORKSPACE_LINK_MISMATCH: ${key}`);
-      addWorkspace(target);
-      const metadata = json(join(root, target, 'package.json'));
-      if (metadata.name !== request.name) fail(`PACKAGE_NAME_MISMATCH: ${key}`);
-      packages.set(key, { key, entry, target, version: metadata.version });
+  for (const {key,entry} of lockInputs(root,workspaces)) {
+    if (!key.split('/').includes('node_modules')) continue;
+    const installed=join(root,key);
+    if(!existsSync(installed)) fail(`MISSING_INSTALLED_PACKAGE: ${key}`);
+    if(entry.link) {
+      const target=repositoryPath(entry.resolved);
+      if(!inside(root,realpathSync(installed)) || realpathSync(installed)!==realpathSync(join(root,target)))fail(`WORKSPACE_LINK_MISMATCH: ${key}`);
+      const metadata=json(join(root,target,'package.json'));
+      packages.set(key,{key,entry,target,version:metadata.version});
     } else {
-      // AIDEV-NOTE: Подготовленный worktree использует внешние symlink пакетов; lockKey всё равно задаёт место в поставке.
-      const metadata = json(join(installed, 'package.json'));
-      if (metadata.name !== (entry.name ?? request.name)) fail(`PACKAGE_NAME_MISMATCH: ${key}`);
-      if (metadata.version !== entry.version) fail(`PACKAGE_VERSION_MISMATCH: ${key}`);
-      packages.set(key, { key, entry, installed, version: entry.version });
-      pending.push(...dependencyRequests(key, entry));
+      const metadata=json(join(installed,'package.json'));
+      const name=key.slice(key.lastIndexOf('node_modules/')+'node_modules/'.length);
+      if(metadata.name!==(entry.name??name))fail(`PACKAGE_NAME_MISMATCH: ${key}`);
+      if(metadata.version!==entry.version)fail(`PACKAGE_VERSION_MISMATCH: ${key}`);
+      packages.set(key,{key,entry,installed,version:entry.version});
     }
   }
   return packages;
@@ -241,7 +166,9 @@ export async function packageComponent(root, component, outputRoot) {
       if (existsSync(join(stage, 'Dockerfile'))) fail('DOCKERFILE_ALREADY_SELECTED');
       const command = component.delivery.command ?? ['node', posix.relative(component.directory, repositoryPath(entrypoint))];
       if (!Array.isArray(command) || !command.length || command.some(value => typeof value !== 'string' || !value || value.includes('\0'))) fail('INVALID_DELIVERY_COMMAND');
-      writeFileSync(join(stage, 'Dockerfile'), `FROM node:24.21.0-bookworm-slim\nWORKDIR ${JSON.stringify(`/app/${component.directory}`)}\nCOPY . /app\nCMD ${JSON.stringify(command)}\n`);
+      const toolchainPath=join(root,'services/codeworks/ci/toolchain.json');
+      const base=existsSync(toolchainPath)?json(toolchainPath).nodeBase:'node:24.21.0-bookworm-slim';
+      writeFileSync(join(stage, 'Dockerfile'), `FROM ${base}\nWORKDIR ${JSON.stringify(`/app/${component.directory}`)}\nCOPY . /app\nCMD ${JSON.stringify(command)}\n`);
       chmodSync(join(stage, 'Dockerfile'), 0o644);
     }
     await validateRuntime(stage, component);

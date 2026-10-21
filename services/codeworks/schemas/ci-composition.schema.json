@@ -1,0 +1,222 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.app/codeworks/ci-composition-v1.schema.json",
+  "title": "Immutable Codeworks CI release composition v1",
+  "type": "object",
+  "required": [
+    "format",
+    "repository",
+    "source",
+    "runId",
+    "attempt",
+    "workflow",
+    "recipe",
+    "billing",
+    "components"
+  ],
+  "properties": {
+    "format": {
+      "const": "brai-release-composition-v1"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "source": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "attempt": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "workflow": {
+      "const": ".github/workflows/codeworks.yml"
+    },
+    "recipe": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "target": {
+      "enum": [
+        "dev",
+        "prod"
+      ]
+    },
+    "createdAt": {
+      "type": "string"
+    },
+    "billing": {
+      "type": "object",
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "const": "hard-stop-confirmed"
+        },
+        "basis": {
+          "type": "string"
+        },
+        "confirmedAt": {
+          "type": "string"
+        },
+        "quota": {
+          "type": "string"
+        }
+      }
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "keys",
+          "artifact",
+          "check"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          },
+          "type": {
+            "enum": [
+              "container",
+              "program",
+              "library"
+            ]
+          },
+          "keys": {
+            "type": "object",
+            "required": [
+              "artifact",
+              "checks"
+            ],
+            "properties": {
+              "artifact": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "checks": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "build": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "runtime": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "compatibility": {
+                "type": "object"
+              }
+            }
+          },
+          "artifact": {
+            "$ref": "#/definitions/reference"
+          },
+          "check": {
+            "$ref": "#/definitions/reference"
+          },
+          "build": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "reused": {
+            "type": "boolean"
+          },
+          "reusedBuild": {
+            "type": "boolean"
+          },
+          "checkedNow": {
+            "type": "boolean"
+          },
+          "buildMs": {
+            "type": "number",
+            "minimum": 0
+          },
+          "checkMs": {
+            "type": "number",
+            "minimum": 0
+          },
+          "packageMs": {
+            "type": "number",
+            "minimum": 0
+          },
+          "systemRequirements": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "deploy": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "retired": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "reason"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "renamedTo": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "measurements": {
+      "type": "object"
+    }
+  },
+  "definitions": {
+    "reference": {
+      "type": "object",
+      "required": [
+        "reference",
+        "digest",
+        "metadata"
+      ],
+      "properties": {
+        "reference": {
+          "type": "string",
+          "pattern": "^ghcr[.]io/[^\\s]+@sha256:[0-9a-f]{64}$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "metadata": {
+          "type": "object"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,75 @@
+# ABOUTME: Единственный стандартный Linux job для component checks и immutable GHCR поставки.
+# ABOUTME: Runner выделяется только после подтверждённого оператором account-wide нулевого hard stop.
+name: Codeworks
+on:
+  push:
+    branches: [dev, main, 'feature/**', 'hotfix/**', 'release/**']
+
+concurrency:
+  group: codeworks-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/feature/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  components:
+    name: Codeworks components
+    if: ${{ vars.CODEWORKS_ZERO_EXTRA_POLICY == 'account-wide-actions-usd0-stop-usage' && vars.CODEWORKS_BILLING_CONFIRMED_AT != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      CODEWORKS_ZERO_EXTRA_POLICY: ${{ vars.CODEWORKS_ZERO_EXTRA_POLICY }}
+      CODEWORKS_BILLING_CONFIRMED_AT: ${{ vars.CODEWORKS_BILLING_CONFIRMED_AT }}
+      CODEWORKS_TARGET: ${{ github.ref == 'refs/heads/main' && 'prod' || 'dev' }}
+      CODEWORKS_DISABLE_CACHE: ${{ vars.CODEWORKS_DISABLE_CACHE }}
+      CODEWORKS_REUSE_PUBLIC_KEY: ${{ vars.CODEWORKS_REUSE_PUBLIC_KEY }}
+      BRAI_WEB_STANDALONE_OUTPUT: '0'
+      CI: '1'
+      NEXT_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.21.0'
+      - name: Verify npm toolchain
+        run: test "$(npm --version)" = '11.19.0'
+      - name: Verify planner and evidence boundaries without npm installation
+        run: node --test --test-isolation=none services/codeworks/components/*.test.mjs services/codeworks/ci/*.test.mjs services/codeworks/tests/ci-verifier.test.mjs services/codeworks/tests/ci-evidence.test.mjs
+      - name: Plan from source and immutable registry objects
+        id: plan
+        run: node services/codeworks/ci/pipeline.mjs plan
+      - name: Optional dependency download cache
+        id: dependency-cache
+        if: ${{ steps.plan.outputs.needs_dependencies == 'true' && env.CODEWORKS_DISABLE_CACHE != '1' }}
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.npm
+          key: npm-linux-x64-11.19.0-${{ hashFiles('package-lock.json') }}
+          restore-keys: npm-linux-x64-11.19.0-
+      - name: Prepare dependencies once when work requires them
+        if: ${{ steps.plan.outputs.needs_dependencies == 'true' }}
+        run: |
+          ci_started=$(date +%s%3N)
+          npm ci --no-audit --no-fund
+          echo "$(( $(date +%s%3N) - ci_started ))" > tmp/ci-dependency-ms
+      - name: Build, check, package and publish composition
+        run: node services/codeworks/ci/pipeline.mjs run
+        env:
+          CODEWORKS_DEPENDENCY_CACHE_HIT: ${{ steps.dependency-cache.outputs.cache-hit }}
+      - name: Bind composition digest to this immutable workflow attempt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: codeworks-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tmp/ci-result.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9

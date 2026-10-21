@@ -10,6 +10,13 @@ Codeworks — один сервис Brai с собственной БД PostgreS
 
 `request-release → COMMIT intent → worker под flock → release → Git / GitHub → awaiting_ci → awaiting_deployment`. `release` принимает явные порты, не импортирует PostgreSQL или транспорт.
 
+Общий Actions/GHCR pipeline и доверие к exact run/attempt/digest принадлежат
+[CI](ci/README.md). Операторская `project.github.ci` закрепляет принятые
+workflow/recipe fingerprints и check App. При её наличии worker принимает только
+удостоверенный composition с immutable Actions proof. Exact head/merge evidence
+сохраняются в durable leg как `head_ci`/`merge_ci`. Недоступное evidence оставляет
+`awaiting_ci`, а installed требует отдельный deployment verifier.
+
 `prepare-write → COMMIT intent → worker под flock → Git branch → checkout → preparer → COMMIT ready`.
 
 MCP stdio и локальный CLI — клиенты единственного NATS API, не отдельные экземпляры сервиса. `main.mjs` собирает PostgreSQL, ядро, NATS и восстановление. Прямой SQL находится в storage, миграции и worker; ядро не импортирует pg/NATS/MCP. Очередь — строки собственной БД, без дополнительного брокера, движка или фреймворка. Node 24.21.0 запускает исходные `.mjs`, отдельная компиляция не требуется.
@@ -151,3 +158,11 @@ ID, вид компонента, проверяемые входы, build edges,
 относительно Git-базы сохраняет удалённый ID только через явный retirement.
 
 Изолированные Git flow проверки: `node --test --test-isolation=none services/codeworks/tests/git-flow.test.mjs`. Изменённые PostgreSQL/API пути: `CODEWORKS_TEST_CONFIG_FILE=<protected JSON> node --test --test-isolation=none --test-concurrency=1 services/codeworks/tests/integration/postgres.test.mjs services/codeworks/tests/integration/git-flow.test.mjs`. Реальные GitHub push/PR и exact checks проверяются отдельно: отсутствие CI сохраняет awaiting_ci, не считается успешной проверкой кода. В тестах GitHub и deployment verifier — явные doubles; они не подтверждают реальный rollout.
+
+Первично удостоверенные CI proofs сохраняются append-only в собственной таблице
+`verified_ci`, вне agent/NATS write API. Signed reuse catalog экспортирует только
+проверенные key/digest/source/run/attempt/recipe. CI public-key var — транспорт;
+final verifier независимо закрепляет Ed25519 public key owner policy и immutable
+catalog digest. Actions artifact retention не ограничивает ранее сохранённое
+owner evidence. Private identity — create-once Ansible input вне agent namespace;
+PG и прежний ключ возвращаются из защищённых backups, без генерации при restore.

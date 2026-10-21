@@ -7,9 +7,11 @@ import { createFlowGit } from './git-flow.mjs';
 import { createGitHub } from './github.mjs';
 import { advanceRelease } from './release.mjs';
 import { Fault,safeFault } from './errors.mjs';
+import {createCIEvidence} from './ci-evidence.mjs';
 /** Исполняет одну незавершённую подготовку; checkpoint нужен также для fault-injection теста. */
-export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[],flowGit=createFlowGit(),github=createGitHub()}={}) {
+export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[],flowGit=createFlowGit(),github}={}) {
   const db=await pool.connect();
+  github??=createGitHub({evidenceStore:createCIEvidence(db)});
   let locked=false;
   try {
     const operation=(await db.query('SELECT * FROM codeworks.operations WHERE id=$1',[operationId])).rows[0];

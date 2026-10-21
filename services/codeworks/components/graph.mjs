@@ -5,7 +5,8 @@ import { dirname, join, relative, resolve, posix } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import Ajv from 'ajv';
+import { descriptorValidator } from './descriptor-validation.mjs';
+import { lockInputs } from './lock-inputs.mjs';
 
 const ignored = new Set(['.git', 'node_modules', '.next', 'dist', 'tmp', '__pycache__', '.venv']);
 export const json = path => JSON.parse(readFileSync(path, 'utf8'));
@@ -38,7 +39,7 @@ export function digestFiles(root, paths, metadata = {}) {
 function git(root, args) { return execFileSync('git', ['-C',root,...args], {encoding:'utf8',maxBuffer:32*1024*1024}); }
 export function discover(root, {base, allowMissingBuildOutputs = false} = {}) {
   const files = sourceFiles(root);
-  const validator = new Ajv({allErrors:true,strict:true}).compile(json(join(root,'services/codeworks/schemas/component.schema.json')));
+  const validator = descriptorValidator(json(join(root,'services/codeworks/schemas/component.schema.json')));
   const components = new Map();
   for (const file of files.filter(path => path.endsWith('/component.json') || path === 'component.json')) {
     const value = json(join(root,file));
@@ -151,13 +152,20 @@ export function discover(root, {base, allowMissingBuildOutputs = false} = {}) {
   }
   return {components, order,files};
 }
-export function fingerprints(root, component) {
+export function fingerprints(root, component, {platform=`${process.platform}/${process.arch==='x64'?'amd64':process.arch}`,variant=process.env.BRAI_WEB_VARIANT??'production'}={}) {
   const c=component;
   const deps=c.dependencies.flatMap(d=>expand(root,d.inputs));
-  const buildFiles=expand(root,[...c.inputs.build,...c.inputs.runtime]);
-  const build=digestFiles(root,[...buildFiles,...deps],{formatVersion:c.formatVersion,build:c.commands.build});
-  const packagingEngine=createHash('sha256').update(readFileSync(fileURLToPath(new URL('./package-runtime.mjs',import.meta.url)))).digest('hex');
-  const lock=c.npm.workspaces.length && existsSync(join(root,'package-lock.json'))?['package-lock.json']:[];
+  const buildFiles=expand(root,[...c.inputs.build,...c.inputs.runtime].filter(path=>path!=='package-lock.json'));
+  const target={platform:platform.split('/')[0],arch:platform.split('/')[1]==='amd64'?'x64':platform.split('/')[1]};
+  const runtimeLock=lockInputs(root,c.npm.workspaces,target);
+  const buildLock=c.commands.build?lockInputs(root,c.npm.workspaces,{...target,development:true}):runtimeLock;
+  const checkLock=lockInputs(root,c.npm.workspaces,{...target,development:true});
+  const toolchainPath=join(root,'services/codeworks/ci/toolchain.json');
+  const toolchain=existsSync(toolchainPath)?json(toolchainPath):{node:process.versions.node,npm:'11.19.0',nodeBase:'node:24.21.0-bookworm-slim'};
+  const compatibility={platform,libc:target.platform==='linux'?(process.report.getReport().header.glibcVersionRuntime?'glibc':'musl'):null,node:toolchain.node,npm:toolchain.npm,...(c.id==='web'?{variant,standalone:false}:{})};
+  const buildEngine=digestFiles(dirname(fileURLToPath(import.meta.url)),['graph.mjs','cli.mjs','lock-inputs.mjs']);
+  const build=digestFiles(root,[...buildFiles,...deps],{formatVersion:c.formatVersion,build:c.commands.build,lock:buildLock,compatibility,buildEngine,outputs:c.delivery.files.filter(path=>/\/(?:dist|\.next)(?:\/|$)/.test(path))});
+  const packagingEngine=digestFiles(dirname(fileURLToPath(import.meta.url)),['package-runtime.mjs','lock-inputs.mjs']);
   const deliveryFiles=[...new Set([...c.delivery.files,...c.dependencies.flatMap(d=>d.delivery)])].sort();
   const payloadInputs=[];
   function collect(path) {
@@ -168,7 +176,10 @@ export function fingerprints(root, component) {
     else if(stat.isFile())payloadInputs.push(path);
   }
   deliveryFiles.forEach(collect);
-  const runtime=digestFiles(root,[...expand(root,c.inputs.runtime),...deps,...lock,...payloadInputs],{build,delivery:{...c.delivery,files:deliveryFiles},npm:c.npm,packagingEngine,modes:payloadInputs.map(path=>[path,lstatSync(join(root,path)).mode & 0o777])});
-  const checks=digestFiles(root,[...buildFiles,...deps,...expand(root,c.inputs.checks)],{build,check:c.commands.check});
-  return {build,runtime,checks};
+  const delivery={...c.delivery,files:deliveryFiles};
+  const sourcePayload=payloadInputs.filter(path=>!/\/(?:dist|\.next)(?:\/|$)/.test(path));
+  const artifact=digestFiles(root,[...expand(root,c.inputs.runtime),...deps,...sourcePayload],{build,delivery,npm:runtimeLock,packagingEngine,compatibility,sourceModes:sourcePayload.map(path=>[path,lstatSync(join(root,path)).mode & 0o777]),base:c.delivery.kind==='oci-context'?toolchain.nodeBase:null,recipe:c.id==='instaloader'?toolchain.pythonBase:null});
+  const runtime=digestFiles(root,payloadInputs,{artifact,modes:payloadInputs.map(path=>[path,lstatSync(join(root,path)).mode & 0o777])});
+  const checks=digestFiles(root,[...buildFiles,...deps,...expand(root,c.inputs.checks)],{build,check:c.commands.check,lock:checkLock,delivery});
+  return {build,runtime,checks,artifact,compatibility};
 }

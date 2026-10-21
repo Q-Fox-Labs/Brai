@@ -2,7 +2,8 @@
 
 `component.json` находится рядом с компонентом. Владелец формата — Codeworks,
 машинный источник — [`component.schema.json`](../schemas/component.schema.json),
-JSON Schema Draft-07. Node читает JSON; подготовленный Ajv проверяет схему.
+JSON Schema Draft-07. Node проверяет используемые keywords без npm preparation;
+новый keyword требует явной поддержки и не игнорируется молча.
 Новых библиотек, движка задач и фоновых процессов нет.
 
 Discovery работает в Git checkout: `git ls-files --cached --others --exclude-standard -z`
@@ -60,7 +61,8 @@ manifest с SHA-256/размерами каждого файла и точным
 относительные пути опубликованных owner contracts; полное дерево исходников не
 нужно. Smoke выполняется из отдельного временного каталога вне репозитория с
 пустыми NODE_PATH/NODE_OPTIONS. OCI Dockerfile только копирует готовые файлы,
-не устанавливает зависимости. Registry, Actions и реальный rollout сюда не входят.
+не устанавливает зависимости. Registry/Actions использует этот же упаковщик
+через [общий CI](../ci/README.md); rollout остаётся отдельным этапом.
 
 Скрипты History/Alerts `scripts/package-runtime.mjs` используют тот же упаковщик,
 принимают только prebuilt outputs с проверенным build receipt и печатают точный immutable каталог. Их `--output`
@@ -81,7 +83,8 @@ codeworks-agent. Transcription сохраняет coordinator/helper/local/exter
 задают pinned OCI runtime requirement. First-party executable здесь отсутствует;
 активные Brai службы его не импортируют. Runtime executable принадлежит внешнему
 образу `brai-instaloader:4.15.3` из его Dockerfile/requirements.txt; build/deploy
-этого образа остаются оператору и этапам CI/rollout. Установки здесь нет.
+этого образа выполняет общий CI по pinned/hash-locked recipe. Exact GHCR digest
+и offline CLI acceptance фиксирует composition; установка остаётся rollout.
 Проверяемый offline запуск: `docker run --rm --pull never --network none
 --read-only brai-instaloader:4.15.3 --help`. Отсутствующий образ — явная ошибка,
 не повод скачивать или считать CLI проверенным.

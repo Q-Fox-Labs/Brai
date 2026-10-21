@@ -12,7 +12,6 @@
   ],
   "inputs": {
     "build": [
-      "package-lock.json",
       "services/supabase-mcp/tsconfig.json"
     ],
     "runtime": [

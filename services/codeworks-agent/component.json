@@ -11,9 +11,7 @@
     "services/codeworks-agent/hermes.mjs"
   ],
   "inputs": {
-    "build": [
-      "package-lock.json"
-    ],
+    "build": [],
     "runtime": [
       "services/codeworks-agent/codex.mjs",
       "services/codeworks-agent/hermes.mjs",
@@ -32,13 +30,19 @@
         "services/codeworks/src/**",
         "services/codeworks/package.json",
         "services/codeworks/schemas/**",
-        "services/codeworks/migrations/**"
+        "services/codeworks/migrations/**",
+        "services/codeworks/ci/registry.mjs",
+        "services/codeworks/ci/catalog.mjs",
+        "services/codeworks/components/descriptor-validation.mjs"
       ],
       "delivery": [
         "services/codeworks/src",
         "services/codeworks/package.json",
         "services/codeworks/schemas",
-        "services/codeworks/migrations"
+        "services/codeworks/migrations",
+        "services/codeworks/ci/registry.mjs",
+        "services/codeworks/ci/catalog.mjs",
+        "services/codeworks/components/descriptor-validation.mjs"
       ]
     }
   ],

@@ -9,6 +9,16 @@ function validatePR(p,w,leg,pr) {
 export async function advanceRelease({project:p,workspace:w,operation:op,release}, {git,github,inspect,save,evidence,checkpoint=async()=>{}}) {
   const flow=release.details;
   const persist=async()=>save(flow);
+  const checkGate=async(leg,sha,stage,fallback)=>{
+    const checks=await github.checks(p,sha);
+    if(!checksPassed(p.github.required_checks,checks,sha))return waiting('awaiting_ci',checks.find(c=>c.ci_state&&c.ci_state!=='CI_VERIFIED')?.ci_state??fallback);
+    if(p.github.ci){
+      const proof=checks.find(c=>c.name===p.github.ci.check_name&&c.app_id===p.github.ci.app_id&&c.ci_verified)?.ci_evidence;
+      if(!proof)return waiting('awaiting_ci','CI_COMPOSITION_REQUIRED');
+      leg[stage+'_ci']=proof;await persist();
+    }
+    return null;
+  };
   const mutation=async(leg,key,work)=>{
     leg[key]=true;await persist();await checkpoint('before-'+key);
     await work();await checkpoint('after-'+key);
@@ -57,7 +67,7 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
         if(pr.merged||pr.state!=='open')throw new Fault('CONFLICT','PR was closed or merged outside this durable candidate.');
         if(await git.remote(p,leg.target)!==leg.target_sha)throw new Fault('TARGET_CHANGED','Target changed; a new release intent and checks are required.');
         if(leg.merge_push_attempted)return waiting('awaiting_reconciliation','MERGE_PUSH_UNCERTAIN');
-        if(!checksPassed(p.github.required_checks,await github.checks(p,leg.head),leg.head))return waiting('awaiting_ci','HEAD_CHECKS_REQUIRED');
+        const headGate=await checkGate(leg,leg.head,'head','HEAD_CHECKS_REQUIRED');if(headGate)return headGate;
         await git.fetch(p,leg.target,leg.target_sha);
         if(!leg.merge_sha){leg.merge_sha=await git.candidate(p,leg,op.created_at,op.id);await persist();}
         if(w.kind==='hotfix'&&name==='primary')await git.validateHotfixSource(p,w,leg.head);
@@ -65,7 +75,7 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
         const fresh=await github.get(p,leg.pr_number);
         validatePR(p,w,leg,fresh);
         if(fresh.merged||fresh.state!=='open')throw new Fault('CONFLICT');
-        if(!checksPassed(p.github.required_checks,await github.checks(p,leg.head),leg.head))return waiting('awaiting_ci','HEAD_CHECKS_REQUIRED');
+        const freshGate=await checkGate(leg,leg.head,'head','HEAD_CHECKS_REQUIRED');if(freshGate)return freshGate;
         if(await git.remote(p,leg.target)!==leg.target_sha)throw new Fault('TARGET_CHANGED');
         await mutation(leg,'merge_push_attempted',()=>git.push(p,leg.target,leg.merge_sha));
         if(!await git.verifyMerge(p,leg))return waiting('awaiting_reconciliation','MERGE_PUSH_UNCERTAIN');
@@ -75,7 +85,7 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
         leg.merged=true;await persist();
       }
     }
-    if(!checksPassed(p.github.required_checks,await github.checks(p,leg.merge_sha),leg.merge_sha))return waiting('awaiting_ci','MERGE_CHECKS_REQUIRED');
+    const mergeGate=await checkGate(leg,leg.merge_sha,'merge','MERGE_CHECKS_REQUIRED');if(mergeGate)return mergeGate;
     const target=leg.target==='main'?'prod':'dev';
     const installed=await evidence(target,leg.merge_sha);
     if(!installed)return waiting('awaiting_deployment','EXACT_MERGE_DEPLOYMENT_REQUIRED');
