@@ -97,12 +97,12 @@ async function restoreOutputs(item,c,root,commands) {
   const artifact=verifyPackage(artifactPath,item.id);
   if(artifact.payloadHash!==selected.metadata.payloadHash)throw Error('RESTORED_PAYLOAD_IDENTITY_MISMATCH');
   for(const path of c.delivery.files.filter(path=>/\/(?:dist|\.next)(?:\/|$)/.test(path))) {
-    rmSync(join(root,path),{recursive:true,force:true});mkdirSync(dirname(join(root,path)),{recursive:true});cpSync(join(artifactPath,path),join(root,path),{recursive:true});
+    rmSync(join(root,path),{recursive:true,force:true});mkdirSync(dirname(join(root,path)),{recursive:true});cpSync(join(artifactPath,path),join(root,path),{recursive:true,verbatimSymlinks:true});
   }
   save(join(root,'tmp/component-state',item.id+'.json'),{build:item.keys.build,outputDigest:c.commands.build?buildOutputDigest(root,c):undefined});
 }
 function runtimeContext(root,c,payload) {
-  const context=mkdtempSync(join(root,'tmp/ci-context-'));mkdirSync(join(context,'payload'));cpSync(payload.path,join(context,'payload'),{recursive:true});
+  const context=mkdtempSync(join(root,'tmp/ci-context-'));mkdirSync(join(context,'payload'));cpSync(payload.path,join(context,'payload'),{recursive:true,verbatimSymlinks:true});
   const base=c.delivery.kind==='oci-context'?json(join(root,'services/codeworks/ci/toolchain.json')).nodeBase:'scratch';
   const command=c.delivery.command??(c.delivery.entrypoints.length?['node',posix.relative(c.directory,c.delivery.entrypoints[0])]:[]);
   const workdir=c.delivery.kind==='oci-context'?`/payload/${c.directory}`:'/payload';
@@ -178,7 +178,7 @@ export async function executePlan(cfg,registry,plan,{repositoryRoot=root,command
     let artifact=item.artifact,check=item.check,build=item.build;
     if(item.hasBuild&&!item.buildHit&&!item.artifactHit) {
       const snapshot=await packageComponent(root,{...c,npm:{workspaces:[]},delivery:{kind:'ready-files',files:c.delivery.files,entrypoints:[],smokeImports:[],systemRequirements:[]}},join(root,'tmp/ci-build-snapshots'));
-      const context=mkdtempSync(join(root,'tmp/ci-build-'));mkdirSync(join(context,'payload'));cpSync(snapshot.path,join(context,'payload'),{recursive:true});
+      const context=mkdtempSync(join(root,'tmp/ci-build-'));mkdirSync(join(context,'payload'));cpSync(snapshot.path,join(context,'payload'),{recursive:true,verbatimSymlinks:true});
       writeFileSync(join(context,'Dockerfile'),'FROM scratch\nCOPY payload/ /payload/\n');
       build=await registry.publish(item.id,buildSnapshotTag(item.keys.build,plan.recipe),context,{...provenance('build',item.keys.build),payloadHash:snapshot.payloadHash});
     }

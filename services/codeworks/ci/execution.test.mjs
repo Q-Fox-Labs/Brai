@@ -2,9 +2,10 @@
 // ABOUTME: Каждый запуск работает в собственном Git fixture под tmp этого worktree.
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
-import {dirname, join, resolve} from 'node:path';
+import {cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync} from 'node:fs';
+import {dirname, isAbsolute, join, relative, resolve, sep} from 'node:path';
 import {execFileSync} from 'node:child_process';
+import {tmpdir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {executePlan, recipeFiles, selectWork} from './pipeline.mjs';
@@ -198,4 +199,72 @@ test('standalone image smoke failure occurs before any registry publication',asy
   };
   await assert.rejects(executePlan(config(f.source),io.registry,plan,{repositoryRoot:f.root,commands}),/STANDALONE_SMOKE_FAILED/);
   assert.deepEqual(docker,['buildx','run']);assert.deepEqual(io.publications,[]);
+});
+
+
+test('ready-files and OCI contexts retain portable workspace links without the source stage', async t => {
+  for (const kind of ['ready-files', 'oci-context']) await t.test(kind, async t => {
+    const f = fixture(t), descriptor = JSON.parse(readFileSync(join(f.root, 'services/probe/component.json'), 'utf8'));
+    const app = { name: '@brai/probe', version: '1.0.0', type: 'module', dependencies: { '@brai/contracts': '1.0.0' } };
+    const contracts = { name: '@brai/contracts', version: '1.0.0', type: 'module', exports: './index.mjs' };
+    f.put('services/probe/package.json', JSON.stringify(app));
+    f.put('services/probe/contracts/package.json', JSON.stringify(contracts));
+    f.put('services/probe/contracts/index.mjs', 'export const value=42;');
+    f.put('services/probe/main.mjs', "import {value} from '@brai/contracts';if(value!==42)throw Error('BAD_RUNTIME');console.log(value);");
+    f.put('package-lock.json', JSON.stringify({lockfileVersion: 3, packages: {
+      'services/probe': app, 'services/probe/contracts': contracts,
+      'node_modules/@brai/contracts': {link: true, resolved: 'services/probe/contracts'},
+    }}));
+    mkdirSync(join(f.root, 'node_modules/@brai'), {recursive: true});
+    symlinkSync('../../services/probe/contracts', join(f.root, 'node_modules/@brai/contracts'));
+    descriptor.type = kind === 'oci-context' ? 'container' : 'program';
+    descriptor.delivery.kind = kind;
+    descriptor.delivery.files.push('services/probe/package.json', 'services/probe/contracts/package.json', 'services/probe/contracts/index.mjs');
+    descriptor.inputs.runtime = [...descriptor.delivery.files];
+    descriptor.delivery.entrypoints = descriptor.delivery.smokeImports = ['services/probe/main.mjs'];
+    descriptor.npm.workspaces = ['services/probe'];
+    f.put('services/probe/component.json', JSON.stringify(descriptor));
+    const relocated = mkdtempSync(join(tmpdir(), 'brai-relocated-context-'));
+    t.after(() => rmSync(relocated, {recursive: true, force: true}));
+    const payload = join(relocated, 'payload');
+    const runRelocated = () => assert.equal(execFileSync(process.execPath, [join(payload, 'services/probe/main.mjs')], {
+      cwd: payload, env: {PATH: process.env.PATH ?? '', NODE_PATH: '', NODE_OPTIONS: ''}, encoding: 'utf8', timeout: 30000,
+    }).trim(), '42');
+    let inspected = false;
+    const inspectContext = context => {
+      cpSync(context, relocated, {recursive: true, verbatimSymlinks: true});
+      const state = JSON.parse(readFileSync(join(f.root, 'tmp/component-state/probe.json'), 'utf8'));
+      const manifest = JSON.parse(readFileSync(join(state.packagePath, 'artifact-manifest.json'), 'utf8'));
+      renameSync(state.packagePath, state.packagePath + '.hidden');
+      try {
+        for (const workspace of manifest.runtimePackages.filter(entry => entry.link)) {
+          const link = join(payload, workspace.lockKey), literal = readlinkSync(link);
+          assert.equal(isAbsolute(literal), false);
+          assert.equal(literal, relative(dirname(link), join(payload, workspace.target)));
+          assert.ok(realpathSync(link).startsWith(payload + sep));
+        }
+        runRelocated();
+      } finally { renameSync(state.packagePath + '.hidden', state.packagePath); }
+      inspected = true;
+    };
+    const io = ports(f.root), registry = {...io.registry, async publish(id, tag, context, metadata) {
+      if (tag.startsWith('input-') && kind === 'ready-files') inspectContext(context);
+      return io.registry.publish(id, tag, context, metadata);
+    }};
+    const commands = async (executable, args, options) => {
+      if (executable !== 'docker') return io.commands(executable, args, options);
+      if (args[0] === 'buildx') inspectContext(args.at(-1));
+      else if (args[0] === 'run') {
+        assert.ok(!args.some(arg => ['-v', '--volume', '--mount'].includes(arg)));
+        assert.equal(args[args.indexOf('--network') + 1], 'none');
+        assert.ok(args.includes('--read-only'));
+        runRelocated();
+      } else assert.fail('unexpected Docker operation');
+      return {stdout: '', stderr: ''};
+    };
+    await executePlan(config(f.source), registry, makePlan(f.root, f.source), {repositoryRoot: f.root, commands});
+    assert.ok(inspected);
+    rmSync(f.root, {recursive: true, force: true});
+    runRelocated();
+  });
 });
