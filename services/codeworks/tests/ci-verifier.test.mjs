@@ -67,6 +67,35 @@ test('GitHub adapter exposes unavailable verifier as awaiting CI, never a succes
   }});
   const rows=await adapter.checks(f.project,f.sha);assert.equal(rows[0].conclusion,null);assert.equal(rows[0].ci_state,'CI_VERIFICATION_UNAVAILABLE');assert.equal(rows[0].ci_verified,false);
 });
+test('separate canonical push suites select the latest exact run and immutable proof, never an older success',async t=>{
+  for(const state of ['success','queued','failure','wrong-workflow','same-run','duplicate-id','wrong-url','wrong-job','wrong-digest'])await t.test(state,async()=>{
+    const f=fixture(),older={...f.check,id:16,details_url:f.check.details_url.replace('/123/','/122/'),conclusion:'failure'};
+    let checks=[older,f.check];
+    if(['queued','failure','wrong-workflow'].includes(state))checks.push({...f.check,id:18,details_url:f.check.details_url.replace('/123/','/124/'),status:state==='queued'?'queued':'completed',conclusion:state==='queued'?null:state==='failure'?'failure':'success'});
+    if(state==='same-run')older.details_url=f.check.details_url;
+    if(state==='duplicate-id')older.id=f.check.id;
+    if(state==='wrong-url')older.details_url='https://foreign.invalid/run/122';
+    if(state==='wrong-job')f.job.check_run_url+='0';
+    if(state==='wrong-digest')f.proof.published.digest='sha256:'+'9'.repeat(64);
+    const reads=[],adapter=createGitHub({registryFactory:()=>f.ports.registry,evidenceStore:{read:async(_project,id,attempt)=>{reads.push([id,attempt]);return f.proof;},save:async()=>{}},run:async(_exe,args)=>{
+      if(args[0]==='auth')return {stdout:'fixture'};
+      const endpoint=args.at(-1).slice(('repos/'+f.project.github.repository+'/').length);
+      let value;
+      if(endpoint.startsWith('commits/'))value={total_count:checks.length,check_runs:checks};
+      else if(/^actions\/runs\/\d+$/.test(endpoint)){const id=Number(endpoint.split('/').at(-1));value={...f.run,id,...(id===124&&state==='wrong-workflow'?{path:'foreign.yml'}:{})};}
+      else value=await f.ports.api(endpoint);
+      return {stdout:JSON.stringify(value)};
+    }});
+    const rows=await adapter.checks(f.project,f.sha);
+    if(state==='success'){
+      assert.equal(rows.length,1);assert.equal(rows[0].ci_verified,true);assert.equal(rows[0].ci_evidence.run_id,'123');assert.equal(rows[0].ci_evidence.composition_digest,f.objects.release.digest);assert.deepEqual(reads,[['123',1]]);
+    }else{
+      assert(rows.every(row=>!row.ci_verified));
+      if(['queued','failure'].includes(state)){assert.equal(rows.length,1);assert.equal(rows[0].ci_state,'EXACT_CI_SUCCESS_REQUIRED');assert.deepEqual(reads,[]);}
+      if(['wrong-workflow','same-run','duplicate-id','wrong-url'].includes(state))assert(rows.every(row=>row.ci_state==='EXACT_CI_CHECK_REQUIRED'));
+    }
+  });
+});
 function zip(content) {
   const name=Buffer.from('ci-result.json'),data=Buffer.from(JSON.stringify(content));
   const local=Buffer.alloc(30);local.writeUInt32LE(0x04034b50);local.writeUInt32LE(data.length,18);local.writeUInt32LE(data.length,22);local.writeUInt16LE(name.length,26);
