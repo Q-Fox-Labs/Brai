@@ -110,6 +110,7 @@ test('build snapshot reuse restores its seal and packages without rebuilding',as
   assert.equal(cold.results.flatMap(x=>x.result).filter(x=>x.packaged).length,1);
   const snapshot=cold.publications.find(x=>x.tag.startsWith('build-'));
   assert.ok(snapshot,'cold build publishes its generated output snapshot');
+  assert.equal(snapshot.tag,'build-'+sha256(coldPlan.items[0].keys.build+coldPlan.recipe),'published build discovery identity includes the accepted CI recipe');
   const snapshotPayload=join(snapshot.context,'payload');
   assert.equal(readFileSync(join(snapshotPayload,'services/probe/dist/main.mjs'),'utf8'),'export const value=1;\n');
   const check=cold.publications.find(x=>x.tag.startsWith('check-')).result;

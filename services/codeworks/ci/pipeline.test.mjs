@@ -5,11 +5,17 @@ import {test} from 'node:test';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {bounded, reusable, selectWork} from './pipeline.mjs';
+import {bounded, reusable, selectWork, buildSnapshotTag} from './pipeline.mjs';
 import {fingerprints} from '../components/graph.mjs';
 import {lockInputs} from '../components/lock-inputs.mjs';
 
 const repoRoot=resolve(dirname(fileURLToPath(import.meta.url)),'../../..');
+test('build discovery separates accepted CI recipes without changing the sealed receipt key',()=>{
+  const key='a'.repeat(64),first=buildSnapshotTag(key,'b'.repeat(64));
+  assert.match(first,/^build-[0-9a-f]{64}$/);
+  assert.equal(first,buildSnapshotTag(key,'b'.repeat(64)));
+  assert.notEqual(first,buildSnapshotTag(key,'c'.repeat(64)));
+});
 function fixture(t) {
   const parent=join(repoRoot,'tmp/pipeline-test');mkdirSync(parent,{recursive:true});
   const root=mkdtempSync(join(parent,'fixture-'));

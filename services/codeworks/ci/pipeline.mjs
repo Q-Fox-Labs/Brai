@@ -11,6 +11,8 @@ import {recipeFiles,verifyRecipeAt,loadRunProof,downloadProof} from '../src/ci-v
 import {verifyCatalog,catalogContains} from './catalog.mjs';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'../../..');
 export {recipeFiles};
+/** Build receipt key stays local; registry identity also pins the accepted CI recipe. */
+export const buildSnapshotTag=(key,recipe)=>'build-'+sha256(key+recipe);
 const save=(path,value)=>{mkdirSync(dirname(path),{recursive:true});writeFileSync(path,JSON.stringify(value,null,2)+'\n');};
 const stamp=()=>new Date().toISOString();
 /** Обрабатывает независимые части максимум двумя workers, останавливая новые работы после ошибки. */
@@ -77,7 +79,7 @@ async function plan(cfg,registry) {
   const items=await bounded(graph.order.filter(id=>graph.components.get(id).environments.includes(target)),async id=>{
     const c=graph.components.get(id),keys=fingerprints(root,c,{variant});
     keys.artifact=sha256(keys.artifact+recipe+dockerToolchain);keys.checks=sha256(keys.checks+recipe+dockerToolchain);
-    const [artifact,check,build]=await Promise.all([registry.lookup(id,'input-'+keys.artifact),registry.lookup(id,'check-'+keys.checks),c.commands.build?registry.lookup(id,'build-'+keys.build):null]);
+    const [artifact,check,build]=await Promise.all([registry.lookup(id,'input-'+keys.artifact),registry.lookup(id,'check-'+keys.checks),c.commands.build?registry.lookup(id,buildSnapshotTag(keys.build,recipe)):null]);
     const [artifactHit,checkHit,buildHit]=await Promise.all([reusable(artifact,{id,key:keys.artifact,kind:'runtime',recipe},reusePorts),reusable(check,{id,key:keys.checks,kind:'check',recipe},reusePorts),c.commands.build?reusable(build,{id,key:keys.build,kind:'build',recipe},reusePorts):false]);
     return {id,keys,hasBuild:!!c.commands.build,hasCheck:!!c.commands.check,hasNpm:!!c.npm.workspaces.length,artifact:artifactHit?artifact:null,check:checkHit?check:null,build:buildHit?build:null,artifactHit,checkHit,buildHit};
   });
@@ -178,7 +180,7 @@ export async function executePlan(cfg,registry,plan,{repositoryRoot=root,command
       const snapshot=await packageComponent(root,{...c,npm:{workspaces:[]},delivery:{kind:'ready-files',files:c.delivery.files,entrypoints:[],smokeImports:[],systemRequirements:[]}},join(root,'tmp/ci-build-snapshots'));
       const context=mkdtempSync(join(root,'tmp/ci-build-'));mkdirSync(join(context,'payload'));cpSync(snapshot.path,join(context,'payload'),{recursive:true});
       writeFileSync(join(context,'Dockerfile'),'FROM scratch\nCOPY payload/ /payload/\n');
-      build=await registry.publish(item.id,'build-'+item.keys.build,context,{...provenance('build',item.keys.build),payloadHash:snapshot.payloadHash});
+      build=await registry.publish(item.id,buildSnapshotTag(item.keys.build,plan.recipe),context,{...provenance('build',item.keys.build),payloadHash:snapshot.payloadHash});
     }
     if(!item.artifactHit) {
       const context=entry.context??runtimeContext(root,c,entry.payload);

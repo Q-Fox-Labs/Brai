@@ -49,7 +49,7 @@ digest, paths/modes и delivery contract. Полный CI recipe fingerprint о�
 DEV/PROD сам по себе не входит в generic key. Next standalone отключён;
 production closure готовит общий упаковщик.
 
-`ghcr.io/<owner>/<repo>-components/<id>` содержит `build-<build key>` с prebuilt
+`ghcr.io/<owner>/<repo>-components/<id>` содержит `build-<sha256(build key + CI recipe)>` с prebuilt
 first-party outputs и seal, `input-<artifact input key>` с полным runtime и
 `check-<check key>`. Состав находится в `.../release:run-<run id>-<attempt>`.
 Tags — только поиск; состав использует digests. Payload проверяется по каждому
