@@ -98,11 +98,11 @@ test('owner-pinned signed catalog verifies reused digests and rejects a substitu
   const entries=['artifact','check'].map(kind=>({id:'probe',digest:f.objects[kind].digest,...Object.fromEntries(['repository','recipe','kind','key','source','runId','attempt'].map(k=>[k,f.objects[kind].metadata[k]]))}));
   const doc=signCatalog({format:'brai-verified-ci-catalog-v1',repository:f.project.github.repository,recipe:f.project.github.ci.recipe_sha256,entries},privateKey);
   const digest='sha256:'+'f'.repeat(64);
-  f.composition.reuseCatalog={digest,reference:`ghcr.io/${f.project.github.repository}-components/catalog@${digest}`};
+  f.composition.reuseCatalog={digest,reference:`ghcr.io/${f.project.github.repository}-components/catalog-v1@${digest}`};
   f.proof.composition=structuredClone(f.composition);
-  f.ports.registry.readJSON=async id=>structuredClone(id==='catalog'?doc:f.composition);
+  f.ports.registry.readJSON=async id=>structuredClone(id==='catalog-v1'?doc:f.composition);
   assert.equal((await f.verify()).verified,true);
   const foreign=generateKeyPairSync('ed25519');
-  f.ports.registry.readJSON=async id=>id==='catalog'?signCatalog(doc.catalog,foreign.privateKey):structuredClone(f.composition);
+  f.ports.registry.readJSON=async id=>id==='catalog-v1'?signCatalog(doc.catalog,foreign.privateKey):structuredClone(f.composition);
   assert.equal((await f.verify()).state,'CI_CATALOG_UNTRUSTED');
 });

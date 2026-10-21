@@ -1,6 +1,8 @@
 // ABOUTME: Проверяет долговечный owner-signed reuse catalog без npm и серверного private key.
 // ABOUTME: Подпись закрепляет только ранее проверенные exact CI digest; labels не создают доверия.
 import {createPublicKey,sign,verify} from 'node:crypto';
+// Stable v1 namespace: first owner publication links the repository before access inheritance.
+export const catalogPackage='catalog-v1';
 export const catalogBytes=catalog=>Buffer.from(JSON.stringify(catalog));
 export function signCatalog(catalog,privateKey) {
   return {catalog,signature:sign(null,catalogBytes(catalog),privateKey).toString('base64')};

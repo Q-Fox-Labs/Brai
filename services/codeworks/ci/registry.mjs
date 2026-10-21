@@ -90,7 +90,7 @@ export function createRegistry({repository,username,token,fetcher=fetch}) {
       let manifest;
       if(existing)manifest=(await get(path,existing.digest)).document;
       else {
-        const layer=jsonLayer(name,value),config=Buffer.from(JSON.stringify({architecture:'amd64',os:'linux',config:{Labels:{'app.brai.codeworks':JSON.stringify(metadata)}},rootfs:{type:'layers',diff_ids:['sha256:'+sha256(layer.raw)]}}));
+        const layer=jsonLayer(name,value),config=Buffer.from(JSON.stringify({architecture:'amd64',os:'linux',config:{Labels:{'org.opencontainers.image.source':'https://github.com/'+repository,'app.brai.codeworks':JSON.stringify(metadata)}},rootfs:{type:'layers',diff_ids:['sha256:'+sha256(layer.raw)]}}));
         for(const blob of [config,layer.compressed]) {
           const started=await write(path,`/v2/${path}/blobs/uploads/`,{method:'POST',expected:202});
           const location=new URL(started.headers.get('location'),'https://ghcr.io');location.searchParams.set('digest','sha256:'+sha256(blob));

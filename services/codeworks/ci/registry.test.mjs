@@ -35,6 +35,8 @@ test('small owner catalog roundtrips immutable OCI; lost response reuses the pub
   assert.equal(repeat.digest,first.digest);assert.equal(blobs,2);assert.equal(writes,5);
   assert.equal((await registry.lookup('catalog','verified')).digest,first.digest);
   const manifest=JSON.parse(objects.get('/v2/owner/repo-components/catalog/manifests/'+first.digest));
+  const config=JSON.parse(objects.get('/v2/owner/repo-components/catalog/blobs/'+manifest.config.digest));
+  assert.equal(config.config.Labels['org.opencontainers.image.source'],'https://github.com/owner/repo','first owner publish links the exact repository for Actions permission inheritance');
   objects.set('/v2/owner/repo-components/catalog/blobs/'+manifest.layers[0].digest,Buffer.from('corrupted'));
   await assert.rejects(registry.readJSON('catalog',first.digest,'catalog.json'),/REGISTRY_DIGEST_MISMATCH/);
 });

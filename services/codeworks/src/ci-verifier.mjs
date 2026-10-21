@@ -4,7 +4,7 @@ import {createHash} from 'node:crypto';
 import {inflateRawSync} from 'node:zlib';
 import {readFileSync} from 'node:fs';
 import {descriptorValidator} from '../components/descriptor-validation.mjs';
-import {verifyCatalog,catalogContains} from '../ci/catalog.mjs';
+import {verifyCatalog,catalogContains,catalogPackage} from '../ci/catalog.mjs';
 const validateComposition=descriptorValidator(JSON.parse(readFileSync(new URL('../schemas/ci-composition.schema.json',import.meta.url),'utf8')));
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const workflow='.github/workflows/codeworks.yml';
@@ -92,8 +92,8 @@ export async function verifyCI(project,sha,checks,{api,registry,readProof,readVe
   let catalog;
   if(manifest.reuseCatalog) {
     const ref=manifest.reuseCatalog;
-    if(ref.reference!==`ghcr.io/${repository.toLowerCase()}-components/catalog@${ref.digest}`)return no('CI_CATALOG_IDENTITY_MISMATCH');
-    catalog=await registry.readJSON('catalog',ref.digest,'catalog.json');
+    if(ref.reference!==`ghcr.io/${repository.toLowerCase()}-components/${catalogPackage}@${ref.digest}`)return no('CI_CATALOG_IDENTITY_MISMATCH');
+    catalog=await registry.readJSON(catalogPackage,ref.digest,'catalog.json');
     if(!verifyCatalog(catalog,policy.reuse_public_key,{repository,recipe:policy.recipe_sha256}))return no('CI_CATALOG_UNTRUSTED');
   }
   const sources=new Map([[sha,Promise.resolve(true)]]),runs=new Map(),proofs=new Map([[runId+'/'+run.run_attempt,Promise.resolve(proof)]]);

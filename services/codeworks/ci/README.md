@@ -134,3 +134,5 @@ cold/repeat/lost-cache runs, isolated component/unrelated lock/test-only changes
 digest/CLI проверки и measurements настоящих compositions. До подтверждения
 нулевого hard stop и нужного API доступа запуск запрещён; отсутствие evidence
 не считается PASS.
+
+Owner reuse catalog использует стабильный OCI package `catalog-v1`. Первая owner-публикация содержит `org.opencontainers.image.source` зарегистрированного репозитория, чтобы GHCR связал package и предоставил Actions унаследованный доступ. Если account отключает наследование, оператор должен явно предоставить workflow read access; `403` останавливает планирование. Старый экспериментальный package `catalog` не используется.

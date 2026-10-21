@@ -2,7 +2,7 @@
 // ABOUTME: Owner private key читается из закрытого файла; agent API и входные отчёты не имеют write-port.
 import {readFileSync,lstatSync} from 'node:fs';
 import {createPrivateKey,createPublicKey,createHash} from 'node:crypto';
-import {signCatalog} from '../ci/catalog.mjs';
+import {signCatalog,catalogPackage} from '../ci/catalog.mjs';
 import {canonical} from './ci-verifier.mjs';
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const policyHash=p=>hash(JSON.stringify(canonical(p.github.ci)));
@@ -42,9 +42,9 @@ export function readCatalogKey(path,expectedPublicKey) {
 /** Deterministic content tag позволяет reconcile потерянный ответ без повторного build/runtime publish. */
 export async function publishCatalog(project,store,registry,privateKey) {
   const document=signCatalog(await store.catalog(project),privateKey),key=hash(JSON.stringify(document)),tag='catalog-'+key;
-  let hit=await registry.lookup('catalog',tag);
-  if(hit&&JSON.stringify(await registry.readJSON('catalog',hit.digest,'catalog.json'))!==JSON.stringify(document))throw Error('CI_CATALOG_PUBLICATION_CONFLICT');
+  let hit=await registry.lookup(catalogPackage,tag);
+  if(hit&&JSON.stringify(await registry.readJSON(catalogPackage,hit.digest,'catalog.json'))!==JSON.stringify(document))throw Error('CI_CATALOG_PUBLICATION_CONFLICT');
   // publishJSON пишет immutable content tag и только затем pointer; оба читаются по digest.
-  hit=await registry.publishJSON('catalog',tag,'catalog.json',document,{format:'brai-ci-catalog-v1',key},{alias:'verified-'+project.github.ci.recipe_sha256,existing:hit});
+  hit=await registry.publishJSON(catalogPackage,tag,'catalog.json',document,{format:'brai-ci-catalog-v1',key},{alias:'verified-'+project.github.ci.recipe_sha256,existing:hit});
   return {reference:hit.reference,digest:hit.digest};
 }

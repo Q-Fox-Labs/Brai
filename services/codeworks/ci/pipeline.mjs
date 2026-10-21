@@ -8,7 +8,7 @@ import {buildOutputDigest,verifyBuildReceipt} from '../components/cli.mjs';
 import {verifyPackage,packageComponent} from '../components/package-runtime.mjs';
 import {createRegistry,run,sha256} from './registry.mjs';
 import {recipeFiles,verifyRecipeAt,loadRunProof,downloadProof} from '../src/ci-verifier.mjs';
-import {verifyCatalog,catalogContains} from './catalog.mjs';
+import {verifyCatalog,catalogContains,catalogPackage} from './catalog.mjs';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'../../..');
 export {recipeFiles};
 /** Build receipt key stays local; registry identity also pins the accepted CI recipe. */
@@ -67,9 +67,9 @@ async function plan(cfg,registry) {
   const variant=target==='dev'?'development':'production';
   let reuseCatalog=null;
   if(process.env.CODEWORKS_REUSE_PUBLIC_KEY) {
-    const hit=await registry.lookup('catalog','verified-'+recipe);
+    const hit=await registry.lookup(catalogPackage,'verified-'+recipe);
     if(hit) {
-      const document=await registry.readJSON('catalog',hit.digest,'catalog.json');
+      const document=await registry.readJSON(catalogPackage,hit.digest,'catalog.json');
       if(!verifyCatalog(document,process.env.CODEWORKS_REUSE_PUBLIC_KEY,{repository:cfg.repository,recipe}))throw Error('CI_CATALOG_UNTRUSTED');
       reuseCatalog={reference:hit.reference,digest:hit.digest,document};
     }

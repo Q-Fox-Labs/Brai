@@ -122,7 +122,7 @@
       "Node.js 24.21.0",
       "Git with merge-tree --write-tree; flock (util-linux)",
       "GitHub CLI (gh), operator authentication; origin HTTPS matches registered repository",
-      "Existing GitHub OAuth operator identity with repo, workflow, read:packages/write:packages; owner-only Ed25519 identity outside agent namespaces; durable Codeworks PG evidence backup",
+      "Existing GitHub OAuth operator identity with repo, workflow, read:packages/write:packages; owner-only Ed25519 identity outside agent namespaces; durable Codeworks PG evidence backup; first owner catalog-v1 publication links the repository and inherits its Actions read access",
       "Python 3 with prepared bridge dependencies; bubblewrap and util-linux; trusted immutable adapter launcher (not bundled external engines)"
     ]
   },
