@@ -88,7 +88,8 @@
       "services/codeworks/tests/ci-key-boundary.test.mjs",
       "services/codeworks/tests/integration/fixture-lifecycle.mjs",
       "services/codeworks/tests/fixture-lifecycle.test.mjs",
-      "services/codeworks/tests/deployment.test.mjs"
+      "services/codeworks/tests/deployment.test.mjs",
+      "services/codeworks/tests/cleanup.test.mjs"
     ]
   },
   "dependencies": [],
