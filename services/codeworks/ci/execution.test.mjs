@@ -191,7 +191,7 @@ test('standalone image smoke failure occurs before any registry publication',asy
     if(args[0]==='buildx') {
       // Buildx трактует legacy build arg как ещё один export; два inline export — реальная ошибка.
       const inline=args.filter((value,index)=>args[index-1]==='--cache-to'&&value==='type=inline').length;
-      assert.equal(inline+Number(args.includes('BUILDKIT_INLINE_CACHE=1')),1);
+      assert.equal(inline+Number(args.includes('BUILDKIT_INLINE_CACHE=1')),process.env.CODEWORKS_DISABLE_CACHE==='1'?0:1);
     }
     docker.push(args[0]);if(args[0]==='run')throw Error('STANDALONE_SMOKE_FAILED');
     return {stdout:'',stderr:''};
