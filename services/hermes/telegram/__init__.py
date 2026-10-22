@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import importlib
+import logging
 from dataclasses import dataclass
 from contextlib import contextmanager
 from hashlib import sha256
@@ -170,6 +171,9 @@ class Bridge:
                     raise BridgeError("HUMAN_OUTPUT_REQUIRED")
                 if error["code"] == -32000 and isinstance(error.get("data"), dict) and error["data"].get("code") in {"HUMAN_FINAL_DECISION_REQUIRED", "HUMAN_OUTPUT_MAPPING_REQUIRED", "STALE_ACTION"}:
                     raise BridgeError(error["data"]["code"])
+                code = error.get("data", {}).get("code") if isinstance(error.get("data"), dict) else None
+                if method == "files.publish" and isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,80}", code):
+                    logging.getLogger(__name__).warning("BRAI_FILE_PUBLISH_REJECTED code=%s", code)
                 raise BridgeError("RPC_REJECTED")
             if not isinstance(response["result"], dict):
                 raise BridgeError("RPC_MALFORMED")
@@ -755,10 +759,10 @@ class TelegramPlugin:
         paths = getattr(event, "media_urls", [])
         if not paths:
             return None
+        descriptors = []
         try:
             if len(paths) > MAX_ATTACHMENTS or not re.fullmatch(r"[1-9][0-9]*", str(event.message_id)):
                 raise BridgeError("ATTACHMENT_LIMIT")
-            descriptors = []
             for index, path in enumerate(paths):
                 result = await asyncio.to_thread(self.bridge.call, "files.publish", {
                     "path": path, "requestId": f"tg:{self.config.chat}:{event.message_id}:{index}"})
@@ -769,12 +773,19 @@ class TelegramPlugin:
                     raise BridgeError("RPC_MALFORMED")
                 descriptors.append(result["markdown"])
             return {"action": "rewrite", "text": "\n\n".join([event.text or "", *descriptors]).strip()}
-        except Exception:
-            try:
-                await self._on_native_loop(self._notify("Вложение не принято Brai. Повторите отправку файла."))
-            except Exception:
-                pass
-            return {"action": "skip", "reason": "brai-file-publication-failed"}
+        except Exception as error:
+            code = str(error) if isinstance(error, BridgeError) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,80}", str(error)) else "UNEXPECTED_ERROR"
+            logging.getLogger(__name__).warning("BRAI_INBOUND_FILE_NOT_STORED code=%s count=%d", code, len(paths))
+            if code == "ATTACHMENT_LIMIT":
+                try:
+                    await self._on_native_loop(self._notify("Не удалось обработать вложения. В одном сообщении должно быть не больше десяти файлов."))
+                except Exception:
+                    pass
+                return {"action": "skip", "reason": "brai-file-input-invalid"}
+            # Native already downloaded these owner-authorized files. A storage failure
+            # must not discard their media_urls or turn a received album into an empty turn.
+            note = "[Состояние вложений: файлы получены и доступны в этом сообщении, но сохранение всех файлов в Brai не подтверждено.]"
+            return {"action": "rewrite", "text": "\n\n".join([event.text or "", *descriptors, note]).strip()}
 
     def _published_path(self, result, artifact_id, filename):
         """Проверить publisher DTO и канонический локальный файл перед native delivery."""
