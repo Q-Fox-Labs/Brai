@@ -111,3 +111,15 @@ test('Admin-only native fs, command and process protocol remains unchanged',asyn
   }
   assert.equal(f.frames.some(x=>x.error),false);await f.router.close();
 });
+
+test('Managed workspace cwd and persisted threads use the same guarded Brai route',async()=>{
+  for(const cwd of ['/state/workspaces/own','/workspace-alias/own']) {
+    const f=fixture({cwd});await init(f);
+    await f.router.receive({id:100,method:'thread/start',params:{cwd}});
+    assert.equal(f.brai.at(-1).method,'thread/start');
+    assert.equal(f.admin.some(x=>x.method==='thread/start'),false);
+    await f.router.receive({id:101,method:'thread/resume',params:{threadId:'workspace-thread'}});
+    assert.equal(f.brai.at(-1).method,'thread/resume');
+    assert.equal(f.admin.some(x=>x.method==='thread/resume'),false);await f.router.close();
+  }
+});

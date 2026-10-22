@@ -53,13 +53,9 @@ export function createNativeRouter({roots,workspaceRoots=[],upstream,brai,send,r
   async function isBrai(value) {
     if(typeof value!=='string'||!path.isAbsolute(value))return false;
     const canonical=await resolvePath(value);
-    return roots.some(root=>inside(canonical,root));
-  }
-  async function isProtected(value) {
-    if(typeof value!=='string'||!path.isAbsolute(value))return false;
-    const canonical=await resolvePath(value);
     return [...roots,...workspaceRoots].some(root=>inside(canonical,root));
   }
+
   function error(id,message){if(id!==undefined)send({id,error:{code:-32000,message}});}
   function observe(route,frame) {
     if(closed)return;
@@ -133,7 +129,7 @@ export function createNativeRouter({roots,workspaceRoots=[],upstream,brai,send,r
       if(writer) {
         const targets=(writer==='filesystem'?['path','sourcePath','destinationPath']:['cwd']).map(key=>p[key]).filter(Boolean);
         if(braiSeen){error(frame.id,writer==='filesystem'?'BRAI_UNTHREADED_WRITE_DENIED':'BRAI_UNTHREADED_COMMAND_DENIED');return;}
-        for(const target of targets)if(await isProtected(target)){error(frame.id,writer==='filesystem'?'BRAI_UNTHREADED_WRITE_DENIED':'BRAI_UNTHREADED_COMMAND_DENIED');return;}
+        for(const target of targets)if(await isBrai(target)){error(frame.id,writer==='filesystem'?'BRAI_UNTHREADED_WRITE_DENIED':'BRAI_UNTHREADED_COMMAND_DENIED');return;}
       }
       if(BLOCKED.has(frame.method)&&braiSeen){error(frame.id,'BRAI_CONTROL_OVERRIDE_DENIED');return;}
       let route='admin';
