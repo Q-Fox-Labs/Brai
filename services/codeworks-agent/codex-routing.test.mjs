@@ -32,7 +32,7 @@ test('Startup catalogue removes builtin patch, shell and code execution metadata
 });
 function fixture({cwd='/admin',loaded=[]}={}) {
   const frames=[],admin=[],brai=[];let adminSend,braiSend;
-  const router=createNativeRouter({roots:['/repo/brai'],send:f=>frames.push(f),resolvePath:async p=>p.replace('/alias','/repo/brai'),
+  const router=createNativeRouter({roots:['/repo/brai'],workspaceRoots:['/state/workspaces'],send:f=>frames.push(f),resolvePath:async p=>p.replace('/alias','/repo/brai').replace('/workspace-alias','/state/workspaces'),
     upstream:send=>{adminSend=send;return {receive(f){admin.push(f);if(f.method==='thread/read')send({id:f.id,result:{thread:{id:f.params.threadId,cwd}}});if(f.method==='thread/loaded/list')send({id:f.id,result:{data:loaded,nextCursor:null}});},close(){}}},
     brai:send=>{braiSend=send;return {receive(f){brai.push(f);if(f.method==='initialize')send({id:f.id,result:{userAgent:'native'}});if(f.method==='thread/start')send({id:f.id,result:{thread:{id:'new-brai',cwd:'/repo/brai'}}});},close(){}}}});
   return {router,frames,admin,brai,adminSend:()=>adminSend,braiSend:()=>braiSend};
@@ -75,4 +75,39 @@ test('Server-request response returns to its owning backend even with equal nati
   const [a,b]=f.frames.slice(-2);assert.notEqual(a.id,b.id);
   await f.router.receive({id:b.id,result:{choice:'ok'}});assert.deepEqual(f.brai.at(-1),{id:10,result:{choice:'ok'}});
   await f.router.close();
+});
+
+test('Protected managed workspaces reject direct fs and every native execution family before a Brai thread',async()=>{
+  const f=fixture();await init(f);
+  const requests=[
+    ['fs/writeFile',{path:'/state/workspaces/own/package.json',dataBase64:'e30='}],
+    ['fs/createDirectory',{path:'/workspace-alias/own/new'}],
+    ['fs/remove',{path:'/state/workspaces/foreign/source'}],
+    ['fs/copy',{sourcePath:'/admin/a',destinationPath:'/workspace-alias/own/a'}],
+    ['command/exec',{cwd:'/state/workspaces/own',command:['unclassified']}],
+    ['process/spawn',{cwd:'/workspace-alias/own',command:['unclassified'],processHandle:'p'}],
+  ];
+  for(let i=0;i<requests.length;i++){const [method,params]=requests[i];await f.router.receive({id:20+i,method,params});}
+  assert.equal(f.frames.filter(x=>x.error).length,requests.length);
+  assert.equal(f.admin.filter(x=>requests.some(([method])=>method===x.method)).length,0);
+  await f.router.close();
+});
+test('A Brai connection fails closed on all unthreaded writer families even for outside or missing paths',async()=>{
+  const f=fixture({cwd:'/repo/brai'});await init(f);
+  await f.router.receive({id:2,method:'thread/read',params:{threadId:'existing'}});
+  const methods=['fs/writeFile','fs/remove','fs/copy','fs/futureWriter','command/exec','command/exec/write','command/exec/terminate','command/exec/resize','process/spawn','process/writeStdin','process/kill','process/resizePty','process/futureWriter'];
+  for(let i=0;i<methods.length;i++)await f.router.receive({id:30+i,method:methods[i],params:{path:'/admin/file',cwd:'/admin',processHandle:'p',processId:'p'}});
+  assert.equal(f.frames.filter(x=>x.error).length,methods.length);
+  assert.equal(f.admin.filter(x=>methods.includes(x.method)).length,0);
+  await f.router.receive({id:90,method:'fs/readFile',params:{path:'/state/workspaces/own/package.json'}});
+  assert.equal(f.admin.at(-1).method,'fs/readFile');await f.router.close();
+});
+test('Admin-only native fs, command and process protocol remains unchanged',async()=>{
+  const f=fixture();await init(f);
+  const methods=['fs/writeFile','fs/copy','command/exec','command/exec/write','process/spawn','process/writeStdin'];
+  for(let i=0;i<methods.length;i++) {
+    const frame={id:50+i,method:methods[i],params:{path:'/admin/file',sourcePath:'/admin/a',destinationPath:'/admin/b',cwd:'/admin',command:['opaque'],processId:'c',processHandle:'p'}};
+    await f.router.receive(frame);assert.deepEqual(f.admin.at(-1),frame);
+  }
+  assert.equal(f.frames.some(x=>x.error),false);await f.router.close();
 });

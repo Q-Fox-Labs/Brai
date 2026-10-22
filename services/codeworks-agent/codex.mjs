@@ -225,6 +225,7 @@ export async function universalMain(config,{openBrai,listenFd}={}) {
     const owner=Symbol('connection');
     const router=createNativeRouter({
       roots:config.roots,
+      workspaceRoots:config.automatic?.descriptor?.project?.workspace_root?[config.automatic.descriptor.project.workspace_root]:[],
       upstream:send=>connectUpstream(config.upstream,send),
       brai:async send=>{const backend=await (openBrai?openBrai(send):managedCodex(config.controlSocket,send,{automatic:config.automatic}));backend.child?.once('close',()=>ws.close(1011,'Native backend closed'));return backend;},
       claimThread(id){if(owners.has(id)&&owners.get(id)!==owner)return false;owners.set(id,owner);return true;},

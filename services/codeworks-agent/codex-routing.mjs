@@ -44,7 +44,7 @@ export function enforceBrai(frame,{cwd,catalogue,mcpCommand,controlSocket,inspec
 }
 
 /** Routes one client connection; children are opened lazily and requests stay ordered. */
-export function createNativeRouter({roots,upstream,brai,send,resolvePath=canonicalPath,claimThread=()=>true,releaseThreads=()=>{}}) {
+export function createNativeRouter({roots,workspaceRoots=[],upstream,brai,send,resolvePath=canonicalPath,claimThread=()=>true,releaseThreads=()=>{}}) {
   const routes=new Map(),pending=new Map(),internal=new Map();
   const prefix='cw-router-'+randomUUID()+'-';
   const serverRequests=new Map();
@@ -54,6 +54,11 @@ export function createNativeRouter({roots,upstream,brai,send,resolvePath=canonic
     if(typeof value!=='string'||!path.isAbsolute(value))return false;
     const canonical=await resolvePath(value);
     return roots.some(root=>inside(canonical,root));
+  }
+  async function isProtected(value) {
+    if(typeof value!=='string'||!path.isAbsolute(value))return false;
+    const canonical=await resolvePath(value);
+    return [...roots,...workspaceRoots].some(root=>inside(canonical,root));
   }
   function error(id,message){if(id!==undefined)send({id,error:{code:-32000,message}});}
   function observe(route,frame) {
@@ -120,12 +125,16 @@ export function createNativeRouter({roots,upstream,brai,send,resolvePath=canonic
         serverRequests.delete(frame.id);
         return (origin.route==='brai'?await managedConnection():await upstreamReady).receive({...frame,id:origin.id});
       }
-      if(frame.method.startsWith('fs/')&&!FS_READ.has(frame.method)) {
-        const targets=['path','sourcePath','destinationPath'].map(key=>p[key]).filter(Boolean);
-        for(const target of targets)if(await isBrai(target)){error(frame.id,'BRAI_UNTHREADED_WRITE_DENIED');return;}
-        if(!targets.length&&braiSeen){error(frame.id,'BRAI_UNTHREADED_WRITE_DENIED');return;}
+      // Native fs/process RPCs have no authoritative thread ownership. Admit their
+      // writer capability only on an Admin-only connection, outside protected roots.
+      // Treat entire execution families as writers; argv never proves readonly.
+      const writer=frame.method.startsWith('fs/')&&!FS_READ.has(frame.method)?'filesystem':
+        frame.method.startsWith('command/')||frame.method.startsWith('process/')?'execution':null;
+      if(writer) {
+        const targets=(writer==='filesystem'?['path','sourcePath','destinationPath']:['cwd']).map(key=>p[key]).filter(Boolean);
+        if(braiSeen){error(frame.id,writer==='filesystem'?'BRAI_UNTHREADED_WRITE_DENIED':'BRAI_UNTHREADED_COMMAND_DENIED');return;}
+        for(const target of targets)if(await isProtected(target)){error(frame.id,writer==='filesystem'?'BRAI_UNTHREADED_WRITE_DENIED':'BRAI_UNTHREADED_COMMAND_DENIED');return;}
       }
-      if(frame.method==='command/exec'&&(braiSeen||await isBrai(p.cwd))){error(frame.id,'BRAI_UNTHREADED_COMMAND_DENIED');return;}
       if(BLOCKED.has(frame.method)&&braiSeen){error(frame.id,'BRAI_CONTROL_OVERRIDE_DENIED');return;}
       let route='admin';
       if(frame.method==='thread/start')route=await isBrai(p.cwd)?'brai':'admin';
