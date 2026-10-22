@@ -12,6 +12,24 @@ import {WebSocketServer} from 'ws';
 import {socketCall,reclaimSocket} from '../codeworks/src/agent-host.mjs';
 import {sandboxArgs} from '../codeworks/src/agent-sandbox.mjs';
 const tool=JSON.parse(await readFile(new URL('../codeworks/src/agent-tools.json',import.meta.url),'utf8'));
+const INPUT_BYTES=16*1024*1024,OUTPUT_BYTES=32*1024*1024,OUTPUT_PENDING_BYTES=OUTPUT_BYTES+2*1024*1024;
+
+/** Native plugin catalogues exceed 16MiB; keep their protocol frames bounded separately from input. */
+export function decodeNativeFrame(line) {
+  if(Buffer.byteLength(line)>OUTPUT_BYTES)throw new Error('CODEX_NATIVE_OUTPUT_LIMIT');
+  return JSON.parse(line);
+}
+
+/** Text frames retain order; the budget includes the next encoded frame and all pending bytes. */
+export function forwardNativeFrame(ws,frame) {
+  const encoded=JSON.stringify(frame),bytes=Buffer.byteLength(encoded);
+  if(ws.readyState!==1||bytes>OUTPUT_BYTES||ws.bufferedAmount+bytes>OUTPUT_PENDING_BYTES) {
+    if(ws.readyState===1)console.error('CODEX_WS_OUTPUT_LIMIT');
+    ws.terminate();return false;
+  }
+  ws.send(encoded);return true;
+}
+
 const instructions='Use codeworks for ALL project reads, patches, files and commands. Native project paths are intentionally inaccessible. Do not request manual worktrees: codeworks automatically prepares one before the first code write. Use mode=read for inspection and mode=write for mutating commands. Route all subsequent reads through codeworks. Never retry a partly executed command.';
 
 /** Допускает только открытые клиентом threads и реально начавшиеся native turns. */
@@ -53,15 +71,14 @@ export async function managedCodex(control,send) {
   const child=spawn('/usr/bin/bwrap',arguments_,{stdio:['pipe','pipe','pipe']});
   const pending=new Map(),admission=createAdmission();let closed=false;
   child.stderr.on('data',chunk=>process.stderr.write(chunk));
-  const write=frame=>{if(closed)return;const bytes=JSON.stringify(frame)+'\n';if(Buffer.byteLength(bytes)>16777216||child.stdin.writableLength>2097152){child.kill('SIGKILL');return;}child.stdin.write(bytes);};
+  const write=frame=>{if(closed)return;const bytes=JSON.stringify(frame)+'\n';if(Buffer.byteLength(bytes)>INPUT_BYTES||child.stdin.writableLength>2097152){console.error('CODEX_NATIVE_INPUT_LIMIT');child.kill('SIGKILL');return;}child.stdin.write(bytes);};
   async function agentCall(nativeId,request) {
     const payload=JSON.stringify({native_session_id:nativeId,request});
     return socketCall(adapter.socket,{payload,signature:createHmac('sha256',Buffer.from(adapter.key,'hex')).update(payload).digest('hex')});
   }
   const reader=createInterface({input:child.stdout});
   reader.on('line',line=>{void (async()=>{
-    if(Buffer.byteLength(line)>16777216){child.kill('SIGKILL');return;}
-    const frame=JSON.parse(line);
+    const frame=decodeNativeFrame(line);
     admission.observe(frame);
     if(frame.method==='item/tool/call'&&frame.params?.tool===tool.name) {
       try {
@@ -78,7 +95,7 @@ export async function managedCodex(control,send) {
       if(request.method!=='thread/resume')await agentCall(id,{action:'status'});
     }}
     send(frame);
-  })().catch(()=>{child.kill('SIGKILL');});});
+  })().catch(error=>{console.error(error.message==='CODEX_NATIVE_OUTPUT_LIMIT'?'CODEX_NATIVE_OUTPUT_LIMIT':'CODEX_NATIVE_FRAME_REJECTED');child.kill('SIGKILL');});});
   child.on('error',()=>{closed=true;});child.on('close',()=>{closed=true;reader.close();});
   return {
     child,
@@ -119,10 +136,10 @@ export async function main() {
   }
   const file=listen.slice('--listen=unix://'.length);
   if(!listen.startsWith('--listen=unix:///'))throw new Error('UNIX_LISTENER_REQUIRED');
-  const server=createServer(),wss=new WebSocketServer({server,maxPayload:16777216,perMessageDeflate:false});
+  const server=createServer(),wss=new WebSocketServer({server,maxPayload:INPUT_BYTES,perMessageDeflate:false});
   wss.on('connection',ws=>{
     if(wss.clients.size>8){ws.close(1013);return;}
-    const started=managedCodex(control,frame=>{if(ws.readyState===1&&ws.bufferedAmount<2097152)ws.send(JSON.stringify(frame));else ws.terminate();});
+    const started=managedCodex(control,frame=>forwardNativeFrame(ws,frame));
     void started.catch(()=>ws.terminate());
     void started.then(proxy=>proxy.child.once('close',()=>ws.close(1011,'Native app-server closed'))).catch(()=>{});
     let queue=Promise.resolve();
