@@ -226,6 +226,7 @@ export async function universalMain(config,{openBrai,listenFd}={}) {
     const router=createNativeRouter({
       roots:config.roots,
       attachmentRoot:config.automatic?.nativeHome?path.join(config.automatic.nativeHome,'attachments'):undefined,
+      visualizationRoot:config.automatic?.nativeHome?path.join(config.automatic.nativeHome,'visualizations'):undefined,
       workspaceRoots:config.automatic?.descriptor?.project?.workspace_root?[config.automatic.descriptor.project.workspace_root]:[],
       upstream:send=>connectUpstream(config.upstream,send),
       brai:async send=>{const backend=await (openBrai?openBrai(send):managedCodex(config.controlSocket,send,{automatic:config.automatic}));backend.child?.once('close',()=>ws.close(1011,'Native backend closed'));return backend;},

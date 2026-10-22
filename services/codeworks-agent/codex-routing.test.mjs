@@ -32,7 +32,7 @@ test('Startup catalogue removes builtin patch, shell and code execution metadata
 });
 function fixture({cwd='/admin',loaded=[],resolvePath=async p=>p.replace('/alias','/repo/brai').replace('/workspace-alias','/state/workspaces')}={}) {
   const frames=[],admin=[],brai=[];let adminSend,braiSend;
-  const router=createNativeRouter({roots:['/repo/brai'],workspaceRoots:['/state/workspaces'],attachmentRoot:'/home/test/.codex/attachments',send:f=>frames.push(f),resolvePath,
+  const router=createNativeRouter({roots:['/repo/brai'],workspaceRoots:['/state/workspaces'],attachmentRoot:'/home/test/.codex/attachments',visualizationRoot:'/home/test/.codex/visualizations',send:f=>frames.push(f),resolvePath,
     upstream:send=>{adminSend=send;return {receive(f){admin.push(f);if(f.method==='thread/read')send({id:f.id,result:{thread:{id:f.params.threadId,cwd}}});if(f.method==='thread/loaded/list')send({id:f.id,result:{data:loaded,nextCursor:null}});},close(){}}},
     brai:send=>{braiSend=send;return {receive(f){brai.push(f);if(f.method==='initialize')send({id:f.id,result:{userAgent:'native'}});if(f.method==='thread/start')send({id:f.id,result:{thread:{id:'new-brai',cwd:'/repo/brai'}}});},close(){}}}});
   return {router,frames,admin,brai,adminSend:()=>adminSend,braiSend:()=>braiSend};
@@ -194,6 +194,46 @@ test('Attachment writes reject symlinked roots, directories and files',async()=>
     const f=fixture({cwd:'/repo/brai',resolvePath:async value=>value===redirected||value.startsWith(redirected+'/')?value.replace(redirected,'/outside'):value});
     await init(f);await f.router.receive({id:270,method:'thread/read',params:{threadId:'existing'}});
     await f.router.receive({id:271,method:'fs/writeFile',params:{path:uploadRoot+'/'+uploadId+'/image.png'}});
+    assert.equal(f.frames.at(-1).error.message,'BRAI_UNTHREADED_WRITE_DENIED');await f.router.close();
+  }
+});
+
+const visualRoot='/home/test/.codex/visualizations';
+const visualDirectory=visualRoot+'/2026/10/22/01a1648d-670b-7e10-a5b0-cae034ec76b1';
+test('Desktop text submit can create its visualization directory on a mixed connection',async()=>{
+  const f=fixture({cwd:'/repo/brai'});await init(f);
+  await f.router.receive({id:300,method:'thread/read',params:{threadId:'existing'}});
+  const frame={id:301,method:'fs/createDirectory',params:{path:visualDirectory,recursive:true}};
+  await f.router.receive(frame);assert.deepEqual(f.admin.at(-1),frame);
+  assert.equal(f.frames.some(x=>x.error),false);await f.router.close();
+});
+test('Visualization preparation admits no file writer, deletion, foreign environment or malformed path',async()=>{
+  const f=fixture({cwd:'/repo/brai'});await init(f);
+  await f.router.receive({id:310,method:'thread/read',params:{threadId:'existing'}});
+  const cases=[
+    ['fs/createDirectory',{path:visualRoot}],
+    ['fs/createDirectory',{path:visualRoot+'/2026/10/22'}],
+    ['fs/createDirectory',{path:visualDirectory+'/nested'}],
+    ['fs/createDirectory',{path:visualDirectory,environmentId:'foreign'}],
+    ['fs/createDirectory',{path:visualRoot+'/2026/99/22/01a1648d-670b-7e10-a5b0-cae034ec76b1'}],
+    ['fs/createDirectory',{path:visualRoot+'/2026/10/22/not-a-thread'}],
+    ['fs/createDirectory',{path:visualRoot+'-sibling/2026/10/22/01a1648d-670b-7e10-a5b0-cae034ec76b1'}],
+    ['fs/writeFile',{path:visualDirectory+'/file.html'}],
+    ['fs/remove',{path:visualDirectory,recursive:true}],
+    ['fs/futureWriter',{path:visualDirectory}],
+    ['command/exec',{cwd:visualDirectory,command:['opaque']}],
+  ];
+  for(let i=0;i<cases.length;i++){
+    const [method,params]=cases[i],frame={id:320+i,method,params};await f.router.receive(frame);
+    assert.ok(f.frames.find(x=>x.id===frame.id)?.error);assert.equal(f.admin.some(x=>x.id===frame.id),false);
+  }
+  await f.router.close();
+});
+test('Visualization preparation rejects symlinked root, date parents and directory',async()=>{
+  for(const redirected of [visualRoot,visualRoot+'/2026',visualDirectory]){
+    const f=fixture({cwd:'/repo/brai',resolvePath:async value=>value===redirected||value.startsWith(redirected+'/')?value.replace(redirected,'/outside'):value});
+    await init(f);await f.router.receive({id:350,method:'thread/read',params:{threadId:'existing'}});
+    await f.router.receive({id:351,method:'fs/createDirectory',params:{path:visualDirectory,recursive:true}});
     assert.equal(f.frames.at(-1).error.message,'BRAI_UNTHREADED_WRITE_DENIED');await f.router.close();
   }
 });

@@ -47,7 +47,7 @@ export function enforceBrai(frame,{cwd,catalogue,mcpCommand,controlSocket,inspec
 }
 
 /** Маршрутизирует общее соединение; attachmentRoot задаётся доверенной конфигурацией, не клиентом. */
-export function createNativeRouter({roots,workspaceRoots=[],attachmentRoot,upstream,brai,send,resolvePath=canonicalPath,claimThread=()=>true,releaseThreads=()=>{}}) {
+export function createNativeRouter({roots,workspaceRoots=[],attachmentRoot,visualizationRoot,upstream,brai,send,resolvePath=canonicalPath,claimThread=()=>true,releaseThreads=()=>{}}) {
   const routes=new Map(),pending=new Map(),internal=new Map();
   const prefix='cw-router-'+randomUUID()+'-';
   const serverRequests=new Map();
@@ -73,6 +73,16 @@ export function createNativeRouter({roots,workspaceRoots=[],attachmentRoot,upstr
     const file=['fs/writeFile','fs/copy','fs/remove'].includes(method)&&uuid&&parts.length===2;
     if(!registry&&!directory&&!file)return false;
     return await resolvePath(root)===root&&await resolvePath(target)===path.resolve(target);
+  }
+
+  // AIDEV-NOTE: Desktop создаёт папку визуализаций до каждого текстового turn.
+  // Это только mkdir служебного каталога; запись файлов и команды не разрешаются.
+  async function visualizationDirectory(frame) {
+    const p=frame.params??{};
+    if(frame.method!=='fs/createDirectory'||p.environmentId!=null||typeof visualizationRoot!=='string'||!path.isAbsolute(visualizationRoot)||typeof p.path!=='string'||!path.isAbsolute(p.path))return false;
+    const root=path.resolve(visualizationRoot),relative=path.relative(root,p.path);
+    if(!/^\d{4}\/(0[1-9]|1[0-2])\/(0[1-9]|[12]\d|3[01])\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(relative))return false;
+    return await resolvePath(root)===root&&await resolvePath(p.path)===path.resolve(p.path);
   }
 
   function error(id,message){if(id!==undefined)send({id,error:{code:-32000,message}});}
@@ -147,7 +157,7 @@ export function createNativeRouter({roots,workspaceRoots=[],attachmentRoot,upstr
         frame.method.startsWith('command/')||frame.method.startsWith('process/')?'execution':null;
       if(writer) {
         const targets=(writer==='filesystem'?['path','sourcePath','destinationPath']:['cwd']).map(key=>p[key]).filter(Boolean);
-        if(braiSeen&&!(writer==='filesystem'&&await attachmentWrite(frame))){error(frame.id,writer==='filesystem'?'BRAI_UNTHREADED_WRITE_DENIED':'BRAI_UNTHREADED_COMMAND_DENIED');return;}
+        if(braiSeen&&!(writer==='filesystem'&&(await attachmentWrite(frame)||await visualizationDirectory(frame)))){error(frame.id,writer==='filesystem'?'BRAI_UNTHREADED_WRITE_DENIED':'BRAI_UNTHREADED_COMMAND_DENIED');return;}
         for(const target of targets)if(await isBrai(target)){error(frame.id,writer==='filesystem'?'BRAI_UNTHREADED_WRITE_DENIED':'BRAI_UNTHREADED_COMMAND_DENIED');return;}
       }
       if(BLOCKED.has(frame.method)&&braiSeen){error(frame.id,'BRAI_CONTROL_OVERRIDE_DENIED');return;}
