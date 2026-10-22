@@ -248,7 +248,7 @@ def main() -> int:
     try:
         payload = staging / "payload"
         rows: list[dict[str, object]] = []
-        node = runtime / "node-v24.21.0-linux-x64/bin/node"
+        node = runtime / "node-v24.22.1-linux-x64/bin/node"
         if not node.is_file() or node.is_symlink():
             raise ValueError("portable Node runtime executable is missing")
         typescript_path = source / "node_modules/typescript"

@@ -11,7 +11,7 @@ const repository=resolve(import.meta.dirname,'../../..');
 function put(root,path,text) {mkdirSync(dirname(join(root,path)),{recursive:true});writeFileSync(join(root,path),text);}
 function descriptor(id) {
  const dir='services/'+id;
- return {formatVersion:1,id,type:'program',status:'active',environments:['dev','prod'],executableSources:[dir+'/main.mjs'],inputs:{build:[dir+'/build.mjs'],runtime:[dir+'/main.mjs'],checks:[dir+'/tests.mjs']},dependencies:[],commands:{build:'node build.mjs',check:'node tests.mjs'},delivery:{kind:'ready-files',files:[dir+'/main.mjs'],entrypoints:[dir+'/main.mjs'],smokeImports:[],systemRequirements:['node:24.21.0']},deploy:{units:[id],migrations:[],health:null},npm:{workspaces:[]}};
+ return {formatVersion:1,id,type:'program',status:'active',environments:['dev','prod'],executableSources:[dir+'/main.mjs'],inputs:{build:[dir+'/build.mjs'],runtime:[dir+'/main.mjs'],checks:[dir+'/tests.mjs']},dependencies:[],commands:{build:'node build.mjs',check:'node tests.mjs'},delivery:{kind:'ready-files',files:[dir+'/main.mjs'],entrypoints:[dir+'/main.mjs'],smokeImports:[],systemRequirements:['node:24.22.1']},deploy:{units:[id],migrations:[],health:null},npm:{workspaces:[]}};
 }
 function fixture(t) {
  mkdirSync(join(repository,'tmp'),{recursive:true});

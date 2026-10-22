@@ -29,7 +29,7 @@ Dockerfile сам по себе не подтверждает готовый о�
 Запуск сервиса не применяет миграции и не загружает модели. SQL миграции должен присутствовать по пути `/opt/brai/local-ai/app/services/local-ai/migrations/001.sql`: standalone migration module читает этот файл относительно `dist/storage/migrate.js`. Перед первым запуском оператор отдельно выполняет миграцию тем же образом с отдельным защищённым окружением:
 
 ```text
-/opt/brai/local-ai/runtime/node-v24.21.0-linux-x64/bin/node /opt/brai/local-ai/app/services/local-ai/dist/storage/migrate.js
+/opt/brai/local-ai/runtime/node-v24.22.1-linux-x64/bin/node /opt/brai/local-ai/app/services/local-ai/dist/storage/migrate.js
 ```
 
 Это окружение содержит `LOCAL_AI_DATABASE_URL`, `LOCAL_AI_OWNER_ROLE` и `LOCAL_AI_APP_ROLE`. Оно не использует `LOCAL_AI_CONFIG_JSON` и не получает runtime credentials приложения. Оркестратор обязан монтировать постоянные model/cache каталоги и выдавать контейнеру только необходимые подключения к PostgreSQL, NATS и внутреннему artifacts/history. Секреты передаются через защищённый механизм окружения, а не через image, release descriptor или command line.

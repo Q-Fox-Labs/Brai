@@ -81,7 +81,7 @@ const { startLocalAi, supportedProfiles } = await load('src/main.mjs');
 const { startLocalAiNats } = await load('dist/transport/index.js');
 const { validateError } = await load('contracts/index.mjs');
 
-// AIDEV-NOTE: Built-in undici channels доступны в current Node v24.21.0 runtime.
+// AIDEV-NOTE: Built-in undici channels доступны в current Node v24.22.1 runtime.
 // Request WeakMap хранит только correlation metadata; payload не читается/не сохраняется.
 const nativeRequests = new WeakMap();
 const diagnosticHooks = [

@@ -542,7 +542,7 @@ def main() -> int:
     node_root = args.node_root.resolve(strict=True)
     llama_root = args.llama_root.resolve(strict=True)
     product_root = args.product_root.resolve(strict=True)
-    if python_base != Path("/usr") or node_root != Path("/opt/node-v24.21.0-linux-x64"):
+    if python_base != Path("/usr") or node_root != Path("/opt/node-v24.22.1-linux-x64"):
         raise ValueError("Python and Node roots differ from the accepted prepared runtimes")
     if venv != Path("/opt/brai/local-ai/runtime/gigaam_pytorch/.venv"):
         raise ValueError("GigaAM venv path differs from the accepted CPU runtime")
@@ -556,7 +556,7 @@ def main() -> int:
         raise ValueError("product checkout HEAD does not match the explicit source revision")
     if run(["/usr/bin/git", "-C", str(product_root), "status", "--porcelain", "--untracked-files=all"]):
         raise ValueError("product checkout is dirty; refusing to bind input inventory to a committed revision")
-    if run([str(node_root / "bin/node"), "--version"]).strip() != "v24.21.0":
+    if run([str(node_root / "bin/node"), "--version"]).strip() != "v24.22.1":
         raise ValueError("Node input version mismatch")
     python_binary = python_base / "bin/python3.12"
     if not python_binary.exists():
@@ -666,7 +666,7 @@ def main() -> int:
     rows: list[dict[str, object]] = []
     try:
         runtime = staging / "runtime"
-        node_dest = runtime / "node-v24.21.0-linux-x64/bin/node"
+        node_dest = runtime / "node-v24.22.1-linux-x64/bin/node"
         add_file(node_root / "bin/node", node_dest, rows, mode=0o755)
         for locator in node_packages:
             relative = Path(locator).relative_to("node_modules")

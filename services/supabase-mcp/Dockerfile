@@ -1,6 +1,6 @@
 # ABOUTME: Собирает переносимый MCP из workspace без файлов admin.
 # ABOUTME: Конфигурацию и пароль контейнер получает только при запуске.
-FROM node:24.21.0-alpine AS build
+FROM node:24.22.1-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
@@ -15,7 +15,7 @@ RUN npm ci --workspace=@brai/supabase-mcp --include-workspace-root=false --ignor
 COPY services/supabase-mcp services/supabase-mcp
 RUN npm run build --workspace=@brai/supabase-mcp
 
-FROM node:24.21.0-alpine
+FROM node:24.22.1-alpine
 WORKDIR /app
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/apps/web/package.json apps/web/package.json

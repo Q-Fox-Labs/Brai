@@ -45,7 +45,7 @@
   "application": {
     "workingDirectory": "/opt/brai/local-ai/app/services/local-ai",
     "entrypoint": [
-      "/opt/brai/local-ai/runtime/node-v24.21.0-linux-x64/bin/node",
+      "/opt/brai/local-ai/runtime/node-v24.22.1-linux-x64/bin/node",
       "src/main.mjs"
     ],
     "requiredConfigEnvironment": "LOCAL_AI_CONFIG_JSON",
@@ -63,8 +63,8 @@
   },
   "runtimePayload": {
     "node": {
-      "path": "payload/runtime/node-v24.21.0-linux-x64/",
-      "version": "24.21.0",
+      "path": "payload/runtime/node-v24.22.1-linux-x64/",
+      "version": "24.22.1",
       "binary": "bin/node"
     },
     "llamaCpp": {
@@ -190,7 +190,7 @@
   "migration": {
     "automatic": false,
     "command": [
-      "/opt/brai/local-ai/runtime/node-v24.21.0-linux-x64/bin/node",
+      "/opt/brai/local-ai/runtime/node-v24.22.1-linux-x64/bin/node",
       "/opt/brai/local-ai/app/services/local-ai/dist/storage/migrate.js"
     ],
     "requiresSameConfig": false,
