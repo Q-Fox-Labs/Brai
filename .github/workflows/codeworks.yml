@@ -39,9 +39,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: '24.21.0'
+          node-version: '24.22.1'
       - name: Verify npm toolchain
-        run: test "$(npm --version)" = '11.19.0'
+        run: test "$(npm --version)" = '11.19.1'
       - name: Verify planner and evidence boundaries without npm installation
         run: node --test --test-isolation=none services/codeworks/components/*.test.mjs services/codeworks/ci/*.test.mjs services/codeworks/tests/ci-verifier.test.mjs services/codeworks/tests/ci-evidence.test.mjs
       - name: Plan from source and immutable registry objects
@@ -53,8 +53,8 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.npm
-          key: npm-linux-x64-11.19.0-${{ hashFiles('package-lock.json') }}
-          restore-keys: npm-linux-x64-11.19.0-
+          key: npm-linux-x64-11.19.1-${{ hashFiles('package-lock.json') }}
+          restore-keys: npm-linux-x64-11.19.1-
       - name: Prepare dependencies once when work requires them
         if: ${{ steps.plan.outputs.needs_dependencies == 'true' }}
         run: |

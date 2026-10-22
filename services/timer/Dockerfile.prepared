@@ -1,6 +1,6 @@
 # ABOUTME: Упаковывает проверенный timer runtime без установки зависимостей.
 # ABOUTME: Образ содержит готовый dist, схемы и owner-миграции точной ревизии.
-FROM node:24.21.0-bookworm-slim
+FROM node:24.22.1-bookworm-slim
 ARG BRAI_SOURCE_REVISION
 LABEL org.opencontainers.image.revision=${BRAI_SOURCE_REVISION}
 ENV NODE_ENV=production

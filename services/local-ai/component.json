@@ -146,7 +146,7 @@
       "services/local-ai/src/main.mjs"
     ],
     "systemRequirements": [
-      "Node.js 24.21.0",
+      "Node.js 24.22.1",
       "Pinned native/Python/FFmpeg runtime from services/local-ai/release.json; supplied by Local AI installer",
       "Model weights and lifecycle state external, only catalog/install/runtime manage models"
     ]

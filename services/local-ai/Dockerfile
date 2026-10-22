@@ -17,7 +17,7 @@ ENV NODE_ENV=production \
     TMPDIR=/var/tmp/brai-local-ai \
     TEMP=/var/tmp/brai-local-ai \
     TMP=/var/tmp/brai-local-ai \
-    PATH=/opt/brai/local-ai/runtime/node-v24.21.0-linux-x64/bin:/opt/brai/local-ai/runtime/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PATH=/opt/brai/local-ai/runtime/node-v24.22.1-linux-x64/bin:/opt/brai/local-ai/runtime/ffmpeg/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     LD_LIBRARY_PATH=/opt/brai/local-ai/runtime/llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/app:/opt/brai/local-ai/runtime/llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/system:/opt/brai/local-ai/runtime/system-libs:/opt/brai/local-ai/runtime/python/lib:/opt/brai/local-ai/runtime/python/lib/python3.12/lib-dynload:/opt/brai/local-ai/runtime/gigaam_pytorch/.venv/lib/python3.12/site-packages/torch/lib:/opt/brai/local-ai/runtime/gigaam_pytorch/.venv/lib/python3.12/site-packages/torchcodec:/opt/brai/local-ai/runtime/gigaam_pytorch/.venv/lib/python3.12/site-packages/torio/lib:/opt/brai/local-ai/runtime/gigaam_pytorch/.venv/lib/python3.12/site-packages/torchaudio/lib
 
 COPY --chown=0:0 payload/app/ /opt/brai/local-ai/app/
@@ -38,4 +38,4 @@ RUN test "$BRAI_LOCAL_AI_BASE" = "ubuntu@sha256:496754492fb28b4d3049432f2ca78744
 
 WORKDIR /opt/brai/local-ai/app/services/local-ai
 USER 1000:1000
-ENTRYPOINT ["/opt/brai/local-ai/runtime/node-v24.21.0-linux-x64/bin/node", "src/main.mjs"]
+ENTRYPOINT ["/opt/brai/local-ai/runtime/node-v24.22.1-linux-x64/bin/node", "src/main.mjs"]

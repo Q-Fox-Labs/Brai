@@ -25,7 +25,7 @@ test('prepared web omits development output and keeps production payload and man
     'apps/web/.next/cache/webpack/old': 'build-cache',
     'apps/web/.next/trace': 'build-trace',
     'apps/web/public/logo.svg': '<svg/>',
-    'apps/web/Dockerfile.prepared': 'FROM node:24.21.0-bookworm-slim\nCOPY . /app/\n',
+    'apps/web/Dockerfile.prepared': 'FROM node:24.22.1-bookworm-slim\nCOPY . /app/\n',
     'services/artifacts/contracts/index.js': 'artifacts-contract',
     'services/artifacts/schemas/facts.json': '{}',
     'services/alerts/contracts/index.js': 'alerts-contract',
