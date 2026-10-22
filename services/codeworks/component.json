@@ -133,7 +133,7 @@
       "services/codeworks/src/ci-verifier.mjs"
     ],
     "systemRequirements": [
-      "Node.js 24.21.0",
+      "Node.js 24.22.1",
       "Git with merge-tree --write-tree; flock (util-linux)",
       "GitHub CLI (gh), operator authentication; origin HTTPS matches registered repository",
       "Existing GitHub OAuth operator identity with repo, workflow, read:packages/write:packages; owner-only Ed25519 identity outside agent namespaces; durable Codeworks PG evidence backup; first owner catalog-v1 publication links the repository and inherits its Actions read access",

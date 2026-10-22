@@ -75,7 +75,7 @@ function smoke(directory) {
 /** Проверяет source/lock или создаёт новый закрытый artifact; существующее назначение не заменяет. */
 async function main() {
   const [mode, revision, output] = process.argv.slice(2);
-  if (!['check-source', 'materialize'].includes(mode) || !/^[0-9a-f]{40}$/.test(revision ?? '') || process.version !== 'v24.21.0') fail('INVALID_RELEASE_INPUT');
+  if (!['check-source', 'materialize'].includes(mode) || !/^[0-9a-f]{40}$/.test(revision ?? '') || process.version !== 'v24.22.1') fail('INVALID_RELEASE_INPUT');
   if (realpathSync(root) !== root) fail('SOURCE_ROOT_INVALID');
   git(['merge-base', '--is-ancestor', revision, 'HEAD']);
   const sourceFiles = git(['ls-tree', '-r', '--name-only', revision, service]).split('\n')
@@ -127,7 +127,7 @@ async function main() {
     const files = payload(output);
     const digest = sha(files.map(file => `${file.path}\0${file.sha256}\n`).join(''));
     writeFileSync(join(output, 'runtime-manifest.json'), JSON.stringify({ format: 'brai-providers-runtime-v1', sourceRevision: revision,
-      nodeVersion: '24.21.0', publicAssets: assets, packages: [...closure].map(([path, metadata]) => ({ path, ...metadata })), files, payloadSha256: digest }) + '\n', { flag: 'wx' });
+      nodeVersion: '24.22.1', publicAssets: assets, packages: [...closure].map(([path, metadata]) => ({ path, ...metadata })), files, payloadSha256: digest }) + '\n', { flag: 'wx' });
     const readonly = path => { const info = lstatSync(path); if (info.isDirectory()) { for (const name of readdirSync(path)) readonly(join(path,name)); chmodSync(path,0o555); } else chmodSync(path,0o444); };
     readonly(output);
     console.log(JSON.stringify({ sourceRevision: revision, lockedPackages: closure.size, publicAssets: assets.length, payloadSha256: digest }));
