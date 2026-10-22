@@ -4,11 +4,14 @@ import {spawn} from 'node:child_process';
 import {existsSync,realpathSync} from 'node:fs';
 import {createInterface} from 'node:readline';
 import {readFile,chmod,unlink} from 'node:fs/promises';
-import {createServer} from 'node:http';
+import {createServer,request as httpRequest} from 'node:http';
 import {createHmac} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import path from 'node:path';
-import {WebSocketServer} from 'ws';
+import WebSocket,{WebSocketServer} from 'ws';
+import {createNativeRouter,enforceBrai} from './codex-routing.mjs';
+import {createConnection} from 'node:net';
+import {createReadonlyInspector,createNativePort,startInspectSocket} from './codex-inspect.mjs';
 import {socketCall,reclaimSocket} from '../codeworks/src/agent-host.mjs';
 import {sandboxArgs} from '../codeworks/src/agent-sandbox.mjs';
 const tool=JSON.parse(await readFile(new URL('../codeworks/src/agent-tools.json',import.meta.url),'utf8'));
@@ -65,9 +68,32 @@ export function createAdmission() {
 }
 
 /** Запускает защищённый native app-server; send получает неизменённые protocol frames. */
-export async function managedCodex(control,send) {
-  const adapter=await socketCall(control,{action:'adapter',executor_id:'codex'}),e=adapter.executor;
-  const arguments_=[...sandboxArgs({cwd:adapter.project.repo_path,procExecutable:e.command[0],local:e.local_mounts??[],hidden:[adapter.state_root,...adapter.hidden_paths,adapter.project.repo_path,adapter.project.workspace_root,...(e.hidden_paths??[])],aliases:e.mounts??[],bridge:adapter.bridge,profile:{source:e.profile,target:e.profile_target??e.profile},env:{...(e.env??{}),CODEX_HOME:e.profile_target??e.profile}}),...e.command,'app-server','--listen','stdio://'];
+async function nativeLaunch(control,automatic) {
+  const adapter=automatic?.descriptor??await socketCall(control,{action:'adapter',executor_id:'codex'}),e=adapter.executor;
+  const profile=automatic?{source:automatic.nativeHome,target:automatic.nativeHome}:{source:e.profile,target:e.profile_target??e.profile};
+  const aliases=[...(e.mounts??[])];
+  if(automatic) {
+    aliases.push([automatic.nativeConfig,path.join(automatic.nativeHome,'config.toml')]);
+    aliases.push([automatic.catalogue,automatic.catalogue],[automatic.runtimeRoot,automatic.runtimeRoot]);
+    if(automatic.inspectSocket&&existsSync(automatic.inspectSocket))aliases.push([automatic.inspectSocket,'/run/codeworks-inspect.sock']);
+  }
+  const hidden=[adapter.state_root,...adapter.hidden_paths,...(automatic?[]:[adapter.project.repo_path,adapter.project.workspace_root]),...(e.hidden_paths??[])];
+  const startup=automatic?['-c','model_catalog_json='+JSON.stringify(automatic.catalogue),'-c','features.shell_tool=false','-c','features.code_mode=false','-c','features.code_mode_only=false']:[];
+  const arguments_=[...sandboxArgs({cwd:adapter.project.repo_path,procExecutable:e.command[0],local:automatic?[]:(e.local_mounts??[]),hidden,aliases,bridge:adapter.bridge,socket:automatic&&automatic.inspectSocket&&existsSync(automatic.inspectSocket)?automatic.inspectSocket:undefined,profile,env:{...(e.env??{}),CODEX_HOME:profile.target,...(automatic?{CODEWORKS_CONTROL_SOCKET:'/run/codeworks.sock'}:{})}}),...e.command,...startup];
+  return {adapter,arguments_};
+}
+
+/** Runs ordinary exec/review with the same protected native profile and MCP boundary. */
+export async function runNativeCli(config,args) {
+  const {arguments_}=await nativeLaunch(config.controlSocket,config.automatic);
+  const child=spawn('/usr/bin/bwrap',[...arguments_,'--no-daemon','--sandbox','read-only','--ask-for-approval','never',...args],{stdio:'inherit'});
+  await new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',code=>{process.exitCode=code??1;resolve();});});
+}
+
+export async function managedCodex(control,send,{automatic}={}) {
+  const {adapter,arguments_:launch}=await nativeLaunch(control,automatic);
+  const arguments_=[...launch,'app-server','--listen','stdio://'];
+
   const child=spawn('/usr/bin/bwrap',arguments_,{stdio:['pipe','pipe','pipe']});
   const pending=new Map(),admission=createAdmission();let closed=false;
   child.stderr.on('data',chunk=>process.stderr.write(chunk));
@@ -80,7 +106,7 @@ export async function managedCodex(control,send) {
   reader.on('line',line=>{void (async()=>{
     const frame=decodeNativeFrame(line);
     admission.observe(frame);
-    if(frame.method==='item/tool/call'&&frame.params?.tool===tool.name) {
+    if(!automatic&&frame.method==='item/tool/call'&&frame.params?.tool===tool.name) {
       try {
         admission.tool(frame);
         const result=await agentCall(frame.params.threadId,frame.params.arguments);
@@ -92,7 +118,7 @@ export async function managedCodex(control,send) {
       const id=frame.result.thread.id;
       if(request.method==='thread/resume'&&id!==request.threadId)throw new Error('NATIVE_RESUME_ID_MISMATCH');
       admission.thread(id);
-      if(request.method!=='thread/resume')await agentCall(id,{action:'status'});
+      if(!automatic&&request.method!=='thread/resume')await agentCall(id,{action:'status'});
     }}
     send(frame);
   })().catch(error=>{console.error(error.message==='CODEX_NATIVE_OUTPUT_LIMIT'?'CODEX_NATIVE_OUTPUT_LIMIT':'CODEX_NATIVE_FRAME_REJECTED');child.kill('SIGKILL');});});
@@ -101,17 +127,17 @@ export async function managedCodex(control,send) {
     child,
     /** Переписывает только начало/возобновление thread; tool identity не берётся из model args. */
     async receive(input) {
-      const frame=structuredClone(input),p=frame.params??{};
+      const frame=automatic?enforceBrai(input,{cwd:adapter.project.repo_path,catalogue:automatic.catalogue,mcpCommand:automatic.mcpCommand,controlSocket:'/run/codeworks.sock',inspectSocket:automatic.inspectSocket?'/run/codeworks-inspect.sock':undefined}):structuredClone(input),p=frame.params??{};
       if(frame.method==='initialize')frame.params={...p,capabilities:{...p.capabilities,experimentalApi:true}};
       if(['thread/start','thread/resume','thread/fork'].includes(frame.method)) {
         if(p.cwd&&path.resolve(p.cwd)!==adapter.project.repo_path){send({id:frame.id,error:{code:-32602,message:'PROJECT_NOT_MANAGED'}});return;}
-        if(frame.method!=='thread/start') {
+        if(!automatic&&frame.method!=='thread/start') {
           const lookup=await socketCall(control,{action:'lookup_native',executor_id:'codex',native_session_id:p.threadId});
           if(!lookup.managed){send({id:frame.id,error:{code:-32602,message:'LEGACY_THREAD_NOT_MANAGED: start a new managed chat.'}});return;}
         }
-        frame.params={...p,cwd:adapter.project.repo_path,developerInstructions:[p.developerInstructions,instructions].filter(Boolean).join('\n'),sandbox:'read-only'};
+        if(!automatic)frame.params={...p,cwd:adapter.project.repo_path,developerInstructions:[p.developerInstructions,instructions].filter(Boolean).join('\n'),sandbox:'read-only'};
         delete frame.params.permissions;
-        if(frame.method==='thread/start')frame.params.dynamicTools=[...(p.dynamicTools??[]).filter(t=>t.name!==tool.name),{type:'function',...tool}];
+        if(!automatic&&frame.method==='thread/start')frame.params.dynamicTools=[...(p.dynamicTools??[]).filter(t=>t.name!==tool.name),{type:'function',...tool}];
         pending.set(frame.id,{method:frame.method,threadId:p.threadId});
       }
       if(frame.method==='turn/start') {
@@ -120,14 +146,122 @@ export async function managedCodex(control,send) {
       write(frame);
     },
     /** Kill PID namespace init; ни один native терминал не переживает завершение adapter. */
-    close() {child.kill('SIGKILL');},
+    close() {return new Promise(resolve=>{if(child.exitCode!==null||child.signalCode!==null){resolve();return;}child.once('close',resolve);child.kill('SIGKILL');});},
   };
+}
+
+
+/** Opens the existing physical native endpoint; closing this client never stops its daemon. */
+export async function connectUpstream(socket,send) {
+  const ws=new WebSocket('ws+unix://'+socket+':/',{maxPayload:OUTPUT_BYTES,perMessageDeflate:false});
+  await new Promise((resolve,reject)=>{ws.once('open',resolve);ws.once('error',reject);});
+  ws.on('message',data=>send(decodeNativeFrame(data.toString())));
+  return {receive(frame){if(!forwardNativeFrame(ws,frame))throw new Error('UPSTREAM_CLOSED');},close(){ws.close();}};
+}
+
+/** Waits only for socket readiness before dispatch; it never retries an RPC. */
+async function waitNativeUpstream(file,child) {
+  const deadline=Date.now()+3000;
+  while(Date.now()<deadline) {
+    if(child.exitCode!==null||child.signalCode!==null)throw new Error('NATIVE_UPSTREAM_EARLY_EXIT');
+    const ready=await new Promise(resolve=>{
+      const connection=createConnection(file);let settled=false;
+      const finish=ok=>{if(settled)return;settled=true;connection.destroy();resolve(ok);};
+      connection.setTimeout(250,()=>finish(false));
+      connection.once('connect',()=>finish(true));connection.once('error',()=>finish(false));
+    });
+    if(ready)return;
+    await new Promise(resolve=>setTimeout(resolve,50));
+  }
+  throw new Error('NATIVE_UPSTREAM_START_TIMEOUT');
+}
+
+/** Reaps only the child owned by this proxy, including a failed startup. */
+async function stopNativeUpstream(child) {
+  if(!child||child.exitCode!==null||child.signalCode!==null)return;
+  await new Promise(resolve=>{
+    const timer=setTimeout(()=>child.kill('SIGKILL'),2000);
+    child.once('close',()=>{clearTimeout(timer);resolve();});child.kill('SIGTERM');
+  });
+}
+
+/** Serves the ordinary Unix HTTP/WS transport; unknown HTTP and daemon shutdown pass through. */
+export async function universalMain(config,{openBrai,listenFd}={}) {
+  if(!path.isAbsolute(config.listen??'')||!path.isAbsolute(config.upstream??'')||config.listen===config.upstream)throw new Error('NATIVE_ROUTING_ENDPOINT_INVALID');
+  // The systemd socket owns the ordinary endpoint through proxy restarts.
+  const activated=listenFd??(process.env.LISTEN_PID===String(process.pid)&&Number(process.env.LISTEN_FDS)===1?3:undefined);
+  const upstreamChild=config.upstreamCommand?spawn(config.upstreamCommand[0],config.upstreamCommand.slice(1),{env:{...process.env,...config.upstreamEnv},stdio:['ignore','ignore','inherit']}):undefined;
+  upstreamChild?.once('error',error=>{console.error('NATIVE_UPSTREAM_START_FAILED: '+error.code);process.exitCode=1;});
+  if(upstreamChild) {
+    try{await waitNativeUpstream(config.upstream,upstreamChild);}
+    catch(error){await stopNativeUpstream(upstreamChild);throw error;}
+  }
+  const closeInspect=config.automatic?.inspectSocket?await startInspectSocket(config.automatic.inspectSocket,createNativePort({inspect:createReadonlyInspector({descriptor:config.automatic.descriptor,controlSocket:config.controlSocket}),controlSocket:config.controlSocket,adapterSocket:config.automatic.adapterSocket})):undefined;
+  const server=createServer((req,res)=>{
+    const upstream=httpRequest({socketPath:config.upstream,path:req.url,method:req.method,headers:req.headers},response=>{
+      res.writeHead(response.statusCode,response.headers);response.pipe(res);
+    });
+    upstream.on('error',()=>{res.writeHead(502);res.end('Native upstream unavailable');});req.pipe(upstream);
+  });
+  const owners=new Map();
+  const wss=new WebSocketServer({noServer:true,maxPayload:INPUT_BYTES,perMessageDeflate:false});
+  server.on('upgrade',(req,socket,head)=>{
+    if(req.url==='/daemon/shutdown') {
+      const native=createConnection(config.upstream);
+      native.on('connect',()=>{
+        const headers=[];
+        for(let i=0;i<req.rawHeaders.length;i+=2)headers.push(req.rawHeaders[i]+': '+req.rawHeaders[i+1]);
+        native.write(req.method+' '+req.url+' HTTP/'+req.httpVersion+'\r\n'+headers.join('\r\n')+'\r\n\r\n');
+        if(head.length)native.write(head);
+        socket.pipe(native);native.pipe(socket);
+      });
+      native.on('error',()=>socket.destroy());socket.on('error',()=>native.destroy());socket.on('close',()=>native.destroy());return;
+    }
+    if(req.url!=='/'){socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');return;}
+    wss.handleUpgrade(req,socket,head,ws=>wss.emit('connection',ws,req));
+  });
+  wss.on('connection',ws=>{
+    if(wss.clients.size>8){ws.close(1013);return;}
+    const owner=Symbol('connection');
+    const router=createNativeRouter({
+      roots:config.roots,
+      workspaceRoots:config.automatic?.descriptor?.project?.workspace_root?[config.automatic.descriptor.project.workspace_root]:[],
+      upstream:send=>connectUpstream(config.upstream,send),
+      brai:async send=>{const backend=await (openBrai?openBrai(send):managedCodex(config.controlSocket,send,{automatic:config.automatic}));backend.child?.once('close',()=>ws.close(1011,'Native backend closed'));return backend;},
+      claimThread(id){if(owners.has(id)&&owners.get(id)!==owner)return false;owners.set(id,owner);return true;},
+      releaseThreads(){for(const [id,current] of owners)if(current===owner)owners.delete(id);},
+      send:frame=>forwardNativeFrame(ws,frame),
+    });
+    let queue=Promise.resolve();
+    ws.on('message',data=>{
+      queue=queue.then(()=>router.receive(JSON.parse(data.toString()))).catch(error=>{
+        console.error('CODEX_ROUTING_REJECTED: '+error.message);ws.close(1011,'Native routing failed');
+      });
+    });
+    ws.on('close',()=>void router.close().catch(()=>{}));ws.on('error',()=>void router.close().catch(()=>{}));
+  });
+  if(activated===undefined)await reclaimSocket(config.listen);
+  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(activated===undefined?config.listen:{fd:activated},resolve);});
+  if(activated===undefined)await chmod(config.listen,0o600);
+  let stopping=false;
+  async function stop(){
+    if(stopping)return;stopping=true;
+    for(const client of wss.clients)client.terminate();
+    wss.close();server.close();await closeInspect?.();
+    await stopNativeUpstream(upstreamChild);
+    if(activated===undefined)await unlink(config.listen).catch(()=>{});
+  }
+  upstreamChild?.once('close',()=>{if(!stopping){console.error('NATIVE_UPSTREAM_CLOSED');void stop();process.exitCode=1;}});
+  process.once('SIGTERM',()=>void stop());process.once('SIGINT',()=>void stop());
+  return {server,wss,stop};
 }
 
 /** Обслуживает штатный Unix WebSocket endpoint desktop либо protocol stdio. */
 export async function main() {
   const control=process.env.CODEWORKS_CONTROL_SOCKET;if(!control)throw new Error('CONTROL_SOCKET_REQUIRED');
   const listen=process.argv.find(arg=>arg.startsWith('--listen='));
+  const routingFile=process.env.CODEWORKS_NATIVE_ROUTING;
+  if(routingFile){const config=JSON.parse(await readFile(routingFile,'utf8'));const cli=process.argv.indexOf('--native-cli');if(cli!==-1)await runNativeCli(config,process.argv.slice(cli+1));else await universalMain(config);return;}
   if(!listen) {
     const proxy=await managedCodex(control,frame=>process.stdout.write(JSON.stringify(frame)+'\n'));
     const input=createInterface({input:process.stdin});

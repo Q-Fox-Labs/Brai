@@ -15,13 +15,18 @@
     "runtime": [
       "services/codeworks-agent/codex.mjs",
       "services/codeworks-agent/hermes.mjs",
-      "services/codeworks-agent/package.json"
+      "services/codeworks-agent/package.json",
+      "services/codeworks-agent/codex-routing.mjs",
+      "services/codeworks-agent/codex-inspect.mjs"
     ],
     "checks": [
       "services/codeworks-agent/tests/admission.test.mjs",
       "services/codeworks-agent/tests/codex-real.mjs",
       "services/codeworks-agent/tests/native-client.mjs",
-      "services/codeworks-agent/tests/hermes-private.py"
+      "services/codeworks-agent/tests/hermes-private.py",
+      "services/codeworks-agent/codex-routing.test.mjs",
+      "services/codeworks-agent/codex-inspect.test.mjs",
+      "services/codeworks-agent/codex-transport.test.mjs"
     ]
   },
   "dependencies": [
@@ -63,20 +68,26 @@
   ],
   "commands": {
     "build": null,
-    "check": "node --test tests/admission.test.mjs"
+    "check": "node --test tests/admission.test.mjs codex-routing.test.mjs codex-inspect.test.mjs codex-transport.test.mjs"
   },
   "delivery": {
     "kind": "ready-files",
     "files": [
       "services/codeworks-agent/codex.mjs",
       "services/codeworks-agent/hermes.mjs",
-      "services/codeworks-agent/package.json"
+      "services/codeworks-agent/package.json",
+      "services/codeworks-agent/codex-routing.mjs",
+      "services/codeworks-agent/codex-inspect.mjs"
     ],
     "entrypoints": [
       "services/codeworks-agent/codex.mjs",
       "services/codeworks-agent/hermes.mjs"
     ],
-    "smokeImports": [],
+    "smokeImports": [
+      "services/codeworks-agent/codex.mjs",
+      "services/codeworks-agent/codex-routing.mjs",
+      "services/codeworks-agent/codex-inspect.mjs"
+    ],
     "systemRequirements": [
       "Node.js 24.22.1"
     ]
