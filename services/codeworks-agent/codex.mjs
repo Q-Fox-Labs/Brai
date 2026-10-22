@@ -217,7 +217,7 @@ export async function universalMain(config,{openBrai,listenFd}={}) {
       });
       native.on('error',()=>socket.destroy());socket.on('error',()=>native.destroy());socket.on('close',()=>native.destroy());return;
     }
-    if(!['/','/app-server'].includes(req.url)){socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');return;}
+    if(!['/','/app-server','/rpc'].includes(req.url)){socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');return;}
     wss.handleUpgrade(req,socket,head,ws=>wss.emit('connection',ws,req));
   });
   wss.on('connection',ws=>{

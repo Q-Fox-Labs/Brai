@@ -20,9 +20,11 @@ test('Universal Unix listener preserves HTTP, Admin WS and daemon shutdown; Brai
   const http=await new Promise((resolve,reject)=>{const req=request({socketPath:listen,path:'/unknown?q=1',method:'POST'},res=>{let body='';res.on('data',chunk=>body+=chunk);res.on('end',()=>resolve({code:res.statusCode,header:res.headers['x-native'],body}));});req.on('error',reject);req.end();});
   assert.deepEqual(http,{code:207,header:'yes',body:'POST /unknown?q=1'});
   const admin=new WebSocket('ws+unix://'+listen+':/');await once(admin,'open');const message=once(admin,'message');admin.send(JSON.stringify({id:7,method:'thread/start',params:{cwd:'/srv/projects/admin'}}));assert.deepEqual(JSON.parse((await message)[0]),{id:7,result:{native:'thread/start'}});admin.close();await once(admin,'close');
-  const desktop=new WebSocket('ws+unix://'+listen+':/app-server');await once(desktop,'open');
+  for(const route of ['/app-server','/rpc']) {
+  const desktop=new WebSocket('ws+unix://'+listen+':'+route);await once(desktop,'open');
   const desktopReply=once(desktop,'message');desktop.send(JSON.stringify({id:8,method:'thread/list',params:{}}));
   assert.deepEqual(JSON.parse((await desktopReply)[0]),{id:8,result:{native:'thread/list'}});desktop.close();await once(desktop,'close');
+  }
   const unknown=new WebSocket('ws+unix://'+listen+':/unregistered');
   const rejected=await new Promise((resolve,reject)=>{unknown.once('unexpected-response',(_req,response)=>{response.resume();resolve(response.statusCode);unknown.terminate();});unknown.once('open',()=>reject(Error('UNKNOWN_PATH_ACCEPTED')));unknown.on('error',()=>{});});
   assert.equal(rejected,404);
