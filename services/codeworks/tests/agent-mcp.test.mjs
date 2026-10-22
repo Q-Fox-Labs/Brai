@@ -17,8 +17,8 @@ const second='22222222-2222-4222-8222-222222222222';
 const session='33333333-3333-4333-8333-333333333333';
 const descriptor={socket:'/private/adapter.sock',key:'ab'.repeat(32)};
 
-async function fixture(t,call){
-  const server=createAgentMcpServer({controlSocket:'/private/control.sock',call});
+async function fixture(t,call,options={}){
+  const server=createAgentMcpServer({controlSocket:'/private/control.sock',call,...options});
   const client=new Client({name:'native-codex-test',version:'1.0.0'});
   const [clientTransport,serverTransport]=InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport),client.connect(clientTransport)]);
@@ -27,6 +27,7 @@ async function fixture(t,call){
 }
 const invoke=(client,args={action:'status'},meta={threadId:first,sessionId:session})=>client.callTool({name:'codeworks',arguments:args,...(meta===undefined?{}:{_meta:meta})});
 const failure=(result,code)=>{assert.equal(result.isError,true);assert.match(result.content[0].text,new RegExp('^'+code+':'));};
+const inspect=(client,args={argv:['pwd']},meta={threadId:first,sessionId:session})=>client.callTool({name:'inspect',arguments:args,...(meta===undefined?{}:{_meta:meta})});
 
 test('publishes existing file/patch/command schema without identity arguments',async t=>{
   const client=await fixture(t,async()=>assert.fail('listing must not contact host'));
@@ -34,6 +35,51 @@ test('publishes existing file/patch/command schema without identity arguments',a
   assert.deepEqual(tools,[JSON.parse(await readFile(new URL('../src/agent-tools.json',import.meta.url),'utf8'))]);
   assert.equal(tools[0].inputSchema.additionalProperties,false);
   for(const key of ['threadId','sessionId','native_session_id','controlSocket'])assert.equal(tools[0].inputSchema.properties[key],undefined);
+  failure(await inspect(client),'INVALID_ARGUMENT');
+});
+
+test('inspect is configured explicitly and exposes only bounded argv',async t=>{
+  const client=await fixture(t,async()=>assert.fail('listing contacted host'),{inspectSocket:'/private/inspect.sock'});
+  const {tools}=await client.listTools();
+  assert.deepEqual(tools.map(tool=>tool.name),['codeworks','inspect']);
+  assert.deepEqual(Object.keys(tools[1].inputSchema.properties),['argv']);
+  assert.equal(tools[1].inputSchema.additionalProperties,false);
+  assert.equal(tools[1].inputSchema.properties.argv.maxItems,128);
+  assert.equal(tools[1].inputSchema.properties.argv.items.maxLength,2048);
+  assert.throws(()=>createAgentMcpServer({controlSocket:'/c',inspectSocket:'relative'}),/CODEWORKS_INSPECT_SOCKET_INVALID/);
+});
+
+test('inspect reaches private diagnostic transport when Codeworks is unavailable',async t=>{
+  const calls=[];
+  const body={stdout:'source diagnostic\n',stderr:'',exit_code:0,root:'/source',source_fallback:true};
+  const client=await fixture(t,async(socket,request)=>{
+    calls.push({socket,request});
+    if(socket==='/private/control.sock')throw new Error('core unavailable');
+    assert.equal(socket,'/private/inspect.sock');return body;
+  },{inspectSocket:'/private/inspect.sock'});
+  failure(await invoke(client),'CODEWORKS_UNAVAILABLE');
+  const args={argv:['sh','-c','printf diagnostic']};
+  const result=await inspect(client,args,{threadId:second,sessionId:session});
+  assert.deepEqual(result.structuredContent,body);
+  assert.deepEqual(JSON.parse(result.content[0].text),body);
+  assert.deepEqual(calls,[{socket:'/private/control.sock',request:{action:'adapter',executor_id:'codex'}},{socket:'/private/inspect.sock',request:{action:'inspect',native_session_id:second,argv:args.argv}}]);
+});
+
+test('inspect rejects untrusted identity, unknown arguments and bounds before dispatch',async t=>{
+  const client=await fixture(t,async()=>assert.fail('invalid inspect reached transport'),{inspectSocket:'/private/inspect.sock'});
+  for(const meta of [{},{sessionId:session},{threadId:null},{threadId:'bad'}])failure(await inspect(client,{argv:['pwd']},meta),'NATIVE_THREAD_ID_REQUIRED');
+  for(const key of ['threadId','sessionId','native_session_id','socket','cwd','mode','input'])failure(await inspect(client,{argv:['pwd'],[key]:'untrusted'}),'INVALID_ARGUMENT');
+  for(const args of [{},{argv:[]},{argv:Array(129).fill('x')},{argv:['x'.repeat(2049)]},{argv:[1]},{argv:['bad\0arg']},{argv:Array(128).fill('x'.repeat(2048))}])failure(await inspect(client,args),'INVALID_ARGUMENT');
+});
+
+test('inspect errors are sanitized without contacting or retrying Codeworks',async t=>{
+  let calls=0;
+  const client=await fixture(t,async socket=>{
+    assert.equal(socket,'/private/inspect.sock');calls++;throw new Error('private '+descriptor.key);
+  },{inspectSocket:'/private/inspect.sock'});
+  const result=await inspect(client);
+  failure(result,'CODEWORKS_UNAVAILABLE');assert.equal(calls,1);
+  assert.equal(JSON.stringify(result).includes(descriptor.key),false);
 });
 
 test('signs native threadId, preserves arguments, and ignores native process sessionId',async t=>{
@@ -135,6 +181,11 @@ test('stdio executable uses each native call identity through real Unix host tra
     return {...descriptor,socket:adapterSocket};
   });
   await listen(adapterSocket,envelope=>{
+    if(envelope.action==='inspect'){
+      assert.equal(envelope.native_session_id,first);
+      assert.deepEqual(envelope.argv,['pwd']);
+      return {stdout:'/source',stderr:'',exit_code:0,root:'/source',source_fallback:true};
+    }
     assert.equal(envelope.signature,createHmac('sha256',Buffer.from(descriptor.key,'hex')).update(envelope.payload).digest('hex'));
     const payload=JSON.parse(envelope.payload);received.push(payload);
     if(payload.request.action==='batch')return {error:'private host error '+descriptor.key};
@@ -143,10 +194,12 @@ test('stdio executable uses each native call identity through real Unix host tra
   const client=new Client({name:'native-stdio-test',version:'1.0.0'});
   const transport=new StdioClientTransport({
     command:process.execPath,args:[fileURLToPath(new URL('../src/agent-mcp.mjs',import.meta.url))],
-    env:{CODEWORKS_CONTROL_SOCKET:controlSocket,CODEX_THREAD_ID:second},stderr:'pipe'
+    env:{CODEWORKS_CONTROL_SOCKET:controlSocket,CODEWORKS_INSPECT_SOCKET:adapterSocket,CODEX_THREAD_ID:second},stderr:'pipe'
   });
   t.after(()=>client.close());
   await client.connect(transport);
+  assert.deepEqual((await client.listTools()).tools.map(tool=>tool.name),['codeworks','inspect']);
+  assert.equal((await inspect(client)).structuredContent.source_fallback,true);
   assert.equal((await invoke(client)).structuredContent.thread,first);
   assert.equal((await invoke(client,{action:'status'},{threadId:second,sessionId:session})).structuredContent.thread,second);
   failure(await client.callTool({name:'codeworks',arguments:{action:'status'}}),'NATIVE_THREAD_ID_REQUIRED');

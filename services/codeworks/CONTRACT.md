@@ -74,7 +74,9 @@ Codex получает dynamic tool `codeworks` в настоящем app-server
 
 Frontend получает descriptor через `{action:"adapter",executor_id:"codex"}`, подписывает HMAC-SHA256 payload `{native_session_id:threadId,request:arguments}` и передаёт его существующему adapter socket. Descriptor/key не входят в ответ модели. Аргументы проверяются прежней схемой; host сохраняет first-write lifecycle, сериализацию своей session, fencing и права ОС. Срок ожидания и предел ответа socket transport — 180 секунд и 2 MiB. Ошибка/разрыв не отменяет принятую мутацию; автоматического повтора нет. После неизвестного результата проверяют status, commit/release повторяют с прежним request_key. Изоляцию native exec и подключение инструмента обеспечивает доверенный server launcher.
 
-Машинный источник инструмента — [agent-tools.json](src/agent-tools.json); MCP публикует его без изменений. Действия:
+При заданном launcher параметре `CODEWORKS_INSPECT_SOCKET` тот же MCP frontend дополнительно публикует `inspect` для readonly диагностики исходников, логов и состояния служб. Единственный аргумент — `argv`: от 1 до 128 строк длиной до 2048 символов, без NUL; весь запрос ограничен 64 KiB. Identity, socket и cwd модель не задаёт. Frontend отправляет в отдельный приватный socket `{action:"inspect",native_session_id:threadId,argv}` без обращения к Codeworks control/core и без повторов. Ответ `{stdout,stderr,exit_code,root,source_fallback}` передаётся без подмены: `root` показывает фактический источник, `source_fallback=true` явно отмечает исходную копию вместо области. Доверенный proxy выполняет команду в readonly namespace со скрытыми секретами, без PTY/stdin, ограничивает исполнение 10 секундами и суммарный вывод 1 MiB. Содержимое shell-команды не классифицируется; readonly обеспечивают права ОС. Без inspect socket инструмент отсутствует. Ошибки возвращают безопасный код, без внутренних сообщений и ключей.
+
+Машинный источник инструмента Codeworks — [agent-tools.json](src/agent-tools.json); MCP публикует его без изменений. Действия:
 
 | Действие | Поведение |
 | --- | --- |
