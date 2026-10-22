@@ -14,7 +14,8 @@
     "services/codeworks/src/worker.mjs",
     "services/codeworks/src/deployment-evidence.mjs",
     "services/codeworks/ci/pipeline.mjs",
-    "services/codeworks/src/verify-ci.mjs"
+    "services/codeworks/src/verify-ci.mjs",
+    "services/codeworks/src/agent-mcp.mjs"
   ],
   "inputs": {
     "build": [
@@ -63,7 +64,8 @@
       "services/codeworks/components/lock-inputs.mjs",
       "services/codeworks/migrations/005.sql",
       "services/codeworks/src/documentation.mjs",
-      "services/codeworks/migrations/006.sql"
+      "services/codeworks/migrations/006.sql",
+      "services/codeworks/src/agent-mcp.mjs"
     ],
     "checks": [
       "services/codeworks/components/cli.mjs",
@@ -95,7 +97,8 @@
       "services/codeworks/tests/cleanup.test.mjs",
       "services/codeworks/tests/documentation.test.mjs",
       "services/codeworks/tests/agent-release-poll.test.mjs",
-      "services/codeworks/tests/integration/agent-commit.test.mjs"
+      "services/codeworks/tests/integration/agent-commit.test.mjs",
+      "services/codeworks/tests/agent-mcp.test.mjs"
     ]
   },
   "dependencies": [],
@@ -122,7 +125,8 @@
       "services/codeworks/src/migrate.mjs",
       "services/codeworks/src/worker.mjs",
       "services/codeworks/src/deployment-evidence.mjs",
-      "services/codeworks/src/verify-ci.mjs"
+      "services/codeworks/src/verify-ci.mjs",
+      "services/codeworks/src/agent-mcp.mjs"
     ],
     "smokeImports": [
       "services/codeworks/src/contracts.mjs",
@@ -130,7 +134,8 @@
       "services/codeworks/src/github.mjs",
       "services/codeworks/src/release.mjs",
       "services/codeworks/src/deployment-evidence.mjs",
-      "services/codeworks/src/ci-verifier.mjs"
+      "services/codeworks/src/ci-verifier.mjs",
+      "services/codeworks/src/agent-mcp.mjs"
     ],
     "systemRequirements": [
       "Node.js 24.21.0",
