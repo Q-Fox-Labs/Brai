@@ -137,7 +137,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         """Поднять изолированные SQLite и native loop для каждого сценария."""
-        self.tmp = tempfile.TemporaryDirectory(dir=REPO / "tmp", prefix="telegram-test-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="telegram-test-")
         self.config = mod.Config("123", Path(self.tmp.name) / "brai-telegram", "/test/trusted.mjs",
                                  "/usr/local/bin/node", str(Path(self.tmp.name) / "results"))
         self.bridge = FakeBridge()
@@ -1373,8 +1373,79 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         text = "\n".join([self.markdown.replace(self.config.result_root, self.config.result_root + ".evil"), self.markdown.replace(self.config.result_root, "https://evil.test/files"),
                           self.markdown.replace(ARTIFACT, ARTIFACT.upper().replace("00000000", "AAAAAAAA", 1)),
                           "https://example.test/file.pdf", "[file](/local/file.pdf)"])
-        self.assertEqual(self.plugin.outgoing(text, platform="telegram"), text)
+        self.assertIsNone(self.plugin.outgoing(text, platform="telegram"))
         self.assertEqual(self.bridge.calls, [])
+
+    async def test_unchanged_long_reply_leaves_final_delivery_to_native_stream(self):
+        text = "## Условия\n\n" + ("**Описание** с _выделением_.\n" * 400)
+        self.assertIsNone(self.plugin.outgoing(text, platform="telegram", session_id="s", turn_id="t"))
+        self.assertEqual(self.bridge.calls, [])
+
+    async def test_raw_media_is_published_once_and_only_verified_copy_is_delivered(self):
+        path = Path(self.config.result_root) / ARTIFACT / self.bridge.file["filename"]
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"pdf")
+        self.bridge.file.update(localPath=str(path), markdown=f"[Отчёт](<{path}>)")
+        raw = "/profile/usercustom/userdata/files/exports/report.pdf"
+        message = f"Отчёт\nMEDIA:{raw}\nMEDIA:{raw}"
+        text = self.plugin.outgoing(message, platform="telegram", session_id="s", turn_id="t")
+        self.assertEqual(text.count("MEDIA:"), 1)
+        self.assertNotIn(raw, text)
+        self.assertIn(f'MEDIA:"{path}"', text)
+        self.assertEqual(self.bridge.calls[0][0], "files.publish")
+        first = self.bridge.calls[0][1]
+        self.assertEqual(first["path"], raw)
+        self.assertTrue(first["requestId"].startswith("tg-output:"))
+        self.plugin.outgoing(message, platform="telegram", session_id="s", turn_id="t")
+        self.assertEqual(first["requestId"], self.bridge.calls[-1][1]["requestId"])
+        self.plugin.outgoing(message, platform="telegram", session_id="s", turn_id="t2")
+        self.assertNotEqual(first["requestId"], self.bridge.calls[-1][1]["requestId"])
+
+    async def test_raw_published_file_is_fetched_instead_of_published_again(self):
+        path = Path(self.config.result_root) / ARTIFACT / "Файл [готов].pdf"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"pdf")
+        self.bridge.file.update(localPath=str(path), filename=path.name)
+        text = self.plugin.outgoing(f'MEDIA:"{path}"', platform="telegram")
+        self.assertEqual(text.strip(), f'MEDIA:"{path}"')
+        self.assertEqual([m for m, _ in self.bridge.calls], ["files.fetch"])
+
+    async def test_raw_media_failure_hides_path_and_never_retries(self):
+        self.bridge.fail = "files.publish"
+        raw = "/profile/usercustom/userdata/files/exports/report.pdf"
+        text = self.plugin.outgoing(f"MEDIA:{raw}", platform="telegram", session_id="s", turn_id="t")
+        self.assertIn("не отправлен", text)
+        self.assertNotIn(raw, text)
+        self.assertNotIn("MEDIA:", text)
+        self.assertEqual(len(self.bridge.calls), 1)
+
+    async def test_media_examples_in_code_do_not_publish(self):
+        text = '```text\nMEDIA:/profile/example.pdf\n```\n`MEDIA:"/profile/example.png"`'
+        self.assertIsNone(self.plugin.outgoing(text, platform="telegram", session_id="s", turn_id="t"))
+        self.assertEqual(self.bridge.calls, [])
+
+    async def test_three_export_files_are_published_as_distinct_verified_copies(self):
+        paths = ["/profile/exports/02-careers.png", "/profile/exports/03-pools.png", "/profile/exports/plan.pdf"]
+        results = []
+        for index, raw in enumerate(paths, 10):
+            artifact = f"00000000-0000-4000-8000-{index:012d}"
+            path = Path(self.config.result_root) / artifact / Path(raw).name
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"test")
+            results.append({**self.bridge.file, "artifactId": artifact, "filename": path.name,
+                            "localPath": str(path), "markdown": f"[Файл](<{path}>)"})
+        def publish(method, params, timeout=15):
+            self.bridge.calls.append((method, params))
+            self.assertEqual(method, "files.publish")
+            return results[paths.index(params["path"])]
+        with patch.object(self.bridge, "call", side_effect=publish):
+            text = self.plugin.outgoing("\n\n".join("MEDIA:" + path for path in paths),
+                                        platform="telegram", session_id="s", turn_id="t")
+        self.assertEqual(text.count("MEDIA:"), 3)
+        self.assertEqual(len(self.bridge.calls), 3)
+        for result in results:
+            self.assertIn(f'MEDIA:"{result["localPath"]}"', text)
+        self.assertNotIn("/profile/exports", text)
 
     async def test_outgoing_native_quoted_media_unicode_voice_and_dedup(self):
         path = Path(self.config.result_root) / ARTIFACT / "Голос сообщение.ogg"
@@ -1406,7 +1477,7 @@ class BridgeTests(unittest.TestCase):
 
     def setUp(self):
         """Создать временный исполняемый RPC fixture."""
-        self.tmp = tempfile.TemporaryDirectory(dir=REPO / "tmp", prefix="telegram-rpc-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="telegram-rpc-")
         self.entry = Path(self.tmp.name) / "rpc.py"
         self.config = mod.Config("123", Path(self.tmp.name), str(self.entry), sys.executable, ROOT)
 
