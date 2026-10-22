@@ -223,6 +223,65 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         return NS(effective_chat=NS(id=int(chat), type=chat_type), effective_user=NS(id=owner),
                   effective_message=NS(**message))
 
+    async def test_shared_group_participant_ingress_tools_and_cross_user_confirmation(self):
+        """Участник работает с общими данными; любой назначенный пользователь принимает кнопку один раз."""
+        self.config = replace(self.config, allowed_users=("456",))
+        await self.set_group_route()
+        self.native_context["HERMES_SESSION_USER_ID"] = "456"
+        self.entry.origin.user_id = "456"
+        await self.plugin.guard(self.update(owner=456), None)
+        event = self.event(media_urls=["/native-download/file.pdf"],
+            source=NS(platform="telegram", chat_type="supergroup", user_id="456", chat_id=GROUP))
+        self.assertEqual((await self.plugin.incoming(event))["action"], "rewrite")
+        self.assertEqual(self.plugin._owner_session(self.entry.session_id), self.entry)
+        data = await self.request()
+        self.assertEqual(self.plugin.tokens.pending()[0]["owner"], "123")
+        denied = FakeQuery(data, owner=789, chat=int(GROUP), chat_type="supergroup")
+        await self.plugin.callback(NS(callback_query=denied), None)
+        self.assertFalse(any(method == "actions.complete" for method, _ in self.bridge.calls))
+        query = FakeQuery(data, owner=123, chat=int(GROUP), chat_type="supergroup")
+        await self.plugin.callback(NS(callback_query=query), None)
+        await self.plugin.callback(NS(callback_query=query), None)
+        self.assertEqual(sum(method == "actions.complete" for method, _ in self.bridge.calls), 1)
+        self.assertEqual(len(self.injections), 1)
+
+    async def test_shared_participant_can_confirm_owner_button_and_revocation_blocks_context(self):
+        """Участник принимает кнопку владельца, а отозванный origin не продолжает работу."""
+        self.config = replace(self.config, allowed_users=("456",))
+        await self.set_group_route()
+        data = await self.request()
+        query = FakeQuery(data, owner=456, chat=int(GROUP), chat_type="supergroup")
+        await self.plugin.callback(NS(callback_query=query), None)
+        self.assertTrue(any(method == "actions.complete" for method, _ in self.bridge.calls))
+        self.native_context["HERMES_SESSION_USER_ID"] = "456"
+        self.entry.origin.user_id = "456"
+        self.plugin.config = replace(self.config, allowed_users=())
+        with self.assertRaises(mod.BridgeError):
+            self.plugin._tool_context({})
+        self.assertIsNone(self.plugin._owner_session(self.entry.session_id))
+        with self.assertRaises(sys.modules["telegram.ext"].ApplicationHandlerStop):
+            await self.plugin.guard(self.update(owner=456), None)
+
+    async def test_shared_users_config_rejects_wildcards_groups_duplicates_and_private_route(self):
+        """Дополнительный доступ задаётся только точными user ID для группового route."""
+        env = {"BRAI_TELEGRAM_OWNER_ID": "123", "BRAI_TELEGRAM_CHAT_ID": GROUP,
+            "BRAI_TELEGRAM_STATE_DIR": str(self.config.state_dir), "BRAI_HERMES_TRUSTED_ENTRY": self.config.entry,
+            "BRAI_HERMES_NODE_EXECUTABLE": self.config.node, "BRAI_TELEGRAM_RESULT_ROOT": self.config.result_root}
+        with patch.dict(os.environ, env, clear=True):
+            os.environ["TELEGRAM_ALLOWED_USERS"] = "456,789"
+            config = mod.Config.from_env()
+            self.assertTrue(all(config.allows(user) for user in ("123", "456", "789")))
+            self.assertFalse(config.allows("999"))
+            for invalid in ("*", GROUP, "456,456", "456, 789", "456,", "0", "0456",
+                            ",".join(str(i) for i in range(1, 22))):
+                os.environ["TELEGRAM_ALLOWED_USERS"] = invalid
+                with self.assertRaises(ValueError):
+                    mod.Config.from_env()
+            os.environ["TELEGRAM_ALLOWED_USERS"] = "456"
+            os.environ["BRAI_TELEGRAM_CHAT_ID"] = "123"
+            with self.assertRaises(ValueError):
+                mod.Config.from_env()
+
     async def test_group_owner_guard_precedes_native_command_media_callback_and_inline(self):
         await self.set_group_route()
         reached = []

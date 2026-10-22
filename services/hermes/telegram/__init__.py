@@ -50,6 +50,11 @@ class Config:
     node: str
     result_root: str
     chat_id: str = ""
+    allowed_users: tuple[str, ...] = ()
+
+    def allows(self, user_id):
+        """Разрешить владельца и назначенных участников общего группового профиля."""
+        return str(user_id) == self.owner or (self.chat.startswith("-") and str(user_id) in self.allowed_users)
 
     @property
     def chat(self):
@@ -61,11 +66,16 @@ class Config:
         """Проверить обязательные параметры; секреты остаются в окружении child process."""
         owner = os.environ.get("BRAI_TELEGRAM_OWNER_ID", "")
         chat = os.environ.get("BRAI_TELEGRAM_CHAT_ID", "")
+        allowed = os.environ.get("TELEGRAM_ALLOWED_USERS", "")
+        users = tuple(allowed.split(",")) if allowed else ()
         state = Path(os.environ.get("BRAI_TELEGRAM_STATE_DIR", ""))
         entry = os.environ.get("BRAI_HERMES_TRUSTED_ENTRY", "")
         node = os.environ.get("BRAI_HERMES_NODE_EXECUTABLE", "")
         root = os.environ.get("BRAI_TELEGRAM_RESULT_ROOT", "")
         if (not re.fullmatch(r"[1-9][0-9]*", owner)
+                or any(not re.fullmatch(r"[1-9][0-9]*", user) for user in users)
+                or len(users) > 20 or len(set(users)) != len(users)
+                or (any(user != owner for user in users) and not chat.startswith("-"))
                 or (chat and not re.fullmatch(r"-?[1-9][0-9]*", chat))
                 or (chat and not chat.startswith("-") and chat != owner) or not state.is_absolute()
                 or state.name != "brai-telegram" or not Path(entry).is_absolute()
@@ -73,7 +83,7 @@ class Config:
                 or not Path(root).is_absolute() or str(Path(root)) != root
                 or re.search(r"[\\<>?#%\x00-\x1f\x7f]", root)):
             raise ValueError("BRAI_TELEGRAM_CONFIG_INVALID")
-        return cls(owner, state, entry, node, root, chat)
+        return cls(owner, state, entry, node, root, chat, users)
 
 
 class Bridge:
@@ -540,7 +550,7 @@ class TelegramPlugin:
         message = getattr(update, "effective_message", None)
         user = getattr(update, "effective_user", None)
         if (self.closed or not self._route_matches(getattr(chat, "id", None), getattr(chat, "type", None))
-                or str(getattr(user, "id", "")) != self.config.owner or getattr(user, "is_bot", False)
+                or not self.config.allows(getattr(user, "id", "")) or getattr(user, "is_bot", False)
                 or getattr(message, "sender_chat", None) or getattr(message, "business_connection_id", None)):
             raise ApplicationHandlerStop
 
@@ -568,7 +578,7 @@ class TelegramPlugin:
         source = getattr(entry, "origin", None)
         return (getattr(entry, "session_id", None) == row["session_id"]
                 and _platform(getattr(source, "platform", None)) == "telegram"
-                and str(getattr(source, "user_id", "")) == row["owner"] == self.config.owner
+                and self.config.allows(getattr(source, "user_id", "")) and row["owner"] == self.config.owner
                 and str(getattr(source, "chat_id", "")) == row["chat_id"] == self.config.chat
                 and self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))
                 and str(getattr(source, "thread_id", None) or "") == row["thread_id"])
@@ -609,7 +619,7 @@ class TelegramPlugin:
         source = getattr(entry, "origin", None)
         if (getattr(entry, "session_id", None) != session_id
                 or _platform(getattr(source, "platform", None)) != "telegram"
-                or str(getattr(source, "user_id", "")) != self.config.owner
+                or not self.config.allows(getattr(source, "user_id", ""))
                 or not self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))):
             return None
         return entry
@@ -714,7 +724,7 @@ class TelegramPlugin:
         entry = self.session_store.lookup_by_session_key(session_key)
         source = getattr(entry, "origin", None)
         if (entry is not None and _platform(getattr(source, "platform", None)) == "telegram"
-                and str(getattr(source, "user_id", "")) == self.config.owner
+                and self.config.allows(getattr(source, "user_id", ""))
                 and self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))):
             await self._fail_stopped_agent_attempts(entry.session_id)
 
@@ -725,7 +735,7 @@ class TelegramPlugin:
             return None
         raw = getattr(event, "raw_message", None)
         if (not self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))
-                or str(getattr(source, "user_id", "")) != self.config.owner
+                or not self.config.allows(getattr(source, "user_id", ""))
                 or getattr(source, "is_bot", False) or getattr(raw, "sender_chat", None)
                 or getattr(raw, "business_connection_id", None)):
             return {"action": "skip", "reason": "brai-owner-route-only"}
@@ -794,7 +804,7 @@ class TelegramPlugin:
                 return None
             if (not self._route_matches(get_session_env("HERMES_SESSION_CHAT_ID"),
                                         get_session_env("HERMES_SESSION_CHAT_TYPE"))
-                    or get_session_env("HERMES_SESSION_USER_ID") != self.config.owner
+                    or not self.config.allows(get_session_env("HERMES_SESSION_USER_ID"))
                     or not all(isinstance(value, str) and value for value in (session_id, tool_call_id))):
                 raise BridgeError("IMAGE_CONTEXT_INVALID")
             path = Path(payload.get("image", ""))
@@ -864,7 +874,7 @@ class TelegramPlugin:
         context["session_id"] = dispatch_id or bound_id
         context["message_id"] = get_session_env("HERMES_SESSION_MESSAGE_ID")
         if (get_session_env("HERMES_SESSION_PLATFORM") != "telegram"
-                or get_session_env("HERMES_SESSION_USER_ID") != self.config.owner
+                or not self.config.allows(get_session_env("HERMES_SESSION_USER_ID"))
                 or not self._route_matches(get_session_env("HERMES_SESSION_CHAT_ID"),
                                            get_session_env("HERMES_SESSION_CHAT_TYPE"))
                 or not self._session_matches({**context, "owner": self.config.owner, "chat_id": self.config.chat})):
@@ -1213,7 +1223,7 @@ class TelegramPlugin:
         chat = getattr(message, "chat", None)
         if (self.closed or query is None
                 or not self._route_matches(getattr(chat, "id", None), getattr(chat, "type", None))
-                or str(getattr(getattr(query, "from_user", None), "id", "")) != self.config.owner
+                or not self.config.allows(getattr(getattr(query, "from_user", None), "id", ""))
                 or getattr(getattr(query, "from_user", None), "is_bot", False)
                 or getattr(message, "sender_chat", None)
                 or getattr(message, "business_connection_id", None)):
