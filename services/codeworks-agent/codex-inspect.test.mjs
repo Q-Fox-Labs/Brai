@@ -4,10 +4,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EventEmitter} from 'node:events';
 import {PassThrough} from 'node:stream';
-import {mkdtemp,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,writeFile,rm,unlink,stat} from 'node:fs/promises';
+import {createServer} from 'node:net';
+import {socketCall} from '../codeworks/src/agent-host.mjs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
-import {createReadonlyInspector,validateInspect} from './codex-inspect.mjs';
+import {createReadonlyInspector,validateInspect,createNativePort,startInspectSocket} from './codex-inspect.mjs';
 const identity='11111111-1111-4111-8111-111111111111';
 test('Inspect rejects foreign fields, cwd, missing identity, argv overflow and NUL',()=>{
   for(const request of [
@@ -53,4 +55,32 @@ test('Even escaped output fits the one MiB response budget',async()=>{
     assert.ok(Buffer.byteLength(JSON.stringify(result))<=1024*1024);
     assert.ok(result.stdout.length<300000);
   }finally{await f.close();}
+});
+
+test('Stable native port reconnects after core socket inode rotation without retrying a failed call',async()=>{
+ const dir=await mkdtemp(path.join(tmpdir(),'cw-port-')),control=path.join(dir,'control.sock'),adapter=path.join(dir,'adapter.sock'),port=path.join(dir,'proxy.sock');
+ let requests=0;const payload=JSON.stringify({native_session_id:identity,request:{action:'status'}}),envelope={payload,signature:'a'.repeat(64)};
+ async function endpoint(file,handler){
+  const server=createServer({allowHalfOpen:true},stream=>{let data='';stream.on('data',chunk=>data+=chunk);stream.on('end',()=>{stream.end(JSON.stringify(handler(JSON.parse(data)))+'\n');});stream.on('error',()=>{});});
+  await new Promise(resolve=>server.listen(file,resolve));return async()=>{await new Promise(resolve=>server.close(resolve));await unlink(file).catch(()=>{});};
+ }
+ let stopControl,stopAdapter,stopPort;
+ try {
+  stopControl=await endpoint(control,()=>({socket:adapter,key:'b'.repeat(64)}));
+  stopAdapter=await endpoint(adapter,request=>{requests++;return {generation:1,thread:JSON.parse(request.payload).native_session_id};});
+  stopPort=await startInspectSocket(port,createNativePort({controlSocket:control,adapterSocket:adapter,inspect:async request=>{validateInspect(request);return {stdout:'source diagnostic',source_fallback:true};}}));
+  const inode=(await stat(port)).ino;
+  assert.equal((await socketCall(port,{action:'adapter',executor_id:'codex'})).socket,'/run/codeworks.sock');
+  assert.deepEqual(await socketCall(port,envelope),{generation:1,thread:identity});
+  await stopAdapter();stopAdapter=undefined;await stopControl();stopControl=undefined;
+  await assert.rejects(socketCall(port,envelope));assert.equal(requests,1);
+  assert.equal((await socketCall(port,{action:'inspect',native_session_id:identity,argv:['pwd']})).source_fallback,true);
+  stopControl=await endpoint(control,()=>({socket:adapter,key:'c'.repeat(64)}));
+  stopAdapter=await endpoint(adapter,request=>{requests++;return {generation:2,thread:JSON.parse(request.payload).native_session_id};});
+  assert.equal((await socketCall(port,{action:'adapter',executor_id:'codex'})).key,'c'.repeat(64));
+  assert.deepEqual(await socketCall(port,envelope),{generation:2,thread:identity});
+  assert.equal((await stat(port)).ino,inode);assert.equal(requests,2);
+  await assert.rejects(socketCall(port,{action:'adapter',executor_id:'hermes'}),/NATIVE_PORT_REQUEST_INVALID/);
+  await assert.rejects(socketCall(port,{payload,signature:'invalid'}),/NATIVE_PORT_REQUEST_INVALID/);
+ }finally{await stopPort?.();await stopAdapter?.();await stopControl?.();await rm(dir,{recursive:true,force:true});}
 });

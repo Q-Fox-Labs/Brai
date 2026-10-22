@@ -11,7 +11,7 @@ import path from 'node:path';
 import WebSocket,{WebSocketServer} from 'ws';
 import {createNativeRouter,enforceBrai} from './codex-routing.mjs';
 import {createConnection} from 'node:net';
-import {createReadonlyInspector,startInspectSocket} from './codex-inspect.mjs';
+import {createReadonlyInspector,createNativePort,startInspectSocket} from './codex-inspect.mjs';
 import {socketCall,reclaimSocket} from '../codeworks/src/agent-host.mjs';
 import {sandboxArgs} from '../codeworks/src/agent-sandbox.mjs';
 const tool=JSON.parse(await readFile(new URL('../codeworks/src/agent-tools.json',import.meta.url),'utf8'));
@@ -75,12 +75,11 @@ async function nativeLaunch(control,automatic) {
   if(automatic) {
     aliases.push([automatic.nativeConfig,path.join(automatic.nativeHome,'config.toml')]);
     aliases.push([automatic.catalogue,automatic.catalogue],[automatic.runtimeRoot,automatic.runtimeRoot]);
-    if(existsSync(automatic.adapterSocket))aliases.push([automatic.adapterSocket,automatic.adapterSocket]);
     if(automatic.inspectSocket&&existsSync(automatic.inspectSocket))aliases.push([automatic.inspectSocket,'/run/codeworks-inspect.sock']);
   }
   const hidden=[adapter.state_root,...adapter.hidden_paths,...(automatic?[]:[adapter.project.repo_path,adapter.project.workspace_root]),...(e.hidden_paths??[])];
   const startup=automatic?['-c','model_catalog_json='+JSON.stringify(automatic.catalogue),'-c','features.shell_tool=false','-c','features.code_mode=false','-c','features.code_mode_only=false']:[];
-  const arguments_=[...sandboxArgs({cwd:adapter.project.repo_path,procExecutable:e.command[0],local:automatic?[]:(e.local_mounts??[]),hidden,aliases,bridge:adapter.bridge,socket:automatic&&existsSync(control)?control:undefined,profile,env:{...(e.env??{}),CODEX_HOME:profile.target,...(automatic?{CODEWORKS_CONTROL_SOCKET:'/run/codeworks.sock'}:{})}}),...e.command,...startup];
+  const arguments_=[...sandboxArgs({cwd:adapter.project.repo_path,procExecutable:e.command[0],local:automatic?[]:(e.local_mounts??[]),hidden,aliases,bridge:adapter.bridge,socket:automatic&&automatic.inspectSocket&&existsSync(automatic.inspectSocket)?automatic.inspectSocket:undefined,profile,env:{...(e.env??{}),CODEX_HOME:profile.target,...(automatic?{CODEWORKS_CONTROL_SOCKET:'/run/codeworks.sock'}:{})}}),...e.command,...startup];
   return {adapter,arguments_};
 }
 
@@ -160,6 +159,32 @@ export async function connectUpstream(socket,send) {
   return {receive(frame){if(!forwardNativeFrame(ws,frame))throw new Error('UPSTREAM_CLOSED');},close(){ws.close();}};
 }
 
+/** Waits only for socket readiness before dispatch; it never retries an RPC. */
+async function waitNativeUpstream(file,child) {
+  const deadline=Date.now()+3000;
+  while(Date.now()<deadline) {
+    if(child.exitCode!==null||child.signalCode!==null)throw new Error('NATIVE_UPSTREAM_EARLY_EXIT');
+    const ready=await new Promise(resolve=>{
+      const connection=createConnection(file);let settled=false;
+      const finish=ok=>{if(settled)return;settled=true;connection.destroy();resolve(ok);};
+      connection.setTimeout(250,()=>finish(false));
+      connection.once('connect',()=>finish(true));connection.once('error',()=>finish(false));
+    });
+    if(ready)return;
+    await new Promise(resolve=>setTimeout(resolve,50));
+  }
+  throw new Error('NATIVE_UPSTREAM_START_TIMEOUT');
+}
+
+/** Reaps only the child owned by this proxy, including a failed startup. */
+async function stopNativeUpstream(child) {
+  if(!child||child.exitCode!==null||child.signalCode!==null)return;
+  await new Promise(resolve=>{
+    const timer=setTimeout(()=>child.kill('SIGKILL'),2000);
+    child.once('close',()=>{clearTimeout(timer);resolve();});child.kill('SIGTERM');
+  });
+}
+
 /** Serves the ordinary Unix HTTP/WS transport; unknown HTTP and daemon shutdown pass through. */
 export async function universalMain(config,{openBrai,listenFd}={}) {
   if(!path.isAbsolute(config.listen??'')||!path.isAbsolute(config.upstream??'')||config.listen===config.upstream)throw new Error('NATIVE_ROUTING_ENDPOINT_INVALID');
@@ -167,7 +192,11 @@ export async function universalMain(config,{openBrai,listenFd}={}) {
   const activated=listenFd??(process.env.LISTEN_PID===String(process.pid)&&Number(process.env.LISTEN_FDS)===1?3:undefined);
   const upstreamChild=config.upstreamCommand?spawn(config.upstreamCommand[0],config.upstreamCommand.slice(1),{env:{...process.env,...config.upstreamEnv},stdio:['ignore','ignore','inherit']}):undefined;
   upstreamChild?.once('error',error=>{console.error('NATIVE_UPSTREAM_START_FAILED: '+error.code);process.exitCode=1;});
-  const closeInspect=config.automatic?.inspectSocket?await startInspectSocket(config.automatic.inspectSocket,createReadonlyInspector({descriptor:config.automatic.descriptor,controlSocket:config.controlSocket})):undefined;
+  if(upstreamChild) {
+    try{await waitNativeUpstream(config.upstream,upstreamChild);}
+    catch(error){await stopNativeUpstream(upstreamChild);throw error;}
+  }
+  const closeInspect=config.automatic?.inspectSocket?await startInspectSocket(config.automatic.inspectSocket,createNativePort({inspect:createReadonlyInspector({descriptor:config.automatic.descriptor,controlSocket:config.controlSocket}),controlSocket:config.controlSocket,adapterSocket:config.automatic.adapterSocket})):undefined;
   const server=createServer((req,res)=>{
     const upstream=httpRequest({socketPath:config.upstream,path:req.url,method:req.method,headers:req.headers},response=>{
       res.writeHead(response.statusCode,response.headers);response.pipe(res);
@@ -218,7 +247,7 @@ export async function universalMain(config,{openBrai,listenFd}={}) {
     if(stopping)return;stopping=true;
     for(const client of wss.clients)client.terminate();
     wss.close();server.close();await closeInspect?.();
-    if(upstreamChild&&!upstreamChild.killed)upstreamChild.kill('SIGTERM');
+    await stopNativeUpstream(upstreamChild);
     if(activated===undefined)await unlink(config.listen).catch(()=>{});
   }
   upstreamChild?.once('close',()=>{if(!stopping){console.error('NATIVE_UPSTREAM_CLOSED');void stop();process.exitCode=1;}});

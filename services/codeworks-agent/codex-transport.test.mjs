@@ -24,3 +24,14 @@ test('Universal Unix listener preserves HTTP, Admin WS and daemon shutdown; Brai
   assert.equal(spawned,0);
  }finally{await proxy.stop();for(const client of wss.clients)client.terminate();wss.close();await new Promise(resolve=>native.close(resolve));await rm(dir,{recursive:true,force:true});}
 });
+
+test('Owned native upstream becomes ready before the listener accepts RPC and is reaped on stop',async()=>{
+ const dir=await mkdtemp(path.join(os.tmpdir(),'cw-startup-')),upstream=path.join(dir,'up.sock'),listen=path.join(dir,'proxy.sock');
+ const code="const http=require('node:http');setTimeout(()=>http.createServer((req,res)=>res.end('native-ready')).listen(process.argv[1]),150)";
+ let proxy;
+ try {
+  proxy=await universalMain({listen,upstream,roots:['/srv/projects/brai-dev'],upstreamCommand:[process.execPath,'-e',code,upstream]});
+  const body=await new Promise((resolve,reject)=>{request({socketPath:listen,path:'/'},res=>{let text='';res.on('data',chunk=>text+=chunk);res.on('end',()=>resolve(text));}).on('error',reject).end();});
+  assert.equal(body,'native-ready');
+ }finally{await proxy?.stop();await rm(dir,{recursive:true,force:true});}
+});

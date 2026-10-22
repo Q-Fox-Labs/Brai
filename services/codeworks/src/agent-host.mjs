@@ -64,6 +64,7 @@ export async function createAgentHost(config,call) {
   }
   await mkdir(config.state_root,{recursive:true,mode:0o700});
   const lock=spawn('/usr/bin/flock',['-n','-E','75',path.join(config.state_root,'host.lock'),'/bin/sh','-c','printf locked; cat >/dev/null'],{stdio:['pipe','pipe','ignore']});
+  const lockClosed=new Promise(resolve=>lock.once('close',resolve));
   await new Promise((resolve,reject)=>{lock.stdout.once('data',()=>resolve());lock.once('error',()=>reject(new Error('HOST_LOCK_BUSY')));lock.once('close',()=>reject(new Error('HOST_LOCK_BUSY')));});
   const tool=JSON.parse(await readFile(path.join(bridge,'agent-tools.json'),'utf8'));
   const valid=new Ajv({strict:false}).compile(tool.inputSchema);
@@ -301,6 +302,45 @@ export async function createAgentHost(config,call) {
   for(const session of sessions.values())await expose(session);
   const adapterKeys=new Map();
   const nativeSessions=new Map([...sessions.values()].filter(s=>s.native_key).map(s=>[s.native_key,Promise.resolve(s)]));
+  const nativeQueues=new Map();
+  function nativeSerial(key,perform) {
+    const result=(nativeQueues.get(key)??Promise.resolve()).then(perform);
+    nativeQueues.set(key,result.catch(()=>{}));return result;
+  }
+  async function successor(session) {
+    let next=sessions.get(session.successor_id);
+    if(!next){
+      const id=session.successor_id;
+      next={id,project_id:session.project_id,executor_id:session.executor_id,kind:'feature',workspace_key:id,revoked:false};
+      await project(next);await persist(next);await expose(next);sessions.set(id,next);
+    }
+    return next;
+  }
+  async function released(session) {
+    if(!session.revoked||!session.workspace_id||!session.release_request)return false;
+    const args=session.release_request.args;
+    if(args.project_id!==session.project_id||args.workspace_id!==session.workspace_id||args.session_id!==session.id)return false;
+    const accepted=await call('request-release',args,session.executor_id);
+    if(accepted.workspace_id!==session.workspace_id)return false;
+    const {operation:op}=await call('operation-status',{project_id:session.project_id,operation_id:accepted.operation_id},session.executor_id);
+    return op.id===accepted.operation_id&&op.project_id===session.project_id&&op.workspace_id===session.workspace_id&&op.executor_id===session.executor_id&&op.kind==='request-release'&&
+      Object.entries(args).every(([key,value])=>op.request?.[key]===value)&&op.status==='succeeded'&&op.result?.state==='succeeded'&&op.result?.details?.cleanup?.removed===true;
+  }
+  async function nativeSession(key,request) {
+    let session=await nativeSessions.get(key);
+    while(session){
+      // AIDEV-NOTE: Старый ключ всегда принадлежит прежнему release, даже при живом новом writer.
+      if(request?.action==='request-release'&&request.request_key===session.release_request?.key)return session;
+      if(!session.successor_id)break;
+      session=await successor(session);
+    }
+    if(request&&session&&await released(session)){
+      // Сначала durable pointer: после сбоя отсутствующая fresh session достраивается с тем же ID.
+      const next={...session,successor_id:randomUUID()};await persist(next);session.successor_id=next.successor_id;
+      session=await successor(session);
+    }
+    return session;
+  }
   for(const executor of ['codex','hermes']) {
     const keyPath=config.adapter_keys?.[executor]??path.join(config.state_root,executor+'.key');let key;
     try{key=await readFile(keyPath);}catch(error){if(error.code!=='ENOENT')throw error;key=randomBytes(32);await writeFile(keyPath,key,{mode:0o600});}
@@ -314,20 +354,24 @@ export async function createAgentHost(config,call) {
       const {native_session_id:identity,request}=JSON.parse(envelope.payload);
       if(typeof identity!=='string'||!identity||identity.length>255)fail('ADAPTER_DENIED');
       const nativeKey=executor+':'+identity;
-      if(!nativeSessions.has(nativeKey))nativeSessions.set(nativeKey,(async()=>{
-        const id=randomUUID(),session={id,native_key:nativeKey,project_id:config.adapter_project_id,executor_id:executor,kind:'feature',workspace_key:id,revoked:false};
-        await project(session);await persist(session);sessions.set(id,session);await expose(session);return session;
-      })());
-      const session=await nativeSessions.get(nativeKey);
-      // Scoped socket queue also serializes same-thread calls arriving through different adapters.
-      return socketCall(path.join(config.state_root,session.id+'.sock'),request);
+      return nativeSerial(nativeKey,async()=>{
+        if(!nativeSessions.has(nativeKey))nativeSessions.set(nativeKey,(async()=>{
+          const id=randomUUID(),session={id,native_key:nativeKey,project_id:config.adapter_project_id,executor_id:executor,kind:'feature',workspace_key:id,revoked:false};
+          await project(session);await persist(session);await expose(session);sessions.set(id,session);return session;
+        })());
+        const session=await nativeSession(nativeKey,request);
+        return socketCall(path.join(config.state_root,session.id+'.sock'),request);
+      });
     });
     if(config.adapter_socket_mode)await chmod(path.join(config.state_root,executor+'.adapter.sock'),Number.parseInt(config.adapter_socket_mode,8));
   }
   await listen(path.join(config.state_root,'control.sock'),async request=>{
     if(request.action==='lookup_native'){
-      const session=await nativeSessions.get(request.executor_id+':'+request.native_session_id);
-      return {managed:!!session,...(session?{session_id:session.id,workspace_id:session.workspace_id??null,revoked:session.revoked}:{})};
+      const key=request.executor_id+':'+request.native_session_id;
+      return nativeSerial(key,async()=>{
+        const session=await nativeSession(key);
+        return {managed:!!session,...(session?{session_id:session.id,workspace_id:session.workspace_id??null,revoked:session.revoked}:{})};
+      });
     }
     if(request.action==='adapter') {
       if(!adapterKeys.has(request.executor_id))fail('ADAPTER_DENIED');
@@ -375,7 +419,8 @@ export async function createAgentHost(config,call) {
       await Promise.all([...processes.values()].map(p=>p.done));
       await Promise.all(servers.map(({server})=>new Promise(resolve=>server.close(resolve))));
       for(const {file} of servers)await unlink(file).catch(()=>{});
-      lock.stdin.end();
+      // EOF запускает завершение flock; только close подтверждает освобождение host lock.
+      lock.stdin.end();await lockClosed;
     },
   };
 }

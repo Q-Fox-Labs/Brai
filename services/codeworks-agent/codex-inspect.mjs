@@ -6,7 +6,7 @@ import {lstat,realpath,chmod,unlink} from 'node:fs/promises';
 import path from 'node:path';
 import {createHmac} from 'node:crypto';
 import {sandboxArgs,workspaceMounts} from '../codeworks/src/agent-sandbox.mjs';
-import {reclaimSocket} from '../codeworks/src/agent-host.mjs';
+import {reclaimSocket,socketCall} from '../codeworks/src/agent-host.mjs';
 
 const LIMIT=1024*1024,UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -78,6 +78,20 @@ export function createReadonlyInspector({descriptor,controlSocket,execute=spawn,
   };
 }
 
+/** One stable proxy port reconnects to the fixed core paths for each new call. */
+export function createNativePort({inspect,controlSocket,adapterSocket,call=socketCall}) {
+  return async request=>{
+    if(request?.action==='inspect')return inspect(request);
+    if(request?.action==='adapter'&&request.executor_id==='codex'&&Object.keys(request).length===2) {
+      const descriptor=await call(controlSocket,{action:'adapter',executor_id:'codex'});
+      if(descriptor.socket!==adapterSocket)throw new Error('ADAPTER_DESCRIPTOR_INVALID');
+      return {...descriptor,socket:'/run/codeworks.sock'};
+    }
+    if(request&&Object.keys(request).length===2&&typeof request.payload==='string'&&Buffer.byteLength(request.payload)<=131072&&typeof request.signature==='string'&&/^[0-9a-f]{64}$/.test(request.signature))return call(adapterSocket,{payload:request.payload,signature:request.signature});
+    throw new Error('NATIVE_PORT_REQUEST_INVALID');
+  };
+}
+
 /** Starts a bounded newline-JSON readonly port inside the existing proxy process. */
 export async function startInspectSocket(file,inspect) {
   const server=createServer({allowHalfOpen:true},stream=>{
@@ -86,11 +100,11 @@ export async function startInspectSocket(file,inspect) {
     stream.on('data',chunk=>{
       if(handled)return;
       data+=chunk;
-      if(Buffer.byteLength(data)>65536){stream.destroy();return;}
+      if(Buffer.byteLength(data)>262144){stream.destroy();return;}
       if(data.includes('\n')) {
         handled=true;
         void (async()=>{
-          try{if(data.trim().split('\n').length!==1)throw new Error('INSPECT_ONE_REQUEST_REQUIRED');stream.end(JSON.stringify(await inspect(JSON.parse(data)))+'\n');}
+          try{if(data.trim().split('\n').length!==1)throw new Error('INSPECT_ONE_REQUEST_REQUIRED');const request=JSON.parse(data);if(request.action==='inspect'&&Buffer.byteLength(data)>65536)throw new Error('INSPECT_REQUEST_LIMIT');stream.setTimeout(request.action==='inspect'?11000:180000,()=>stream.destroy());stream.end(JSON.stringify(await inspect(request))+'\n');}
           catch(error){stream.end(JSON.stringify({error:error.message})+'\n');}
         })();
       }

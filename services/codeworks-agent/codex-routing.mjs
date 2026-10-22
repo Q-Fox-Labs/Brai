@@ -76,6 +76,7 @@ export function createNativeRouter({roots,upstream,brai,send,resolvePath=canonic
     send(frame);
   }
   const upstreamReady=Promise.resolve(upstream(frame=>observe('admin',frame)));
+  void upstreamReady.catch(()=>{}); // The first receive reports the connection error without an unhandled rejection.
   async function requestAdmin(method,params) {
     const connection=await upstreamReady,id=prefix+(++sequence);
     const result=new Promise((resolve,reject)=>{
