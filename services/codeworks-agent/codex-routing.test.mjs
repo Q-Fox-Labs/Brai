@@ -12,6 +12,7 @@ test('Brai overrides every startup writer surface and keeps native identity',()=
   assert.equal(out.params.sandbox,'read-only');assert.equal(out.params.approvalPolicy,'never');
   for(const key of ['permissions','history','path','dynamicTools'])assert.equal(out.params[key],undefined);
   assert.deepEqual(Object.keys(out.params.config.mcp_servers),['workspace']);
+  assert.deepEqual(out.params.config.mcp_servers.workspace.omit_tools_from,['deferred','code_mode']);
   assert.equal(out.params.config['features.shell_tool'],false);
   assert.equal(out.params.developerInstructions,'use native writer');
   assert.equal(frame.params.permissions,'full');

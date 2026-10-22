@@ -35,7 +35,7 @@ export function enforceBrai(frame,{cwd,catalogue,mcpCommand,controlSocket,inspec
   if(frame.method==='thread/start'||frame.method==='turn/start')p.environments=[];
   if(frame.method==='turn/start')p.sandboxPolicy={type:'readOnly'};else p.sandbox='read-only';
   if(frame.method!=='turn/start') {
-    const config={approval_policy:'never',sandbox_mode:'read-only',model_catalog_json:catalogue,mcp_servers:{workspace:{command:mcpCommand[0],args:mcpCommand.slice(1),env:{CODEWORKS_CONTROL_SOCKET:controlSocket,...(inspectSocket?{CODEWORKS_INSPECT_SOCKET:inspectSocket}:{})},required:true}}};
+    const config={approval_policy:'never',sandbox_mode:'read-only',model_catalog_json:catalogue,mcp_servers:{workspace:{command:mcpCommand[0],args:mcpCommand.slice(1),env:{CODEWORKS_CONTROL_SOCKET:controlSocket,...(inspectSocket?{CODEWORKS_INSPECT_SOCKET:inspectSocket}:{})},required:true,omit_tools_from:['deferred','code_mode']}}};
     for(const feature of OFF_FEATURES)config['features.'+feature]=false;
     // AIDEV-NOTE: Do not merge arbitrary client MCP/config tables: they can install another writer.
     p.config=config;
