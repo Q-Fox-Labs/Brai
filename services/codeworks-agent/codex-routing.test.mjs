@@ -123,3 +123,21 @@ test('Managed workspace cwd and persisted threads use the same guarded Brai rout
     assert.equal(f.admin.some(x=>x.method==='thread/resume'),false);await f.router.close();
   }
 });
+
+test('Thread settings preserve model UI while clamping every native writer permission',()=>{
+  const out=enforceBrai({method:'thread/settings/update',params:{threadId:'t',cwd:'/foreign',approvalPolicy:'on-request',sandboxPolicy:{type:'dangerFullAccess'},permissions:'full',runtimeWorkspaceRoots:['/'],config:{x:1},model:'gpt-6.1-sol',effort:'high',disabledPluginIds:[]}},options);
+  assert.equal(out.params.cwd,options.cwd);assert.equal(out.params.approvalPolicy,'never');
+  assert.deepEqual(out.params.sandboxPolicy,{type:'readOnly'});
+  for(const key of ['permissions','runtimeWorkspaceRoots','config'])assert.equal(out.params[key],undefined);
+  assert.equal(out.params.model,'gpt-6.1-sol');assert.equal(out.params.effort,'high');assert.deepEqual(out.params.disabledPluginIds,[]);
+  const turn={method:'turn/settings/update',params:{threadId:'t',turnId:'u',model:'gpt-6.1-sol',effort:'high'}};
+  assert.deepEqual(enforceBrai(turn,options),turn);
+});
+test('Brai cannot invoke native thread shells, manual execution approval or new unreviewed thread controls',async()=>{
+  const f=fixture({cwd:'/repo/brai'});await init(f);
+  for(const method of ['thread/shellCommand','thread/approveGuardianDeniedAction','thread/futureWriter'])await f.router.receive({id:110,method,params:{threadId:'existing',command:'opaque'}});
+  assert.equal(f.frames.filter(x=>x.error).length,3);assert.equal(f.brai.length,0);await f.router.close();
+  const admin=fixture();await init(admin);
+  const frame={id:120,method:'thread/shellCommand',params:{threadId:'admin-thread',command:'opaque'}};
+  await admin.router.receive(frame);assert.deepEqual(admin.admin.at(-1),frame);await admin.router.close();
+});

@@ -4,7 +4,9 @@ import path from 'node:path';
 import {realpath} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 
-const SETTINGS=new Set(['thread/start','thread/resume','thread/fork','turn/start']);
+const SETTINGS=new Set(['thread/start','thread/resume','thread/fork','turn/start','thread/settings/update']);
+// Exact 0.163 client thread API; new endpoints require admission review before forwarding.
+const BRAI_THREAD_METHODS=new Set("thread/start thread/resume thread/fork thread/archive thread/delete thread/unsubscribe thread/increment_elicitation thread/decrement_elicitation thread/name/set thread/prediction/request thread/goal/set thread/goal/get thread/goal/clear thread/queue/add thread/queue/list thread/queue/update thread/queue/delete thread/queue/reorder thread/queue/start thread/metadata/update thread/attachment/add thread/attachment/list thread/attachmentOwner/list thread/attachment/remove thread/section/move thread/settings/update thread/memoryMode/set thread/unarchive thread/compact/start thread/backgroundTerminals/clean thread/backgroundTerminals/list thread/backgroundTerminals/terminate thread/revert thread/list thread/search thread/searchOccurrences thread/loaded/list thread/read thread/readState/update thread/turns/list thread/items/list thread/items/read thread/inject_items turn/start turn/settings/update turn/steer turn/interrupt thread/realtime/start thread/realtime/appendAudio thread/realtime/appendText thread/realtime/appendSpeech thread/realtime/stop thread/timeline/list thread/realtime/listVoices review/start mcpServerStatus/list".split(' '));
 const FS_READ=new Set(['fs/readFile','fs/readDirectory','fs/getMetadata','fs/watch','fs/unwatch']);
 const BLOCKED=new Set(['config/value/write','config/batchWrite','externalAgentConfig/import','environment/add','environment/update']);
 const OFF_FEATURES=['shell_tool','code_mode','code_mode_only','js_repl','js_repl_tools_only'];
@@ -33,8 +35,9 @@ export function enforceBrai(frame,{cwd,catalogue,mcpCommand,controlSocket,inspec
   delete p.permissions;delete p.runtimeWorkspaceRoots;delete p.environments;delete p.dynamicTools;delete p.history;delete p.path;delete p.config;
   delete p.sandboxPolicy;delete p.permissionProfile;delete p.additionalPermissions;
   if(frame.method==='thread/start'||frame.method==='turn/start')p.environments=[];
-  if(frame.method==='turn/start')p.sandboxPolicy={type:'readOnly'};else p.sandbox='read-only';
-  if(frame.method!=='turn/start') {
+  const policyUpdate=frame.method==='turn/start'||frame.method==='thread/settings/update';
+  if(policyUpdate)p.sandboxPolicy={type:'readOnly'};else p.sandbox='read-only';
+  if(!policyUpdate) {
     const config={approval_policy:'never',sandbox_mode:'read-only',model_catalog_json:catalogue,mcp_servers:{workspace:{command:mcpCommand[0],args:mcpCommand.slice(1),env:{CODEWORKS_CONTROL_SOCKET:controlSocket,...(inspectSocket?{CODEWORKS_INSPECT_SOCKET:inspectSocket}:{})},required:true,default_tools_approval_mode:'approve',omit_tools_from:['deferred','code_mode']}}};
     for(const feature of OFF_FEATURES)config['features.'+feature]=false;
     // AIDEV-NOTE: Do not merge arbitrary client MCP/config tables: they can install another writer.
@@ -138,6 +141,7 @@ export function createNativeRouter({roots,workspaceRoots=[],upstream,brai,send,r
         try{route=await routeThread(p.threadId);}catch(cause){error(frame.id,'THREAD_ROUTE_LOOKUP_FAILED: '+cause.message);return;}
       }
       if(route==='brai') {
+        if(!BRAI_THREAD_METHODS.has(frame.method)){error(frame.id,'BRAI_NATIVE_THREAD_CAPABILITY_DENIED');return;}
         if(p.threadId&&!claimThread(p.threadId)){error(frame.id,'THREAD_ALREADY_CONNECTED');return;}
         braiSeen=true;
         // AIDEV-NOTE: unsubscribe removes a subscriber, not the runtime. Never cold-copy a live writer.
