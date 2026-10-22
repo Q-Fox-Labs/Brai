@@ -425,14 +425,58 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, {"action": "rewrite", "text": "Текст\n\n" + self.markdown})
         self.assertEqual([args["requestId"] for method, args in self.bridge.calls], ["tg:123:42:0"] * 2)
 
-    async def test_publication_failure_or_limit_drops_event_and_notifies_owner(self):
+    async def test_publication_failure_preserves_native_album_and_caption(self):
         self.bridge.fail = "files.publish"
-        result = await self.plugin.incoming(self.event(media_urls=["/file.pdf"]))
-        self.assertEqual(result["action"], "skip")
-        self.assertIn("не принято", self.bot.sent[-1]["text"])
-        result = await self.plugin.incoming(self.event(media_urls=["/file.pdf"] * 11))
-        self.assertEqual(result["action"], "skip")
+        paths = ["/native-download/one.jpg", "/native-download/two.jpg"]
+        event = self.event(text="Прочитай оба изображения", media_urls=paths.copy(),
+                           media_types=["image/jpeg", "image/jpeg"])
+        with self.assertLogs(mod.__name__, level="WARNING") as logs:
+            result = await self.plugin.incoming(event)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn(event.text, result["text"])
+        self.assertIn("сохранение всех файлов в Brai не подтверждено", result["text"])
+        self.assertEqual(event.media_urls, paths)
+        self.assertEqual(event.media_types, ["image/jpeg", "image/jpeg"])
+        self.assertEqual(self.bot.sent, [])
         self.assertEqual(len(self.bridge.calls), 1)
+        self.assertIn("code=TIMEOUT count=2", logs.output[0])
+        self.assertNotIn("/native-download", logs.output[0])
+
+    async def test_partial_publication_preserves_descriptor_and_all_native_files(self):
+        original_call = self.bridge.call
+        def call(method, params, timeout=15):
+            if method == "files.publish" and params["path"].endswith("two.jpg"):
+                self.bridge.calls.append((method, params))
+                raise mod.BridgeError("RPC_REJECTED")
+            return original_call(method, params, timeout)
+        self.bridge.call = call
+        event = self.event(media_urls=["/native-download/one.jpg", "/native-download/two.jpg"])
+        with self.assertLogs(mod.__name__, level="WARNING"):
+            result = await self.plugin.incoming(event)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn(self.markdown, result["text"])
+        self.assertIn("не подтверждено", result["text"])
+        self.assertEqual(len(event.media_urls), 2)
+        self.assertEqual([args["requestId"] for method, args in self.bridge.calls],
+                         ["tg:123:42:0", "tg:123:42:1"])
+        self.assertEqual(self.bot.sent, [])
+
+    async def test_malformed_publisher_result_does_not_discard_native_file(self):
+        self.bridge.file["markdown"] = "[untrusted](https://example.test)"
+        event = self.event(media_urls=["/native-download/one.jpg"])
+        with self.assertLogs(mod.__name__, level="WARNING"):
+            result = await self.plugin.incoming(event)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertNotIn("https://example.test", result["text"])
+        self.assertEqual(event.media_urls, ["/native-download/one.jpg"])
+
+    async def test_attachment_limit_still_rejects_before_publication(self):
+        with self.assertLogs(mod.__name__, level="WARNING"):
+            result = await self.plugin.incoming(self.event(media_urls=["/file.pdf"] * 11))
+        self.assertEqual(result["action"], "skip")
+        self.assertEqual(result["reason"], "brai-file-input-invalid")
+        self.assertEqual(self.bridge.calls, [])
+        self.assertIn("десяти", self.bot.sent[-1]["text"])
 
     async def test_wrong_message_foreign_sender_group_forgery_do_not_complete(self):
         data = await self.request()
