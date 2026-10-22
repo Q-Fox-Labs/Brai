@@ -1,0 +1,170 @@
+{
+  "formatVersion": 1,
+  "id": "local-ai",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev",
+    "prod"
+  ],
+  "executableSources": [
+    "services/local-ai/runners/gigaam/runner.py",
+    "services/local-ai/runners/resources/observe.py",
+    "services/local-ai/runners/silero/runner.py",
+    "services/local-ai/src/main.mjs",
+    "services/local-ai/src/storage/migrate.ts"
+  ],
+  "inputs": {
+    "build": [
+      "services/local-ai/tsconfig.json"
+    ],
+    "runtime": [
+      "services/local-ai/contracts/index.mjs",
+      "services/local-ai/migrations/001.sql",
+      "services/local-ai/package.json",
+      "services/local-ai/profiles/embeddinggemma2_llama_cpp.json",
+      "services/local-ai/profiles/gigaam_pytorch.json",
+      "services/local-ai/profiles/llama_cpp.json",
+      "services/local-ai/profiles/silero_pytorch.json",
+      "services/local-ai/release.json",
+      "services/local-ai/runners/gigaam/__init__.py",
+      "services/local-ai/runners/gigaam/diagnose_quality.py",
+      "services/local-ai/runners/gigaam/longform.py",
+      "services/local-ai/runners/gigaam/measure_longform.py",
+      "services/local-ai/runners/gigaam/measure_short.py",
+      "services/local-ai/runners/gigaam/model_manifest.json",
+      "services/local-ai/runners/gigaam/openrpc.json",
+      "services/local-ai/runners/gigaam/prepare.py",
+      "services/local-ai/runners/gigaam/prepare_vad.py",
+      "services/local-ai/runners/gigaam/rpc.py",
+      "services/local-ai/runners/gigaam/runner.py",
+      "services/local-ai/runners/gigaam/schemas.json",
+      "services/local-ai/runners/gigaam/vad_manifest.json",
+      "services/local-ai/runners/llama_cpp/measure.mjs",
+      "services/local-ai/runners/llama_cpp/verify.mjs",
+      "services/local-ai/runners/resources/observe.py",
+      "services/local-ai/runners/resources/resource-report.schema.json",
+      "services/local-ai/runners/silero/openrpc.json",
+      "services/local-ai/runners/silero/runner.py",
+      "services/local-ai/runners/silero/schemas.json",
+      "services/local-ai/schemas/facts.schema.json",
+      "services/local-ai/schemas/messages.schema.json",
+      "services/local-ai/src/adapters/artifacts/index.ts",
+      "services/local-ai/src/adapters/history/index.ts",
+      "services/local-ai/src/catalog/index.ts",
+      "services/local-ai/src/errors.ts",
+      "services/local-ai/src/install/huggingface.ts",
+      "services/local-ai/src/lifecycle/index.ts",
+      "services/local-ai/src/lifecycle/manager.ts",
+      "services/local-ai/src/lifecycle/runtime-factory.ts",
+      "services/local-ai/src/main.mjs",
+      "services/local-ai/src/ports.ts",
+      "services/local-ai/src/storage/migrate.ts",
+      "services/local-ai/src/storage/postgres.ts",
+      "services/local-ai/src/transport/index.ts",
+      "services/local-ai/src/types.ts"
+    ],
+    "checks": [
+      "services/local-ai/release/tests/test_release_helpers.py",
+      "services/local-ai/runners/gigaam/test_audio_boundary.py",
+      "services/local-ai/runners/gigaam/test_diagnose_quality.py",
+      "services/local-ai/runners/gigaam/test_longform.py",
+      "services/local-ai/runners/gigaam/test_measure_longform.py",
+      "services/local-ai/runners/gigaam/test_measure_short.py",
+      "services/local-ai/runners/gigaam/test_prepare_vad.py",
+      "services/local-ai/runners/gigaam/test_rpc.py",
+      "services/local-ai/runners/gigaam/test_runner_diagnostics.py",
+      "services/local-ai/runners/gigaam/test_runner_dispatch.py",
+      "services/local-ai/runners/resources/test_observe.py",
+      "services/local-ai/runners/silero/test_runner.py",
+      "services/local-ai/tests/benchmarks/baseline.mjs",
+      "services/local-ai/tests/catalog.test.mjs",
+      "services/local-ai/tests/contracts.test.mjs",
+      "services/local-ai/tests/gemma-lifecycle.test.mjs",
+      "services/local-ai/tests/install.test.mjs",
+      "services/local-ai/tests/integration/artifacts-peer.mjs",
+      "services/local-ai/tests/integration/artifacts.test.mjs",
+      "services/local-ai/tests/integration/assembly.test.mjs",
+      "services/local-ai/tests/integration/history.test.mjs",
+      "services/local-ai/tests/integration/install-acceptance-helper.mjs",
+      "services/local-ai/tests/integration/install-acceptance-helper.test.mjs",
+      "services/local-ai/tests/integration/install-acceptance.test.mjs",
+      "services/local-ai/tests/integration/install-huggingface.test.mjs",
+      "services/local-ai/tests/integration/lifecycle.test.mjs",
+      "services/local-ai/tests/integration/storage.test.mjs",
+      "services/local-ai/tests/integration/transport.test.mjs",
+      "services/local-ai/tests/lifecycle.test.mjs",
+      "services/local-ai/tests/multimodal.test.mjs",
+      "services/local-ai/tests/portable-runtime.test.py",
+      "services/local-ai/tests/storage.test.mjs",
+      "services/local-ai/tests/synthesize.test.mjs",
+      "services/local-ai/tests/transport.test.mjs"
+    ]
+  },
+  "dependencies": [],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "ready-files",
+    "files": [
+      "services/local-ai/contracts",
+      "services/local-ai/dist",
+      "services/local-ai/migrations",
+      "services/local-ai/package.json",
+      "services/local-ai/profiles",
+      "services/local-ai/release.json",
+      "services/local-ai/runners/gigaam/__init__.py",
+      "services/local-ai/runners/gigaam/longform.py",
+      "services/local-ai/runners/gigaam/model_manifest.json",
+      "services/local-ai/runners/gigaam/openrpc.json",
+      "services/local-ai/runners/gigaam/prepare.py",
+      "services/local-ai/runners/gigaam/prepare_vad.py",
+      "services/local-ai/runners/gigaam/requirements.lock",
+      "services/local-ai/runners/gigaam/rpc.py",
+      "services/local-ai/runners/gigaam/runner.py",
+      "services/local-ai/runners/gigaam/schemas.json",
+      "services/local-ai/runners/gigaam/vad_manifest.json",
+      "services/local-ai/runners/llama_cpp/verify.mjs",
+      "services/local-ai/runners/resources/observe.py",
+      "services/local-ai/runners/resources/resource-report.schema.json",
+      "services/local-ai/runners/silero/openrpc.json",
+      "services/local-ai/runners/silero/runner.py",
+      "services/local-ai/runners/silero/schemas.json",
+      "services/local-ai/schemas",
+      "services/local-ai/src/main.mjs"
+    ],
+    "entrypoints": [
+      "services/local-ai/src/main.mjs",
+      "services/local-ai/runners/gigaam/runner.py",
+      "services/local-ai/runners/silero/runner.py",
+      "services/local-ai/dist/storage/migrate.js"
+    ],
+    "smokeImports": [
+      "services/local-ai/contracts/index.mjs",
+      "services/local-ai/src/main.mjs"
+    ],
+    "systemRequirements": [
+      "Node.js 24.21.0",
+      "Pinned native/Python/FFmpeg runtime from services/local-ai/release.json; supplied by Local AI installer",
+      "Model weights and lifecycle state external, only catalog/install/runtime manage models"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "local-ai",
+      "local-ai-migrate",
+      "brai-local-ai-operation3-production.service"
+    ],
+    "migrations": [
+      "services/local-ai/migrations"
+    ],
+    "health": "NATS brai.local_ai.v1.status; components database/nats/executables/weights ready"
+  },
+  "npm": {
+    "workspaces": [
+      "services/local-ai"
+    ]
+  }
+}

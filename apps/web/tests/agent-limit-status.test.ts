@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { createElement, type ComponentType } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import * as helpers from "../lib/agent/limits.ts";
+import { unreadFinal } from "../lib/agent/read-state.ts";
 
 const require = createRequire(import.meta.url), ts = require("typescript") as typeof import("typescript");
 const uiCache = new Map<string, Record<string, unknown>>();
@@ -23,7 +24,7 @@ function ui(name: string): Record<string, unknown> {
 }
 const compiled = ts.transpileModule(readFileSync(new URL("../app/agent/sidebar.tsx", import.meta.url), "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
 const module = { exports: {} as { default: ComponentType<Record<string, unknown>> } };
-new Function("require", "module", "exports", compiled)((name: string) => name === "../../lib/agent/limits" ? helpers : name.startsWith("@/components/ui/") ? ui(name) : require(name), module, module.exports);
+new Function("require", "module", "exports", compiled)((name: string) => name === "../../lib/agent/limits" ? helpers : name === "../../lib/agent/read-state" ? { unreadFinal } : name.startsWith("@/components/ui/") ? ui(name) : require(name), module, module.exports);
 
 function render(state: string) {
   const noop = () => {};

@@ -1,0 +1,52 @@
+{
+  "formatVersion": 1,
+  "id": "instaloader",
+  "type": "library",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [],
+  "inputs": {
+    "build": [],
+    "runtime": [
+      "dependencies/instaloader/Dockerfile",
+      "dependencies/instaloader/requirements.txt",
+      "dependencies/instaloader/compose.yml"
+    ],
+    "checks": []
+  },
+  "dependencies": [],
+  "commands": {
+    "build": null,
+    "check": null
+  },
+  "delivery": {
+    "kind": "ready-files",
+    "files": [
+      "dependencies/instaloader/compose.yml",
+      "dependencies/instaloader/requirements.txt",
+      "dependencies/instaloader/Dockerfile"
+    ],
+    "entrypoints": [],
+    "smokeImports": [],
+    "systemRequirements": [
+      "External Python OCI CLI built in the common CI from hash-locked requirements and immutable Python base; exact GHCR digest is recorded by release composition",
+      "Python3.13 and Instaloader4.15.3 belong to the CI-built external OCI image; offline --help is required before publication"
+    ],
+    "command": [
+      "instaloader"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "instaloader"
+    ],
+    "migrations": [],
+    "health": null
+  },
+  "npm": {
+    "workspaces": []
+  },
+  "reason": "Pinned external on-demand CLI recipe; CI supplies its real Python runtime image, while ordinary library files alone are not runnable"
+}

@@ -1,8 +1,8 @@
 // ABOUTME: Определяет DTO и внутренние записи ядра local-ai.
 // ABOUTME: Локальные пути принадлежат установке и никогда не попадают в wire DTO.
-export type OperationKind = 'embed' | 'transcribe';
+export type OperationKind = 'embed' | 'transcribe' | 'synthesize';
 export type InputKind = 'text' | 'image_artifact' | 'audio_artifact' | 'video_artifact';
-export type OutputKind = 'vector' | 'transcription';
+export type OutputKind = 'vector' | 'transcription' | 'audio_artifact';
 export type InvocationPurpose = 'query' | 'document' | 'symmetric';
 export type ServiceErrorCode =
   | 'INVALID_ARGUMENT' | 'MODEL_NOT_FOUND' | 'MODEL_NOT_INSTALLED' | 'UNSUPPORTED_OPERATION'
@@ -20,6 +20,7 @@ export type ModelFilter = CatalogFilter & { ready?: boolean };
 export type ModelParameters = {
   embed: { purpose: InvocationPurpose[] } | null;
   transcribe: Record<string, never> | null;
+  synthesize?: { voices: ('eugene')[] } | null;
 };
 export type HardwareRequirements = { cpuArchitectures: string[]; minMemoryBytes: number | null; accelerator: string | null };
 export type ProfileLimits = {
@@ -88,3 +89,6 @@ export type EmbedInput = { model: ModelSelector; texts?: readonly string[]; inpu
 export type EmbedOutput = { vectors: readonly (readonly number[])[] };
 export type TranscribeInput = { model: ModelSelector; audioPath: string };
 export type TranscribeOutput = { text: string; segments?: readonly { startSeconds: number; endSeconds: number; text: string }[] };
+
+export type SynthesizeInput = { model: ModelSelector; text: string; voice: 'eugene' };
+export type SynthesizeOutput = { audio: Uint8Array; mimeType: 'audio/ogg' };

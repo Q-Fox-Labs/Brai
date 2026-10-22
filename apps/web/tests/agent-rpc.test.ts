@@ -12,7 +12,7 @@ function adapter(request: RequestPort, unavailable = false) {
   const source = readFileSync(new URL("../server/agent-http.ts", import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const module = { exports: {} as { rpc(command: Command): Promise<unknown> } };
-  const ports: Record<string, unknown> = { "./auth": {}, "../lib/agent/stream": {}, "./gateway": { GatewayError: class extends Error {}, natsConnection: async () => { if (unavailable) throw new Error("offline"); return { request }; } } };
+  const ports: Record<string, unknown> = { "./auth": {}, "../lib/agent/stream": {}, "./web-config": { disabledAgentResponse: () => null }, "./gateway": { GatewayError: class extends Error {}, natsConnection: async () => { if (unavailable) throw new Error("offline"); return { request }; } } };
   new Function("require", "module", "exports", compiled)((name: string) => ports[name] ?? require(name), module, module.exports);
   return module.exports.rpc;
 }

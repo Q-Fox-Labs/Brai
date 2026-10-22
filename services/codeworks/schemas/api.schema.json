@@ -1,0 +1,1480 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.dev/codeworks/api.schema.json",
+  "definitions": {
+    "writer": {
+      "type": "object",
+      "properties": {
+        "executor_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "enum": [
+            "active",
+            "quiesced",
+            "committing"
+          ]
+        }
+      },
+      "required": [
+        "executor_id",
+        "session_id",
+        "epoch",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    "project": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "repo_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "common_dir": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_root": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "allowed_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^[^\\u0000-\\u001f]+$"
+          },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "documentation_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "uniqueItems": true,
+          "maxItems": 128
+        },
+        "excluded_paths": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "^[^\\u0000-\\u001f]+$"
+          },
+          "minItems": 0,
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "executors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "minItems": 1,
+          "uniqueItems": true,
+          "maxItems": 32
+        },
+        "git_flow": {
+          "type": "object",
+          "properties": {
+            "feature_base": {
+              "const": "refs/remotes/origin/dev"
+            },
+            "hotfix_base": {
+              "const": "refs/remotes/origin/main"
+            },
+            "feature_prefix": {
+              "const": "feature/"
+            },
+            "hotfix_prefix": {
+              "const": "hotfix/"
+            }
+          },
+          "required": [
+            "feature_base",
+            "hotfix_base",
+            "feature_prefix",
+            "hotfix_prefix"
+          ],
+          "additionalProperties": false
+        },
+        "preparer_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "node_version": {
+          "const": "24.21.0"
+        },
+        "platform": {
+          "enum": [
+            "linux-x64",
+            "linux-arm64"
+          ]
+        },
+        "github": {
+          "type": "object",
+          "properties": {
+            "repository": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            },
+            "required_checks": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255
+                  },
+                  "app_id": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "name",
+                  "app_id"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "ci": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "check_name",
+                "app_id",
+                "workflow_sha256",
+                "recipe_sha256"
+              ],
+              "properties": {
+                "check_name": {
+                  "const": "Codeworks components"
+                },
+                "app_id": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "workflow_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "recipe_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "reuse_public_key": {
+                  "type": "string",
+                  "minLength": 40,
+                  "maxLength": 256
+                }
+              }
+            }
+          },
+          "required": [
+            "repository",
+            "required_checks"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "repo_path",
+        "common_dir",
+        "workspace_root",
+        "allowed_paths",
+        "excluded_paths",
+        "executors",
+        "git_flow",
+        "preparer_path",
+        "node_version",
+        "platform"
+      ],
+      "additionalProperties": false
+    },
+    "project.register": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "$ref": "#/definitions/project"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "additionalProperties": false
+    },
+    "project.get": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        }
+      },
+      "required": [
+        "project_id"
+      ],
+      "additionalProperties": false
+    },
+    "prepare-write": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "kind": {
+          "enum": [
+            "feature",
+            "hotfix",
+            "promotion"
+          ]
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "element_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "move_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "evidence_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "project_id",
+        "idempotency_key",
+        "workspace_key",
+        "kind",
+        "session_id"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "promotion"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "commit_sha",
+              "evidence_id"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "commit_sha"
+                  ]
+                },
+                {
+                  "required": [
+                    "evidence_id"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "status": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "project_id",
+        "workspace_id"
+      ],
+      "additionalProperties": false
+    },
+    "attach-or-transfer": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "expected_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mode": {
+          "enum": [
+            "attach",
+            "quiesce"
+          ]
+        },
+        "writes_stopped": {
+          "const": true
+        },
+        "move_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "project_id",
+        "idempotency_key",
+        "workspace_id",
+        "session_id",
+        "expected_epoch",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "request-release": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "expected_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "target": {
+          "enum": [
+            "dev",
+            "prod"
+          ]
+        },
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      },
+      "required": [
+        "project_id",
+        "idempotency_key",
+        "workspace_id",
+        "session_id",
+        "expected_epoch",
+        "target",
+        "commit_sha"
+      ],
+      "additionalProperties": false
+    },
+    "operation-status": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "project_id",
+        "operation_id"
+      ],
+      "additionalProperties": false
+    },
+    "accepted": {
+      "type": "object",
+      "properties": {
+        "operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "workspace_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "workspace_id"
+      ],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "INVALID_ARGUMENT",
+            "NOT_FOUND",
+            "FORBIDDEN",
+            "CONFLICT",
+            "WRITER_BUSY",
+            "OWNERSHIP_CONFLICT",
+            "DEPENDENCIES_INCOMPATIBLE",
+            "GIT_FAILED",
+            "BUSY",
+            "INTERNAL",
+            "GITHUB_UNAVAILABLE",
+            "CHECKS_BLOCKED",
+            "TARGET_CHANGED",
+            "MERGE_CONFLICT",
+            "PRODUCTION_BASE_MISMATCH",
+            "VERIFIED_DEV_REQUIRED"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "additionalProperties": false
+    },
+    "workspace": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "element_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "feature",
+            "hotfix",
+            "promotion"
+          ]
+        },
+        "base_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "base_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "preparation_state": {
+          "enum": [
+            "intent",
+            "branch",
+            "checkout",
+            "dependencies",
+            "ready",
+            "failed"
+          ]
+        },
+        "writer": {
+          "$ref": "#/definitions/writer"
+        },
+        "created_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "workspace_key",
+        "element_id",
+        "kind",
+        "base_ref",
+        "base_sha",
+        "branch",
+        "path",
+        "preparation_state",
+        "writer",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "attachment": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "executor_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "move_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attempt_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "writer_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "created_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        }
+      },
+      "required": [
+        "id",
+        "workspace_id",
+        "executor_id",
+        "session_id",
+        "move_id",
+        "attempt_id",
+        "writer_epoch",
+        "created_at"
+      ],
+      "additionalProperties": false
+    },
+    "operation": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "executor_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "actor_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "^[^\\u0000-\\u001f]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "enum": [
+            "prepare-write",
+            "attach-or-transfer",
+            "request-release",
+            "rollout",
+            "commit"
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "succeeded",
+            "failed",
+            "awaiting_execution",
+            "awaiting_ci",
+            "awaiting_deployment",
+            "awaiting_reconciliation"
+          ]
+        },
+        "step": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "request": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/prepare-write"
+            },
+            {
+              "$ref": "#/definitions/attach-or-transfer"
+            },
+            {
+              "$ref": "#/definitions/request-release"
+            },
+            {
+              "$ref": "#/definitions/rolloutRequest"
+            },
+            {
+              "$ref": "#/definitions/commitIntent"
+            }
+          ]
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/preparedResult"
+            },
+            {
+              "$ref": "#/definitions/writerResult"
+            },
+            {
+              "$ref": "#/definitions/releaseResult"
+            },
+            {
+              "$ref": "#/definitions/gitReleaseResult"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/definitions/rolloutResult"
+            },
+            {
+              "$ref": "#/definitions/commitResult"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "updated_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "workspace_id",
+        "executor_id",
+        "actor_id",
+        "kind",
+        "status",
+        "step",
+        "request",
+        "result",
+        "error",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    "statusResponse": {
+      "type": "object",
+      "properties": {
+        "workspace": {
+          "$ref": "#/definitions/workspace"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/attachment"
+          },
+          "maxItems": 100
+        },
+        "git": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "head": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40}$"
+                },
+                "branch": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 255,
+                  "pattern": "^[^\\u0000-\\u001f]+$"
+                },
+                "dirty": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "head",
+                "branch",
+                "dirty"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "workspace",
+        "attachments",
+        "git"
+      ],
+      "additionalProperties": false
+    },
+    "operationResponse": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "$ref": "#/definitions/operation"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "additionalProperties": false
+    },
+    "projectResponse": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "$ref": "#/definitions/project"
+        }
+      },
+      "required": [
+        "project"
+      ],
+      "additionalProperties": false
+    },
+    "preparedResult": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "workspace_id"
+      ],
+      "additionalProperties": false
+    },
+    "writerResult": {
+      "type": "object",
+      "properties": {
+        "writer": {
+          "$ref": "#/definitions/writer"
+        }
+      },
+      "required": [
+        "writer"
+      ],
+      "additionalProperties": false
+    },
+    "releaseResult": {
+      "type": "object",
+      "properties": {
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "reason": {
+          "const": "RELEASE_EXECUTION_NOT_AVAILABLE"
+        }
+      },
+      "required": [
+        "release_id",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "releaseLeg": {
+      "type": "object",
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "head": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "target": {
+          "enum": [
+            "dev",
+            "main"
+          ]
+        },
+        "target_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "push_attempted": {
+          "const": true
+        },
+        "pr_attempted": {
+          "const": true
+        },
+        "pr_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pr_url": {
+          "type": "string"
+        },
+        "merge_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "merge_push_attempted": {
+          "const": true
+        },
+        "merged": {
+          "const": true
+        },
+        "deployment_evidence_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "head_ci": {
+          "$ref": "#/definitions/ciEvidence"
+        },
+        "merge_ci": {
+          "$ref": "#/definitions/ciEvidence"
+        },
+        "deployment_operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "branch",
+        "head",
+        "target",
+        "target_sha"
+      ],
+      "additionalProperties": false
+    },
+    "releaseFlow": {
+      "type": "object",
+      "properties": {
+        "primary": {
+          "$ref": "#/definitions/releaseLeg"
+        },
+        "backport": {
+          "$ref": "#/definitions/releaseLeg"
+        },
+        "cleanup": {
+          "type": "object",
+          "properties": {
+            "removed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "removed"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "gitReleaseResult": {
+      "type": "object",
+      "properties": {
+        "release_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "running",
+            "succeeded",
+            "awaiting_execution",
+            "awaiting_ci",
+            "awaiting_deployment",
+            "awaiting_reconciliation",
+            "failed"
+          ]
+        },
+        "details": {
+          "$ref": "#/definitions/releaseFlow"
+        }
+      },
+      "required": [
+        "release_id",
+        "state",
+        "details"
+      ],
+      "additionalProperties": false
+    },
+    "ciEvidence": {
+      "type": "object",
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "head_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "workflow": {
+          "const": ".github/workflows/codeworks.yml"
+        },
+        "recipe": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "composition_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "composition_reference": {
+          "type": "string",
+          "pattern": "^ghcr\\.io/[a-z0-9_./-]+@sha256:[0-9a-f]{64}$"
+        },
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[^/]+/[^/]+/actions/runs/[0-9]+$"
+        }
+      },
+      "required": [
+        "run_id",
+        "attempt",
+        "head_sha",
+        "workflow",
+        "recipe",
+        "composition_digest",
+        "composition_reference",
+        "url"
+      ],
+      "additionalProperties": false
+    },
+    "rolloutRequest": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "enum": [
+            "dev",
+            "prod"
+          ]
+        },
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "ci": {
+          "$ref": "#/definitions/ciEvidence"
+        }
+      },
+      "required": [
+        "target",
+        "commit_sha",
+        "ci"
+      ],
+      "additionalProperties": false
+    },
+    "rolloutResult": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "awaiting_deployment",
+            "succeeded",
+            "failed"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "commit": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "expected_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "documentation_journal": {
+          "type": "string",
+          "pattern": "^[0-9a-f-]{36}$"
+        }
+      },
+      "required": [
+        "project_id",
+        "idempotency_key",
+        "session_id",
+        "message"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "workspace_id",
+            "expected_epoch"
+          ],
+          "not": {
+            "required": [
+              "documentation_journal"
+            ]
+          }
+        },
+        {
+          "required": [
+            "documentation_journal"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "workspace_id"
+                ]
+              },
+              {
+                "required": [
+                  "expected_epoch"
+                ]
+              },
+              {
+                "required": [
+                  "parent_sha"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "commitIntent": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "actor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "expected_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "pattern": "^[^\\u0000]+$"
+        },
+        "parent_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "documentation_journal": {
+          "type": "string",
+          "pattern": "^[0-9a-f-]{36}$"
+        },
+        "documentation": {
+          "type": "object",
+          "required": [
+            "id",
+            "entries",
+            "phase"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "phase": {
+              "const": "ready"
+            },
+            "entries": {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 256,
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "before",
+                  "after",
+                  "index"
+                ]
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "project_id",
+        "idempotency_key",
+        "session_id",
+        "message"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "workspace_id",
+            "expected_epoch",
+            "parent_sha"
+          ],
+          "not": {
+            "required": [
+              "documentation_journal"
+            ]
+          }
+        },
+        {
+          "required": [
+            "documentation_journal"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "workspace_id"
+                ]
+              },
+              {
+                "required": [
+                  "expected_epoch"
+                ]
+              },
+              {
+                "required": [
+                  "parent_sha"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "commitResult": {
+      "type": "object",
+      "properties": {
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "parent_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "tree": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "index": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "push_attempted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "commit_sha"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

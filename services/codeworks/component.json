@@ -1,0 +1,158 @@
+{
+  "formatVersion": 1,
+  "id": "codeworks",
+  "type": "program",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [
+    "services/codeworks/components/cli.mjs",
+    "services/codeworks/src/main.mjs",
+    "services/codeworks/src/mcp.mjs",
+    "services/codeworks/src/migrate.mjs",
+    "services/codeworks/src/worker.mjs",
+    "services/codeworks/src/deployment-evidence.mjs",
+    "services/codeworks/ci/pipeline.mjs",
+    "services/codeworks/src/verify-ci.mjs"
+  ],
+  "inputs": {
+    "build": [
+      "services/codeworks/schemas/component.schema.json"
+    ],
+    "runtime": [
+      "services/codeworks/asyncapi.json",
+      "services/codeworks/migrations/001.sql",
+      "services/codeworks/migrations/002.sql",
+      "services/codeworks/package.json",
+      "services/codeworks/schemas/api.schema.json",
+      "services/codeworks/schemas/component.schema.json",
+      "services/codeworks/src/agent-files.py",
+      "services/codeworks/src/agent-hermes.py",
+      "services/codeworks/src/agent-host.mjs",
+      "services/codeworks/src/agent-proxy.py",
+      "services/codeworks/src/agent-sandbox.mjs",
+      "services/codeworks/src/agent-tools.json",
+      "services/codeworks/src/client.mjs",
+      "services/codeworks/src/contracts.mjs",
+      "services/codeworks/src/deployment-evidence.mjs",
+      "services/codeworks/src/domain.mjs",
+      "services/codeworks/src/errors.mjs",
+      "services/codeworks/src/git-flow.mjs",
+      "services/codeworks/src/git.mjs",
+      "services/codeworks/src/github.mjs",
+      "services/codeworks/src/main.mjs",
+      "services/codeworks/src/mcp.mjs",
+      "services/codeworks/src/migrate.mjs",
+      "services/codeworks/src/nats.mjs",
+      "services/codeworks/src/release.mjs",
+      "services/codeworks/src/runtime.mjs",
+      "services/codeworks/src/storage.mjs",
+      "services/codeworks/src/worker.mjs",
+      "services/codeworks/src/ci-verifier.mjs",
+      "services/codeworks/ci/registry.mjs",
+      "services/codeworks/components/descriptor-validation.mjs",
+      "services/codeworks/schemas/ci-composition.schema.json",
+      "services/codeworks/migrations/003.sql",
+      "services/codeworks/src/ci-evidence.mjs",
+      "services/codeworks/ci/catalog.mjs",
+      "services/codeworks/src/verify-ci.mjs",
+      "services/codeworks/src/deployment.mjs",
+      "services/codeworks/migrations/004.sql",
+      "services/codeworks/components/package-runtime.mjs",
+      "services/codeworks/components/lock-inputs.mjs",
+      "services/codeworks/migrations/005.sql",
+      "services/codeworks/src/documentation.mjs",
+      "services/codeworks/migrations/006.sql"
+    ],
+    "checks": [
+      "services/codeworks/components/cli.mjs",
+      "services/codeworks/components/graph.mjs",
+      "services/codeworks/components/graph.test.mjs",
+      "services/codeworks/components/package-runtime.mjs",
+      "services/codeworks/components/package-runtime.test.mjs",
+      "services/codeworks/tests/agent-files.test.mjs",
+      "services/codeworks/tests/contracts.test.mjs",
+      "services/codeworks/tests/git-flow.test.mjs",
+      "services/codeworks/tests/integration/agent-host.test.mjs",
+      "services/codeworks/tests/integration/fixture.mjs",
+      "services/codeworks/tests/integration/git-flow.test.mjs",
+      "services/codeworks/tests/integration/postgres.test.mjs",
+      "services/codeworks/tests/integration/recovery.mjs",
+      ".github/workflows/codeworks.yml",
+      "services/codeworks/components/lock-inputs.mjs",
+      "services/codeworks/components/descriptor-validation.mjs",
+      "services/codeworks/ci/pipeline.mjs",
+      "services/codeworks/ci/toolchain.json",
+      "services/codeworks/tests/ci-verifier.test.mjs",
+      "services/codeworks/ci/*.test.mjs",
+      "services/codeworks/tests/ci-evidence.test.mjs",
+      "services/codeworks/tests/integration/ci-evidence.test.mjs",
+      "services/codeworks/tests/ci-key-boundary.test.mjs",
+      "services/codeworks/tests/integration/fixture-lifecycle.mjs",
+      "services/codeworks/tests/fixture-lifecycle.test.mjs",
+      "services/codeworks/tests/deployment.test.mjs",
+      "services/codeworks/tests/cleanup.test.mjs",
+      "services/codeworks/tests/documentation.test.mjs",
+      "services/codeworks/tests/agent-release-poll.test.mjs",
+      "services/codeworks/tests/integration/agent-commit.test.mjs"
+    ]
+  },
+  "dependencies": [],
+  "commands": {
+    "build": null,
+    "check": "node --test --test-isolation=none tests/*.test.mjs components/*.test.mjs ci/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "ready-files",
+    "files": [
+      "services/codeworks/migrations",
+      "services/codeworks/package.json",
+      "services/codeworks/schemas",
+      "services/codeworks/src",
+      "services/codeworks/ci/registry.mjs",
+      "services/codeworks/components/descriptor-validation.mjs",
+      "services/codeworks/ci/catalog.mjs",
+      "services/codeworks/components/package-runtime.mjs",
+      "services/codeworks/components/lock-inputs.mjs"
+    ],
+    "entrypoints": [
+      "services/codeworks/src/main.mjs",
+      "services/codeworks/src/mcp.mjs",
+      "services/codeworks/src/migrate.mjs",
+      "services/codeworks/src/worker.mjs",
+      "services/codeworks/src/deployment-evidence.mjs",
+      "services/codeworks/src/verify-ci.mjs"
+    ],
+    "smokeImports": [
+      "services/codeworks/src/contracts.mjs",
+      "services/codeworks/src/git-flow.mjs",
+      "services/codeworks/src/github.mjs",
+      "services/codeworks/src/release.mjs",
+      "services/codeworks/src/deployment-evidence.mjs",
+      "services/codeworks/src/ci-verifier.mjs"
+    ],
+    "systemRequirements": [
+      "Node.js 24.21.0",
+      "Git with merge-tree --write-tree; flock (util-linux)",
+      "GitHub CLI (gh), operator authentication; origin HTTPS matches registered repository",
+      "Existing GitHub OAuth operator identity with repo, workflow, read:packages/write:packages; owner-only Ed25519 identity outside agent namespaces; durable Codeworks PG evidence backup; first owner catalog-v1 publication links the repository and inherits its Actions read access",
+      "Python 3 with prepared bridge dependencies; bubblewrap and util-linux; trusted immutable adapter launcher (not bundled external engines)"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "brai-codeworks.service",
+      "brai-codeworks-agents-test.service"
+    ],
+    "migrations": [
+      "services/codeworks/migrations"
+    ],
+    "health": null
+  },
+  "npm": {
+    "workspaces": [
+      "services/codeworks"
+    ]
+  }
+}

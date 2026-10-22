@@ -1,6 +1,6 @@
 // ABOUTME: Регистрирует сервис истории и преобразует NATS сообщения в вызовы ядра.
 // ABOUTME: Источник записи удостоверяется ACL subject; SQL и проверка DTO принадлежат соседним слоям.
-import { connect, type NatsConnection, type Service, type ServiceMsg } from "nats";
+import { AckPolicy, DeliverPolicy, DiscardPolicy, RetentionPolicy, ReplayPolicy, StorageType, connect, type ConsumerMessages, type JsMsg, type NatsConnection, type Service, type ServiceMsg } from "nats";
 import { randomUUID } from "node:crypto";
 import { decodeJson, errorStatus, limits } from "./contracts.js";
 import { HistoryFault, type HistoryHandlers } from "./domain.js";
@@ -11,6 +11,9 @@ const appendSubject = "brai.history.v1.append.*";
 const listSubject = "brai.history.v1.query.list";
 const getSubject = "brai.history.v1.query.get";
 const sourcePattern = /^[a-z][a-z0-9_]{0,63}$/;
+const elementsStream = "BRAI_ELEMENTS_EVENTS_V1";
+const elementsDurable = "history_elements_events";
+const elementsSubject = "brai.elements.v1.events.>";
 
 /** Подключает service identity и использует inbox, разрешённый его ACL. */
 export function connectNats(config: Config): Promise<NatsConnection> {
@@ -115,4 +118,19 @@ export async function runNats(nc: NatsConnection, handlers: HistoryHandlers, gat
     throw error;
   }
   return { service, stop: () => service.stop() };
+}
+
+/** Подключает опциональный durable consumer общего Elements stream; ACK следует за COMMIT истории. */
+export async function runElementsEvents(nc: NatsConnection, handlers: HistoryHandlers, gate: LoadGate): Promise<{ finished: Promise<void>; stop: () => Promise<void> }> {
+  const manager = await nc.jetstreamManager(); const stream = (await manager.streams.info(elementsStream)).config;
+  if (stream.storage !== StorageType.File || stream.retention !== RetentionPolicy.Limits || !stream.subjects?.includes(elementsSubject)) throw new Error("HISTORY_ELEMENTS_STREAM_CONFIG_MISMATCH");
+  const consumer = await manager.consumers.info(elementsStream, elementsDurable);
+  if (consumer.config.ack_policy !== AckPolicy.Explicit || consumer.config.deliver_policy !== DeliverPolicy.All || consumer.config.replay_policy !== ReplayPolicy.Instant || consumer.config.filter_subject !== elementsSubject || consumer.config.max_deliver !== -1 || consumer.config.headers_only || consumer.config.deliver_subject) throw new Error("HISTORY_ELEMENTS_CONSUMER_CONFIG_MISMATCH");
+  const pull = await nc.jetstream().consumers.get(elementsStream, elementsDurable); let stopped = false; let messages: ConsumerMessages | undefined;
+  const finished = (async () => { while (!stopped && !nc.isClosed()) { try { messages = await pull.consume({ max_messages: 1, expires: 1_000 }); for await (const message of messages) { if (stopped) { message.nak(); break; } await consumeElementEvent(message, handlers, gate); } } catch (error) { if (!stopped) console.error(JSON.stringify({ service: "service_history", operation: "elements.consume", result: error instanceof Error ? error.name : "UNKNOWN" })); } finally { messages?.stop(); messages = undefined; } } })();
+  return { finished, async stop() { stopped = true; messages?.stop(); await finished; } };
+}
+async function consumeElementEvent(message: JsMsg, handlers: HistoryHandlers, gate: LoadGate): Promise<void> {
+  try { const value = decodeJson(message.data); await gate.run(context => handlers.appendElementsEvent(value, context)); message.ack(); }
+  catch (error) { const failure = safeFault(error); if (["INVALID_ARGUMENT", "EVENT_ID_CONFLICT", "NOT_FOUND"].includes(failure.code)) message.term(); else message.nak(Math.min(30_000, 1000 * 2 ** Math.min(5, message.info.deliveryCount - 1))); }
 }

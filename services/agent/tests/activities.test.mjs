@@ -11,13 +11,13 @@ import nativeSchema from '../contracts/codex/schema.json' with { type: 'json' };
 import { summary, messageAttention } from '../dist/display.js';
 function fixture() {
   let observer, generation = 'g1';
-  const settings = { beforeCall: null };
+  const settings = { beforeCall: null, activeFlags: [], updatedAt: 99 };
   const calls = [], events = [], entries = [
     { turnId: 'turn', startedAtMs: 1000, item: { id: 'user', type: 'userMessage', content: [{ type: 'text', text: 'hello' }] } },
     { turnId: 'turn', item: { id: 'cmd', type: 'commandExecution', command: 'run command', aggregatedOutput: 'large output', status: 'completed', exitCode: 0 } },
     { turnId: 'turn', startedAtMs: 2000, item: { id: 'agent', type: 'agentMessage', text: 'answer' } },
   ];
-  const thread = (id = 't') => ({ id, name: id, preview: '', updatedAt: 99, cwd: '/demo', status: { type: 'idle' } });
+  const thread = (id = 't') => ({ id, name: id, preview: '', updatedAt: settings.updatedAt, cwd: '/demo', status: { type: 'idle', activeFlags: settings.activeFlags } });
   const port = {
     status: () => ({ generation, connection: 'connected', authorization: 'ready' }),
     subscribe: fn => { observer = fn; return () => {}; },
@@ -250,6 +250,25 @@ test('link query parameters do not ask for a reply, but visible questions still 
   for (const text of ['Какой вариант выбрать? [Каталог](https://example.com/?q=1)', '[Какой вариант?](https://example.com/?q=1)', 'Продолжить？']) {
     assert.equal(messageAttention({ ...f.entries.at(-1).item, text }).awaitingReply, true, text);
   }
+});
+
+test('thread list requires a renderable question or supported form for user-input attention', async t => {
+  const f = fixture(); t.after(() => f.app.close());
+  f.settings.activeFlags = ['waitingOnUserInput'];
+  f.entries.at(-1).item = { id: 'notice', type: 'agentMessage', phase: 'final_answer', text: 'Brai не поддерживает item/tool/call.' };
+  let listed = (await f.app.request({ action: 'threads', projectId: 'p' })).data.find(thread => thread.id === 't');
+  assert.equal(listed.awaitingReply, false);
+
+  f.entries.at(-1).item = { id: 'async-question', type: 'agentMessage', delivery: 'async', questions: [{ title: 'Какой вариант?', options: ['A'] }] };
+  f.settings.updatedAt++;
+  listed = (await f.app.request({ action: 'threads', projectId: 'p' })).data.find(thread => thread.id === 't');
+  assert.equal(listed.awaitingReply, true);
+
+  f.settings.activeFlags = ['waitingOnApproval'];
+  f.settings.updatedAt++;
+  f.entries.at(-1).item = { id: 'notice', type: 'agentMessage', phase: 'final_answer', text: 'Brai не поддерживает item/tool/call.' };
+  listed = (await f.app.request({ action: 'threads', projectId: 'p' })).data.find(thread => thread.id === 't');
+  assert.equal(listed.awaitingReply, true);
 });
 
 test('final attention survives reading and tool updates, clears on reply, and returns in native list', async t => {

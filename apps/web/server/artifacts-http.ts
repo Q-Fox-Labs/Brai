@@ -8,6 +8,7 @@ import { GatewayError } from "./gateway";
 import { agentArtifactsConnection, agentResultsConnection } from "./agent-artifacts";
 import { agentOwnerId, permittedAgent, rpc as agentRpc } from "./agent-http";
 import { readBoundedJson, RequestBodyFailure } from "./request-body";
+import { disabledAgentResponse } from "./web-config";
 
 class ArtifactFailure extends Error {
   constructor(public status: number, public code: string) { super(code); }
@@ -110,6 +111,8 @@ function preparedMatches(artifact: Artifact, ownerId: string, input: PrepareInpu
 /** Создаёт/восстанавливает подготовку с неизменным requestId и доверенной областью из сессии. */
 export async function prepareAttachment(request: Request): Promise<Response> {
   try {
+    const disabled = disabledAgentResponse();
+    if (disabled) return disabled;
     if (request.method !== "POST") throw failure(405, "METHOD_NOT_ALLOWED");
     checkOrigin(request);
     const session = await requireAgentSession(request), ownerId = agentOwnerId(session), input = parsePrepare(await readSmallJson(request));
@@ -144,6 +147,8 @@ async function preparedArtifact(artifactId: string, kind: "original" | "copy", o
 /** Сверяет готовые объекты и создаёт идемпотентное отношение копия→оригинал. */
 export async function finalizeAttachment(request: Request): Promise<Response> {
   try {
+    const disabled = disabledAgentResponse();
+    if (disabled) return disabled;
     if (request.method !== "POST") throw failure(405, "METHOD_NOT_ALLOWED");
     checkOrigin(request);
     const session = await requireAgentSession(request), ownerId = agentOwnerId(session), input = parsePair(await readSmallJson(request));
@@ -212,6 +217,8 @@ function authHeaders(artifact: Artifact, output = false, download = false): Head
 /** Проверяет Caddy forward-auth запрос; успешный ответ содержит только безопасные file headers. */
 export async function artifactReadAuth(request: Request): Promise<Response> {
   try {
+    const disabled = disabledAgentResponse();
+    if (disabled) return disabled;
     const method = request.headers.get("x-forwarded-method");
     if (request.method !== "GET" && request.method !== "HEAD") throw failure(405, "METHOD_NOT_ALLOWED");
     if (method !== "GET" && method !== "HEAD") throw failure(405, "METHOD_NOT_ALLOWED");

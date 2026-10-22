@@ -1,6 +1,6 @@
 // ABOUTME: Подключает JetStream ingestion и NATS Services к чистым операциям alerts.
 // ABOUTME: Ack следует за commit; broker-ресурсы готовит оператор, сигналы не содержат уведомлений.
-import { connect, AckPolicy, DeliverPolicy, DiscardPolicy, ReplayPolicy, RetentionPolicy, StorageType, type NatsConnection, type ServiceMsg, type JsMsg } from 'nats';
+import { connect, AckPolicy, DeliverPolicy, DiscardPolicy, ReplayPolicy, RetentionPolicy, StorageType, type ConsumerMessages, type NatsConnection, type ServiceMsg, type JsMsg } from 'nats';
 import { randomUUID } from 'node:crypto';
 import { errorStatus, limits, subjects, type Operation } from '../contracts/index.mjs';
 import { AlertsFault, type AlertsHandlers } from './domain.js';
@@ -9,6 +9,9 @@ import type { Config } from './config.js';
 
 export const streamName = 'BRAI_ALERTS_INGEST_V1';
 export const durableName = 'alerts_ingest';
+export const elementsStreamName = 'BRAI_ELEMENTS_EVENTS_V1';
+export const elementsDurableName = 'alerts_elements_events';
+const elementsSubject = 'brai.elements.v1.events.>';
 const pullExpiresMs = 10_000;
 /** Подключает выделенную сервисную identity и собственный inbox. */
 export function connectNats(cfg: Config): Promise<NatsConnection> {
@@ -47,6 +50,21 @@ export async function ingestMessage(msg: JsMsg, handlers: AlertsHandlers, gate: 
     else msg.nak(Math.min(30_000, 1000 * 2 ** Math.min(5, msg.info.deliveryCount - 1)));
     log('ingest', error.code, started, metadata);
   }
+}
+/** Обрабатывает общий Elements event; события без notification считаются успешно проигнорированными. */
+export async function ingestElementsMessage(msg: JsMsg, handlers: AlertsHandlers, gate: LoadGate): Promise<void> {
+  try { const input = decode(msg.data); await gate.run(context => handlers.ingestElementsEvent(input, context)); msg.ack(); }
+  catch (cause) { const error = fault(cause); if (['INVALID_ARGUMENT', 'EVENT_ID_CONFLICT', 'UNKNOWN_TYPE'].includes(error.code)) msg.term(); else msg.nak(Math.min(30_000, 1000 * 2 ** Math.min(5, msg.info.deliveryCount - 1))); }
+}
+/** Проверяет и подключает durable Alerts consumer общего Elements stream. */
+export async function runElementsEvents(nc: NatsConnection, handlers: AlertsHandlers, gate: LoadGate): Promise<{ finished: Promise<void>; stop: () => Promise<void> }> {
+  const manager = await nc.jetstreamManager(); const stream = (await manager.streams.info(elementsStreamName)).config;
+  if (stream.storage !== StorageType.File || stream.retention !== RetentionPolicy.Limits || !stream.subjects?.includes(elementsSubject)) throw new Error('ALERTS_ELEMENTS_STREAM_CONFIG_MISMATCH');
+  const info = await manager.consumers.info(elementsStreamName, elementsDurableName); const consumerConfig = info.config;
+  if (consumerConfig.ack_policy !== AckPolicy.Explicit || consumerConfig.deliver_policy !== DeliverPolicy.All || consumerConfig.replay_policy !== ReplayPolicy.Instant || consumerConfig.filter_subject !== elementsSubject || consumerConfig.max_deliver !== -1 || consumerConfig.headers_only || consumerConfig.deliver_subject) throw new Error('ALERTS_ELEMENTS_CONSUMER_CONFIG_MISMATCH');
+  const consumer = await nc.jetstream().consumers.get(elementsStreamName, elementsDurableName); let messages: ConsumerMessages | undefined; let stopped = false;
+  const finished = (async () => { while (!stopped && !nc.isClosed()) { try { messages = await consumer.consume({ max_messages: 1, expires: 1_000 }); for await (const msg of messages) { if (stopped) { msg.nak(); break; } await ingestElementsMessage(msg, handlers, gate); } } catch (error) { if (!stopped) console.error(JSON.stringify({ service: 'service_alerts', operation: 'elements.consume', result: error instanceof Error ? error.name : 'UNKNOWN' })); } finally { messages?.stop(); messages = undefined; } } })();
+  return { finished, async stop() { stopped = true; messages?.stop(); await finished; } };
 }
 /** Регистрирует Services API и ограниченный pull; NATS SDK предоставляет PING/INFO/STATS. */
 export async function runNats(nc: NatsConnection, handlers: AlertsHandlers, gate: LoadGate) {

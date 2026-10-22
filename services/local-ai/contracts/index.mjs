@@ -17,6 +17,7 @@ export const subjects = Object.freeze({
   modelsRemove: 'brai.local_ai.v1.models.remove',
   invokeEmbed: 'brai.local_ai.v1.invoke.embed',
   invokeTranscribe: 'brai.local_ai.v1.invoke.transcribe',
+  invokeSynthesize: 'brai.local_ai.v1.invoke.synthesize',
   cancel: 'brai.local_ai.v1.cancel',
   status: 'brai.local_ai.v1.status',
 });
@@ -44,7 +45,7 @@ const requestNames = {
   [subjects.operationsGet]: 'OperationGetRequest', [subjects.modelsConfigure]: 'ConfigureRequest',
   [subjects.modelsLoad]: 'ModelRevisionRequest', [subjects.modelsUnload]: 'ModelRevisionRequest',
   [subjects.modelsRemove]: 'ModelRevisionRequest', [subjects.invokeEmbed]: 'EmbedRequest',
-  [subjects.invokeTranscribe]: 'TranscribeRequest', [subjects.cancel]: 'CancelRequest',
+  [subjects.invokeTranscribe]: 'TranscribeRequest', [subjects.invokeSynthesize]: 'SynthesizeRequest', [subjects.cancel]: 'CancelRequest',
   [subjects.status]: 'StatusRequest',
 };
 const responseNames = {
@@ -53,7 +54,7 @@ const responseNames = {
   [subjects.operationsGet]: 'InstallOperation', [subjects.modelsConfigure]: 'ConfiguredResponse',
   [subjects.modelsLoad]: 'ModelMutationResponse', [subjects.modelsUnload]: 'ModelMutationResponse',
   [subjects.modelsRemove]: 'ModelMutationResponse', [subjects.invokeEmbed]: 'EmbedResponse',
-  [subjects.invokeTranscribe]: 'TranscribeResponse', [subjects.cancel]: 'CancelResponse',
+  [subjects.invokeTranscribe]: 'TranscribeResponse', [subjects.invokeSynthesize]: 'SynthesizeResponse', [subjects.cancel]: 'CancelResponse',
   [subjects.status]: 'StatusResponse',
 };
 

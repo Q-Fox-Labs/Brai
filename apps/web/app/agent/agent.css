@@ -26,7 +26,10 @@
 .agent-project-color-0 { color: var(--primary); }
 .agent-project-color-1 { color: var(--secondary-foreground); }
 .agent-project-color-2 { color: var(--muted-foreground); }
-.agent-project-dot { width: .375rem; height: .375rem; flex: none; margin-left: auto; border-radius: 9999px; background: var(--muted-foreground); }
+.agent-project-attention { display: flex; align-items: center; gap: .375rem; margin-left: auto; flex: none; }
+.agent-project-unread { color: var(--primary); font-size: .75rem; font-variant-numeric: tabular-nums; }
+.agent-project-dot { width: .375rem; height: .375rem; flex: none; border-radius: 9999px; background: var(--muted-foreground); }
+.agent-read-error { margin: 0; padding: .375rem .75rem; color: var(--muted-foreground); font-size: .75rem; }
 .agent-project-dot.is-available { background: var(--primary); }
 .agent-icon-button { width: 2rem; height: 2rem; padding: 0; color: var(--muted-foreground); }
 .agent-thread-list[hidden] { display: none; }

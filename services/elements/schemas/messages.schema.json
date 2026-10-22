@@ -1,0 +1,799 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.app/schemas/elements/messages.schema.json",
+  "definitions": {
+    "request": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "event_version": {
+          "const": 1
+        },
+        "event_type": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.]{1,95}$"
+        },
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "owner_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "actor": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "human",
+                "agent",
+                "system"
+              ]
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        "aggregate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "element",
+                "move",
+                "attempt"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        "data": {
+          "type": "object"
+        },
+        "notification": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "event_id",
+        "event_version",
+        "event_type",
+        "occurred_at",
+        "owner_id",
+        "actor",
+        "aggregate",
+        "data"
+      ]
+    },
+    "elements_structure_create": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "elements": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "moves": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "elements",
+        "moves",
+        "user_id"
+      ]
+    },
+    "elements_element_create": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "revision": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "fields": {
+          "type": "object"
+        },
+        "kind": {
+          "enum": [
+            "level",
+            "mission",
+            "quest",
+            "goal",
+            "task"
+          ]
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "result_spec": {
+          "type": "object"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "initial_resources": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "type": "object"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "title",
+        "user_id"
+      ]
+    },
+    "elements_element_revise": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fields": {
+          "type": "object"
+        },
+        "revision_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "element_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "result_spec": {
+          "type": "object"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "element_id",
+        "revision_id",
+        "title",
+        "user_id"
+      ]
+    },
+    "elements_move_create": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "element_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "target_element_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "previous_move_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "purpose": {
+          "enum": [
+            "work",
+            "start",
+            "accept",
+            "finish",
+            "confirm",
+            "review",
+            "final",
+            "plan"
+          ]
+        },
+        "conditions": {
+          "type": "object"
+        },
+        "fields": {
+          "type": "object"
+        },
+        "kind": {
+          "enum": [
+            "action",
+            "operation"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "result_schema": {
+          "type": "object"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "element_id",
+        "kind",
+        "title",
+        "instructions",
+        "result_schema",
+        "user_id"
+      ]
+    },
+    "elements_move_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "after_move_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "before_move_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "moves": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "object"
+          }
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "after_move_id",
+        "before_move_id",
+        "moves",
+        "user_id"
+      ]
+    },
+    "elements_element_activate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "element_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "cancel": {
+          "type": "boolean"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "element_id",
+        "user_id"
+      ]
+    },
+    "elements_graph_get": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "root_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "user_id"
+      ]
+    },
+    "elements_timeline_get": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "element_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "user_id"
+      ]
+    },
+    "elements_moves_available": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "element_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "user_id"
+      ]
+    },
+    "elements_move_claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "move_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "attempt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "executor_kind": {
+          "enum": [
+            "human",
+            "agent",
+            "system"
+          ]
+        },
+        "executor_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "input_resource_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "uniqueItems": true,
+          "maxItems": 500
+        },
+        "target_input_resource_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "uniqueItems": true,
+          "maxItems": 500
+        }
+      },
+      "required": [
+        "move_id",
+        "idempotency_key",
+        "executor_kind",
+        "input_resource_ids",
+        "user_id"
+      ]
+    },
+    "elements_move_complete": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "result": {},
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "attempt_id",
+        "result",
+        "user_id"
+      ]
+    },
+    "elements_move_fail": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "error_code": {
+          "type": "string"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "attempt_id",
+        "error_code",
+        "user_id"
+      ]
+    },
+    "board": {
+      "type": "object",
+      "required": [
+        "elements",
+        "moves",
+        "resources",
+        "attempts"
+      ],
+      "properties": {
+        "elements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "kind",
+              "parentId",
+              "status",
+              "revision",
+              "title",
+              "description",
+              "input",
+              "output"
+            ]
+          }
+        },
+        "moves": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "ownerId",
+              "targetId",
+              "previousId",
+              "kind",
+              "status",
+              "input",
+              "output"
+            ]
+          }
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "attemptId",
+              "title",
+              "content"
+            ]
+          }
+        },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "moveId",
+              "status"
+            ]
+          }
+        },
+        "revisions": {
+          "type": "array"
+        },
+        "links": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "devStatusRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user_id",
+        "kind",
+        "id",
+        "status",
+        "request_id"
+      ],
+      "properties": {
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "kind": {
+          "enum": [
+            "element",
+            "move"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "element"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "draft",
+                  "active",
+                  "completed",
+                  "cancelled"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "planned",
+                  "claimed",
+                  "succeeded",
+                  "cancelled"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "elements_planning_packet": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "user_id",
+        "attempt_id"
+      ]
+    },
+    "elements_planning_bind": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "baseline": {
+          "type": "object"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "user_id",
+        "attempt_id",
+        "baseline"
+      ]
+    },
+    "elements_planning_build": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "candidate": {
+          "type": "object"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "user_id",
+        "attempt_id",
+        "candidate"
+      ]
+    },
+    "elements_planning_apply": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "attempt_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "candidate_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "review": {
+          "type": "object"
+        },
+        "user_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      },
+      "required": [
+        "user_id",
+        "attempt_id",
+        "candidate_sha256",
+        "review"
+      ]
+    },
+    "elements_element_reclassify": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "element_id": { "type": "string", "format": "uuid" },
+        "expected_revision_id": { "type": "string", "format": "uuid" },
+        "target_kind": { "enum": ["task", "goal", "quest"] },
+        "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 4000 },
+        "user_id": { "type": "string", "minLength": 1, "maxLength": 255 }
+      },
+      "required": ["user_id", "element_id", "expected_revision_id", "target_kind", "idempotency_key", "reason"]
+    },
+    "elements_planning_expand_repeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "move_id": { "type": "string", "format": "uuid" },
+        "revision_id": { "type": "string", "format": "uuid" },
+        "resource_id": { "type": "string", "format": "uuid" },
+        "items": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "type": "object", "additionalProperties": false, "properties": { "id": { "type": "string", "format": "uuid" }, "label": { "type": "string", "minLength": 1, "maxLength": 1000 } }, "required": ["id", "label"] } },
+        "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "user_id": { "type": "string", "minLength": 1, "maxLength": 255 }
+      },
+      "required": ["user_id", "move_id", "revision_id", "resource_id", "items", "idempotency_key"]
+    }
+  }
+}

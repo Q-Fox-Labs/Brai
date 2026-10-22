@@ -1,0 +1,87 @@
+{
+  "openrpc": "1.3.2",
+  "info": {"title":"Hermes trusted Telegram bridge","version":"1.0.0","description":"Private owner-bound JSON-RPC stdio. UTF-8 JSON document per line; requests at most 65536 bytes, responses at most 1048576 bytes. Timeout or channel loss can leave unknown outcome. This program must never be exposed as the model MCP server."},
+  "methods": [
+    {
+      "name":"files.publish",
+      "description":"Uses existing publisher MCP; stable requestId binds exact bytes and metadata. Byte limit 2 GiB; path must belong to configured publisher read roots.",
+      "paramStructure":"by-name",
+      "params":[
+        {"name":"path","required":true,"schema":{"type":"string","minLength":1}},
+        {"name":"requestId","required":true,"schema":{"type":"string","minLength":1,"maxLength":256}},
+        {"name":"title","required":false,"schema":{"type":"string","minLength":1,"maxLength":512}}
+      ],
+      "result":{"name":"file","schema":{"$ref":"#/components/schemas/FileResult"}}
+    },
+    {
+      "name":"files.fetch",
+      "description":"Restores a ready artifact of the trusted owner through publisher, checking size and SHA-256.",
+      "paramStructure":"by-name",
+      "params":[{"name":"artifactId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}],
+      "result":{"name":"file","schema":{"$ref":"#/components/schemas/FileResult"}}
+    },
+    {
+      "name":"actions.read",
+      "description":"Reads only an Action belonging to the fixed owner.",
+      "paramStructure":"by-name",
+      "params":[{"name":"moveId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}],
+      "result":{"name":"action","schema":{"$ref":"#/components/schemas/Action"}}
+    },
+    {
+      "name":"actions.prepare",
+      "description":"Claims the exact human attempt before Telegram displays a decision or requests practical work. Decision-only confirm/final Actions have one Accept button; clarification and practical work have no button. Practical results are submitted only from the actual owner MessageEvent by actions.result. confirmationStage is canonical; null on recovery means substantive outputs are required, not approval. Retry uses the same key and selected resource IDs. Recovery after revision change is for cancellation only.",
+      "paramStructure":"by-name",
+      "params":[
+        {"name":"moveId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},
+        {"name":"revisionId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},
+        {"name":"idempotencyKey","required":true,"schema":{"type":"string","minLength":1,"maxLength":200}},
+        {"name":"inputResourceIds","required":false,"schema":{"type":"array","uniqueItems":true,"items":{"$ref":"#/components/schemas/Uuid"}}}
+      ],
+      "result":{"name":"action","schema":{"$ref":"#/components/schemas/Action"}}
+    },
+    {
+      "name":"actions.complete",
+      "description":"Requires a consumed private-owner Telegram callback bound to the exact attempt and revision. Canonical positive stage is derived from the real integrated planning decision; changes always writes review/changes. Integrated plans support only decision-only confirm/final Actions with one output; unsupported work fails HUMAN_OUTPUT_REQUIRED. Game-core atomically checks the current revision and claim snapshot for integrated planning decisions and planning stage; legacy review/final checks are preflight only. Repeated terminal or stale callbacks are rejected.",
+      "paramStructure":"by-name",
+      "params":[
+        {"name":"moveId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},
+        {"name":"attemptId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},
+        {"name":"revisionId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},
+        {"name":"stage","required":true,"schema":{"enum":["planning","final","review","clarification"]}},
+        {"name":"decision","required":true,"schema":{"enum":["approved","success","changes","cancelled","clarify"]}},
+        {"name":"comment","required":false,"schema":{"type":"string","maxLength":16000}},
+        {"name":"source","required":false,"schema":{"type":"object"}}
+      ],
+      "result":{"name":"result","schema":{"type":"object","description":"Unmodified Elements move_complete owner DTO; see services/elements/CONTRACT.md."}}
+    },
+    {
+      "name":"actions.cancel",
+      "description":"Terminates the exact current running human attempt via owner fail; move returns to planned. Revision may have advanced because cleanup must not confirm a new revision.",
+      "paramStructure":"by-name",
+      "params":[
+        {"name":"moveId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},
+        {"name":"attemptId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},
+        {"name":"revisionId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},
+        {"name":"reason","required":true,"schema":{"enum":["expired","cancelled","declined"]}}
+      ],
+      "result":{"name":"result","schema":{"type":"object","description":"Unmodified Elements move_fail owner DTO; see services/elements/CONTRACT.md."}}
+    },
+    {"name":"actions.fail_agent","description":"Fail the exact current agent Operation attempt after a native terminal session hook. Reads the owner graph, then uses elements_move_fail only if the same attempt is still running. Not exposed to model MCP.","paramStructure":"by-name","params":[{"name":"moveId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},{"name":"attemptId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}}],"result":{"name":"result","schema":{"type":"object"}}},
+    {"name":"actions.feedback","description":"Only the trusted plugin supplies the exact current owner message text and provenance. Changes complete the current decision-only human Action as review/changes. Clarification answers complete clarification/answered from the actual current owner message. Cancellation uses element_activate with revision CAS and a durable feedback ID; preserves completed records and cancels the uncompleted descendant tree. Not exposed to the model MCP.","paramStructure":"by-name","params":[{"name":"elementId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},{"name":"revisionId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},{"name":"moveId","required":false,"schema":{"$ref":"#/components/schemas/Uuid"}},{"name":"decision","required":true,"schema":{"enum":["changes","cancelled","clarify"]}},{"name":"feedback","required":true,"schema":{"type":"object","required":["id","content","source"],"properties":{"id":{"$ref":"#/components/schemas/Uuid"},"content":{"type":"string","minLength":1,"maxLength":16000},"source":{"type":"object"}}}}],"result":{"name":"result","schema":{"type":"object"}}},
+    {"name":"actions.result","description":"Complete only a currently running human attempt. Practical output content/source come from a real owner MessageEvent; for multi-output Actions the caller maps exact contract names and explicit final decision text.","paramStructure":"by-name","params":[{"name":"moveId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},{"name":"revisionId","required":true,"schema":{"$ref":"#/components/schemas/Uuid"}},{"name":"content","required":true,"schema":{"type":"string","minLength":1,"maxLength":16000}},{"name":"source","required":true,"schema":{"type":"object"}},{"name":"decisionText","required":false,"schema":{"type":"string"}},{"name":"decisionSource","required":false,"schema":{"type":"object"}}],"result":{"name":"result","schema":{"type":"object"}}}
+  ],
+  "components": {
+    "schemas": {
+      "Uuid":{"type":"string","format":"uuid"},
+      "FileResult":{"type":"object","required":["artifactId","filename","mimeType","sizeBytes","sha256","localPath","markdown"],"properties":{"artifactId":{"$ref":"#/components/schemas/Uuid"},"filename":{"type":"string"},"mimeType":{"type":"string"},"sizeBytes":{"type":"integer","minimum":0},"sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"localPath":{"type":"string"},"markdown":{"type":"string"}}},
+      "Action":{"type":"object","required":["moveId","revisionId","targetId","title","status","attemptId"],"properties":{"confirmationStage":{"enum":["planning","final","clarification",null],"description":"Canonical stage for an integrated decision-only Action. Clarification has no approval button and accepts only a plain owner answer. Null means substantive human outputs are required; absence preserves legacy caller stage."},"moveId":{"$ref":"#/components/schemas/Uuid"},"revisionId":{"$ref":"#/components/schemas/Uuid"},"targetId":{"$ref":"#/components/schemas/Uuid"},"title":{"type":"string"},"status":{"type":"string"},"attemptId":{"type":["string","null"]},"attemptStatus":{"type":["string","null"]},"attemptExecutorKind":{"type":["string","null"]},"inputResourceIds":{"type":"array","items":{"$ref":"#/components/schemas/Uuid"}},"targetTitle":{"type":"string"},"targetDescription":{"type":"string"},"confirmationText":{"type":["string","null"],"description":"Full current plan, selected actual result or clarification question for chat; null means no reviewable content is available. No UI link or model-supplied summary."}}}
+    },
+    "errors": {
+      "ParseError":{"code":-32700,"message":"Parse error"},
+      "InvalidRequest":{"code":-32600,"message":"Invalid Request"},
+      "MethodNotFound":{"code":-32601,"message":"Method not found"},
+      "InvalidParams":{"code":-32602,"message":"Invalid params"},
+      "OwnerFailure":{"code":-32000,"message":"Safe owner code","data":{"code":"OUTCOME_UNKNOWN"}}
+    }
+  }
+}

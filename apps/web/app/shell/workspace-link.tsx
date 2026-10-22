@@ -3,7 +3,7 @@
 // ABOUTME: Сохраняет адрес, Back/Forward и обычное открытие ссылки в новой вкладке.
 import type { ComponentProps, MouseEvent } from "react";
 
-type WorkspacePath = "/" | "/agent" | "/do" | "/alerts";
+type WorkspacePath = "/" | "/agent" | "/do" | "/alerts" | "/elements";
 
 /** Меняет адрес рабочего раздела без сетевого перехода; Next синхронизирует usePathname. */
 export function navigateWorkspace(href: WorkspacePath) {

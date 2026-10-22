@@ -1,0 +1,22 @@
+// ABOUTME: Проверяет публичный artifacts adapter на bounded synthetic NATS/HTTP.
+// ABOUTME: Не обращается к настоящим данным или платной модели.
+import test from 'node:test';import assert from 'node:assert/strict';import {createServer} from 'node:http';import {once} from 'node:events';import {randomUUID,createHash} from 'node:crypto';
+import {artifactsPort} from '../dist/artifacts.js';
+const bytes=Buffer.from('synthetic text');const sha=b=>createHash('sha256').update(b).digest('hex');
+test('owner/state/MIME/size/hash/origin and deletion during read; exact bounded UTF8 text',async()=>{
+ let calls=0,gets=0,mode='ok';const id=randomUUID();
+ const server=createServer((req,res)=>{calls++;if(mode==='redirect'){res.writeHead(302,{location:'http://example.org/'});res.end();return;}res.end(mode==='hash'?Buffer.from('changed'):mode==='largebody'?Buffer.alloc(65537):bytes);});server.listen(0,'127.0.0.1');await once(server,'listening');const origin=`http://127.0.0.1:${server.address().port}`;
+ const artifact=()=>({artifactId:id,ownerId:mode==='owner'?'other':'fixture',requestId:'fixture',kind:'original',status:['pending','deleted'].includes(mode)?mode:mode==='delete-during'&&gets>1?'deleted':'ready',title:'synthetic',filename:'text.txt',extension:'txt',mimeType:mode==='mime'?'application/pdf':'text/plain',source:'fixture',sizeBytes:mode==='oversize'?65537:bytes.length,sha256:sha(bytes),createdAt:'2026-10-18T00:00:00Z',updatedAt:'2026-10-18T00:00:00Z',internalUrl:(mode==='origin'?'http://example.org':origin)+'/files/'+id});
+ const nc={async request(){gets++;return {data:Buffer.from(JSON.stringify(artifact()))};}};const port=artifactsPort(nc,{internalOrigin:origin,uploadOrigin:origin});
+ try{assert.deepEqual(await port.text('fixture',[id],AbortSignal.timeout(1000)),[{artifactId:id,text:bytes.toString()}]);
+ for(mode of ['owner','pending','deleted','mime','oversize','hash','origin','redirect','largebody','delete-during']){gets=0;const before=calls;await assert.rejects(port.text('fixture',[id],AbortSignal.timeout(1000)),e=>e.code==='INVALID_ARTIFACT');if(['owner','pending','deleted','mime','oversize','origin'].includes(mode))assert.equal(calls,before);}
+ }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});
+test('lost prepare and PUT responses and partial upload reuse exact requestId/bytes',async()=>{
+ let prepareCalls=0,mode='lost-prepare',ready=false,uploads=0;const id=randomUUID(),requestId='stable-output';let saved;
+ const server=createServer(async(req,res)=>{uploads++;if(mode==='partial'){req.once('data',()=>req.destroy());return;}const chunks=[];for await(const c of req)chunks.push(c);saved=Buffer.concat(chunks);if(mode==='partial'){res.destroy();return;}ready=true;if(mode==='lost-put'){res.destroy();return;}res.writeHead(201);res.end();});server.listen(0,'127.0.0.1');await once(server,'listening');const origin=`http://127.0.0.1:${server.address().port}`;
+ const artifact=()=>({artifactId:id,ownerId:'fixture',requestId,kind:'original',status:ready?'ready':'pending',title:'Generated image',filename:'image.png',extension:'png',mimeType:'image/png',source:'providers',sizeBytes:ready?bytes.length:null,sha256:ready?sha(bytes):null,createdAt:'2026-10-18T00:00:00Z',updatedAt:'2026-10-18T00:00:00Z',...(ready?{internalUrl:origin+'/files/'+id}:{})});
+ const nc={async request(subject,data){if(subject.endsWith('prepare')){prepareCalls++;assert.equal(JSON.parse(Buffer.from(data)).requestId,requestId);assert.equal(JSON.parse(Buffer.from(data)).metadata.details.operationId,pending.operationId);if(mode==='lost-prepare')throw Error('TIMEOUT');return {data:Buffer.from(JSON.stringify({artifact:artifact(),uploadUrl:origin+'/upload/token'}))};}return {data:Buffer.from(JSON.stringify(artifact()))};}};
+ const port=artifactsPort(nc,{internalOrigin:origin,uploadOrigin:origin}),pending={ownerId:'fixture',operationId:randomUUID(),inputHash:'a'.repeat(64),requestId,bytes,sha256:sha(bytes),expiresAt:Date.now()+86400000};
+ try{await assert.rejects(port.save(pending,AbortSignal.timeout(1000)));mode='partial';await assert.rejects(port.save(pending,AbortSignal.timeout(1000)));mode='lost-put';const result=await port.save(pending,AbortSignal.timeout(1000));assert.equal(result.artifactId,id);assert.ok(saved.equals(bytes));assert.equal(uploads,2);assert.equal(prepareCalls,3);assert.equal((await port.save(pending,AbortSignal.timeout(1000))).artifactId,id);assert.equal(uploads,2);}finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});

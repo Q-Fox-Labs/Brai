@@ -3,7 +3,7 @@
 export { createLifecycleManager } from './manager.js';
 export type {
   EmbedInvocation, Invocation, InvocationResult, LifecycleLimits, LifecycleManager, LifecycleManagerOptions,
-  LifecycleStatus, TranscribeInvocation,
+  LifecycleStatus, TranscribeInvocation, SynthesizeInvocation,
 } from './manager.js';
 export { createProfileRuntimeFactory } from './runtime-factory.js';
 export type { ProfileRuntimeFactoryConfig } from './runtime-factory.js';

@@ -43,6 +43,9 @@ PRODUCT_FILES = (
     "services/local-ai/runners/gigaam/schemas.json",
     "services/local-ai/runners/gigaam/vad_manifest.json",
     "services/local-ai/runners/llama_cpp/verify.mjs",
+    "services/local-ai/runners/silero/runner.py",
+    "services/local-ai/runners/silero/schemas.json",
+    "services/local-ai/runners/silero/openrpc.json",
 )
 EXCLUDED_PARTS = {"tests", "__pycache__", ".pytest_cache", ".mypy_cache"}
 EXCLUDED_SUFFIXES = {".pyc", ".pyo"}

@@ -1,0 +1,127 @@
+{
+  "formatVersion": 1,
+  "id": "providers",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [
+    "services/providers/src/main.ts",
+    "services/providers/src/migrate.ts",
+    "services/providers/src/catalog.ts"
+  ],
+  "inputs": {
+    "build": [
+      "services/providers/tsconfig.json"
+    ],
+    "runtime": [
+      "services/providers/catalog.json",
+      "services/providers/migrations/001_operations.sql",
+      "services/providers/migrations/002_outputs.sql",
+      "services/providers/migrations/003_observation.sql",
+      "services/providers/package.json",
+      "services/providers/release.mjs",
+      "services/providers/schemas/v0.schema.json",
+      "services/providers/schemas/v1.schema.json",
+      "services/providers/src/artifacts.ts",
+      "services/providers/src/catalog.ts",
+      "services/providers/src/chat-http.ts",
+      "services/providers/src/chat.ts",
+      "services/providers/src/client.ts",
+      "services/providers/src/core.ts",
+      "services/providers/src/egress.ts",
+      "services/providers/src/http.ts",
+      "services/providers/src/image.ts",
+      "services/providers/src/index.ts",
+      "services/providers/src/json.ts",
+      "services/providers/src/main.ts",
+      "services/providers/src/migrate.ts",
+      "services/providers/src/nats-v1.ts",
+      "services/providers/src/nats.ts",
+      "services/providers/src/observation-postgres.ts",
+      "services/providers/src/observation.ts",
+      "services/providers/src/operations.ts",
+      "services/providers/src/postgres.ts",
+      "services/providers/src/schema.ts",
+      "services/providers/src/v1-schema.ts",
+      "services/providers/litellm.yaml"
+    ],
+    "checks": [
+      "services/providers/tests/artifacts.test.mjs",
+      "services/providers/tests/chat-nats.test.mjs",
+      "services/providers/tests/chat.test.mjs",
+      "services/providers/tests/client-http.test.mjs",
+      "services/providers/tests/egress.test.mjs",
+      "services/providers/tests/image.test.mjs",
+      "services/providers/tests/nats-v1.test.mjs",
+      "services/providers/tests/nats.test.mjs",
+      "services/providers/tests/observation-nats.test.mjs",
+      "services/providers/tests/observation.test.mjs",
+      "services/providers/tests/operations.test.mjs",
+      "services/providers/tests/postgres.test.mjs",
+      "services/providers/tests/v0.test.mjs"
+    ]
+  },
+  "dependencies": [
+    {
+      "id": "artifacts",
+      "inputs": [
+        "services/artifacts/contracts/**",
+        "services/artifacts/schemas/**"
+      ],
+      "delivery": [
+        "services/artifacts/contracts",
+        "services/artifacts/schemas"
+      ]
+    }
+  ],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test --test-isolation=none tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "ready-files",
+    "files": [
+      "services/artifacts/contracts",
+      "services/artifacts/schemas",
+      "services/providers/catalog.json",
+      "services/providers/dist",
+      "services/providers/litellm.yaml",
+      "services/providers/migrations",
+      "services/providers/package.json",
+      "services/providers/schemas"
+    ],
+    "entrypoints": [
+      "services/providers/dist/main.js",
+      "services/providers/dist/migrate.js",
+      "services/providers/dist/chat-http.js",
+      "services/providers/dist/observation.js",
+      "services/providers/dist/catalog.js"
+    ],
+    "smokeImports": [
+      "services/providers/dist/catalog.js",
+      "services/providers/dist/artifacts.js"
+    ],
+    "systemRequirements": [
+      "Node.js 24.21.0",
+      "External LiteLLM proxy docker.litellm.ai/berriai/litellm@sha256:3d88bd757134a00e8c00237b85a021ab1f6d54abb9c1df750f411dbe7256a500, Compose service litellm / container brai-dev-providers-litellm; operator supplies secrets and networking"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "providers",
+      "brai-dev-providers"
+    ],
+    "migrations": [
+      "services/providers/migrations"
+    ],
+    "health": "No model health endpoint; operation-specific health only"
+  },
+  "npm": {
+    "workspaces": [
+      "services/providers",
+      "services/artifacts"
+    ]
+  }
+}

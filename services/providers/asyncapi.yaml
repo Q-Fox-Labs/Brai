@@ -1,0 +1,296 @@
+# ABOUTME: Описывает синхронный v0 и устойчивый v1 NATS endpoints providers.
+# ABOUTME: Структуры принадлежат локальным Draft-07 схемам; владельца удостоверяет broker ACL.
+asyncapi: 2.6.0
+info:
+  title: Brai providers
+  version: 1.0.0
+  description: Изолированный синхронный decide, без дедупликации и повторов вычисления.
+defaultContentType: application/json
+channels:
+  brai.providers.v0.invoke.decide:
+    description: >-
+      NATS Services brai_providers, queue brai_providers. Request-reply на inbox caller.
+      Предел 32768 bytes вход /16384 bytes upstream, concurrency2, deadline≤30s.
+      После unknown повтор вычисления автоматически запрещён. Сервисные ошибки
+      имеют Nats-Service-Error и Nats-Service-Error-Code=500, без upstream text.
+    bindings:
+      nats:
+        queue: brai_providers
+        bindingVersion: 0.1.0
+    subscribe:
+      operationId: decide
+      message:
+        $ref: '#/components/messages/request'
+    publish:
+      operationId: decideReply
+      message:
+        oneOf:
+          - $ref: '#/components/messages/response'
+          - $ref: '#/components/messages/error'
+  brai.providers.v1.invoke.decide:
+    description: >-
+      NATS Services brai_providers_v1, queue brai_providers_v1. Trusted owner ACL.
+      Inference2, control8, no compute queue. Invoke returns durable acceptance.
+      Replay same owner/operationId/input within7days; result24h. No inference retries.
+      Request bytes65536 for invoke,2048 control; reply73728. Service errors code500.
+    bindings:
+      nats:
+        queue: brai_providers_v1
+        bindingVersion: 0.1.0
+    subscribe:
+      operationId: v1_invoke_decide
+      message:
+        $ref: '#/components/messages/v1_decideRequest'
+    publish:
+      operationId: v1_invoke_decide_reply
+      message:
+        oneOf:
+          - $ref: '#/components/messages/v1_operation'
+          - $ref: '#/components/messages/v1_error'
+  brai.providers.v1.invoke.image:
+    description: >-
+      Shared durable ledger/capacity2, no compute retry. Exactly one1024x1024 PNG,
+      quality standard/low, responseFormat b64_json, model google/gemini-2.5-flash-image.
+      Deadline180s. Optional artifactIds only text/plain, total65536bytes.
+      output_pending means durable bytes await artifacts save; result stays null.
+      Same invoke replay/startup repeats only prepare/PUT/get with stable IDs/bytes.
+      Pending quota32MiB/2slots,TTL24h; successful result exposes ready artifactId/hash,
+      never public/internal URLs. NATS errors code500, direct DTO, trusted owner ACL.
+    bindings:
+      nats: {queue: brai_providers_v1, bindingVersion: 0.1.0}
+    subscribe:
+      operationId: v1_invoke_image
+      message: {$ref: '#/components/messages/v1_imageRequest'}
+    publish:
+      operationId: v1_invoke_image_reply
+      message:
+        oneOf:
+          - {$ref: '#/components/messages/v1_operation'}
+          - {$ref: '#/components/messages/v1_error'}
+  brai.providers.v1.invoke.chat:
+    description: >-
+      One durable chat turn, shared capacity2 and control8. Caller subscribes and flushes
+      _INBOX.{connectionId}.{token} before invoke. Core NATS has no token replay;
+      sequence gap, disconnect, timeout or local buffer overflow requires operations.get,
+      never automatic inference retry. Deadline90s, request65536/reply73728 bytes.
+    bindings:
+      nats: {queue: brai_providers_v1, bindingVersion: 0.1.0}
+    subscribe:
+      operationId: v1_invoke_chat
+      message: {$ref: '#/components/messages/v1_chatRequest'}
+    publish:
+      operationId: v1_invoke_chat_reply
+      message:
+        oneOf:
+          - {$ref: '#/components/messages/v1_operation'}
+          - {$ref: '#/components/messages/v1_error'}
+  '_INBOX.{connectionId}.{token}':
+    description: >-
+      Private caller subscription authorized by broker ACL, Core NATS best effort.
+      sequence starts1, completed only after durable finish. Local unflushed bytes32768;
+      overflow stops delivery with best-effort STREAM_DELIVERY_INTERRUPTED, compute can finish.
+      Client must bound its subscription and use get on gap/slow-consumer/missing completed.
+    parameters:
+      connectionId: {schema: {type: string}}
+      token: {schema: {type: string}}
+    publish:
+      operationId: v1_chat_events
+      message: {$ref: '#/components/messages/v1_streamEvent'}
+  brai.providers.v1.operations.get:
+    description: >-
+      NATS Services brai_providers_v1, queue brai_providers_v1. Trusted owner ACL.
+      Inference2, control8, no compute queue. Invoke returns durable acceptance.
+      Replay same owner/operationId/input within7days; result24h. No inference retries.
+      Request bytes65536 for invoke,2048 control; reply73728. Service errors code500.
+    bindings:
+      nats:
+        queue: brai_providers_v1
+        bindingVersion: 0.1.0
+    subscribe:
+      operationId: v1_operations_get
+      message:
+        $ref: '#/components/messages/v1_operationKey'
+    publish:
+      operationId: v1_operations_get_reply
+      message:
+        oneOf:
+          - $ref: '#/components/messages/v1_operation'
+          - $ref: '#/components/messages/v1_error'
+  brai.providers.v1.operations.cancel:
+    description: >-
+      NATS Services brai_providers_v1, queue brai_providers_v1. Trusted owner ACL.
+      Inference2, control8, no compute queue. Invoke returns durable acceptance.
+      Replay same owner/operationId/input within7days; result24h. No inference retries.
+      Request bytes65536 for invoke,2048 control; reply73728. Service errors code500.
+    bindings:
+      nats:
+        queue: brai_providers_v1
+        bindingVersion: 0.1.0
+    subscribe:
+      operationId: v1_operations_cancel
+      message:
+        $ref: '#/components/messages/v1_operationKey'
+    publish:
+      operationId: v1_operations_cancel_reply
+      message:
+        oneOf:
+          - $ref: '#/components/messages/v1_operation'
+          - $ref: '#/components/messages/v1_error'
+  brai.providers.v1.models.list:
+    description: >-
+      NATS Services brai_providers_v1, queue brai_providers_v1. Trusted owner ACL.
+      Inference2, control8, no compute queue. Invoke returns durable acceptance.
+      Replay same owner/operationId/input within7days; result24h. No inference retries.
+      Request bytes65536 for invoke,2048 control; reply73728. Service errors code500.
+    bindings:
+      nats:
+        queue: brai_providers_v1
+        bindingVersion: 0.1.0
+    subscribe:
+      operationId: v1_models_list
+      message:
+        $ref: '#/components/messages/v1_modelsListRequest'
+    publish:
+      operationId: v1_models_list_reply
+      message:
+        oneOf:
+          - $ref: '#/components/messages/v1_modelsListResponse'
+          - $ref: '#/components/messages/v1_error'
+  brai.providers.v1.models.get:
+    description: >-
+      NATS Services brai_providers_v1, queue brai_providers_v1. Trusted owner ACL.
+      Inference2, control8, no compute queue. Invoke returns durable acceptance.
+      Replay same owner/operationId/input within7days; result24h. No inference retries.
+      Request bytes65536 for invoke,2048 control; reply73728. Service errors code500.
+    bindings:
+      nats:
+        queue: brai_providers_v1
+        bindingVersion: 0.1.0
+    subscribe:
+      operationId: v1_models_get
+      message:
+        $ref: '#/components/messages/v1_modelsGetRequest'
+    publish:
+      operationId: v1_models_get_reply
+      message:
+        oneOf:
+          - $ref: '#/components/messages/v1_model'
+          - $ref: '#/components/messages/v1_error'
+  brai.providers.v1.status:
+    description: >-
+      NATS Services brai_providers_v1, queue brai_providers_v1. Trusted owner ACL.
+      Inference2, control8, no compute queue. Invoke returns durable acceptance.
+      Replay same owner/operationId/input within7days; result24h. No inference retries.
+      Request bytes65536 for invoke,2048 control; reply73728. Service errors code500.
+    bindings:
+      nats:
+        queue: brai_providers_v1
+        bindingVersion: 0.1.0
+    subscribe:
+      operationId: v1_status
+      message:
+        $ref: '#/components/messages/v1_statusRequest'
+    publish:
+      operationId: v1_status_reply
+      message:
+        oneOf:
+          - $ref: '#/components/messages/v1_statusResponse'
+          - $ref: '#/components/messages/v1_error'
+  brai.history.v1.append.service_providers:
+    description: >-
+      Best-effort owner scoped safe operation fact; Core request timeout1s, active8,
+      no retry/queue. Source bound by ACL; reply confirms append, failures do not affect model.
+    publish:
+      operationId: appendSafeOperationFact
+      message:
+        payload:
+          $ref: '../history/schemas/messages.schema.json#/definitions/appendRequest'
+  brai.alerts.v1.ingest:
+    description: >-
+      Existing BRAI_ALERTS_INGEST_V1. Source durable outbox128/TTL24h, batch8,
+      PubAck timeout1s, poll5s. Stable eventId/JSON and Nats-Msg-Id across lost PubAck.
+      user owner scope, failure type1, episode owner/provider/model; success closes silently.
+    publish:
+      operationId: publishOperationFailure
+      message:
+        headers:
+          type: object
+          required: [Nats-Msg-Id]
+          properties:
+            Nats-Msg-Id: {type: string, format: uuid}
+        payload:
+          $ref: '../alerts/schemas/messages.schema.json#/definitions/ingest'
+components:
+  messages:
+    request:
+      name: DecideRequest
+      payload:
+        $ref: './schemas/v0.schema.json#/definitions/request'
+    response:
+      name: DecideResponse
+      payload:
+        $ref: './schemas/v0.schema.json#/definitions/response'
+    error:
+      name: DecideError
+      headers:
+        type: object
+        required: [Nats-Service-Error, Nats-Service-Error-Code]
+        properties:
+          Nats-Service-Error: {type: string}
+          Nats-Service-Error-Code: {const: '500'}
+      payload:
+        $ref: './schemas/v0.schema.json#/definitions/error'
+    v1_decideRequest:
+      name: V1_decideRequest
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/decideRequest'
+    v1_error:
+      name: V1_error
+      headers:
+        $ref: '#/components/messages/error/headers'
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/error'
+    v1_model:
+      name: V1_model
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/model'
+    v1_modelsGetRequest:
+      name: V1_modelsGetRequest
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/modelsGetRequest'
+    v1_modelsListRequest:
+      name: V1_modelsListRequest
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/modelsListRequest'
+    v1_modelsListResponse:
+      name: V1_modelsListResponse
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/modelsListResponse'
+    v1_operation:
+      name: V1_operation
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/operation'
+    v1_operationKey:
+      name: V1_operationKey
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/operationKey'
+    v1_statusRequest:
+      name: V1_statusRequest
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/statusRequest'
+    v1_statusResponse:
+      name: V1_statusResponse
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/statusResponse'
+    v1_chatRequest:
+      name: V1_chatRequest
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/chatRequest'
+    v1_streamEvent:
+      name: V1_streamEvent
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/streamEvent'
+    v1_imageRequest:
+      name: V1_imageRequest
+      payload:
+        $ref: './schemas/v1.schema.json#/definitions/imageRequest'

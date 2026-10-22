@@ -31,6 +31,7 @@ export interface HistoryTransaction {
   insertEvent(input: EventInput): Promise<HistoryEvent | null>;
   events(filters: Filters, after: EventKey | null, count: number): Promise<HistoryEvent[]>;
   catalog(table: CatalogTable, id: number, lock?: boolean): Promise<CatalogRow | null>;
+  typeByCode(categoryCode: string, typeCode: string): Promise<EventType | null>;
   catalogList(table: CatalogTable, categoryId: number | undefined, after: number | null, count: number): Promise<CatalogRow[]>;
   catalogInsert(table: CatalogTable, request: MutationRequest): Promise<CatalogRow>;
   catalogUpdate(table: CatalogTable, request: MutationRequest): Promise<CatalogRow>;
@@ -43,6 +44,7 @@ export interface HistoryStore {
 /** Одна прикладная граница для двух транспортов; gate подключается вне ядра. */
 export interface HistoryHandlers {
   appendEvent(input: unknown, context?: OperationContext): Promise<{ event: HistoryEvent }>;
+  appendElementsEvent(input: unknown, context?: OperationContext): Promise<{ event: HistoryEvent; inserted: boolean }>;
   listForWeb(input: unknown, context?: OperationContext): Promise<Page<HistoryEvent>>;
   getForWeb(input: unknown, context?: OperationContext): Promise<{ event: HistoryEvent }>;
   searchEvents(input: unknown, context?: OperationContext): Promise<Page<HistoryEvent>>;
@@ -100,6 +102,13 @@ function normalizedFilters(raw: Record<string, any> = {}): Filters {
 }
 function normalizeEvent(raw: Record<string, any>): EventInput {
   return { id: raw.id.toLowerCase(), source: raw.source, type_id: raw.type_id, occurred_at: normalizeTimestamp(raw.occurred_at), actor_id: raw.actor_id ?? null, scope_type: raw.scope_type, scope_id: raw.scope_id, object_type: raw.object_type ?? null, object_id: raw.object_id ?? null, data: raw.data ?? {} };
+}
+function elementsEvent(value: unknown): Record<string, any> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new HistoryFault("INVALID_ARGUMENT");
+  const raw = value as Record<string, any>; const aggregate = raw.aggregate; const actor = raw.actor; const data = raw.data;
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw.event_id ?? "") || raw.event_version !== 1 || typeof raw.event_type !== "string" || !/^[a-z][a-z0-9_.]{1,95}$/.test(raw.event_type) || !/^\d{4}-/.test(raw.occurred_at ?? "") || typeof raw.owner_id !== "string" || raw.owner_id.length < 1 || raw.owner_id.length > 255 || !actor || typeof actor !== "object" || Array.isArray(actor) || !["human", "agent", "system"].includes(actor.kind) || (actor.id !== undefined && actor.id !== null && (typeof actor.id !== "string" || actor.id.length > 255)) || !aggregate || typeof aggregate !== "object" || Array.isArray(aggregate) || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(aggregate.id ?? "") || !["element", "move", "attempt"].includes(aggregate.kind) || !data || typeof data !== "object" || Array.isArray(data)) throw new HistoryFault("INVALID_ARGUMENT");
+  const category = data.history_category_code, type = data.history_type_code; if (typeof category !== "string" || typeof type !== "string") throw new HistoryFault("INVALID_ARGUMENT");
+  return raw;
 }
 function sameEvent(input: EventInput, saved: HistoryEvent): boolean {
   const { recorded_at, ...content } = saved;
@@ -212,6 +221,15 @@ export function createHistoryHandlers(store: HistoryStore, options: { cursorKey:
     });
   }
   return {
+    async appendElementsEvent(value, context) {
+      const raw = elementsEvent(value);
+      return store.transaction(null, context, async tx => {
+        const catalog = await tx.typeByCode(raw.data.history_category_code, raw.data.history_type_code);
+        if (!catalog) throw new HistoryFault("INVALID_ARGUMENT");
+        const input: EventInput = { id: raw.event_id.toLowerCase(), source: "service_elements", type_id: catalog.id, occurred_at: normalizeTimestamp(raw.occurred_at), actor_id: raw.actor?.id ?? null, scope_type: "user", scope_id: raw.owner_id, object_type: raw.aggregate.kind, object_id: raw.aggregate.id.toLowerCase(), data: raw };
+        const inserted = await tx.insertEvent(input); const saved = inserted ?? await tx.event(input.source, input.id); if (!saved) throw new HistoryFault("INTERNAL"); if (!inserted && !sameEvent(input, saved)) throw new HistoryFault("EVENT_ID_CONFLICT"); return { event: saved, inserted: !!inserted };
+      });
+    },
     async appendEvent(value, context) {
       const event = normalizeEvent(input("history_append", value));
       if (event.source === "service_history" && ["sys_categories", "sys_types"].includes(event.object_type ?? "")) throw new HistoryFault("INVALID_ARGUMENT");

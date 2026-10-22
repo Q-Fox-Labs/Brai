@@ -2,8 +2,20 @@
 // ABOUTME: Синтетические страницы не запускают Agent и не читают пользовательскую историю.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readThreadRange, startCatalogPolling } from "../lib/agent/catalog.ts";
+import { readAllThreads, readThreadRange, startCatalogPolling } from "../lib/agent/catalog.ts";
 const thread = (id: number) => ({ id: String(id), title: `Thread ${id}`, preview: "", model: null, canAcceptDirectInput: true, updatedAt: id });
+test("full project metadata includes later pages beyond the visible range and rejects partial totals", async () => {
+  let calls = 0;
+  const all = await readAllThreads(async cursor => {
+    calls++;
+    const start = cursor ? 1000 : 0;
+    return { generation: "g", data: Array.from({ length: 1000 }, (_, index) => thread(start + index)), nextCursor: cursor ? null : "later" };
+  });
+  assert.equal(calls, 2); assert.equal(all.data.length, 2000); assert.equal(all.nextCursor, null);
+  await assert.rejects(readAllThreads(async cursor => { if (cursor) throw new Error("offline"); return { generation: "g", data: [thread(1)], nextCursor: "later" }; }), /offline/);
+  await assert.rejects(readAllThreads(async cursor => ({ generation: cursor ? "other" : "g", data: [thread(1)], nextCursor: cursor ? null : "later" })), /Каталог обновился/);
+  await assert.rejects(readAllThreads(async () => ({ generation: "g", data: [], nextCursor: "loop" })), /продолжение/);
+});
 test("refresh retains the loaded range and cursor with new first-page chats", async () => {
   const calls: (string | undefined)[] = [];
   const result = await readThreadRange(async cursor => {

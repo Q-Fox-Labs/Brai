@@ -17,6 +17,7 @@ function memory() {
         async event(source,id) {return events.find(e=>e.source===source&&e.id===id&&(user===null||e.scope_type==='user'&&e.scope_id===user))??null;},
         async lockEvent(){},
         async catalog(table,id){return categories.find(row=>row.id===id)??null;},
+        async typeByCode(){return {id:1201,category_id:12,code:'execute',name:'Выполнение',description:''};},
         async catalogInsert(table,request){const row={id:categories.length+1,code:request.code,name:request.name,description:request.description};categories.push(row);return row;},
         async catalogUpdate(table,request){const index=categories.findIndex(row=>row.id===request.id);const row={...categories[index],name:request.name,description:request.description};categories[index]=row;return row;},
         async events(filters,after,count) {return events.filter(e=>user===null||e.scope_type==='user'&&e.scope_id===user).filter(e=>!filters.source||e.source===filters.source).sort((a,b)=>b.id.localeCompare(a.id)).filter(e=>!after||e.id<after[2]).slice(0,count);}
@@ -68,4 +69,9 @@ test('catalog replay validates complete audit and returns original result after 
   await assert.rejects(m.core.categoryCreate(request),fault('EVENT_ID_CONFLICT'));m.rows.find(e=>e.id===request.event_id)[field]=saved;
  }
  m.rows.find(e=>e.id===request.event_id).data.new={...original.result,id:999};await assert.rejects(m.core.categoryCreate(request),fault('EVENT_ID_CONFLICT'));
+});
+test('Elements envelope resolves local type codes and is idempotent',async()=>{
+ const m=memory();const payload={event_id:randomUUID(),event_version:1,event_type:'move.completed',occurred_at:'2026-10-15T20:00:00.000Z',owner_id:'user-a',actor:{kind:'agent',id:'agent-1'},aggregate:{kind:'attempt',id:randomUUID()},data:{history_category_code:'execution',history_type_code:'execute',result:{ok:true}}};
+ const first=await m.core.appendElementsEvent(payload);const second=await m.core.appendElementsEvent(payload);
+ assert.equal(first.inserted,true);assert.equal(second.inserted,false);assert.equal(first.event.source,'service_elements');assert.equal(first.event.type_id,1201);assert.equal(m.rows.length,1);
 });

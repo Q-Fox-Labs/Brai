@@ -53,7 +53,7 @@ function dependencies(order, hooks = {}) {
       createHuggingFaceCatalog() { order.push('hub.create'); return {}; },
       createHistoryFactPublisher() { order.push('history.create'); return history; },
       startLocalAiNats(_nc, _config, handlers) {
-        assert.equal(Object.keys(handlers).length, 13, 'all public subjects must be wired');
+        assert.equal(Object.keys(handlers).length, 14, 'all public subjects must be wired');
         order.push('transport.start');
         if (hooks.transportFailure) throw new Error('fixture failure');
         return transport;
@@ -69,6 +69,24 @@ test('configuration rejects omitted or unmeasured runtime limits before resource
   assert.throws(() => validateLocalAiConfig({ ...valid, postgres: { ...valid.postgres, outboxCapacity: 1 } }), /postgres/);
   assert.throws(() => validateLocalAiConfig({ ...valid, runtime: { ...valid.runtime, llama_cpp: { ...valid.runtime.llama_cpp, env: { ...valid.runtime.llama_cpp.env, SECRET_KEY: 'never-accepted' } } } }), /runtime\.llama_cpp\.env\.SECRET_KEY/);
   assert.throws(() => validateLocalAiConfig({ ...valid, nats: { ...valid.nats, inboxPrefix: '_INBOX' } }), /nats\.inboxPrefix/);
+});
+
+test('optional upload origin is validated before startup and passed to the Artifacts adapter', async () => {
+  const input = config();
+  input.artifacts.uploadBaseUrl = 'https://upload.invalid/';
+  assert.equal(validateLocalAiConfig(input), input);
+  for (const uploadBaseUrl of [undefined, null, '', 'invalid', 'ftp://upload.invalid/', 'https://user:secret@upload.invalid/', 'https://upload.invalid/path', 'https://upload.invalid/?q=1', 'https://upload.invalid/#fragment', 'https://upload.invalid/?', 'https://upload.invalid/#']) {
+    assert.throws(() => validateLocalAiConfig({ ...input, artifacts: { ...input.artifacts, uploadBaseUrl } }), /artifacts\.uploadBaseUrl/);
+  }
+  assert.throws(() => validateLocalAiConfig({ ...input, artifacts: { ...input.artifacts, unknownUploadOption: true } }), /artifacts/);
+  const deps = dependencies([]);
+  let actual;
+  deps.factories.createArtifactsAdapter = value => { actual = value; return {}; };
+  const runtime = await startLocalAi(input, deps);
+  try {
+    assert.equal(actual.internalBaseUrl, input.artifacts.internalBaseUrl);
+    assert.equal(actual.uploadBaseUrl, input.artifacts.uploadBaseUrl);
+  } finally { await runtime.close(); }
 });
 
 test('supported profile projection preserves pinned manifest and unknown GigaAM audio limit', () => {

@@ -28,6 +28,7 @@ channels:
   modelsRemove: { address: brai.local_ai.v1.models.remove, messages: { request: { $ref: '#/components/messages/ModelRevisionRequest' } } }
   invokeEmbed: { address: brai.local_ai.v1.invoke.embed, messages: { request: { $ref: '#/components/messages/EmbedRequest' } } }
   invokeTranscribe: { address: brai.local_ai.v1.invoke.transcribe, messages: { request: { $ref: '#/components/messages/TranscribeRequest' } } }
+  invokeSynthesize: { address: brai.local_ai.v1.invoke.synthesize, messages: { request: { $ref: '#/components/messages/SynthesizeRequest' } } }
   cancel: { address: brai.local_ai.v1.cancel, messages: { request: { $ref: '#/components/messages/CancelRequest' } } }
   status: { address: brai.local_ai.v1.status, messages: { request: { $ref: '#/components/messages/StatusRequest' } } }
   replies:
@@ -41,6 +42,7 @@ channels:
       ModelMutationResponse: { $ref: '#/components/messages/ModelMutationResponse' }
       EmbedResponse: { $ref: '#/components/messages/EmbedResponse' }
       TranscribeResponse: { $ref: '#/components/messages/TranscribeResponse' }
+      SynthesizeResponse: { $ref: '#/components/messages/SynthesizeResponse' }
       CancelResponse: { $ref: '#/components/messages/CancelResponse' }
       StatusResponse: { $ref: '#/components/messages/StatusResponse' }
       ServiceError: { $ref: '#/components/messages/ServiceError' }
@@ -56,6 +58,7 @@ operations:
   modelsRemove: { action: receive, channel: { $ref: '#/channels/modelsRemove' }, messages: [{ $ref: '#/channels/modelsRemove/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/ModelMutationResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
   invokeEmbed: { action: receive, channel: { $ref: '#/channels/invokeEmbed' }, messages: [{ $ref: '#/channels/invokeEmbed/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/EmbedResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
   invokeTranscribe: { action: receive, channel: { $ref: '#/channels/invokeTranscribe' }, messages: [{ $ref: '#/channels/invokeTranscribe/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/TranscribeResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
+  invokeSynthesize: { action: receive, channel: { $ref: '#/channels/invokeSynthesize' }, messages: [{ $ref: '#/channels/invokeSynthesize/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/SynthesizeResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
   cancel: { action: receive, channel: { $ref: '#/channels/cancel' }, messages: [{ $ref: '#/channels/cancel/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/CancelResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
   status: { action: receive, channel: { $ref: '#/channels/status' }, messages: [{ $ref: '#/channels/status/messages/request' }], reply: { channel: { $ref: '#/channels/replies' }, messages: [{ $ref: '#/channels/replies/messages/StatusResponse' }, { $ref: '#/channels/replies/messages/ServiceError' }] }, bindings: { nats: { queue: brai_local_ai, bindingVersion: '0.1.0' } } }
 components:
@@ -75,8 +78,10 @@ components:
     ModelMutationResponse: { name: ModelMutationResponse, payload: { $ref: './schemas/messages.schema.json#/definitions/ModelMutationResponse' } }
     EmbedRequest: { name: EmbedRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/EmbedRequest' } }
     TranscribeRequest: { name: TranscribeRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/TranscribeRequest' } }
+    SynthesizeRequest: { name: SynthesizeRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/SynthesizeRequest' } }
     EmbedResponse: { name: EmbedResponse, payload: { $ref: './schemas/messages.schema.json#/definitions/EmbedResponse' } }
     TranscribeResponse: { name: TranscribeResponse, payload: { $ref: './schemas/messages.schema.json#/definitions/TranscribeResponse' } }
+    SynthesizeResponse: { name: SynthesizeResponse, payload: { $ref: './schemas/messages.schema.json#/definitions/SynthesizeResponse' } }
     CancelRequest: { name: CancelRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/CancelRequest' } }
     CancelResponse: { name: CancelResponse, payload: { $ref: './schemas/messages.schema.json#/definitions/CancelResponse' } }
     StatusRequest: { name: StatusRequest, payload: { $ref: './schemas/messages.schema.json#/definitions/StatusRequest' } }

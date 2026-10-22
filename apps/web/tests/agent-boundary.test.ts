@@ -16,7 +16,7 @@ function load(name: string, ports: Record<string, unknown>) {
   return module.exports;
 }
 const id = "11111111-1111-4111-8111-111111111111", copyId = "22222222-2222-4222-8222-222222222222";
-const variables = ["WEB_ORIGIN", "BRAI_AGENT_ALLOWED_EMAILS", "BRAI_AGENT_OWNER_EMAIL", "BRAI_AGENT_OWNER_ID", "AGENT_ARTIFACTS_UPLOAD_BASE_URL", "ARTIFACTS_UPLOAD_BASE_URL", "AGENT_ARTIFACTS_NATS_URL", "AGENT_ARTIFACTS_NATS_USER", "AGENT_ARTIFACTS_NATS_PASSWORD", "AGENT_ARTIFACTS_NATS_INBOX_PREFIX", "NATS_URL", "AGENT_RESULTS_NATS_URL", "AGENT_RESULTS_NATS_USER", "AGENT_RESULTS_NATS_PASSWORD", "AGENT_RESULTS_NATS_INBOX_PREFIX"];
+const variables = ["WEB_ORIGIN", "BRAI_WEB_AGENT_MODE", "BRAI_AGENT_ALLOWED_EMAILS", "BRAI_AGENT_OWNER_EMAIL", "BRAI_AGENT_OWNER_ID", "AGENT_ARTIFACTS_UPLOAD_BASE_URL", "ARTIFACTS_UPLOAD_BASE_URL", "AGENT_ARTIFACTS_NATS_URL", "AGENT_ARTIFACTS_NATS_USER", "AGENT_ARTIFACTS_NATS_PASSWORD", "AGENT_ARTIFACTS_NATS_INBOX_PREFIX", "NATS_URL", "AGENT_RESULTS_NATS_URL", "AGENT_RESULTS_NATS_USER", "AGENT_RESULTS_NATS_PASSWORD", "AGENT_RESULTS_NATS_INBOX_PREFIX"];
 function fixture(mapped = true) {
   const previous = Object.fromEntries(variables.map(key => [key, process.env[key]]));
   for (const key of variables) delete process.env[key];
@@ -43,13 +43,57 @@ function fixture(mapped = true) {
   const nats = { ...require("nats"), connect: async (options: Record<string, unknown>) => { connections.push(options); return connection(String(options.servers)); } };
   const contracts = load("contracts", {}), gateway = load("gateway", { nats, "./contracts": contracts });
   const auth = load("auth", { "./contracts": contracts, "./gateway": gateway });
-  const agent = load("agent-http", { "./auth": auth, "./gateway": gateway, "../lib/agent/stream": {} });
+  const webConfig = load("web-config", {});
+  const agent = load("agent-http", { "./auth": auth, "./gateway": gateway, "./web-config": webConfig, "../lib/agent/stream": {} });
   const transport = load("agent-artifacts", { nats, "./gateway": gateway });
-  const artifacts = load("artifacts-http", { "./auth": auth, "./gateway": gateway, "./agent-http": agent, "./agent-artifacts": transport, "./request-body": load("request-body", {}) });
+  const artifacts = load("artifacts-http", { "./auth": auth, "./gateway": gateway, "./agent-http": agent, "./agent-artifacts": transport, "./request-body": load("request-body", {}), "./web-config": webConfig });
   const request = (path: string, body?: unknown, user = "local-user") => new Request(`https://dev.test/api/agent/${path}`, { method: body ? "POST" : "GET", headers: { origin: "https://dev.test", "x-brai-user": user, "content-type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
   return { session, artifact, binding, calls, connections, request, agent, artifacts, transport, setUpload(value: string) { uploadUrl = value; }, setAgent(value: unknown) { agentReply = value; }, close() { for (const key of variables) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; } } };
 }
 const prepare = { projectId: "project", threadId: "thread", requestId: "prepare-id", kind: "original", filename: "image.png", mimeType: "image/png" };
+test("readState and readMark use session-owned storage, strict methods and reject owner injection", async () => {
+  const f = fixture();
+  try {
+    f.setAgent({ marks: { "project:thread": ["final"] } });
+    const route = (action: string) => ({ params: Promise.resolve({ path: [action] }) });
+    const read = await f.agent.agentGet(f.request("readState"), route("readState"));
+    assert.equal(read.status, 200); assert.deepEqual(await read.json(), { marks: { "project:thread": ["final"] } });
+    assert.deepEqual(f.calls.at(-1)?.payload, { action: "readState", ownerId: "canonical-owner" });
+    const entry = { projectId: "project", threadId: "thread", messageId: "final", lastMessageAt: 100 };
+    assert.equal((await f.agent.agentPost(f.request("readMark", entry), route("readMark"))).status, 202);
+    assert.deepEqual(f.calls.at(-1)?.payload, { action: "readMark", ...entry, ownerId: "canonical-owner" });
+    const before = f.calls.filter(call => call.subject === "brai.agent.v3.rpc").length;
+    assert.equal((await f.agent.agentGet(f.request("readState?ownerId=other"), route("readState"))).status, 400);
+    assert.equal((await f.agent.agentPost(f.request("readState", {}), route("readState"))).status, 400);
+    assert.equal((await f.agent.agentGet(f.request("readMark?projectId=project&threadId=thread&messageId=final&lastMessageAt=100"), route("readMark"))).status, 400);
+    assert.equal((await f.agent.agentPost(f.request("readMark", { ...entry, ownerId: "other" }), route("readMark"))).status, 400);
+    assert.equal((await f.agent.agentPost(f.request("readMark", { ...entry, lastMessageAt: "100" }), route("readMark"))).status, 400);
+    assert.equal((await f.agent.agentGet(f.request("readState", undefined, "canonical-owner"), route("readState"))).status, 401);
+    assert.equal((await f.agent.agentPost(f.request("readMark", entry, "canonical-owner"), route("readMark"))).status, 401);
+    const crossOrigin = new Request("https://dev.test/api/agent/readMark", { method: "POST", headers: { origin: "https://evil.test", "x-brai-user": "local-user", "content-type": "application/json" }, body: JSON.stringify(entry) });
+    assert.equal((await f.agent.agentPost(crossOrigin, route("readMark"))).status, 403);
+    assert.equal(f.calls.filter(call => call.subject === "brai.agent.v3.rpc").length, before);
+  } finally { f.close(); }
+});
+
+test("Hermes mode blocks legacy Agent and artifact routes before auth or NATS calls", async () => {
+  const f = fixture();
+  try {
+    process.env.BRAI_WEB_AGENT_MODE = "hermes_telegram";
+    const route = { params: Promise.resolve({ path: ["projects"] }) };
+    const before = f.calls.length;
+    const agentResponse = await f.agent.agentGet(f.request("projects"), route);
+    const prepareResponse = await f.artifacts.prepareAttachment(f.request("attachments/prepare", prepare));
+    const finalizeResponse = await f.artifacts.finalizeAttachment(f.request("attachments/finalize", { projectId: "project", threadId: "thread", requestId: "request", pair: { originalArtifactId: id, modelArtifactId: id } }));
+    const authRequest = new Request("https://dev.test/api/agent/artifact-auth", { headers: { "x-forwarded-method": "GET", "x-forwarded-uri": `/api/agent/attachments/${id}?projectId=project&threadId=thread&expectedUserId=local-user` } });
+    const authResponse = await f.artifacts.artifactReadAuth(authRequest);
+    for (const response of [agentResponse, prepareResponse, finalizeResponse, authResponse]) {
+      assert.equal(response.status, 404);
+      assert.deepEqual(await response.json(), { code: "NOT_FOUND" });
+    }
+    assert.equal(f.calls.length, before);
+  } finally { f.close(); }
+});
 
 test("HTTP uses canonical owner internally and local identity in returned attachment URLs", async () => {
   const f = fixture();

@@ -7,12 +7,13 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import type { AgentLimits, ThreadMetadata } from "@brai/agent/contracts";
 import { formatLimitReset, limitCountdown } from "../../lib/agent/limits";
+import { unreadFinal } from "../../lib/agent/read-state";
 
 export type Project = { projectId: string; name: string; available: boolean };
-export type ThreadPage = { data: ThreadMetadata[]; nextCursor: string | null; loading: boolean; error: string };
+export type ThreadPage = { data: ThreadMetadata[]; nextCursor: string | null; loading: boolean; error: string; complete?: boolean };
 type Props = {
   projects: Project[]; pages: Record<string, ThreadPage>; projectId: string; threadId: string;
-  open: boolean; email: string; busy: boolean; accountLimits: AgentLimits; readMessages?: Record<string, string>;
+  open: boolean; email: string; busy: boolean; accountLimits: AgentLimits; readMessages?: Record<string, string[]>;
   select: (projectId: string, threadId?: string) => void;
   create: (projectId: string) => void; more: (projectId: string) => void; refresh: (projectId: string) => void;
   archive: (projectId: string, threadId: string) => void;
@@ -51,6 +52,7 @@ export default function Sidebar({ projects, pages, projectId, threadId, open, em
       {orderedProjects.map(project => {
         const index = projects.indexOf(project), collapsed = preferences.collapsed.includes(project.projectId);
         const page = pages[project.projectId], count = visible[project.projectId] ?? 5;
+        const unread = page?.complete ? page.data.filter(thread => unreadFinal(project.projectId, thread, readMessages)).length : 0;
         return <section className={`agent-project ${dragged === project.projectId ? "is-dragging" : ""}`} key={project.projectId} aria-label={project.name} data-project-id={project.projectId} data-drop-position={dropTarget?.id === project.projectId ? (dropTarget.after ? "after" : "before") : undefined}
           onDragOver={event => {
             if (!dragged || dragged === project.projectId) return;
@@ -76,7 +78,7 @@ export default function Sidebar({ projects, pages, projectId, threadId, open, em
               onDragEnd={finishDragging}
               onClick={() => { if (Date.now() < suppressClickUntil.current) return; save({ ...preferences, collapsed: collapsed ? preferences.collapsed.filter(id => id !== project.projectId) : [...preferences.collapsed, project.projectId] }); }}>
               <svg className={`agent-project-icon agent-project-color-${index % 3}`} width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /><path d="m8 12 3 2-3 2m6 0h3" /></svg>
-              <span>{project.name}</span><span className={`agent-project-dot ${project.available ? "is-available" : ""}`} title={project.available ? "Проект доступен" : "Проект недоступен"} />
+              <span>{project.name}</span><span className="agent-project-attention">{unread > 0 && <span className="agent-project-unread" aria-label={`Непрочитанных итогов: ${unread}`}>{unread}</span>}<span className={`agent-project-dot ${project.available ? "is-available" : ""}`} title={project.available ? "Проект доступен" : "Проект недоступен"} /></span>
             </Button>
             <Button type="button" variant="ghost" size="icon-sm" className="agent-icon-button" aria-label={`Новый чат в ${project.name}`} title="Новый чат" onClick={() => { if (collapsed) save({ ...preferences, collapsed: preferences.collapsed.filter(id => id !== project.projectId) }); create(project.projectId); }}>+</Button>
           </div>
@@ -84,7 +86,7 @@ export default function Sidebar({ projects, pages, projectId, threadId, open, em
             {sortThreads(page?.data ?? []).slice(0, count).map(thread => {
               const title = thread.title || thread.preview || "Новый чат", selected = projectId === project.projectId && threadId === thread.id;
               return <div key={thread.id} data-thread-id={thread.id} className={`agent-thread ${selected ? "is-selected" : ""}`}>
-                <Button type="button" variant="ghost" className="agent-thread-select" title={title} aria-pressed={selected} onClick={() => select(project.projectId, thread.id)}><span className="agent-thread-title">{title}</span>{thread.awaitingReply ? <span className="agent-thread-indicator is-question" role="status" aria-label="Агент ждёт ответа" title="Агент ждёт ответа">?</span> : thread.active ? <span className="agent-thread-spinner" role="status" aria-label="Агент работает" /> : thread.finalMessageId && readMessages[`${project.projectId}:${thread.id}`] !== thread.finalMessageId ? <span className="agent-thread-indicator is-completed" role="status" aria-label="Непрочитанный итог" title="Непрочитанный итог"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg></span> : null}</Button>
+                <Button type="button" variant="ghost" className="agent-thread-select" title={title} aria-pressed={selected} onClick={() => select(project.projectId, thread.id)}><span className="agent-thread-title">{title}</span>{thread.awaitingReply ? <span className="agent-thread-indicator is-question" role="status" aria-label="Агент ждёт ответа" title="Агент ждёт ответа">?</span> : thread.active ? <span className="agent-thread-spinner" role="status" aria-label="Агент работает" /> : unreadFinal(project.projectId, thread, readMessages) ? <span className="agent-thread-indicator is-completed" role="status" aria-label="Непрочитанный итог" title="Непрочитанный итог"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg></span> : null}</Button>
                 <ThreadActions title={title} disabled={busy || !project.available} archive={() => archive(project.projectId, thread.id)} />
               </div>;
             })}

@@ -20,7 +20,7 @@ const MAX_SEARCH_RESPONSE_BYTES = 1_048_576;
 const MAX_PAGE_SIZE = 100;
 const MAX_CURSOR_BYTES = 2048;
 
-export type ProfileFileManifest = Readonly<{ path: string; bytes: number; sha256: string }>;
+export type ProfileFileManifest = Readonly<{ path: string; bytes: number; sha256: string; url?: string }>;
 export type SupportedProfile = Readonly<{
   profileId: string;
   modelId: string;
@@ -32,7 +32,7 @@ export type SupportedProfile = Readonly<{
 
 type PublicSearchInput = {
   query: string;
-  filter?: { operation?: 'embed' | 'transcribe'; inputKind?: 'text' | 'image_artifact' | 'audio_artifact' | 'video_artifact'; outputKind?: 'vector' | 'transcription'; language?: string };
+  filter?: { operation?: 'embed' | 'transcribe' | 'synthesize'; inputKind?: 'text' | 'image_artifact' | 'audio_artifact' | 'video_artifact'; outputKind?: 'vector' | 'transcription' | 'audio_artifact'; language?: string };
   page?: { cursor?: string; limit?: number };
 };
 
@@ -98,6 +98,7 @@ export type ModelInstallerOptions = {
 /** Подключает поиск только к публичному Hub API и помечает поддержанными лишь подготовленные профили. */
 export function createHuggingFaceCatalog(options: HuggingFaceCatalogOptions): HuggingFaceCatalog {
   const profiles = indexProfiles(options.profiles);
+  for (const [repository, profile] of profiles.byRepository) if (profile.files.some(file => file.url)) profiles.byRepository.delete(repository);
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = positive(options.requestTimeoutMs ?? 5_000, 60_000, 'INVALID_HUB_TIMEOUT');
   const maxQueryLength = positive(options.maxQueryLength ?? 200, 1_000, 'INVALID_SEARCH_LIMIT');
@@ -520,7 +521,7 @@ async function downloadFile(input: {
   signal: AbortSignal;
   onBytes(count: number): Promise<void>;
 }): Promise<number> {
-  const url = new URL(
+  const url = input.file.url ? new URL(input.file.url) : new URL(
     '/' + input.profile.repository.split('/').map(encodeURIComponent).join('/')
       + '/resolve/' + encodeURIComponent(input.profile.revision)
       + '/' + input.file.path.split('/').map(encodeURIComponent).join('/') + '?download=true',
@@ -528,7 +529,7 @@ async function downloadFile(input: {
   );
   let response: Response;
   try {
-    response = await input.fetchImpl(url, { method: 'GET', headers: { accept: 'application/octet-stream' }, signal: input.signal, redirect: 'follow' });
+    response = await input.fetchImpl(url, { method: 'GET', headers: { accept: 'application/octet-stream' }, signal: input.signal, redirect: input.file.url ? 'error' : 'follow' });
   } catch {
     if (input.signal.aborted) throw new LocalAiError('CANCELLED', 'INSTALL_CANCELLED');
     throw new LocalAiError('DEPENDENCY_UNAVAILABLE', 'HUGGINGFACE_DOWNLOAD_FAILED', true);
@@ -663,6 +664,12 @@ function validateProfile(profile: SupportedProfile): void {
       || !Number.isSafeInteger(file.bytes) || file.bytes < 1 || !/^[\da-f]{64}$/i.test(file.sha256)) {
       throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_SUPPORTED_PROFILE_FILES');
     }
+    if (profile.profileId === 'silero_pytorch' && file.url === undefined) throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_SUPPORTED_PROFILE_FILES');
+    if (file.url !== undefined && (profile.profileId !== 'silero_pytorch' || profile.modelId !== 'silero-tts-ru-v5_5'
+      || profile.repository !== 'silero-models/tts' || profile.revision !== '50081637b602126ee06cb3bc8a744d25651d2da1'
+      || file.path !== 'v5_5_ru.pt' || file.bytes !== 145420684
+      || file.sha256 !== '50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437'
+      || file.url !== 'https://models.silero.ai/models/tts/ru/v5_5_ru.pt')) throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_SUPPORTED_PROFILE_FILES');
     paths.add(file.path);
     total += file.bytes;
     if (!Number.isSafeInteger(total)) throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_SUPPORTED_PROFILE_FILES');
@@ -720,9 +727,9 @@ function validateSearch(input: PublicSearchInput, maxQueryLength: number, maxPag
     const filter = input.filter;
     const allowed = new Set(['operation', 'inputKind', 'outputKind', 'language']);
     if (!filter || typeof filter !== 'object' || Object.keys(filter).some(key => !allowed.has(key))
-      || filter.operation !== undefined && !['embed', 'transcribe'].includes(filter.operation)
+      || filter.operation !== undefined && !['embed', 'transcribe', 'synthesize'].includes(filter.operation)
       || filter.inputKind !== undefined && !['text', 'image_artifact', 'audio_artifact', 'video_artifact'].includes(filter.inputKind)
-      || filter.outputKind !== undefined && !['vector', 'transcription'].includes(filter.outputKind)
+      || filter.outputKind !== undefined && !['vector', 'transcription', 'audio_artifact'].includes(filter.outputKind)
       || filter.language !== undefined && (typeof filter.language !== 'string' || filter.language.length < 1 || filter.language.length > 128)) {
       throw new LocalAiError('INVALID_ARGUMENT', 'INVALID_CATALOG_SEARCH_FILTER');
     }

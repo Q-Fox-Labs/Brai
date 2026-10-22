@@ -8,10 +8,11 @@ import type { CodexPort, Observation } from './codex.js';
 import { createAttachments, type ArtifactsConfig, type ArtifactsPort, type NatsConfig } from './attachments.js';
 import { createResults } from './results.js';
 import { createLimitsMonitor } from './limits.js';
+import type { ReadStatePort } from './read-state.js';
 import { nameThread } from './title.js';
 import { display, messagePage, metadata, text, compact, summary, messageAttention, goal, progress } from './display.js';
 import { asyncQuestionMethod, asyncQuestionRequest, asyncQuestionReply, asyncReplyIds } from './async-questions.js';
-export type Config = { ownerId?: string; artifacts?: ArtifactsConfig; codex: { socketUrl: string }; nats: NatsConfig; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
+export type Config = { readStatePath?: string; ownerId?: string; artifacts?: ArtifactsConfig; codex: { socketUrl: string }; nats: NatsConfig; projects: { projectId: string; name: string; cwd: string; available?: boolean }[]; allowedModels?: string[]; newThread?: { approvalsReviewer?: string | null; model?: string } };
 type Session = { answering: Set<string>; attention: ReturnType<typeof messageAttention>; view: NativeSnapshot & { goal: GoalProjection; planProgress: PlanProgress }; mutating?: boolean; goalRevision: number; opened: boolean; fresh: boolean; titleNeeded: boolean; titleRequest: string; naming?: boolean; closing?: boolean; activeModel?: string | null; raw: Map<string, string | number>; revisions: Map<string, number>; details: Map<string, DisplayItem> };
 function pendingRequest(request: PendingRequest) { return request.kind !== 'unsupported' && !request.answered; }
 function projectTurn(turn: any): NativeTurn {
@@ -21,12 +22,12 @@ function projectTurn(turn: any): NativeTurn {
   return { id: turn.id, status: turn.status, ...(message ? { error: { message, ...(code ? { code } : {}) } } : {}) };
 }
 /** Собирает команды и единственного владельца live items/pending. */
-export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void, artifactsPort?: ArtifactsPort, resultsPort: ArtifactsPort | undefined = artifactsPort) {
+export function createApplication(codex: CodexPort, config: Config, emit: (event: EventEnvelope) => void, artifactsPort?: ArtifactsPort, resultsPort: ArtifactsPort | undefined = artifactsPort, readState?: ReadStatePort) {
   const attachments = createAttachments(codex, config.artifacts, artifactsPort);
   const results = createResults(codex, config.artifacts, config.ownerId, resultsPort);
   const decorate = async (r: Command, items: DisplayItem[], deadline?: number) => results.decorate(r, await attachments.decorate(r, items, deadline), deadline);
   const sessions = new Map<string, Session>();
-  const messageTimes = new Map<string, { updatedAt: number; lastMessageAt: number; finalMessageId: string | null; awaitingReply: boolean }>();
+  const messageTimes = new Map<string, { updatedAt: number; lastMessageAt: number; finalMessageId: string | null; awaitingReply: boolean; pendingForm: boolean }>();
   let creating = 0, admission = Promise.resolve();
   let modelCatalog: { generation: string; result: Promise<ModelCatalog> } | undefined;
   const operations = new Map<string, { hash: string; result: Promise<any> }>();
@@ -352,6 +353,13 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
   const limitMonitor = createLimitsMonitor(codex);
   const unsubscribe = codex.subscribe(observe);
   async function execute(r: Command, deadline?: number): Promise<any> {
+    if (r.action === 'readState' || r.action === 'readMark') {
+      if (!config.ownerId || r.ownerId !== config.ownerId) fail('INVALID_ARGUMENT', r.action === 'readState' ? 'query' : 'not-sent');
+      if (!readState) fail('UNSUPPORTED', r.action === 'readState' ? 'query' : 'not-sent');
+      if (r.action === 'readState') return readState.read(r.ownerId!);
+      project(r.projectId);
+      return readState.mark({ ownerId: r.ownerId!, projectId: r.projectId!, threadId: r.threadId!, messageId: r.messageId!, lastMessageAt: r.lastMessageAt! });
+    }
     if (r.action === 'status') return { ...codex.status(), ready: codex.status().connection === 'connected' && codex.status().authorization === 'ready', limits: limitMonitor.snapshot() };
     if (r.action === 'projects') return { generation: current(), projects: config.projects.map(p => ({ projectId: p.projectId, name: p.name, available: p.available !== false })) };
     if (codex.status().connection !== 'connected' || codex.status().authorization !== 'ready') fail('UPSTREAM_UNAVAILABLE', r.operationId ? 'not-sent' : 'query');
@@ -369,6 +377,7 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
         const cached = messageTimes.get(thread.id);
         let lastMessageAt = cached?.lastMessageAt ?? 0;
         let attention = { finalMessageId: cached?.finalMessageId ?? null, awaitingReply: cached?.awaitingReply ?? false };
+        let pendingForm = cached?.pendingForm ?? false;
         if ((!cached || cached.updatedAt !== thread.updatedAt) && performance.now() < deadline) {
           try {
             let cursor: string | undefined;
@@ -378,19 +387,25 @@ export function createApplication(codex: CodexPort, config: Config, emit: (event
               if (remaining <= 0) fail('TIMEOUT', 'query');
               const items = await codex.call('thread/items/list', { threadId: thread.id, limit: 10, sortDirection: 'desc', ...(cursor ? { cursor } : {}) }, { timeoutMs: Math.min(1000, remaining) });
               const message = items.data.find((entry: any) => ['userMessage', 'agentMessage'].includes(entry.item.type));
-              if (message) { readAttention = messageAttention(display(message.item, message.turnId)); readTime = message.startedAtMs ?? message.completedAtMs ?? thread.updatedAt * 1000; break; }
+              if (message) {
+                readAttention = messageAttention(display(message.item, message.turnId));
+                pendingForm = Boolean(asyncQuestionRequest(message.item, message.turnId));
+                readTime = message.startedAtMs ?? message.completedAtMs ?? thread.updatedAt * 1000;
+                break;
+              }
               if (!items.nextCursor) break;
               cursor = items.nextCursor;
             }
             if (generation !== current()) fail('STALE_GENERATION', 'query');
             lastMessageAt = readTime; attention = readAttention;
-            messageTimes.set(thread.id, { updatedAt: thread.updatedAt, lastMessageAt, ...attention });
+            messageTimes.set(thread.id, { updatedAt: thread.updatedAt, lastMessageAt, ...attention, pendingForm });
             while (messageTimes.size > 1000) messageTimes.delete(messageTimes.keys().next().value!);
           } catch {
             // AIDEV-NOTE: Сбой истории одного чата не скрывает список; не кэшируем неудачу как успешное чтение.
           }
         }
-        return { ...metadata(thread), ...attention, awaitingReply: thread.status?.activeFlags?.some((flag: string) => ['waitingOnApproval', 'waitingOnUserInput'].includes(flag)) || (thread.status?.type !== 'active' && attention.awaitingReply), ...(live ? { finalMessageId: live.finalMessageId, awaitingReply: live.awaitingReply } : {}), lastMessageAt: Math.max(lastMessageAt, live?.lastMessageAt ?? 0), active: live?.active ?? thread.status?.type === 'active' };
+        const approvalPending = thread.status?.activeFlags?.includes('waitingOnApproval') ?? false;
+        return { ...metadata(thread), ...attention, awaitingReply: approvalPending || pendingForm || (thread.status?.type !== 'active' && attention.awaitingReply), ...(live ? { finalMessageId: live.finalMessageId, awaitingReply: live.awaitingReply } : {}), lastMessageAt: Math.max(lastMessageAt, live?.lastMessageAt ?? 0), active: live?.active ?? thread.status?.type === 'active' };
       })));
       if (generation !== current()) fail('STALE_GENERATION', 'query');
       return { generation, data: data.sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0) || a.id.localeCompare(b.id)), nextCursor: page.nextCursor ?? null };

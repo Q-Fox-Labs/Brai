@@ -113,7 +113,16 @@
       "sourceRevision": "cec030b4c4f35d928e4a9044a3bdb29ebd499fac",
       "mustBeVerifiedOffline": true
     },
-    "externalNetworkAtRuntime": "not required for prepared-model inference; no build-time downloads"
+    "externalNetworkAtRuntime": "not required for prepared-model inference; no build-time downloads",
+    "silero": {
+      "runtime": "gigaam_pytorch/.venv",
+      "dependencies": {
+        "torch": "2.8.0+cpu",
+        "numpy": "2.2.6"
+      },
+      "ffmpegDirectory": "payload/runtime/ffmpeg/bin/",
+      "newDependencies": false
+    }
   },
   "externalModelData": {
     "includedInImage": false,
@@ -152,6 +161,15 @@
           }
         ],
         "includedInImage": false
+      },
+      {
+        "profileId": "silero_pytorch",
+        "modelId": "silero-tts-ru-v5_5",
+        "revision": "50081637b602126ee06cb3bc8a744d25651d2da1",
+        "directory": "silero-tts-ru-v5_5/50081637b602126ee06cb3bc8a744d25651d2da1/silero_pytorch",
+        "file": "v5_5_ru.pt",
+        "bytes": 145420684,
+        "sha256": "50081637b602126ee06cb3bc8a744d25651d2da149ee8864b9a379bfdd934437"
       }
     ],
     "auxiliaryVad": {

@@ -1,0 +1,66 @@
+{
+  "formatVersion": 1,
+  "id": "supabase-mcp",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev",
+    "prod"
+  ],
+  "executableSources": [
+    "services/supabase-mcp/src/main.ts"
+  ],
+  "inputs": {
+    "build": [
+      "services/supabase-mcp/tsconfig.json"
+    ],
+    "runtime": [
+      "services/supabase-mcp/package.json",
+      "services/supabase-mcp/src/config.ts",
+      "services/supabase-mcp/src/contracts.ts",
+      "services/supabase-mcp/src/database.ts",
+      "services/supabase-mcp/src/main.ts",
+      "services/supabase-mcp/src/metadata.ts",
+      "services/supabase-mcp/src/server.ts",
+      "services/supabase-mcp/src/tools.ts"
+    ],
+    "checks": [
+      "services/supabase-mcp/test/compose.yml",
+      "services/supabase-mcp/test/connection.test.mjs",
+      "services/supabase-mcp/test/integration.test.mjs",
+      "services/supabase-mcp/test/unit.test.mjs"
+    ]
+  },
+  "dependencies": [],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test test/unit.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/supabase-mcp/dist",
+      "services/supabase-mcp/package.json"
+    ],
+    "entrypoints": [
+      "services/supabase-mcp/dist/main.js"
+    ],
+    "smokeImports": [],
+    "systemRequirements": [
+      "Node.js 24.21.0"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "supabase-mcp",
+      "brai-supabase-mcp.service"
+    ],
+    "migrations": [],
+    "health": "TCP 127.0.0.1:3001 accepts MCP connections"
+  },
+  "npm": {
+    "workspaces": [
+      "services/supabase-mcp"
+    ]
+  }
+}

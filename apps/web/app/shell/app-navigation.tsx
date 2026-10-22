@@ -6,7 +6,7 @@ import Link, { navigateWorkspace } from "./workspace-link";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent as ReactTouchEvent } from "react";
 import { motion, useMotionValue, useSpring, useTransform, type MotionValue } from "motion/react";
-import { ChevronDown, ChevronUp, Ellipsis, SquareTerminal, Timer, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Ellipsis, Network, SquareTerminal, Timer, X } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { BraiBrandIcon } from "@/components/ui/brai-brand-icon";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -16,12 +16,13 @@ import { useMobileSheetDrag } from "./use-mobile-sheet-drag";
 import { useSoftwareKeyboardOpen } from "./use-software-keyboard-open";
 import { sectionSwipePageStyle, useLeftEdgeMenuSwipe, useSectionSwipeNavigation } from "./use-section-swipe-navigation";
 
-type Route = { href: "/" | "/agent" | "/do" | "/alerts"; label: string; icon: "agent" | "timer" | "do" };
+type Route = { href: "/" | "/agent" | "/do" | "/alerts" | "/elements"; label: string; icon: "agent" | "timer" | "do" | "elements" };
 type MobilePanel = "profile" | "shortcuts";
 const routes: Route[] = [
   { href: "/agent", label: "Агент", icon: "agent" },
   { href: "/", label: "Таймер", icon: "timer" },
   { href: "/do", label: "Дела", icon: "do" },
+  { href: "/elements", label: "Элементы", icon: "elements" },
 ];
 const mobileQuery = "(max-width: 860px)";
 const historyMarker = "__braiNavigationPanel";
@@ -42,7 +43,7 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
   const keyboardOpen = useSoftwareKeyboardOpen(isMobile);
   const activeSection = pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : "timer";
   const selectSection = useCallback((section: "agent" | "timer" | "do") => navigateWorkspace(section === "timer" ? "/" : `/${section}`), []);
-  const dockSwipe = useSectionSwipeNavigation(activeSection, selectSection, isMobile && panel === null && pathname !== "/alerts");
+  const dockSwipe = useSectionSwipeNavigation(activeSection, selectSection, isMobile && panel === null && pathname !== "/alerts" && pathname !== "/elements");
   const currentSwipeStyle = sectionSwipePageStyle(dockSwipe.visual, "current");
   const openPanel = useCallback((next: MobilePanel, source: HTMLElement) => {
     opener.current = source;
@@ -323,6 +324,7 @@ function RouteLink({ route, current, compact = false, mobile = false, timerElaps
 
 function RouteIcon({ name }: { name: Route["icon"] }) {
   if (name === "agent") return <BraiBrandIcon />;
+  if (name === "elements") return <Network aria-hidden="true" />;
   if (name === "timer") return <Timer aria-hidden="true" />;
   return <SquareTerminal aria-hidden="true" />;
 }

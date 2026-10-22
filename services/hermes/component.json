@@ -1,0 +1,183 @@
+{
+  "formatVersion": 1,
+  "id": "hermes",
+  "type": "program",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [
+    "services/hermes/runtime.mjs",
+    "services/hermes/telegram/__init__.py",
+    "services/hermes/tools.mjs",
+    "services/hermes/trusted.mjs",
+    "services/hermes/memos/embedding/adapter.mjs",
+    "services/hermes/memos/bridge/codex_bridge.py"
+  ],
+  "inputs": {
+    "build": [],
+    "runtime": [
+      "services/hermes/catalog.mjs",
+      "services/hermes/config.mjs",
+      "services/hermes/confirmation.mjs",
+      "services/hermes/human-actions.mjs",
+      "services/hermes/package.json",
+      "services/hermes/runtime.mjs",
+      "services/hermes/telegram/__init__.py",
+      "services/hermes/tools.mjs",
+      "services/hermes/transcribe.mjs",
+      "services/hermes/trusted.mjs",
+      "services/hermes/trusted.openrpc.json",
+      "services/hermes/voice.mjs",
+      "services/hermes/memos/embedding/adapter.mjs",
+      "services/hermes/memos/bridge/codex_bridge.py",
+      "services/hermes/memos/bridge/requirements.txt",
+      "services/hermes/planning-read.mjs"
+    ],
+    "checks": [
+      "services/hermes/memos/embedding/adapter.test.mjs",
+      "services/hermes/telegram/tests/test_plugin.py",
+      "services/hermes/tests/confirmation.test.mjs",
+      "services/hermes/tests/tools.test.mjs",
+      "services/hermes/tests/transcribe.test.mjs",
+      "services/hermes/tests/planning-read.test.mjs"
+    ]
+  },
+  "dependencies": [
+    {
+      "id": "alerts",
+      "inputs": [
+        "services/alerts/contracts/**",
+        "services/alerts/schemas/**"
+      ],
+      "delivery": [
+        "services/alerts/contracts",
+        "services/alerts/schemas"
+      ]
+    },
+    {
+      "id": "local-ai",
+      "inputs": [
+        "services/local-ai/contracts/**",
+        "services/local-ai/schemas/**"
+      ],
+      "delivery": [
+        "services/local-ai/contracts",
+        "services/local-ai/schemas"
+      ]
+    },
+    {
+      "id": "timer",
+      "inputs": [
+        "services/timer/schemas/**"
+      ],
+      "delivery": [
+        "services/timer/schemas"
+      ]
+    },
+    {
+      "id": "history",
+      "inputs": [
+        "services/history/schemas/**"
+      ],
+      "delivery": [
+        "services/history/schemas"
+      ]
+    },
+    {
+      "id": "agent",
+      "inputs": [
+        "services/agent/src/publisher*.ts",
+        "services/agent/package.json"
+      ],
+      "delivery": [
+        "services/agent/dist/publisher-mcp.js",
+        "services/agent/dist/publisher.js",
+        "services/agent/dist/publisher-http.js",
+        "services/agent/package.json"
+      ]
+    },
+    {
+      "id": "artifacts",
+      "inputs": [
+        "services/artifacts/contracts/**",
+        "services/artifacts/schemas/**"
+      ],
+      "delivery": [
+        "services/artifacts/contracts",
+        "services/artifacts/schemas"
+      ]
+    },
+    {
+      "id": "transcription",
+      "inputs": [
+        "services/transcription/contracts/**",
+        "services/transcription/schemas/**"
+      ],
+      "delivery": [
+        "services/transcription/contracts",
+        "services/transcription/schemas"
+      ]
+    }
+  ],
+  "commands": {
+    "build": null,
+    "check": "node --test --test-isolation=none tests/*.test.mjs memos/embedding/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "ready-files",
+    "files": [
+      "services/hermes/catalog.mjs",
+      "services/hermes/config.mjs",
+      "services/hermes/confirmation.mjs",
+      "services/hermes/human-actions.mjs",
+      "services/hermes/package.json",
+      "services/hermes/runtime.mjs",
+      "services/hermes/telegram/__init__.py",
+      "services/hermes/tools.mjs",
+      "services/hermes/transcribe.mjs",
+      "services/hermes/trusted.mjs",
+      "services/hermes/voice.mjs",
+      "services/hermes/memos/embedding/adapter.mjs",
+      "services/hermes/memos/bridge/codex_bridge.py",
+      "services/hermes/memos/bridge/requirements.txt",
+      "services/hermes/planning-read.mjs"
+    ],
+    "entrypoints": [
+      "services/hermes/tools.mjs",
+      "services/hermes/runtime.mjs",
+      "services/hermes/telegram/__init__.py",
+      "services/hermes/trusted.mjs",
+      "services/hermes/memos/embedding/adapter.mjs",
+      "services/hermes/memos/bridge/codex_bridge.py"
+    ],
+    "smokeImports": [
+      "services/hermes/catalog.mjs",
+      "services/hermes/trusted.mjs",
+      "services/hermes/memos/embedding/adapter.mjs"
+    ],
+    "systemRequirements": [
+      "Node.js 24.21.0",
+      "Python 3.12 with pinned memos/bridge/requirements.txt in the existing Hermes bridge-venv; no Python dependencies are bundled",
+      "Operator-owned bridge_runtime.py single-owner launcher and codex_cli_owner.py from the existing Hermes runtime; installed absolute Codex executable and protected worker/configuration",
+      "Existing external Hermes gateway, MemOS, browser, AWG2 and intake runtimes are installed and operated through Admin; not bundled",
+      "External Hermes engine pinned at 517b5e10febd619ce30bb22580e29b160266eb43; external MemOS engine pinned at a7367d07e55db61099f7b4e2c1108bc5831a24f3; preinstalled through the existing operator lifecycle, not bundled or installed by CI"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "brai-hermes-dev.service",
+      "brai-hermes-dev-intake.service",
+      "brai-hermes-dev-embeddings.service",
+      "brai-hermes-dev-codex-bridge.service"
+    ],
+    "migrations": [],
+    "health": null
+  },
+  "npm": {
+    "workspaces": [
+      "services/hermes",
+      "services/agent"
+    ]
+  }
+}

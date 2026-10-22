@@ -7,6 +7,7 @@ import { connect } from 'nats';
 import pg from 'pg';
 import llamaProfile from '../profiles/llama_cpp.json' with { type: 'json' };
 import gigaProfile from '../profiles/gigaam_pytorch.json' with { type: 'json' };
+import sileroProfile from '../profiles/silero_pytorch.json' with { type: 'json' };
 import gemmaProfile from '../profiles/embeddinggemma2_llama_cpp.json' with { type: 'json' };
 import { subjects } from '../contracts/index.mjs';
 import { createArtifactsAdapter } from '../dist/adapters/artifacts/index.js';
@@ -107,11 +108,19 @@ export function validateLocalAiConfig(input) {
 
   const artifacts = object(config.artifacts, 'artifacts', [
     'internalBaseUrl', 'tempRoot', 'maxAudioBytes',
+    ...(Object.hasOwn(config.artifacts ?? {}, 'uploadBaseUrl') ? ['uploadBaseUrl'] : []),
   ]);
   const baseUrl = string(artifacts.internalBaseUrl, 'artifacts.internalBaseUrl');
   let parsedUrl;
   try { parsedUrl = new URL(baseUrl); } catch { invalid('artifacts.internalBaseUrl'); }
   if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password || parsedUrl.pathname !== '/') invalid('artifacts.internalBaseUrl');
+  if (Object.hasOwn(artifacts, 'uploadBaseUrl')) {
+    const uploadBaseUrl = string(artifacts.uploadBaseUrl, 'artifacts.uploadBaseUrl');
+    let uploadUrl;
+    try { uploadUrl = new URL(uploadBaseUrl); } catch { invalid('artifacts.uploadBaseUrl'); }
+    if (!['http:', 'https:'].includes(uploadUrl.protocol) || uploadUrl.username || uploadUrl.password
+      || uploadUrl.pathname !== '/' || uploadBaseUrl.includes('?') || uploadBaseUrl.includes('#')) invalid('artifacts.uploadBaseUrl');
+  }
   string(artifacts.tempRoot, 'artifacts.tempRoot');
   if (!path.isAbsolute(artifacts.tempRoot)) invalid('artifacts.tempRoot');
   positive(artifacts.maxAudioBytes, 'artifacts.maxAudioBytes');
@@ -121,8 +130,8 @@ export function validateLocalAiConfig(input) {
   ]);
   string(installer.rootDirectory, 'installer.rootDirectory');
   if (!path.isAbsolute(installer.rootDirectory)) invalid('installer.rootDirectory');
-  const seeds = object(installer.seedDirectories, 'installer.seedDirectories', ['llama_cpp', 'gigaam_pytorch', ...(config.runtime.embeddinggemma2_llama_cpp ? ['embeddinggemma2_llama_cpp'] : [])]);
-  const prepared = [llamaProfile, gigaProfile, ...(config.runtime.embeddinggemma2_llama_cpp ? [gemmaProfile] : [])];
+  const seeds = object(installer.seedDirectories, 'installer.seedDirectories', ['llama_cpp', 'gigaam_pytorch', ...(config.runtime.embeddinggemma2_llama_cpp ? ['embeddinggemma2_llama_cpp'] : []), ...(config.runtime.silero_pytorch ? ['silero_pytorch'] : [])]);
+  const prepared = [llamaProfile, gigaProfile, ...(config.runtime.embeddinggemma2_llama_cpp ? [gemmaProfile] : []), ...(config.runtime.silero_pytorch ? [sileroProfile] : [])];
   for (const profile of prepared) {
     const candidate = string(seeds[profile.profileId], `installer.seedDirectories.${profile.profileId}`);
     const canonical = path.join(installer.rootDirectory, profile.modelId, profile.source.revision, profile.profileId);
@@ -135,7 +144,7 @@ export function validateLocalAiConfig(input) {
   ]);
   for (const key of Object.keys(lifecycle)) positive(lifecycle[key], `lifecycle.${key}`, 2_147_483_647);
 
-  const runtime = object(config.runtime, 'runtime', ['llama_cpp', 'gigaam_pytorch', ...(config.runtime.embeddinggemma2_llama_cpp ? ['embeddinggemma2_llama_cpp'] : [])]);
+  const runtime = object(config.runtime, 'runtime', ['llama_cpp', 'gigaam_pytorch', ...(config.runtime.embeddinggemma2_llama_cpp ? ['embeddinggemma2_llama_cpp'] : []), ...(config.runtime.silero_pytorch ? ['silero_pytorch'] : [])]);
   const llama = object(runtime.llama_cpp, 'runtime.llama_cpp', [
     'executable', 'cwd', 'args', 'env', 'startupTimeoutMs', 'requestTimeoutMs', 'stopGraceMs', 'maxLineBytes',
     'host', 'port', 'dimensions', 'contextTokens', 'maxBatchTokens', 'queryInstruction',
@@ -196,6 +205,21 @@ export function validateLocalAiConfig(input) {
       || values.symmetricInstruction !== gemmaProfile.encoding.symmetricInstruction
       || values.port === llama.port) invalid('runtime.embeddinggemma2_llama_cpp.profile');
   }
+  if (runtime.silero_pytorch) {
+    const values = object(runtime.silero_pytorch, 'runtime.silero_pytorch', [
+      'executable', 'cwd', 'args', 'env', 'startupTimeoutMs', 'requestTimeoutMs', 'stopGraceMs', 'maxLineBytes', 'threads', 'ffmpegExecutable',
+    ]);
+    for (const key of ['executable', 'cwd', 'ffmpegExecutable']) {
+      string(values[key], 'runtime.silero_pytorch.' + key);
+      if (!path.isAbsolute(values[key])) invalid('runtime.silero_pytorch.' + key);
+    }
+    strings(values.args, 'runtime.silero_pytorch.args');
+    env(values.env, 'runtime.silero_pytorch.env');
+    for (const key of ['startupTimeoutMs', 'requestTimeoutMs', 'maxLineBytes', 'threads']) positive(values[key], 'runtime.silero_pytorch.' + key, 2147483647);
+    nonNegative(values.stopGraceMs, 'runtime.silero_pytorch.stopGraceMs', 2147483647);
+    if (values.threads !== 4 || values.requestTimeoutMs !== 180000
+      || JSON.stringify(values.args) !== JSON.stringify(sileroProfile.engine.args)) invalid('runtime.silero_pytorch.profile');
+  }
   return config;
 }
 
@@ -203,6 +227,7 @@ function runtimeConfig(config) {
   const { llama_cpp: llama, gigaam_pytorch: giga } = config.runtime;
   return {
     profiles: {
+      ...(config.runtime.silero_pytorch ? { silero_pytorch: { ...config.runtime.silero_pytorch } } : {}),
       llama_cpp: {
         executable: llama.executable, cwd: llama.cwd, args: llama.args, env: llama.env,
         startupTimeoutMs: llama.startupTimeoutMs, requestTimeoutMs: llama.requestTimeoutMs,
@@ -213,6 +238,7 @@ function runtimeConfig(config) {
       },
       ...(config.runtime.embeddinggemma2_llama_cpp ? { embeddinggemma2_llama_cpp: {
         ...config.runtime.embeddinggemma2_llama_cpp,
+        deferredMedia: gemmaProfile.lifecycle.initialMode === 'text',
         port: () => config.runtime.embeddinggemma2_llama_cpp.port,
       } } : {}),
       gigaam_pytorch: {
@@ -258,7 +284,18 @@ export function supportedProfiles(config) {
     files: gemmaProfile.source.files.map(file => ({ path: file.path, sizeBytes: file.bytes, sha256: file.sha256 })),
     limits: { ...embedding.limits, vectorDimensions: gemmaProfile.encoding.dimensions },
   };
+  const synthesis = {
+    modelId: sileroProfile.modelId, name: 'Silero TTS Russian v5.5', description: 'Russian speech synthesis.',
+    source: sileroProfile.source.repository, license: null, revision: sileroProfile.source.revision,
+    profileId: sileroProfile.profileId, supported: true, operations: ['synthesize'], languages: ['ru'],
+    inputKinds: ['text'], outputKinds: ['audio_artifact'],
+    files: sileroProfile.source.files.map(file => ({ path: file.path, sizeBytes: file.bytes, sha256: file.sha256 })),
+    hardwareRequirements: { cpuArchitectures: [], minMemoryBytes: null, accelerator: null },
+    limits: { maxInputBytes: null, maxAudioSeconds: null, maxItems: 1, maxResultBytes: null, vectorDimensions: null },
+    parameters: { embed: null, transcribe: null, synthesize: { voices: ['eugene'] } },
+  };
   return [
+    ...(config.runtime.silero_pytorch ? [{ profileId: sileroProfile.profileId, modelId: synthesis.modelId, repository: sileroProfile.source.repository, revision: sileroProfile.source.revision, files: sileroProfile.source.files, record: synthesis }] : []),
     ...(config.runtime.embeddinggemma2_llama_cpp ? [{ profileId: gemmaProfile.profileId, modelId: gemma.modelId, repository: gemmaProfile.source.repository, revision: gemmaProfile.source.revision, files: gemmaProfile.source.files, record: gemma }] : []),
     { profileId: llamaProfile.profileId, modelId: embedding.modelId, repository: llamaProfile.source.repository, revision: llamaProfile.source.revision, files: llamaProfile.source.files, record: embedding },
     { profileId: gigaProfile.profileId, modelId: transcription.modelId, repository: gigaProfile.source.repository, revision: gigaProfile.source.revision, files: gigaProfile.source.files, record: transcription },
@@ -394,6 +431,7 @@ export async function startLocalAi(input, dependencies = {}) {
     const runtimeFactory = (factories.createProfileRuntimeFactory ?? createProfileRuntimeFactory)(runtimeConfig(config));
     const artifacts = makeArtifacts({
       nats: nc, internalBaseUrl: config.artifacts.internalBaseUrl,
+      ...(Object.hasOwn(config.artifacts, 'uploadBaseUrl') ? { uploadBaseUrl: config.artifacts.uploadBaseUrl } : {}),
       tempRoot: config.artifacts.tempRoot, maxAudioBytes: config.artifacts.maxAudioBytes,
       allowedMimeTypes: AUDIO_MIME_TYPES,
     });
@@ -445,6 +483,10 @@ export async function startLocalAi(input, dependencies = {}) {
         const result = await lifecycle.invoke({ ...request, operation: 'transcribe' }, context);
         return { requestId: request.requestId, operationId: request.operationId, model: result.model, durationMs: result.durationMs, text: result.text, segments: result.segments };
       },
+      [subjects.invokeSynthesize]: async (request, context) => {
+        const result = await lifecycle.invoke({ ...request, operation: 'synthesize' }, context);
+        return { requestId: request.requestId, operationId: request.operationId, model: result.model, durationMs: result.durationMs, audioArtifactId: result.audioArtifactId };
+      },
       [subjects.cancel]: async request => {
         const result = await lifecycle.cancel(request.ownerId, request.operationId);
         if (result !== 'not_found') return { operationId: request.operationId, status: result };
@@ -461,7 +503,7 @@ export async function startLocalAi(input, dependencies = {}) {
         try { await pool.query('SELECT 1'); } catch { database = status('unavailable', 'DEPENDENCY_UNAVAILABLE'); }
         const natsStatus = transport?.connected() ? status('ready') : status('unavailable', 'DEPENDENCY_UNAVAILABLE');
         let executablesReady = true;
-        for (const profile of [config.runtime.llama_cpp, config.runtime.gigaam_pytorch, ...(config.runtime.embeddinggemma2_llama_cpp ? [config.runtime.embeddinggemma2_llama_cpp] : [])]) {
+        for (const profile of [config.runtime.llama_cpp, config.runtime.gigaam_pytorch, ...(config.runtime.embeddinggemma2_llama_cpp ? [config.runtime.embeddinggemma2_llama_cpp] : []), ...(config.runtime.silero_pytorch ? [config.runtime.silero_pytorch] : [])]) {
           try { await access(profile.executable, constants.X_OK); } catch { executablesReady = false; }
         }
         const executables = status(executablesReady ? 'ready' : 'unavailable', executablesReady ? null : 'ENGINE_UNAVAILABLE');

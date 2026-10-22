@@ -1,11 +1,12 @@
 // ABOUTME: Запускает закреплённые per-model local-ai runtime и переводит их протоколы в порты приложения.
 // ABOUTME: Аргументы передаются напрямую; сеть, веса, пути и числовые лимиты поступают из конфигурации.
+import { constants } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { lstat, mkdtemp, rm, readFile } from 'node:fs/promises';
+import { lstat, mkdtemp, rm, readFile, open } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import type { RuntimeFactory, RuntimePort } from '../ports.js';
 import { LocalAiError } from '../errors.js';
-import type { EmbedInput, EmbedOutput, OperationContext, ResolvedModel, TranscribeInput, TranscribeOutput } from '../types.js';
+import type { EmbedInput, EmbedOutput, OperationContext, ResolvedModel, TranscribeInput, TranscribeOutput, SynthesizeInput, SynthesizeOutput } from '../types.js';
 
 type ProfileConfig = {
   executable: string;
@@ -17,11 +18,12 @@ type ProfileConfig = {
   stopGraceMs: number;
   maxLineBytes: number;
 };
-type LlamaProfileConfig = ProfileConfig & { host: string; port: () => number; dimensions: number; contextTokens: number; maxBatchTokens: number; queryInstruction: string; documentInstruction?: string; symmetricInstruction?: string };
+type LlamaProfileConfig = ProfileConfig & { deferredMedia?: boolean; host: string; port: () => number; dimensions: number; contextTokens: number; maxBatchTokens: number; queryInstruction: string; documentInstruction?: string; symmetricInstruction?: string };
 export type ProfileRuntimeFactoryConfig = {
   profiles: {
     llama_cpp: LlamaProfileConfig;
     embeddinggemma2_llama_cpp?: LlamaProfileConfig;
+    silero_pytorch?: ProfileConfig & { threads: number; ffmpegExecutable: string };
     gigaam_pytorch: ProfileConfig & { vadModelPath: string; vadRevision: string; threads: number; longformMaximumSeconds: number; audioDecodeTimeoutSeconds: number };
   };
   fetch?: typeof fetch;
@@ -63,7 +65,7 @@ function substitute(args: readonly string[], values: Readonly<Record<string, str
 
 type SpawnedRuntime = { child: ChildProcess; exited: Promise<void>; stop: () => Promise<void> };
 type SpawnRuntimeOptions = {
-  executor: 'llama_cpp' | 'gigaam_pytorch';
+  executor: 'llama_cpp' | 'gigaam_pytorch' | 'silero_pytorch';
   privateTempDirectory?: string;
   cleanupAfterGroupExit?: () => Promise<void>;
 };
@@ -175,6 +177,8 @@ function spawnRuntime(config: ProfileConfig, args: readonly string[], options: S
     monitorTimer = undefined;
     exitResolve();
     diagnostic('runtime', 'group_exit', options.executor, 'EXIT_CONFIRMED', Date.now() - startedAt, child);
+    // AIDEV-NOTE: Даже после failed bounded stop поздний physical exit обязан запустить cleanup один раз.
+    if (options.cleanupAfterGroupExit) void cleanup().catch(() => undefined);
     return true;
   };
   const monitorExit = (): void => {
@@ -278,18 +282,20 @@ function assertVectors(value: unknown, count: number, dimensions: number): Embed
 class ChildRuntime implements RuntimePort {
   readonly exited: Promise<void>;
   #child: ChildProcess;
-  #config: ProfileRuntimeFactoryConfig['profiles']['gigaam_pytorch'];
+  #config: ProfileConfig & { vadRevision?: string };
+  #audioPath?: string;
   #closePromise?: Promise<void>;
   #stop: () => Promise<void>;
   #stdoutBuffer = Buffer.alloc(0);
   #waiters = new Map<string, RpcWaiter>();
   #nextId = 0;
 
-  constructor(child: ChildProcess, exited: Promise<void>, config: ProfileRuntimeFactoryConfig['profiles']['gigaam_pytorch'], stop: () => Promise<void>) {
+  constructor(child: ChildProcess, exited: Promise<void>, config: ProfileConfig & { vadRevision?: string }, stop: () => Promise<void>, audioPath?: string) {
     this.#child = child;
     this.exited = exited;
     this.#config = config;
     this.#stop = stop;
+    this.#audioPath = audioPath;
     child.stdout!.on('data', (chunk: Buffer) => this.#onStdout(chunk));
     child.on('error', () => this.#rejectWaiters(serviceError('ENGINE_UNAVAILABLE')));
     child.on('close', () => this.#rejectWaiters(serviceError('ENGINE_UNAVAILABLE')));
@@ -360,7 +366,7 @@ class ChildRuntime implements RuntimePort {
       const privateData = assertRecord(reply.error.data) && assertRecord(reply.error.data.diagnostic) ? reply.error.data.diagnostic : undefined;
       const stage = privateData && ['audio_probe', 'audio_decode', 'short_transcribe', 'longform_upstream', 'longform_normalize'].includes(String(privateData.stage)) ? String(privateData.stage) : 'runner_reply';
       const error = reply.error.code === -32001 ? serviceError('INVALID_ARGUMENT', 'AUDIO_INVALID_OR_TOO_LARGE') : serviceError('ENGINE_UNAVAILABLE');
-      diagnostic(waiter.method, stage, 'gigaam_pytorch', error.code, Date.now() - waiter.startedAt);
+      diagnostic(waiter.method, stage, this.#audioPath ? 'silero_pytorch' : 'gigaam_pytorch', error.code, Date.now() - waiter.startedAt);
       waiter.reject(error);
     }
     else if (Object.hasOwn(reply, 'result')) waiter.resolve(reply.result);
@@ -400,13 +406,36 @@ class ChildRuntime implements RuntimePort {
     const result = await this.#rpc('health', {}, context);
     if (!assertRecord(result) || result.ready !== true
       || result.model_id !== selector.modelId || result.revision !== selector.revision
-      || result.vad_revision !== this.#config.vadRevision) {
+      || this.#config.vadRevision !== undefined && result.vad_revision !== this.#config.vadRevision) {
       throw serviceError('MODEL_LOAD_FAILED');
     }
   }
 
   async embed(_input: EmbedInput, _context: OperationContext): Promise<EmbedOutput> {
     throw serviceError('UNSUPPORTED_OPERATION');
+  }
+
+  async synthesize(input: SynthesizeInput, context: OperationContext): Promise<SynthesizeOutput> {
+    if (!this.#audioPath) throw serviceError('UNSUPPORTED_OPERATION');
+    const result = await this.#rpc('synthesize', { text: input.text, voice: input.voice }, context);
+    if (!assertRecord(result) || Object.keys(result).length !== 2 || result.audio_path !== this.#audioPath || result.mime_type !== 'audio/ogg') throw serviceError('ENGINE_UNAVAILABLE');
+    const file = await open(this.#audioPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.size < 1) throw serviceError('ENGINE_UNAVAILABLE');
+      if (info.size > 64 * 1024 * 1024) throw serviceError('RESULT_TOO_LARGE');
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      for await (const chunk of file.createReadStream({ autoClose: false })) {
+        bytes += chunk.length;
+        if (bytes > 64 * 1024 * 1024) throw serviceError('RESULT_TOO_LARGE');
+        chunks.push(chunk);
+      }
+      if (bytes !== info.size) throw serviceError('ENGINE_UNAVAILABLE');
+      const audio = Buffer.concat(chunks, bytes);
+      checkContext(context);
+      return { audio, mimeType: 'audio/ogg' };
+    } finally { await file.close(); }
   }
 
   async transcribe(input: TranscribeInput, context: OperationContext): Promise<TranscribeOutput> {
@@ -569,6 +598,84 @@ Query: ${text}` : text;
   }
 }
 
+/** Держит один Gemma runner; первый media-вход заменяет text-only на закреплённый полный профиль. */
+function deferredGemmaRuntime(initial: RuntimePort, openMedia: (context: OperationContext) => Promise<RuntimePort>): RuntimePort {
+  let current = initial;
+  let full = false;
+  let closing = false;
+  let switching = false;
+  let finished = false;
+  let transition: Promise<void> | undefined;
+  let closePromise: Promise<void> | undefined;
+  let resolveExit!: () => void;
+  const exited = new Promise<void>(resolve => { resolveExit = resolve; });
+  const finish = () => { finished = true; resolveExit(); };
+  const watch = (runtime: RuntimePort) => {
+    void runtime.exited.then(() => {
+      // AIDEV-NOTE: Выход text-only при переходе не означает выход логического runtime.
+      if (current === runtime && !switching) finish();
+    });
+  };
+  watch(initial);
+  const activateMedia = async (context: OperationContext): Promise<void> => {
+    if (full) return;
+    if (!transition) {
+      switching = true;
+      transition = (async () => {
+        try {
+          // AIDEV-NOTE: В pinned llama.cpp нет hot-attach mmproj; подтверждаем exit до следующего spawn.
+          await current.close();
+          await current.exited;
+          checkContext(context);
+          if (closing) throw serviceError('CANCELLED');
+          const next = await openMedia(context);
+          if (closing) {
+            await next.close();
+            await next.exited;
+            throw serviceError('CANCELLED');
+          }
+          current = next;
+          full = true;
+          switching = false;
+          watch(next);
+        } catch (error) {
+          // openMedia подтверждает выход неготового child; current остаётся прежним либо принятым runner.
+          await current.close().catch(() => undefined);
+          await current.exited;
+          switching = false;
+          finish();
+          throw error;
+        }
+      })();
+    }
+    await transition;
+  };
+  return {
+    exited,
+    async embed(input, context) {
+      checkContext(context);
+      if (closing || finished) throw serviceError('ENGINE_UNAVAILABLE');
+      if (input.inputs?.some(item => item.type !== 'text')) await activateMedia(context);
+      checkContext(context);
+      if (closing || finished) throw serviceError('ENGINE_UNAVAILABLE');
+      return current.embed(input, context);
+    },
+    transcribe(input, context) { return current.transcribe(input, context); },
+    synthesize(input, context) { if (!current.synthesize) throw serviceError('UNSUPPORTED_OPERATION'); return current.synthesize(input, context); },
+    close() {
+      if (closePromise) return closePromise;
+      closing = true;
+      closePromise = (async () => {
+        if (transition) await transition.catch(() => undefined);
+        await current.close();
+        await current.exited;
+        finish();
+      })();
+      return closePromise;
+    },
+  };
+}
+
 /** Создаёт адаптеры только для закреплённых профилей и проверяет готовность до возврата runtime. */
 export function createProfileRuntimeFactory(config: ProfileRuntimeFactoryConfig): RuntimeFactory {
   const fetcher = config.fetch ?? fetch;
@@ -585,14 +692,49 @@ export function createProfileRuntimeFactory(config: ProfileRuntimeFactoryConfig)
         const port = profile.port();
         if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw serviceError('MODEL_LOAD_FAILED');
         const args = substitute(profile.args, { modelPath: join(model.installation.directory, gguf.path), port: String(port), ...(model.model.profileId === 'embeddinggemma2_llama_cpp' ? { mmprojPath: modelPath(model, 'mmproj-embeddinggemma-2-Q8_0.gguf') } : {}) });
-        const process = spawnRuntime(profile, args, { executor: 'llama_cpp' });
-        const runtime = new LlamaRuntime(process.child, process.exited, profile, port, fetcher, process.stop);
+        const openRunner = async (runnerArgs: readonly string[], loadContext: OperationContext): Promise<RuntimePort> => {
+          const process = spawnRuntime(profile, runnerArgs, { executor: 'llama_cpp' });
+          const runtime = new LlamaRuntime(process.child, process.exited, profile, port, fetcher, process.stop);
+          try {
+            await waitUntilReady(runtime, process.exited, profile.startupTimeoutMs, loadContext, model.model);
+            return runtime;
+          } catch (error) {
+            try { await runtime.close(); }
+            catch { await runtime.exited; }
+            if (error instanceof LocalAiError) throw error;
+            throw serviceError('MODEL_LOAD_FAILED');
+          }
+        };
+        const projector = args.indexOf('--mmproj');
+        if (model.model.profileId === 'embeddinggemma2_llama_cpp' && profile.deferredMedia && projector >= 0) {
+          if (projector + 1 >= args.length || args[projector + 1].startsWith('--')) throw serviceError('MODEL_LOAD_FAILED');
+          const textArgs = [...args.slice(0, projector), ...args.slice(projector + 2), '--no-mmproj'];
+          const initial = await openRunner(textArgs, context);
+          return deferredGemmaRuntime(initial, loadContext => openRunner(args, loadContext));
+        }
+        return openRunner(args, context);
+      }
+      if (model.model.profileId === 'silero_pytorch') {
+        const profile = config.profiles.silero_pytorch;
+        if (!profile) throw serviceError('NOT_SUPPORTED');
+        validateProfileConfig(profile);
+        if (profile.threads !== 4 || profile.requestTimeoutMs !== 180_000 || !isAbsolute(profile.ffmpegExecutable)
+          || model.installation.modelId !== model.model.modelId || model.installation.revision !== model.model.revision
+          || model.installation.profileId !== model.model.profileId || !model.installation.files.some(file => file.path === 'v5_5_ru.pt')) throw serviceError('MODEL_NOT_INSTALLED');
+        const privateTemp = await createGigaPrivateTempDirectory();
+        let process: SpawnedRuntime;
+        try {
+          const args = substitute(profile.args, { modelPath: model.installation.directory, revision: model.model.revision,
+            threads: String(profile.threads), outputDirectory: privateTemp.path, ffmpegExecutable: profile.ffmpegExecutable });
+          process = spawnRuntime(profile, args, { executor: 'silero_pytorch', privateTempDirectory: privateTemp.path,
+            cleanupAfterGroupExit: () => removeGigaPrivateTempDirectory(privateTemp) });
+        } catch (error) { await removeGigaPrivateTempDirectory(privateTemp); throw error; }
+        const runtime = new ChildRuntime(process.child, process.exited, profile, process.stop, join(privateTemp.path, 'audio.ogg'));
         try {
           await waitUntilReady(runtime, process.exited, profile.startupTimeoutMs, context, model.model);
           return runtime;
         } catch (error) {
-          try { await runtime.close(); }
-          catch { await runtime.exited; }
+          try { await runtime.close(); } catch { await runtime.exited; }
           if (error instanceof LocalAiError) throw error;
           throw serviceError('MODEL_LOAD_FAILED');
         }

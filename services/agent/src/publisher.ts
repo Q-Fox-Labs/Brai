@@ -35,6 +35,13 @@ function mime(prefix: Buffer, filename: string): string {
   if (prefix.subarray(0, 4).toString() === 'RIFF' && prefix.subarray(8, 12).toString() === 'WEBP') return 'image/webp';
   if (prefix.length >= 12 && prefix.subarray(4, 8).toString() === 'ftyp' && ['isom', 'iso2', 'mp41', 'mp42', 'avc1', 'dash', 'M4V ', 'MSNV'].includes(prefix.subarray(8, 12).toString())) return 'video/mp4';
   if (prefix.length >= 4 && prefix.subarray(0, 4).equals(Buffer.from([26, 69, 223, 163])) && prefix.includes(Buffer.from('webm'))) return 'video/webm';
+  if (prefix.subarray(0, 4).toString() === 'RIFF' && prefix.subarray(8, 12).toString() === 'WAVE') return 'audio/wav';
+  if (prefix.subarray(0, 4).toString() === 'fLaC') return 'audio/flac';
+  if (prefix.length >= 28 && prefix.subarray(0, 4).toString() === 'OggS' && prefix[4] === 0 && prefix[26] > 0) {
+    const packet = 27 + prefix[26];
+    if (prefix.subarray(packet, packet + 8).equals(Buffer.from('OpusHead'))
+      || prefix.subarray(packet, packet + 7).equals(Buffer.from([1, 118, 111, 114, 98, 105, 115]))) return 'audio/ogg';
+  }
   const extension = extname(filename).toLowerCase();
   return ({ '.txt': 'text/plain', '.md': 'text/markdown', '.csv': 'text/csv', '.json': 'application/json', '.pdf': 'application/pdf', '.html': 'text/html', '.svg': 'image/svg+xml' } as Record<string, string>)[extension] ?? 'application/octet-stream';
 }

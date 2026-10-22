@@ -20,8 +20,10 @@ export type AgentLimits = { state: "loading" | "ready" | "stale" | "unavailable"
 export type ContextUsage = { usedTokens: number; contextWindow: number | null };
 export type NativeSnapshot = { projectId: string; threadId: string; generation: string; epoch: string; seq: number; thread: ThreadMetadata; turn: NativeTurn | null; state: string; items: DisplayItem[]; requests: PendingRequest[]; truncated: boolean; goal?: GoalProjection; planProgress?: PlanProgress; contextUsage?: ContextUsage | null };
 export type EventEnvelope = { projectId: string; threadId: string; generation: string; epoch: string; seq: number; event: { type: "STATE_SNAPSHOT"; snapshot: NativeSnapshot } };
-export type Action = "projects" | "status" | "models" | "threads" | "create" | "open" | "turns" | "items" | "activities" | "item" | "start" | "steer" | "interrupt" | "answer" | "archive" | "goalGet" | "goalSet" | "goalClear";
-export type Command = { action: Action; ownerId?: string; agentMode?: AgentMode; objective?: string; status?: "active" | "paused"; tokenBudget?: number | null; permissionMode?: PermissionMode; model?: string; effort?: string; projectId?: string; threadId?: string; generation?: string; operationId?: string; turnId?: string; expectedTurnId?: string; requestId?: string; text?: string; attachments?: ReferenceAttachment[]; answer?: unknown; cursor?: string; itemId?: string; itemIds?: string[] };
+/** Снимок прочитанных итогов владельца; наборы bounded, ключ projectId:threadId. */
+export type ReadState = { marks: Record<string, string[]> };
+export type Action = "readState" | "readMark" | "projects" | "status" | "models" | "threads" | "create" | "open" | "turns" | "items" | "activities" | "item" | "start" | "steer" | "interrupt" | "answer" | "archive" | "goalGet" | "goalSet" | "goalClear";
+export type Command = { action: Action; ownerId?: string; messageId?: string; lastMessageAt?: number; agentMode?: AgentMode; objective?: string; status?: "active" | "paused"; tokenBudget?: number | null; permissionMode?: PermissionMode; model?: string; effort?: string; projectId?: string; threadId?: string; generation?: string; operationId?: string; turnId?: string; expectedTurnId?: string; requestId?: string; text?: string; attachments?: ReferenceAttachment[]; answer?: unknown; cursor?: string; itemId?: string; itemIds?: string[] };
 export type ErrorResponse = { code: string; outcome: "not-sent" | "unknown" | "query" };
 export declare const subjects: { rpc: string; event: string };
 export declare const rpcTimeouts: { read: number; mutation: number };
@@ -31,3 +33,4 @@ export declare function bytes(value: unknown): number;
 export declare function validateCommand(value: unknown): value is Command;
 export declare function validateLimits(value: unknown): value is AgentLimits;
 export declare function validateEnvelope(value: unknown): value is EventEnvelope;
+export declare function validateReadState(value: unknown): value is ReadState;

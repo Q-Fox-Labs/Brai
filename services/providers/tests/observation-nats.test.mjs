@@ -1,0 +1,74 @@
+// ABOUTME: Проверяет observation через настоящие NATS, PostgreSQL, JetStream и controlled HTTP upstream.
+// ABOUTME: Собственные synthetic fixtures; внешняя модель не вызывается, delivery в DEV проверяется отдельно.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import {createServer} from 'node:http';
+import pg from 'pg';
+import {connect,RetentionPolicy,StorageType,DiscardPolicy} from 'nats';
+import {postgresStore} from '../dist/postgres.js';
+import {postgresObservation} from '../dist/observation-postgres.js';
+import {historySender,createObservation,OBSERVATION_LIMITS as L} from '../dist/observation.js';
+import {registerProvidersV1} from '../dist/nats-v1.js';
+import {createOperations} from '../dist/operations.js';
+import {Failure,MODEL} from '../dist/core.js';
+const pgURL=process.env.PROVIDERS_TEST_PG_URL,natsURL=process.env.PROVIDERS_TEST_NATS_URL;
+test('real NATS+PG+HTTP+JetStream: privacy, no recompute, restart/lost PubAck, episode recovery, capacity and TTL',{skip:!pgURL||!natsURL},async t=>{
+ assert.equal(new URL(pgURL).pathname,'/providers_v1_test');
+ const owner='observation-fixture-'+randomUUID(),store=postgresStore(pgURL);await store.migrate();await store.migrate();t.after(()=>store.close());
+ let side=postgresObservation(pgURL);t.after(()=>side.close());
+ const sql=new pg.Client({connectionString:pgURL});await sql.connect();t.after(async()=>{await sql.query("DELETE FROM providers_alert_outbox WHERE payload->>'scope_id'=$1 OR payload->>'scope_id' LIKE $2",[owner,owner+'-%']);await sql.query('DELETE FROM providers_alert_episodes WHERE owner_id=$1 OR owner_id LIKE $2',[owner,owner+'-%']);await sql.query('DELETE FROM providers_operations WHERE owner_id=$1 OR owner_id LIKE $2',[owner,owner+'-%']);await sql.end();});
+ const nc=await connect({servers:natsURL,reconnect:false});
+ const jsm=await nc.jetstreamManager(),js=nc.jetstream(),stream='PROVIDERS_OBSERVATION_FIXTURE';
+ await jsm.streams.delete(stream).catch(()=>{});
+ await jsm.streams.add({name:stream,subjects:['brai.alerts.v1.ingest'],retention:RetentionPolicy.Workqueue,storage:StorageType.File,discard:DiscardPolicy.New,max_bytes:1048576,max_msg_size:65536,duplicate_window:120000000000});t.after(async()=>{await jsm.streams.delete(stream);await nc.close();});
+ let attempts=0,success=false;
+ const http=createServer((_q,res)=>{attempts++;res.writeHead(success?200:503,{'content-type':'application/json'});res.end(success?JSON.stringify({model:MODEL,answers:{check:{type:'noul',noul:.5}},usage:{input_tokens:4,output_tokens:0}}):JSON.stringify({error:'PRIVATE https://unsafe upstream body key-secret'}));});
+ await new Promise(resolve=>http.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>http.close(resolve)));
+ const port=async(_input,signal)=>{const response=await fetch('http://127.0.0.1:'+http.address().port,{method:'POST',body:'synthetic-private',signal});if(!response.ok){await response.body.cancel();throw new Failure('UPSTREAM_UNAVAILABLE','unknown');}return response.json();};
+ const operations=createOperations(store,port),facts=[];
+ let lost=true,publishAttempts=0;
+ const history=historySender(nc),observer=createObservation(side,history,async event=>{publishAttempts++;await js.publish('brai.alerts.v1.ingest',JSON.stringify(event),{msgID:event.id,timeout:1000});if(lost)throw Error('controlled lost PubAck');});
+ const service=await registerProvidersV1(nc,operations,{diagnostics:()=>observer.status()});t.after(()=>service.stop());
+ const historySub=nc.subscribe('brai.history.v1.append.service_providers');t.after(()=>historySub.unsubscribe());
+ const historyWork=(async()=>{for await(const m of historySub){const fact=m.json();facts.push(fact);m.respond('{}');}})();void historyWork;
+ const call=async(s,input)=>{const response=await nc.request('brai.providers.v1.'+s,JSON.stringify(input),{timeout:3000});assert.ok(!response.headers?.get('Nats-Service-Error'));return response.json();};
+ const request=()=>({ownerId:owner,operationId:randomUUID(),provider:'typesafe',model:MODEL,state:['PRIVATE',{url:'https://unsafe',key:'key-secret'}],questions:{check:{type:'noul',instructions:'PRIVATE'}},deadlineAt:new Date(Date.now()+30000).toISOString()});
+ await observer.tick();assert.equal(facts.length,0);assert.equal(publishAttempts,0);assert.equal(attempts,0);
+ const input=request();await call('invoke.decide',input);await operations.idle();assert.equal(attempts,1);
+ assert.equal((await call('operations.get',{ownerId:owner,operationId:input.operationId})).phase,'outcome_unknown');
+ await observer.tick();for(let i=0;i<150&&history.status().active;i++)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(publishAttempts,1);assert.equal(facts.length,1);assert.equal(history.status().sent,1);
+ const first=(await side.pendingAlerts(Date.now()))[0];assert.ok(first);assert.equal(first.scope_id,owner);assert.ok(!/PRIVATE|unsafe|key-secret|https/.test(JSON.stringify(first)));assert.ok(!/PRIVATE|unsafe|key-secret|https/.test(JSON.stringify(facts)));
+ assert.equal((await call('invoke.decide',input)).phase,'outcome_unknown');assert.equal(attempts,1);assert.equal((await call('status',{})).active,0);
+ const status=await call('status',{});assert.equal(status.ready,true);assert.equal(status.dependencies.alerts,'unavailable');assert.equal(status.dependencies.modelProbe,'disabled');
+ await side.close();side=postgresObservation(pgURL);lost=false;
+ const replay=createObservation(side,history,async event=>{assert.deepEqual(event,first);await js.publish('brai.alerts.v1.ingest',JSON.stringify(event),{msgID:event.id,timeout:1000});});await replay.tick();
+ assert.equal((await side.pendingAlerts(Date.now())).length,0);assert.equal((await jsm.streams.info(stream)).state.messages,1);assert.equal(attempts,1);
+ const repeat=request();await call('invoke.decide',repeat);await operations.idle();await replay.tick();assert.equal((await jsm.streams.info(stream)).state.messages,1,'continuing episode has no new Alert');
+ success=true;await call('invoke.decide',request());await operations.idle();await replay.tick();
+ assert.equal((await sql.query('SELECT count(*)::int n FROM providers_alert_episodes WHERE owner_id=$1',[owner])).rows[0].n,0);
+ success=false;await call('invoke.decide',request());await operations.idle();
+ const unavailable=createObservation(side,history,async()=>{throw Error('controlled outage')});await unavailable.tick();assert.equal((await side.pendingAlerts(Date.now())).length,1,'new episode after successful operation');
+ const before=attempts;await unavailable.tick();assert.equal(attempts,before,'side channel retries never compute');
+ historySub.unsubscribe();await call('invoke.decide',request());await operations.idle();await unavailable.tick();await new Promise(resolve=>setTimeout(resolve,30));assert.ok(history.status().failed>0);assert.equal((await call('status',{})).active,0);
+ const orderedOwner=owner+'-order',orderedAt=Date.now();
+ const ordered=(createdAt)=>({ownerId:orderedOwner,operationId:randomUUID(),inputHash:'b'.repeat(64),phase:'accepted',cancelRequested:false,createdAt,finishedAt:null,keyExpiresAt:orderedAt+604800000,resultExpiresAt:null,route:{provider:'typesafe',model:MODEL,catalogVersion:'test'},result:null,errorCode:null});
+ const earlier=ordered(orderedAt-20),later=ordered(orderedAt-10);await store.accept(earlier);await store.accept(later);
+ await store.finish(later.ownerId,later.operationId,'failed',null,'UPSTREAM_UNAVAILABLE',orderedAt-5,later.inputHash);
+ await store.finish(earlier.ownerId,earlier.operationId,'succeeded',null,null,orderedAt-1,earlier.inputHash);
+ const orderedFacts=(await side.collectObservations(Date.now())).facts.filter(f=>f.scope_id===orderedOwner);assert.deepEqual(orderedFacts.map(f=>f.data.phase),['failed','succeeded']);
+ assert.equal((await sql.query('SELECT count(*)::int n FROM providers_alert_episodes WHERE owner_id=$1',[orderedOwner])).rows[0].n,0,'completion order closes episode despite reverse acceptance order');
+ // AIDEV-NOTE: Direct synthetic lifecycle rows exercise finite storage without 129 HTTP/model calls.
+ const base=Date.now();
+ for(let i=0;i<L.outboxRows+2;i++){
+   const operation={ownerId:owner+'-'+i,operationId:randomUUID(),inputHash:'a'.repeat(64),phase:'accepted',cancelRequested:false,createdAt:base+i,finishedAt:null,keyExpiresAt:base+604800000,resultExpiresAt:null,route:{provider:'typesafe',model:MODEL,catalogVersion:'test'},result:null,errorCode:null};
+   await store.accept(operation);await store.finish(operation.ownerId,operation.operationId,'failed',null,'UPSTREAM_UNAVAILABLE',base+i,operation.inputHash);
+ }
+ let dropped=0;
+ for(let i=0;i<Math.ceil((L.outboxRows+2)/L.batch)+1;i++)dropped+=(await side.collectObservations(Date.now())).dropped;
+ const count=(await sql.query('SELECT count(*)::int n FROM providers_alert_outbox')).rows[0].n;assert.equal(count,L.outboxRows);assert.ok(dropped>=3);
+ assert.ok((await sql.query('SELECT count(*)::int n FROM providers_alert_episodes')).rows[0].n<=L.episodeRows);
+ const expired=await side.collectObservations(Date.now()+L.ttlMs+1000);assert.equal(expired.expired,L.outboxRows);assert.equal(expired.outboxSize,0);
+ const ping=(await nc.request('$SRV.PING.brai_providers_v1','',{timeout:1000})).json();assert.ok(ping.id);assert.equal(attempts,before+1,'overflow and TTL do not call upstream');
+ observer.stop();replay.stop();unavailable.stop();
+});

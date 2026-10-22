@@ -14,6 +14,7 @@ export class AlertsFault extends Error {
 /** Транзакция живёт только внутри callback; все строки уже ограничены user-контекстом. */
 export interface AlertsTransaction {
   insert(input: EventInput): Promise<boolean>;
+  typeByCode(code: string): Promise<number | null>;
   get(serviceId: string, id: string): Promise<Notification | null>;
   list(after: EventKey | null, count: number): Promise<Notification[]>;
   summary(): Promise<Summary>;
@@ -28,6 +29,7 @@ export interface AlertsStore {
 /** Входные сценарии для долговечного ingestion и доверенных web-команд. */
 export interface AlertsHandlers {
   ingest(value: unknown, context?: OperationContext): Promise<{ inserted: boolean; user_id: string | null }>;
+  ingestElementsEvent(value: unknown, context?: OperationContext): Promise<{ inserted: boolean; user_id: string | null }>;
   execute(operation: Operation, value: unknown, context?: OperationContext): Promise<ListResponse | { notification: Notification } | Summary>;
   ready(): Promise<void>;
 }
@@ -122,6 +124,14 @@ export function createAlertsHandlers(store: AlertsStore, options: { cursorKey: U
       const user_id = event.scope_type === 'user' ? event.scope_id : null;
       if (inserted) changed(user_id);
       return { inserted, user_id };
+    },
+    async ingestElementsEvent(value, context) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new AlertsFault("INVALID_ARGUMENT");
+      const raw = value as Record<string, any>; const notification = raw.notification;
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw.event_id ?? "") || typeof raw.owner_id !== "string" || raw.owner_id.length < 1 || raw.owner_id.length > 255 || typeof raw.occurred_at !== "string" || !notification || typeof notification !== "object" || Array.isArray(notification) || typeof notification.type_code !== "string" || typeof notification.title !== "string" || notification.title.length < 1 || notification.title.length > 256 || typeof notification.text !== "string" || notification.text.length > 8192 || (notification.data !== undefined && (!notification.data || typeof notification.data !== "object" || Array.isArray(notification.data)))) throw new AlertsFault("INVALID_ARGUMENT");
+      const event = { id: raw.event_id.toLowerCase(), service_id: "service_elements", scope_type: "user" as const, scope_id: raw.owner_id, title: notification.title, text: notification.text, data: notification.data ?? {}, occurred_at: normalizeTimestamp(raw.occurred_at) } as any;
+      const inserted = await store.transaction(null, context, async tx => { const typeId = await tx.typeByCode(notification.type_code); if (!typeId) throw new AlertsFault("UNKNOWN_TYPE"); event.type_id = typeId; return tx.insert(event); });
+      if (inserted) changed(raw.owner_id); return { inserted, user_id: raw.owner_id };
     },
     async execute(operation, value, context) {
       const raw = input(operation, value);

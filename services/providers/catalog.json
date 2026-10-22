@@ -1,0 +1,51 @@
+{
+  "version": "artifacts-v1-1",
+  "models": [
+    {
+      "provider": "typesafe",
+      "model": "jev-1.13.0",
+      "upstreamModel": "typesafe/jev-1.13.0",
+      "apiKeyEnv": "TYPESAFE_API_KEY",
+      "capabilities": [
+        "decide"
+      ],
+      "questionTypes": [
+        "noul",
+        "choice",
+        "score"
+      ],
+      "stateTypes": [
+        "string",
+        "object",
+        "array"
+      ],
+      "deadlineMs": 30000
+    },
+    {
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v3.2",
+      "upstreamModel": "openrouter/deepseek/deepseek-v3.2",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "capabilities": [
+        "chat",
+        "stream",
+        "tools"
+      ],
+      "questionTypes": [],
+      "stateTypes": [],
+      "deadlineMs": 90000
+    },
+    {
+      "provider": "openrouter",
+      "model": "google/gemini-2.5-flash-image",
+      "upstreamModel": "openrouter/google/gemini-2.5-flash-image",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "capabilities": [
+        "image"
+      ],
+      "questionTypes": [],
+      "stateTypes": [],
+      "deadlineMs": 180000
+    }
+  ]
+}

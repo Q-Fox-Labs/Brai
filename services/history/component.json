@@ -1,0 +1,90 @@
+{
+  "formatVersion": 1,
+  "id": "history",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev",
+    "prod"
+  ],
+  "executableSources": [
+    "services/history/src/health.ts",
+    "services/history/src/main.ts",
+    "services/history/src/migrate.ts"
+  ],
+  "inputs": {
+    "build": [
+      "services/history/tsconfig.json"
+    ],
+    "runtime": [
+      "services/history/DEPLOYMENT.md",
+      "services/history/migrations/001.sql",
+      "services/history/package.json",
+      "services/history/schemas/common.schema.json",
+      "services/history/schemas/messages.schema.json",
+      "services/history/schemas/tools.schema.json",
+      "services/history/src/config.ts",
+      "services/history/src/contracts.ts",
+      "services/history/src/domain.ts",
+      "services/history/src/health.ts",
+      "services/history/src/load.ts",
+      "services/history/src/main.ts",
+      "services/history/src/mcp.ts",
+      "services/history/src/migrate.ts",
+      "services/history/src/nats.ts",
+      "services/history/src/storage.ts",
+      "services/history/CONTRACT.md"
+    ],
+    "checks": [
+      "services/history/tests/config.test.mjs",
+      "services/history/tests/contracts.test.mjs",
+      "services/history/tests/domain.test.mjs",
+      "services/history/tests/integration/init.sql",
+      "services/history/tests/integration/mcp.test.mjs",
+      "services/history/tests/integration/nats-runtime.test.mjs",
+      "services/history/tests/integration/storage.test.mjs",
+      "services/history/tests/load.test.mjs",
+      "services/history/tests/nats-runtime.test.mjs"
+    ]
+  },
+  "dependencies": [],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/history/CONTRACT.md",
+      "services/history/dist",
+      "services/history/migrations",
+      "services/history/package.json",
+      "services/history/schemas"
+    ],
+    "entrypoints": [
+      "services/history/dist/main.js",
+      "services/history/dist/migrate.js",
+      "services/history/dist/health.js"
+    ],
+    "smokeImports": [],
+    "systemRequirements": [
+      "Node.js 24.21.0"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "history",
+      "history-migrate",
+      "brai-history.service"
+    ],
+    "migrations": [
+      "services/history/migrations"
+    ],
+    "health": "node services/history/dist/health.js"
+  },
+  "npm": {
+    "workspaces": [
+      "services/history"
+    ]
+  }
+}

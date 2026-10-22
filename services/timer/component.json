@@ -1,0 +1,86 @@
+{
+  "formatVersion": 1,
+  "id": "timer",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev",
+    "prod"
+  ],
+  "executableSources": [
+    "services/timer/src/health.ts",
+    "services/timer/src/main.ts",
+    "services/timer/src/migrate.ts"
+  ],
+  "inputs": {
+    "build": [
+      "services/timer/tsconfig.json"
+    ],
+    "runtime": [
+      "services/timer/migrations/001.sql",
+      "services/timer/migrations/002.sql",
+      "services/timer/migrations/003.sql",
+      "services/timer/migrations/004.sql",
+      "services/timer/package.json",
+      "services/timer/schemas/commands.schema.json",
+      "services/timer/schemas/common.schema.json",
+      "services/timer/schemas/messages.schema.json",
+      "services/timer/src/config.ts",
+      "services/timer/src/domain.ts",
+      "services/timer/src/flow.ts",
+      "services/timer/src/health.ts",
+      "services/timer/src/main.ts",
+      "services/timer/src/migrate.ts",
+      "services/timer/src/nats.ts",
+      "services/timer/src/schema.ts",
+      "services/timer/src/statistics.ts",
+      "services/timer/src/storage.ts"
+    ],
+    "checks": [
+      "services/timer/tests/domain.test.mjs",
+      "services/timer/tests/integration/compose.yml",
+      "services/timer/tests/integration/init.sql",
+      "services/timer/tests/integration/timer.test.mjs",
+      "services/timer/tests/statistics.test.mjs",
+      "services/timer/tests/storage.test.mjs"
+    ]
+  },
+  "dependencies": [],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/timer/dist",
+      "services/timer/migrations",
+      "services/timer/package.json",
+      "services/timer/schemas"
+    ],
+    "entrypoints": [
+      "services/timer/dist/main.js",
+      "services/timer/dist/migrate.js",
+      "services/timer/dist/health.js"
+    ],
+    "smokeImports": [],
+    "systemRequirements": [
+      "Node.js 24.21.0"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "timer",
+      "timer-migrate"
+    ],
+    "migrations": [
+      "services/timer/migrations"
+    ],
+    "health": "node services/timer/dist/health.js"
+  },
+  "npm": {
+    "workspaces": [
+      "services/timer"
+    ]
+  }
+}

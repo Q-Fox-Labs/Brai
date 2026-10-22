@@ -7,6 +7,66 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
+            "action",
+            "ownerId"
+          ],
+          "properties": {
+            "action": {
+              "const": "readState"
+            },
+            "ownerId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "action",
+            "ownerId",
+            "projectId",
+            "threadId",
+            "messageId",
+            "lastMessageAt"
+          ],
+          "properties": {
+            "action": {
+              "const": "readMark"
+            },
+            "ownerId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "projectId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "threadId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "messageId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "lastMessageAt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
             "action"
           ],
           "properties": {
@@ -1586,6 +1646,9 @@
         },
         {
           "$ref": "#/definitions/Goal"
+        },
+        {
+          "$ref": "#/definitions/ReadState"
         }
       ]
     },
@@ -1983,6 +2046,33 @@
           "type": "string",
           "maxLength": 2048,
           "pattern": "^/api/agent/results/"
+        }
+      }
+    },
+    "ReadState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "marks"
+      ],
+      "properties": {
+        "marks": {
+          "type": "object",
+          "propertyNames": {
+            "minLength": 1,
+            "maxLength": 257
+          },
+          "additionalProperties": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 128,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
         }
       }
     }

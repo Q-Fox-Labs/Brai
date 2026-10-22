@@ -1,0 +1,169 @@
+// ABOUTME: Связывает доверенный Telegram callback с человеческой попыткой game-core.
+// ABOUTME: Этот порт не регистрируется в обычном MCP и не удостоверяет Telegram пользователя.
+import { fault } from './runtime.mjs';
+import { confirmationText } from './confirmation.mjs';
+
+const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
+const uncertain = error => typeof error.code !== 'string' || ['TIMEOUT', 'DEADLINE_EXCEEDED', 'CONNECTION_CLOSED', 'INVALID_UPSTREAM_RESPONSE'].includes(error.code);
+
+/** Создаёт private порт; вызывающий обязан проверить owner-private chat и одноразовый callback token. */
+export function createHumanActions(runtime) {
+  async function lookup({ moveId }, signal) {
+    if (!uuid(moveId)) throw fault('INVALID_ARGUMENT');
+    const graph = await runtime.graph(signal), move = graph.moves.find(move => move.id === moveId);
+    if (!move) throw fault('NOT_FOUND');
+    if (move.kind !== 'action') throw fault('FORBIDDEN');
+    const target = graph.elements.find(element => element.id === move.targetId);
+    if (!target) throw fault('INVALID_UPSTREAM_RESPONSE');
+    const planning = move.fields?.planning;
+    // AIDEV-NOTE: Кнопка записывает только решение; предметные выходы human work нельзя получить из клика.
+    const confirmationStage = planning && Array.isArray(planning.output_contracts) && planning.output_contracts.length === 1
+      ? (planning.decision === 'confirm' ? 'planning' : planning.decision === 'final' ? 'final' : planning.decision === 'clarify' ? 'clarification' : null) : null;
+    const action = { ...(planning ? { confirmationStage, confirmationText: confirmationText(graph, move, target) } : {}), moveId, revisionId: target.revision, targetId: target.id, title: move.title, status: move.status,
+      ...(planning ? { decision: planning.decision ?? null, outputContracts: planning.output_contracts ?? [] } : {}),
+      attemptId: move.attemptId || null, attemptStatus: graph.attempts.find(attempt => attempt.id === move.attemptId)?.status ?? null,
+      attemptExecutorKind: move.executor ?? null, inputResourceIds: move.input ?? [], targetTitle: target.title, targetDescription: target.description };
+    return { action, graph, move, target };
+  }
+  return {
+    async read(args, signal) {
+      if (!exact(args, ['moveId'])) throw fault('INVALID_ARGUMENT');
+      return (await lookup(args, signal)).action;
+    },
+    /** Закрепляет human attempt до показа кнопки; повтор прежнего ключа не создаёт новую попытку. */
+    async prepare(args, signal) {
+      if (!exact(args, ['moveId', 'revisionId', 'idempotencyKey', 'inputResourceIds']) || !uuid(args.revisionId) ||
+        typeof args.idempotencyKey !== 'string' || !args.idempotencyKey || args.idempotencyKey.length > 200 ||
+        args.inputResourceIds !== undefined && (!Array.isArray(args.inputResourceIds) || args.inputResourceIds.some(id => !uuid(id)))) throw fault('INVALID_ARGUMENT');
+      const { action, graph, move, target } = await lookup(args, signal);
+      // AIDEV-NOTE: Claimed допускает только восстановление прежнего ключа после crash до записи attemptId в Telegram.
+      if (action.revisionId !== args.revisionId && action.status !== 'claimed') throw fault('STALE_ACTION');
+      if (!['planned', 'claimed'].includes(action.status)) throw fault('STALE_ACTION');
+      // Claimed same-key recovery остаётся доступен для отмены даже неподдерживаемой прежней кнопки.
+      if (action.status === 'planned' && action.confirmationStage === null && (!action.outputContracts?.length || action.decision === 'confirm')) throw fault('HUMAN_OUTPUT_REQUIRED');
+      let inputs = args.inputResourceIds;
+      if (!inputs) {
+        const available = await runtime.elementsCall('elements_moves_available', {}, signal);
+        const ready = available.items?.find(move => move.id === args.moveId);
+        inputs = ready?.required_resource_ids ?? ready?.available_resource_ids ?? (action.status === 'claimed' ? action.inputResourceIds : undefined);
+        if (!inputs) throw fault('INPUT_RESOURCES_REQUIRED');
+      }
+      try {
+        const result = await runtime.elementsCall('elements_move_claim', { move_id: args.moveId,
+          idempotency_key: `telegram:${args.idempotencyKey}`, executor_kind: 'human', input_resource_ids: inputs }, signal);
+        if (!uuid(result.attempt?.id) || result.attempt.executor_kind !== 'human') throw fault('INVALID_UPSTREAM_RESPONSE');
+        if (result.attempt.status !== 'running' || action.status === 'claimed' && result.attempt.id !== action.attemptId) throw fault('STALE_ACTION');
+        return { ...action, ...(move.fields?.planning ? { confirmationText: confirmationText(graph, move, target, inputs) } : {}), revisionId: args.revisionId, currentRevisionId: action.revisionId, attemptId: result.attempt.id, status: result.attempt.status, inputResourceIds: inputs };
+      } catch (error) {
+        if (uncertain(error)) throw fault('OUTCOME_UNKNOWN');
+        throw error;
+      }
+    },
+    /** Завершает только сохранённую human attempt; planning revision дополнительно проверяет owner в транзакции. */
+    async complete(args, signal) {
+      if (!exact(args, ['moveId', 'attemptId', 'revisionId', 'stage', 'decision', 'comment', 'source']) || !uuid(args.attemptId) || !uuid(args.revisionId) ||
+        !['planning', 'final', 'review', 'clarification'].includes(args.stage) || !['approved', 'success', 'changes', 'cancelled', 'clarify'].includes(args.decision) ||
+        args.comment !== undefined && (typeof args.comment !== 'string' || args.comment.length > 16_000)) throw fault('INVALID_ARGUMENT');
+      const { action } = await lookup(args, signal);
+      if (action.revisionId !== args.revisionId || action.attemptId !== args.attemptId || action.attemptStatus !== 'running' || action.attemptExecutorKind !== 'human') throw fault('STALE_ACTION');
+      if (action.confirmationStage === null && action.outputContracts?.length) throw fault('HUMAN_OUTPUT_REQUIRED');
+      if (action.confirmationStage === 'clarification'
+        ? args.decision !== 'clarify' || args.stage !== 'clarification' || !args.comment?.trim()
+        : ![(action.confirmationStage ?? args.stage) === 'final' ? 'success' : 'approved', 'changes'].includes(args.decision)) throw fault('INVALID_ARGUMENT');
+      const stage = args.decision === 'changes' ? 'review' : args.decision === 'clarify' ? 'clarification' : action.confirmationStage ?? args.stage;
+      const outcome = args.decision === 'clarify' ? 'answered' : args.decision;
+      const result = { resources: [{ title: action.title, content: args.comment?.trim() || args.decision,
+        metadata: { element_id: action.targetId, revision_id: args.revisionId, stage, outcome, ...(args.source ? { source: args.source } : {}) } }] };
+      try { return await runtime.elementsCall('elements_move_complete', { attempt_id: args.attemptId, result }, signal); }
+      catch (error) {
+        if (uncertain(error)) throw fault('OUTCOME_UNKNOWN');
+        throw error;
+      }
+    },
+    /** Только текст реального входящего сообщения из доверенного Telegram плагина. */
+    async feedback(args, signal) {
+      if (!exact(args, ['elementId', 'revisionId', 'moveId', 'decision', 'feedback']) || !uuid(args.elementId) || !uuid(args.revisionId) ||
+          !['changes', 'cancelled', 'clarify'].includes(args.decision) || !uuid(args.feedback?.id) || typeof args.feedback?.content !== 'string' ||
+          !args.feedback.content.trim() || args.feedback.content.length > 16_000 || !args.feedback.source || typeof args.feedback.source !== 'object') throw fault('INVALID_ARGUMENT');
+      const graph = await runtime.graph(signal), target = graph.elements.find(element => element.id === args.elementId);
+      if (!target) throw fault('NOT_FOUND');
+      if (args.decision === 'cancelled') {
+        try { return await runtime.elementsCall('elements_element_activate', { element_id: target.id, revision_id: args.revisionId, cancel: true, feedback: args.feedback }, signal); }
+        catch (error) { if (uncertain(error)) throw fault('OUTCOME_UNKNOWN'); throw error; }
+      }
+      if (target.revision !== args.revisionId || ['completed', 'cancelled'].includes(target.status)) throw fault('STALE_ACTION');
+      const { action } = await lookup({ moveId: args.moveId }, signal);
+      if (action.targetId !== target.id || (args.decision === 'clarify'
+        ? action.confirmationStage !== 'clarification' : !['planning', 'final'].includes(action.confirmationStage))) throw fault('HUMAN_OUTPUT_REQUIRED');
+      return this.complete({ moveId: action.moveId, revisionId: args.revisionId, attemptId: action.attemptId,
+        stage: args.decision === 'clarify' ? 'clarification' : 'review',
+        decision: args.decision === 'clarify' ? 'clarify' : 'changes', comment: args.feedback.content, source: args.feedback.source }, signal);
+    },
+    /** Завершает практический Action по фактическому тексту owner из текущего Telegram MessageEvent. */
+    async result(args, signal) {
+      if (!exact(args, ['moveId', 'revisionId', 'content', 'source', 'decisionText', 'decisionSource']) || !uuid(args.moveId) || !uuid(args.revisionId) ||
+        typeof args.content !== 'string' || !args.content.trim() || args.content.length > 16_000 || !args.source || typeof args.source !== 'object') throw fault('INVALID_ARGUMENT');
+      if (args.decisionText !== undefined && (typeof args.decisionText !== 'string' || !args.decisionText.trim() || args.decisionText.length > 16_000 || !args.decisionSource || typeof args.decisionSource !== 'object')) throw fault('INVALID_ARGUMENT');
+      const { action } = await lookup({ moveId: args.moveId }, signal);
+      const contracts = action.outputContracts;
+      if (!contracts?.length || action.revisionId !== args.revisionId || action.status !== 'claimed' ||
+        action.attemptStatus !== 'running' || action.attemptExecutorKind !== 'human') throw fault('STALE_ACTION');
+      let values, outcome;
+      if (contracts.length === 1) {
+        values = [args.content.trim()];
+        if (action.decision === 'final') {
+          const statement = args.decisionText ?? args.content;
+          if (/(?:есть замечания|нужно доработать|не принимаю|не принято)/i.test(statement)) outcome = 'changes';
+          else if (/(?:принимаю|всё принимаю|все принимаю|результат принят|всё готово|все готово)/i.test(statement)) outcome = 'success';
+          else throw fault('HUMAN_FINAL_DECISION_REQUIRED');
+        }
+      } else {
+        let parsed;
+        try { parsed = JSON.parse(args.content); } catch { throw fault('HUMAN_OUTPUT_MAPPING_REQUIRED'); }
+        const names = contracts.map(item => item.name);
+        if (new Set(names).size !== names.length || names.includes('decision')) throw fault('HUMAN_OUTPUT_MAPPING_REQUIRED');
+        const keys = [...names, ...(action.decision === 'final' ? ['decision'] : [])];
+        if (!exact(parsed, keys) || keys.some(key => typeof parsed[key] !== 'string' || !parsed[key].trim())) throw fault('HUMAN_OUTPUT_MAPPING_REQUIRED');
+        if (action.decision === 'final') {
+          if (!['success', 'changes'].includes(parsed.decision)) throw fault('HUMAN_FINAL_DECISION_REQUIRED');
+          outcome = parsed.decision;
+        }
+        values = names.map(name => parsed[name].trim());
+      }
+      const resources = contracts.map((item, index) => ({ output_key: item.key, title: item.name,
+        content: values[index], metadata: { source: args.source,
+          ...(action.decision === 'final' && index === contracts.length - 1 ? {
+            element_id: action.targetId, revision_id: args.revisionId,
+            stage: outcome === 'changes' ? 'review' : 'final', outcome,
+            source: args.decisionSource ?? args.source,
+            ...(args.decisionSource ? { practical_source: args.source } : {}),
+          } : {}) } }));
+      try { return await runtime.elementsCall('elements_move_complete', { attempt_id: action.attemptId, result: { resources } }, signal); }
+      catch (error) { if (uncertain(error)) throw fault('OUTCOME_UNKNOWN'); throw error; }
+    },
+    /** Освобождает истёкшую или отменённую human attempt, сохраняя технический итог и planned Move. */
+    async cancel(args, signal) {
+      if (!exact(args, ['moveId', 'attemptId', 'revisionId', 'reason']) || !uuid(args.attemptId) || !uuid(args.revisionId) ||
+        !['expired', 'cancelled', 'declined'].includes(args.reason)) throw fault('INVALID_ARGUMENT');
+      const { action } = await lookup(args, signal);
+      if (action.attemptId !== args.attemptId || action.attemptStatus !== 'running' || action.attemptExecutorKind !== 'human') throw fault('STALE_ACTION');
+      try { return await runtime.elementsCall('elements_move_fail', { attempt_id: args.attemptId, error_code: `HUMAN_${args.reason.toUpperCase()}` }, signal); }
+      catch (error) {
+        if (uncertain(error)) throw fault('OUTCOME_UNKNOWN');
+        throw error;
+      }
+    },
+    /** Завершает только exact agent Operation attempt после terminal native hook. */
+    async failAgent(args, signal) {
+      if (!exact(args, ['moveId', 'attemptId']) || !uuid(args.moveId) || !uuid(args.attemptId)) throw fault('INVALID_ARGUMENT');
+      const graph = await runtime.graph(signal), move = graph.moves.find(item => item.id === args.moveId);
+      const attempt = graph.attempts.find(item => item.id === args.attemptId);
+      if (!move) throw fault('NOT_FOUND');
+      if (move.kind !== 'operation' || move.executor === 'human') throw fault('FORBIDDEN');
+      if (move.attemptId !== args.attemptId || attempt?.moveId !== args.moveId || attempt.status !== 'running') return { attempt: attempt ?? null, status: 'already_stopped' };
+      try { return await runtime.elementsCall('elements_move_fail', { attempt_id: args.attemptId, error_code: 'AGENT_STOPPED' }, signal); }
+      catch (error) { if (uncertain(error)) throw fault('OUTCOME_UNKNOWN'); throw error; }
+    },
+  };
+}
