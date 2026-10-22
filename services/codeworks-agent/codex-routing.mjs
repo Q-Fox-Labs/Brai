@@ -46,8 +46,8 @@ export function enforceBrai(frame,{cwd,catalogue,mcpCommand,controlSocket,inspec
   return out;
 }
 
-/** Routes one client connection; children are opened lazily and requests stay ordered. */
-export function createNativeRouter({roots,workspaceRoots=[],upstream,brai,send,resolvePath=canonicalPath,claimThread=()=>true,releaseThreads=()=>{}}) {
+/** Маршрутизирует общее соединение; attachmentRoot задаётся доверенной конфигурацией, не клиентом. */
+export function createNativeRouter({roots,workspaceRoots=[],attachmentRoot,upstream,brai,send,resolvePath=canonicalPath,claimThread=()=>true,releaseThreads=()=>{}}) {
   const routes=new Map(),pending=new Map(),internal=new Map();
   const prefix='cw-router-'+randomUUID()+'-';
   const serverRequests=new Map();
@@ -57,6 +57,22 @@ export function createNativeRouter({roots,workspaceRoots=[],upstream,brai,send,r
     if(typeof value!=='string'||!path.isAbsolute(value))return false;
     const canonical=await resolvePath(value);
     return [...roots,...workspaceRoots].some(root=>inside(canonical,root));
+  }
+
+  // AIDEV-NOTE: Desktop загружает вложения без threadId на общем соединении.
+  // Разрешена только его отдельная область; config и project writers остаются закрыты.
+  async function attachmentWrite(frame) {
+    const p=frame.params??{},method=frame.method;
+    if(typeof attachmentRoot!=='string'||!path.isAbsolute(attachmentRoot)||p.environmentId!=null)return false;
+    const target=method==='fs/copy'?p.destinationPath:p.path;
+    if(typeof target!=='string'||!path.isAbsolute(target))return false;
+    const root=path.resolve(attachmentRoot),relative=path.relative(root,target),parts=relative.split(path.sep);
+    const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(parts[0]);
+    const registry=method==='fs/writeFile'&&relative==='pasted-text-attachments.json';
+    const directory=['fs/createDirectory','fs/remove'].includes(method)&&uuid&&parts.length===1;
+    const file=['fs/writeFile','fs/copy','fs/remove'].includes(method)&&uuid&&parts.length===2;
+    if(!registry&&!directory&&!file)return false;
+    return await resolvePath(root)===root&&await resolvePath(target)===path.resolve(target);
   }
 
   function error(id,message){if(id!==undefined)send({id,error:{code:-32000,message}});}
@@ -131,7 +147,7 @@ export function createNativeRouter({roots,workspaceRoots=[],upstream,brai,send,r
         frame.method.startsWith('command/')||frame.method.startsWith('process/')?'execution':null;
       if(writer) {
         const targets=(writer==='filesystem'?['path','sourcePath','destinationPath']:['cwd']).map(key=>p[key]).filter(Boolean);
-        if(braiSeen){error(frame.id,writer==='filesystem'?'BRAI_UNTHREADED_WRITE_DENIED':'BRAI_UNTHREADED_COMMAND_DENIED');return;}
+        if(braiSeen&&!(writer==='filesystem'&&await attachmentWrite(frame))){error(frame.id,writer==='filesystem'?'BRAI_UNTHREADED_WRITE_DENIED':'BRAI_UNTHREADED_COMMAND_DENIED');return;}
         for(const target of targets)if(await isBrai(target)){error(frame.id,writer==='filesystem'?'BRAI_UNTHREADED_WRITE_DENIED':'BRAI_UNTHREADED_COMMAND_DENIED');return;}
       }
       if(BLOCKED.has(frame.method)&&braiSeen){error(frame.id,'BRAI_CONTROL_OVERRIDE_DENIED');return;}

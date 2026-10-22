@@ -30,9 +30,9 @@ test('Startup catalogue removes builtin patch, shell and code execution metadata
   assert.equal(original.models[0].apply_patch_tool_type,'freeform');
   assert.throws(()=>readonlyCatalogue({models:[]}));
 });
-function fixture({cwd='/admin',loaded=[]}={}) {
+function fixture({cwd='/admin',loaded=[],resolvePath=async p=>p.replace('/alias','/repo/brai').replace('/workspace-alias','/state/workspaces')}={}) {
   const frames=[],admin=[],brai=[];let adminSend,braiSend;
-  const router=createNativeRouter({roots:['/repo/brai'],workspaceRoots:['/state/workspaces'],send:f=>frames.push(f),resolvePath:async p=>p.replace('/alias','/repo/brai').replace('/workspace-alias','/state/workspaces'),
+  const router=createNativeRouter({roots:['/repo/brai'],workspaceRoots:['/state/workspaces'],attachmentRoot:'/home/test/.codex/attachments',send:f=>frames.push(f),resolvePath,
     upstream:send=>{adminSend=send;return {receive(f){admin.push(f);if(f.method==='thread/read')send({id:f.id,result:{thread:{id:f.params.threadId,cwd}}});if(f.method==='thread/loaded/list')send({id:f.id,result:{data:loaded,nextCursor:null}});},close(){}}},
     brai:send=>{braiSend=send;return {receive(f){brai.push(f);if(f.method==='initialize')send({id:f.id,result:{userAgent:'native'}});if(f.method==='thread/start')send({id:f.id,result:{thread:{id:'new-brai',cwd:'/repo/brai'}}});},close(){}}}});
   return {router,frames,admin,brai,adminSend:()=>adminSend,braiSend:()=>braiSend};
@@ -140,4 +140,60 @@ test('Brai cannot invoke native thread shells, manual execution approval or new 
   const admin=fixture();await init(admin);
   const frame={id:120,method:'thread/shellCommand',params:{threadId:'admin-thread',command:'opaque'}};
   await admin.router.receive(frame);assert.deepEqual(admin.admin.at(-1),frame);await admin.router.close();
+});
+
+const uploadRoot='/home/test/.codex/attachments';
+const uploadId='47b45722-225e-4f03-8f4d-5131a0f78f8b';
+test('Desktop attachment lifecycle remains available after Brai and Admin chats share a connection',async()=>{
+  const f=fixture({cwd:'/repo/brai'});await init(f);
+  await f.router.receive({id:200,method:'thread/read',params:{threadId:'existing'}});
+  await f.router.receive({id:201,method:'thread/start',params:{cwd:'/admin'}});
+  const directory=uploadRoot+'/'+uploadId,file=directory+'/image.png';
+  const requests=[
+    ['fs/createDirectory',{path:directory,recursive:true}],
+    ['fs/writeFile',{path:file,dataBase64:'aW1hZ2U='}],
+    ['fs/copy',{sourcePath:'/tmp/image.png',destinationPath:directory+'/copy.png'}],
+    ['fs/writeFile',{path:uploadRoot+'/pasted-text-attachments.json',dataBase64:'e30='}],
+    ['fs/remove',{path:file,force:true}],
+    ['fs/remove',{path:directory,recursive:true,force:true}],
+  ];
+  for(let i=0;i<requests.length;i++) {
+    const [method,params]=requests[i],frame={id:210+i,method,params};
+    await f.router.receive(frame);assert.deepEqual(f.admin.at(-1),frame);
+  }
+  assert.equal(f.frames.some(x=>x.error),false);await f.router.close();
+});
+test('Attachment exception cannot change config, project files, other environments or unreviewed filesystem methods',async()=>{
+  const f=fixture({cwd:'/repo/brai'});await init(f);
+  await f.router.receive({id:230,method:'thread/read',params:{threadId:'existing'}});
+  const directory=uploadRoot+'/'+uploadId;
+  const requests=[
+    ['fs/writeFile',{path:'/home/test/.codex/config.toml'}],
+    ['fs/writeFile',{path:directory+'/../../config.toml'}],
+    ['fs/createDirectory',{path:uploadRoot}],
+    ['fs/writeFile',{path:uploadRoot+'/arbitrary.json'}],
+    ['fs/remove',{path:uploadRoot,recursive:true}],
+    ['fs/remove',{path:uploadRoot+'/pasted-text-attachments.json'}],
+    ['fs/writeFile',{path:directory+'/nested/file'}],
+    ['fs/writeFile',{path:uploadRoot+'-sibling/'+uploadId+'/image.png'}],
+    ['fs/createDirectory',{path:uploadRoot+'/not-a-uuid'}],
+    ['fs/writeFile',{path:directory+'/image.png',environmentId:'foreign'}],
+    ['fs/futureWriter',{path:directory+'/image.png'}],
+    ['fs/copy',{sourcePath:'/repo/brai/file',destinationPath:directory+'/image.png'}],
+    ['command/exec',{cwd:directory,command:['anything']}],
+  ];
+  for(let i=0;i<requests.length;i++) {
+    const [method,params]=requests[i],frame={id:240+i,method,params};await f.router.receive(frame);
+    assert.ok(f.frames.find(x=>x.id===frame.id)?.error,method+' must remain denied');
+    assert.equal(f.admin.some(x=>x.id===frame.id),false);
+  }
+  await f.router.close();
+});
+test('Attachment writes reject symlinked roots, directories and files',async()=>{
+  for(const redirected of [uploadRoot,uploadRoot+'/'+uploadId,uploadRoot+'/'+uploadId+'/image.png']) {
+    const f=fixture({cwd:'/repo/brai',resolvePath:async value=>value===redirected||value.startsWith(redirected+'/')?value.replace(redirected,'/outside'):value});
+    await init(f);await f.router.receive({id:270,method:'thread/read',params:{threadId:'existing'}});
+    await f.router.receive({id:271,method:'fs/writeFile',params:{path:uploadRoot+'/'+uploadId+'/image.png'}});
+    assert.equal(f.frames.at(-1).error.message,'BRAI_UNTHREADED_WRITE_DENIED');await f.router.close();
+  }
 });
