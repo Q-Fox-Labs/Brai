@@ -31,6 +31,51 @@ export function unwrap(result) {
   throw fault('INVALID_UPSTREAM_RESPONSE');
 }
 
+/** Reconnect only for the next explicit call; never replay a request with unknown effects. */
+export async function connectMcpEndpoint(endpoint, { timeout = 12_000, callTimeout = 300_000 } = {}) {
+  let current, opening, closed = false;
+  const clients = new Set();
+  async function client() {
+    if (closed) throw fault('CANCELLED');
+    if (current) return current;
+    if (!opening) opening = (async () => {
+      const next = new Client({ name: 'brai-hermes-owner', version: '1.0.0' });
+      clients.add(next);
+      try {
+        await next.connect(new StreamableHTTPClientTransport(new URL(endpoint.url), {
+          requestInit: { headers: endpoint.token ? { Authorization: `Bearer ${endpoint.token}` } : {} },
+        }), { timeout });
+        if (closed) throw fault('CANCELLED');
+        current = next;
+        return next;
+      } catch (error) {
+        await next.close().catch(() => {}); clients.delete(next); throw error;
+      } finally { opening = undefined; }
+    })();
+    return opening;
+  }
+  async function invoke(method, ...args) {
+    const selected = await client();
+    try { return await selected[method](...args); }
+    catch (error) {
+      // Owner business failures are unwrapped later. Only broken protocol/transport invalidates this generation.
+      if ((typeof error.code === 'number' && error.code >= 400 && error.code <= 599)
+          || typeof error.code !== 'string' || uncertain(error)) {
+        if (current === selected) current = undefined;
+        // A delayed failure from an older generation cannot close the replacement client.
+        await selected.close().catch(() => {}); clients.delete(selected);
+      }
+      throw error;
+    }
+  }
+  await client();
+  return {
+    list: () => invoke('listTools', {}, { timeout }),
+    call: (name, args, signal) => invoke('callTool', { name, arguments: args }, undefined, { signal, timeout: callTimeout }),
+    async close() { closed = true; await opening?.catch(() => {}); await Promise.allSettled([...clients].map(value => value.close())); clients.clear(); current = undefined; },
+  };
+}
+
 /** Подключает реальные клиенты; publisher запускается независимо от основного Agent. */
 export async function connectPorts(config) {
   const clients = [], timeout = config.requestTimeoutMs ?? 12_000;
@@ -39,12 +84,9 @@ export async function connectPorts(config) {
     const endpoints = {};
     for (const name of ['elements', 'history', 'transcription']) {
       const endpoint = config[name];
-      const client = new Client({ name: `brai-hermes-${name}`, version: '1.0.0' });
-      clients.push(client);
-      await client.connect(new StreamableHTTPClientTransport(new URL(endpoint.url), {
-        requestInit: { headers: endpoint.token ? { Authorization: `Bearer ${endpoint.token}` } : {} },
-      }), { timeout });
-      endpoints[name] = client;
+      const endpointClient = await connectMcpEndpoint(endpoint, { timeout, callTimeout: config.longRequestTimeoutMs ?? 300_000 });
+      clients.push(endpointClient);
+      endpoints[name] = endpointClient;
     }
     const publisher = new Client({ name: 'brai-hermes-files', version: '1.0.0' });
     clients.push(publisher);
@@ -57,10 +99,11 @@ export async function connectPorts(config) {
       inboxPrefix: config.nats.inboxPrefix ?? '_INBOX.brai_hermes', name: 'brai-hermes-tools', timeout: 5000 });
     const js = nc.jetstream();
     return {
-      async list(name) { return (await endpoints[name].listTools({}, { timeout })).tools; },
+      async list(name) { return (await (name === 'publisher' ? endpoints[name].listTools({}, { timeout }) : endpoints[name].list())).tools; },
       async mcp(name, tool, args, signal) {
-        return unwrap(await endpoints[name].callTool({ name: tool, arguments: args }, undefined,
-          { signal, timeout: name === 'publisher' ? 1_800_000 : config.longRequestTimeoutMs ?? 300_000 }));
+        return unwrap(await (name === 'publisher'
+          ? endpoints[name].callTool({ name: tool, arguments: args }, undefined, { signal, timeout: 1_800_000 })
+          : endpoints[name].call(tool, args, signal)));
       },
       async request(subject, payload, signal, requestTimeout = timeout) {
         signal?.throwIfAborted();
@@ -182,7 +225,7 @@ export async function createBraiTools(config, ports) {
         if (value.ownerId !== undefined && value.ownerId !== config.ownerId) throw fault('OWNER_MISMATCH');
         return value;
       } catch (error) {
-        if (mutation && uncertain(error)) throw fault('OUTCOME_UNKNOWN', { requestId: args.requestId ?? args.commandId ?? args.idempotency_key ?? null });
+        if (mutation && uncertain(error)) throw fault('OUTCOME_UNKNOWN', { requestId: args.requestId ?? args.commandId ?? args.idempotency_key ?? args.attempt_id ?? args.revision_id ?? null });
         if (error.code && /^[A-Z][A-Z0-9_]{0,80}$/.test(error.code)) throw error;
         throw fault(signal?.aborted ? 'CANCELLED' : 'UPSTREAM_UNAVAILABLE');
       } finally { active--; }

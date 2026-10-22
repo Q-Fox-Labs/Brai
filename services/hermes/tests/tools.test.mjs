@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
+import { createServer } from 'node:http';
 import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +12,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { compileInput, natsTools } from '../catalog.mjs';
 import { validateConfig } from '../config.mjs';
-import { createBraiTools, fault } from '../runtime.mjs';
+import { createBraiTools, connectMcpEndpoint, unwrap, fault } from '../runtime.mjs';
 import { createHumanActions } from '../human-actions.mjs';
 import { createTrustedDispatcher, serveTrusted } from '../trusted.mjs';
 import { serveTools } from '../tools.mjs';
@@ -472,4 +473,71 @@ test('draft acceptance keeps current revision meaning without lifecycle Move tit
   assert.match(action.confirmationText, /Принять этот план/);
   assert.doesNotMatch(action.confirmationText, /Доработать текущий план|Рассмотреть новую постановку/);
   assert.doesNotMatch(action.confirmationText, /Старая постановка|Старое рассмотрение/);
+});
+
+
+// A real HTTP peer reproduces owner restart/session loss without touching business data.
+async function restartedOwner(t, invalidStatus = 404) {
+  let generation = 1, initializes = 0, effects = 0, drop = false;
+  const calls = [], waiting = [];
+  let hold = false;
+  const http = createServer(async (req, res) => {
+    if (req.method === 'GET') { res.writeHead(405).end(); return; }
+    if (req.method === 'DELETE') { res.writeHead(200).end(); return; }
+    let bytes = ''; for await (const part of req) bytes += part;
+    const body = JSON.parse(bytes);
+    if (!body.id && body.id !== 0) { res.writeHead(202).end(); return; }
+    const reply = result => { res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': String(generation) }); res.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result })); };
+    if (body.method === 'initialize') { initializes++; reply({ protocolVersion: body.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'synthetic-owner', version: '1' } }); return; }
+    if (req.headers['mcp-session-id'] !== String(generation)) { res.writeHead(invalidStatus).end('Bad Request: Server not initialized'); return; }
+    if (body.method === 'tools/list') { reply({ tools: [
+      { name: 'elements_planning_build', inputSchema: schema({ attempt_id: { type: 'string' }, candidate: { type: 'object' } }) },
+      { name: 'elements_timeline_get', inputSchema: schema({}) },
+    ] }); return; }
+    calls.push(body.params.name);
+    if (hold) { waiting.push(() => { res.writeHead(500).end('synthetic transport failure'); }); return; }
+    if (body.params.name === 'elements_planning_build') {
+      effects++;
+      if (drop) { drop = false; req.socket.destroy(); return; }
+    }
+    reply({ content: [], structuredContent: { effects } });
+  });
+  await new Promise(resolve => http.listen(0, '127.0.0.1', resolve));
+  const endpoint = await connectMcpEndpoint({ url: `http://127.0.0.1:${http.address().port}/mcp` }, { timeout: 1000, callTimeout: 1000 });
+  t.after(async () => { await endpoint.close(); http.closeAllConnections(); await new Promise(resolve => http.close(resolve)); });
+  const runtime = await createBraiTools(config, { list: async name => name === 'elements' ? (await endpoint.list()).tools : [],
+    mcp: async (_, name, args, signal) => unwrap(await endpoint.call(name, args, signal)), close: async () => {} });
+  return { runtime, endpoint, calls, waiting, restart: () => { generation++; }, dropReply: () => { drop = true; }, hold: () => { hold = true; },
+    release: () => { hold = false; }, counts: () => ({ initializes, effects }) };
+}
+
+for (const status of [400, 404]) test(`owner session HTTP ${status} never replays mutation; next explicit read reconnects`, async t => {
+  const owner = await restartedOwner(t, status);
+  owner.restart();
+  await assert.rejects(owner.runtime.call('elements_planning_build', { attempt_id: ids[0], candidate: {} }), error => error.code === 'OUTCOME_UNKNOWN' && error.requestId === ids[0]);
+  assert.deepEqual(owner.counts(), { initializes: 1, effects: 0 });
+  assert.deepEqual(await owner.runtime.call('elements_timeline_get', {}), { effects: 0 });
+  assert.deepEqual(owner.counts(), { initializes: 2, effects: 0 });
+  assert.deepEqual(owner.calls, ['elements_timeline_get']);
+});
+
+test('lost mutation reply stays unknown; explicit reconciliation sees one persisted effect', async t => {
+  const owner = await restartedOwner(t); owner.dropReply();
+  await assert.rejects(owner.runtime.call('elements_planning_build', { attempt_id: ids[0], candidate: {} }), /OUTCOME_UNKNOWN/);
+  assert.deepEqual(await owner.runtime.call('elements_timeline_get', {}), { effects: 1 });
+  assert.deepEqual(owner.counts(), { initializes: 2, effects: 1 });
+  assert.deepEqual(owner.calls, ['elements_planning_build', 'elements_timeline_get']);
+});
+
+test('late old-generation failure preserves a replacement client during concurrent calls', async t => {
+  const owner = await restartedOwner(t); owner.hold();
+  const first = owner.endpoint.call('elements_timeline_get', {}).catch(error => error);
+  const second = owner.endpoint.call('elements_timeline_get', {}).catch(error => error);
+  while (owner.waiting.length !== 2) await new Promise(resolve => setTimeout(resolve, 1));
+  owner.waiting[0](); await first;
+  owner.release();
+  assert.deepEqual(unwrap(await owner.endpoint.call('elements_timeline_get', {})), { effects: 0 });
+  owner.waiting[1](); await second;
+  assert.deepEqual(unwrap(await owner.endpoint.call('elements_timeline_get', {})), { effects: 0 });
+  assert.equal(owner.counts().initializes, 2);
 });
