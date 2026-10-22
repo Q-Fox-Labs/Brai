@@ -1,6 +1,6 @@
 # ABOUTME: Запускает готовую переносимую поставку alerts без установки пакетов.
 # ABOUTME: Контекст собирает package-runtime.mjs; runtime не применяет SQL миграции.
-FROM node:24.21.0-bookworm-slim
+FROM node:24.22.1-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --chown=node:node . .

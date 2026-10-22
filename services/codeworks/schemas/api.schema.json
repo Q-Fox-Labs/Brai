@@ -137,7 +137,7 @@
           "pattern": "^[^\\u0000-\\u001f]+$"
         },
         "node_version": {
-          "const": "24.21.0"
+          "const": "24.22.1"
         },
         "platform": {
           "enum": [

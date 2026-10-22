@@ -1,6 +1,6 @@
 # ABOUTME: Собирает и запускает веб-приложение на закреплённой Node.js LTS.
 # ABOUTME: Контейнер использует production output Next.js standalone.
-FROM node:24.21.0-bookworm-slim AS build
+FROM node:24.22.1-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
@@ -24,7 +24,7 @@ COPY services/alerts/contracts services/alerts/contracts
 COPY services/alerts/schemas services/alerts/schemas
 RUN npm run build --workspace=@brai/web
 
-FROM node:24.21.0-bookworm-slim AS runtime
+FROM node:24.22.1-bookworm-slim AS runtime
 ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
 WORKDIR /app

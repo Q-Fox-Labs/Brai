@@ -157,7 +157,7 @@
       "services/hermes/memos/embedding/adapter.mjs"
     ],
     "systemRequirements": [
-      "Node.js 24.21.0",
+      "Node.js 24.22.1",
       "Python 3.12 with pinned memos/bridge/requirements.txt in the existing Hermes bridge-venv; no Python dependencies are bundled",
       "Operator-owned bridge_runtime.py single-owner launcher and codex_cli_owner.py from the existing Hermes runtime; installed absolute Codex executable and protected worker/configuration",
       "Existing external Hermes gateway, MemOS, browser, AWG2 and intake runtimes are installed and operated through Admin; not bundled",

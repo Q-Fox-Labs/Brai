@@ -161,7 +161,7 @@ export function fingerprints(root, component, {platform=`${process.platform}/${p
   const buildLock=c.commands.build?lockInputs(root,c.npm.workspaces,{...target,development:true}):runtimeLock;
   const checkLock=lockInputs(root,c.npm.workspaces,{...target,development:true});
   const toolchainPath=join(root,'services/codeworks/ci/toolchain.json');
-  const toolchain=existsSync(toolchainPath)?json(toolchainPath):{node:process.versions.node,npm:'11.19.0',nodeBase:'node:24.21.0-bookworm-slim'};
+  const toolchain=existsSync(toolchainPath)?json(toolchainPath):{node:process.versions.node,npm:'11.19.1',nodeBase:'node:24.22.1-bookworm-slim'};
   const compatibility={platform,libc:target.platform==='linux'?(process.report.getReport().header.glibcVersionRuntime?'glibc':'musl'):null,node:toolchain.node,npm:toolchain.npm,...(c.id==='web'?{variant,standalone:false}:{})};
   const buildEngine=digestFiles(dirname(fileURLToPath(import.meta.url)),['graph.mjs','cli.mjs','lock-inputs.mjs']);
   const build=digestFiles(root,[...buildFiles,...deps],{formatVersion:c.formatVersion,build:c.commands.build,lock:buildLock,compatibility,buildEngine,outputs:c.delivery.files.filter(path=>/\/(?:dist|\.next)(?:\/|$)/.test(path))});

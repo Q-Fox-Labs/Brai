@@ -33,7 +33,7 @@ export async function setup({git=createGit(),command=runCommand}={}) {
       const root=await realpath(await mkdtemp(path.join(temporaryRoot,'codeworks-test-')));temporary.push(root);
       const repo=path.join(root,'repo'),areas=path.join(root,'areas');
       await mkdir(repo);await mkdir(areas);await mkdir(path.join(repo,'node_modules'));
-      const manifest={name:'fixture',version:'1.0.0',private:true,workspaces:['packages/*'],engines:{node:'24.21.0',npm:'11.19.0'}};
+      const manifest={name:'fixture',version:'1.0.0',private:true,workspaces:['packages/*'],engines:{node:'24.22.1',npm:'11.19.1'}};
       if(sharedFixture)manifest.dependencies={'shared-readonly':'1.0.0'};
       const leaf={name:'@fixture/leaf',version:'1.0.0'};
       await mkdir(path.join(repo,'packages/leaf'),{recursive:true});
@@ -63,7 +63,7 @@ export async function setup({git=createGit(),command=runCommand}={}) {
       const sourceCommon=(await command('git',['rev-parse','--path-format=absolute','--git-common-dir'])).stdout;
       const preparer=path.join(common,'hooks/prepare-brai-worktree');
       await copyFile(process.env.CODEWORKS_TEST_PREPARER??path.join(sourceCommon,'hooks/prepare-brai-worktree'),preparer);await chmod(preparer,0o755);
-      const project={id:'test_'+randomUUID(),repo_path:repo,common_dir:common,workspace_root:areas,allowed_paths:['.'],excluded_paths:['.git','node_modules','.env'],executors:['codex','hermes'],git_flow:{feature_base:'refs/remotes/origin/dev',hotfix_base:'refs/remotes/origin/main',feature_prefix:'feature/',hotfix_prefix:'hotfix/'},preparer_path:preparer,node_version:'24.21.0',platform:process.platform+'-'+process.arch};
+      const project={id:'test_'+randomUUID(),repo_path:repo,common_dir:common,workspace_root:areas,allowed_paths:['.'],excluded_paths:['.git','node_modules','.env'],executors:['codex','hermes'],git_flow:{feature_base:'refs/remotes/origin/dev',hotfix_base:'refs/remotes/origin/main',feature_prefix:'feature/',hotfix_prefix:'hotfix/'},preparer_path:preparer,node_version:'24.22.1',platform:process.platform+'-'+process.arch};
       if(github){
         project.github=github;
         const remote=path.join(root,'origin.git');
