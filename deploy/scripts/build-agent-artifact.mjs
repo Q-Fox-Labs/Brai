@@ -11,7 +11,7 @@ const preparedDependencies = args.includes('--prepared-dependencies');
 const options = Object.fromEntries(args.filter((value) => value !== '--prepared-dependencies').reduce((pairs, value, index, all) => index % 2 ? pairs : [...pairs, [value.slice(2), all[index + 1]]], []));
 const { source, revision, output } = options;
 if (Object.keys(options).some(key => !['source', 'revision', 'output'].includes(key)) || !source || !output || !isAbsolute(source) || !isAbsolute(output) || !/^[0-9a-f]{40}$/.test(revision ?? '')) throw Error('EXPLICIT_BUILD_INPUTS_REQUIRED');
-if (process.version !== 'v24.21.0') throw Error('NODE_VERSION_MISMATCH');
+if (process.version !== 'v24.22.1') throw Error('NODE_VERSION_MISMATCH');
 /** Запускает один инструмент с ограниченными временем и выводом. */
 function run(file, args, cwd = source) {
   return execFileSync(file, args, { cwd, encoding: 'utf8', timeout: 600000, maxBuffer: 16 * 1024 * 1024 }).trim();
@@ -56,12 +56,12 @@ async function writeArtifactManifest(output, fields) {
   const payloadFiles = await inventoryFiles(output);
   await writeFile(join(output, 'artifact-manifest.json'), `${JSON.stringify({ ...fields, runtimePackages: fields.runtimePackages, payloadFiles, payloadSha256: await payloadDigest(payloadFiles) }, null, 2)}\n`, { flag: 'wx' });
 }
-if (run('npm', ['--version']) !== '11.19.0') throw Error('NPM_VERSION_MISMATCH');
+if (run('npm', ['--version']) !== '11.19.1') throw Error('NPM_VERSION_MISMATCH');
 if (preparedDependencies) {
   run(process.execPath, [join(import.meta.dirname, 'materialize-runtime.mjs'), '--source', source, '--workspace', '@brai/agent', '--revision', revision, '--output', output]);
   const agent = JSON.parse(await readFile(join(source, 'services/agent/package.json'), 'utf8'));
   const runtime = JSON.parse(await readFile(join(output, 'runtime-manifest.json'), 'utf8'));
-  await writeArtifactManifest(output, { format: 'brai-host-agent-artifact-v2', sourceRevision: revision, nodeVersion: '24.21.0', npmVersion: '11.19.0', agentPackage: { name: agent.name, version: agent.version }, productionDependencies: agent.dependencies, entrypoints: ['services/agent/dist/main.js', 'services/agent/dist/health.js'], runtimePackages: runtime.runtimePackages });
+  await writeArtifactManifest(output, { format: 'brai-host-agent-artifact-v2', sourceRevision: revision, nodeVersion: '24.22.1', npmVersion: '11.19.1', agentPackage: { name: agent.name, version: agent.version }, productionDependencies: agent.dependencies, entrypoints: ['services/agent/dist/main.js', 'services/agent/dist/health.js'], runtimePackages: runtime.runtimePackages });
   console.log(JSON.stringify({ artifact: output, revision, preparedDependencies: true }));
   process.exit(0);
 }
@@ -81,6 +81,6 @@ try {
   for (const name of ['contracts', 'schemas']) await cp(join(stage, 'services/artifacts', name), join(output, 'services/artifacts', name), { recursive: true, dereference: true });
   await cp(join(stage, 'node_modules'), join(output, 'node_modules'), { recursive: true, dereference: true });
   const runtimePackages = await installedPackageClosure(stage);
-  await writeArtifactManifest(output, { format: 'brai-host-agent-artifact-v2', sourceRevision: revision, nodeVersion: '24.21.0', npmVersion: '11.19.0', agentPackage: { name: agent.name, version: agent.version }, productionDependencies: agent.dependencies, entrypoints: ['services/agent/dist/main.js', 'services/agent/dist/health.js'], runtimePackages });
+  await writeArtifactManifest(output, { format: 'brai-host-agent-artifact-v2', sourceRevision: revision, nodeVersion: '24.22.1', npmVersion: '11.19.1', agentPackage: { name: agent.name, version: agent.version }, productionDependencies: agent.dependencies, entrypoints: ['services/agent/dist/main.js', 'services/agent/dist/health.js'], runtimePackages });
   console.log(JSON.stringify({ artifact: output, revision }));
 } finally { await rm(stage, { recursive: true, force: true }); }

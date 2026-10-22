@@ -1,6 +1,6 @@
 # Ограниченный внутренний Chat Completions
 
-Это собственный вход providers для встроенного `fetch` Node.js 24.21.0
+Это собственный вход providers для встроенного `fetch` Node.js 24.22.1
 (Undici 7.29.1). Он проверен на JSON, SSE и function tools. Он использует тот же
 `createOperations` и PostgreSQL, что и NATS. Прямого proxy к LiteLLM нет.
 Инструменты выполняет caller.

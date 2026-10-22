@@ -517,7 +517,7 @@ const completed = await client.chat(input satisfies ChatInput, event => consume(
 приходят только через защищённый env_file. Существующие потребители не переключены.
 
 Приёмка task6: actual изолированные NATS/PG и controlled HTTP SSE upstream;
-встроенный fetch Node24.21.0/Undici7.29.1. Оба входа дали одинаковые text/tool IDs,
+встроенный fetch Node24.22.1/Undici7.29.1. Оба входа дали одинаковые text/tool IDs,
 caller вернул оба tool result и получил одинаковый следующий ход с сохранённым
 opaque provider state. Проверены auth/owner spoof, malformed JSON/SSE, unknown
 fields, mismatched tool results, gap, lost reply, NATS/HTTP disconnect, durable

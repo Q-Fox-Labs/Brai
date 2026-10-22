@@ -18,7 +18,7 @@ function fixture(t) {
   };
   const component = {
     id: 'fixture', type: 'program', directory: 'services/example',
-    delivery: { kind: 'ready-files', files: ['services/example/main.mjs'], entrypoints: ['services/example/main.mjs'], smokeImports: ['services/example/main.mjs'], systemRequirements: ['Node.js 24.21.0'] },
+    delivery: { kind: 'ready-files', files: ['services/example/main.mjs'], entrypoints: ['services/example/main.mjs'], smokeImports: ['services/example/main.mjs'], systemRequirements: ['Node.js 24.22.1'] },
   };
   write('services/example/main.mjs', 'export const value = 42;\n');
   return { root, write, component, build: () => packageComponent(root, component, 'tmp/output') };
@@ -38,7 +38,7 @@ test('deterministic payloads preserve layout and mode; existing payload is verif
   assert.equal(first.path, join(root, 'tmp/output', `fixture-${first.payloadHash}`));
   const diskManifest = JSON.parse(readFileSync(join(first.path, 'artifact-manifest.json'), 'utf8'));
   assert.equal(diskManifest.path, undefined);
-  assert.equal(diskManifest.systemRequirements[0], 'Node.js 24.21.0');
+  assert.equal(diskManifest.systemRequirements[0], 'Node.js 24.22.1');
   chmodSync(join(root, 'services/example/main.mjs'), 0o755);
   const executable = await build();
   assert.notEqual(executable.payloadHash, first.payloadHash);
