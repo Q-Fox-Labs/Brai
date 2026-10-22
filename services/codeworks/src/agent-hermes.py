@@ -13,47 +13,12 @@ import select
 import time
 import threading
 import inspect
-import stat
 from types import ModuleType
 from pathlib import Path
 import sys
 from functools import wraps
 
 from importlib.util import spec_from_file_location, module_from_spec
-
-
-def read_profile_document(profile, path):
-    """Read bounded instruction text only; never execute skills or follow escaped links."""
-    profile = Path(profile).resolve(strict=True)
-    candidate = Path(path)
-    if not candidate.is_absolute() or '..' in candidate.parts:
-        raise ValueError('PROFILE_DOCUMENT_DENIED')
-    candidate = candidate.resolve(strict=True)
-    relative = candidate.relative_to(profile)
-    parts = relative.parts
-    allowed = (len(parts) == 1 or parts[:1] == ('skills',)
-               or parts[:2] in (('usercustom', 'hermescustom'), ('usercustom', 'userdata')))
-    if not allowed or candidate.suffix.lower() not in {'.md', '.txt'}:
-        raise ValueError('PROFILE_DOCUMENT_DENIED')
-    # Walk directory FDs so a path replacement cannot redirect the final read to auth/state.
-    fd = os.open(profile, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        for part in parts[:-1]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = child
-        target = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-        with os.fdopen(target, 'rb') as source:
-            info = os.fstat(source.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_size > 262144:
-                raise ValueError('PROFILE_DOCUMENT_LIMIT')
-            content = source.read(262145)
-            if len(content) > 262144:
-                raise ValueError('PROFILE_DOCUMENT_LIMIT')
-    finally:
-        os.close(fd)
-    return {'path': str(candidate), 'content': content.decode('utf-8'),
-            'sha256': hashlib.sha256(content).hexdigest()}
 
 
 def install(bootstrap_path=Path('/run/codeworks-key'), channel_fd=None):
@@ -154,45 +119,17 @@ def install(bootstrap_path=Path('/run/codeworks-key'), channel_fd=None):
     from tools.registry import registry
     from toolsets import create_custom_toolset
 
-    document_profile = os.environ.get('HERMES_HOME') if os.environ.get('CODEWORKS_HERMES_PROFILE_READS') == '1' else None
-
     def handle(args, session_id='', **kwargs):
         """Use only dispatcher identity; model payload cannot choose another session."""
         if not session_id:
             return json.dumps({'error': 'NATIVE_SESSION_REQUIRED'})
-        if document_profile and args.get('action') == 'read' and str(args.get('path', '')).startswith(document_profile + '/'):
-            try:
-                return json.dumps(read_profile_document(document_profile, args['path']), ensure_ascii=False)
-            except (OSError, ValueError, UnicodeError):
-                return json.dumps({'error': 'PROFILE_DOCUMENT_DENIED'})
         payload = json.dumps({'native_session_id': session_id, 'request': args}, ensure_ascii=False, separators=(',', ':'))
         envelope = {'payload': payload, 'signature': hmac.new(key, payload.encode(), hashlib.sha256).hexdigest()}
         return json.dumps(proxy.call(envelope), ensure_ascii=False)
 
     schema = {'name': 'codeworks', 'description': proxy.TOOL['description'], 'parameters': proxy.TOOL['inputSchema']}
-    if document_profile:
-        schema['description'] += ' In this gateway action=read also reads absolute Markdown/text instruction paths in HERMES_HOME (top-level policies, usercustom/hermescustom, usercustom/userdata, skills). This grants no writes or shell access.'
     registry.register(name='codeworks', toolset='codeworks', schema=schema, handler=handle)
     create_custom_toolset('codeworks', description='Managed project file access', tools=['codeworks'])
-    document_schemas = []
-    if document_profile:
-        view_schema = {'name': 'skill_view', 'description': 'Read an installed skill or its Markdown/text references without executing preprocessing or installing dependencies.', 'parameters': {'type': 'object', 'properties': {'name': {'type': 'string'}, 'file_path': {'type': 'string'}}, 'required': ['name'], 'additionalProperties': False}}
-
-        def view_skill(args, **kwargs):
-            try:
-                name = Path(args.get('name', ''))
-                file = Path(args.get('file_path') or 'SKILL.md')
-                if not str(name) or name.is_absolute() or file.is_absolute() or '..' in (*name.parts, *file.parts):
-                    raise ValueError('PROFILE_DOCUMENT_DENIED')
-                skill_root = (Path(document_profile) / 'skills' / name).resolve(strict=True)
-                document = read_profile_document(document_profile, skill_root / file)
-                Path(document['path']).relative_to(skill_root)
-                return json.dumps({'success': True, 'name': str(name), **document}, ensure_ascii=False)
-            except (OSError, ValueError, UnicodeError):
-                return json.dumps({'success': False, 'error': 'PROFILE_DOCUMENT_DENIED'})
-
-        registry.register(name='skill_view', toolset='codeworks', schema=view_schema, handler=view_skill)
-        document_schemas.append(view_schema)
     owner_schemas = []
     for definition in bootstrap.pop('tools', []):
         name = definition['name']
@@ -223,7 +160,7 @@ def install(bootstrap_path=Path('/run/codeworks-key'), channel_fd=None):
 
     def dispatch(name, args, **kwargs):
         """Fail closed before any native in-process code tool can access signer memory."""
-        if name not in {'codeworks', *owner_names, *(value['name'] for value in document_schemas)} and not (name in plugin_names and plugin_schema(name)):
+        if name not in {'codeworks', *owner_names} and not (name in plugin_names and plugin_schema(name)):
             return json.dumps({'error': 'NATIVE_TOOL_DISABLED_USE_CODEWORKS'})
         return native_dispatch(name, args, **kwargs)
 
@@ -236,7 +173,7 @@ def install(bootstrap_path=Path('/run/codeworks-key'), channel_fd=None):
     @wraps(native_init)
     def managed_init(agent, *args, **kwargs):
         native_init(agent, *args, **kwargs)
-        schemas = [schema, *document_schemas, *owner_schemas, *(value for name in sorted(plugin_names) if (value := plugin_schema(name)))]
+        schemas = [schema, *owner_schemas, *(value for name in sorted(plugin_names) if (value := plugin_schema(name)))]
         agent.tools = [{'type': 'function', 'function': value} for value in schemas]
         agent.valid_tool_names = {value['name'] for value in schemas}
 
