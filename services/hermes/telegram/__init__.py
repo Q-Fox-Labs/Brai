@@ -468,6 +468,12 @@ class TelegramPlugin:
         self.descriptor = re.compile(
             r"!?\[(?:\\[^\r\n]|[^\]\\\r\n])*\]\(<" + re.escape(config.result_root.rstrip("/")) + r"/(?P<id>" + UUID
             + r")/(?P<name>[^<>/\r\n]+)>\)")
+        self.output_files = re.compile(
+            r"(?P<code>```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z)|`[^`\r\n]+`)|"
+            + self.descriptor.pattern
+            + r'|(?m:^[ \t]*MEDIA:(?:"(?P<quoted>[^"\r\n]+)"|(?P<bare>/[^\r\n]+?))[ \t]*$)')
+        self.result_path = re.compile(re.escape(config.result_root.rstrip("/"))
+                                      + r"/(?P<id>" + UUID + r")/(?P<name>[^/\r\n]+)")
 
     def factory(self, app, adapter):
         """Поставить owner/route guard до всех native handlers; сохранить scoped callback."""
@@ -832,32 +838,58 @@ class TelegramPlugin:
                                "error": "Картинка создана, но публикация Brai не подтверждена. Не запускайте генерацию повторно; проверьте Artifacts."},
                               ensure_ascii=False)
 
-    def outgoing(self, response_text, platform=None, **kwargs):
-        """Заменять только точные publisher descriptors native MEDIA; не скачивать URL."""
+    def outgoing(self, response_text, platform=None, session_id="", turn_id="", **kwargs):
+        """Передавать явные файлы через publisher; неизменённый ответ оставить потоку."""
         if _platform(platform) != "telegram":
             return None
-        deadline, seen, count = time.monotonic() + OUTPUT_TIMEOUT, set(), 0
+        deadline, seen, paths, count = time.monotonic() + OUTPUT_TIMEOUT, set(), set(), 0
 
         def replace(match):
             nonlocal count
-            artifact_id = match["id"]
-            if artifact_id in seen:
-                return ""
-            seen.add(artifact_id)
-            count += 1
+            if match["code"] is not None:
+                return match.group()
             try:
+                reference = match
+                raw = match["quoted"] or match["bare"]
+                if raw:
+                    if raw in paths:
+                        return ""
+                    paths.add(raw)
+                    reference = self.result_path.fullmatch(raw)
+                artifact_id = reference["id"] if reference else None
+                if artifact_id in seen:
+                    return ""
+                count += 1
                 if count > MAX_ATTACHMENTS:
                     raise BridgeError("ATTACHMENT_LIMIT")
-                result = self.bridge.call("files.fetch", {"artifactId": artifact_id},
+                if reference:
+                    result = self.bridge.call("files.fetch", {"artifactId": artifact_id},
                                           timeout=min(RPC_TIMEOUT, deadline - time.monotonic()))
-                path = self._published_path(result, artifact_id, match["name"])
+                else:
+                    if not Path(raw).is_absolute() or not session_id or not turn_id:
+                        raise BridgeError("FILE_CONTEXT_INVALID")
+                    identity = json.dumps([self.config.owner, self.config.chat, session_id, turn_id, raw],
+                                          ensure_ascii=False, separators=(",", ":"))
+                    result = self.bridge.call("files.publish", {
+                        "path": raw, "requestId": "tg-output:" + sha256(identity.encode()).hexdigest()},
+                        timeout=min(RPC_TIMEOUT, deadline - time.monotonic()))
+                    reference = self.descriptor.fullmatch(result.get("markdown", ""))
+                    if not reference:
+                        raise BridgeError("RPC_MALFORMED")
+                    artifact_id = reference["id"]
+                path = self._published_path(result, artifact_id, reference["name"])
+                if artifact_id in seen:
+                    return ""
+                seen.add(artifact_id)
                 # AIDEV-NOTE: Штатный parser принимает quoted paths с пробелами и Unicode.
                 voice = "[[audio_as_voice]]\n" if Path(path).suffix.lower() in {".ogg", ".opus"} else ""
                 return f'\n{voice}MEDIA:"{path}"\n'
             except Exception:
                 return "[Файл не отправлен: Brai не подтвердил доступ к артефакту.]"
 
-        return self.descriptor.sub(replace, response_text)
+        rewritten = self.output_files.sub(replace, response_text)
+        # Native Hermes treats any string as a transformed final, even if equal.
+        return rewritten if rewritten != response_text else None
 
     def _tool_context(self, kwargs):
         """Доверенный маршрут текущего native turn; аргументы модели его не задают."""
