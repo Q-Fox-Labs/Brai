@@ -159,6 +159,17 @@ export async function connectUpstream(socket,send) {
   return {receive(frame){if(!forwardNativeFrame(ws,frame))throw new Error('UPSTREAM_CLOSED');},close(){ws.close();}};
 }
 
+/** Проверяет существующий endpoint; лишь отсутствие listener разрешает один запуск. */
+export async function nativeUpstreamExists(file,{connect=createConnection,timeout=1000}={}) {
+  return new Promise((resolve,reject)=>{
+    const connection=connect(file);let settled=false;
+    const finish=(error,present)=>{if(settled)return;settled=true;connection.destroy();error?reject(error):resolve(present);};
+    connection.setTimeout(timeout,()=>finish(new Error('NATIVE_UPSTREAM_PROBE_TIMEOUT')));
+    connection.once('connect',()=>finish(undefined,true));
+    connection.once('error',error=>finish(['ENOENT','ECONNREFUSED'].includes(error.code)?undefined:error,false));
+  });
+}
+
 /** Waits only for socket readiness before dispatch; it never retries an RPC. */
 async function waitNativeUpstream(file,child) {
   const deadline=Date.now()+3000;
@@ -190,7 +201,10 @@ export async function universalMain(config,{openBrai,listenFd}={}) {
   if(!path.isAbsolute(config.listen??'')||!path.isAbsolute(config.upstream??'')||config.listen===config.upstream)throw new Error('NATIVE_ROUTING_ENDPOINT_INVALID');
   // The systemd socket owns the ordinary endpoint through proxy restarts.
   const activated=listenFd??(process.env.LISTEN_PID===String(process.pid)&&Number(process.env.LISTEN_FDS)===1?3:undefined);
-  const upstreamChild=config.upstreamCommand?spawn(config.upstreamCommand[0],config.upstreamCommand.slice(1),{env:{...process.env,...config.upstreamEnv},stdio:['ignore','ignore','inherit']}):undefined;
+  if(config.upstreamReuseExisting!==undefined&&typeof config.upstreamReuseExisting!=='boolean')throw new Error('NATIVE_UPSTREAM_REUSE_INVALID');
+  if(config.upstreamReuseExisting&&!config.upstreamCommand)throw new Error('NATIVE_UPSTREAM_COMMAND_REQUIRED');
+  const reused=config.upstreamReuseExisting&&await nativeUpstreamExists(config.upstream);
+  const upstreamChild=config.upstreamCommand&&!reused?spawn(config.upstreamCommand[0],config.upstreamCommand.slice(1),{env:{...process.env,...config.upstreamEnv},stdio:['ignore','ignore','inherit']}):undefined;
   upstreamChild?.once('error',error=>{console.error('NATIVE_UPSTREAM_START_FAILED: '+error.code);process.exitCode=1;});
   if(upstreamChild) {
     try{await waitNativeUpstream(config.upstream,upstreamChild);}
@@ -245,15 +259,41 @@ export async function universalMain(config,{openBrai,listenFd}={}) {
   if(activated===undefined)await reclaimSocket(config.listen);
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(activated===undefined?config.listen:{fd:activated},resolve);});
   if(activated===undefined)await chmod(config.listen,0o600);
-  let stopping=false;
+  let stopping=false,upstreamMonitor;
   async function stop(){
     if(stopping)return;stopping=true;
     for(const client of wss.clients)client.terminate();
+    upstreamMonitor?.terminate();
     wss.close();server.close();await closeInspect?.();
     await stopNativeUpstream(upstreamChild);
     if(activated===undefined)await unlink(config.listen).catch(()=>{});
   }
-  upstreamChild?.once('close',()=>{if(!stopping){console.error('NATIVE_UPSTREAM_CLOSED');void stop();process.exitCode=1;}});
+  const upstreamClosed=()=>{if(!stopping){console.error('NATIVE_UPSTREAM_CLOSED');void stop();process.exitCode=1;}};
+  upstreamChild?.once('close',upstreamClosed);
+  if(reused) {
+    // AIDEV-NOTE: Отдельный WS следит только за daemon; обычные клиенты не владеют lifecycle.
+    // При его потере gateway завершает работу с ошибкой, штатный Restart=on-failure повторяет admission.
+    upstreamMonitor=new WebSocket('ws+unix://'+config.upstream+':/',{maxPayload:OUTPUT_BYTES,perMessageDeflate:false,handshakeTimeout:1000});
+    try{
+      await new Promise((resolve,reject)=>{upstreamMonitor.once('open',resolve);upstreamMonitor.once('error',reject);});
+      await new Promise((resolve,reject)=>{
+        const finish=error=>{clearTimeout(timer);upstreamMonitor.off('message',message);upstreamMonitor.off('close',closed);error?reject(error):resolve();};
+        const closed=()=>finish(new Error('NATIVE_UPSTREAM_MONITOR_CLOSED'));
+        const message=data=>{
+          let frame;try{frame=decodeNativeFrame(data.toString());}catch(error){finish(error);return;}
+          if(frame.id!==1)return;
+          if(frame.error||!frame.result){finish(new Error('NATIVE_UPSTREAM_MONITOR_REJECTED'));return;}
+          upstreamMonitor.send(JSON.stringify({method:'initialized',params:{}}));finish();
+        };
+        const timer=setTimeout(()=>finish(new Error('NATIVE_UPSTREAM_MONITOR_TIMEOUT')),1000);
+        upstreamMonitor.on('message',message);upstreamMonitor.once('close',closed);
+        upstreamMonitor.send(JSON.stringify({id:1,method:'initialize',params:{clientInfo:{name:'codeworks-upstream-monitor',version:'1.0.0'}}}));
+      });
+    }
+    catch(error){await stop();throw error;}
+    upstreamMonitor.on('error',upstreamClosed);upstreamMonitor.once('close',upstreamClosed);
+    if(upstreamMonitor.readyState!==WebSocket.OPEN){await stop();throw new Error('NATIVE_UPSTREAM_MONITOR_CLOSED');}
+  }
   process.once('SIGTERM',()=>void stop());process.once('SIGINT',()=>void stop());
   return {server,wss,stop};
 }
