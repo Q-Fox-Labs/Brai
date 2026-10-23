@@ -65,7 +65,7 @@ test('transport identity authorizes project access and registration',async()=>{
 });
 test('prepare keeps one task workspace and operation across retries and executor changes',async()=>{
   const f=fixture(),first=await f.h.call('prepare',prepare,'codex');
-  assert.match(first.path,/^\/areas\//);assert.match(first.branch,/^feature\/codeworks-/);
+  assert.match(first.path,/^\/areas\//);assert.equal(first.branch,'feature/task');
   assert.deepEqual(await f.h.call('prepare',{workspace_key:'task',request_key:'prepare-task',project_id:'p'},'codex'),first);
   assert.deepEqual(await f.h.call('prepare',{...prepare,request_key:'resume-task'},'hermes'),first);
   assert.equal(f.operations.size,1);assert.equal(f.workspaces.size,1);
@@ -90,6 +90,7 @@ test('status finds task, workspace, operation or list without exposing historica
   assert.deepEqual(await f.h.call('status',{project_id:'p',operation_id:accepted.operation_id},'codex'),byKey);
   assert.deepEqual(await f.h.call('status',{project_id:'p'},'codex'),{workspaces:[byKey.workspace]});
   w.removed_at='2026-10-23T01:00:00.000Z';assert.equal((await f.h.call('status',{project_id:'p',workspace_key:'task'},'codex')).git,null);
+  await assert.rejects(f.h.call('prepare',prepare,'codex'),{code:'CONFLICT'});
   await assert.rejects(f.h.call('prepare',{...prepare,request_key:'finished-task'},'codex'),{code:'CONFLICT'});
 });
 test('status preserves durable failure when Git inspection fails and masks unexpected infrastructure details',async()=>{
@@ -182,7 +183,7 @@ test('hotfix preparation requires exact installed production base',async()=>{
   f.evidence={commit_sha:'b'.repeat(40)};
   await assert.rejects(f.h.call('prepare',args,'codex'),{code:'PRODUCTION_BASE_MISMATCH'});
   f.evidence={commit_sha:sha};
-  const accepted=await f.h.call('prepare',args,'codex');assert.match(accepted.branch,/^hotfix\/codeworks-/);
+  const accepted=await f.h.call('prepare',args,'codex');assert.equal(accepted.branch,'hotfix/'+args.workspace_key);
   f.workspaces.get(accepted.workspace_id).preparation_state='ready';
   await f.h.call('release',{...scoped,workspace_id:accepted.workspace_id},'hermes');assert.equal(f.releases[0].target,'prod');
 });
@@ -215,4 +216,21 @@ test('durable release response preserves exact trusted CI identity and rejects a
   validate('gitReleaseResult',{release_id:id,state:'awaiting_deployment',details:{primary:leg}});
   assert.throws(()=>validate('releaseLeg',{...leg,head_ci:{...proof,agent_verified:true}}));
   assert.throws(()=>validate('releaseLeg',{...leg,head_ci:{...proof,composition_digest:'mutable-tag'}}));
+});
+
+test('new task names become readable branches and identifiers cannot name new tasks',async()=>{
+  const f=fixture();
+  for(const workspace_key of ['7701f83f-2488-4334-b3ec-306156eddff3','task-7701f83f-2488-4334-b3ec-306156eddff3','a'.repeat(40),'a'.repeat(65),'Uppercase','task/path','task--name']){
+    await assert.rejects(f.h.call('prepare',{...prepare,workspace_key,request_key:'bad-'+workspace_key},'codex'),{code:'INVALID_ARGUMENT'});
+  }
+  assert.equal(f.workspaces.size,0);
+  const area=await f.h.call('prepare',{...prepare,workspace_key:'codeworks-auto-cleanup'},'codex');
+  assert.equal(area.branch,'feature/codeworks-auto-cleanup');
+});
+test('existing task with a legacy identifier resumes its original branch',async()=>{
+  const f=fixture(),area=await f.h.call('prepare',prepare,'codex'),w=f.workspaces.get(area.workspace_id);
+  w.workspace_key=w.id;w.branch='feature/codeworks-'+w.id;
+  const resumed=await f.h.call('prepare',{...prepare,workspace_key:w.id,request_key:'resume-legacy'},'codex');
+  assert.equal(resumed.branch,w.branch);assert.equal(resumed.workspace_id,w.id);
+  assert.equal(f.workspaces.size,1);assert.equal(f.operations.size,1);
 });

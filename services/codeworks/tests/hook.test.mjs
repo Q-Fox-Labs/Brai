@@ -119,3 +119,11 @@ test('new file through symlink resolves to protected main', async () => {
     assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
   } finally { await rm(directory, {recursive: true, force: true}); }
 });
+
+test('invalid new task key asks for a readable name without creating a second area',async()=>{
+  const f=fixture({connect:async()=>({call:async()=>{throw Object.assign(new Error('invalid key'),{code:'INVALID_ARGUMENT'});},close:async()=>{}})});
+  const result=await runHook(bash('touch src/a'),f.options);
+  assert.equal(result.hookSpecificOutput.permissionDecision,'deny');
+  assert.match(result.hookSpecificOutput.additionalContext,/осмысленным workspace_key/);
+  assert.match(result.hookSpecificOutput.additionalContext,/status/);
+});

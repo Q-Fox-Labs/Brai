@@ -149,7 +149,8 @@ export async function runHook(event, {env = process.env, config, connect = conne
     client = await connect(await loadClientConfig(env));
     const result = await client.call('prepare', args);
     return denied(`Область Codeworks: ${JSON.stringify(result)}. Дождитесь ready через status с project_id=${project.id}, workspace_id=${result.workspace_id}, operation_id=${result.operation_id}. Затем повторите исходную запись штатным инструментом по path области, с её рабочим каталогом. Ветка: ${result.branch}. Hook не переносит правки автоматически. workspace_key=${workspaceKey}; request_key=${requestKey}.`);
-  } catch {
+  } catch (error) {
+    if(error?.code==='INVALID_ARGUMENT')return denied('Для новой задачи вызовите prepare с коротким осмысленным workspace_key, например codeworks-auto-cleanup; ID чата не является названием задачи. Для продолжения найдите прежнюю область через status. Затем повторите запись в возвращённом дереве.');
     return denied(`Codeworks недоступен или prepare завершился ошибкой. Исходная запись остановлена; чтение и диагностика доступны. Проверьте status с project_id=${project.id}, workspace_key=${workspaceKey}; повтор prepare использует тот же запрос ${JSON.stringify(args)}. Ошибка ожидания не отменяет операцию.`);
   } finally {
     try { await client?.close(); } catch { /* Не скрываем решение hook при ошибке закрытия соединения. */ }
