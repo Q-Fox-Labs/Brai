@@ -1,6 +1,6 @@
 # ABOUTME: Запускает переносимый runtime-артефакт service_history на закреплённой Node.js LTS.
 # ABOUTME: Сборка образа только копирует готовые файлы и не устанавливает пакеты.
-FROM node:24.21.0-bookworm-slim
+FROM node:24.22.1-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --chown=1000:1000 . .

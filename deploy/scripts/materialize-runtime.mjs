@@ -10,7 +10,7 @@ const options = Object.fromEntries(process.argv.slice(2).reduce((pairs, value, i
 const { source, workspace, revision, output } = options;
 if (Object.keys(options).some((key) => !['source', 'workspace', 'revision', 'output'].includes(key)) || !source || !workspace || !output || !isAbsolute(source) || !isAbsolute(output) || !/^[0-9a-f]{40}$/.test(revision ?? '')) throw Error('EXPLICIT_BUILD_INPUTS_REQUIRED');
 if (!['@brai/artifacts', '@brai/agent', '@brai/web', '@brai/timer'].includes(workspace)) throw Error('UNSUPPORTED_RUNTIME_WORKSPACE');
-if (process.version !== 'v24.21.0') throw Error('NODE_VERSION_MISMATCH');
+if (process.version !== 'v24.22.1') throw Error('NODE_VERSION_MISMATCH');
 const run = (file, args) => execFileSync(file, args, { cwd: source, encoding: 'utf8', timeout: 30000 }).trim();
 const actualRevision = run('git', ['rev-parse', 'HEAD']);
 if (actualRevision !== revision) throw Error('SOURCE_REVISION_MISMATCH');
@@ -170,7 +170,7 @@ for (const file of payloadFiles) payloadHash.update(`${file.path}\0${file.sha256
 const manifest = {
   format: 'brai-prepared-runtime-v1',
   sourceRevision: revision,
-  nodeVersion: '24.21.0',
+  nodeVersion: '24.22.1',
   workspace: packageName,
   packageVersion: sourceManifest.version,
   productionDependencies: sourceManifest.dependencies ?? {},

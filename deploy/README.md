@@ -73,7 +73,7 @@ docker compose --env-file /path/to/release-test.compose.env -f deploy/compose.pr
 
 Agent работает вне контейнера, рядом с готовым Codex app server. Универсальный продукт не требует admin или конкретного домена/сервера.
 
-Для переносимого выпуска выполните `node deploy/scripts/build-agent-artifact.mjs --source /absolute/repository --revision <40-char-commit> --output /absolute/new-artifact`. Требуются закреплённые Node24.21.0/npm11.19.0. Builder использует только заданный Git commit и locked production dependencies. Артефакт содержит compiled agent, contracts, package и production node_modules; workspace исходники, тесты и admin не поставляются. Manifest v2 содержит точную sourceRevision и toolchain; npm lock остаётся владельцем dependency inventory.
+Для переносимого выпуска выполните `node deploy/scripts/build-agent-artifact.mjs --source /absolute/repository --revision <40-char-commit> --output /absolute/new-artifact`. Требуются закреплённые Node24.22.1/npm11.19.1. Builder использует только заданный Git commit и locked production dependencies. Артефакт содержит compiled agent, contracts, package и production node_modules; workspace исходники, тесты и admin не поставляются. Manifest v2 содержит точную sourceRevision и toolchain; npm lock остаётся владельцем dependency inventory.
 
 Запуск: `BRAI_AGENT_CONFIG=/absolute/config.json node /absolute/artifact/services/agent/dist/main.js`. Health запускается тем же способом с `dist/health.js`. SIGINT/SIGTERM освобождает собственные подключения. Сам Codex app server не запускается и не перезапускается. Его endpoint, NATS credentials, проекты и модели задаются внешней защищённой конфигурацией.
 

@@ -1,6 +1,6 @@
 # ABOUTME: Собирает официальный Better Auth и автономный NATS adapter.
 # ABOUTME: Runtime не содержит внутренних материалов admin и не слушает HTTP.
-FROM node:24.21.0-bookworm-slim AS build
+FROM node:24.22.1-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
@@ -14,7 +14,7 @@ COPY services/supabase-mcp/package.json services/supabase-mcp/package.json
 RUN npm ci
 COPY services/auth services/auth
 RUN npm run build --workspace=@brai/auth
-FROM node:24.21.0-bookworm-slim AS runtime
+FROM node:24.22.1-bookworm-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package.json package-lock.json ./

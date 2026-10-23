@@ -1,6 +1,6 @@
 # ABOUTME: Собирает и запускает PostgreSQL/NATS сервис artifacts.
 # ABOUTME: Runtime не содержит owner migration inputs и не выполняет DDL.
-FROM node:24.21.0-bookworm-slim AS build
+FROM node:24.22.1-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY apps/web/package.json apps/web/package.json
@@ -15,7 +15,7 @@ RUN npm ci
 COPY services/artifacts services/artifacts
 RUN npm run build --workspace=@brai/artifacts
 
-FROM node:24.21.0-bookworm-slim AS runtime
+FROM node:24.22.1-bookworm-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package.json package-lock.json ./

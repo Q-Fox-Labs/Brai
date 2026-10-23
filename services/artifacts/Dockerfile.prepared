@@ -1,6 +1,6 @@
 # ABOUTME: Упаковывает заранее материализованный artifacts runtime без установок.
 # ABOUTME: Контекст уже содержит только точные locked dependencies и runtime-файлы.
-FROM node:24.21.0-bookworm-slim AS runtime
+FROM node:24.22.1-bookworm-slim AS runtime
 ARG BRAI_SOURCE_REVISION
 LABEL org.opencontainers.image.revision=${BRAI_SOURCE_REVISION}
 ENV NODE_ENV=production
