@@ -2,6 +2,7 @@
 // ABOUTME: Передаёт явные JSON-запросы в API жизненного цикла Codeworks.
 // ABOUTME: Не исполняет команды агента; справка и схемы доступны без подключения к сервису.
 import {pathToFileURL} from 'node:url';
+import {realpathSync} from 'node:fs';
 import {methods, expanded, validate} from './contracts.mjs';
 import {Fault} from './errors.mjs';
 import {connectClient, loadClientConfig} from './client.mjs';
@@ -67,4 +68,4 @@ export async function runCLI({argv = process.argv.slice(2), stdin = process.stdi
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = await runCLI();
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) process.exitCode = await runCLI();

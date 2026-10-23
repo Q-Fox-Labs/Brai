@@ -156,7 +156,7 @@ export async function runHook(event, {env = process.env, config, connect = conne
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try { process.stdout.write(JSON.stringify(await runHook(await readJSON(process.stdin))) + '\n'); }
   catch { process.stderr.write('Codeworks hook: invalid hook input.\n'); process.exitCode = 1; }
 }
