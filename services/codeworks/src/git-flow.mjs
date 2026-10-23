@@ -3,7 +3,7 @@
 import { command } from './git.mjs';
 import { Fault } from './errors.mjs';
 const sha=value=>/^[0-9a-f]{40}$/.test(value);
-const branch=value=>/^(?:dev|main|(?:feature|hotfix|release)\/codeworks-[0-9a-f-]{36})$/.test(value);
+const branch=value=>/^(?:dev|main|(?:feature|hotfix)\/[a-z0-9]+(?:-[a-z0-9]+)*)$/.test(value)&&value.length<=72;
 /** Создаёт адаптер; localRemote разрешён только изолированным fixture, не runtime-конфигурацией. */
 export function createFlowGit({run=command,localRemote=false,requireLock=()=>{if(process.env.CODEWORKS_LOCK_HELD!=='1')throw new Fault('INTERNAL','Git mutation requires the project lock.');}}={}) {
   const git=(p,args,options)=>run('git',['-C',p.repo_path,...args],options);
@@ -35,7 +35,7 @@ export function createFlowGit({run=command,localRemote=false,requireLock=()=>{if
     /** Требует происхождение от frozen base; hotfix не может импортировать merge dev. */
     async validateHead(p,w,head) {
       if(!await ancestor(p,w.base_sha,head))throw new Fault('CONFLICT');
-      if(w.kind==='promotion'&&head!==w.base_sha)throw new Fault('CONFLICT','Promotion must preserve the verified dev commit.');
+      if(!['feature','hotfix'].includes(w.kind))throw new Fault('INVALID_ARGUMENT');
       if(w.kind==='hotfix'&&(await git(p,['rev-list','--min-parents=2',w.base_sha+'..'+head])).stdout)throw new Fault('CONFLICT','Hotfix must be linear from the installed production base.');
     },
     /** Сверяет commit ancestry со свежим dev до публикации main; copied/cherry-picked строки этим не определяются. */

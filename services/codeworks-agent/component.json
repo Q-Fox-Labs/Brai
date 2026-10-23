@@ -2,98 +2,38 @@
   "formatVersion": 1,
   "id": "codeworks-agent",
   "type": "library",
-  "status": "active",
-  "environments": [
-    "dev"
-  ],
-  "executableSources": [
-    "services/codeworks-agent/codex.mjs",
-    "services/codeworks-agent/hermes.mjs"
-  ],
+  "status": "retired",
+  "reason": "Управление агентами удалено. Hermes-исходники сохранены для отдельного разбора и не поставляются.",
+  "environments": [],
+  "executableSources": [],
   "inputs": {
     "build": [],
-    "runtime": [
-      "services/codeworks-agent/codex.mjs",
-      "services/codeworks-agent/hermes.mjs",
-      "services/codeworks-agent/package.json"
-    ],
-    "checks": [
-      "services/codeworks-agent/tests/admission.test.mjs",
-      "services/codeworks-agent/tests/codex-real.mjs",
-      "services/codeworks-agent/tests/native-client.mjs",
-      "services/codeworks-agent/tests/hermes-private.py"
-    ]
+    "runtime": [],
+    "checks": []
   },
-  "dependencies": [
-    {
-      "id": "codeworks",
-      "inputs": [
-        "services/codeworks/src/**",
-        "services/codeworks/package.json",
-        "services/codeworks/schemas/**",
-        "services/codeworks/migrations/**",
-        "services/codeworks/ci/registry.mjs",
-        "services/codeworks/ci/catalog.mjs",
-        "services/codeworks/components/descriptor-validation.mjs"
-      ],
-      "delivery": [
-        "services/codeworks/src",
-        "services/codeworks/package.json",
-        "services/codeworks/schemas",
-        "services/codeworks/migrations",
-        "services/codeworks/ci/registry.mjs",
-        "services/codeworks/ci/catalog.mjs",
-        "services/codeworks/components/descriptor-validation.mjs"
-      ]
-    },
-    {
-      "id": "hermes",
-      "inputs": [
-        "services/hermes/catalog.mjs",
-        "services/hermes/config.mjs",
-        "services/hermes/human-actions.mjs",
-        "services/hermes/planning-read.mjs",
-        "services/hermes/runtime.mjs",
-        "services/hermes/trusted.mjs",
-        "services/hermes/telegram/__init__.py",
-        "services/hermes/package.json"
-      ],
-      "delivery": []
-    }
-  ],
+  "dependencies": [],
   "commands": {
     "build": null,
-    "check": "node --test tests/admission.test.mjs"
+    "check": null
   },
   "delivery": {
     "kind": "ready-files",
-    "files": [
-      "services/codeworks-agent/codex.mjs",
-      "services/codeworks-agent/hermes.mjs",
-      "services/codeworks-agent/package.json"
-    ],
-    "entrypoints": [
-      "services/codeworks-agent/codex.mjs",
-      "services/codeworks-agent/hermes.mjs"
-    ],
+    "files": [],
+    "entrypoints": [],
     "smokeImports": [],
-    "systemRequirements": [
-      "Node.js 24.22.1"
-    ]
+    "systemRequirements": []
   },
   "deploy": {
     "units": [
       "brai-codeworks-codex.service",
       "brai-codeworks-codex-test.service",
-      "brai-hermes-dev.service"
+      "brai-hermes-dev.service",
+      "brai-codeworks-agents-test.service"
     ],
     "migrations": [],
     "health": null
   },
   "npm": {
-    "workspaces": [
-      "services/codeworks-agent",
-      "services/codeworks"
-    ]
+    "workspaces": []
   }
 }

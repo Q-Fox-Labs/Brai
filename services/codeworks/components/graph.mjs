@@ -55,7 +55,7 @@ export function discover(root, {base, allowMissingBuildOutputs = false} = {}) {
       const current=components.get(old.id);
       if (!current) throw Error(`COMPONENT_REMOVED_WITHOUT_RETIREMENT: ${old.id}`);
       if (old.status==='retired' && current.status!=='retired') throw Error(`RETIRED_ID_REUSED: ${old.id}`);
-      if (old.status==='active' && current.status==='active' && old.deploy.units.some(unit=>!current.deploy.units.includes(unit))) throw Error(`DEPLOY_UNIT_REMOVED_WITHOUT_RETIREMENT: ${old.id}`);
+      if (old.status==='active' && current.status==='active' && old.deploy.units.some(unit=>!current.deploy.units.includes(unit)&&![...components.values()].some(c=>c.status==='retired'&&c.deploy.units.includes(unit)))) throw Error(`DEPLOY_UNIT_REMOVED_WITHOUT_RETIREMENT: ${old.id}`);
     }
   }
   const active = [...components.values()].filter(c=>c.status==='active');
@@ -65,7 +65,7 @@ export function discover(root, {base, allowMissingBuildOutputs = false} = {}) {
       const manifest=json(join(root,file));
       if(manifest.bin || Object.keys(manifest.scripts??{}).some(name=>/^(start($|:)|mcp$|migrate$|health$|trusted$)/.test(name))) throw Error(`MISSING_COMPONENT: ${file}`);
     }
-    if (/^(apps|services)\/[^/]+\/package\.json$/.test(file) && !active.some(c=>c.directory===dirname(file))) throw Error(`MISSING_COMPONENT: ${file}`);
+    if (/^(apps|services)\/[^/]+\/package\.json$/.test(file) && ![...components.values()].some(c=>c.directory===dirname(file))) throw Error(`MISSING_COMPONENT: ${file}`);
     // New executable entrypoints must be explicitly admitted by their owner, including nested Python programs.
     const executable = (lstatSync(join(root,file)).mode & 0o111) && readFileSync(join(root,file),'utf8').startsWith('#!');
     if ((executable || /(^|\/)(main\.(ts|mjs|js|py)|runner\.py)$/.test(file)) && !file.includes('/tests/') && !file.includes('/test/')) {

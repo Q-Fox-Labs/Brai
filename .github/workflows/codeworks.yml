@@ -3,11 +3,11 @@
 name: Codeworks
 on:
   push:
-    branches: [dev, main, 'feature/**', 'hotfix/**', 'release/**']
+    branches: [dev, main, 'feature/**', 'hotfix/**', 'codex/**']
 
 concurrency:
   group: codeworks-${{ github.ref }}
-  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/feature/') }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/feature/') || startsWith(github.ref, 'refs/heads/codex/') }}
 
 permissions:
   contents: read

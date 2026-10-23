@@ -80,8 +80,11 @@ Actions proof — транспорт первичной проверки с rete
 однократно сохраняет успешно удостоверенный proof в append-only PG `verified_ci`,
 привязав его к project/run/attempt и fingerprint operator policy. Обычный agent API
 не имеет такого write-port. Сохранённые proofs и защищённые release records не
-теряют доказательство после expiry Actions artifact. До первичной проверки
-неизвестный expired proof даёт явный stop, без молчаливой пересборки.
+теряют доказательство после expiry Actions artifact. Если исходный Actions proof
+отсутствует или истёк и signed catalog не подтверждает объект, планировщик
+считает его промахом кеша и выполняет необходимые build/check/package.
+Чужой или дублированный proof остаётся ошибкой идентификации. Verifier выпуска
+по-прежнему требует proof текущего состава: промах кеша не разрешает установку.
 
 Owner экспортирует компактный Ed25519-signed catalog проверенных component
 key/digest/source/run/attempt/recipe в GHCR: immutable `catalog-<content hash>` и
@@ -95,8 +98,8 @@ verifier независимо проверяет этот catalog ключом �
 Private key `/etc/brai-dev/codeworks-ci/identity.pem` создаёт Ansible один раз;
 owner задаёт `CODEWORKS_REUSE_PRIVATE_KEY_FILE`. Public PEM закрепляют и в policy
 `reuse_public_key`, и в repo var `CODEWORKS_REUSE_PUBLIC_KEY`. Ключ не передаётся
-CI. Помимо UID/mode0600 существующая namespace mask `/etc/brai-dev` скрывает его
-от native агентов и broker read/write commands, FS tools ограничены project roots.
+CI. Доступ к файлу ограничен штатными правами владельца и mode0600;
+Codeworks не добавляет sandbox агента и не ограничивает его файловые инструменты.
 При reinstall сохраняются key и PG; backup/restore возвращает прежнюю пару и
 `verified_ci`, не генерирует замену. Потеря ключа требует явной ротации policy.
 [Операция Ansible и backup scope](/srv/projects/admin/docs/CODEWORKS_AGENTS.md).

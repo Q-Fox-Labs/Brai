@@ -115,6 +115,10 @@ test('HTTP MCP инициализирует сессию, перечисляет
 
     const sessionId = transport.sessionId;
     await transport.terminateSession();
+    const staleCall = await fetch(url, { method: 'POST', headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-session-id': sessionId },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'stale', method: 'tools/call', params: { name: 'elements_structure_create', arguments: canonicalBatch } }) });
+    assert.equal(staleCall.status, 404, 'unknown session is rejected before dispatch instead of creating an uninitialized session');
+    assert.equal(creates.length, 1, 'stale mutation was never dispatched');
     const closed = await fetch(url, { headers: { accept: 'text/event-stream', 'mcp-session-id': sessionId } });
     assert.equal(closed.status, 404, 'DELETE removes the initialized session');
     await closed.body?.cancel();

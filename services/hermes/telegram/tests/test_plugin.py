@@ -137,7 +137,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         """Поднять изолированные SQLite и native loop для каждого сценария."""
-        self.tmp = tempfile.TemporaryDirectory(dir=REPO / "tmp", prefix="telegram-test-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="telegram-test-")
         self.config = mod.Config("123", Path(self.tmp.name) / "brai-telegram", "/test/trusted.mjs",
                                  "/usr/local/bin/node", str(Path(self.tmp.name) / "results"))
         self.bridge = FakeBridge()
@@ -222,6 +222,65 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         """Создать native update с отдельными sender, chat и effective message."""
         return NS(effective_chat=NS(id=int(chat), type=chat_type), effective_user=NS(id=owner),
                   effective_message=NS(**message))
+
+    async def test_shared_group_participant_ingress_tools_and_cross_user_confirmation(self):
+        """Участник работает с общими данными; любой назначенный пользователь принимает кнопку один раз."""
+        self.config = replace(self.config, allowed_users=("456",))
+        await self.set_group_route()
+        self.native_context["HERMES_SESSION_USER_ID"] = "456"
+        self.entry.origin.user_id = "456"
+        await self.plugin.guard(self.update(owner=456), None)
+        event = self.event(media_urls=["/native-download/file.pdf"],
+            source=NS(platform="telegram", chat_type="supergroup", user_id="456", chat_id=GROUP))
+        self.assertEqual((await self.plugin.incoming(event))["action"], "rewrite")
+        self.assertEqual(self.plugin._owner_session(self.entry.session_id), self.entry)
+        data = await self.request()
+        self.assertEqual(self.plugin.tokens.pending()[0]["owner"], "123")
+        denied = FakeQuery(data, owner=789, chat=int(GROUP), chat_type="supergroup")
+        await self.plugin.callback(NS(callback_query=denied), None)
+        self.assertFalse(any(method == "actions.complete" for method, _ in self.bridge.calls))
+        query = FakeQuery(data, owner=123, chat=int(GROUP), chat_type="supergroup")
+        await self.plugin.callback(NS(callback_query=query), None)
+        await self.plugin.callback(NS(callback_query=query), None)
+        self.assertEqual(sum(method == "actions.complete" for method, _ in self.bridge.calls), 1)
+        self.assertEqual(len(self.injections), 1)
+
+    async def test_shared_participant_can_confirm_owner_button_and_revocation_blocks_context(self):
+        """Участник принимает кнопку владельца, а отозванный origin не продолжает работу."""
+        self.config = replace(self.config, allowed_users=("456",))
+        await self.set_group_route()
+        data = await self.request()
+        query = FakeQuery(data, owner=456, chat=int(GROUP), chat_type="supergroup")
+        await self.plugin.callback(NS(callback_query=query), None)
+        self.assertTrue(any(method == "actions.complete" for method, _ in self.bridge.calls))
+        self.native_context["HERMES_SESSION_USER_ID"] = "456"
+        self.entry.origin.user_id = "456"
+        self.plugin.config = replace(self.config, allowed_users=())
+        with self.assertRaises(mod.BridgeError):
+            self.plugin._tool_context({})
+        self.assertIsNone(self.plugin._owner_session(self.entry.session_id))
+        with self.assertRaises(sys.modules["telegram.ext"].ApplicationHandlerStop):
+            await self.plugin.guard(self.update(owner=456), None)
+
+    async def test_shared_users_config_rejects_wildcards_groups_duplicates_and_private_route(self):
+        """Дополнительный доступ задаётся только точными user ID для группового route."""
+        env = {"BRAI_TELEGRAM_OWNER_ID": "123", "BRAI_TELEGRAM_CHAT_ID": GROUP,
+            "BRAI_TELEGRAM_STATE_DIR": str(self.config.state_dir), "BRAI_HERMES_TRUSTED_ENTRY": self.config.entry,
+            "BRAI_HERMES_NODE_EXECUTABLE": self.config.node, "BRAI_TELEGRAM_RESULT_ROOT": self.config.result_root}
+        with patch.dict(os.environ, env, clear=True):
+            os.environ["TELEGRAM_ALLOWED_USERS"] = "456,789"
+            config = mod.Config.from_env()
+            self.assertTrue(all(config.allows(user) for user in ("123", "456", "789")))
+            self.assertFalse(config.allows("999"))
+            for invalid in ("*", GROUP, "456,456", "456, 789", "456,", "0", "0456",
+                            ",".join(str(i) for i in range(1, 22))):
+                os.environ["TELEGRAM_ALLOWED_USERS"] = invalid
+                with self.assertRaises(ValueError):
+                    mod.Config.from_env()
+            os.environ["TELEGRAM_ALLOWED_USERS"] = "456"
+            os.environ["BRAI_TELEGRAM_CHAT_ID"] = "123"
+            with self.assertRaises(ValueError):
+                mod.Config.from_env()
 
     async def test_group_owner_guard_precedes_native_command_media_callback_and_inline(self):
         await self.set_group_route()
@@ -366,14 +425,58 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, {"action": "rewrite", "text": "Текст\n\n" + self.markdown})
         self.assertEqual([args["requestId"] for method, args in self.bridge.calls], ["tg:123:42:0"] * 2)
 
-    async def test_publication_failure_or_limit_drops_event_and_notifies_owner(self):
+    async def test_publication_failure_preserves_native_album_and_caption(self):
         self.bridge.fail = "files.publish"
-        result = await self.plugin.incoming(self.event(media_urls=["/file.pdf"]))
-        self.assertEqual(result["action"], "skip")
-        self.assertIn("не принято", self.bot.sent[-1]["text"])
-        result = await self.plugin.incoming(self.event(media_urls=["/file.pdf"] * 11))
-        self.assertEqual(result["action"], "skip")
+        paths = ["/native-download/one.jpg", "/native-download/two.jpg"]
+        event = self.event(text="Прочитай оба изображения", media_urls=paths.copy(),
+                           media_types=["image/jpeg", "image/jpeg"])
+        with self.assertLogs(mod.__name__, level="WARNING") as logs:
+            result = await self.plugin.incoming(event)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn(event.text, result["text"])
+        self.assertIn("сохранение всех файлов в Brai не подтверждено", result["text"])
+        self.assertEqual(event.media_urls, paths)
+        self.assertEqual(event.media_types, ["image/jpeg", "image/jpeg"])
+        self.assertEqual(self.bot.sent, [])
         self.assertEqual(len(self.bridge.calls), 1)
+        self.assertIn("code=TIMEOUT count=2", logs.output[0])
+        self.assertNotIn("/native-download", logs.output[0])
+
+    async def test_partial_publication_preserves_descriptor_and_all_native_files(self):
+        original_call = self.bridge.call
+        def call(method, params, timeout=15):
+            if method == "files.publish" and params["path"].endswith("two.jpg"):
+                self.bridge.calls.append((method, params))
+                raise mod.BridgeError("RPC_REJECTED")
+            return original_call(method, params, timeout)
+        self.bridge.call = call
+        event = self.event(media_urls=["/native-download/one.jpg", "/native-download/two.jpg"])
+        with self.assertLogs(mod.__name__, level="WARNING"):
+            result = await self.plugin.incoming(event)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn(self.markdown, result["text"])
+        self.assertIn("не подтверждено", result["text"])
+        self.assertEqual(len(event.media_urls), 2)
+        self.assertEqual([args["requestId"] for method, args in self.bridge.calls],
+                         ["tg:123:42:0", "tg:123:42:1"])
+        self.assertEqual(self.bot.sent, [])
+
+    async def test_malformed_publisher_result_does_not_discard_native_file(self):
+        self.bridge.file["markdown"] = "[untrusted](https://example.test)"
+        event = self.event(media_urls=["/native-download/one.jpg"])
+        with self.assertLogs(mod.__name__, level="WARNING"):
+            result = await self.plugin.incoming(event)
+        self.assertEqual(result["action"], "rewrite")
+        self.assertNotIn("https://example.test", result["text"])
+        self.assertEqual(event.media_urls, ["/native-download/one.jpg"])
+
+    async def test_attachment_limit_still_rejects_before_publication(self):
+        with self.assertLogs(mod.__name__, level="WARNING"):
+            result = await self.plugin.incoming(self.event(media_urls=["/file.pdf"] * 11))
+        self.assertEqual(result["action"], "skip")
+        self.assertEqual(result["reason"], "brai-file-input-invalid")
+        self.assertEqual(self.bridge.calls, [])
+        self.assertIn("десяти", self.bot.sent[-1]["text"])
 
     async def test_wrong_message_foreign_sender_group_forgery_do_not_complete(self):
         data = await self.request()
@@ -1314,8 +1417,79 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         text = "\n".join([self.markdown.replace(self.config.result_root, self.config.result_root + ".evil"), self.markdown.replace(self.config.result_root, "https://evil.test/files"),
                           self.markdown.replace(ARTIFACT, ARTIFACT.upper().replace("00000000", "AAAAAAAA", 1)),
                           "https://example.test/file.pdf", "[file](/local/file.pdf)"])
-        self.assertEqual(self.plugin.outgoing(text, platform="telegram"), text)
+        self.assertIsNone(self.plugin.outgoing(text, platform="telegram"))
         self.assertEqual(self.bridge.calls, [])
+
+    async def test_unchanged_long_reply_leaves_final_delivery_to_native_stream(self):
+        text = "## Условия\n\n" + ("**Описание** с _выделением_.\n" * 400)
+        self.assertIsNone(self.plugin.outgoing(text, platform="telegram", session_id="s", turn_id="t"))
+        self.assertEqual(self.bridge.calls, [])
+
+    async def test_raw_media_is_published_once_and_only_verified_copy_is_delivered(self):
+        path = Path(self.config.result_root) / ARTIFACT / self.bridge.file["filename"]
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"pdf")
+        self.bridge.file.update(localPath=str(path), markdown=f"[Отчёт](<{path}>)")
+        raw = "/profile/usercustom/userdata/files/exports/report.pdf"
+        message = f"Отчёт\nMEDIA:{raw}\nMEDIA:{raw}"
+        text = self.plugin.outgoing(message, platform="telegram", session_id="s", turn_id="t")
+        self.assertEqual(text.count("MEDIA:"), 1)
+        self.assertNotIn(raw, text)
+        self.assertIn(f'MEDIA:"{path}"', text)
+        self.assertEqual(self.bridge.calls[0][0], "files.publish")
+        first = self.bridge.calls[0][1]
+        self.assertEqual(first["path"], raw)
+        self.assertTrue(first["requestId"].startswith("tg-output:"))
+        self.plugin.outgoing(message, platform="telegram", session_id="s", turn_id="t")
+        self.assertEqual(first["requestId"], self.bridge.calls[-1][1]["requestId"])
+        self.plugin.outgoing(message, platform="telegram", session_id="s", turn_id="t2")
+        self.assertNotEqual(first["requestId"], self.bridge.calls[-1][1]["requestId"])
+
+    async def test_raw_published_file_is_fetched_instead_of_published_again(self):
+        path = Path(self.config.result_root) / ARTIFACT / "Файл [готов].pdf"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"pdf")
+        self.bridge.file.update(localPath=str(path), filename=path.name)
+        text = self.plugin.outgoing(f'MEDIA:"{path}"', platform="telegram")
+        self.assertEqual(text.strip(), f'MEDIA:"{path}"')
+        self.assertEqual([m for m, _ in self.bridge.calls], ["files.fetch"])
+
+    async def test_raw_media_failure_hides_path_and_never_retries(self):
+        self.bridge.fail = "files.publish"
+        raw = "/profile/usercustom/userdata/files/exports/report.pdf"
+        text = self.plugin.outgoing(f"MEDIA:{raw}", platform="telegram", session_id="s", turn_id="t")
+        self.assertIn("не отправлен", text)
+        self.assertNotIn(raw, text)
+        self.assertNotIn("MEDIA:", text)
+        self.assertEqual(len(self.bridge.calls), 1)
+
+    async def test_media_examples_in_code_do_not_publish(self):
+        text = '```text\nMEDIA:/profile/example.pdf\n```\n`MEDIA:"/profile/example.png"`'
+        self.assertIsNone(self.plugin.outgoing(text, platform="telegram", session_id="s", turn_id="t"))
+        self.assertEqual(self.bridge.calls, [])
+
+    async def test_three_export_files_are_published_as_distinct_verified_copies(self):
+        paths = ["/profile/exports/02-careers.png", "/profile/exports/03-pools.png", "/profile/exports/plan.pdf"]
+        results = []
+        for index, raw in enumerate(paths, 10):
+            artifact = f"00000000-0000-4000-8000-{index:012d}"
+            path = Path(self.config.result_root) / artifact / Path(raw).name
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"test")
+            results.append({**self.bridge.file, "artifactId": artifact, "filename": path.name,
+                            "localPath": str(path), "markdown": f"[Файл](<{path}>)"})
+        def publish(method, params, timeout=15):
+            self.bridge.calls.append((method, params))
+            self.assertEqual(method, "files.publish")
+            return results[paths.index(params["path"])]
+        with patch.object(self.bridge, "call", side_effect=publish):
+            text = self.plugin.outgoing("\n\n".join("MEDIA:" + path for path in paths),
+                                        platform="telegram", session_id="s", turn_id="t")
+        self.assertEqual(text.count("MEDIA:"), 3)
+        self.assertEqual(len(self.bridge.calls), 3)
+        for result in results:
+            self.assertIn(f'MEDIA:"{result["localPath"]}"', text)
+        self.assertNotIn("/profile/exports", text)
 
     async def test_outgoing_native_quoted_media_unicode_voice_and_dedup(self):
         path = Path(self.config.result_root) / ARTIFACT / "Голос сообщение.ogg"
@@ -1347,7 +1521,7 @@ class BridgeTests(unittest.TestCase):
 
     def setUp(self):
         """Создать временный исполняемый RPC fixture."""
-        self.tmp = tempfile.TemporaryDirectory(dir=REPO / "tmp", prefix="telegram-rpc-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="telegram-rpc-")
         self.entry = Path(self.tmp.name) / "rpc.py"
         self.config = mod.Config("123", Path(self.tmp.name), str(self.entry), sys.executable, ROOT)
 

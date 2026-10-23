@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import importlib
+import logging
 from dataclasses import dataclass
 from contextlib import contextmanager
 from hashlib import sha256
@@ -50,6 +51,11 @@ class Config:
     node: str
     result_root: str
     chat_id: str = ""
+    allowed_users: tuple[str, ...] = ()
+
+    def allows(self, user_id):
+        """Разрешить владельца и назначенных участников общего группового профиля."""
+        return str(user_id) == self.owner or (self.chat.startswith("-") and str(user_id) in self.allowed_users)
 
     @property
     def chat(self):
@@ -61,11 +67,16 @@ class Config:
         """Проверить обязательные параметры; секреты остаются в окружении child process."""
         owner = os.environ.get("BRAI_TELEGRAM_OWNER_ID", "")
         chat = os.environ.get("BRAI_TELEGRAM_CHAT_ID", "")
+        allowed = os.environ.get("TELEGRAM_ALLOWED_USERS", "")
+        users = tuple(allowed.split(",")) if allowed else ()
         state = Path(os.environ.get("BRAI_TELEGRAM_STATE_DIR", ""))
         entry = os.environ.get("BRAI_HERMES_TRUSTED_ENTRY", "")
         node = os.environ.get("BRAI_HERMES_NODE_EXECUTABLE", "")
         root = os.environ.get("BRAI_TELEGRAM_RESULT_ROOT", "")
         if (not re.fullmatch(r"[1-9][0-9]*", owner)
+                or any(not re.fullmatch(r"[1-9][0-9]*", user) for user in users)
+                or len(users) > 20 or len(set(users)) != len(users)
+                or (any(user != owner for user in users) and not chat.startswith("-"))
                 or (chat and not re.fullmatch(r"-?[1-9][0-9]*", chat))
                 or (chat and not chat.startswith("-") and chat != owner) or not state.is_absolute()
                 or state.name != "brai-telegram" or not Path(entry).is_absolute()
@@ -73,7 +84,7 @@ class Config:
                 or not Path(root).is_absolute() or str(Path(root)) != root
                 or re.search(r"[\\<>?#%\x00-\x1f\x7f]", root)):
             raise ValueError("BRAI_TELEGRAM_CONFIG_INVALID")
-        return cls(owner, state, entry, node, root, chat)
+        return cls(owner, state, entry, node, root, chat, users)
 
 
 class Bridge:
@@ -160,6 +171,9 @@ class Bridge:
                     raise BridgeError("HUMAN_OUTPUT_REQUIRED")
                 if error["code"] == -32000 and isinstance(error.get("data"), dict) and error["data"].get("code") in {"HUMAN_FINAL_DECISION_REQUIRED", "HUMAN_OUTPUT_MAPPING_REQUIRED", "STALE_ACTION"}:
                     raise BridgeError(error["data"]["code"])
+                code = error.get("data", {}).get("code") if isinstance(error.get("data"), dict) else None
+                if method == "files.publish" and isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,80}", code):
+                    logging.getLogger(__name__).warning("BRAI_FILE_PUBLISH_REJECTED code=%s", code)
                 raise BridgeError("RPC_REJECTED")
             if not isinstance(response["result"], dict):
                 raise BridgeError("RPC_MALFORMED")
@@ -458,6 +472,12 @@ class TelegramPlugin:
         self.descriptor = re.compile(
             r"!?\[(?:\\[^\r\n]|[^\]\\\r\n])*\]\(<" + re.escape(config.result_root.rstrip("/")) + r"/(?P<id>" + UUID
             + r")/(?P<name>[^<>/\r\n]+)>\)")
+        self.output_files = re.compile(
+            r"(?P<code>```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z)|`[^`\r\n]+`)|"
+            + self.descriptor.pattern
+            + r'|(?m:^[ \t]*MEDIA:(?:"(?P<quoted>[^"\r\n]+)"|(?P<bare>/[^\r\n]+?))[ \t]*$)')
+        self.result_path = re.compile(re.escape(config.result_root.rstrip("/"))
+                                      + r"/(?P<id>" + UUID + r")/(?P<name>[^/\r\n]+)")
 
     def factory(self, app, adapter):
         """Поставить owner/route guard до всех native handlers; сохранить scoped callback."""
@@ -540,7 +560,7 @@ class TelegramPlugin:
         message = getattr(update, "effective_message", None)
         user = getattr(update, "effective_user", None)
         if (self.closed or not self._route_matches(getattr(chat, "id", None), getattr(chat, "type", None))
-                or str(getattr(user, "id", "")) != self.config.owner or getattr(user, "is_bot", False)
+                or not self.config.allows(getattr(user, "id", "")) or getattr(user, "is_bot", False)
                 or getattr(message, "sender_chat", None) or getattr(message, "business_connection_id", None)):
             raise ApplicationHandlerStop
 
@@ -568,7 +588,7 @@ class TelegramPlugin:
         source = getattr(entry, "origin", None)
         return (getattr(entry, "session_id", None) == row["session_id"]
                 and _platform(getattr(source, "platform", None)) == "telegram"
-                and str(getattr(source, "user_id", "")) == row["owner"] == self.config.owner
+                and self.config.allows(getattr(source, "user_id", "")) and row["owner"] == self.config.owner
                 and str(getattr(source, "chat_id", "")) == row["chat_id"] == self.config.chat
                 and self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))
                 and str(getattr(source, "thread_id", None) or "") == row["thread_id"])
@@ -609,7 +629,7 @@ class TelegramPlugin:
         source = getattr(entry, "origin", None)
         if (getattr(entry, "session_id", None) != session_id
                 or _platform(getattr(source, "platform", None)) != "telegram"
-                or str(getattr(source, "user_id", "")) != self.config.owner
+                or not self.config.allows(getattr(source, "user_id", ""))
                 or not self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))):
             return None
         return entry
@@ -714,7 +734,7 @@ class TelegramPlugin:
         entry = self.session_store.lookup_by_session_key(session_key)
         source = getattr(entry, "origin", None)
         if (entry is not None and _platform(getattr(source, "platform", None)) == "telegram"
-                and str(getattr(source, "user_id", "")) == self.config.owner
+                and self.config.allows(getattr(source, "user_id", ""))
                 and self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))):
             await self._fail_stopped_agent_attempts(entry.session_id)
 
@@ -725,7 +745,7 @@ class TelegramPlugin:
             return None
         raw = getattr(event, "raw_message", None)
         if (not self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))
-                or str(getattr(source, "user_id", "")) != self.config.owner
+                or not self.config.allows(getattr(source, "user_id", ""))
                 or getattr(source, "is_bot", False) or getattr(raw, "sender_chat", None)
                 or getattr(raw, "business_connection_id", None)):
             return {"action": "skip", "reason": "brai-owner-route-only"}
@@ -739,10 +759,10 @@ class TelegramPlugin:
         paths = getattr(event, "media_urls", [])
         if not paths:
             return None
+        descriptors = []
         try:
             if len(paths) > MAX_ATTACHMENTS or not re.fullmatch(r"[1-9][0-9]*", str(event.message_id)):
                 raise BridgeError("ATTACHMENT_LIMIT")
-            descriptors = []
             for index, path in enumerate(paths):
                 result = await asyncio.to_thread(self.bridge.call, "files.publish", {
                     "path": path, "requestId": f"tg:{self.config.chat}:{event.message_id}:{index}"})
@@ -753,12 +773,19 @@ class TelegramPlugin:
                     raise BridgeError("RPC_MALFORMED")
                 descriptors.append(result["markdown"])
             return {"action": "rewrite", "text": "\n\n".join([event.text or "", *descriptors]).strip()}
-        except Exception:
-            try:
-                await self._on_native_loop(self._notify("Вложение не принято Brai. Повторите отправку файла."))
-            except Exception:
-                pass
-            return {"action": "skip", "reason": "brai-file-publication-failed"}
+        except Exception as error:
+            code = str(error) if isinstance(error, BridgeError) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,80}", str(error)) else "UNEXPECTED_ERROR"
+            logging.getLogger(__name__).warning("BRAI_INBOUND_FILE_NOT_STORED code=%s count=%d", code, len(paths))
+            if code == "ATTACHMENT_LIMIT":
+                try:
+                    await self._on_native_loop(self._notify("Не удалось обработать вложения. В одном сообщении должно быть не больше десяти файлов."))
+                except Exception:
+                    pass
+                return {"action": "skip", "reason": "brai-file-input-invalid"}
+            # Native already downloaded these owner-authorized files. A storage failure
+            # must not discard their media_urls or turn a received album into an empty turn.
+            note = "[Состояние вложений: файлы получены и доступны в этом сообщении, но сохранение всех файлов в Brai не подтверждено.]"
+            return {"action": "rewrite", "text": "\n\n".join([event.text or "", *descriptors, note]).strip()}
 
     def _published_path(self, result, artifact_id, filename):
         """Проверить publisher DTO и канонический локальный файл перед native delivery."""
@@ -794,7 +821,7 @@ class TelegramPlugin:
                 return None
             if (not self._route_matches(get_session_env("HERMES_SESSION_CHAT_ID"),
                                         get_session_env("HERMES_SESSION_CHAT_TYPE"))
-                    or get_session_env("HERMES_SESSION_USER_ID") != self.config.owner
+                    or not self.config.allows(get_session_env("HERMES_SESSION_USER_ID"))
                     or not all(isinstance(value, str) and value for value in (session_id, tool_call_id))):
                 raise BridgeError("IMAGE_CONTEXT_INVALID")
             path = Path(payload.get("image", ""))
@@ -822,32 +849,58 @@ class TelegramPlugin:
                                "error": "Картинка создана, но публикация Brai не подтверждена. Не запускайте генерацию повторно; проверьте Artifacts."},
                               ensure_ascii=False)
 
-    def outgoing(self, response_text, platform=None, **kwargs):
-        """Заменять только точные publisher descriptors native MEDIA; не скачивать URL."""
+    def outgoing(self, response_text, platform=None, session_id="", turn_id="", **kwargs):
+        """Передавать явные файлы через publisher; неизменённый ответ оставить потоку."""
         if _platform(platform) != "telegram":
             return None
-        deadline, seen, count = time.monotonic() + OUTPUT_TIMEOUT, set(), 0
+        deadline, seen, paths, count = time.monotonic() + OUTPUT_TIMEOUT, set(), set(), 0
 
         def replace(match):
             nonlocal count
-            artifact_id = match["id"]
-            if artifact_id in seen:
-                return ""
-            seen.add(artifact_id)
-            count += 1
+            if match["code"] is not None:
+                return match.group()
             try:
+                reference = match
+                raw = match["quoted"] or match["bare"]
+                if raw:
+                    if raw in paths:
+                        return ""
+                    paths.add(raw)
+                    reference = self.result_path.fullmatch(raw)
+                artifact_id = reference["id"] if reference else None
+                if artifact_id in seen:
+                    return ""
+                count += 1
                 if count > MAX_ATTACHMENTS:
                     raise BridgeError("ATTACHMENT_LIMIT")
-                result = self.bridge.call("files.fetch", {"artifactId": artifact_id},
+                if reference:
+                    result = self.bridge.call("files.fetch", {"artifactId": artifact_id},
                                           timeout=min(RPC_TIMEOUT, deadline - time.monotonic()))
-                path = self._published_path(result, artifact_id, match["name"])
+                else:
+                    if not Path(raw).is_absolute() or not session_id or not turn_id:
+                        raise BridgeError("FILE_CONTEXT_INVALID")
+                    identity = json.dumps([self.config.owner, self.config.chat, session_id, turn_id, raw],
+                                          ensure_ascii=False, separators=(",", ":"))
+                    result = self.bridge.call("files.publish", {
+                        "path": raw, "requestId": "tg-output:" + sha256(identity.encode()).hexdigest()},
+                        timeout=min(RPC_TIMEOUT, deadline - time.monotonic()))
+                    reference = self.descriptor.fullmatch(result.get("markdown", ""))
+                    if not reference:
+                        raise BridgeError("RPC_MALFORMED")
+                    artifact_id = reference["id"]
+                path = self._published_path(result, artifact_id, reference["name"])
+                if artifact_id in seen:
+                    return ""
+                seen.add(artifact_id)
                 # AIDEV-NOTE: Штатный parser принимает quoted paths с пробелами и Unicode.
                 voice = "[[audio_as_voice]]\n" if Path(path).suffix.lower() in {".ogg", ".opus"} else ""
                 return f'\n{voice}MEDIA:"{path}"\n'
             except Exception:
                 return "[Файл не отправлен: Brai не подтвердил доступ к артефакту.]"
 
-        return self.descriptor.sub(replace, response_text)
+        rewritten = self.output_files.sub(replace, response_text)
+        # Native Hermes treats any string as a transformed final, even if equal.
+        return rewritten if rewritten != response_text else None
 
     def _tool_context(self, kwargs):
         """Доверенный маршрут текущего native turn; аргументы модели его не задают."""
@@ -864,7 +917,7 @@ class TelegramPlugin:
         context["session_id"] = dispatch_id or bound_id
         context["message_id"] = get_session_env("HERMES_SESSION_MESSAGE_ID")
         if (get_session_env("HERMES_SESSION_PLATFORM") != "telegram"
-                or get_session_env("HERMES_SESSION_USER_ID") != self.config.owner
+                or not self.config.allows(get_session_env("HERMES_SESSION_USER_ID"))
                 or not self._route_matches(get_session_env("HERMES_SESSION_CHAT_ID"),
                                            get_session_env("HERMES_SESSION_CHAT_TYPE"))
                 or not self._session_matches({**context, "owner": self.config.owner, "chat_id": self.config.chat})):
@@ -1213,7 +1266,7 @@ class TelegramPlugin:
         chat = getattr(message, "chat", None)
         if (self.closed or query is None
                 or not self._route_matches(getattr(chat, "id", None), getattr(chat, "type", None))
-                or str(getattr(getattr(query, "from_user", None), "id", "")) != self.config.owner
+                or not self.config.allows(getattr(getattr(query, "from_user", None), "id", ""))
                 or getattr(getattr(query, "from_user", None), "is_bot", False)
                 or getattr(message, "sender_chat", None)
                 or getattr(message, "business_connection_id", None)):

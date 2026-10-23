@@ -54,7 +54,9 @@ export async function loadRunProof(api,readProof,runId,attempt,source) {
   const list=await api(`actions/runs/${runId}/artifacts?per_page=100`);
   if(!Array.isArray(list.artifacts)||list.total_count!==list.artifacts.length||list.total_count>100)throw Error('CI_PROOF_LIST_INVALID');
   const matching=list.artifacts.filter(a=>a.name===`codeworks-proof-${runId}-${attempt}`);
-  if(matching.length!==1||matching[0].expired||String(matching[0].workflow_run?.id)!==String(runId)||matching[0].workflow_run?.head_sha!==source)throw Error('CI_PROOF_IDENTITY_MISMATCH');
+  if(!matching.length)throw Error('CI_PROOF_UNAVAILABLE');
+  if(matching.length!==1||String(matching[0].workflow_run?.id)!==String(runId)||matching[0].workflow_run?.head_sha!==source)throw Error('CI_PROOF_IDENTITY_MISMATCH');
+  if(matching[0].expired)throw Error('CI_PROOF_UNAVAILABLE');
   return readProof(matching[0]);
 }
 /** API и registry читаются независимо от agent input; policy закрепляет workflow и recipe bytes. */

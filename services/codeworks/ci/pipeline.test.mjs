@@ -127,6 +127,8 @@ test('reusable accepts only a successful matching run identity',async()=>{
   const readOriginProof=async(runId,attempt,source)=>{assert.equal(runId,metadata.runId);assert.equal(attempt,metadata.attempt);assert.equal(source,metadata.source);return proof;};
   const validOptions={repository,readRun:async()=>valid,readRecipe,readOriginProof};
   assert.equal(await reusable(hit,expected,validOptions),true);
+  assert.equal(await reusable(hit,expected,{...validOptions,readOriginProof:async()=>{throw Error('CI_PROOF_UNAVAILABLE');}}),false,'missing proof schedules a fresh build instead of failing CI');
+  await assert.rejects(reusable(hit,expected,{...validOptions,readOriginProof:async()=>{throw Error('CI_PROOF_IDENTITY_MISMATCH');}}),/CI_PROOF_IDENTITY_MISMATCH/);
   assert.equal(await reusable(hit,expected,{...validOptions,readRecipe:async()=>false}),false,'changed recipe inputs make the object non-reusable');
   const wrongProof={composition:{components:[{...proof.composition.components[0],artifact:{digest:'sha256:'+'e'.repeat(64)}}]}};
   assert.equal(await reusable(hit,expected,{...validOptions,readOriginProof:async()=>wrongProof}),false,'label digest must match the artifact recorded by its origin run');

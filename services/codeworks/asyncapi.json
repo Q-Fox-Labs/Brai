@@ -2,7 +2,7 @@
   "asyncapi": "3.1.0",
   "info": {
     "title": "Codeworks NATS Services",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "description": "service_codeworks supports PING, INFO and STATS. ACL bind executor subject segment to broker identity. Registry operations require configured admin executor. Error headers and payload are ServiceError."
   },
   "defaultContentType": "application/json",
@@ -19,28 +19,25 @@
         "project_getResponse": {
           "$ref": "#/components/messages/project_getResponse"
         },
-        "prepare_writeResponse": {
-          "$ref": "#/components/messages/prepare_writeResponse"
+        "prepareResponse": {
+          "$ref": "#/components/messages/prepareResponse"
         },
         "statusResponse": {
           "$ref": "#/components/messages/statusResponse"
         },
-        "attach_or_transferResponse": {
-          "$ref": "#/components/messages/attach_or_transferResponse"
+        "syncResponse": {
+          "$ref": "#/components/messages/syncResponse"
         },
-        "request_releaseResponse": {
-          "$ref": "#/components/messages/request_releaseResponse"
+        "releaseResponse": {
+          "$ref": "#/components/messages/releaseResponse"
         },
-        "operation_statusResponse": {
-          "$ref": "#/components/messages/operation_statusResponse"
-        },
-        "commitResponse": {
-          "$ref": "#/components/messages/commitResponse"
+        "cleanupResponse": {
+          "$ref": "#/components/messages/cleanupResponse"
         }
       }
     },
     "project_register": {
-      "address": "brai.codeworks.v1.{executor}.project.register",
+      "address": "brai.codeworks.v2.{executor}.project.register",
       "parameters": {
         "executor": {
           "description": "ACL-protected transport identity, never taken from request payload."
@@ -53,7 +50,7 @@
       }
     },
     "project_get": {
-      "address": "brai.codeworks.v1.{executor}.project.get",
+      "address": "brai.codeworks.v2.{executor}.project.get",
       "parameters": {
         "executor": {
           "description": "ACL-protected transport identity, never taken from request payload."
@@ -65,21 +62,21 @@
         }
       }
     },
-    "prepare_write": {
-      "address": "brai.codeworks.v1.{executor}.prepare-write",
+    "prepare": {
+      "address": "brai.codeworks.v2.{executor}.prepare",
       "parameters": {
         "executor": {
           "description": "ACL-protected transport identity, never taken from request payload."
         }
       },
       "messages": {
-        "prepare_writeRequest": {
-          "$ref": "#/components/messages/prepare_writeRequest"
+        "prepareRequest": {
+          "$ref": "#/components/messages/prepareRequest"
         }
       }
     },
     "status": {
-      "address": "brai.codeworks.v1.{executor}.status",
+      "address": "brai.codeworks.v2.{executor}.status",
       "parameters": {
         "executor": {
           "description": "ACL-protected transport identity, never taken from request payload."
@@ -91,55 +88,42 @@
         }
       }
     },
-    "attach_or_transfer": {
-      "address": "brai.codeworks.v1.{executor}.attach-or-transfer",
+    "sync": {
+      "address": "brai.codeworks.v2.{executor}.sync",
       "parameters": {
         "executor": {
           "description": "ACL-protected transport identity, never taken from request payload."
         }
       },
       "messages": {
-        "attach_or_transferRequest": {
-          "$ref": "#/components/messages/attach_or_transferRequest"
+        "syncRequest": {
+          "$ref": "#/components/messages/syncRequest"
         }
       }
     },
-    "request_release": {
-      "address": "brai.codeworks.v1.{executor}.request-release",
+    "release": {
+      "address": "brai.codeworks.v2.{executor}.release",
       "parameters": {
         "executor": {
           "description": "ACL-protected transport identity, never taken from request payload."
         }
       },
       "messages": {
-        "request_releaseRequest": {
-          "$ref": "#/components/messages/request_releaseRequest"
+        "releaseRequest": {
+          "$ref": "#/components/messages/releaseRequest"
         }
       }
     },
-    "operation_status": {
-      "address": "brai.codeworks.v1.{executor}.operation-status",
+    "cleanup": {
+      "address": "brai.codeworks.v2.{executor}.cleanup",
       "parameters": {
         "executor": {
           "description": "ACL-protected transport identity, never taken from request payload."
         }
       },
       "messages": {
-        "operation_statusRequest": {
-          "$ref": "#/components/messages/operation_statusRequest"
-        }
-      }
-    },
-    "commit": {
-      "address": "brai.codeworks.v1.{executor}.commit",
-      "parameters": {
-        "executor": {
-          "description": "ACL-protected transport identity, never taken from request payload."
-        }
-      },
-      "messages": {
-        "commitRequest": {
-          "$ref": "#/components/messages/commitRequest"
+        "cleanupRequest": {
+          "$ref": "#/components/messages/cleanupRequest"
         }
       }
     }
@@ -211,14 +195,14 @@
         }
       }
     },
-    "prepare_write": {
+    "prepare": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/prepare_write"
+        "$ref": "#/channels/prepare"
       },
       "messages": [
         {
-          "$ref": "#/channels/prepare_write/messages/prepare_writeRequest"
+          "$ref": "#/channels/prepare/messages/prepareRequest"
         }
       ],
       "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
@@ -230,7 +214,7 @@
         "x-nats-reply-subject": "message.reply",
         "messages": [
           {
-            "$ref": "#/channels/serviceReply/messages/prepare_writeResponse"
+            "$ref": "#/channels/serviceReply/messages/prepareResponse"
           },
           {
             "$ref": "#/channels/serviceReply/messages/ServiceError"
@@ -277,14 +261,14 @@
         }
       }
     },
-    "attach_or_transfer": {
+    "sync": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/attach_or_transfer"
+        "$ref": "#/channels/sync"
       },
       "messages": [
         {
-          "$ref": "#/channels/attach_or_transfer/messages/attach_or_transferRequest"
+          "$ref": "#/channels/sync/messages/syncRequest"
         }
       ],
       "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
@@ -296,7 +280,7 @@
         "x-nats-reply-subject": "message.reply",
         "messages": [
           {
-            "$ref": "#/channels/serviceReply/messages/attach_or_transferResponse"
+            "$ref": "#/channels/serviceReply/messages/syncResponse"
           },
           {
             "$ref": "#/channels/serviceReply/messages/ServiceError"
@@ -310,14 +294,14 @@
         }
       }
     },
-    "request_release": {
+    "release": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/request_release"
+        "$ref": "#/channels/release"
       },
       "messages": [
         {
-          "$ref": "#/channels/request_release/messages/request_releaseRequest"
+          "$ref": "#/channels/release/messages/releaseRequest"
         }
       ],
       "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
@@ -329,7 +313,7 @@
         "x-nats-reply-subject": "message.reply",
         "messages": [
           {
-            "$ref": "#/channels/serviceReply/messages/request_releaseResponse"
+            "$ref": "#/channels/serviceReply/messages/releaseResponse"
           },
           {
             "$ref": "#/channels/serviceReply/messages/ServiceError"
@@ -343,14 +327,14 @@
         }
       }
     },
-    "operation_status": {
+    "cleanup": {
       "action": "receive",
       "channel": {
-        "$ref": "#/channels/operation_status"
+        "$ref": "#/channels/cleanup"
       },
       "messages": [
         {
-          "$ref": "#/channels/operation_status/messages/operation_statusRequest"
+          "$ref": "#/channels/cleanup/messages/cleanupRequest"
         }
       ],
       "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
@@ -362,40 +346,7 @@
         "x-nats-reply-subject": "message.reply",
         "messages": [
           {
-            "$ref": "#/channels/serviceReply/messages/operation_statusResponse"
-          },
-          {
-            "$ref": "#/channels/serviceReply/messages/ServiceError"
-          }
-        ]
-      },
-      "bindings": {
-        "nats": {
-          "queue": "service_codeworks",
-          "bindingVersion": "0.1.0"
-        }
-      }
-    },
-    "commit": {
-      "action": "receive",
-      "channel": {
-        "$ref": "#/channels/commit"
-      },
-      "messages": [
-        {
-          "$ref": "#/channels/commit/messages/commitRequest"
-        }
-      ],
-      "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
-      "reply": {
-        "channel": {
-          "$ref": "#/channels/serviceReply"
-        },
-        "description": "Native NATS reply subject.",
-        "x-nats-reply-subject": "message.reply",
-        "messages": [
-          {
-            "$ref": "#/channels/serviceReply/messages/commitResponse"
+            "$ref": "#/channels/serviceReply/messages/cleanupResponse"
           },
           {
             "$ref": "#/channels/serviceReply/messages/ServiceError"
@@ -458,14 +409,14 @@
           "$ref": "./schemas/api.schema.json#/definitions/projectResponse"
         }
       },
-      "prepare_writeRequest": {
-        "name": "prepare_writeRequest",
+      "prepareRequest": {
+        "name": "prepareRequest",
         "payload": {
-          "$ref": "./schemas/api.schema.json#/definitions/prepare-write"
+          "$ref": "./schemas/api.schema.json#/definitions/prepare"
         }
       },
-      "prepare_writeResponse": {
-        "name": "prepare_writeResponse",
+      "prepareResponse": {
+        "name": "prepareResponse",
         "payload": {
           "$ref": "./schemas/api.schema.json#/definitions/accepted"
         }
@@ -482,50 +433,38 @@
           "$ref": "./schemas/api.schema.json#/definitions/statusResponse"
         }
       },
-      "attach_or_transferRequest": {
-        "name": "attach_or_transferRequest",
+      "syncRequest": {
+        "name": "syncRequest",
         "payload": {
-          "$ref": "./schemas/api.schema.json#/definitions/attach-or-transfer"
+          "$ref": "./schemas/api.schema.json#/definitions/sync"
         }
       },
-      "attach_or_transferResponse": {
-        "name": "attach_or_transferResponse",
-        "payload": {
-          "$ref": "./schemas/api.schema.json#/definitions/accepted"
-        }
-      },
-      "request_releaseRequest": {
-        "name": "request_releaseRequest",
-        "payload": {
-          "$ref": "./schemas/api.schema.json#/definitions/request-release"
-        }
-      },
-      "request_releaseResponse": {
-        "name": "request_releaseResponse",
+      "syncResponse": {
+        "name": "syncResponse",
         "payload": {
           "$ref": "./schemas/api.schema.json#/definitions/accepted"
         }
       },
-      "operation_statusRequest": {
-        "name": "operation_statusRequest",
+      "releaseRequest": {
+        "name": "releaseRequest",
         "payload": {
-          "$ref": "./schemas/api.schema.json#/definitions/operation-status"
+          "$ref": "./schemas/api.schema.json#/definitions/release"
         }
       },
-      "operation_statusResponse": {
-        "name": "operation_statusResponse",
+      "releaseResponse": {
+        "name": "releaseResponse",
         "payload": {
-          "$ref": "./schemas/api.schema.json#/definitions/operationResponse"
+          "$ref": "./schemas/api.schema.json#/definitions/accepted"
         }
       },
-      "commitRequest": {
-        "name": "commitRequest",
+      "cleanupRequest": {
+        "name": "cleanupRequest",
         "payload": {
-          "$ref": "./schemas/api.schema.json#/definitions/commit"
+          "$ref": "./schemas/api.schema.json#/definitions/cleanup"
         }
       },
-      "commitResponse": {
-        "name": "commitResponse",
+      "cleanupResponse": {
+        "name": "cleanupResponse",
         "payload": {
           "$ref": "./schemas/api.schema.json#/definitions/accepted"
         }

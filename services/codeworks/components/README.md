@@ -77,7 +77,7 @@ CLI по умолчанию сравнивает с `refs/remotes/origin/dev`; �
 
 Описаны web, auth, timer, history, alerts, artifacts (включая MCP), elements,
 transcription, local-ai, agent, providers, supabase-mcp, hermes, codeworks и
-codeworks-agent. Transcription сохраняет coordinator/helper/local/external как
+codeworks-agent (retired; прежний контроллер не поставляется). Transcription сохраняет coordinator/helper/local/external как
 четыре executable одного владельца. Caddy, NATS, Temporal и Supabase — внешние
 зависимости оператора. Instaloader — рецепт внешней on-demand программы (type `library`): готовые файлы
 задают pinned OCI runtime requirement. First-party executable здесь отсутствует;
@@ -117,8 +117,8 @@ node --test --test-isolation=none services/codeworks/components/*.test.mjs
 | agent | общий brai-agent.service | общий brai-agent.service |
 | supabase-mcp | supabase-mcp | brai-supabase-mcp.service, supabase-mcp |
 | hermes | brai-hermes-dev.service, brai-hermes-dev-intake.service, brai-hermes-dev-embeddings.service, brai-hermes-dev-codex-bridge.service | нет отдельного unit |
-| codeworks | brai-codeworks-agents-test.service (staged) | endpoint ещё не включён |
-| codeworks-agent | brai-codeworks-codex-test.service (staged) | endpoint ещё не включён |
+| codeworks | brai-codeworks.service (выключен до отдельного согласования) | нет |
+| codeworks-agent | retired: прежние controller units не устанавливаются | нет |
 | providers | Compose providers / brai-dev-providers; внешний proxy litellm / brai-dev-providers-litellm | отдельного действующего unit нет |
 | instaloader | внешний on-demand рецепт, service instaloader | отдельного действующего unit нет |
 

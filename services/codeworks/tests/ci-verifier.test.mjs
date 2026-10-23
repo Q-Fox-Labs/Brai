@@ -7,7 +7,7 @@ import {resolve,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash,generateKeyPairSync} from 'node:crypto';
 import {signCatalog} from '../ci/catalog.mjs';
-import {verifyCI,recipeFiles,downloadProof} from '../src/ci-verifier.mjs';
+import {verifyCI,recipeFiles,downloadProof,loadRunProof} from '../src/ci-verifier.mjs';
 import {digestFiles} from '../components/graph.mjs';
 import {createGitHub} from '../src/github.mjs';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'../../..'),workflow='.github/workflows/codeworks.yml';
@@ -57,7 +57,12 @@ test('billing failure remains an explicit blocked CI state without installed evi
   assert.deepEqual(await f.verify(),{verified:false,state:'CI_BILLING_BLOCKED'});
 });
 test('missing or expired mandatory digest proof fails closed; registry labels alone are insufficient',async()=>{
-  const f=fixture();f.artifact.expired=true;await assert.rejects(f.verify(),/CI_PROOF_IDENTITY/);
+  const f=fixture();f.artifact.expired=true;await assert.rejects(f.verify(),/CI_PROOF_UNAVAILABLE/);
+});
+test('absent or expired cache proof is unavailable, while foreign or duplicate proof fails identity',async()=>{
+  const f=fixture(),readProof=async()=>f.proof;
+  for(const artifacts of [[],[{...f.artifact,expired:true}]])await assert.rejects(loadRunProof(async()=>({total_count:artifacts.length,artifacts}),readProof,'123',1,f.sha),/CI_PROOF_UNAVAILABLE/);
+  for(const artifacts of [[f.artifact,f.artifact],[{...f.artifact,workflow_run:{id:124,head_sha:f.sha}}]])await assert.rejects(loadRunProof(async()=>({total_count:artifacts.length,artifacts}),readProof,'123',1,f.sha),/CI_PROOF_IDENTITY_MISMATCH/);
 });
 test('GitHub adapter exposes unavailable verifier as awaiting CI, never a successful check',async()=>{
   const f=fixture();f.project.github.required_checks=[{name:'Codeworks components',app_id:42}];

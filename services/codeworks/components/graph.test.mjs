@@ -97,6 +97,38 @@ test('removal requires retirement; rename retains explicit tombstone and prevent
  a.renamedTo='b';save(root,'a',a);git('add','.');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','retire');a.status='active';delete a.renamedTo;save(root,'a',a);assert.throws(()=>discover(root,{base:'HEAD'}),/RETIRED_ID_REUSED/);
 });
 
+test('removing one active deploy unit requires its explicit retired tombstone',t=>{
+ const root=fixture(t),active=add(root,'probe',d=>d.deploy.units=['probe','old-worker']);
+ const git=(...args)=>execFileSync('git',['-C',root,...args],{stdio:'pipe'});
+ git('add','.');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture');
+ active.deploy.units=['probe'];save(root,'probe',active);
+ assert.throws(()=>discover(root,{base:'HEAD'}),/DEPLOY_UNIT_REMOVED_WITHOUT_RETIREMENT: probe/);
+ const retired={...descriptor('old-worker'),status:'retired',reason:'Worker retired explicitly',executableSources:[],inputs:{build:[],runtime:[],checks:[]},commands:{build:null,check:null},delivery:{kind:'ready-files',files:[],entrypoints:[],smokeImports:[],systemRequirements:[]}};
+ save(root,'old-worker',retired);
+ const graph=discover(root,{base:'HEAD'});
+ assert.deepEqual(graph.order,['probe']);assert.equal(graph.components.get('old-worker').status,'retired');
+ assert.deepEqual(graph.components.get('old-worker').deploy.units,['old-worker']);
+ retired.deploy.units=['different-worker'];save(root,'old-worker',retired);
+ assert.throws(()=>discover(root,{base:'HEAD'}),/DEPLOY_UNIT_REMOVED_WITHOUT_RETIREMENT: probe/);
+});
+test('retired package metadata admits development scripts but rejects runtime scripts and bins',t=>{
+ const root=fixture(t),retired={...descriptor('probe'),status:'retired',reason:'Runtime removed',executableSources:[],inputs:{build:[],runtime:[],checks:[]},commands:{build:null,check:null},delivery:{kind:'ready-files',files:[],entrypoints:[],smokeImports:[],systemRequirements:[]}};
+ save(root,'probe',retired);
+ const metadata={name:'@fixture/probe',private:true,scripts:{test:'node --test',lint:'node tools/lint.mjs'}};
+ put(root,'services/probe/package.json',JSON.stringify(metadata));
+ assert.deepEqual(discover(root).order,[]);
+ for(const runtime of [
+  {bin:'worker.mjs'},{bin:{worker:'worker.mjs'}},
+  ...['start','start:worker','mcp','migrate','health','trusted'].map(name=>({scripts:{[name]:'node worker.mjs'}})),
+ ]){
+  put(root,'services/probe/package.json',JSON.stringify({...metadata,...runtime}));
+  assert.throws(()=>discover(root),/MISSING_COMPONENT: services\/probe\/package.json/);
+ }
+ put(root,'services/probe/package.json',JSON.stringify(metadata));
+ rmSync(join(root,'services/probe/component.json'));
+ assert.throws(()=>discover(root),/MISSING_COMPONENT: services\/probe\/package.json/);
+});
+
 // These are executable behavior regressions: assert delivered bytes, not only key inequality.
 test('build config and effective dependency delivery cannot reuse stale payload',async t=>{
  const root=fixture(t);
@@ -113,6 +145,8 @@ test('build config and effective dependency delivery cannot reuse stale payload'
  assert.notEqual(first.artifact.payloadHash,second.artifact.payloadHash);
  assert.equal(readFileSync(join(second.artifact.path,'services/probe/dist/main.mjs'),'utf8'),'export const value=2;');
  add(root,'neighbor');put(root,'services/neighbor/extra.json','{"revision":1}');
+ // AIDEV-NOTE: Явный исходный mode сохраняет проверку смены прав при umask 0077.
+ chmodSync(join(root,'services/neighbor/extra.json'),0o644);
  d.dependencies=[{id:'neighbor',inputs:[],delivery:[]}];save(root,'probe',d);
  const before=(await execute(root,'package',['probe'])).find(x=>x.id==='probe');
  d.dependencies[0].delivery=['services/neighbor/extra.json'];save(root,'probe',d);
