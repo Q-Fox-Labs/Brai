@@ -22,10 +22,10 @@ export async function enqueueDeployment(db,project,target,sha,evidence,evidenceD
     await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',['rollout:'+project.id+':'+target]);
     let old;
     if(retryOf){
-      const previous=(await db.query('SELECT d.*,o.status FROM codeworks.deployments d JOIN codeworks.operations o ON o.id=d.operation_id WHERE d.operation_id=$1',[retryOf])).rows[0];
-      if(previous?.status!=='failed'||previous.project_id!==project.id||previous.target!==target||previous.commit_sha!==sha||previous.run_id!==String(evidence.run_id)||previous.attempt!==String(evidence.attempt)||previous.composition_digest!==evidence.composition_digest||!equal(previous.composition,c))throw Error('FAILED_EXACT_ROLLOUT_REQUIRED');
-      old=(await db.query('SELECT operation_id FROM codeworks.deployments WHERE retry_of=$1',[retryOf])).rows[0];
-    }else old=(await db.query('SELECT operation_id FROM codeworks.deployments WHERE project_id=$1 AND target=$2 AND run_id=$3 AND attempt=$4 ORDER BY created_at DESC,operation_id DESC LIMIT 1',[project.id,target,String(evidence.run_id),String(evidence.attempt)])).rows[0];
+      const previous=(await db.query('SELECT d.*,o.status,o.archived AS operation_archived FROM codeworks.deployments d JOIN codeworks.operations o ON o.id=d.operation_id WHERE d.operation_id=$1',[retryOf])).rows[0];
+      if(previous?.status!=='failed'||previous.archived||previous.operation_archived||previous.project_id!==project.id||previous.target!==target||previous.commit_sha!==sha||previous.run_id!==String(evidence.run_id)||previous.attempt!==String(evidence.attempt)||previous.composition_digest!==evidence.composition_digest||!equal(previous.composition,c))throw Error('FAILED_EXACT_ROLLOUT_REQUIRED');
+      old=(await db.query('SELECT operation_id FROM codeworks.deployments WHERE retry_of=$1 AND NOT archived',[retryOf])).rows[0];
+    }else old=(await db.query('SELECT operation_id FROM codeworks.deployments WHERE project_id=$1 AND target=$2 AND run_id=$3 AND attempt=$4 AND NOT archived ORDER BY created_at DESC,operation_id DESC LIMIT 1',[project.id,target,String(evidence.run_id),String(evidence.attempt)])).rows[0];
     if(old){await db.query('COMMIT');return old.operation_id;}
     const id=randomUUID();
     await db.query("INSERT INTO codeworks.operations(id,project_id,executor_id,kind,status,step,request) VALUES($1,$2,'codeworks_owner','rollout','pending','verified-ci',$3)",[id,project.id,{target,commit_sha:sha,ci:evidence}]);

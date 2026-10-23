@@ -95,8 +95,8 @@ verifier независимо проверяет этот catalog ключом �
 Private key `/etc/brai-dev/codeworks-ci/identity.pem` создаёт Ansible один раз;
 owner задаёт `CODEWORKS_REUSE_PRIVATE_KEY_FILE`. Public PEM закрепляют и в policy
 `reuse_public_key`, и в repo var `CODEWORKS_REUSE_PUBLIC_KEY`. Ключ не передаётся
-CI. Помимо UID/mode0600 существующая namespace mask `/etc/brai-dev` скрывает его
-от native агентов и broker read/write commands, FS tools ограничены project roots.
+CI. Доступ к файлу ограничен штатными правами владельца и mode0600;
+Codeworks не добавляет sandbox агента и не ограничивает его файловые инструменты.
 При reinstall сохраняются key и PG; backup/restore возвращает прежнюю пару и
 `verified_ci`, не генерирует замену. Потеря ключа требует явной ротации policy.
 [Операция Ansible и backup scope](/srv/projects/admin/docs/CODEWORKS_AGENTS.md).

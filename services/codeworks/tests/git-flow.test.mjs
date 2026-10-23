@@ -1,4 +1,4 @@
-// ABOUTME: Проверяет три Git маршрута на настоящих изолированных bare repositories.
+// ABOUTME: Проверяет feature/hotfix маршруты на настоящих изолированных bare repositories.
 // ABOUTME: GitHub здесь явный test double; реальный GitHub PR проверяется отдельно без искусственного CI.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,9 +9,7 @@ import {fileURLToPath} from 'node:url';
 import {command} from '../src/git.mjs';
 import {createFlowGit} from '../src/git-flow.mjs';
 import {createGitHub} from '../src/github.mjs';
-import {advanceRelease,checksPassed} from '../src/release.mjs';
-import {validate,methods} from '../src/contracts.mjs';
-import {createHandlers} from '../src/domain.mjs';
+import {advanceRelease,advanceSync,checksPassed} from '../src/release.mjs';
 const required=[{name:'code',app_id:42}];
 const check=(sha,extra={})=>({name:'code',app_id:42,sha,status:'completed',conclusion:'success',...extra});
 async function fixture(t,kind='feature') {
@@ -27,9 +25,9 @@ async function fixture(t,kind='feature') {
   const base=(await g('rev-parse','HEAD')).stdout;await g('branch','main');await g('push','origin','dev','main');
   await writeFile(path.join(repo,'unreleased'),'not in production\n');await g('add','.');await g('commit','-m','Unreleased dev');
   const dev=(await g('rev-parse','HEAD')).stdout;await g('push','origin','dev');
-  const id=randomUUID(),headBase=kind==='hotfix'?base:dev,branch=(kind==='promotion'?'release':kind)+'/codeworks-'+id;
+  const id=randomUUID(),headBase=kind==='hotfix'?base:dev,branch=kind+'/codeworks-'+id;
   await g('checkout','-b',branch,headBase);
-  if(kind!=='promotion'){await writeFile(path.join(repo,'fix'),'change\n');await g('add','.');await g('commit','-m','Change');}
+  await writeFile(path.join(repo,'fix'),'change\n');await g('add','.');await g('commit','-m','Change');
   const head=(await g('rev-parse','HEAD')).stdout;
   const project={id:'p',repo_path:repo,github:{repository:'fixture/repository',required_checks:required}};
   const workspace={id,kind,branch,base_sha:headBase};
@@ -58,7 +56,7 @@ test('checks fail closed on absence, pending, failure, skipped, wrong SHA/app an
   for(const rows of [[],[check(sha,{status:'queued'})],[check(sha,{conclusion:'failure'})],[check(sha,{conclusion:'skipped'})],[check('b'.repeat(40))],[check(sha,{app_id:7})],[check(sha),check(sha)]])assert.equal(checksPassed(required,rows,sha),false);
   assert.equal(checksPassed([],[],sha),false);
 });
-for(const kind of ['feature','promotion','hotfix'])test(kind+' follows exact route; merge waits final CI and trusted installed evidence',async t=>{
+for(const kind of ['feature','hotfix'])test(kind+' follows exact route; merge waits final CI and trusted installed evidence',async t=>{
   const f=await fixture(t,kind);
   assert.deepEqual(await f.advance(),{status:'awaiting_ci',reason:'HEAD_CHECKS_REQUIRED'});
   assert.equal(f.prs.length,1);assert.equal(f.release.details.primary.head,f.head);
@@ -161,12 +159,7 @@ test('hotfix reconciles a lost main push before considering a subsequent dev bac
   assert.equal((await f.advance({git})).reason,'MERGE_CHECKS_REQUIRED');
   assert.equal(f.release.details.primary.merged,true);assert.equal(f.creations,1);
 });
-test('promotion remains pinned while later dev advances',async t=>{
-  const f=await fixture(t,'promotion');await f.advance();
-  await f.g('checkout','dev');await writeFile(path.join(f.repo,'later'),'not approved\n');await f.g('add','.');await f.g('commit','-m','Later dev');await f.g('push','origin','dev');
-  f.good(f.head);assert.equal((await f.advance()).reason,'MERGE_CHECKS_REQUIRED');
-  const merge=f.release.details.primary.merge_sha;assert.equal((await f.g('ls-tree','--name-only',merge)).stdout.includes('later'),false);assert.equal(f.release.details.primary.head,f.dev);
-});
+
 test('ownership and exact PR checks reject changed head/repository and closed PR',async t=>{
   for(const alter of [p=>p.head.sha='f'.repeat(40),p=>p.head.repo.full_name='foreign/repository',p=>p.body='foreign',p=>p.state='closed']){
     const f=await fixture(t);await f.advance();alter(f.prs[0]);f.good(f.head);await assert.rejects(f.advance(),{code:'CONFLICT'});
@@ -190,16 +183,7 @@ test('final fresh PR read revalidates every pinned identity before target mutati
     assert.equal(f.release.details.primary.merge_push_attempted,undefined);
   });
 });
-test('production proof has no agent/NATS method and promotion requires exact recorded dev evidence',async()=>{
-  assert.equal(methods.some(m=>/evidence|deployment/.test(m)),false);
-  const id=randomUUID(),proof=randomUUID(),sha='a'.repeat(40);
-  const args={project_id:'p',workspace_key:'promotion',idempotency_key:'p',kind:'promotion',session_id:'s',commit_sha:sha,evidence_id:proof};
-  validate('prepare-write',args);assert.throws(()=>validate('prepare-write',{...args,evidence_id:undefined}));
-  const project={id:'p',repo_path:'/repo',workspace_root:'/areas',executors:['codex'],git_flow:{}};
-  const db={project:async()=>project,request:async()=>null,workspaceByKey:async()=>null,evidenceById:async()=>({id:proof,target:'dev',commit_sha:'b'.repeat(40)})};
-  const store={transaction:async(_,fn)=>fn(db),read:async(_,fn)=>fn(db)};
-  await assert.rejects(createHandlers(store,{}, {allowedRepositories:['/repo']}).call('prepare-write',args,'codex'),{code:'VERIFIED_DEV_REQUIRED'});
-});
+
 test('GitHub adapter preserves exact query SHA, app identity and lost API error boundary',async()=>{
   const calls=[],sha='c'.repeat(40),p={github:{repository:'fixture/repository'}};
   const gh=createGitHub({run:async(exe,args,options)=>{calls.push({exe,args,options});return {stdout:JSON.stringify({total_count:1,check_runs:[{name:'code',app:{id:42},head_sha:sha,status:'completed',conclusion:'success'}]})};}});
@@ -212,11 +196,92 @@ test('failed/pending/wrong-SHA checks block target mutation through the actual r
     f.checks.set(f.head,rows);assert.equal((await f.advance()).status,'awaiting_ci');assert.equal(await f.git.remote(f.project,'dev'),f.dev);
   }
 });
-test('reusing promotion workspace with a different pinned SHA or evidence is rejected',async()=>{
-  const id=randomUUID(),evidence_id=randomUUID(),base='a'.repeat(40);
-  const w={id,kind:'promotion',base_sha:base,base_ref:'verified-dev:'+evidence_id,writer:{executor_id:'codex',session_id:'s',epoch:1,state:'active'}};
-  const db={project:async()=>({repo_path:'/repo',executors:['codex']}),request:async()=>null,workspaceByKey:async()=>w};
-  const store={read:async(_,fn)=>fn(db),transaction:async(_,fn)=>fn(db)};
-  const h=createHandlers(store,{}, {allowedRepositories:['/repo']});
-  await assert.rejects(h.call('prepare-write',{project_id:'p',workspace_key:'p',idempotency_key:'changed',kind:'promotion',session_id:'s',commit_sha:'b'.repeat(40),evidence_id},'codex'),{code:'CONFLICT'});
+
+
+for(const kind of ['feature','hotfix'])test(kind+' sync publishes a working PR and never mutates a target or checks acceptance',async t=>{
+  const f=await fixture(t,kind),details={},saved=[];
+  const ports={git:f.git,github:{...f.gh,checks:()=>assert.fail('sync must not inspect release checks')},inspect:async()=>({head:f.head,dirty:false}),save:async value=>saved.push(structuredClone(value))};
+  const input={project:f.project,workspace:f.workspace,operation:{request:{commit_sha:f.head}},details};
+  assert.deepEqual(await advanceSync(input,ports),{status:'succeeded',reason:'SYNCHRONIZED'});
+  assert.equal(await f.git.remote(f.project,f.branch),f.head);assert.equal(f.prs.length,1);
+  assert.equal(await f.git.remote(f.project,'dev'),f.dev);assert.equal(await f.git.remote(f.project,'main'),f.base);
+  assert.equal(details.primary.merge_sha,undefined);assert.equal(details.primary.merged,undefined);
+  assert.equal(saved.some(value=>value.primary.push_attempted),true);
+  assert.equal((await advanceSync(input,ports)).status,'succeeded');assert.equal(f.creations,1);
+});
+test('sync rejects changed or dirty HEAD before publishing and recovers a lost push response',async t=>{
+  const f=await fixture(t),input={project:f.project,workspace:f.workspace,operation:{request:{commit_sha:f.head}},details:{}};
+  const ports={git:f.git,github:f.gh,inspect:async()=>({head:f.head,dirty:false}),save:async()=>{}};
+  for(const current of [{head:f.base,dirty:false},{head:f.head,dirty:true}]){
+    await assert.rejects(advanceSync(input,{...ports,inspect:async()=>current}),{code:'CONFLICT'});
+    assert.equal(await f.git.remote(f.project,f.branch),null);assert.equal(f.creations,0);
+  }
+  let pushes=0;
+  const git={...f.git,push:async(...args)=>{pushes++;await f.git.push(...args);throw Error('sync response lost');}};
+  await assert.rejects(advanceSync(input,{...ports,git}),/sync response lost/);
+  assert.equal(input.details.primary.push_attempted,true);
+  assert.equal((await advanceSync(input,{...ports,git})).status,'succeeded');assert.equal(pushes,1);
+  assert.equal(await f.git.remote(f.project,'dev'),f.dev);assert.equal(f.creations,1);
+});
+test('sync reconciles a lost PR response and keeps an unknown outcome for inspection',async t=>{
+  for(const created of [true,false]){
+    const f=await fixture(t),input={project:f.project,workspace:f.workspace,operation:{request:{commit_sha:f.head}},details:{}};
+    const github={...f.gh,create:async(...args)=>{if(created)await f.gh.create(...args);throw Error('sync PR response lost');}};
+    const ports={git:f.git,github,inspect:async()=>({head:f.head,dirty:false}),save:async()=>{}};
+    await assert.rejects(advanceSync(input,ports),/sync PR response lost/);
+    assert.equal((await advanceSync(input,ports)).status,created?'succeeded':'awaiting_reconciliation');
+    assert.equal(f.creations,created?1:0);assert.equal(await f.git.remote(f.project,'dev'),f.dev);
+  }
+});
+test('release rejects changed or dirty HEAD before creating a remote branch',async t=>{
+  const f=await fixture(t);
+  for(const current of [{head:f.base,dirty:false},{head:f.head,dirty:true}]){
+    await assert.rejects(f.advance({inspect:async()=>current}),{code:'CONFLICT'});
+    assert.equal(await f.git.remote(f.project,f.branch),null);assert.equal(f.creations,0);
+    assert.equal(await f.git.remote(f.project,'dev'),f.dev);
+  }
+});
+
+test('failed installation ends release; explicit retry keeps merged legs and original proof behind fresh CI',async t=>{
+  const f=await fixture(t),failedId=randomUUID(),childId=randomUUID();
+  f.project.github.ci={check_name:'code',app_id:42,recipe_sha256:'b'.repeat(64),workflow_sha256:'c'.repeat(64)};
+  const proof=(head,run_id='123')=>({head_sha:head,run_id,attempt:1,workflow:'.github/workflows/codeworks.yml',recipe:'b'.repeat(64),composition_digest:'sha256:'+'d'.repeat(64),composition_reference:'ghcr.io/fixture/repository-components/release@sha256:'+'d'.repeat(64),url:'https://github.com/fixture/repository/actions/runs/'+run_id});
+  const verified=(head,run_id)=>f.checks.set(head,[check(head,{ci_verified:true,ci_evidence:proof(head,run_id)})]);
+  verified(f.head);assert.equal((await f.advance()).reason,'MERGE_CHECKS_REQUIRED');
+  const merged=f.release.details.primary.merge_sha;verified(merged);
+  const failed=await f.advance({deploy:async()=>({operation_id:failedId,status:'failed'})});
+  assert.deepEqual(failed,{status:'failed',reason:'DEPLOYMENT_FAILED'});
+  const pinned=structuredClone(f.release.details.primary.merge_ci),leg=f.release.details.primary;
+  assert.equal(leg.deployment_operation_id,failedId);assert.equal(leg.merged,true);
+  // Новый request_key копирует сохранённые legs и разрешает только retry конкретной failed установки.
+  leg.deployment_retry_of=failedId;f.operation.id=randomUUID();
+  const calls=[],deploy=async(target,sha,evidence,retryOf)=>{calls.push({target,sha,evidence:structuredClone(evidence),retryOf});return {operation_id:childId,status:'pending'};};
+  const git={...f.git,candidate:()=>assert.fail('installation retry must not create another merge'),push:()=>assert.fail('installation retry must not push another merge')};
+  f.checks.set(merged,[check(merged,{conclusion:'failure',ci_verified:true,ci_evidence:proof(merged,'456')})]);
+  assert.equal((await f.advance({git,deploy})).status,'awaiting_ci');assert.equal(calls.length,0);
+  verified(merged,'456');
+  assert.equal((await f.advance({git,deploy})).status,'awaiting_deployment');
+  assert.deepEqual(calls,[{target:'dev',sha:merged,evidence:pinned,retryOf:failedId}]);
+  assert.deepEqual(f.release.details.primary.merge_ci,pinned);assert.equal(f.release.details.primary.deployment_operation_id,childId);
+  assert.equal(f.creations,1);assert.equal(await f.git.remote(f.project,'dev'),merged);
+  assert.equal((await f.advance({git,deploy:async(...args)=>{await deploy(...args);return {operation_id:childId,status:'failed'};}})).reason,'DEPLOYMENT_FAILED');
+  assert.equal(calls[1].retryOf,failedId);assert.equal(f.release.details.primary.deployment_retry_of,failedId);
+  delete f.release.details.primary.merge_ci;
+  await assert.rejects(f.advance({git,deploy:()=>assert.fail('missing original proof must not enqueue')}),{code:'CONFLICT'});
+  assert.equal(f.release.details.primary.merge_ci,undefined);
+});
+
+test('target advancement after merge blocks installation and retry without blocking an already installed leg',async t=>{
+  for(const retry of [false,true]){
+    const f=await fixture(t);f.good(f.head);assert.equal((await f.advance()).reason,'MERGE_CHECKS_REQUIRED');
+    const leg=f.release.details.primary,merged=leg.merge_sha;f.good(merged);
+    leg.merge_ci={head_sha:merged,run_id:'123',attempt:1};
+    if(retry)leg.deployment_retry_of=randomUUID();
+    await f.g('checkout','-B','dev',merged);await writeFile(path.join(f.repo,'newer-target'),'keep newer target\n');await f.g('add','.');await f.g('commit','-m','Newer target');await f.g('push','origin','dev');
+    const advanced=await f.git.remote(f.project,'dev');
+    await assert.rejects(f.advance({deploy:()=>assert.fail('advanced target must block deployment admission')}),{code:'TARGET_CHANGED'});
+    assert.equal(await f.git.remote(f.project,'dev'),advanced);assert.equal(leg.deployment_operation_id,undefined);
+    f.installed('dev',merged);assert.equal((await f.advance()).status,'succeeded');
+    assert.equal(await f.git.remote(f.project,'dev'),advanced);
+  }
 });

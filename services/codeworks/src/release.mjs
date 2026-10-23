@@ -1,21 +1,27 @@
-// ABOUTME: Продолжает durable Git flow feature, promotion и hotfix через явные порты.
+// ABOUTME: Продолжает GitHub синхронизацию и выпуски feature/hotfix через явные порты.
 // ABOUTME: Merge не означает CI или установленный выпуск; неопределённую публикацию сначала сверяет чтением.
 import { Fault } from './errors.mjs';
 const waiting=(status,reason)=>({status,reason});
 function validatePR(p,w,leg,pr) {
   if(!pr||!pr.body?.includes('Codeworks workspace '+w.id+';')||pr.head?.sha!==leg.head||pr.head?.ref!==leg.branch||pr.base?.ref!==leg.target||pr.head?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||pr.base?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||(leg.pr_number&&pr.number!==leg.pr_number))throw new Fault('CONFLICT','PR identity differs from pinned intent.');
 }
-/** Один ограниченный проход. save фиксирует все намерения ДО Git/GitHub мутаций; evidence — доверенный owner state. */
+/** Один проход; save фиксирует намерения до мутаций, evidence читает доверенную установку.
+ * deploy(target,sha,proof,retryOf) возвращает {operation_id,status}; retryOf разрешает одну явную попытку.
+ */
 export async function advanceRelease({project:p,workspace:w,operation:op,release}, {git,github,inspect,save,evidence,deploy,checkpoint=async()=>{}}) {
+  if(!['feature','hotfix'].includes(w.kind))throw new Fault('INVALID_ARGUMENT');
   const flow=release.details;
   const persist=async()=>save(flow);
   const checkGate=async(leg,sha,stage,fallback)=>{
     const checks=await github.checks(p,sha);
     if(!checksPassed(p.github.required_checks,checks,sha))return waiting('awaiting_ci',checks.find(c=>c.ci_state&&c.ci_state!=='CI_VERIFIED')?.ci_state??fallback);
+    const pinnedRetry=stage==='merge'&&leg.deployment_retry_of;
+    if(pinnedRetry&&!leg.merge_ci)throw new Fault('CONFLICT','Deployment retry requires the original verified merge proof.');
     if(p.github.ci){
       const proof=checks.find(c=>c.name===p.github.ci.check_name&&c.app_id===p.github.ci.app_id&&c.ci_verified)?.ci_evidence;
       if(!proof)return waiting('awaiting_ci','CI_COMPOSITION_REQUIRED');
-      leg[stage+'_ci']=proof;await persist();
+      // AIDEV-NOTE: Свежие проверки обязательны, а technical retry устанавливает прежний immutable proof.
+      if(!pinnedRetry){leg[stage+'_ci']=proof;await persist();}
     }
     return null;
   };
@@ -89,12 +95,40 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
     const target=leg.target==='main'?'prod':'dev';
     const installed=await evidence(target,leg.merge_sha);
     if(!installed){
-      if(deploy&&leg.merge_ci){leg.deployment_operation_id=await deploy(target,leg.merge_sha,leg.merge_ci);await persist();}
+      if(await git.remote(p,leg.target)!==leg.merge_sha)throw new Fault('TARGET_CHANGED','Target advanced before installation; this release cannot replace it.');
+      if(deploy&&leg.merge_ci){
+        const deployment=await deploy(target,leg.merge_sha,leg.merge_ci,leg.deployment_retry_of??null);
+        leg.deployment_operation_id=deployment.operation_id;await persist();
+        if(deployment.status==='failed')return waiting('failed','DEPLOYMENT_FAILED');
+      }
       return waiting('awaiting_deployment','EXACT_MERGE_DEPLOYMENT_REQUIRED');
     }
     leg.deployment_evidence_id=installed.id;await persist();
   }
   return waiting('succeeded','VERIFIED_RELEASE_COMPLETED');
+}
+/** Публикует рабочую ветку и PR без принятия задачи, слияния и развёртывания. */
+export async function advanceSync({project:p,workspace:w,operation:op,details}, {git,github,inspect,save,checkpoint=async()=>{}}) {
+  if(!p.github)throw new Fault('CONFLICT','GitHub is not configured.');
+  const current=await inspect(p,w),head=op.request.commit_sha;
+  if(current.dirty||current.head!==head)throw new Fault('CONFLICT','Workspace changed during synchronization.');
+  await git.validateHead(p,w,head);
+  const leg=details.primary??={branch:w.branch,head,target:w.kind==='feature'?'dev':'main',target_sha:await git.remote(p,w.kind==='feature'?'dev':'main')};
+  await save(details);
+  if(await git.remote(p,w.branch)!==head){
+    leg.push_attempted=true;await save(details);await checkpoint('before-sync-push');
+    await git.push(p,w.branch,head);await checkpoint('after-sync-push');
+  }
+  let pr=await github.find(p,leg);
+  if(!pr){
+    if(leg.pr_attempted)return waiting('awaiting_reconciliation','PR_CREATE_UNCERTAIN');
+    leg.pr_attempted=true;await save(details);
+    pr=await github.create(p,leg,'Codeworks workspace '+w.id+'; working branch.');
+  }
+  validatePR(p,w,leg,pr);
+  if(pr.state!=='open'||pr.merged)throw new Fault('CONFLICT','Working PR is already closed.');
+  leg.pr_number=pr.number;leg.pr_url=pr.html_url;await save(details);
+  return waiting('succeeded','SYNCHRONIZED');
 }
 /** Fail closed: absent, pending, failed, skipped, wrong app или SHA не дают merge/release. */
 export function checksPassed(required,checks,sha) {
