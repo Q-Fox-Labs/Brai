@@ -65,10 +65,12 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
           if(w){
             if(w.kind!==kind||w.removed_at||w.kind==='promotion')throw new Fault('CONFLICT','Use a new workspace key for a different or completed task.');
           }else{
+            const key=args.workspace_key;
+            if(key.length>64||!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(key)||/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i.test(key)||/^[0-9a-f]{12,}$/i.test(key))throw new Fault('INVALID_ARGUMENT','New workspace_key must be a short descriptive task name, e.g. codeworks-auto-cleanup; UUIDs and commit hashes are not task names.');
             const base_sha=await git.readBase(p,kind);
             if(kind==='hotfix'&&(await db.currentEvidence(p.id,'prod'))?.commit_sha!==base_sha)throw new Fault('PRODUCTION_BASE_MISMATCH');
             const id=randomUUID();
-            w={id,project_id:p.id,workspace_key:args.workspace_key,kind,base_ref:p.git_flow[kind+'_base'],base_sha,branch:p.git_flow[kind+'_prefix']+'codeworks-'+id,path:path.join(p.workspace_root,id),ownership_token:randomUUID()};
+            w={id,project_id:p.id,workspace_key:args.workspace_key,kind,base_ref:p.git_flow[kind+'_base'],base_sha,branch:p.git_flow[kind+'_prefix']+args.workspace_key,path:path.join(p.workspace_root,id),ownership_token:randomUUID()};
             await db.insertWorkspace(w);
           }
         }else{

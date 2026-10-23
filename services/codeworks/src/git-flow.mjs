@@ -3,7 +3,7 @@
 import { command } from './git.mjs';
 import { Fault } from './errors.mjs';
 const sha=value=>/^[0-9a-f]{40}$/.test(value);
-const branch=value=>/^(?:dev|main|(?:feature|hotfix)\/codeworks-[0-9a-f-]{36})$/.test(value);
+const branch=value=>/^(?:dev|main|(?:feature|hotfix)\/[a-z0-9]+(?:-[a-z0-9]+)*)$/.test(value)&&value.length<=72;
 /** Создаёт адаптер; localRemote разрешён только изолированным fixture, не runtime-конфигурацией. */
 export function createFlowGit({run=command,localRemote=false,requireLock=()=>{if(process.env.CODEWORKS_LOCK_HELD!=='1')throw new Fault('INTERNAL','Git mutation requires the project lock.');}}={}) {
   const git=(p,args,options)=>run('git',['-C',p.repo_path,...args],options);
