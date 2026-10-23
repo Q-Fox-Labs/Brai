@@ -12,16 +12,22 @@ import { migrate } from '../../src/migrate.mjs';
 import { launchWorker } from '../../src/runtime.mjs';
 export const configured=!!process.env.CODEWORKS_TEST_CONFIG_FILE;
 /** Принимает только две конкретные disposable DB; credentials не логируются. */
-export async function setup({git=createGit(),command=runCommand}={}) {
+export async function readConfig() {
+  if(!configured)throw new Error('CODEWORKS_TEST_CONFIG_FILE_REQUIRED');
   const config=JSON.parse(await readFile(process.env.CODEWORKS_TEST_CONFIG_FILE,'utf8'));
   for(const [key,name] of [['owner_url','brai_codeworks_test'],['app_url','brai_codeworks_test'],['restore_owner_url','brai_codeworks_restore_test'],['restore_app_url','brai_codeworks_restore_test']]) {
     const url=new URL(config[key]);
     if(url.pathname!=='/'+name||!['postgres:','postgresql:'].includes(url.protocol))throw new Error('DISPOSABLE_DATABASE_REQUIRED');
   }
+  return config;
+}
+/** Применяет owner migrations только в указанной test DB и создаёт реальные Git fixtures. */
+export async function setup({git=createGit(),command=runCommand}={}) {
+  const config=await readConfig();
   const owner=new Pool({connectionString:config.owner_url,max:4}),app=new Pool({connectionString:config.app_url,max:8});
   await migrate(owner,config.app_role);
   await migrate(owner,config.app_role);
-  await owner.query('TRUNCATE codeworks.requests,codeworks.attachments,codeworks.releases,codeworks.operations,codeworks.workspaces,codeworks.projects CASCADE');
+  await owner.query('TRUNCATE codeworks.requests,codeworks.legacy_attachments,codeworks.releases,codeworks.operations,codeworks.workspaces,codeworks.projects CASCADE');
   const allowedRepositories=[];
   const h=createHandlers(createStore(app),git,{allowedRepositories});
   const temporary=[];
@@ -54,6 +60,8 @@ export async function setup({git=createGit(),command=runCommand}={}) {
       await writeFile(path.join(repo,'hello.txt'),'frozen base\n');
       if(documentationPaths.length){await mkdir(path.join(repo,'docs'));await writeFile(path.join(repo,'docs/readme.md'),'base docs\n');}
       await command('git',['init','-b','dev',repo]);
+      await command('git',['-C',repo,'config','user.name','Codeworks fixture']);
+      await command('git',['-C',repo,'config','user.email','fixture@example.invalid']);
       await command('git',['-C',repo,'add','.']);
       await command('git',['-C',repo,'commit','-m','Synthetic base']);
       const base=(await command('git',['-C',repo,'rev-parse','HEAD'])).stdout;
@@ -85,7 +93,7 @@ export async function setup({git=createGit(),command=runCommand}={}) {
     },
     /** Закрывает только созданные fixtures и собственные строки тестовой БД. */
     async close() {
-      await owner.query('TRUNCATE codeworks.requests,codeworks.attachments,codeworks.releases,codeworks.operations,codeworks.workspaces,codeworks.projects CASCADE');
+      await owner.query('TRUNCATE codeworks.requests,codeworks.legacy_attachments,codeworks.releases,codeworks.operations,codeworks.workspaces,codeworks.projects CASCADE');
       await Promise.all([owner.end(),app.end()]);
       for(const root of temporary)await rm(root,{recursive:true,force:true});
     },

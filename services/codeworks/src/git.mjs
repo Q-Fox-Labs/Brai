@@ -1,7 +1,7 @@
 // ABOUTME: Создаёт и проверяет только доказанно принадлежащие Codeworks Git worktree.
-// ABOUTME: Не присваивает существующие ветки/пути, сохраняет чужие/активные/dirty области и не устанавливает пакеты.
+// ABOUTME: Не присваивает существующие ветки/пути, сохраняет чужие и dirty области и не устанавливает пакеты.
 import { spawn } from 'node:child_process';
-import { lstat, realpath, readFile, unlink } from 'node:fs/promises';
+import { lstat, realpath, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Fault } from './errors.mjs';
 const relative=value=>value==='.'||(!path.isAbsolute(value)&&!value.split('/').some(p=>!p||p==='.'||p==='..')&&!value.includes('\\'));
@@ -83,11 +83,6 @@ export function createGit({flowGit}={}) {
       }
       return base;
     },
-    /** Promotion использует исторический проверенный SHA dev, даже если latest dev уже другой. */
-    async readPinned(project,head) {
-      const current=await this.readBase(project,'feature');
-      if(!/^[0-9a-f]{40}$/.test(head)||(await git(project,['merge-base','--is-ancestor',head,current],{allowFailure:true})).code!==0)throw new Fault('VERIFIED_DEV_REQUIRED');
-    },
     /** Проверяет ветку, worktree registration и ownership; никогда не принимает стороннюю область. */
     async inspect(project,w) {
       await topology(project);
@@ -96,38 +91,10 @@ export function createGit({flowGit}={}) {
       if((await local(w,['symbolic-ref','--short','HEAD'])).stdout!==w.branch)throw new Fault('OWNERSHIP_CONFLICT');
       return {head:(await local(w,['rev-parse','HEAD'])).stdout,branch:w.branch,dirty:!!(await local(w,['status','--porcelain=v1','--untracked-files=all'])).stdout};
     },
-    /** Готовит immutable commit object только из разрешённых файлов собственной области. */
-    async planCommit(project,w,op) {
-      requireLock();const current=await this.inspect(project,w);
-      if(current.head!==op.request.parent_sha)throw new Fault('OWNERSHIP_CONFLICT');
-      const permit=file=>file&&project.allowed_paths.some(p=>p==='.'||file===p||file.startsWith(p+'/'))&&!project.excluded_paths.some(p=>file===p||file.startsWith(p+'/'))&&!file.split('/').some(p=>['.git','.env','.secrets','.agents','.codex','node_modules'].includes(p)||p.startsWith('.env.'));
-      const tracked=(await local(w,['diff','--name-only','--no-renames','-z',current.head])).stdout;
-      const untracked=(await local(w,['ls-files','--others','--exclude-standard','-z'])).stdout;
-      if((tracked+untracked).split('\0').filter(Boolean).some(file=>!permit(file)))throw new Fault('FORBIDDEN');
-      const index=(await local(w,['rev-parse','--path-format=absolute','--git-path','codeworks-index-'+op.id])).stdout;
-      const env={GIT_INDEX_FILE:index};
-      await local(w,['read-tree',current.head],{env});
-      await local(w,['add','--all','--','.'],{env});
-      const files=(await local(w,['diff','--cached','--name-only','--no-renames','-z',current.head],{env})).stdout;
-      if(files.split('\0').filter(Boolean).some(file=>!permit(file)))throw new Fault('FORBIDDEN');
-      const tree=(await local(w,['write-tree'],{env})).stdout;
-      const date=new Date(op.created_at).toISOString();
-      const commit_sha=tree===(await local(w,['rev-parse',current.head+'^{tree}'])).stdout?current.head:(await local(w,['commit-tree',tree,'-p',current.head,'-F','-'],{input:op.request.message+'\n\nCodeworks-Operation: '+op.id+'\n',env:{GIT_AUTHOR_DATE:date,GIT_COMMITTER_DATE:date}})).stdout;
-      return {parent_sha:current.head,tree,commit_sha,index};
-    },
-    /** CAS ветки и восстановление index повторяются без второго commit после interruption. */
-    async finishCommit(project,w,plan) {
-      requireLock();const current=await this.inspect(project,w);
-      if(current.head!==plan.parent_sha&&current.head!==plan.commit_sha)throw new Fault('OWNERSHIP_CONFLICT');
-      if(current.head!==plan.commit_sha)await git(project,['update-ref','refs/heads/'+w.branch,plan.commit_sha,plan.parent_sha]);
-      await local(w,['read-tree',plan.tree]);
-      if(plan.index)await unlink(plan.index).catch(error=>{if(error.code!=='ENOENT')throw error;});
-      return {commit_sha:plan.commit_sha};
-    },
-    /** Убирает только quiesced clean own worktree после доказанного слияния всех release legs. */
+    /** Убирает только clean own worktree после доказанного слияния всех release legs. */
     async cleanup(project,w,heads) {
       requireLock();await topology(project);
-      if(!heads.length||w.writer?.state!=='quiesced'||!w.path.startsWith(project.workspace_root+'/')||w.path===project.repo_path)return false;
+      if(!heads.length||!w.path.startsWith(project.workspace_root+'/')||w.path===project.repo_path)return false;
       const head=await branches(project,w);if(!head)return true;
       for(const target of heads)if(!/^[0-9a-f]{40}$/.test(target)||(await git(project,['merge-base','--is-ancestor',head,target],{allowFailure:true})).code!==0)return false;
       if(await registration(project,w)){

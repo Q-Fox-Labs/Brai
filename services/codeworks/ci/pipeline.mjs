@@ -44,7 +44,10 @@ export async function reusable(hit,expected,{repository,token,readRun,readRecipe
   if(doc.repository?.full_name!==repository||doc.head_sha!==m.source||doc.path!=='.github/workflows/codeworks.yml'||doc.event!=='push'||doc.status!=='completed'||doc.conclusion!=='success'||String(doc.run_attempt)!==m.attempt)return false;
   if(!await (readRecipe??((source,recipe)=>verifyRecipeAt(endpoint=>github(`repos/${repository}/${endpoint}`,token),source,recipe)))(m.source,expected.recipe))return false;
   if(catalogContains(catalog,expected.id,hit))return true;
-  const proof=await (readOriginProof??((id,attempt,source)=>loadRunProof(endpoint=>github(`repos/${repository}/${endpoint}`,token),artifact=>downloadProof({repository,token},artifact),id,attempt,source)))(m.runId,m.attempt,m.source);
+  const proof=await (readOriginProof??((id,attempt,source)=>loadRunProof(endpoint=>github(`repos/${repository}/${endpoint}`,token),artifact=>downloadProof({repository,token},artifact),id,attempt,source)))(m.runId,m.attempt,m.source).catch(error=>{
+    if(error.message==='CI_PROOF_UNAVAILABLE')return null;
+    throw error;
+  });
   const component=proof?.composition?.components?.find(c=>c.id===expected.id),kind=expected.kind==='runtime'?'artifact':expected.kind==='build'?'build':'check';
   if(component?.[kind]?.digest!==hit.digest||(kind==='artifact'?component?.keys?.artifact:kind==='build'?component?.keys?.build:component?.keys?.checks)!==expected.key)return false;
   return true;
