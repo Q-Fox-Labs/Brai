@@ -74,17 +74,37 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
     const merged=state.result.details.primary.merge_sha;assert.notEqual(merged,head);assert.equal(await flowGit.remote(p,kind==='feature'?'dev':'main'),merged);
     checks.set(head,good(head));await run();assert.equal((await op(p,accepted.operation_id)).step,'MERGE_CHECKS_REQUIRED');
     checks.set(merged,good(merged));await run();assert.equal((await op(p,accepted.operation_id)).status,'awaiting_deployment');
-    await evidence(p,kind==='feature'?'dev':'prod',merged);await run();
+    await evidence(p,kind==='feature'?'dev':'prod',merged);
     if(kind==='hotfix'){
+      await run();
+      assert.equal((await f.app.query("SELECT id FROM codeworks.operations WHERE workspace_id=$1 AND kind='cleanup'",[w.id])).rowCount,0);
       state=await op(p,accepted.operation_id);assert.equal(state.status,'awaiting_ci');assert.ok(state.result.details.backport);
       checks.set(state.result.details.backport.merge_sha,good(state.result.details.backport.merge_sha));await run();
       assert.equal((await op(p,accepted.operation_id)).status,'awaiting_deployment');
-      await evidence(p,'dev',state.result.details.backport.merge_sha);await run();
+      await evidence(p,'dev',state.result.details.backport.merge_sha);
     }
+    // Сбой до COMMIT не оставляет ни успешный выпуск, ни отдельное намерение очистки.
+    await assert.rejects(run({checkpoint:async point=>{if(point==='before-release-completed')throw Object.assign(new Error('crash'),{code:'TEST_INTERRUPTION'});}}),{code:'TEST_INTERRUPTION'});
+    assert.equal((await f.app.query("SELECT id FROM codeworks.operations WHERE workspace_id=$1 AND kind='cleanup'",[w.id])).rowCount,0);
+    await run();
     state=await op(p,accepted.operation_id);assert.equal(state.status,'succeeded');assert.equal(state.step,'VERIFIED_RELEASE_COMPLETED');assert.equal(state.result.details.primary.head_ci.head_sha,head);assert.equal(state.result.details.primary.merge_ci.head_sha,merged);
     if(kind==='hotfix')assert.equal((await command('git',['-C',p.repo_path,'ls-tree','--name-only',merged])).stdout.includes('unreleased'),false);
     assert.equal((await git.inspect(p,w)).head,head);assert.equal(createCount,kind==='hotfix'?2:1);
     assert.equal('cleanup' in state.result.details,false);
+    const automatic=state.result.cleanup_operation_id;assert.ok(automatic);
+    await run();
+    assert.equal((await f.app.query("SELECT id FROM codeworks.operations WHERE workspace_id=$1 AND kind='cleanup'",[w.id])).rowCount,1);
+    assert.ok((await createStore(f.app).pending(100)).some(row=>row.id===automatic));
+    if(kind==='feature'){
+      await f.worker(p,automatic);
+      assert.equal((await op(p,automatic)).status,'succeeded');assert.ok((await area(w.id)).removed_at);
+      await assert.rejects(lstat(w.path),{code:'ENOENT'});
+      assert.notEqual((await command('git',['-C',p.repo_path,'show-ref','--verify','refs/heads/'+w.branch],{allowFailure:true})).code,0);
+      assert.equal(await flowGit.remote(p,w.branch),head);
+      assert.equal((await op(p,accepted.operation_id)).status,'succeeded');
+      await assert.rejects(f.h.call('prepare',args,'codex'),{code:'CONFLICT'});
+      return;
+    }
     const cleanup=async key=>{
       const a=await f.h.call('cleanup',{project_id:p.id,workspace_id:w.id,request_key:key},'hermes');
       await f.worker(p,a.operation_id);
@@ -92,10 +112,12 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
       return {accepted:a,operation:status.operation,status};
     };
     await writeFile(path.join(w.path,'untracked'),'keep dirty\n');
-    const dirty=await cleanup('dirty-cleanup');assert.equal(dirty.operation.status,'succeeded');assert.deepEqual(dirty.operation.result,{removed:false});
+    await f.worker(p,automatic);
+    const dirty=await op(p,automatic);assert.equal(dirty.status,'failed');assert.equal(dirty.error.code,'CONFLICT');
+    assert.equal((await op(p,accepted.operation_id)).status,'succeeded');
     assert.equal((await lstat(w.path)).isDirectory(),true);await rm(path.join(w.path,'untracked'));
     await writeFile(path.join(w.path,'unmerged'),'keep new commit\n');await command('git',['-C',w.path,'add','unmerged']);await command('git',['-C',w.path,'commit','-m','Unmerged fixture change']);
-    assert.deepEqual((await cleanup('unmerged-cleanup')).operation.result,{removed:false});
+    const unmerged=await cleanup('unmerged-cleanup');assert.equal(unmerged.operation.status,'failed');assert.equal(unmerged.operation.error.code,'CONFLICT');
     await command('git',['-C',w.path,'reset','--hard',head]);
     await command('git',['-C',p.repo_path,'worktree','unlock',w.path]);await command('git',['-C',p.repo_path,'worktree','lock','--reason','foreign',w.path]);
     const foreign=await cleanup('foreign-cleanup');assert.equal(foreign.operation.status,'failed');assert.equal(foreign.operation.error.code,'OWNERSHIP_CONFLICT');

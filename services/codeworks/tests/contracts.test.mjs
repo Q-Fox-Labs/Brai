@@ -90,6 +90,7 @@ test('status finds task, workspace, operation or list without exposing historica
   assert.deepEqual(await f.h.call('status',{project_id:'p',operation_id:accepted.operation_id},'codex'),byKey);
   assert.deepEqual(await f.h.call('status',{project_id:'p'},'codex'),{workspaces:[byKey.workspace]});
   w.removed_at='2026-10-23T01:00:00.000Z';assert.equal((await f.h.call('status',{project_id:'p',workspace_key:'task'},'codex')).git,null);
+  await assert.rejects(f.h.call('prepare',prepare,'codex'),{code:'CONFLICT'});
   await assert.rejects(f.h.call('prepare',{...prepare,request_key:'finished-task'},'codex'),{code:'CONFLICT'});
 });
 test('status preserves durable failure when Git inspection fails and masks unexpected infrastructure details',async()=>{

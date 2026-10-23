@@ -27,4 +27,6 @@ for(const kind of ['feature','hotfix'])test(kind+' cleanup preserves dirty/unmer
  assert.equal(await git.cleanup(project,w,heads),true);await assert.rejects(access(w.path));
  assert.notEqual((await command('git',['-C',repo,'show-ref','--verify','refs/heads/'+w.branch],{allowFailure:true})).code,0);
  assert.equal(await git.cleanup(project,w,heads),true);
+ await mkdir(w.path);await writeFile(w.path+'/foreign','preserve');
+ assert.equal(await git.cleanup(project,w,heads),false);await access(w.path+'/foreign');
 });

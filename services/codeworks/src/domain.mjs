@@ -55,6 +55,7 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         if(old){
           if(old.payload_sha256!==digest||old.archived)throw new Fault('CONFLICT','Request key belongs to another or archived operation.');
           const w=await db.workspace(p.id,old.workspace_id);
+          if(method==='prepare'&&w.removed_at)throw new Fault('CONFLICT','Task workspace was removed; use a new workspace key for a new task.');
           return {operation_id:old.operation_id,workspace_id:w.id,path:w.path,branch:w.branch};
         }
         let w;

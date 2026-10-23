@@ -16,7 +16,9 @@ codeworks --request-json '{"action":"status","project_id":"brai","workspace_key"
 
 Дождитесь ready, затем используйте возвращённый path обычными инструментами.
 Для sync/release нужны workspace_id, точный commit_sha и стабильный request_key;
-cleanup вызывается отдельно после успешного выпуска. Справка и схемы:
+после успешного выпуска cleanup ставится автоматически. Его идентификатор —
+cleanup_operation_id в статусе выпуска. Если очистка сохранила дерево с ошибкой,
+устраните причину и повторите cleanup с новым request_key. Справка и схемы:
 `codeworks --help`, `codeworks --schema`.
 
 Подключение: CODEWORKS_CLIENT_CONFIG — публичный JSON с server, credsFile,

@@ -95,7 +95,7 @@ export function createGit({flowGit}={}) {
     async cleanup(project,w,heads) {
       requireLock();await topology(project);
       if(!heads.length||!w.path.startsWith(project.workspace_root+'/')||w.path===project.repo_path)return false;
-      const head=await branches(project,w);if(!head)return true;
+      const head=await branches(project,w);if(!head)return !await exists(w.path);
       for(const target of heads)if(!/^[0-9a-f]{40}$/.test(target)||(await git(project,['merge-base','--is-ancestor',head,target],{allowFailure:true})).code!==0)return false;
       if(await registration(project,w)){
         if((await this.inspect(project,w)).dirty)return false;

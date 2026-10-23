@@ -1,6 +1,7 @@
 // ABOUTME: Выполняет сохранённые операции деревьев, GitHub и выпуска.
 // ABOUTME: Работает только со своими операциями под проектным lock; процессы и права агента не затрагивает.
 import { Pool } from 'pg';
+import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { createGit } from './git.mjs';
 import { createFlowGit } from './git-flow.mjs';
@@ -42,8 +43,9 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
         const legs=w.kind==='hotfix'?[release.details.primary,release.details.backport]:[release.details.primary];
         if(legs.some(leg=>!leg?.merged||!leg.deployment_evidence_id))throw new Fault('CONFLICT');
         const removed=await git.cleanup(project,w,legs.map(l=>l.merge_sha));
-        if(removed)await db.query('UPDATE codeworks.workspaces SET removed_at=COALESCE(removed_at,now()) WHERE id=$1',[w.id]);
-        await finish('succeeded',removed?'removed':'preserved',{removed});return;
+        if(!removed)throw new Fault('CONFLICT','Cleanup preserved the workspace: check uncommitted or unmerged changes, then retry cleanup with a new request key.');
+        await db.query('UPDATE codeworks.workspaces SET removed_at=COALESCE(removed_at,now()) WHERE id=$1',[w.id]);
+        await finish('succeeded','removed',{removed});return;
       }
       if(op.kind==='sync'){
         const details=op.result??{};
@@ -69,10 +71,14 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
           if(['GITHUB_UNAVAILABLE','GIT_FAILED'].includes(error?.code))outcome={status:'awaiting_reconciliation',reason:error.code};
           else throw error;
         }
+        const cleanupId=outcome.status==='succeeded'?randomUUID():null;
         await db.query('BEGIN');
         try{
           await db.query('UPDATE codeworks.releases SET state=$2,details=$3 WHERE id=$1',[release.id,outcome.status,release.details]);
-          await finish(outcome.status,outcome.reason,{release_id:release.id,state:outcome.status,details:release.details});
+          // AIDEV-NOTE: Выпуск и намерение очистки фиксируются вместе; существующий worker продолжит очистку после сбоя.
+          if(cleanupId)await db.query("INSERT INTO codeworks.operations(id,project_id,workspace_id,executor_id,kind,status,step,request) VALUES($1,$2,$3,$4,'cleanup','pending','intent',$5)",[cleanupId,op.project_id,w.id,op.executor_id,{project_id:op.project_id,workspace_id:w.id,request_key:'release-cleanup-'+op.id}]);
+          await finish(outcome.status,outcome.reason,{release_id:release.id,state:outcome.status,details:release.details,...(cleanupId?{cleanup_operation_id:cleanupId}:{})});
+          if(cleanupId)await checkpoint('before-release-completed');
           await db.query('COMMIT');
         }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}
         return;
