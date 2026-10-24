@@ -393,6 +393,49 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await dispatch(self.update(), "owner")
         self.assertEqual(reached, ["owner"])
 
+    async def test_business_updates_reach_their_handler_without_brai_access(self):
+        """Business lifecycle проходит к своему плагину без publisher и общего owner turn."""
+        await self.set_group_route()
+        reached = []
+        for field in ("business_connection", "business_message", "edited_business_message",
+                      "deleted_business_messages"):
+            with self.subTest(field=field):
+                payload = (NS(user=NS(id=123, is_bot=False)) if field == "business_connection"
+                           else NS(business_connection_id="business", chat=NS(id=999, type="private")))
+                update = NS(effective_chat=getattr(payload, "chat", None),
+                            effective_user=None if field == "business_connection" else NS(id=999),
+                            effective_message=payload if field.endswith("message") else None,
+                            **{field: payload})
+                # Следующий native Business handler должен получить исходный update.
+                await self.app.handlers[0].callback(update, None)
+                reached.append(update)
+                self.assertIs(getattr(reached[-1], field), payload)
+        self.assertEqual(len(reached), 4)
+        for sender in (123, 456, 999):
+            source = NS(platform="telegram", chat_id=str(sender), user_id=str(sender), chat_type="dm")
+            event = self.event(source=source, media_urls=["/download/file.pdf"],
+                               raw_message=NS(business_connection_id="business"))
+            self.assertEqual((await self.plugin.incoming(event))["action"], "skip")
+        self.assertEqual(self.plugin.inbound_events, {})
+        self.assertEqual(self.bridge.calls, [])
+        self.assertEqual(self.bot.sent, [])
+
+    async def test_business_connection_requires_primary_owner_and_closed_guard_stops_updates(self):
+        """Участник Brai не может подключить свой Business-аккаунт; unload закрывает весь ingress."""
+        self.config = replace(self.config, allowed_users=("456",))
+        await self.set_group_route()
+        stop = sys.modules["telegram.ext"].ApplicationHandlerStop
+        for user in (NS(id=456), NS(id=999), NS(id=123, is_bot=True), None):
+            update = NS(business_connection=NS(user=user))
+            with self.subTest(user=user), self.assertRaises(stop):
+                await self.plugin.guard(update, None)
+        self.plugin.closed = True
+        for field in ("business_connection", "business_message", "edited_business_message",
+                      "deleted_business_messages"):
+            payload = NS(user=NS(id=123, is_bot=False))
+            with self.subTest(field=field), self.assertRaises(stop):
+                await self.plugin.guard(NS(**{field: payload}), None)
+
     async def test_group_ingress_route_owner_and_idempotent_attachment_namespace(self):
         await self.set_group_route()
         event = self.event(media_urls=["/native-download/file.pdf"],
