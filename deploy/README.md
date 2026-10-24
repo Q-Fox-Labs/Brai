@@ -112,3 +112,9 @@ node deploy/scripts/build-agent-artifact.mjs --source "$PWD" --revision "$REV" -
 Materializer ничего не устанавливает и не собирает; он требует точное совпадение Git revision, чистое дерево и готовые `.next`/`dist`, сверяет каждый установленный пакет с точной версией lock entry, копирует symlink targets в самодостаточную closure, сохраняя расположение locked dependencies как в корневом `node_modules`, так и в `node_modules` объявленных workspaces и записывает newline-terminated manifest. Для prepared web/artifacts используйте оба Compose overlay: `compose.artifacts.yml` и `compose.prepared.yml`, передав абсолютные `BRAI_WEB_RUNTIME_CONTEXT`, `BRAI_ARTIFACTS_RUNTIME_CONTEXT`, `BRAI_SOURCE_REVISION`; prepared Dockerfiles делают только `COPY`. В `compose.production-test.yml` изменённые web/artifact images собираются из этих runtime contexts, а auth/timer получают заранее принятые образы через `BRAI_AUTH_IMAGE` и `BRAI_TIMER_IMAGE`; test Compose не объявляет неподдерживаемые prepared-контексты для auth/timer. Финальные release bundles/images принимаются только после web local acceptance и привязки к commit, чей hash равен `sourceRevision` manifest/image label.
 
 Prepared timer также использует `services/timer/Dockerfile.prepared`: упаковка выполняет только COPY готовых `dist`, `schemas`, `migrations` и точной runtime closure. Отдельная owner-команда миграций остаётся обязательной; startup таймера не меняет схему.
+
+## Связанные материалы
+
+- [ALERTS.md](ALERTS.md).
+- [tests/artifacts-acceptance/README.md](tests/artifacts-acceptance/README.md).
+- [tests/artifacts-acceptance/browser-checklist.md](tests/artifacts-acceptance/browser-checklist.md).

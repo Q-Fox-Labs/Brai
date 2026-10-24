@@ -1,6 +1,6 @@
 // ABOUTME: Discovers owner descriptors, checks build edges and compares component lifecycle with Git.
 // ABOUTME: Git задаёт границу исходников; ignored live-каталоги не читаются.
-import { existsSync, globSync, readFileSync, readdirSync, lstatSync } from 'node:fs';
+import { existsSync, globSync, readFileSync, readdirSync, lstatSync, realpathSync } from 'node:fs';
 import { dirname, join, relative, resolve, posix } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -182,4 +182,92 @@ export function fingerprints(root, component, {platform=`${process.platform}/${p
   const runtime=digestFiles(root,payloadInputs,{artifact,modes:payloadInputs.map(path=>[path,lstatSync(join(root,path)).mode & 0o777])});
   const checks=digestFiles(root,[...buildFiles,...deps,...expand(root,c.inputs.checks)],{build,check:c.commands.check,lock:checkLock,delivery});
   return {build,runtime,checks,artifact,compatibility};
+}
+
+// AIDEV-NOTE: Навигация проверяется в том же доверенном recipe, что и component graph.
+const privateRoot='docs/user-agent/usercustom';
+const insidePrivate=p=>p===privateRoot||p.startsWith(privateRoot+'/');
+const links=text=>[...text.replace(/```[\s\S]*?```/g,'').replace(/`[^`\n]*`/g,'').matchAll(/!?\[[^\]\n]*\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g)].map(m=>m[1].replace(/^<|>$/g,''));
+function sourceTarget(file,href) {
+  if (/^(?:https?:|mailto:|data:)/i.test(href)) return null;
+  if (href.startsWith('#')) return file;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href)||href.startsWith('/')) throw Error('DOC_EXTERNAL_LOCAL_PATH: '+file);
+  return posix.normalize(posix.join(posix.dirname(file),decodeURIComponent(href.split('#')[0])));
+}
+function anchors(text) {
+  const found=new Set(),counts=new Map();
+  for(const match of text.replace(/```[\s\S]*?```/g,'').matchAll(/^#{1,6}\s+(.+?)\s*#*$/gm)) {
+    const base=match[1].toLowerCase().replace(/[^\p{L}\p{N} _-]/gu,'').replace(/ /g,'-');
+    const count=counts.get(base)??0;
+    counts.set(base,count+1);found.add(base+(count?'-'+count:''));
+  }
+  for(const match of text.matchAll(/<a\s+(?:id|name)=["']([^"']+)["']/gi))found.add(match[1]);
+  return found;
+}
+/** Проверяет полноту карточек, локальные ссылки, достижимость и отсутствие приватных входов. */
+export function validateDocumentation(root,graph) {
+  const files=graph.files, source=new Set(files);
+  const read=p=>readFileSync(join(root,p),'utf8');
+  for(const p of ['docs/README.md','docs/components/README.md','docs/environment/README.md','docs/user-agent/README.md','AGENTS.md'])
+    if(!source.has(p))throw Error('DOC_REQUIRED: '+p);
+  const index=read('docs/components/README.md'),environment=read('docs/environment/README.md');
+  const referenced=(file,text,target)=>links(text).some(h=>sourceTarget(file,h)===target);
+  for(const c of graph.components.values()) {
+    const own=/^(apps|services)\//.test(c.directory);
+    const card=(own?'docs/components/':'docs/environment/')+c.id+'.md';
+    const base=own?'docs/components/README.md':'docs/environment/README.md';
+    if(!source.has(card)||!referenced(base,own?index:environment,card))throw Error('DOC_COMPONENT_MISSING: '+c.id);
+    if(c.status==='retired') {
+      if(!/\bretired\b/.test(read(card)))throw Error('DOC_RETIRED_UNMARKED: '+c.id);
+    } else if(own) {
+      const technical=c.directory+'/README.md';
+      if(!source.has(technical)||!referenced(card,read(card),technical))throw Error('DOC_TECHNICAL_MISSING: '+c.id);
+    }
+    for(const p of [...c.inputs.runtime,...c.inputs.build,...c.inputs.checks,...c.delivery.files,...c.dependencies.flatMap(d=>[...d.inputs,...d.delivery])]) {
+      const normalized=posix.normalize(p.replace(/\/$/,''));
+      if(insidePrivate(normalized)||normalized=== '.'||normalized==='docs'||normalized==='docs/user-agent')
+        throw Error('DOC_PRIVATE_DELIVERY: '+c.id);
+      const wildcard=p.search(/[?*{[]/);
+      if(wildcard!==-1) {
+        const prefix=p.slice(0,wildcard);
+        if(privateRoot.startsWith(prefix)||prefix.startsWith(privateRoot))
+          throw Error('DOC_PRIVATE_DELIVERY: '+c.id);
+      }
+    }
+  }
+  const tracked=execFileSync('git',['-C',root,'ls-files','-z'],{encoding:'utf8'}).split('\0');
+  if(tracked.some(insidePrivate))throw Error('DOC_PRIVATE_TRACKED');
+  const ignored=execFileSync('git',['-C',root,'check-ignore','--no-index','--stdin'],{input:privateRoot+'/probe.md\n',encoding:'utf8',stdio:['pipe','pipe','pipe']});
+  if(ignored.trim()!==privateRoot+'/probe.md')throw Error('DOC_PRIVATE_NOT_IGNORED');
+  const markdown=files.filter(p=>!/(?:^|\/)(?:vendor|archives?|fixtures)(?:\/)/.test(p)&&p.endsWith('.md')&&p!=='AGENTS.md'&&!p.endsWith('/AGENTS.md')&&!p.endsWith('/CLAUDE.md'));
+  const edges=new Map();
+  // AIDEV-NOTE: Принятые исходные правила являются byte-pinned assets; их исходные ссылки не переписываются.
+  const baseline='services/elements/planning/baseline.json',pinned=new Map();
+  if(source.has(baseline))for(const [name,info] of Object.entries(JSON.parse(read(baseline)).files))
+    if(name.endsWith('.md'))pinned.set('services/elements/planning/'+name,info.sha256);
+  for(const file of markdown) {
+    const targets=[];
+    const text=read(file);
+    if(pinned.has(file)&&createHash('sha256').update(text).digest('hex')!==pinned.get(file))throw Error('DOC_PINNED_RULE_CHANGED: '+file);
+    for(const href of links(text)) {
+      if(pinned.has(file)&&href==='AGENTS.md')continue;
+      const target=sourceTarget(file,href);
+      if(target===null)continue;
+      if(target==='..'||target.startsWith('../')||insidePrivate(target))throw Error('DOC_INVALID_LINK: '+file+' -> '+target);
+      if(!existsSync(join(root,target)))throw Error('DOC_BROKEN_LINK: '+file+' -> '+target);
+      const actual=relative(resolve(root),realpathSync(join(root,target)));
+      if(actual==='..'||actual.startsWith('../'))throw Error('DOC_LINK_OUTSIDE: '+file);
+      if(target.endsWith('.md')) {
+        const fragment=decodeURIComponent(href.split('#').slice(1).join('#'));
+        if(fragment&&!anchors(read(target)).has(fragment))throw Error('DOC_BROKEN_ANCHOR: '+file+' -> '+href);
+        targets.push(target);
+      }
+    }
+    edges.set(file,targets);
+  }
+  if(!referenced('AGENTS.md',read('AGENTS.md'),'docs/README.md'))throw Error('DOC_AGENT_ENTRY_REQUIRED');
+  const reached=new Set(),queue=['docs/README.md'];
+  while(queue.length) {const file=queue.shift();if(reached.has(file))continue;reached.add(file);queue.push(...(edges.get(file)??[]));}
+  for(const file of markdown)if(!reached.has(file))throw Error('DOC_UNREACHABLE: '+file);
+  return {components:graph.components.size,documents:markdown.length};
 }

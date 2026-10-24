@@ -124,3 +124,10 @@ Async-ответ использует внутренний operationId `async:<S
 Два агента DEV и production используют один явный `config.readStatePath` к private SQLite-файлу. Node 24 предоставляет SQLite без дополнительных пакетов. Межпроцессная `BEGIN IMMEDIATE`, WAL, `synchronous=FULL` и busy timeout 1000 мс обеспечивают атомарное сохранение. Каталог создаёт lifecycle экземпляра; файл, WAL и данные восстанавливаются отдельно от immutable release. Отсутствующий файл означает первый запуск, повреждённый файл останавливает запуск. Без настроенного пути read-команды возвращают `UNSUPPORTED`.
 
 Для одного чата агент хранит наибольшее время и не более 128 прочитанных ID. Старые и равные отметки объединяют ID; это сохраняет прочтение при различии времени live-события и native истории. Новый неизвестный ID с более новым временем заменяет набор, уже известный ID ничего не меняет. Снимок ограничен `limits.state`, суммарное содержимое строк — `16 * limits.state`; переполнение отказывает без удаления прочитанности. Повтор readMark идемпотентен после любого исхода. Сбой до commit возвращает `UPSTREAM_UNAVAILABLE/not-sent`, сбой commit — `unknown`; readState возвращает `query` при ошибке чтения.
+
+## Связанные материалы
+
+- [ARCHITECTURE.md](ARCHITECTURE.md).
+- [PUBLISHER.md](PUBLISHER.md).
+- [SCENARIOS.md](SCENARIOS.md).
+- [contracts/codex/README.md](contracts/codex/README.md).

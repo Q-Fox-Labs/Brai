@@ -48,3 +48,9 @@ URL контейнерных клиентов — `nats://nats:4222`; логин
 Streams создаёт сервис таймера; инфраструктура их не создаёт. Их создание, политики хранения, схемы сообщений и семантика принадлежат `services/timer`. Эта конфигурация закрепляет только инфраструктурные имена и права для согласованных subjects. При изменении consumer names или inboxPrefix сначала согласуйте ACL.
 
 Полный Compose Supabase производен от официального выпуска; [лицензия upstream](https://github.com/supabase/supabase/blob/self-hosted/v0.8.2/LICENSE) применяется к исходному определению. Настройки, секреты и данные конкретного экземпляра в поставку не входят.
+
+## Связанные материалы
+
+- [instaloader/README.md](instaloader/README.md).
+- [nats/artifacts-candidate.md](nats/artifacts-candidate.md).
+- [temporal/README.md](temporal/README.md).

@@ -48,3 +48,8 @@ Runtime требует явные переменные окружения:
 ## Доступ к истории
 
 Web после проверки BetterAuth-сессии передаёт user_id серверным запросом. Сервис фиксирует scope_type=user и scope_id=user_id, а веб-роль читает события через RLS. Внутренний MCP доступен агентам только в доверенной сети и использует отдельные разрешения. Его ресурсы: brai://history/CONTRACT.md и brai://history/schemas/common.schema.json. Успешный вызов возвращает owner DTO в structuredContent и пустой content. Ошибка возвращается с isError=true и единственным JSON-текстом в content, соответствующим owner DTO {code,message,retryable}; structuredContent для ошибки отсутствует. Ответный JSON-RPC envelope не больше 524 288 байт; предел 10 секунд включает чтение HTTP-запроса, ожидание очереди и выполнение ядра. Запросы к справочникам, события и собственный аудит выполняют общие прикладные операции сервиса.
+
+## Связанные материалы
+
+- [CONTRACT.md](CONTRACT.md).
+- [DEPLOYMENT.md](DEPLOYMENT.md).
