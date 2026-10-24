@@ -17,3 +17,8 @@ node services/alerts/scripts/package-runtime.mjs
 Интеграции требуют явно заданный disposable loopback стенд `brai_alerts_test`: `ALERTS_TEST_OWNER_DATABASE_URL`, `ALERTS_TEST_APP_DATABASE_URL`, `ALERTS_TEST_WEB_DATABASE_URL`, соответствующие `ALERTS_TEST_{OWNER,APP,WEB}_ROLE` и `ALERTS_TEST_NATS_URL`. Для брокера тестовые identities `alerts`, `web`, `publisher`, `fixture`; сервисные credentials могут задаваться `ALERTS_TEST_NATS_USER`, `ALERTS_TEST_NATS_PASSWORD`. Публичные production адреса и другие имена БД тесты запрещают. Без явных параметров интеграционные сценарии пропускаются; такой запуск не подтверждает интеграцию. Тесты очищают только disposable данные и создают временный stream полного буфера.
 
 Проверки охватывают replay/conflict, RLS/SQL grants, микросекундный курсор, важность и настоящий цвет категории, snapshot `read_all`, остановленный consumer, отказ БД, crash после COMMIT до ACK, malformed TERM, Service error headers, бюджет страницы и `DiscardNew`. Отдельная проверка полного буфера использует уменьшенный лимит временного stream; runtime отдельно сверяет production значение 256 MiB.
+
+## Связанные материалы
+
+- [CONTRACT.md](CONTRACT.md).
+- [DEPLOYMENT.md](DEPLOYMENT.md).

@@ -21,3 +21,6 @@ apps/web/next-env.d.ts
 
 # DEV immutable releases and local runtime tooling.
 .runtime/
+
+# Личные дополнения пользовательского агента не входят в исходники и поставки.
+/docs/user-agent/usercustom/

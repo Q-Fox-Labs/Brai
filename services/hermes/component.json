@@ -32,7 +32,10 @@
       "services/hermes/memos/embedding/adapter.mjs",
       "services/hermes/memos/bridge/codex_bridge.py",
       "services/hermes/memos/bridge/requirements.txt",
-      "services/hermes/planning-read.mjs"
+      "services/hermes/planning-read.mjs",
+      "docs/user-agent/instructions/context.md",
+      "docs/user-agent/instructions/skills/brai-task-workflows/SKILL.md",
+      "docs/user-agent/instructions/skills/brai-task-workflows/references/planning-and-results.md"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
@@ -141,7 +144,10 @@
       "services/hermes/memos/embedding/adapter.mjs",
       "services/hermes/memos/bridge/codex_bridge.py",
       "services/hermes/memos/bridge/requirements.txt",
-      "services/hermes/planning-read.mjs"
+      "services/hermes/planning-read.mjs",
+      "docs/user-agent/instructions/context.md",
+      "docs/user-agent/instructions/skills/brai-task-workflows/SKILL.md",
+      "docs/user-agent/instructions/skills/brai-task-workflows/references/planning-and-results.md"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",

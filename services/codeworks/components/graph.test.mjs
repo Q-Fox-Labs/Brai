@@ -24,6 +24,16 @@ function fixture(t) {
 function add(root,id,edit=()=>{}) {
  const d=descriptor(id);edit(d);
  put(root,'services/'+id+'/component.json',JSON.stringify(d));
+ put(root,'.gitignore', '/docs/user-agent/usercustom/\n');
+ put(root,'AGENTS.md','[Docs](docs/README.md)');
+ put(root,'docs/README.md','[Components](components/README.md) [Environment](environment/README.md) [Agent](user-agent/README.md)');
+ put(root,'docs/environment/README.md','# Environment');
+ put(root,'docs/user-agent/README.md','# Agent');
+ const previous=(()=>{try{return readFileSync(join(root,'docs/components/README.md'),'utf8');}catch{return '# Components\n';}})();
+ put(root,'docs/components/README.md',previous+'\n['+id+']('+id+'.md)');
+ put(root,'docs/components/'+id+'.md','retired when applicable: [Technical](../../services/'+id+'/README.md)');
+ put(root,'services/'+id+'/README.md','# Technical');
+
  put(root,'services/'+id+'/main.mjs','export const value=1;\n');
  put(root,'services/'+id+'/build.mjs',"import{appendFileSync}from'node:fs';appendFileSync('build-count','1');\n");
  put(root,'services/'+id+'/tests.mjs',"import assert from 'node:assert/strict';assert.equal(1,1);\n");return d;
@@ -203,4 +213,19 @@ test('generated output corruption is rejected until explicit build restores sour
  put(root,'services/probe/tests.mjs',"import{writeFileSync}from'node:fs';writeFileSync('dist/main.mjs','export const value=999;');");
  await assert.rejects(execute(root,'run',['probe']),/BUILD_OUTPUT_MISMATCH/);
  assert.equal(readFileSync(join(first.artifact.path,'services/probe/dist/main.mjs'),'utf8'),'export const value=1;\n');
+});
+
+test('reference documentation leaves runtime keys unchanged while packaged instructions change them',t=>{
+ const root=fixture(t),d=add(root,'probe');
+ put(root,'docs/user-agent/instructions/context.md','accepted behavior\n');
+ d.inputs.runtime.push('docs/user-agent/instructions/context.md');
+ d.delivery.files.push('docs/user-agent/instructions/context.md');
+ save(root,'probe',d);
+ const before=fingerprints(root,discover(root).components.get('probe'));
+ put(root,'docs/components/probe.md','Updated user guide');
+ const reference=fingerprints(root,discover(root).components.get('probe'));
+ assert.equal(reference.runtime,before.runtime);assert.equal(reference.artifact,before.artifact);
+ put(root,'docs/user-agent/instructions/context.md','new behavior\n');
+ const changed=fingerprints(root,discover(root).components.get('probe'));
+ assert.notEqual(changed.runtime,before.runtime);assert.notEqual(changed.artifact,before.artifact);
 });

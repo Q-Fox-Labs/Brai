@@ -195,3 +195,10 @@ test('runtime launch contract changes receive their own immutable identity', asy
  component.delivery.command=['node','main.mjs','--mode=second'];component.delivery.systemRequirements.push('external runtime v2');
  const second=await build();assert.notEqual(second.payloadHash,first.payloadHash);assert.deepEqual(second.runtime.command,component.delivery.command);
 });
+
+test('personal documentation is rejected even through a selected parent directory', async t => {
+  const {write,component,build}=fixture(t);
+  write('docs/user-agent/usercustom/personal.md','local only');
+  component.delivery.files.push('docs/user-agent');
+  await assert.rejects(build(), /FORBIDDEN_DELIVERY_FILE: docs\/user-agent\/usercustom/);
+});

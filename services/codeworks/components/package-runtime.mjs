@@ -25,6 +25,7 @@ function repositoryPath(value) {
 }
 
 function checkFirstPartyPath(key) {
+  if (key === 'docs/user-agent/usercustom' || key.startsWith('docs/user-agent/usercustom/')) fail(`FORBIDDEN_DELIVERY_FILE: ${key}`);
   const parts = key.split('/');
   if (parts.some(part => /^(?:\.env(?:\..*)?|\.git|node_modules|tests?|__tests__|data|datasets|weights)$/i.test(part)) || /(?:^|[/_.-])credentials?(?:[./_-]|$)/i.test(key) || /\.(?:key|pem|p12|pfx|gguf|safetensors|pt|pth|bin)$/i.test(key) || /\.(?:test|spec)\.[^/]+$/i.test(key)) fail(`FORBIDDEN_DELIVERY_FILE: ${key}`);
   if (/\.(?:[cm]?tsx?|jsx)$/i.test(key) && !/\.d\.(?:ts|mts|cts)$/i.test(key)) fail(`UNBUILT_DELIVERY_SOURCE: ${key}`);

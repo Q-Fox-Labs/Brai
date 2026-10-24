@@ -80,3 +80,7 @@ docker compose -f services/supabase-mcp/test/compose.yml down --volumes
 Интеграционная проверка требует двух выделенных одноразовых PostgreSQL 17 на loopback, роль `postgres` с trust и чистые экземпляры. Она создаёт синтетические БД и роли, в том числе 300 БД для пагинации. После любого исхода выполните `down --volumes`; стенд содержит только синтетические данные. Тест не читает `.env` или рабочие секреты. PostgreSQL fixtures удаляет владелец стенда после любого исхода. Проверяется настоящий SDK MCP-клиент и HTTP; это само по себе не доказывает handshake конкретного бинарного клиента Codex.
 
 Прямые зависимости закреплены точными версиями в package и lockfile. Перенесённые фрагменты SQL: [NOTICE](NOTICE), лицензия [LICENSE.supabase](LICENSE.supabase).
+
+## Связанные материалы
+
+- [CONTRACT.md](CONTRACT.md).

@@ -88,7 +88,14 @@
       "services/codeworks/tests/deployment.test.mjs",
       "services/codeworks/tests/cleanup.test.mjs",
       "services/codeworks/tests/cli.test.mjs",
-      "services/codeworks/tests/hook.test.mjs"
+      "services/codeworks/tests/hook.test.mjs",
+      "services/codeworks/components/documentation.test.mjs",
+      "AGENTS.md",
+      "docs/README.md",
+      "docs/components/*.md",
+      "docs/environment/*.md",
+      "docs/user-agent/README.md",
+      "docs/user-agent/instructions/**/*.md"
     ]
   },
   "dependencies": [],
