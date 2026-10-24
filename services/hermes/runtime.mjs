@@ -14,16 +14,31 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 /** Создаёт безопасную ошибку порта без адресов, credentials или содержимого входа. */
 export function fault(code, details = {}) { return Object.assign(new Error(code), { code, ...details }); }
 
-/** Извлекает owner DTO; upstream MCP ошибки сохраняют только безопасный код. */
-export function unwrap(result) {
+/** Принимает только ограниченную диагностику планирования, без произвольных полей владельца. */
+export function planningDiagnostic(value) {
+  if (!object(value) || Object.keys(value).length !== 2 ||
+      !['input', 'bind', 'build', 'review', 'expand'].includes(value.phase) ||
+      typeof value.reason !== 'string' || !value.reason.trim() || value.reason.length > 500) return undefined;
+  return { phase: value.phase, reason: value.reason };
+}
+
+/** Извлекает owner DTO; только Elements planning может передать безопасную диагностику отказа. */
+export function unwrap(result, { planning = false } = {}) {
   if (result.isError) {
-    let code = 'UPSTREAM_ERROR';
+    let code = 'UPSTREAM_ERROR', diagnostic;
     for (const item of result.content ?? []) {
       if (item.type !== 'text') continue;
-      try { const parsed = JSON.parse(item.text); if (/^[A-Z][A-Z0-9_]{0,80}$/.test(parsed.code ?? parsed.errorCode)) code = parsed.code ?? parsed.errorCode; }
-      catch { if (/^[A-Z][A-Z0-9_]{0,80}$/.test(item.text)) code = item.text; }
+      try {
+        const parsed = JSON.parse(item.text);
+        if (/^[A-Z][A-Z0-9_]{0,80}$/.test(parsed.code ?? parsed.errorCode)) {
+          code = parsed.code ?? parsed.errorCode;
+          diagnostic = planning && code === 'INVALID_ARGUMENT' ? planningDiagnostic(parsed.diagnostic) : undefined;
+        }
+      } catch {
+        if (/^[A-Z][A-Z0-9_]{0,80}$/.test(item.text)) { code = item.text; diagnostic = undefined; }
+      }
     }
-    throw fault(code);
+    throw fault(code, diagnostic ? { diagnostic } : {});
   }
   if (object(result.structuredContent)) return result.structuredContent;
   const text = result.content?.find(item => item.type === 'text')?.text;
@@ -103,7 +118,7 @@ export async function connectPorts(config) {
       async mcp(name, tool, args, signal) {
         return unwrap(await (name === 'publisher'
           ? endpoints[name].callTool({ name: tool, arguments: args }, undefined, { signal, timeout: 1_800_000 })
-          : endpoints[name].call(tool, args, signal)));
+          : endpoints[name].call(tool, args, signal)), { planning: name === 'elements' && tool.startsWith('elements_planning_') });
       },
       async request(subject, payload, signal, requestTimeout = timeout) {
         signal?.throwIfAborted();

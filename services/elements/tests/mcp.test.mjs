@@ -9,6 +9,8 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { startMcp, toolInputs, toolNames } from '../dist/mcp.js';
 import { createLoadGate } from '../dist/load.js';
 import { ElementsFault } from '../dist/domain.js';
+import { assemble } from '../dist/planning.js';
+import { fixture as planningFixture } from './planning-fixture.mjs';
 
 const elementId = '00000000-0000-4000-8000-000000000001';
 const moveId = '00000000-0000-4000-8000-000000000002';
@@ -74,6 +76,11 @@ test('HTTP MCP инициализирует сессию, перечисляет
   const owner = 'mcp-test-owner', calls = [], creates = [];
   const graph = { elements: [{ id: '00000000-0000-4000-8000-000000000001', title: 'Synthetic task' }], moves: [], attempts: [], resources: [] };
   const handlers = {
+    async planningBind() {
+      const f=planningFixture();
+      f.criteria.requirements[0].quote='Несуществующая цитата';
+      return assemble({files:f.files,baseline:f.criteria});
+    },
     async structureCreate(args, context) {
       creates.push({ args, actorId: context.actorId });
       return { elements: [{ id: elementId }], moves: [{ id: moveId }] };
@@ -112,6 +119,11 @@ test('HTTP MCP инициализирует сессию, перечисляет
     assert.equal(failure.isError, true);
     assert.equal(failure.structuredContent, undefined);
     assert.deepEqual(JSON.parse(failure.content[0].text), { code: 'NOT_FOUND', message: 'NOT_FOUND', retryable: false });
+
+    const rejected = await client.callTool({name:'elements_planning_bind',arguments:{attempt_id:moveId,baseline:{}}});
+    assert.equal(rejected.isError,true);
+    assert.deepEqual(JSON.parse(rejected.content[0].text),{code:'INVALID_ARGUMENT',message:'INVALID_ARGUMENT',retryable:false,
+      diagnostic:{phase:'bind',reason:'Нет основания требования'}});
 
     const sessionId = transport.sessionId;
     await transport.terminateSession();
