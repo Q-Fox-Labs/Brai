@@ -144,7 +144,9 @@ export function discover(root, {base, allowMissingBuildOutputs = false} = {}) {
         }
         if (target) {
           const other=owner(target);
-          if (other?.id===c.id && !localInputs.has(target)) throw Error(`UNDECLARED_LOCAL_INPUT: ${file} -> ${target}`);
+          // AIDEV-NOTE: Generated runtime files belong to delivery, never source fingerprints.
+          const ownOutput=c.commands.build && /\/(?:dist|\.next)(?:\/|$)/.test(target) && c.delivery.files.some(path=>target===path||target.startsWith(path+'/'));
+          if (other?.id===c.id && !localInputs.has(target) && !ownOutput) throw Error(`UNDECLARED_LOCAL_INPUT: ${file} -> ${target}`);
           if (other && other.id!==c.id && !admitted.has(target)) throw Error(`UNDECLARED_IMPORT: ${file} -> ${target}`);
         }
       }

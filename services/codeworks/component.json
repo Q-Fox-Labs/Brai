@@ -64,7 +64,6 @@
       "services/codeworks/migrations/007.sql",
       "services/codeworks/src/temporal.mjs",
       "services/codeworks/src/lifecycle.mjs",
-      "services/codeworks/dist/workflows.js",
       "services/codeworks/migrations/008.sql",
       "services/codeworks/src/transition.mjs",
       "services/codeworks/src/replay.mjs"
