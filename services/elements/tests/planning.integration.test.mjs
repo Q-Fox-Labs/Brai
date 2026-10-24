@@ -19,6 +19,17 @@ test('planning PostgreSQL: apply/replay/rollback, future outputs, retry, remarks
   const baseline={...f.criteria,inputs:Object.fromEntries(Object.entries(packet.files).map(([k,v])=>[k,createHash('sha256').update(v).digest('hex')]))};
   const diagnostic=spawnSync('/usr/bin/python3',['services/elements/planning/runner.py'],{input:JSON.stringify({files:packet.files,baseline,candidate:f.candidate}),encoding:'utf8'});
   assert.equal(diagnostic.status,0,diagnostic.stdout+diagnostic.stderr);
+  // Отклонённая цитата не завершает попытку и не фиксирует ошибочный baseline.
+  const invalid=structuredClone(baseline);invalid.requirements[0].quote='TEST цитата вне исходного поручения';
+  const beforeRejected=await h.graphGet(req({}));
+  await assert.rejects(()=>h.planningBind(req({attempt_id:a.id,baseline:invalid})),error=>{
+   assert.equal(error.code,'INVALID_ARGUMENT');
+   assert.deepEqual(error.diagnostic,{phase:'bind',reason:'Нет основания требования'});
+   return true;
+  });
+  const afterRejected=await h.graphGet(req({}));
+  assert.deepEqual(afterRejected,beforeRejected);
+  assert.equal(afterRejected.attempts.find(item=>item.id===a.id).status,'running');
   await h.planningBind(req({attempt_id:a.id,baseline}));
   const built=await h.planningBuild(req({attempt_id:a.id,candidate:f.candidate}));
   const review={baseline_sha256:built.baseline_sha256,candidate_sha256:built.candidate_sha256,verdict:'accept',coverage:[{requirement:'word',items:['upper']},{requirement:'signal',items:['signal']}],errors:[],notes:[]};
