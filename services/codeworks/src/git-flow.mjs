@@ -1,5 +1,5 @@
 // ABOUTME: Выполняет ограниченные Git шаги выпусков под существующим project flock.
-// ABOUTME: Только обычный push, без force, удаления refs, checkout чужой ветки или уборки worktree.
+// ABOUTME: Публикует без перезаписи истории; удаляет только ветку задачи с точным ожидаемым SHA.
 import { command } from './git.mjs';
 import { Fault } from './errors.mjs';
 const sha=value=>/^[0-9a-f]{40}$/.test(value);
@@ -58,6 +58,14 @@ export function createFlowGit({run=command,localRemote=false,requireLock=()=>{if
     async push(p,b,head) {
       locked();await origin(p);if(!branch(b)||!sha(head))throw new Fault('INVALID_ARGUMENT');
       await git(p,['push','--porcelain','origin',head+':refs/heads/'+b]);
+    },
+    /** Удаляет только feature/hotfix ref с ожидаемым SHA; отсутствие после сбоя означает успех. */
+    async removeBranch(p,b,expected) {
+      locked();if(!branch(b)||!b.startsWith('feature/')&&!b.startsWith('hotfix/')||!sha(expected))throw new Fault('INVALID_ARGUMENT');
+      const current=await remote(p,b);if(current===null)return;
+      if(current!==expected)throw new Fault('TARGET_CHANGED','Task branch changed after release; cleanup preserved it.');
+      await git(p,['push','--porcelain','--force-with-lease=refs/heads/'+b+':'+expected,'origin',':refs/heads/'+b]);
+      if(await remote(p,b)!==null)throw new Fault('TARGET_CHANGED','Task branch still exists; retry cleanup after inspection.');
     },
     /** Доказывает точные parents слияния и наличие commit в фактическом remote target. */
     async verifyMerge(p,leg) {

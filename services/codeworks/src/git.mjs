@@ -91,17 +91,23 @@ export function createGit({flowGit}={}) {
       if((await local(w,['symbolic-ref','--short','HEAD'])).stdout!==w.branch)throw new Fault('OWNERSHIP_CONFLICT');
       return {head:(await local(w,['rev-parse','HEAD'])).stdout,branch:w.branch,dirty:!!(await local(w,['status','--porcelain=v1','--untracked-files=all'])).stdout};
     },
-    /** Убирает только clean own worktree после доказанного слияния всех release legs. */
-    async cleanup(project,w,heads) {
+    /** Убирает clean own worktree и ветку выпуска; remote удаляет до потери локального ownership. */
+    async cleanup(project,w,heads,acceptedHead) {
       requireLock();await topology(project);
       if(!heads.length||!w.path.startsWith(project.workspace_root+'/')||w.path===project.repo_path)return false;
-      const head=await branches(project,w);if(!head)return !await exists(w.path);
+      const head=await branches(project,w);
+      const flow=project.github?(flowGit??(await import('./git-flow.mjs')).createFlowGit()):null;
+      if(!head)return !await exists(w.path)&&(!flow||await flow.remote(project,w.branch)===null);
+      if(flow&&head!==acceptedHead)return false;
       for(const target of heads)if(!/^[0-9a-f]{40}$/.test(target)||(await git(project,['merge-base','--is-ancestor',head,target],{allowFailure:true})).code!==0)return false;
-      if(await registration(project,w)){
-        if((await this.inspect(project,w)).dirty)return false;
+      const registered=await registration(project,w);
+      if(registered){if((await this.inspect(project,w)).dirty)return false;}
+      else if(await exists(w.path))return false;
+      if(flow)await flow.removeBranch(project,w.branch,acceptedHead);
+      if(registered){
         await git(project,['worktree','unlock',w.path]);
         try{await git(project,['worktree','remove',w.path]);}catch(error){await git(project,['worktree','lock','--reason','codeworks:'+w.ownership_token,w.path],{allowFailure:true});throw error;}
-      }else if(await exists(w.path))return false;
+      }
       const proof=(await git(project,['rev-parse',ownershipRef(w)])).stdout;
       await git(project,['update-ref','--stdin'],{input:'start\ndelete refs/heads/'+w.branch+' '+head+'\ndelete '+ownershipRef(w)+' '+proof+'\nprepare\ncommit\n'});
       return true;
