@@ -12,10 +12,19 @@ planner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(planner)
 
 
+def checked(phase, operation, *args):
+    """Сохранить этап отклонения без изменения нормативной проверки."""
+    try:
+        return operation(*args)
+    except (ValueError, KeyError, TypeError, AssertionError) as error:
+        error.planning_phase = phase
+        raise
+
+
 def run(value):
     """Проверить критерии, собрать кандидат и при наличии review выдать квитанцию."""
     if 'expand_stage' in value:
-        return {'stage': planner.expand_repeat(value['expand_stage'], value['move_id'], value['binding'])}
+        return {'stage': checked('expand', planner.expand_repeat, value['expand_stage'], value['move_id'], value['binding'])}
     with TemporaryDirectory(prefix='brai-plan-') as directory:
         root = Path(directory).resolve()
         for name, content in value['files'].items():
@@ -23,17 +32,17 @@ def run(value):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
         planner.save(root / 'criteria.json', value['baseline'])
-        planner.bind(root, 'packet.json', 'criteria.json')
+        checked('bind', planner.bind, root, 'packet.json', 'criteria.json')
         if 'candidate' not in value:
             return {'baseline_sha256': planner.sha(root / 'criteria.json')}
         planner.save(root / 'candidate.json', value['candidate'])
-        planner.build(root, 'packet.json', 'candidate.json', 'plan')
+        checked('build', planner.build, root, 'packet.json', 'candidate.json', 'plan')
         result = {'stage': planner.load(root / 'plan.json'), 'markdown': (root / 'plan.md').read_text(),
                   'manifest': planner.load(root / 'plan.manifest.json'),
                   'baseline_sha256': planner.sha(root / 'criteria.json'), 'candidate_sha256': planner.sha(root / 'candidate.json')}
         if 'review' in value:
             planner.save(root / 'review.json', value['review'])
-            planner.release(root, 'plan.manifest.json', 'criteria.json', 'review.json', 'receipt.json')
+            checked('review', planner.release, root, 'plan.manifest.json', 'criteria.json', 'review.json', 'receipt.json')
             result['receipt'] = planner.load(root / 'receipt.json')
         return result
 
@@ -44,5 +53,5 @@ try:
         raise ValueError('Пакет слишком велик')
     print(json.dumps(run(json.loads(raw)), ensure_ascii=False))
 except (ValueError, KeyError, TypeError, AssertionError) as error:
-    print(json.dumps({'error': str(error)}, ensure_ascii=False))
+    print(json.dumps({'error': str(error), 'phase': getattr(error, 'planning_phase', 'input')}, ensure_ascii=False))
     sys.exit(2)

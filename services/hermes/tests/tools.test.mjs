@@ -300,6 +300,30 @@ test('настоящий MCP SDK передаёт tool catalogue и ошибки
   } finally { await client.close(); await service.close(); }
 });
 
+test('Hermes MCP сохраняет диагностику только Elements planning без автоматического повтора', async () => {
+  const diagnostic={phase:'bind',reason:'Нет основания требования'};
+  const failure={isError:true,content:[{type:'text',text:JSON.stringify({code:'INVALID_ARGUMENT',message:'INVALID_ARGUMENT',diagnostic,privateValue:'hidden'})}]};
+  assert.throws(()=>unwrap(failure),error=>!error.diagnostic);
+  for(const invalid of [{...diagnostic,extra:'hidden'},{...diagnostic,phase:'unknown'},{...diagnostic,reason:'x'.repeat(501)},null]) {
+    assert.throws(()=>unwrap({...failure,content:[{type:'text',text:JSON.stringify({code:'INVALID_ARGUMENT',diagnostic:invalid})}]},{planning:true}),error=>!error.diagnostic);
+  }
+  let calls=0;
+  const {ports}=fixture({
+    list:async endpoint=>endpoint==='elements'?[{name:'elements_planning_bind',inputSchema:schema({attempt_id:{type:'string'},baseline:{type:'object'}})}]:tools[endpoint],
+    mcp:async()=>{calls++;return unwrap(failure,{planning:true});},
+  });
+  const runtime=await createBraiTools(config,ports);
+  const [clientTransport,serverTransport]=InMemoryTransport.createLinkedPair();
+  const service=await serveTools(runtime,serverTransport),client=new Client({name:'diagnostic-test',version:'1.0.0'});
+  try {
+    await client.connect(clientTransport);
+    const rejected=await client.callTool({name:'elements_planning_bind',arguments:{attempt_id:ids[0],baseline:{}}});
+    assert.equal(rejected.isError,true);
+    assert.deepEqual(JSON.parse(rejected.content[0].text),{code:'INVALID_ARGUMENT',message:'INVALID_ARGUMENT',diagnostic});
+    assert.equal(calls,1);
+  } finally {await client.close();await service.close();}
+});
+
 test('LocalAI synthesize использует новый owner контракт и фиксированные ограничения голоса', () => {
   const tool = natsTools.find(tool => tool.name === 'local_ai_invoke_synthesize');
   const args = { requestId: ids[0], operationId: ids[1], model: { modelId: 'silero-tts-ru-v5_5', revision: '50081637b602126ee06cb3bc8a744d25651d2da1', profileId: 'silero_pytorch' }, deadlineAt: '2026-10-19T13:00:00Z', text: 'Тест', voice: 'eugene' };
