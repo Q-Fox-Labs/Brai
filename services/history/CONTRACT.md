@@ -83,7 +83,7 @@ Endpoint `brai.history.v1.append.<source>` также принимает Core NA
 
 Для новых источников NATS request-reply сам по себе не подтверждает фиксацию события в чужой БД и не заменяет их гарантию доставки. Первый выпуск не вводит JetStream или outbox: собственный аудит сервиса записывается атомарно с изменением справочника.
 
-При `HISTORY_ELEMENTS_EVENTS_ENABLED=true` сервис подключает durable consumer `history_elements_events` к stream `BRAI_ELEMENTS_EVENTS_V1` и принимает envelope Elements. Категория и тип разрешаются по `data.history_category_code` и `data.history_type_code` в собственном справочнике; числовые ID Elements не передаёт. ACK следует после COMMIT. Повтор использует `(source=service_elements,event_id)` и то же содержимое.
+При `HISTORY_GAME_CORE_EVENTS_ENABLED=true` сервис подключает durable consumer `history_game_core_events` к stream `BRAI_GAME_CORE_EVENTS_V1` и принимает envelope GameCore. Категория и тип разрешаются по `data.history_category_code` и `data.history_type_code` в собственном справочнике; числовые ID GameCore не передаёт. ACK следует после COMMIT. Повтор использует `(source=service_game_core,event_id)` и то же содержимое.
 
 ## Справочники и собственная история
 
@@ -123,3 +123,5 @@ MCP работает через Streamable HTTP по /mcp на loopback или �
 Отдельный владелец БД запускает миграции и не входит в runtime; HISTORY_OWNER_ROLE должен совпадать с владельцем целевой БД. App и web — разные роли без SUPERUSER, CREATEDB, CREATEROLE, REPLICATION, BYPASSRLS, членства в других ролях и владения таблицами history или public. App-роль не может выполнять DDL, менять или очищать events; запись в системные справочники ограничена разрешёнными полями. Web-роль имеет только чтение событий с RLS и получает user_id локально внутри транзакции. Приложение не хранит owner credentials.
 
 Секрет HMAC курсора передаётся через HISTORY_CURSOR_HMAC_KEY_FILE и должен оставаться прежним после выпуска и восстановления: смена ключа делает уже выданные курсоры недействительными. Значения секретов не попадают в логи. Порядок сборки, запуска, резервного копирования и восстановления описан в [DEPLOYMENT.md](DEPLOYMENT.md). Запуск процесса не применяет миграции. Откат образа не удаляет БД и не очищает историю; восстановление БД и стабильного ключа выполняют отдельно по эксплуатационной процедуре.
+
+Переход на game-core выполняется при остановленных производителях и потребителях. Миграция владельца сохраняет UUID и данные: ожидающие outbox-события получают новый subject, History и Alerts — источник `service_game_core`; отметки прочтения сохраняются. Конфликт идентичности прерывает транзакцию. До запуска нового транспорта оператор переносит сохранённые JetStream-события; повторная доставка использует прежние UUID.

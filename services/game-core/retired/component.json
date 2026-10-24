@@ -1,0 +1,40 @@
+{
+  "formatVersion": 1,
+  "id": "elements",
+  "type": "container",
+  "status": "retired",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [],
+  "inputs": {
+    "build": [],
+    "runtime": [],
+    "checks": []
+  },
+  "dependencies": [],
+  "commands": {
+    "build": null,
+    "check": null
+  },
+  "delivery": {
+    "kind": "ready-files",
+    "files": [],
+    "entrypoints": [],
+    "smokeImports": [],
+    "systemRequirements": []
+  },
+  "deploy": {
+    "units": [
+      "elements",
+      "elements-migrate"
+    ],
+    "migrations": [],
+    "health": null
+  },
+  "npm": {
+    "workspaces": []
+  },
+  "renamedTo": "game-core",
+  "reason": "Компонент переименован в game-core; запись требуется для остановки прежних deploy units."
+}

@@ -91,7 +91,7 @@ Summary: `{unread_count,category}`. `category` — `null` при нуле либ
 
 ## Долговечный вход и сигналы
 
-При `ALERTS_ELEMENTS_EVENTS_ENABLED=true` сервис дополнительно подключает durable consumer `alerts_elements_events` к stream `BRAI_ELEMENTS_EVENTS_V1`. Он обрабатывает только envelope с полем `notification`, разрешает `notification.type_code` в собственном справочнике и ACK-ает сообщение после COMMIT. События без notification безопасно подтверждаются без записи.
+При `ALERTS_GAME_CORE_EVENTS_ENABLED=true` сервис дополнительно подключает durable consumer `alerts_game_core_events` к stream `BRAI_GAME_CORE_EVENTS_V1`. Он обрабатывает только envelope с полем `notification`, разрешает `notification.type_code` в собственном справочнике и ACK-ает сообщение после COMMIT. События без notification безопасно подтверждаются без записи.
 
 `brai.alerts.v1.ingest` — JetStream `BRAI_ALERTS_INGEST_V1`, file storage, WorkQueue retention, без expiry, лимит 256 MiB, `DiscardNew`, максимум сообщения 65 536 байт. Producer сохраняет ID/содержимое до успешного PubAck и при отказе заполненного stream повторяет позже. PubAck подтверждает хранение у брокера, а не COMMIT alerts. Потеря неотправленного события между чужой БД и брокером остаётся ответственностью источника; новый outbox не введён.
 
@@ -110,3 +110,5 @@ Runtime и health отказывают при дополнительных ли�
 Owner — отдельный владелец собственной БД и таблиц. App/web — разные роли без суперправ, CREATE, BYPASSRLS, членства в других ролях или владения таблицами. App имеет INSERT выбранных колонок notifications, SELECT каталогов/уведомлений/marks; web имеет RLS SELECT own+global и INSERT собственных marks для доступных notifications. Runtime не получает owner URL, не делает DDL, не изменяет или удаляет записи. Web-пул устанавливает пользовательский контекст локально в каждой транзакции; без него нет ни личных, ни общих записей. Миграция проверяет владельца БД и роли, закрывает PUBLIC и grants.
 
 История: alerts не публикует отдельные business events в history для ingestion/read; они не требуются текущему поведению. Его данные и индивидуальное прочтение принадлежат alerts. Будущее подключение источников и аудит требуют отдельного контракта. Transcription публикует проблемные события через ingest по своему локальному контракту; штатные переходы молчат.
+
+Переход на game-core выполняется при остановленных производителях и потребителях. Миграция владельца сохраняет UUID и данные: ожидающие outbox-события получают новый subject, History и Alerts — источник `service_game_core`; отметки прочтения сохраняются. Конфликт идентичности прерывает транзакцию. До запуска нового транспорта оператор переносит сохранённые JetStream-события; повторная доставка использует прежние UUID.

@@ -16,13 +16,13 @@ import { useMobileSheetDrag } from "./use-mobile-sheet-drag";
 import { useSoftwareKeyboardOpen } from "./use-software-keyboard-open";
 import { sectionSwipePageStyle, useLeftEdgeMenuSwipe, useSectionSwipeNavigation } from "./use-section-swipe-navigation";
 
-type Route = { href: "/" | "/agent" | "/do" | "/alerts" | "/elements"; label: string; icon: "agent" | "timer" | "do" | "elements" };
+type Route = { href: "/" | "/agent" | "/do" | "/alerts" | "/game-core"; label: string; icon: "agent" | "timer" | "do" | "game-core" };
 type MobilePanel = "profile" | "shortcuts";
 const routes: Route[] = [
   { href: "/agent", label: "Агент", icon: "agent" },
   { href: "/", label: "Таймер", icon: "timer" },
   { href: "/do", label: "Дела", icon: "do" },
-  { href: "/elements", label: "Элементы", icon: "elements" },
+  { href: "/game-core", label: "Элементы", icon: "game-core" },
 ];
 const mobileQuery = "(max-width: 860px)";
 const historyMarker = "__braiNavigationPanel";
@@ -43,7 +43,7 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
   const keyboardOpen = useSoftwareKeyboardOpen(isMobile);
   const activeSection = pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : "timer";
   const selectSection = useCallback((section: "agent" | "timer" | "do") => navigateWorkspace(section === "timer" ? "/" : `/${section}`), []);
-  const dockSwipe = useSectionSwipeNavigation(activeSection, selectSection, isMobile && panel === null && pathname !== "/alerts" && pathname !== "/elements");
+  const dockSwipe = useSectionSwipeNavigation(activeSection, selectSection, isMobile && panel === null && pathname !== "/alerts" && pathname !== "/game-core");
   const currentSwipeStyle = sectionSwipePageStyle(dockSwipe.visual, "current");
   const openPanel = useCallback((next: MobilePanel, source: HTMLElement) => {
     opener.current = source;
@@ -324,7 +324,7 @@ function RouteLink({ route, current, compact = false, mobile = false, timerElaps
 
 function RouteIcon({ name }: { name: Route["icon"] }) {
   if (name === "agent") return <BraiBrandIcon />;
-  if (name === "elements") return <Network aria-hidden="true" />;
+  if (name === "game-core") return <Network aria-hidden="true" />;
   if (name === "timer") return <Timer aria-hidden="true" />;
   return <SquareTerminal aria-hidden="true" />;
 }

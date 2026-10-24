@@ -14,7 +14,7 @@ ID: `hermes`. Описывает компонент в исходниках; е�
 
 Это собственные адаптеры Brai; внешний движок Hermes и MemOS поставляет окружение. Доступные инструменты определяет конфигурация, а не текст справки.
 
-Связанные компоненты: [elements](elements.md), [artifacts](artifacts.md), [timer](timer.md), [history](history.md), [alerts](alerts.md), [local-ai](local-ai.md), [transcription](transcription.md).
+Связанные компоненты: [game-core](game-core.md), [artifacts](artifacts.md), [timer](timer.md), [history](history.md), [alerts](alerts.md), [local-ai](local-ai.md), [transcription](transcription.md).
 
 ## Технические подробности
 

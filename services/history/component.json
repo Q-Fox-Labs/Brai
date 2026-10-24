@@ -19,6 +19,7 @@
     "runtime": [
       "services/history/DEPLOYMENT.md",
       "services/history/migrations/001.sql",
+      "services/history/migrations/002-game-core-source.sql",
       "services/history/package.json",
       "services/history/schemas/common.schema.json",
       "services/history/schemas/messages.schema.json",
