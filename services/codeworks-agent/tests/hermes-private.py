@@ -22,7 +22,7 @@ agent.AIAgent=AIAgent;sys.modules['run_agent']=agent
 with tempfile.TemporaryDirectory() as temporary:
     root=Path(temporary);plugin=root/'plugin.py'
     plugin.write_text("import sys\ndef private():\n return sys.modules['_brai_codeworks_gateway'].call_plugin('actions.read',{},2)\n")
-    boot=root/'bootstrap';boot.write_text(json.dumps({'key':'12'*32,'env':{'BOOTSTRAP_TEST':'not-in-argv'},'capability':'secret-cap','plugin':{'path':str(plugin),'sha256':hashlib.sha256(plugin.read_bytes()).hexdigest()},'tools':[{'name':'elements_graph_get','inputSchema':{'type':'object'}}]}))
+    boot=root/'bootstrap';boot.write_text(json.dumps({'key':'12'*32,'env':{'BOOTSTRAP_TEST':'not-in-argv'},'capability':'secret-cap','plugin':{'path':str(plugin),'sha256':hashlib.sha256(plugin.read_bytes()).hexdigest()},'tools':[{'name':'game_core_graph_get','inputSchema':{'type':'object'}}]}))
     client,server=socket.socketpair();requests=[];wrong_id=[False]
     def serve():
         pending=b''
@@ -38,7 +38,7 @@ with tempfile.TemporaryDirectory() as temporary:
     # install closes fd3 only; use a stable duplicate outside that reserved slot.
     fd=os.dup(client.fileno());installed=mod.install(boot,fd)
     assert not boot.exists() and os.environ['BOOTSTRAP_TEST']=='not-in-argv'
-    assert json.loads(r.dispatch('elements_graph_get',{}))=={'elements':[]}
+    assert json.loads(r.dispatch('game_core_graph_get',{}))=={'elements':[]}
     for name in ['terminal','python','read_file','actions.complete']:
         assert 'NATIVE_TOOL_DISABLED' in r.dispatch(name,{})
     try:sys.modules['_brai_codeworks_gateway'].call_plugin('actions.complete',{},2)
@@ -51,11 +51,11 @@ with tempfile.TemporaryDirectory() as temporary:
     except RuntimeError as e:assert str(e)=='TRUSTED_PLUGIN_REQUIRED'
     else:raise AssertionError('changed plugin accepted')
     assert len(requests)==2 and requests[0]['channel']=='owner' and requests[1]['capability']=='secret-cap'
-    native=AIAgent();assert native.valid_tool_names=={'codeworks','elements_graph_get'}
+    native=AIAgent();assert native.valid_tool_names=={'codeworks','game_core_graph_get'}
     assert 'actions.complete' not in json.dumps(native.tools) and 'secret-cap' not in json.dumps(native.tools)
     wrong_id[0]=True
-    assert json.loads(r.dispatch('elements_graph_get',{}))['error']=='PRIVATE_RESPONSE_REJECTED'
+    assert json.loads(r.dispatch('game_core_graph_get',{}))['error']=='PRIVATE_RESPONSE_REJECTED'
     count=len(requests)
-    assert json.loads(r.dispatch('elements_graph_get',{}))['error']=='PRIVATE_CHANNEL_UNAVAILABLE'
+    assert json.loads(r.dispatch('game_core_graph_get',{}))['error']=='PRIVATE_CHANNEL_UNAVAILABLE'
     assert len(requests)==count  # Unknown result is fenced, never retried blindly.
 print('PASS private Hermes consumed bootstrap, exact owner names, canonical-only trusted capability, drift/native denial')

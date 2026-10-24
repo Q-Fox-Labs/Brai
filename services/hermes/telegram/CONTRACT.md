@@ -59,7 +59,7 @@ Scoped `CallbackQueryHandler(pattern="^brai:")` не перехватывает 
 
 ## Автоматическое продолжение после кнопки
 
-До показа кнопки модель должна получить реальные Element/Action IDs из существующих game-core create/structure tools и вызвать `elements_request_human_action`. Confirmation принимает возвращённые `moveId/revisionId`; UUID-заглушки и выдуманные IDs запрещены. Плагин не создаёт сущности вместо модели.
+До показа кнопки модель должна получить реальные Element/Action IDs из существующих game-core create/structure tools и вызвать `game_core_request_human_action`. Confirmation принимает возвращённые `moveId/revisionId`; UUID-заглушки и выдуманные IDs запрещены. Плагин не создаёт сущности вместо модели.
 
 `request_confirmation` снимает task-local `HERMES_SESSION_KEY`, `HERMES_SESSION_ID`, thread и owner/route через публичный `gateway.session_context.get_session_env` до перехода на loop бота. Публичный `pre_gateway_dispatch` передаёт `session_store`; плагин сохраняет только этот read-only порт и проверяет `lookup_by_session_key`/origin. Отсутствующая, заменённая или чужая session закрывает запрос до claim. Кнопка и уведомления отправляются в исходный thread. SQLite хранит tokens, exact owner/session agent attempts и один приватный отложенный practical report на owner/move для раздельных сообщений результата и решения. Legacy кнопка без session context не может продолжить работу, но её прежняя попытка по-прежнему очищается.
 

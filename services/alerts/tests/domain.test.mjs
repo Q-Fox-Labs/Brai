@@ -54,9 +54,9 @@ test('valid legacy HMAC cursors remain readable after the compact cursor upgrade
   assert.deepEqual(received, position);
   await assert.rejects(f.handlers.execute('list', { user_id: 'other', cursor: token }), { code: 'INVALID_CURSOR' });
 });
-test('Elements notification envelope resolves local type and repeats safely', async () => {
+test('GameCore notification envelope resolves local type and repeats safely', async () => {
   const f = fixture(); const event = { event_id: 'aaaaaaaa-1111-4111-8111-111111111111', event_version: 1, event_type: 'element.completed', occurred_at: '2026-10-15T20:00:00.000Z', owner_id: 'u', actor: { kind: 'agent', id: 'agent-1' }, aggregate: { kind: 'element', id: 'bbbbbbbb-1111-4111-8111-111111111111' }, data: {}, notification: { type_code: 'completed', title: 'Завершено', text: 'Ход принят', data: {} } };
-  assert.deepEqual(await f.handlers.ingestElementsEvent(event), { inserted: true, user_id: 'u' });
-  assert.deepEqual(await f.handlers.ingestElementsEvent(event), { inserted: false, user_id: 'u' });
+  assert.deepEqual(await f.handlers.ingestGameCoreEvent(event), { inserted: true, user_id: 'u' });
+  assert.deepEqual(await f.handlers.ingestGameCoreEvent(event), { inserted: false, user_id: 'u' });
   assert.deepEqual(f.signals, ['u']);
 });

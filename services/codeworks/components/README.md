@@ -75,7 +75,7 @@ CLI по умолчанию сравнивает с `refs/remotes/origin/dev`; �
 каталога с прежним ID сохраняет идентичность. Tombstone не запускает и не удаляет
 службу: фактическое отключение — отдельный reviewed rollout оператора.
 
-Описаны web, auth, timer, history, alerts, artifacts (включая MCP), elements,
+Описаны web, auth, timer, history, alerts, artifacts (включая MCP), game-core,
 transcription, local-ai, agent, providers, supabase-mcp, hermes, codeworks и
 codeworks-agent (retired; прежний контроллер не поставляется). Transcription сохраняет coordinator/helper/local/external как
 четыре executable одного владельца. Caddy, NATS, Temporal и Supabase — внешние
@@ -119,6 +119,6 @@ conventional main/runner и файлы с shebang и executable mode незав�
 
 ## Документация в проверках компонентов
 
-Тот же graph/CLI проверяет обязательные индексы, карточки по существующим ID, технические README, ссылки и локальные якоря. Активные документы должны быть достижимы от [главного README](../../../docs/README.md). Архивы, vendor и тестовые fixtures не требуют переписывания; принятые правила Elements сверяются по baseline.
+Тот же graph/CLI проверяет обязательные индексы, карточки по существующим ID, технические README, ссылки и локальные якоря. Активные документы должны быть достижимы от [главного README](../../../docs/README.md). Архивы, vendor и тестовые fixtures не требуют переписывания; принятые правила GameCore сверяются по baseline.
 
 Проверка выполняется также при планировании и исполнении CI, даже при полном попадании в кеш. Личные файлы docs/user-agent/usercustom не читаются из исходников и запрещены в составе поставки. Самостоятельного сервиса или второго реестра компонентов нет.

@@ -179,7 +179,7 @@ FIFO ограничен 512 неизменными намерениями. Пу�
 - [app/agent/markdown.md](app/agent/markdown.md).
 - [app/agent/queue.md](app/agent/queue.md).
 - [app/do/README.md](app/do/README.md).
-- [app/elements/README.md](app/elements/README.md).
+- [app/game-core/README.md](app/game-core/README.md).
 - [components/ui/README.md](components/ui/README.md).
 - [public/brand/README.md](public/brand/README.md).
 - [public/fonts/README.md](public/fonts/README.md).

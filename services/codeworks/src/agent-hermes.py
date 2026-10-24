@@ -205,8 +205,8 @@ def main():
         raise RuntimeError('NATIVE_SOURCE_WRITABLE')
     if args.check_owner_bridge:
         from tools.registry import registry
-        assert 'elements_graph_get' in {value['name'] for value in installed['owner_schemas']}
-        value = json.loads(registry.dispatch('elements_graph_get', {}))
+        assert 'game_core_graph_get' in {value['name'] for value in installed['owner_schemas']}
+        value = json.loads(registry.dispatch('game_core_graph_get', {}))
         assert isinstance(value.get('elements'), list) and isinstance(value.get('moves'), list)
         for name in ['terminal', 'read_file', 'python', 'actions.complete']:
             assert 'NATIVE_TOOL_DISABLED_USE_CODEWORKS' in registry.dispatch(name, {})

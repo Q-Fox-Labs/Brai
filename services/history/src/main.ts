@@ -6,7 +6,7 @@ import { config, type Config } from "./config.js";
 import { limits } from "./contracts.js";
 import { createHistoryHandlers, type HistoryHandlers } from "./domain.js";
 import { createLoadGate, type LoadGate } from "./load.js";
-import { connectNats, runElementsEvents, runNats } from "./nats.js";
+import { connectNats, runGameCoreEvents, runNats } from "./nats.js";
 import { createPostgresStore } from "./storage.js";
 import { startMcp, type McpRuntime } from "./mcp.js";
 import type { NatsConnection, Service } from "nats";
@@ -40,7 +40,7 @@ export async function startHistoryRuntime(cfg: Config = config()): Promise<Histo
   let connection: NatsConnection | undefined;
   let service: Service | undefined;
   let mcp: McpRuntime | undefined;
-  let elementsEvents: Awaited<ReturnType<typeof runElementsEvents>> | undefined;
+  let gameCoreEvents: Awaited<ReturnType<typeof runGameCoreEvents>> | undefined;
   let stopping: Promise<void> | undefined;
 
   const closePools = () => Promise.all([appPool.end(), webPool.end()]).then(() => undefined);
@@ -48,13 +48,13 @@ export async function startHistoryRuntime(cfg: Config = config()): Promise<Histo
     connection = await connectNats(cfg);
     const runtime = await runNats(connection, handlers, gate);
     service = runtime.service;
-    if (cfg.elementsEventsEnabled) elementsEvents = await runElementsEvents(connection, handlers, gate);
+    if (cfg.gameCoreEventsEnabled) gameCoreEvents = await runGameCoreEvents(connection, handlers, gate);
     mcp = await startMcp(cfg, handlers, gate);
   } catch (error) {
     gate.stopAccepting();
     try { await mcp?.close(); } catch {}
     try { await service?.stop(); } catch {}
-    try { await elementsEvents?.stop(); } catch {}
+    try { await gameCoreEvents?.stop(); } catch {}
     try { await connection?.drain(); } catch {}
     await gate.drain();
     await closePools();
@@ -73,7 +73,7 @@ export async function startHistoryRuntime(cfg: Config = config()): Promise<Histo
         gate.stopAccepting();
         try {
           await Promise.all([service?.stop(), mcp?.close()]);
-          await elementsEvents?.stop();
+          await gameCoreEvents?.stop();
         }
         finally {
           await gate.drain();

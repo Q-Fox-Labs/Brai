@@ -1,0 +1,114 @@
+{
+  "formatVersion": 1,
+  "id": "game-core",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [
+    "services/game-core/planning/runner.py",
+    "services/game-core/src/health.ts",
+    "services/game-core/src/main.ts",
+    "services/game-core/src/migrate.ts",
+    "services/game-core/src/import-snapshot.ts"
+  ],
+  "inputs": {
+    "build": [
+      "services/game-core/tsconfig.json"
+    ],
+    "runtime": [
+      "services/game-core/migrations/001.sql",
+      "services/game-core/migrations/002-game-core.sql",
+      "services/game-core/migrations/003-transport.sql",
+      "services/game-core/package.json",
+      "services/game-core/planning/baseline.json",
+      "services/game-core/planning/element-classification-rules.md",
+      "services/game-core/planning/game-planning-format.md",
+      "services/game-core/planning/game-planning-rules.md",
+      "services/game-core/planning/goal-planning-rules.md",
+      "services/game-core/planning/planning-review-rules.md",
+      "services/game-core/planning/planning-system.py",
+      "services/game-core/planning/quest-planning-rules.md",
+      "services/game-core/planning/runner.py",
+      "services/game-core/schemas/messages.schema.json",
+      "services/game-core/schemas/tools.schema.json",
+      "services/game-core/src/config.ts",
+      "services/game-core/src/contracts.ts",
+      "services/game-core/src/domain.ts",
+      "services/game-core/src/game.ts",
+      "services/game-core/src/health.ts",
+      "services/game-core/src/import-snapshot.ts",
+      "services/game-core/src/load.ts",
+      "services/game-core/src/main.ts",
+      "services/game-core/src/mcp.ts",
+      "services/game-core/src/migrate.ts",
+      "services/game-core/src/nats.ts",
+      "services/game-core/src/planning.ts",
+      "services/game-core/src/storage.ts",
+      "deploy/game-core-jetstream-config.mjs",
+      "deploy/game-core-transport-migration.mjs"
+    ],
+    "checks": [
+      "services/game-core/tests/domain.test.mjs",
+      "services/game-core/tests/game.integration.test.mjs",
+      "services/game-core/tests/hierarchy.integration.test.mjs",
+      "services/game-core/tests/mcp.test.mjs",
+      "services/game-core/tests/planning-edges.integration.test.mjs",
+      "services/game-core/tests/planning-fixture.mjs",
+      "services/game-core/tests/planning.integration.test.mjs",
+      "services/game-core/tests/planning.test.mjs",
+      "services/game-core/tests/transport.integration.test.mjs",
+      "services/game-core/tests/transport.test.mjs"
+    ]
+  },
+  "dependencies": [],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/game-core/dist",
+      "services/game-core/migrations",
+      "services/game-core/package.json",
+      "services/game-core/planning/baseline.json",
+      "services/game-core/planning/element-classification-rules.md",
+      "services/game-core/planning/game-planning-format.md",
+      "services/game-core/planning/game-planning-rules.md",
+      "services/game-core/planning/goal-planning-rules.md",
+      "services/game-core/planning/planning-review-rules.md",
+      "services/game-core/planning/planning-system.py",
+      "services/game-core/planning/quest-planning-rules.md",
+      "services/game-core/planning/runner.py",
+      "services/game-core/schemas"
+    ],
+    "entrypoints": [
+      "services/game-core/dist/main.js",
+      "services/game-core/dist/migrate.js",
+      "services/game-core/dist/health.js",
+      "services/game-core/planning/runner.py",
+      "services/game-core/dist/import-snapshot.js"
+    ],
+    "smokeImports": [],
+    "systemRequirements": [
+      "Node.js 24.22.1"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "game-core",
+      "game-core-migrate"
+    ],
+    "migrations": [
+      "services/game-core/migrations"
+    ],
+    "health": "node services/game-core/dist/health.js"
+  },
+  "npm": {
+    "workspaces": [
+      "services/game-core"
+    ]
+  }
+}

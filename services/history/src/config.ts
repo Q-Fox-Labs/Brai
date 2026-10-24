@@ -16,7 +16,7 @@ export interface Config {
   mcpAllowedOrigins: string[];
   mcpMaxSessions: number;
   mcpSessionIdleMs: number;
-  elementsEventsEnabled: boolean;
+  gameCoreEventsEnabled: boolean;
 }
 
 type SecretReader = (path: string) => Buffer;
@@ -93,6 +93,6 @@ export function config(env: NodeJS.ProcessEnv = process.env, readSecret: SecretR
     mcpAllowedOrigins,
     mcpMaxSessions: positiveInteger(env, "HISTORY_MCP_MAX_SESSIONS"),
     mcpSessionIdleMs: positiveInteger(env, "HISTORY_MCP_SESSION_IDLE_MS"),
-    elementsEventsEnabled: flag(env, "HISTORY_ELEMENTS_EVENTS_ENABLED"),
+    gameCoreEventsEnabled: flag(env, "HISTORY_GAME_CORE_EVENTS_ENABLED"),
   };
 }

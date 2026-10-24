@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto';
 
 export const planningReadTool = {
-  name: 'elements_planning_packet_read',
+  name: 'game_core_planning_packet_read',
   description: 'Read the manifest or an exact named file from the current claimed planning packet without code execution or local files. Omit file_name for the complete file_sha256 map to record in baseline.inputs. Read every named packet/rule/input file in chunks until next_offset is null. inputs_sha256 is an aggregate, not the per-file hashes. This does not bind or approve a plan.',
   inputSchema: { type: 'object', additionalProperties: false, required: ['attempt_id'], properties: {
     attempt_id: { type: 'string', format: 'uuid' }, file_name: { type: 'string', minLength: 1, maxLength: 500 },

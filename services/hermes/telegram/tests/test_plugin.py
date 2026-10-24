@@ -934,7 +934,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(method == "actions.result" for method, _ in self.bridge.calls), 1)
 
     async def test_terminal_session_fails_only_observed_exact_agent_attempt(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"),
@@ -945,7 +945,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [])
 
     async def test_successful_turn_preserves_claim_for_live_exact_session_delegation(self):
-        self.plugin.observe_agent_move(tool_name="mcp__brai__elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="mcp__brai__game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         api = ModuleType("tools.async_delegation")
@@ -959,7 +959,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.plugin.tokens.agent_attempts("123", "native-session-1")), 1)
 
     async def test_successful_turn_preserves_claim_for_exact_pending_delivery_only(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         api = ModuleType("tools.async_delegation")
@@ -984,7 +984,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         for terminal in ({"completed": False, "failed": True, "interrupted": False},
                          {"completed": False, "failed": False, "interrupted": True}):
             with self.subTest(terminal=terminal):
-                self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+                self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
                     result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
                     session_id="native-session-1", status="ok")
                 api = ModuleType("tools.async_delegation")
@@ -997,22 +997,22 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                 self.bridge.calls.clear()
 
     async def test_namespaced_claim_and_completion_are_tracked_but_foreign_prefix_is_ignored(self):
-        self.plugin.observe_agent_move(tool_name="mcp__other__elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="mcp__other__game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [])
-        self.plugin.observe_agent_move(tool_name="mcp__brai__elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="mcp__brai__game_core_move_claim", args={"move_id": MOVE},
             result=json.dumps({"result": json.dumps({"attempt": {
                 "id": ATTEMPT, "status": "running", "executor_kind": "agent"}})}),
             session_id="native-session-1", status="ok")
         self.assertEqual(len(self.plugin.tokens.agent_attempts("123", "native-session-1")), 1)
-        self.plugin.observe_agent_move(tool_name="mcp__brai__elements_move_complete", args={"attempt_id": ATTEMPT},
+        self.plugin.observe_agent_move(tool_name="mcp__brai__game_core_move_complete", args={"attempt_id": ATTEMPT},
             result=json.dumps({"result": json.dumps({"attempt": {"id": ATTEMPT, "status": "succeeded"}})}),
             session_id="native-session-1", status="ok")
         self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [])
 
     async def test_factory_reconnect_does_not_mark_live_claim_as_startup_orphan(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         self.plugin.factory(self.app, object())
@@ -1022,7 +1022,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(method == "actions.fail_agent" for method, _ in self.bridge.calls))
 
     async def test_durable_agent_failure_is_retried_during_startup_recovery(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         self.bridge.fail = "actions.fail_agent"
@@ -1048,7 +1048,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         plugin.close()
 
     async def test_terminal_cleanup_preserves_claims_from_other_session_or_owner(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         await self.plugin.on_session_end(session_id="other-session", platform="telegram", completed=True)
@@ -1056,7 +1056,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.plugin.tokens.agent_attempts("123", "other-session")), 0)
 
     async def test_owner_incoming_does_not_fail_active_claim_in_same_or_other_session(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         other_attempt = "00000000-0000-4000-8000-000000000088"
@@ -1066,7 +1066,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.plugin.tokens.agent_attempts("123")), 2)
 
     async def test_terminal_outage_retries_on_later_owner_incoming(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         self.bridge.fail = "actions.fail_agent"

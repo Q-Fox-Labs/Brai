@@ -29,12 +29,12 @@ test('manifest hashes exact full UTF-8 strings; Unicode chunks reconstruct all f
 });
 test('helper uses only existing owner packet read and preserves refusal without retry', async () => {
  const calls=[];
- const ports={list:async endpoint=>endpoint==='elements'?[{name:'elements_planning_packet',inputSchema:{type:'object',properties:{attempt_id:{type:'string',format:'uuid'}},required:['attempt_id'],additionalProperties:false}}]:[],
+ const ports={list:async endpoint=>endpoint==='gameCore'?[{name:'game_core_planning_packet',inputSchema:{type:'object',properties:{attempt_id:{type:'string',format:'uuid'}},required:['attempt_id'],additionalProperties:false}}]:[],
   mcp:async(endpoint,name,args)=>{calls.push({endpoint,name,args});if(args.attempt_id!==attempt)throw fault('NOT_FOUND');return packet;},close:async()=>{}};
  const runtime=await createBraiTools({ownerId:'fixed-owner'},ports);
  assert.ok(runtime.tools.find(t=>t.name===planningReadTool.name));
  assert.deepEqual(await runtime.call(planningReadTool.name,{attempt_id:attempt}),readPlanningPacket(packet,{},fault));
- assert.deepEqual(calls,[{endpoint:'elements',name:'elements_planning_packet',args:{attempt_id:attempt}}]);
+ assert.deepEqual(calls,[{endpoint:'gameCore',name:'game_core_planning_packet',args:{attempt_id:attempt}}]);
  for(const invalid of [{attempt_id:attempt,owner_id:'foreign'},{attempt_id:attempt,file_name:'packet.json',offset:-1},{attempt_id:attempt,limit:12001},{attempt_id:attempt,file_name:'packet.json',limit:1.5},{attempt_id:attempt,path:'/etc/passwd'}])
   await assert.rejects(runtime.call(planningReadTool.name,invalid),/INVALID_ARGUMENT/);
  assert.equal(calls.length,1);

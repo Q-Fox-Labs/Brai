@@ -44,13 +44,13 @@ export function createHumanActions(runtime) {
       if (action.status === 'planned' && action.confirmationStage === null && (!action.outputContracts?.length || action.decision === 'confirm')) throw fault('HUMAN_OUTPUT_REQUIRED');
       let inputs = args.inputResourceIds;
       if (!inputs) {
-        const available = await runtime.elementsCall('elements_moves_available', {}, signal);
+        const available = await runtime.gameCoreCall('game_core_moves_available', {}, signal);
         const ready = available.items?.find(move => move.id === args.moveId);
         inputs = ready?.required_resource_ids ?? ready?.available_resource_ids ?? (action.status === 'claimed' ? action.inputResourceIds : undefined);
         if (!inputs) throw fault('INPUT_RESOURCES_REQUIRED');
       }
       try {
-        const result = await runtime.elementsCall('elements_move_claim', { move_id: args.moveId,
+        const result = await runtime.gameCoreCall('game_core_move_claim', { move_id: args.moveId,
           idempotency_key: `telegram:${args.idempotencyKey}`, executor_kind: 'human', input_resource_ids: inputs }, signal);
         if (!uuid(result.attempt?.id) || result.attempt.executor_kind !== 'human') throw fault('INVALID_UPSTREAM_RESPONSE');
         if (result.attempt.status !== 'running' || action.status === 'claimed' && result.attempt.id !== action.attemptId) throw fault('STALE_ACTION');
@@ -75,7 +75,7 @@ export function createHumanActions(runtime) {
       const outcome = args.decision === 'clarify' ? 'answered' : args.decision;
       const result = { resources: [{ title: action.title, content: args.comment?.trim() || args.decision,
         metadata: { element_id: action.targetId, revision_id: args.revisionId, stage, outcome, ...(args.source ? { source: args.source } : {}) } }] };
-      try { return await runtime.elementsCall('elements_move_complete', { attempt_id: args.attemptId, result }, signal); }
+      try { return await runtime.gameCoreCall('game_core_move_complete', { attempt_id: args.attemptId, result }, signal); }
       catch (error) {
         if (uncertain(error)) throw fault('OUTCOME_UNKNOWN');
         throw error;
@@ -89,7 +89,7 @@ export function createHumanActions(runtime) {
       const graph = await runtime.graph(signal), target = graph.elements.find(element => element.id === args.elementId);
       if (!target) throw fault('NOT_FOUND');
       if (args.decision === 'cancelled') {
-        try { return await runtime.elementsCall('elements_element_activate', { element_id: target.id, revision_id: args.revisionId, cancel: true, feedback: args.feedback }, signal); }
+        try { return await runtime.gameCoreCall('game_core_element_activate', { element_id: target.id, revision_id: args.revisionId, cancel: true, feedback: args.feedback }, signal); }
         catch (error) { if (uncertain(error)) throw fault('OUTCOME_UNKNOWN'); throw error; }
       }
       if (target.revision !== args.revisionId || ['completed', 'cancelled'].includes(target.status)) throw fault('STALE_ACTION');
@@ -139,7 +139,7 @@ export function createHumanActions(runtime) {
             source: args.decisionSource ?? args.source,
             ...(args.decisionSource ? { practical_source: args.source } : {}),
           } : {}) } }));
-      try { return await runtime.elementsCall('elements_move_complete', { attempt_id: action.attemptId, result: { resources } }, signal); }
+      try { return await runtime.gameCoreCall('game_core_move_complete', { attempt_id: action.attemptId, result: { resources } }, signal); }
       catch (error) { if (uncertain(error)) throw fault('OUTCOME_UNKNOWN'); throw error; }
     },
     /** Освобождает истёкшую или отменённую human attempt, сохраняя технический итог и planned Move. */
@@ -148,7 +148,7 @@ export function createHumanActions(runtime) {
         !['expired', 'cancelled', 'declined'].includes(args.reason)) throw fault('INVALID_ARGUMENT');
       const { action } = await lookup(args, signal);
       if (action.attemptId !== args.attemptId || action.attemptStatus !== 'running' || action.attemptExecutorKind !== 'human') throw fault('STALE_ACTION');
-      try { return await runtime.elementsCall('elements_move_fail', { attempt_id: args.attemptId, error_code: `HUMAN_${args.reason.toUpperCase()}` }, signal); }
+      try { return await runtime.gameCoreCall('game_core_move_fail', { attempt_id: args.attemptId, error_code: `HUMAN_${args.reason.toUpperCase()}` }, signal); }
       catch (error) {
         if (uncertain(error)) throw fault('OUTCOME_UNKNOWN');
         throw error;
@@ -162,7 +162,7 @@ export function createHumanActions(runtime) {
       if (!move) throw fault('NOT_FOUND');
       if (move.kind !== 'operation' || move.executor === 'human') throw fault('FORBIDDEN');
       if (move.attemptId !== args.attemptId || attempt?.moveId !== args.moveId || attempt.status !== 'running') return { attempt: attempt ?? null, status: 'already_stopped' };
-      try { return await runtime.elementsCall('elements_move_fail', { attempt_id: args.attemptId, error_code: 'AGENT_STOPPED' }, signal); }
+      try { return await runtime.gameCoreCall('game_core_move_fail', { attempt_id: args.attemptId, error_code: 'AGENT_STOPPED' }, signal); }
       catch (error) { if (uncertain(error)) throw fault('OUTCOME_UNKNOWN'); throw error; }
     },
   };

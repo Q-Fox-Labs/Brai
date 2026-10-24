@@ -18,7 +18,7 @@ export async function serveTools(runtime, transport = new StdioServerTransport()
       return { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
     } catch (error) {
       const code = /^[A-Z][A-Z0-9_]{0,80}$/.test(error.code) ? error.code : 'UPSTREAM_UNAVAILABLE';
-      const diagnostic = code === 'INVALID_ARGUMENT' && request.params.name.startsWith('elements_planning_') ? planningDiagnostic(error.diagnostic) : undefined;
+      const diagnostic = code === 'INVALID_ARGUMENT' && request.params.name.startsWith('game_core_planning_') ? planningDiagnostic(error.diagnostic) : undefined;
       return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code, message: code, ...(diagnostic ? { diagnostic } : {}), ...(code === 'OUTCOME_UNKNOWN' ? { requestId: error.requestId } : {}) }) }] };
     }
   });

@@ -242,9 +242,9 @@ export function validateDocumentation(root,graph) {
   const markdown=files.filter(p=>!/(?:^|\/)(?:vendor|archives?|fixtures)(?:\/)/.test(p)&&p.endsWith('.md')&&p!=='AGENTS.md'&&!p.endsWith('/AGENTS.md')&&!p.endsWith('/CLAUDE.md'));
   const edges=new Map();
   // AIDEV-NOTE: Принятые исходные правила являются byte-pinned assets; их исходные ссылки не переписываются.
-  const baseline='services/elements/planning/baseline.json',pinned=new Map();
+  const baseline='services/game-core/planning/baseline.json',pinned=new Map();
   if(source.has(baseline))for(const [name,info] of Object.entries(JSON.parse(read(baseline)).files))
-    if(name.endsWith('.md'))pinned.set('services/elements/planning/'+name,info.sha256);
+    if(name.endsWith('.md'))pinned.set('services/game-core/planning/'+name,info.sha256);
   for(const file of markdown) {
     const targets=[];
     const text=read(file);
