@@ -1,0 +1,16 @@
+### Visual inspection: mandatory cost and scope gate
+
+Before any multi-frame recognition say: «Визуальный просмотр может быть дорогим: каждый выбранный кадр нужно передать модели для распознавания. Чем чаще кадры, тем больше нагрузка на лимиты подписки и возможные API-расходы. Полный покадровый просмотр ещё дороже. Можно дешевле: субтитры, аудио или отдельные таймкоды. Продолжить?» Do not claim that every source frame must be recognized: sampling is available. Exact money/subscription limits depend on the provider/model and are unknown unless verified.
+
+After explicit agreement, ask the cadence and region of interest. Offer four pickable choices with `clarify`: «Каждые 5 секунд — общий разбор», «Каждую секунду — подробный», «Каждые 0,5 секунды — быстрые действия», «Каждую минуту — обзор». The free-text alternative supports 2/10/15/30 seconds, scene-based/manual points, and custom values. Recommend 30–60 seconds for long talks, 5 seconds for demos, and 0.5–1 only for short action/UI segments. Ask whether the whole video or a range is needed and what to look for; allow «важно на 01:23» to restrict scope. A thumbnail is not a video frame.
+
+Download only after scope selection: `terminal(command="python SKILL_DIR/scripts/video_workflow.py fetch 'URL' --kind video", timeout=600)`. Local files skip download. Run `plan` before recognition:
+`terminal(command="python SKILL_DIR/scripts/video_workflow.py plan 'LOCAL_VIDEO' --interval 5 --start 0 --end 120")`.
+Show its exact selected frame count (computed, never mental arithmetic), interval, range, image width cap, and that audio is NOT included. Confirm this scope if the count is large or differs from what was agreed. Default budget is 60 frames per approved batch; never silently relax it or make a million-frame plan. New scope/count/cadence or API-provider change needs renewed agreement.
+
+Generate only the agreed batch:
+`terminal(command="python SKILL_DIR/scripts/video_workflow.py frames 'LOCAL_VIDEO' --interval 5 --start 0 --end 120 --max-frames 60 --consent --out 'NEW_JOB/frames'", timeout=600)`.
+`--consent` records prior chat consent; the flag does not create consent by itself. The script only extracts frames, it does NOT recognize them or charge a vision API. Read the generated manifest, then call `vision_analyze` for each selected JPEG with a targeted question. Save each observation immediately with timestamp/path/status to `observations.json` using `write_file`/`execute_code`; resume from recorded successful items rather than analyzing twice. Small batches are fine; do not spawn unbounded parallel image calls. At the approved limit stop and ask before continuing. Never silently skip frames; failures remain in the report. Do not label extraction as successful recognition.
+
+Summarize observations in temporal order, optionally combine separately retrieved subtitles/audio. Final report states analyzed count versus planned count, sampled time range, cadence, unreadable/failing frames and unseen gaps. Say «анализ выбранных кадров», not «посмотрел всё», when sampled. Never infer sounds/dialogue from silent images; OCR uncertainty and events between samples must be explicit. For a single requested screenshot, return it without vision unless the user requests interpretation (then no multi-frame approval is needed).
+
