@@ -7,7 +7,7 @@ import {methods, expanded, validate} from './contracts.mjs';
 import {Fault} from './errors.mjs';
 import {connectClient, loadClientConfig} from './client.mjs';
 
-const HELP = `Codeworks: prepare, status, sync, release, cleanup, project.register, project.get
+const HELP = `Codeworks: prepare, status, sync, release, cleanup, lifecycle.status, release.close, workspace.cancel, project.register, project.get
 Usage: codeworks --request-json '{"action":"status","project_id":"my_project"}'
        codeworks < request.json
        codeworks --help | --schema

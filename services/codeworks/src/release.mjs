@@ -8,8 +8,9 @@ function validatePR(p,w,leg,pr) {
 /** Один проход; save фиксирует намерения до мутаций, evidence читает доверенную установку.
  * deploy(target,sha,proof,retryOf) возвращает {operation_id,status}; retryOf разрешает одну явную попытку.
  */
-export async function advanceRelease({project:p,workspace:w,operation:op,release}, {git,github,inspect,save,evidence,deploy,checkpoint=async()=>{}}) {
+export async function advanceRelease({project:p,workspace:w,operation:op,release}, {git,github,inspect,save,evidence,deploy,acquire,releaseLane=async()=>{},verifyEvidence=async()=>true,checkpoint=async()=>{}}) {
   if(!['feature','hotfix'].includes(w.kind))throw new Fault('INVALID_ARGUMENT');
+  const queued=!!acquire;acquire??=async()=>true;
   const flow=release.details;
   const persist=async()=>save(flow);
   const checkGate=async(leg,sha,stage,fallback)=>{
@@ -36,6 +37,9 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
   // После попытки main push сначала сверяется её исход; backport вправе добавить этот hotfix в dev.
   if(w.kind==='hotfix'&&!flow.primary?.merge_push_attempted)await git.validateHotfixSource(p,w,release.requested_sha);
   if(!flow.primary){
+    const head={head:release.requested_sha};
+    const headGate=queued?await checkGate(head,head.head,'head','HEAD_CHECKS_REQUIRED'):null;if(headGate)return headGate;
+    if(!await acquire(w.kind==='feature'?'dev':'prod'))return waiting('awaiting_execution','TARGET_QUEUE');
     const target=w.kind==='feature'?'dev':'main';
     const target_sha=await git.remote(p,target);
     if(!target_sha||target_sha===release.requested_sha)throw new Fault('CONFLICT','Release has no new commit for this target.');
@@ -43,13 +47,22 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
       const installed=await evidence('prod');
       if(!installed||installed.commit_sha!==w.base_sha||target_sha!==w.base_sha)throw new Fault('PRODUCTION_BASE_MISMATCH');
     }
-    flow.primary={branch:w.branch,head:release.requested_sha,target,target_sha};await persist();
+    flow.primary={branch:w.branch,head:release.requested_sha,target,target_sha,...(head.head_ci?{head_ci:head.head_ci}:{})};await persist();
   }
   for(const name of w.kind==='hotfix'?['primary','backport']:['primary']){
     if(!flow[name]){
+      const head={head:release.requested_sha};
+      const headGate=queued?await checkGate(head,head.head,'head','HEAD_CHECKS_REQUIRED'):null;if(headGate)return headGate;
+      if(!await acquire('dev'))return waiting('awaiting_execution','TARGET_QUEUE');
       flow[name]={branch:w.branch,head:release.requested_sha,target:'dev',target_sha:await git.remote(p,'dev')};await persist();
     }
-    const leg=flow[name];
+    const leg=flow[name],lane=leg.target==='main'?'prod':'dev';
+    if(leg.deployment_evidence_id){
+      if(!await verifyEvidence(leg.deployment_evidence_id,lane,leg.merge_sha))throw new Fault('CONFLICT','Confirmed installation evidence is missing.');
+      await releaseLane(lane);continue;
+    }
+    const queuedGate=queued?await checkGate(leg,leg.head,'head','HEAD_CHECKS_REQUIRED'):null;if(queuedGate)return queuedGate;
+    if(!await acquire(lane))return waiting('awaiting_execution','TARGET_QUEUE');
     if(!leg.merged){
       const remote=await git.remote(p,leg.branch);
       if(remote!==leg.head){
@@ -103,7 +116,7 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
       }
       return waiting('awaiting_deployment','EXACT_MERGE_DEPLOYMENT_REQUIRED');
     }
-    leg.deployment_evidence_id=installed.id;await persist();
+    leg.deployment_evidence_id=installed.id;await persist();await releaseLane(target);
   }
   return waiting('succeeded','VERIFIED_RELEASE_COMPLETED');
 }

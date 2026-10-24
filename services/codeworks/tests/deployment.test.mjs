@@ -20,6 +20,8 @@ test('running and failed adapter outcomes never record installed/evidence; misma
  const d={project_id:'p',target:'dev',commit_sha:composition.source,composition,composition_digest:'digest'},queries=[];
  const db={query:async(sql,args)=>{queries.push(sql);return {rows:sql.startsWith('SELECT')?[d]:[]};}};
  assert.equal((await advanceDeployment(db,{id:'id'},async()=>({status:'running'}))).status,'awaiting_deployment');
+ assert.equal((await advanceDeployment(db,{id:'id'},async()=>({status:'unknown'}))).status,'awaiting_reconciliation');
+ assert.equal((await advanceDeployment(db,{id:'id'},async()=>({status:'unstarted'}))).reason,'ANSIBLE_ROLLOUT_UNSTARTED');
  assert.equal((await advanceDeployment(db,{id:'id'},async()=>({status:'failed',phase:'download'}))).status,'failed');
  await assert.rejects(advanceDeployment(db,{id:'id'},async()=>({status:'succeeded',receipt:{operation_id:'wrong'}})),/RECEIPT_MISMATCH/);
  assert.equal(queries.some(q=>q.includes('INSERT INTO codeworks.installed')),false);

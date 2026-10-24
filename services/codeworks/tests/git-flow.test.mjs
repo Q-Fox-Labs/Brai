@@ -313,3 +313,23 @@ test('lost deletion response reconciles absence and rejects a changed origin',as
   await f.g('remote','set-url','--push','origin','https://github.com/foreign/repository.git');
   await assert.rejects(f.git.removeBranch(f.project,f.branch,f.head),{code:'OWNERSHIP_CONFLICT'});
 });
+
+test('Temporal admission checks head CI before queue and pins target only after FIFO acquisition',async t=>{
+  const f=await fixture(t);let acquired=false,requests=0;
+  const acquire=async()=>{requests++;return acquired;};
+  assert.equal((await f.advance({acquire})).reason,'HEAD_CHECKS_REQUIRED');assert.equal(requests,0);assert.equal(f.prs.length,0);assert.equal(f.release.details.primary,undefined);
+  f.good(f.head);assert.equal((await f.advance({acquire})).reason,'TARGET_QUEUE');assert.equal(f.release.details.primary,undefined);
+  await f.g('checkout','dev');await writeFile(path.join(f.repo,'before-acquisition'),'new base\n');await f.g('add','.');await f.g('commit','-m','Advance before queue');await f.g('push','origin','dev');
+  const next=await f.git.remote(f.project,'dev');acquired=true;
+  assert.equal((await f.advance({acquire})).reason,'MERGE_CHECKS_REQUIRED');assert.equal(f.release.details.primary.target_sha,next);
+});
+test('confirmed PROD remains successful while DEV waits even when a newer PROD receipt appears',async t=>{
+  const f=await fixture(t,'hotfix'),released=[];f.good(f.head);
+  const ports={acquire:async()=>true,releaseLane:async target=>released.push(target)};
+  assert.equal((await f.advance(ports)).reason,'MERGE_CHECKS_REQUIRED');const primary=f.release.details.primary;f.good(primary.merge_sha);f.installed('prod',primary.merge_sha);
+  assert.equal((await f.advance(ports)).reason,'MERGE_CHECKS_REQUIRED');assert.ok(released.includes('prod'));
+  const confirmed=f.release.details.primary.deployment_evidence_id;
+  const back=f.release.details.backport;f.proofs.set('prod',{id:randomUUID(),commit_sha:'f'.repeat(40)});
+  assert.equal((await f.advance({...ports,deploy:()=>assert.fail('confirmed PROD must not be installed again')})).reason,'MERGE_CHECKS_REQUIRED');
+  assert.equal(f.release.details.primary.deployment_evidence_id,confirmed);assert.equal(back.target,'dev');
+});

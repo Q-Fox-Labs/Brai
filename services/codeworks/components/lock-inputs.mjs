@@ -25,6 +25,7 @@ export function lockInputs(root,workspaces,{development=false,platform=process.p
   if(!lock.packages||lock.lockfileVersion<2)throw Error('UNSUPPORTED_PACKAGE_LOCK');
   const selected=new Map(),visited=new Set(),pending=[];
   function workspace(key) {
+    if(key==='.')key=''; // AIDEV-NOTE: Корневой npm-набор выбирают явно, без включения всего репозитория в payload.
     if(visited.has(key))return;
     if(key.startsWith('/')||key.split('/').includes('..'))throw Error('INVALID_WORKSPACE_PATH');
     const manifest=read(join(root,key,'package.json')),entry=lock.packages[key];

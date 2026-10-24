@@ -15,7 +15,8 @@ export const configured=!!process.env.CODEWORKS_TEST_CONFIG_FILE;
 export async function readConfig() {
   if(!configured)throw new Error('CODEWORKS_TEST_CONFIG_FILE_REQUIRED');
   const config=JSON.parse(await readFile(process.env.CODEWORKS_TEST_CONFIG_FILE,'utf8'));
-  for(const [key,name] of [['owner_url','brai_codeworks_test'],['app_url','brai_codeworks_test'],['restore_owner_url','brai_codeworks_restore_test'],['restore_app_url','brai_codeworks_restore_test']]) {
+  const primary=config.fixture==='temporal'?'brai_codeworks_temporal_test':'brai_codeworks_test',restore=config.fixture==='temporal'?'brai_codeworks_temporal_restore_test':'brai_codeworks_restore_test';
+  for(const [key,name] of [['owner_url',primary],['app_url',primary],['restore_owner_url',restore],['restore_app_url',restore]]) {
     const url=new URL(config[key]);
     if(url.pathname!=='/'+name||!['postgres:','postgresql:'].includes(url.protocol))throw new Error('DISPOSABLE_DATABASE_REQUIRED');
   }

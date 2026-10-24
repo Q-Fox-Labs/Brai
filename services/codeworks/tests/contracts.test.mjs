@@ -36,8 +36,8 @@ function fixture() {
   return {h,project,workspaces,operations,requests,releases,failedDeployments,set current(value){current=value;},set inspectionError(value){inspectionError=value;},set successful(value){successful=value;},set evidence(value){evidence=value;}};
 }
 
-test('owner API exposes only project administration and five lifecycle methods',()=>{
-  assert.deepEqual(methods,['project.register','project.get','prepare','status','sync','release','cleanup']);
+test('owner API exposes project administration and compatible lifecycle methods',()=>{
+  assert.deepEqual(methods,['project.register','project.get','prepare','status','sync','release','cleanup','lifecycle.status','release.close','workspace.cancel']);
   assert.equal(canonical({b:1,a:{d:2,c:3}}),canonical({a:{c:3,d:2},b:1}));
   validate('prepare',prepare);validate('prepare',{...prepare,kind:'hotfix'});
   for(const method of ['sync','release'])validate(method,scoped);

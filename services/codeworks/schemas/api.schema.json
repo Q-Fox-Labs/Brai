@@ -978,6 +978,203 @@
         "workspace_id"
       ],
       "additionalProperties": false
+    },
+    "release.close": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "request_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "release_operation_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        }
+      },
+      "required": [
+        "project_id",
+        "request_key",
+        "workspace_id",
+        "release_operation_id",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "workspace.cancel": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "request_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        }
+      },
+      "required": [
+        "project_id",
+        "request_key",
+        "workspace_id",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "lifecycle.status": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      },
+      "required": [
+        "project_id",
+        "workspace_id"
+      ],
+      "additionalProperties": false
+    },
+    "lifecycleResponse": {
+      "type": "object",
+      "properties": {
+        "workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "task_status": {
+          "enum": [
+            "active",
+            "removed",
+            "cancelled",
+            "historical"
+          ]
+        },
+        "workflow": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "open",
+                    "draining",
+                    "completed"
+                  ]
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "executor_state": {
+                  "type": "string"
+                },
+                "last_confirmed_stage": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "blocked_reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "status",
+                "generation",
+                "executor_state",
+                "last_confirmed_stage",
+                "blocked_reason"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "target": {
+                "enum": [
+                  "dev",
+                  "prod"
+                ]
+              },
+              "operation_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "state": {
+                "enum": [
+                  "queued",
+                  "held"
+                ]
+              }
+            },
+            "required": [
+              "target",
+              "operation_id",
+              "state"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "workspace_id",
+        "task_status",
+        "workflow",
+        "blockers"
+      ],
+      "additionalProperties": false
     }
   }
 }
