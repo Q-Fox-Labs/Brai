@@ -564,13 +564,25 @@ class TelegramPlugin:
                 and chat_type in {"group", "supergroup", "forum"})
 
     async def guard(self, update, context):
-        """Остановить чужой update до команд, download, native кнопок и inline queries."""
+        """Передать Business своему плагину; остальные updates ограничить маршрутами Brai."""
         from telegram.ext import ApplicationHandlerStop
+        if self.closed:
+            raise ApplicationHandlerStop
+        connection = getattr(update, "business_connection", None)
+        if connection is not None:
+            owner = getattr(connection, "user", None)
+            if str(getattr(owner, "id", "")) != self.config.owner or getattr(owner, "is_bot", False):
+                raise ApplicationHandlerStop
+            return
+        # AIDEV-NOTE: У Business свой lifecycle и авторизация подключения; общий Brai turn ниже по-прежнему запрещён.
+        if any(getattr(update, field, None) is not None for field in
+               ("business_message", "edited_business_message", "deleted_business_messages")):
+            return
         chat = getattr(update, "effective_chat", None)
         message = getattr(update, "effective_message", None)
         user = getattr(update, "effective_user", None)
-        if (self.closed or not self._route_matches(getattr(chat, "id", None), getattr(chat, "type", None),
-                                                       getattr(user, "id", ""))
+        if (not self._route_matches(getattr(chat, "id", None), getattr(chat, "type", None),
+                                    getattr(user, "id", ""))
                 or not self.config.allows(getattr(user, "id", "")) or getattr(user, "is_bot", False)
                 or getattr(message, "sender_chat", None) or getattr(message, "business_connection_id", None)):
             raise ApplicationHandlerStop
