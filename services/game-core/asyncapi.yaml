@@ -1,0 +1,94 @@
+# ABOUTME: Описывает game-core на сохранённом NATS транспорте GameCore.
+# ABOUTME: События совместимы с существующими History и Alerts adapters.
+asyncapi: 2.6.0
+info:
+  title: Brai game-core
+  version: 1.0.0
+  description: NATS Services и JetStream контракт game-core с совместимыми GameCore subjects.
+defaultContentType: application/json
+channels:
+  brai.game-core.v1.query.graph:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_graph_get' }
+  brai.game-core.v1.query.timeline:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_timeline_get' }
+  brai.game-core.v1.query.element:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_graph_get' }
+  brai.game-core.v1.query.moves:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_moves_available' }
+  brai.game-core.v1.command.create:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_structure_create' }
+  brai.game-core.v1.command.revise:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_element_revise' }
+  brai.game-core.v1.command.claim:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_move_claim' }
+  brai.game-core.v1.command.complete:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_move_complete' }
+  brai.game-core.v1.command.activate:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_element_activate' }
+  brai.game-core.v1.command.fail:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_move_fail' }
+  brai.game-core.v1.command.link:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_move_link' }
+  brai.game-core.v1.command.dev-status:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/devStatusRequest' }
+  'brai.game-core.v1.events.>':
+    subscribe:
+      message: { $ref: '#/components/messages/event' }
+      bindings:
+        nats:
+          subject: brai.game-core.v1.events.>
+  brai.game-core.v1.command.planning-packet:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_planning_packet' }
+  brai.game-core.v1.command.planning-bind:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_planning_bind' }
+  brai.game-core.v1.command.planning-build:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_planning_build' }
+  brai.game-core.v1.command.planning-apply:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_planning_apply' }
+  brai.game-core.v1.command.reclassify:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_element_reclassify' }
+  brai.game-core.v1.command.planning-expand-repeat:
+    publish:
+      message:
+        payload: { $ref: './schemas/messages.schema.json#/definitions/game_core_planning_expand_repeat' }
+
+components:
+  messages:
+    request:
+      payload: { $ref: './schemas/messages.schema.json#/definitions/request' }
+    event:
+      payload: { $ref: './schemas/messages.schema.json#/definitions/event' }

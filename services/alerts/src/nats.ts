@@ -9,9 +9,9 @@ import type { Config } from './config.js';
 
 export const streamName = 'BRAI_ALERTS_INGEST_V1';
 export const durableName = 'alerts_ingest';
-export const elementsStreamName = 'BRAI_ELEMENTS_EVENTS_V1';
-export const elementsDurableName = 'alerts_elements_events';
-const elementsSubject = 'brai.elements.v1.events.>';
+export const gameCoreStreamName = 'BRAI_GAME_CORE_EVENTS_V1';
+export const gameCoreDurableName = 'alerts_game_core_events';
+const gameCoreSubject = 'brai.game-core.v1.events.>';
 const pullExpiresMs = 10_000;
 /** Подключает выделенную сервисную identity и собственный inbox. */
 export function connectNats(cfg: Config): Promise<NatsConnection> {
@@ -51,19 +51,19 @@ export async function ingestMessage(msg: JsMsg, handlers: AlertsHandlers, gate: 
     log('ingest', error.code, started, metadata);
   }
 }
-/** Обрабатывает общий Elements event; события без notification считаются успешно проигнорированными. */
-export async function ingestElementsMessage(msg: JsMsg, handlers: AlertsHandlers, gate: LoadGate): Promise<void> {
-  try { const input = decode(msg.data); await gate.run(context => handlers.ingestElementsEvent(input, context)); msg.ack(); }
+/** Обрабатывает общий GameCore event; события без notification считаются успешно проигнорированными. */
+export async function ingestGameCoreMessage(msg: JsMsg, handlers: AlertsHandlers, gate: LoadGate): Promise<void> {
+  try { const input = decode(msg.data); await gate.run(context => handlers.ingestGameCoreEvent(input, context)); msg.ack(); }
   catch (cause) { const error = fault(cause); if (['INVALID_ARGUMENT', 'EVENT_ID_CONFLICT', 'UNKNOWN_TYPE'].includes(error.code)) msg.term(); else msg.nak(Math.min(30_000, 1000 * 2 ** Math.min(5, msg.info.deliveryCount - 1))); }
 }
-/** Проверяет и подключает durable Alerts consumer общего Elements stream. */
-export async function runElementsEvents(nc: NatsConnection, handlers: AlertsHandlers, gate: LoadGate): Promise<{ finished: Promise<void>; stop: () => Promise<void> }> {
-  const manager = await nc.jetstreamManager(); const stream = (await manager.streams.info(elementsStreamName)).config;
-  if (stream.storage !== StorageType.File || stream.retention !== RetentionPolicy.Limits || !stream.subjects?.includes(elementsSubject)) throw new Error('ALERTS_ELEMENTS_STREAM_CONFIG_MISMATCH');
-  const info = await manager.consumers.info(elementsStreamName, elementsDurableName); const consumerConfig = info.config;
-  if (consumerConfig.ack_policy !== AckPolicy.Explicit || consumerConfig.deliver_policy !== DeliverPolicy.All || consumerConfig.replay_policy !== ReplayPolicy.Instant || consumerConfig.filter_subject !== elementsSubject || consumerConfig.max_deliver !== -1 || consumerConfig.headers_only || consumerConfig.deliver_subject) throw new Error('ALERTS_ELEMENTS_CONSUMER_CONFIG_MISMATCH');
-  const consumer = await nc.jetstream().consumers.get(elementsStreamName, elementsDurableName); let messages: ConsumerMessages | undefined; let stopped = false;
-  const finished = (async () => { while (!stopped && !nc.isClosed()) { try { messages = await consumer.consume({ max_messages: 1, expires: 1_000 }); for await (const msg of messages) { if (stopped) { msg.nak(); break; } await ingestElementsMessage(msg, handlers, gate); } } catch (error) { if (!stopped) console.error(JSON.stringify({ service: 'service_alerts', operation: 'elements.consume', result: error instanceof Error ? error.name : 'UNKNOWN' })); } finally { messages?.stop(); messages = undefined; } } })();
+/** Проверяет и подключает durable Alerts consumer общего GameCore stream. */
+export async function runGameCoreEvents(nc: NatsConnection, handlers: AlertsHandlers, gate: LoadGate): Promise<{ finished: Promise<void>; stop: () => Promise<void> }> {
+  const manager = await nc.jetstreamManager(); const stream = (await manager.streams.info(gameCoreStreamName)).config;
+  if (stream.storage !== StorageType.File || stream.retention !== RetentionPolicy.Limits || !stream.subjects?.includes(gameCoreSubject)) throw new Error('ALERTS_GAME_CORE_STREAM_CONFIG_MISMATCH');
+  const info = await manager.consumers.info(gameCoreStreamName, gameCoreDurableName); const consumerConfig = info.config;
+  if (consumerConfig.ack_policy !== AckPolicy.Explicit || consumerConfig.deliver_policy !== DeliverPolicy.All || consumerConfig.replay_policy !== ReplayPolicy.Instant || consumerConfig.filter_subject !== gameCoreSubject || consumerConfig.max_deliver !== -1 || consumerConfig.headers_only || consumerConfig.deliver_subject) throw new Error('ALERTS_GAME_CORE_CONSUMER_CONFIG_MISMATCH');
+  const consumer = await nc.jetstream().consumers.get(gameCoreStreamName, gameCoreDurableName); let messages: ConsumerMessages | undefined; let stopped = false;
+  const finished = (async () => { while (!stopped && !nc.isClosed()) { try { messages = await consumer.consume({ max_messages: 1, expires: 1_000 }); for await (const msg of messages) { if (stopped) { msg.nak(); break; } await ingestGameCoreMessage(msg, handlers, gate); } } catch (error) { if (!stopped) console.error(JSON.stringify({ service: 'service_alerts', operation: 'game-core.consume', result: error instanceof Error ? error.name : 'UNKNOWN' })); } finally { messages?.stop(); messages = undefined; } } })();
   return { finished, async stop() { stopped = true; messages?.stop(); await finished; } };
 }
 /** Регистрирует Services API и ограниченный pull; NATS SDK предоставляет PING/INFO/STATS. */

@@ -32,7 +32,7 @@ FAILURE = "Операция Brai не подтверждена. Проверьт
 CONFIRMATION_DESCRIPTION = (
     "Ask the owner to confirm a human Action in the configured Telegram chat. First create "
     "the Element and Action with the available game-core structure/create tools, or use existing ones. "
-    "Call elements_request_human_action for the real moveId; pass its returned moveId and revisionId here. "
+    "Call game_core_request_human_action for the real moveId; pass its returned moveId and revisionId here. "
     "Never invent IDs or pass placeholder UUIDs. Decision-only plan/final Actions show saved content with one Accept button. Clarification Actions show their question with no button and accept a plain owner answer. Practical human Actions show the required work without a button; after the owner performs it, save only the current real message through brai_telegram_submit_result. Remarks and cancellation are ordinary owner messages handled by brai_telegram_submit_feedback. Do not send a separate copy. After ok=true, finish with NO_REPLY; after failure, explain it. A verified owner decision automatically resumes this session."
 )
 
@@ -655,12 +655,12 @@ class TelegramPlugin:
                 return
         if not isinstance(result, dict):
             return
-        if tool_name == "elements_move_claim":
+        if tool_name == "game_core_move_claim":
             attempt = result.get("attempt") if isinstance(result.get("attempt"), dict) else result
             move_id, attempt_id = args.get("move_id"), attempt.get("id")
             if _uuid(move_id) and _uuid(attempt_id) and attempt.get("executor_kind") == "agent" and attempt.get("status") == "running":
                 self.tokens.track_agent_attempt(self.config.owner, session_id, move_id, attempt_id)
-        elif tool_name in {"elements_move_complete", "elements_move_fail"} and _uuid(args.get("attempt_id")):
+        elif tool_name in {"game_core_move_complete", "game_core_move_fail"} and _uuid(args.get("attempt_id")):
             self.tokens.clear_agent_attempt(self.config.owner, session_id, args["attempt_id"])
 
     async def _fail_stopped_agent_attempts(self, session_id):

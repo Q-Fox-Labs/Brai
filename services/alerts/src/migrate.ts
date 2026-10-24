@@ -25,6 +25,7 @@ export async function migrate(pool: Pool, ownerRole: string, appRole: string, we
     await client.query(`REVOKE CREATE ON SCHEMA public FROM ${quote(appRole)},${quote(webRole)}`);
     // AIDEV-NOTE: Повтор всегда сверяет закреплённые seed ID/code/category; журнал не скрывает повреждённый seed.
     await client.query(readFileSync(new URL("../migrations/001.sql", import.meta.url), "utf8"));
+    await client.query(readFileSync(new URL("../migrations/002-game-core-source.sql", import.meta.url), "utf8"));
     const schemaOwner = (await client.query("SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname='alerts'")).rows[0]?.owner;
     const wrongTableOwner = (await client.query("SELECT 1 FROM pg_class WHERE relnamespace='alerts'::regnamespace AND relowner<>(SELECT oid FROM pg_roles WHERE rolname=$1)", [ownerRole])).rowCount;
     if (schemaOwner !== ownerRole || wrongTableOwner) throw new Error("ALERTS_REQUIRES_MIGRATION_OWNER");

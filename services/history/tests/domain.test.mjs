@@ -70,8 +70,8 @@ test('catalog replay validates complete audit and returns original result after 
  }
  m.rows.find(e=>e.id===request.event_id).data.new={...original.result,id:999};await assert.rejects(m.core.categoryCreate(request),fault('EVENT_ID_CONFLICT'));
 });
-test('Elements envelope resolves local type codes and is idempotent',async()=>{
+test('GameCore envelope resolves local type codes and is idempotent',async()=>{
  const m=memory();const payload={event_id:randomUUID(),event_version:1,event_type:'move.completed',occurred_at:'2026-10-15T20:00:00.000Z',owner_id:'user-a',actor:{kind:'agent',id:'agent-1'},aggregate:{kind:'attempt',id:randomUUID()},data:{history_category_code:'execution',history_type_code:'execute',result:{ok:true}}};
- const first=await m.core.appendElementsEvent(payload);const second=await m.core.appendElementsEvent(payload);
- assert.equal(first.inserted,true);assert.equal(second.inserted,false);assert.equal(first.event.source,'service_elements');assert.equal(first.event.type_id,1201);assert.equal(m.rows.length,1);
+ const first=await m.core.appendGameCoreEvent(payload);const second=await m.core.appendGameCoreEvent(payload);
+ assert.equal(first.inserted,true);assert.equal(second.inserted,false);assert.equal(first.event.source,'service_game_core');assert.equal(first.event.type_id,1201);assert.equal(m.rows.length,1);
 });

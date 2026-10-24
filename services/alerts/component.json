@@ -20,6 +20,7 @@
       "services/alerts/DEPLOYMENT.md",
       "services/alerts/contracts/index.mjs",
       "services/alerts/migrations/001.sql",
+      "services/alerts/migrations/002-game-core-source.sql",
       "services/alerts/package.json",
       "services/alerts/schemas/messages.schema.json",
       "services/alerts/src/config.ts",

@@ -14,7 +14,7 @@ ID: `web`. Описывает компонент в исходниках; его
 
 Интерфейс не владеет данными соседних сервисов и не заменяет их API. После несовместимого обновления может потребоваться обновить вкладку.
 
-Связанные компоненты: [auth](auth.md), [timer](timer.md), [elements](elements.md), [agent](agent.md), [artifacts](artifacts.md).
+Связанные компоненты: [auth](auth.md), [timer](timer.md), [game-core](game-core.md), [agent](agent.md), [artifacts](artifacts.md).
 
 ## Технические подробности
 
