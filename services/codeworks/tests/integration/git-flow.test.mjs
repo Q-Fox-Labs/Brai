@@ -26,6 +26,19 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
   const subtest=(name,body)=>{t.signal.throwIfAborted();return t.test(name,()=>own.run(body));};
   const op=async(p,id)=>(await f.h.call('status',{project_id:p.id,operation_id:id},'codex')).operation;
   const area=async id=>(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[id])).rows[0];
+  // AIDEV-NOTE: Cleanup использует настоящий flock/worker, но разрешает только fixture-local origin через DI.
+  const cleanupWorker=own.guard(async(p,id)=>{
+    const script=`import {Pool} from 'pg';
+      import {runOperation} from '${new URL('../../src/worker.mjs',import.meta.url).href}';
+      import {createGit} from '${new URL('../../src/git.mjs',import.meta.url).href}';
+      import {createFlowGit} from '${new URL('../../src/git-flow.mjs',import.meta.url).href}';
+      const flowGit=createFlowGit({localRemote:true}),pool=new Pool({connectionString:process.env.CODEWORKS_DATABASE_URL});
+      try {await runOperation(pool,process.argv[2],createGit({flowGit}),{flowGit,allowedRepositories:[process.argv[1]]});}
+      finally {await pool.end();}`;
+    await command('/bin/sh',['-c','exec 3>"$1" || exit 74; flock -x 3 || exit $?; export CODEWORKS_LOCK_HELD=1; exec "$2" --input-type=module -e "$3" "$4" "$5"',
+      'cleanup-fixture',path.join(p.common_dir,'codeworks.lock'),process.execPath,script,p.repo_path,id],{env:{CODEWORKS_DATABASE_URL:f.config.app_url}});
+  });
+
   const evidence=own.guard((p,target,commit_sha)=>recordDeployment(f.app,{project_id:p.id,target,commit_sha,evidence_url:'https://fixture.invalid/'+commit_sha},{allowedRepositories:[p.repo_path]}));
   for(const kind of ['feature','hotfix'])await subtest(kind+' durable route/check/installed gates survive recovery',async()=>{
     const p=await f.project({github:{repository:'fixture/repository',required_checks,ci}});
@@ -96,23 +109,23 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
     assert.equal((await f.app.query("SELECT id FROM codeworks.operations WHERE workspace_id=$1 AND kind='cleanup'",[w.id])).rowCount,1);
     assert.ok((await createStore(f.app).pending(100)).some(row=>row.id===automatic));
     if(kind==='feature'){
-      await f.worker(p,automatic);
+      await cleanupWorker(p,automatic);
       assert.equal((await op(p,automatic)).status,'succeeded');assert.ok((await area(w.id)).removed_at);
       await assert.rejects(lstat(w.path),{code:'ENOENT'});
       assert.notEqual((await command('git',['-C',p.repo_path,'show-ref','--verify','refs/heads/'+w.branch],{allowFailure:true})).code,0);
-      assert.equal(await flowGit.remote(p,w.branch),head);
+      assert.equal(await flowGit.remote(p,w.branch),null);
       assert.equal((await op(p,accepted.operation_id)).status,'succeeded');
       await assert.rejects(f.h.call('prepare',args,'codex'),{code:'CONFLICT'});
       return;
     }
     const cleanup=async key=>{
       const a=await f.h.call('cleanup',{project_id:p.id,workspace_id:w.id,request_key:key},'hermes');
-      await f.worker(p,a.operation_id);
+      await cleanupWorker(p,a.operation_id);
       const status=await f.h.call('status',{project_id:p.id,operation_id:a.operation_id},'hermes');
       return {accepted:a,operation:status.operation,status};
     };
     await writeFile(path.join(w.path,'untracked'),'keep dirty\n');
-    await f.worker(p,automatic);
+    await cleanupWorker(p,automatic);
     const dirty=await op(p,automatic);assert.equal(dirty.status,'failed');assert.equal(dirty.error.code,'CONFLICT');
     assert.equal((await op(p,accepted.operation_id)).status,'succeeded');
     assert.equal((await lstat(w.path)).isDirectory(),true);await rm(path.join(w.path,'untracked'));
@@ -135,7 +148,7 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
     const removed=await cleanup('clean-cleanup');assert.equal(removed.operation.status,'succeeded');assert.deepEqual(removed.operation.result,{removed:true});
     assert.ok((await area(w.id)).removed_at);await assert.rejects(lstat(w.path),{code:'ENOENT'});
     assert.notEqual((await command('git',['-C',p.repo_path,'show-ref','--verify','refs/heads/'+w.branch],{allowFailure:true})).code,0);
-    assert.equal(await flowGit.remote(p,w.branch),head);
+    assert.equal(await flowGit.remote(p,w.branch),null);
     assert.deepEqual(await f.h.call('cleanup',{project_id:p.id,workspace_id:w.id,request_key:'clean-cleanup'},'hermes'),removed.accepted);
     assert.deepEqual(await f.h.call('release',request,'codex'),accepted);
     assert.equal((await f.h.call('status',{project_id:p.id,workspace_id:w.id},'codex')).git,null);

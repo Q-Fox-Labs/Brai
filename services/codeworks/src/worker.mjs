@@ -42,7 +42,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
         if(!release)throw new Fault('CONFLICT','Cleanup requires a completed release.');
         const legs=w.kind==='hotfix'?[release.details.primary,release.details.backport]:[release.details.primary];
         if(legs.some(leg=>!leg?.merged||!leg.deployment_evidence_id))throw new Fault('CONFLICT');
-        const removed=await git.cleanup(project,w,legs.map(l=>l.merge_sha));
+        const removed=await git.cleanup(project,w,legs.map(l=>l.merge_sha),release.requested_sha);
         if(!removed)throw new Fault('CONFLICT','Cleanup preserved the workspace: check uncommitted or unmerged changes, then retry cleanup with a new request key.');
         await db.query('UPDATE codeworks.workspaces SET removed_at=COALESCE(removed_at,now()) WHERE id=$1',[w.id]);
         await finish('succeeded','removed',{removed});return;
