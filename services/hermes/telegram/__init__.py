@@ -497,7 +497,7 @@ class TelegramPlugin:
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
         for row in self.tokens.pending():
-            route_changed = row["chat_id"] != self.config.chat or row["owner"] != self.config.owner
+            route_changed = not self._saved_route_matches(row["chat_id"]) or row["owner"] != self.config.owner
             recover_now = (row["consumed"] or not row["attempt_id"] or row["message_id"] is None
                            or route_changed)
             if route_changed:
@@ -549,9 +549,19 @@ class TelegramPlugin:
         future = asyncio.run_coroutine_threadsafe(coroutine, self.loop)
         return await asyncio.wrap_future(future)
 
-    def _route_matches(self, chat_id, chat_type):
-        return (str(chat_id) == self.config.chat and chat_type in
-                ({"group", "supergroup", "forum"} if self.config.chat.startswith("-") else {"private", "dm"}))
+    def _saved_route_matches(self, chat_id):
+        """Проверить сохранённый групповой или личный маршрут текущего списка доступа."""
+        return str(chat_id) == self.config.chat or self.config.allows(chat_id)
+
+    def _route_matches(self, chat_id, chat_type, user_id):
+        """Разрешить заданную группу либо личный чат самого разрешённого отправителя."""
+        chat_id, user_id = str(chat_id), str(user_id)
+        if not self.config.allows(user_id):
+            return False
+        if chat_type in {"private", "dm"}:
+            return chat_id == user_id
+        return (self.config.chat.startswith("-") and chat_id == self.config.chat
+                and chat_type in {"group", "supergroup", "forum"})
 
     async def guard(self, update, context):
         """Остановить чужой update до команд, download, native кнопок и inline queries."""
@@ -559,7 +569,8 @@ class TelegramPlugin:
         chat = getattr(update, "effective_chat", None)
         message = getattr(update, "effective_message", None)
         user = getattr(update, "effective_user", None)
-        if (self.closed or not self._route_matches(getattr(chat, "id", None), getattr(chat, "type", None))
+        if (self.closed or not self._route_matches(getattr(chat, "id", None), getattr(chat, "type", None),
+                                                       getattr(user, "id", ""))
                 or not self.config.allows(getattr(user, "id", "")) or getattr(user, "is_bot", False)
                 or getattr(message, "sender_chat", None) or getattr(message, "business_connection_id", None)):
             raise ApplicationHandlerStop
@@ -589,8 +600,9 @@ class TelegramPlugin:
         return (getattr(entry, "session_id", None) == row["session_id"]
                 and _platform(getattr(source, "platform", None)) == "telegram"
                 and self.config.allows(getattr(source, "user_id", "")) and row["owner"] == self.config.owner
-                and str(getattr(source, "chat_id", "")) == row["chat_id"] == self.config.chat
-                and self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))
+                and str(getattr(source, "chat_id", "")) == row["chat_id"]
+                and self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None),
+                                        getattr(source, "user_id", ""))
                 and str(getattr(source, "thread_id", None) or "") == row["thread_id"])
 
     async def _resume(self, token):
@@ -630,7 +642,8 @@ class TelegramPlugin:
         if (getattr(entry, "session_id", None) != session_id
                 or _platform(getattr(source, "platform", None)) != "telegram"
                 or not self.config.allows(getattr(source, "user_id", ""))
-                or not self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))):
+                or not self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None),
+                                        getattr(source, "user_id", ""))):
             return None
         return entry
 
@@ -690,8 +703,10 @@ class TelegramPlugin:
         except Exception:
             # Keep the durable exact attempt for the next startup/owner-turn recovery.
             if notify:
-                await self._notify("Hermes остановил работу, но Brai не подтвердил завершение начатого Хода. Проверьте его состояние.",
-                                   self.config.chat, thread_id)
+                entry = self._owner_session(row["session_id"])
+                if entry is not None:
+                    await self._notify("Hermes остановил работу, но Brai не подтвердил завершение начатого Хода. Проверьте его состояние.",
+                                       str(entry.origin.chat_id), thread_id)
 
     async def recover_durable_agent_attempts(self):
         """Retry only attempts proven terminal by a lifecycle hook or startup boundary."""
@@ -735,7 +750,8 @@ class TelegramPlugin:
         source = getattr(entry, "origin", None)
         if (entry is not None and _platform(getattr(source, "platform", None)) == "telegram"
                 and self.config.allows(getattr(source, "user_id", ""))
-                and self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))):
+                and self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None),
+                                        getattr(source, "user_id", ""))):
             await self._fail_stopped_agent_attempts(entry.session_id)
 
     async def incoming(self, event, **kwargs):
@@ -744,7 +760,8 @@ class TelegramPlugin:
         if _platform(getattr(source, "platform", None)) != "telegram":
             return None
         raw = getattr(event, "raw_message", None)
-        if (not self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None))
+        if (not self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None),
+                                        getattr(source, "user_id", ""))
                 or not self.config.allows(getattr(source, "user_id", ""))
                 or getattr(source, "is_bot", False) or getattr(raw, "sender_chat", None)
                 or getattr(raw, "business_connection_id", None)):
@@ -765,7 +782,7 @@ class TelegramPlugin:
                 raise BridgeError("ATTACHMENT_LIMIT")
             for index, path in enumerate(paths):
                 result = await asyncio.to_thread(self.bridge.call, "files.publish", {
-                    "path": path, "requestId": f"tg:{self.config.chat}:{event.message_id}:{index}"})
+                    "path": path, "requestId": f"tg:{source.chat_id}:{event.message_id}:{index}"})
                 if not _uuid(result.get("artifactId")) or not isinstance(result.get("markdown"), str):
                     raise BridgeError("RPC_MALFORMED")
                 match = self.descriptor.fullmatch(result["markdown"])
@@ -778,7 +795,8 @@ class TelegramPlugin:
             logging.getLogger(__name__).warning("BRAI_INBOUND_FILE_NOT_STORED code=%s count=%d", code, len(paths))
             if code == "ATTACHMENT_LIMIT":
                 try:
-                    await self._on_native_loop(self._notify("Не удалось обработать вложения. В одном сообщении должно быть не больше десяти файлов."))
+                    await self._on_native_loop(self._notify("Не удалось обработать вложения. В одном сообщении должно быть не больше десяти файлов.",
+                        str(source.chat_id), str(getattr(source, "thread_id", None) or "")))
                 except Exception:
                     pass
                 return {"action": "skip", "reason": "brai-file-input-invalid"}
@@ -820,7 +838,8 @@ class TelegramPlugin:
             if get_session_env("HERMES_SESSION_PLATFORM") != "telegram":
                 return None
             if (not self._route_matches(get_session_env("HERMES_SESSION_CHAT_ID"),
-                                        get_session_env("HERMES_SESSION_CHAT_TYPE"))
+                                        get_session_env("HERMES_SESSION_CHAT_TYPE"),
+                                        get_session_env("HERMES_SESSION_USER_ID"))
                     or not self.config.allows(get_session_env("HERMES_SESSION_USER_ID"))
                     or not all(isinstance(value, str) and value for value in (session_id, tool_call_id))):
                 raise BridgeError("IMAGE_CONTEXT_INVALID")
@@ -830,7 +849,7 @@ class TelegramPlugin:
                     or path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}
                     or not stat.S_ISREG(path.lstat().st_mode)):
                 raise BridgeError("IMAGE_PATH_INVALID")
-            identity = json.dumps([self.config.owner, self.config.chat, session_id, tool_call_id],
+            identity = json.dumps([self.config.owner, get_session_env("HERMES_SESSION_CHAT_ID"), session_id, tool_call_id],
                                   ensure_ascii=False, separators=(",", ":"))
             published = self.bridge.call("files.publish", {
                 "path": str(path), "requestId": "tg-image:" + sha256(identity.encode()).hexdigest()})
@@ -879,7 +898,16 @@ class TelegramPlugin:
                 else:
                     if not Path(raw).is_absolute() or not session_id or not turn_id:
                         raise BridgeError("FILE_CONTEXT_INVALID")
-                    identity = json.dumps([self.config.owner, self.config.chat, session_id, turn_id, raw],
+                    from gateway.session_context import get_session_env
+                    entry = self._owner_session(session_id)
+                    if entry is not None:
+                        chat_id = str(entry.origin.chat_id)
+                    else:
+                        chat_id = get_session_env("HERMES_SESSION_CHAT_ID")
+                        if not self._route_matches(chat_id, get_session_env("HERMES_SESSION_CHAT_TYPE"),
+                                                   get_session_env("HERMES_SESSION_USER_ID")):
+                            raise BridgeError("FILE_CONTEXT_INVALID")
+                    identity = json.dumps([self.config.owner, chat_id, session_id, turn_id, raw],
                                           ensure_ascii=False, separators=(",", ":"))
                     result = self.bridge.call("files.publish", {
                         "path": raw, "requestId": "tg-output:" + sha256(identity.encode()).hexdigest()},
@@ -913,14 +941,15 @@ class TelegramPlugin:
             raise BridgeError("SESSION_CONTEXT_INVALID")
         context = {key: get_session_env(name) for key, name in (
             ("session_key", "HERMES_SESSION_KEY"), ("session_id", "HERMES_SESSION_ID"),
-            ("thread_id", "HERMES_SESSION_THREAD_ID"))}
+            ("thread_id", "HERMES_SESSION_THREAD_ID"), ("chat_id", "HERMES_SESSION_CHAT_ID"))}
         context["session_id"] = dispatch_id or bound_id
         context["message_id"] = get_session_env("HERMES_SESSION_MESSAGE_ID")
         if (get_session_env("HERMES_SESSION_PLATFORM") != "telegram"
                 or not self.config.allows(get_session_env("HERMES_SESSION_USER_ID"))
                 or not self._route_matches(get_session_env("HERMES_SESSION_CHAT_ID"),
-                                           get_session_env("HERMES_SESSION_CHAT_TYPE"))
-                or not self._session_matches({**context, "owner": self.config.owner, "chat_id": self.config.chat})):
+                                           get_session_env("HERMES_SESSION_CHAT_TYPE"),
+                                           get_session_env("HERMES_SESSION_USER_ID"))
+                or not self._session_matches({**context, "owner": self.config.owner})):
             raise BridgeError("SESSION_CONTEXT_INVALID")
         return context
 
@@ -935,7 +964,7 @@ class TelegramPlugin:
             result = await self._on_native_loop(self._request(args, context))
             if json.loads(result).get("ok"):
                 # Public MessageEvent: this exact inbound request has received its reply.
-                key = (self.config.chat, context["thread_id"], context["message_id"])
+                key = (context["chat_id"], context["thread_id"], context["message_id"])
                 event = self.inbound_events.pop(key, None)
                 if event is not None:
                     event.reply_expected = False
@@ -980,12 +1009,12 @@ class TelegramPlugin:
             return json.dumps({"ok": False, "code": code, "message": message}, ensure_ascii=False)
 
     async def _result(self, args, context):
-        key = (self.config.chat, context["thread_id"], context["message_id"])
+        key = (context["chat_id"], context["thread_id"], context["message_id"])
         event = self.inbound_events.get(key)
         content = getattr(event, "text", None) if event is not None else None
         if not isinstance(content, str) or not content.strip() or len(content) > 16000:
             raise BridgeError("OWNER_MESSAGE_REQUIRED")
-        source = {"platform": "telegram", "chat_id": self.config.chat, "thread_id": context["thread_id"], "message_id": context["message_id"]}
+        source = {"platform": "telegram", "chat_id": context["chat_id"], "thread_id": context["thread_id"], "message_id": context["message_id"]}
         pending = self.tokens.human_result(self.config.owner, args["moveId"])
         if pending and (pending["revision_id"] != args["revisionId"]):
             self.tokens.clear_human_result(self.config.owner, args["moveId"])
@@ -1037,7 +1066,7 @@ class TelegramPlugin:
         return response
 
     async def _feedback(self, args, context):
-        key = (self.config.chat, context["thread_id"], context["message_id"])
+        key = (context["chat_id"], context["thread_id"], context["message_id"])
         event = self.inbound_events.get(key)
         if event is None or not isinstance(getattr(event, "text", None), str) or not event.text.strip() or len(event.text) > 16000:
             raise BridgeError("OWNER_MESSAGE_REQUIRED")
@@ -1056,7 +1085,8 @@ class TelegramPlugin:
                 candidates = [row for row in self.tokens.pending() if row["stage"] == "clarification"
                     and row["move_id"] == args["moveId"] and row["target_id"] == args["elementId"]
                     and row["revision_id"] == args["revisionId"] and row["session_id"] == context["session_id"]
-                    and row["thread_id"] == context["thread_id"] and not row["consumed"]
+                    and row["thread_id"] == context["thread_id"] and row["chat_id"] == context["chat_id"]
+                    and not row["consumed"]
                     and await asyncio.to_thread(self._session_matches, row)]
                 if len(candidates) != 1:
                     raise BridgeError("CLARIFICATION_NOT_PENDING")
@@ -1069,7 +1099,7 @@ class TelegramPlugin:
             request_id = f"{value[:8]}-{value[8:12]}-5{value[13:16]}-a{value[17:20]}-{value[20:32]}"
             result = await asyncio.to_thread(self.bridge.call, "actions.feedback", {**args, "feedback": {
                 "id": request_id, "content": event.text, "source": {"platform": "telegram",
-                "chat_id": self.config.chat, "thread_id": context["thread_id"], "message_id": context["message_id"]}}})
+                "chat_id": context["chat_id"], "thread_id": context["thread_id"], "message_id": context["message_id"]}}})
             if args["decision"] == "cancelled":
                 if result.get("id") != args["elementId"] or result.get("status") != "cancelled":
                     raise BridgeError("FEEDBACK_UNCONFIRMED")
@@ -1108,6 +1138,9 @@ class TelegramPlugin:
         for pending in self.tokens.pending():
             if pending["move_id"] != args["moveId"]:
                 continue
+            if (pending["chat_id"] != context["chat_id"] or pending["thread_id"] != context["thread_id"]
+                    or pending["session_id"] != context["session_id"]):
+                raise BridgeError("CONFIRMATION_PENDING")
             if (not pending["consumed"] and pending["message_id"] is not None
                     and pending["revision_id"] == args["revisionId"]
                     and await asyncio.to_thread(self._session_matches, pending)
@@ -1121,7 +1154,7 @@ class TelegramPlugin:
             self.tokens.resolve(pending["token"])
         # Reservation до prepare закрывает crash между backend claim и SQLite записью.
         token = existing["token"] if existing else self.tokens.create(
-            self.config.owner, {**args, "attemptId": ""}, stage, self.config.chat, context)
+            self.config.owner, {**args, "attemptId": ""}, stage, context["chat_id"], context)
         try:
             action = await self._prepare(self.tokens.unresolved(token))
             stage = self.tokens.unresolved(token)["stage"]
@@ -1172,14 +1205,14 @@ class TelegramPlugin:
                 if existing and len(chunks) == 1:
                     from telegram.error import BadRequest
                     try:
-                        await self.bot.edit_message_text(chat_id=int(self.config.chat),
+                        await self.bot.edit_message_text(chat_id=int(self.tokens.unresolved(token)["chat_id"]),
                             message_id=int(existing["message_id"]), text=chunk, parse_mode="HTML", **keyboard,
                             connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
                     except BadRequest as error:
                         if "message is not modified" not in str(error).lower():
                             raise
                 else:
-                    message = await self.bot.send_message(chat_id=int(self.config.chat), text=chunk, **route,
+                    message = await self.bot.send_message(chat_id=int(self.tokens.unresolved(token)["chat_id"]), text=chunk, **route,
                         parse_mode="HTML", **keyboard, connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
                     self.tokens.bind(token, message.message_id)
             return json.dumps({"ok": True, "status": "awaiting_owner", "moveId": action["moveId"],
@@ -1265,7 +1298,8 @@ class TelegramPlugin:
         message = getattr(query, "message", None)
         chat = getattr(message, "chat", None)
         if (self.closed or query is None
-                or not self._route_matches(getattr(chat, "id", None), getattr(chat, "type", None))
+                or not self._route_matches(getattr(chat, "id", None), getattr(chat, "type", None),
+                    getattr(getattr(query, "from_user", None), "id", ""))
                 or not self.config.allows(getattr(getattr(query, "from_user", None), "id", ""))
                 or getattr(getattr(query, "from_user", None), "is_bot", False)
                 or getattr(message, "sender_chat", None)
@@ -1276,7 +1310,7 @@ class TelegramPlugin:
         if not match or len(data.encode("utf-8")) > 64:
             await query.answer("Используй «Принять». Замечания и отмену напиши сообщением.", show_alert=True)
             return
-        row = self.tokens.consume(match[1], self.config.owner, getattr(message, "message_id", None), self.config.chat,
+        row = self.tokens.consume(match[1], self.config.owner, getattr(message, "message_id", None), str(chat.id),
                                   str(getattr(message, "message_thread_id", None) or ""))
         if row is None:
             await query.answer("Кнопка уже использована или не относится к сообщению.", show_alert=True)
