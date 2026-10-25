@@ -9,9 +9,10 @@ import {authorizeCommand} from './lifecycle.mjs';
 import {runOperation} from './worker.mjs';
 import {createActivityGit} from './git-steps.mjs';
 import {withExecutionContext} from './execution-context.mjs';
+import {createCodeIndex} from './code-index.mjs';
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 /** Создаёт Activities; identity берётся из SDK, а не из переданного пользователем payload. */
-export function createActivities(pool,{allowedRepositories,execute=runOperation,adapters=createActivityGit(),identity=()=>{const info=Context.current().info;if(info.workflowType!=='codeworksWorkspace')throw Error('ADMITTED_WORKFLOW_TYPE_REQUIRED');return info.workflowExecution.workflowId;}}={}) {
+export function createActivities(pool,{allowedRepositories,execute=runOperation,adapters=createActivityGit(),codeIndex=createCodeIndex(pool),identity=()=>{const info=Context.current().info;if(info.workflowType!=='codeworksWorkspace')throw Error('ADMITTED_WORKFLOW_TYPE_REQUIRED');return info.workflowExecution.workflowId;}}={}) {
   const session=async work=>{const db=await pool.connect();try{return await work(db,identity());}finally{db.release();}};
   const registry=async(db,id,generation)=>{
     const r=(await db.query("SELECT * FROM codeworks.workflow_registry WHERE workflow_id=$1 AND generation=$2 AND owner='temporal'",[id,generation])).rows[0];
@@ -23,7 +24,7 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
     const checkpoint=async()=>{context?.cancellationSignal.throwIfAborted();};
     try{
       try{const context=Context.current();context.heartbeat({operation_id:operationId});heartbeat=setInterval(()=>context.heartbeat({operation_id:operationId}),2000);heartbeat.unref();}catch{/* Явный identity доступен из изолированных тестов. */}
-      await withExecutionContext({signal:context?.cancellationSignal},()=>execute(pool,operationId,adapters.git,{...adapters,allowedRepositories,workflowId:id,generation,scoped:true,expectedKind,prepareStep,checkpoint}));
+      await withExecutionContext({signal:context?.cancellationSignal},()=>execute(pool,operationId,adapters.git,{...adapters,codeIndex,allowedRepositories,workflowId:id,generation,scoped:true,expectedKind,prepareStep,checkpoint}));
       return await session(async db=>{
         await authorizeCommand(db,operationId,id,generation);
         const o=(await db.query('SELECT o.status,o.step,o.error,w.preparation_state FROM codeworks.operations o LEFT JOIN codeworks.workspaces w ON w.id=o.workspace_id WHERE o.id=$1',[operationId])).rows[0];
@@ -34,6 +35,26 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
     }finally{if(heartbeat)clearInterval(heartbeat);}
   };
   return {
+    /** Фоновый проход не входит в ledger команд и не переводит выпуск в reconciliation. */
+    maintainIndex:async generation=>{
+      const item=await session(async(db,id)=>{
+        const r=await registry(db,id,generation);
+        if(r.state==='completed'||r.lifecycle!=='active'||!r.workspace_id)return null;
+        if((await db.query("SELECT 1 FROM codeworks.commands WHERE workflow_id=$1 AND kind IN ('cleanup','workspace.cancel') AND state<>'done' LIMIT 1",[id])).rowCount)return null;
+        const w=(await db.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[r.workspace_id])).rows[0];
+        if(!w||w.removed_at||w.preparation_state!=='ready')return null;
+        const p=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1',[w.project_id])).rows[0]?.config;
+        if(!p||!allowedRepositories.includes(p.repo_path))throw Error('INDEX_PROJECT_FORBIDDEN');
+        return {project:p,workspace:w};
+      });
+      if(!item)return;
+      let context;try{context=Context.current();}catch{/* Только fixture identity. */}
+      const beat=setInterval(()=>context?.heartbeat({stage:'index-maintenance'}),2000);beat.unref();
+      try{await withExecutionContext({signal:context?.cancellationSignal},async()=>{
+        await adapters.git.inspect(item.project,item.workspace);
+        await codeIndex.maintain(item.project,item.workspace);
+      });}finally{clearInterval(beat);}
+    },
     /** Загружает ограниченную порцию в порядке БД; в историю не попадают credentials и параметры адаптеров. */
     loadCommands:generation=>session(async(db,id)=>{
       const r=await registry(db,id,generation);
@@ -112,7 +133,10 @@ export function startTemporal(pool,options){
   const executionPool=new Pool({connectionString:options.databaseURL,max:4,connectionTimeoutMillis:3000,statement_timeout:10000});
   executionPool.on('error',()=>console.error('codeworks execution database disconnected'));
   executionPool.on('connect',client=>client.on('error',()=>{}));
-  const activities=createActivities(executionPool,options);
+  // Один connection удерживает index guard, второй обслуживает короткие checkpoints; команды имеют прежний пул.
+  const indexPool=new Pool({connectionString:options.databaseURL,max:2,connectionTimeoutMillis:3000,statement_timeout:10000});
+  indexPool.on('error',()=>console.error('codeworks index database disconnected'));
+  const activities=createActivities(executionPool,{...options,codeIndex:options.codeIndex??createCodeIndex(indexPool)});
   const running=(async()=>{
     while(!stopping){
       try{
@@ -132,5 +156,5 @@ export function startTemporal(pool,options){
       if(!stopping)await wait(1000);
     }
   })();
-  return {async close(){stopping=true;abort.abort();if(relay)clearInterval(relay);if(worker?.getState()==='RUNNING')worker.shutdown();await running;await executionPool.end();}};
+  return {async close(){stopping=true;abort.abort();if(relay)clearInterval(relay);if(worker?.getState()==='RUNNING')worker.shutdown();await running;await executionPool.end();await indexPool.end();}};
 }
