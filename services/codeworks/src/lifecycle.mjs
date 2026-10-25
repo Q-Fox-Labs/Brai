@@ -46,7 +46,7 @@ export async function closeRelease(db,op,project,workspace,{flowGit,github,recon
   if(!r)throw new Fault('NOT_FOUND');
   if(r.closed_at)return {status:'succeeded',reason:'RELEASE_ALREADY_CLOSED'};
   if(r.state==='succeeded')throw new Fault('CONFLICT','A successful release cannot be closed.');
-  // AIDEV-NOTE: Проектный flock исключает параллельный проход; external Ansible живёт независимо от него.
+  // AIDEV-NOTE: Execution guard области исключает повтор Activity; Ansible имеет отдельную защиту своего rollout ID.
   for(const leg of [r.details.primary,r.details.backport].filter(Boolean)){
     if(leg.pr_attempted&&!leg.pr_number){
       const pr=await github.find(project,leg);

@@ -9,7 +9,7 @@ import { createGit } from './git.mjs';
 import { createHandlers } from './domain.mjs';
 import { Fault } from './errors.mjs';
 import {startTemporal} from './temporal.mjs';
-/** Запускает один worker под flock; FD 3 наследуют Node и его Git/preparer потомки. */
+/** Сохраняет legacy launcher для изолированных recovery fixtures; Temporal Activities его не используют. */
 export function launchWorker(commonDir,operationId,env=process.env) {
   const script='exec 3>"$1" || exit 74; flock -n -E 75 3 || exit $?; export CODEWORKS_LOCK_HELD=1; exec "$2" "$3" "$4"';
   return spawn('/bin/sh',['-c',script,'codeworks',path.join(commonDir,'codeworks.lock'),process.execPath,fileURLToPath(new URL('./worker.mjs',import.meta.url)),operationId],{env,stdio:['ignore','ignore','pipe']});
@@ -25,7 +25,7 @@ export async function startRuntime({databaseURL,adminExecutor='codeworks_admin',
   const store=createStore(pool),handlers=createHandlers(store,createGit(),{adminExecutor,allowedRepositories,requireTemporal:startRecovery});
   let stopping=false;
   let temporal;
-  try{temporal=startRecovery?startTemporal(pool,{databaseURL,allowedRepositories,launchWorker,address:process.env.CODEWORKS_TEMPORAL_ADDRESS,namespace:process.env.CODEWORKS_TEMPORAL_NAMESPACE,taskQueue:process.env.CODEWORKS_TEMPORAL_TASK_QUEUE}):null;}catch(error){await pool.end();throw error;}
+  try{temporal=startRecovery?startTemporal(pool,{databaseURL,allowedRepositories,address:process.env.CODEWORKS_TEMPORAL_ADDRESS,namespace:process.env.CODEWORKS_TEMPORAL_NAMESPACE,taskQueue:process.env.CODEWORKS_TEMPORAL_TASK_QUEUE}):null;}catch(error){await pool.end();throw error;}
   return {
     handlers,pool,
     /** Выполняет короткий API вызов; durable worker переживает разрыв вызывающего транспорта. */

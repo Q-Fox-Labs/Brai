@@ -2,16 +2,36 @@
 // ABOUTME: Временная потеря Temporal не останавливает NATS API и не теряет сохранённые команды.
 import {Connection,Client,WorkflowExecutionAlreadyStartedError} from '@temporalio/client';
 import {NativeConnection,Worker} from '@temporalio/worker';
+import {Pool} from 'pg';
 import {Context} from '@temporalio/activity';
 import {fileURLToPath} from 'node:url';
 import {authorizeCommand} from './lifecycle.mjs';
+import {runOperation} from './worker.mjs';
+import {createActivityGit} from './git-steps.mjs';
+import {withExecutionContext} from './execution-context.mjs';
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 /** Создаёт Activities; identity берётся из SDK, а не из переданного пользователем payload. */
-export function createActivities(pool,{launchWorker,allowedRepositories,databaseURL,identity=()=>{const info=Context.current().info;if(info.workflowType!=='codeworksWorkspace')throw Error('ADMITTED_WORKFLOW_TYPE_REQUIRED');return info.workflowExecution.workflowId;},children=new Set()}={}) {
+export function createActivities(pool,{allowedRepositories,execute=runOperation,adapters=createActivityGit(),identity=()=>{const info=Context.current().info;if(info.workflowType!=='codeworksWorkspace')throw Error('ADMITTED_WORKFLOW_TYPE_REQUIRED');return info.workflowExecution.workflowId;}}={}) {
   const session=async work=>{const db=await pool.connect();try{return await work(db,identity());}finally{db.release();}};
   const registry=async(db,id,generation)=>{
     const r=(await db.query("SELECT * FROM codeworks.workflow_registry WHERE workflow_id=$1 AND generation=$2 AND owner='temporal'",[id,generation])).rows[0];
     if(!r)throw Error('WORKFLOW_OWNER_REQUIRED');return r;
+  };
+  const executeCommand=(expectedKind,prepareStep)=>async(operationId,generation)=>{
+    const id=identity();let heartbeat;
+    let context;try{context=Context.current();}catch{/* Только явный тестовый identity работает без SDK context. */}
+    const checkpoint=async()=>{context?.cancellationSignal.throwIfAborted();};
+    try{
+      try{const context=Context.current();context.heartbeat({operation_id:operationId});heartbeat=setInterval(()=>context.heartbeat({operation_id:operationId}),2000);heartbeat.unref();}catch{/* Явный identity доступен из изолированных тестов. */}
+      await withExecutionContext({signal:context?.cancellationSignal},()=>execute(pool,operationId,adapters.git,{...adapters,allowedRepositories,workflowId:id,generation,scoped:true,expectedKind,prepareStep,checkpoint}));
+      return await session(async db=>{
+        await authorizeCommand(db,operationId,id,generation);
+        const o=(await db.query('SELECT o.status,o.step,o.error,w.preparation_state FROM codeworks.operations o LEFT JOIN codeworks.workspaces w ON w.id=o.workspace_id WHERE o.id=$1',[operationId])).rows[0];
+        await db.query("UPDATE codeworks.commands SET state=CASE WHEN $2 IN ('succeeded','failed') THEN 'done' ELSE state END,updated_at=now() WHERE operation_id=$1",[operationId,o.status]);
+        await db.query("UPDATE codeworks.workflow_registry SET last_stage=$2,blocked_reason=$3,executor_state='waiting',updated_at=now() WHERE workflow_id=$1",[id,o.step,o.status==='succeeded'?null:o.error?.code??o.step]);
+        return {status:o.status,preparation_state:o.preparation_state};
+      });
+    }finally{if(heartbeat)clearInterval(heartbeat);}
   };
   return {
     /** Загружает ограниченную порцию в порядке БД; в историю не попадают credentials и параметры адаптеров. */
@@ -21,38 +41,20 @@ export function createActivities(pool,{launchWorker,allowedRepositories,database
       await db.query("UPDATE codeworks.workflow_registry SET executor_state='running',updated_at=now() WHERE workflow_id=$1",[id]);
       const release=r.workspace_id?(await db.query('SELECT operation_id,requested_sha,details FROM codeworks.releases WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1',[r.workspace_id])).rows[0]:null;
       const checkpoint={workflow_id:id,workspace_id:r.workspace_id,rollout_operation_id:r.operation_id,position:Number(r.position),...(release?{release_operation_id:release.operation_id,sha:release.requested_sha,evidence_ids:[release.details.primary,release.details.backport].filter(Boolean).flatMap(leg=>leg.deployment_evidence_id?[leg.deployment_evidence_id]:[])}:{})};
-      return {completed:false,checkpoint,commands:(await db.query("SELECT operation_id,sequence FROM codeworks.commands WHERE workflow_id=$1 AND generation=$2 AND state='pending' AND NOT(kind='release' AND EXISTS(SELECT 1 FROM codeworks.commands control WHERE control.workflow_id=codeworks.commands.workflow_id AND control.kind='release.close' AND control.state<>'done' AND control.admitted_request->>'release_operation_id'=codeworks.commands.operation_id::text)) ORDER BY sequence LIMIT 32",[id,generation])).rows};
+      return {completed:false,checkpoint,commands:(await db.query("SELECT operation_id,sequence,kind FROM codeworks.commands WHERE workflow_id=$1 AND generation=$2 AND state='pending' AND NOT(kind='release' AND EXISTS(SELECT 1 FROM codeworks.commands control WHERE control.workflow_id=codeworks.commands.workflow_id AND control.kind='release.close' AND control.state<>'done' AND control.admitted_request->>'release_operation_id'=codeworks.commands.operation_id::text)) ORDER BY sequence LIMIT 32",[id,generation])).rows};
     }),
-    /** Один ограниченный проход существующих адаптеров; ожидания CI/Ansible возвращаются в durable timer. */
-    async executeCommand(operationId,generation){
-      const id=identity();
-      const op=await session(async db=>{
-        const c=await authorizeCommand(db,operationId,id,generation);
-        if(c.state!=='pending')return null;
-        return (await db.query('SELECT p.config FROM codeworks.operations o JOIN codeworks.projects p ON p.id=o.project_id WHERE o.id=$1',[operationId])).rows[0];
-      });
-      if(!op)return;
-      const child=launchWorker(op.config.common_dir,operationId,{...process.env,CODEWORKS_DATABASE_URL:databaseURL,CODEWORKS_ALLOWED_REPOSITORIES:JSON.stringify(allowedRepositories),CODEWORKS_WORKFLOW_ID:id,CODEWORKS_WORKFLOW_GENERATION:String(generation)});
-      children.add(child);child.stderr.on('data',()=>{});
-      let abort,heartbeat;
-      try{
-        const signal=Context.current().cancellationSignal;
-        Context.current().heartbeat({operation_id:operationId});
-        heartbeat=setInterval(()=>Context.current().heartbeat({operation_id:operationId}),2000);heartbeat.unref();
-        abort=()=>child.kill('SIGTERM');signal.addEventListener('abort',abort,{once:true});
-      }catch{/* Явный тестовый identity позволяет проверять порт вне Activity context. */}
-      let result;
-      try{result=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code,signal)=>resolve({code,signal}));});}
-      finally{if(heartbeat)clearInterval(heartbeat);children.delete(child);if(abort)Context.current().cancellationSignal.removeEventListener('abort',abort);}
-      if(result.code===75)return;
-      if(result.code!==0)throw Error('OPERATION_PASS_INTERRUPTED');
-      await session(async db=>{
-        await authorizeCommand(db,operationId,id,generation);
-        const o=(await db.query('SELECT status,step,error FROM codeworks.operations WHERE id=$1',[operationId])).rows[0];
-        await db.query("UPDATE codeworks.commands SET state=CASE WHEN $2 IN ('succeeded','failed') THEN 'done' ELSE state END,updated_at=now() WHERE operation_id=$1",[operationId,o.status]);
-        await db.query("UPDATE codeworks.workflow_registry SET last_stage=$2,blocked_reason=$3,executor_state='waiting',updated_at=now() WHERE workflow_id=$1",[id,o.step,o.status==='succeeded'?null:o.error?.code??o.step]);
-      });
-    },
+    // AIDEV-NOTE: Имя executeCommand остаётся для Activity, уже записанных в старых историях.
+    executeCommand:executeCommand(),
+    prepareBranch:executeCommand('prepare','branch'),
+    prepareCheckout:executeCommand('prepare','checkout'),
+    prepareDependencies:executeCommand('prepare','dependencies'),
+    confirmWorkspace:executeCommand('prepare','ready'),
+    synchronizeBranch:executeCommand('sync'),
+    advanceRelease:executeCommand('release'),
+    reconcileRollout:executeCommand('rollout'),
+    cleanupWorkspace:executeCommand('cleanup'),
+    closeRelease:executeCommand('release.close'),
+    cancelWorkspace:executeCommand('workspace.cancel'),
     /** Исчерпание технических повторов замораживает команду, сохраняя доказательства и занятый контур. */
     requireReconciliation:(operationId,generation)=>session(async(db,id)=>{
       await authorizeCommand(db,operationId,id,generation);
@@ -106,8 +108,11 @@ export function startTemporal(pool,options){
   if(!address||!namespace||!taskQueue)throw Error('TEMPORAL_CONFIGURATION_REQUIRED');
   let stopping=false,worker,connection,native,relay,delivery;
   const abort=new AbortController();
-  const children=new Set();
-  const activities=createActivities(pool,{...options,children});
+  // AIDEV-NOTE: Медленный внешний проход не исчерпывает соединения NATS API и доставщика.
+  const executionPool=new Pool({connectionString:options.databaseURL,max:4,connectionTimeoutMillis:3000,statement_timeout:10000});
+  executionPool.on('error',()=>console.error('codeworks execution database disconnected'));
+  executionPool.on('connect',client=>client.on('error',()=>{}));
+  const activities=createActivities(executionPool,options);
   const running=(async()=>{
     while(!stopping){
       try{
@@ -127,5 +132,5 @@ export function startTemporal(pool,options){
       if(!stopping)await wait(1000);
     }
   })();
-  return {async close(){stopping=true;abort.abort();if(relay)clearInterval(relay);if(worker?.getState()==='RUNNING')worker.shutdown();for(const child of children)child.kill('SIGTERM');await running;}};
+  return {async close(){stopping=true;abort.abort();if(relay)clearInterval(relay);if(worker?.getState()==='RUNNING')worker.shutdown();await running;await executionPool.end();}};
 }

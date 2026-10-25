@@ -54,8 +54,21 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         return result;
       });
     } else {
+      // AIDEV-NOTE: Git и сеть не входят в транзакцию приёма. Повтор ключа не зависит от нынешнего состояния дерева.
+      const snapshot=await store.read(args.project_id,async db=>{
+        const p=await project(db,args.project_id,executorId);
+        const old=await db.request(p.id,executorId,args.request_key);
+        const w=old?null:method==='prepare'?await db.workspaceByKey(p.id,args.workspace_key):await db.workspace(p.id,args.workspace_id);
+        return {project:dto(p),workspace:w?dto(w):null,repeated:!!old};
+      });
+      let baseSHA,inspection;
+      if(!snapshot.repeated){
+        if(method==='prepare'&&!snapshot.workspace)baseSHA=await git.readBase(snapshot.project,args.kind??'feature');
+        if(['sync','release'].includes(method)&&snapshot.workspace&&!snapshot.workspace.removed_at&&snapshot.workspace.preparation_state==='ready')inspection=await git.inspect(snapshot.project,snapshot.workspace);
+      }
       value=await store.transaction(args.project_id,async db=>{
         const p=await project(db,args.project_id,executorId);
+        if(canonical(p)!==canonical(snapshot.project))throw new Fault('CONFLICT','Project changed during admission; inspect status before retry.');
         const digest=createHash('sha256').update(canonical({method,args})).digest('hex');
         const old=await db.request(p.id,executorId,args.request_key);
         if(old){
@@ -74,7 +87,8 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
           }else{
             const key=args.workspace_key;
             if(key.length>64||!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(key)||/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i.test(key)||/^[0-9a-f]{12,}$/i.test(key))throw new Fault('INVALID_ARGUMENT','New workspace_key must be a short descriptive task name, e.g. codeworks-auto-cleanup; UUIDs and commit hashes are not task names.');
-            const base_sha=await git.readBase(p,kind);
+            const base_sha=baseSHA;
+            if(!base_sha)throw new Fault('CONFLICT','Workspace changed during admission.');
             if(kind==='hotfix'&&(await db.currentEvidence(p.id,'prod'))?.commit_sha!==base_sha)throw new Fault('PRODUCTION_BASE_MISMATCH');
             const id=randomUUID();
             w={id,project_id:p.id,workspace_key:args.workspace_key,kind,base_ref:p.git_flow[kind+'_base'],base_sha,branch:p.git_flow[kind+'_prefix']+args.workspace_key,path:path.join(p.workspace_root,id),ownership_token:randomUUID()};
@@ -87,7 +101,8 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
           if(w.kind==='promotion')throw new Fault('CONFLICT','Historical promotion workspaces are read-only.');
           if(['sync','release'].includes(method)){
             if(w.preparation_state!=='ready'||w.removed_at)throw new Fault('CONFLICT','Workspace must be prepared first.');
-            const state=await git.inspect(p,w);
+            const state=inspection;
+            if(!state||snapshot.workspace?.id!==w.id||['path','branch','base_sha','ownership_token'].some(key=>snapshot.workspace[key]!==w[key]))throw new Fault('CONFLICT','Workspace changed during admission.');
             if(state.dirty||state.head!==args.commit_sha)throw new Fault('CONFLICT','Operation requires the current clean workspace commit.');
             if(await db.activeRelease(w.id))throw new Fault('CONFLICT','Workspace has an unfinished release; inspect its status first.');
           }

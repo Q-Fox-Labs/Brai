@@ -15,7 +15,8 @@
     "services/codeworks/ci/pipeline.mjs",
     "services/codeworks/src/verify-ci.mjs",
     "services/codeworks/src/cli.mjs",
-    "services/codeworks/src/hook.mjs"
+    "services/codeworks/src/hook.mjs",
+    "services/codeworks/src/git-step.mjs"
   ],
   "inputs": {
     "build": [
@@ -66,7 +67,11 @@
       "services/codeworks/src/lifecycle.mjs",
       "services/codeworks/migrations/008.sql",
       "services/codeworks/src/transition.mjs",
-      "services/codeworks/src/replay.mjs"
+      "services/codeworks/src/replay.mjs",
+      "services/codeworks/src/git-steps.mjs",
+      "services/codeworks/src/git-step.mjs",
+      "services/codeworks/src/execution-context.mjs",
+      "services/codeworks/git-step.openrpc.json"
     ],
     "checks": [
       "services/codeworks/components/cli.mjs",
@@ -149,7 +154,11 @@
       "services/codeworks/src/lifecycle.mjs",
       "services/codeworks/dist/workflows.js",
       "services/codeworks/src/transition.mjs",
-      "services/codeworks/src/replay.mjs"
+      "services/codeworks/src/replay.mjs",
+      "services/codeworks/src/git-steps.mjs",
+      "services/codeworks/src/git-step.mjs",
+      "services/codeworks/src/execution-context.mjs",
+      "services/codeworks/git-step.openrpc.json"
     ],
     "entrypoints": [
       "services/codeworks/src/main.mjs",
@@ -158,7 +167,8 @@
       "services/codeworks/src/deployment-evidence.mjs",
       "services/codeworks/src/verify-ci.mjs",
       "services/codeworks/src/cli.mjs",
-      "services/codeworks/src/hook.mjs"
+      "services/codeworks/src/hook.mjs",
+      "services/codeworks/src/git-step.mjs"
     ],
     "smokeImports": [
       "services/codeworks/src/contracts.mjs",
