@@ -102,6 +102,19 @@ class Admission(unittest.TestCase):
         self.assertEqual(json.loads((self.root/'baseline.json').read_text()),self.full)
         state.prepare(self.root,self.full,inputs(self.full),administrative=True)
 
+    def test_mount_permutation_keeps_client_to_admin_extension_compatible(self):
+        """Перестановка одинаковых Docker mounts не меняет продукт и разрешение дополнения."""
+        service=self.full['projects']['brai']['document']['services']['web']
+        service['volumes']=[
+            {'type':'bind','source':'/srv/projects/brai/a','target':'/a','read_only':True},
+            {'type':'bind','source':'/srv/projects/brai/b','target':'/b','read_only':False}]
+        self.client=partition.product(self.full)
+        self.install()
+        service['volumes'].reverse()
+        self.assertEqual(partition.encoded(partition.product(self.full)),partition.encoded(self.client))
+        state.prepare(self.root,self.full,inputs(self.full),administrative=True)
+        self.assertEqual(json.loads((self.root/'baseline.json').read_text()),self.full)
+
     def test_extension_does_not_accept_another_product(self):
         self.install();other=copy.deepcopy(self.full);other['source_revisions']['prod']='f'*40
         before=(self.root/'baseline.json').read_bytes()

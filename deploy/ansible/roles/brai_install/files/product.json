@@ -1081,10 +1081,9 @@
             "restart": "unless-stopped",
             "volumes": [
               {
-                "bind": {},
                 "read_only": true,
-                "source": "/etc/brai/supabase-mcp.json",
-                "target": "/run/supabase-mcp/config.json",
+                "source": "/opt/brai-components/supabase-mcp/7c4c418ac19e9e99335adffb21fb4a53ce204be5f22ce5fec8c3e478417d9f00",
+                "target": "/payload",
                 "type": "bind"
               },
               {
@@ -1095,9 +1094,10 @@
                 "type": "bind"
               },
               {
+                "bind": {},
                 "read_only": true,
-                "source": "/opt/brai-components/supabase-mcp/7c4c418ac19e9e99335adffb21fb4a53ce204be5f22ce5fec8c3e478417d9f00",
-                "target": "/payload",
+                "source": "/etc/brai/supabase-mcp.json",
+                "target": "/run/supabase-mcp/config.json",
                 "type": "bind"
               }
             ],
@@ -1253,16 +1253,16 @@
             "user": "1000:1000",
             "volumes": [
               {
+                "read_only": true,
+                "source": "/opt/brai-components/alerts/e79697480b8baf3fe0f7db0b5475006bcb47e515a39c2ddb7089f62eff603dca",
+                "target": "/payload",
+                "type": "bind"
+              },
+              {
                 "bind": {},
                 "read_only": true,
                 "source": "/srv/projects/brai/.secrets/alerts_cursor_hmac_key",
                 "target": "/run/secrets/alerts_cursor_hmac_key",
-                "type": "bind"
-              },
-              {
-                "read_only": true,
-                "source": "/opt/brai-components/alerts/e79697480b8baf3fe0f7db0b5475006bcb47e515a39c2ddb7089f62eff603dca",
-                "target": "/payload",
                 "type": "bind"
               }
             ],
@@ -1349,15 +1349,15 @@
             "restart": "unless-stopped",
             "volumes": [
               {
-                "source": "artifacts_data",
-                "target": "/var/lib/brai-artifacts",
-                "type": "volume"
-              },
-              {
                 "read_only": true,
                 "source": "/opt/brai-components/artifacts/abfeb1e45c7ad0624f49165eb4cef41e5f8ad7dd2dbf3c0c5ee0b5f66c514de4",
                 "target": "/payload",
                 "type": "bind"
+              },
+              {
+                "source": "artifacts_data",
+                "target": "/var/lib/brai-artifacts",
+                "type": "volume"
               }
             ],
             "working_dir": "/payload/services/artifacts"
@@ -1557,16 +1557,16 @@
             "user": "1000:1000",
             "volumes": [
               {
+                "read_only": true,
+                "source": "/opt/brai-components/history/29fc8c2d4c053488c130b4424bbb7c10467aec67d3782416fb7686313d97fd4c",
+                "target": "/payload",
+                "type": "bind"
+              },
+              {
                 "bind": {},
                 "read_only": true,
                 "source": "/srv/projects/brai/.secrets/history_cursor_hmac_key",
                 "target": "/run/secrets/history_cursor_hmac_key",
-                "type": "bind"
-              },
-              {
-                "read_only": true,
-                "source": "/opt/brai-components/history/29fc8c2d4c053488c130b4424bbb7c10467aec67d3782416fb7686313d97fd4c",
-                "target": "/payload",
                 "type": "bind"
               }
             ],
@@ -1687,12 +1687,6 @@
             "shm_size": 67108864,
             "volumes": [
               {
-                "read_only": true,
-                "source": "/srv/projects/brai/deploy/Caddyfile.agent-attachments",
-                "target": "/etc/caddy/artifact-attachments.caddy",
-                "type": "bind"
-              },
-              {
                 "read_only": false,
                 "source": "caddy_caddy_config",
                 "target": "/config",
@@ -1708,6 +1702,12 @@
                 "read_only": true,
                 "source": "/etc/brai/caddy/Caddyfile",
                 "target": "/etc/caddy/Caddyfile",
+                "type": "bind"
+              },
+              {
+                "read_only": true,
+                "source": "/srv/projects/brai/deploy/Caddyfile.agent-attachments",
+                "target": "/etc/caddy/artifact-attachments.caddy",
                 "type": "bind"
               },
               {
@@ -1751,16 +1751,16 @@
             "shm_size": 67108864,
             "volumes": [
               {
-                "read_only": true,
-                "source": "/etc/brai/alerts-candidate/nats.conf",
-                "target": "/etc/nats/nats.conf",
-                "type": "bind"
-              },
-              {
                 "read_only": false,
                 "source": "nats_nats_data",
                 "target": "/data",
                 "type": "volume"
+              },
+              {
+                "read_only": true,
+                "source": "/etc/brai/alerts-candidate/nats.conf",
+                "target": "/etc/nats/nats.conf",
+                "type": "bind"
               }
             ],
             "working_dir": "/"
@@ -1891,6 +1891,12 @@
             "volumes": [
               {
                 "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/db/webhooks.sql",
+                "target": "/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql",
+                "type": "bind"
+              },
+              {
+                "read_only": false,
                 "source": "/opt/supabase/deployment/volumes/db/jwt.sql",
                 "target": "/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql",
                 "type": "bind"
@@ -1905,6 +1911,12 @@
                 "read_only": false,
                 "source": "/opt/supabase/deployment/volumes/db/_supabase.sql",
                 "target": "/docker-entrypoint-initdb.d/migrations/97-_supabase.sql",
+                "type": "bind"
+              },
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/db/logs.sql",
+                "target": "/docker-entrypoint-initdb.d/migrations/99-logs.sql",
                 "type": "bind"
               },
               {
@@ -1924,18 +1936,6 @@
                 "source": "supabase_db-config",
                 "target": "/etc/postgresql-custom",
                 "type": "volume"
-              },
-              {
-                "read_only": false,
-                "source": "/opt/supabase/deployment/volumes/db/webhooks.sql",
-                "target": "/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql",
-                "type": "bind"
-              },
-              {
-                "read_only": false,
-                "source": "/opt/supabase/deployment/volumes/db/logs.sql",
-                "target": "/docker-entrypoint-initdb.d/migrations/99-logs.sql",
-                "type": "bind"
               },
               {
                 "read_only": false,
@@ -2373,8 +2373,9 @@
             "user": "1000:1000",
             "volumes": [
               {
-                "source": "/var/lib/brai/local-ai/operation3/production/30e6c4c8bd19850e94b73f50192ad8b7310a0b92/8683b1d1-5222-473e-b9be-3445432f22e4/models",
-                "target": "/var/lib/brai/local-ai/operation3/production/30e6c4c8bd19850e94b73f50192ad8b7310a0b92/8683b1d1-5222-473e-b9be-3445432f22e4/models",
+                "read_only": true,
+                "source": "/opt/brai-components/local-ai/b8443ee9371e0841a660c00ce22f0a57f484c7b8da07b52722e0707fced0d74a",
+                "target": "/opt/brai/local-ai/app",
                 "type": "bind"
               },
               {
@@ -2389,15 +2390,14 @@
                 "type": "bind"
               },
               {
-                "read_only": true,
-                "source": "/var/lib/brai/local-ai/vad/e66f3d3b9eb0873085418a7b813d3b369bf160bb",
-                "target": "/var/lib/brai/local-ai/vad/e66f3d3b9eb0873085418a7b813d3b369bf160bb",
+                "source": "/var/lib/brai/local-ai/operation3/production/30e6c4c8bd19850e94b73f50192ad8b7310a0b92/8683b1d1-5222-473e-b9be-3445432f22e4/models",
+                "target": "/var/lib/brai/local-ai/operation3/production/30e6c4c8bd19850e94b73f50192ad8b7310a0b92/8683b1d1-5222-473e-b9be-3445432f22e4/models",
                 "type": "bind"
               },
               {
                 "read_only": true,
-                "source": "/opt/brai-components/local-ai/b8443ee9371e0841a660c00ce22f0a57f484c7b8da07b52722e0707fced0d74a",
-                "target": "/opt/brai/local-ai/app",
+                "source": "/var/lib/brai/local-ai/vad/e66f3d3b9eb0873085418a7b813d3b369bf160bb",
+                "target": "/var/lib/brai/local-ai/vad/e66f3d3b9eb0873085418a7b813d3b369bf160bb",
                 "type": "bind"
               }
             ]

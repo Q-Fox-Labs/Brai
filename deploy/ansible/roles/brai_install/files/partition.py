@@ -60,6 +60,8 @@ def product(manifest):
         doc['networks']={k:v for k,v in doc.get('networks',{}).items() if k in used}
         for net in doc['networks'].values():networks.add(net.get('name'))
         for svc in doc['services'].values():
+            if 'volumes' in svc:
+                svc['volumes'].sort(key=lambda mount:(mount['target'],mount['type'],mount.get('source','')))
             images.add(svc['image'])
             for mount in svc.get('volumes',[]):
                 if mount['source']=='/usr/local/libexec/brai-codeworks-transcription.mjs':
