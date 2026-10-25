@@ -78,7 +78,13 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
   });
   await t.test('worker SIGKILL and upgrade A to copied immutable bundle B preserve workflow identity',async()=>{
     await stop('SIGKILL');
-    const history=await client.workflow.getHandle(row.workflow_id).fetchHistory();
+    let history=await client.workflow.getHandle(row.workflow_id).fetchHistory();
+    // Continue-As-New может уже открыть пустой run: replay проверяет именно run с исполненной подготовкой.
+    for(;;){
+      const previous=history.events[0]?.workflowExecutionStartedEventAttributes?.continuedExecutionRunId;
+      if(history.events.some(e=>e.activityTaskScheduledEventAttributes?.activityType?.name==='executeCommand')||!previous)break;
+      history=await client.workflow.getHandle(row.workflow_id,previous).fetchHistory();
+    }
     const serialized=temporal.api.history.v1.History.toObject(history,{longs:String,enums:String,bytes:String});
     await writeFile(path.join(root,'history.json'),JSON.stringify(serialized));
     if(process.env.CODEWORKS_PREVIOUS_WORKFLOW_BUNDLE)assert.ok(history.events.some(e=>e.activityTaskScheduledEventAttributes?.activityType?.name==='executeCommand'),'replay must cover the installed coarse Activity history');
@@ -187,7 +193,8 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
     const source=fileURLToPath(new URL('../../../../',import.meta.url)).replace(/\/$/,'');
     const pkg=JSON.parse(await readFile(path.join(source,'tmp/codeworks-temporal/package.log'),'utf8'))[0].artifact.path;
     const adapter=process.env.CODEWORKS_TEMPORAL_FIXTURE_ADAPTER;
-    const fixture={...config,source,projectId:project.id,artifactA,artifactB,original:pkg,...(process.env.CODEWORKS_PREVIOUS_ARTIFACT_ROOT?{previousArtifact:process.env.CODEWORKS_PREVIOUS_ARTIFACT_ROOT}:{}),nextBundle:path.join(source,'tmp/codeworks-temporal/artifact-b-workflows.js'),environment:{CODEWORKS_TEMPORAL_ADDRESS:config.address,CODEWORKS_TEMPORAL_NAMESPACE:config.namespace,CODEWORKS_TEMPORAL_TASK_QUEUE:config.taskQueue,CODEWORKS_DEPLOYMENT_CONFIG:adapter}};
+    const upgradeQueue=config.taskQueue+'-upgrade';
+    const fixture={...config,taskQueue:upgradeQueue,source,projectId:project.id,artifactA,artifactB,original:pkg,...(process.env.CODEWORKS_PREVIOUS_ARTIFACT_ROOT?{previousArtifact:process.env.CODEWORKS_PREVIOUS_ARTIFACT_ROOT}:{}),nextBundle:path.join(source,'tmp/codeworks-temporal/artifact-b-workflows.js'),environment:{CODEWORKS_TEMPORAL_ADDRESS:config.address,CODEWORKS_TEMPORAL_NAMESPACE:config.namespace,CODEWORKS_TEMPORAL_TASK_QUEUE:upgradeQueue,CODEWORKS_DEPLOYMENT_CONFIG:adapter}};
     await writeFile(input,JSON.stringify(fixture),{mode:0o600});
     const ansible=async action=>{const result=await command('/usr/bin/ansible-playbook',['-i','localhost,','-c','local','/srv/projects/admin/ansible/playbooks/operations/codeworks_temporal_service_fixture.yml','-e',JSON.stringify({codeworks_fixture_action:action,codeworks_fixture_input:input,codeworks_fixture_source:source})],{timeout:120000,allowFailure:true,env:{...process.env,ANSIBLE_CONFIG:'/srv/projects/admin/ansible/ansible.cfg'}});await writeFile(path.join(base,'ansible-'+action+'.log'),result.stdout+'\n'+result.stderr);assert.equal(result.code,0,'fixture Ansible '+action+': '+result.stdout.slice(-2500)+' '+result.stderr);};
     try{
@@ -204,7 +211,8 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
       assert.equal((await f.app.query('SELECT count(*) FROM codeworks.deployments WHERE operation_id=$1',[id])).rows[0].count,'1');
       assert.equal((await f.app.query("SELECT count(*) FROM codeworks.deployment_evidence WHERE evidence_url=$1",[result.receipt.evidence_url])).rows[0].count,'1');
       assert.equal(JSON.parse(await readFile(base+'/'+id+'/installation.json','utf8')).operation_id,id);
-      await writeFile(path.join(source,'tmp/codeworks-temporal/self-update.json'),JSON.stringify({workflow_id:ledger.workflow_id,operation_id:id,sha:head,artifact_digest:'sha256:'+manifest.payloadHash,receipt:result.receipt},null,2));
+      assert.doesNotMatch(await readFile(base+'/runtime.log','utf8'),/Nondeterminism|non-deterministic/i,'isolated A/B queue must replay without incompatible test histories');
+      await writeFile(path.join(source,'tmp/codeworks-temporal/self-update.json'),JSON.stringify({workflow_id:ledger.workflow_id,operation_id:id,task_queue:upgradeQueue,previous_artifact:process.env.CODEWORKS_PREVIOUS_ARTIFACT_ROOT?await import('node:fs/promises').then(m=>m.realpath(process.env.CODEWORKS_PREVIOUS_ARTIFACT_ROOT)):null,sha:head,artifact_digest:'sha256:'+manifest.payloadHash,receipt:result.receipt},null,2));
     }finally{await ansible('stop');await start();}
   });
   await t.test('slow GitHub, duplicate Activity and SIGKILL leave admission and independent workspace execution available',{timeout:100000},async()=>{
