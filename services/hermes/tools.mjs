@@ -6,7 +6,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { loadConfig } from './config.mjs';
-import { startBraiTools } from './runtime.mjs';
+import { startBraiTools, planningDiagnostic } from './runtime.mjs';
 
 /** Подключает MCP к собранным портам; stdout занят только MCP. */
 export async function serveTools(runtime, transport = new StdioServerTransport()) {
@@ -18,7 +18,8 @@ export async function serveTools(runtime, transport = new StdioServerTransport()
       return { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
     } catch (error) {
       const code = /^[A-Z][A-Z0-9_]{0,80}$/.test(error.code) ? error.code : 'UPSTREAM_UNAVAILABLE';
-      return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code, message: code, ...(code === 'OUTCOME_UNKNOWN' ? { requestId: error.requestId } : {}) }) }] };
+      const diagnostic = code === 'INVALID_ARGUMENT' && request.params.name.startsWith('game_core_planning_') ? planningDiagnostic(error.diagnostic) : undefined;
+      return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code, message: code, ...(diagnostic ? { diagnostic } : {}), ...(code === 'OUTCOME_UNKNOWN' ? { requestId: error.requestId } : {}) }) }] };
     }
   });
   let closing;

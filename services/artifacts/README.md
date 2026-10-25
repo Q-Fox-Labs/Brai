@@ -107,3 +107,7 @@ MCP запускается отдельной командой `npm run mcp --wo
 Конечные пределы: запросы 128 KiB, ответы NATS 1 MiB, 16 параллельных вызовов, 64 сессии с очисткой после 5 минут простоя, deadline запроса 15 секунд и bounded остановка 5 секунд. Их можно задать через `ARTIFACTS_MCP_MAX_REQUEST_BYTES`, `ARTIFACTS_MCP_MAX_RESPONSE_BYTES`, `ARTIFACTS_MCP_MAX_CONCURRENT`, `ARTIFACTS_MCP_MAX_SESSIONS`, `ARTIFACTS_MCP_SESSION_IDLE_MS`, `ARTIFACTS_MCP_REQUEST_TIMEOUT_MS` и `ARTIFACTS_MCP_STOP_TIMEOUT_MS`. MCP не повторяет команды автоматически; после timeout для изменения данных исход может быть неизвестен.
 
 `ARTIFACTS_TEST_ADMIN_URL=... ARTIFACTS_TEST_NATS_URL=... npm run test:integration --workspace=@brai/artifacts` проверяет настоящий MCP SDK client на изолированных loopback fixtures. Тест создаёт собственную БД и роли с суффиксом процесса и удаляет их по завершении.
+
+## Связанные материалы
+
+- [CONTRACT.md](CONTRACT.md).

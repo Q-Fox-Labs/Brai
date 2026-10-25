@@ -223,6 +223,90 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         return NS(effective_chat=NS(id=int(chat), type=chat_type), effective_user=NS(id=owner),
                   effective_message=NS(**message))
 
+    async def set_private_participant(self, user="456"):
+        """Открыть native DM назначенного участника при настроенной общей группе."""
+        self.config = replace(self.config, allowed_users=("456", "789"))
+        await self.set_group_route()
+        self.native_context.update(HERMES_SESSION_CHAT_ID=user, HERMES_SESSION_CHAT_TYPE="dm",
+                                   HERMES_SESSION_USER_ID=user, HERMES_SESSION_MESSAGE_ID="42")
+        self.entry.origin.chat_id = self.entry.origin.user_id = user
+        self.entry.origin.chat_type = "dm"
+
+    async def test_group_profile_accepts_authorized_private_senders_only(self):
+        """Личка доступна назначенным пользователям с точной привязкой chat ID к sender ID."""
+        await self.set_private_participant()
+        stop = sys.modules["telegram.ext"].ApplicationHandlerStop
+        for user in (123, 456, 789):
+            for kind in ("private", "dm"):
+                await self.plugin.guard(self.update(chat=str(user), owner=user, chat_type=kind), None)
+                self.assertIsNone(await self.plugin.incoming(self.event(source=NS(
+                    platform="telegram", chat_id=str(user), user_id=str(user), chat_type=kind))))
+        for chat, user in (("999", 999), ("456", 123), ("789", 456)):
+            with self.assertRaises(stop):
+                await self.plugin.guard(self.update(chat=chat, owner=user, chat_type="private"), None)
+            self.assertEqual((await self.plugin.incoming(self.event(source=NS(
+                platform="telegram", chat_id=chat, user_id=str(user), chat_type="dm"))))["action"], "skip")
+
+    async def test_private_files_have_separate_idempotency_namespace(self):
+        """Одинаковые message ID из группы и разных личек не сталкиваются в publisher."""
+        await self.set_private_participant()
+        for chat, user, kind in ((GROUP, "456", "group"), ("456", "456", "dm"), ("789", "789", "dm")):
+            await self.plugin.incoming(self.event(media_urls=["/download/file.pdf"], source=NS(
+                platform="telegram", chat_id=chat, user_id=user, chat_type=kind)))
+        keys = [args["requestId"] for method, args in self.bridge.calls if method == "files.publish"]
+        self.assertEqual(keys, [f"tg:{chat}:42:0" for chat in (GROUP, "456", "789")])
+
+    async def test_private_confirmation_delivery_callback_and_restart_stay_in_dm(self):
+        """Кнопка и продолжение остаются в личке; перезапуск не отменяет валидный DM token."""
+        await self.set_private_participant()
+        data = await self.request()
+        self.assertEqual(self.bot.sent[-1]["chat_id"], 456)
+        self.assertNotIn("message_thread_id", self.bot.sent[-1])
+        row = self.plugin.tokens.pending()[0]
+        self.assertEqual((row["owner"], row["chat_id"]), ("123", "456"))
+        self.plugin.factory(self.app, object())
+        await asyncio.sleep(0)
+        for user, chat, kind in ((123, 123, "private"), (789, 789, "private"), (456, int(GROUP), "supergroup"),
+                                  (123, 456, "private")):
+            await self.plugin.callback(NS(callback_query=FakeQuery(data, owner=user, chat=chat, chat_type=kind)), None)
+        self.assertFalse(any(method in {"actions.complete", "actions.cancel"} for method, _ in self.bridge.calls))
+        query = FakeQuery(data, owner=456, chat=456)
+        await self.plugin.callback(NS(callback_query=query), None)
+        await self.plugin.callback(NS(callback_query=query), None)
+        self.assertEqual(sum(method == "actions.complete" for method, _ in self.bridge.calls), 1)
+        self.assertEqual(len(self.injections), 1)
+        self.assertEqual(self.bot.sent[-1]["chat_id"], 456)
+
+    async def test_private_feedback_uses_actual_message_and_chat(self):
+        """Замечания из лички не подменяются сообщением группы с тем же ID."""
+        await self.set_private_participant()
+        for chat, text, kind in ((GROUP, "групповое сообщение", "group"), ("456", "исправь мой план", "dm")):
+            await self.plugin.incoming(self.event(text=text, source=NS(
+                platform="telegram", chat_id=chat, user_id="456", chat_type=kind)))
+        result = json.loads(await self.plugin.submit_feedback({"elementId": TARGET, "revisionId": REVISION,
+            "moveId": MOVE, "decision": "changes"}))
+        self.assertTrue(result["ok"])
+        call = next(args for method, args in self.bridge.calls if method == "actions.feedback")
+        self.assertEqual(call["feedback"]["content"], "исправь мой план")
+        self.assertEqual(call["feedback"]["source"]["chat_id"], "456")
+        self.plugin.config = replace(self.config, allowed_users=())
+        self.assertFalse(self.plugin._session_matches({
+            "session_key": self.native_context["HERMES_SESSION_KEY"], "session_id": self.entry.session_id,
+            "chat_id": "456", "thread_id": "", "owner": "123"}))
+        with self.assertRaises(mod.BridgeError):
+            self.plugin._tool_context({})
+
+    async def test_confirmation_cannot_be_reused_or_cancelled_from_another_chat(self):
+        """Запрос того же Action из другой беседы не переносит и не отменяет чужую кнопку."""
+        await self.set_group_route()
+        await self.request()
+        self.native_context.update(HERMES_SESSION_CHAT_ID="123", HERMES_SESSION_CHAT_TYPE="dm")
+        self.entry.origin.chat_id, self.entry.origin.chat_type = "123", "dm"
+        result = json.loads(await self.plugin.request_confirmation({"moveId": MOVE, "revisionId": REVISION}))
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(self.bot.sent), 1)
+        self.assertFalse(any(method == "actions.cancel" for method, _ in self.bridge.calls))
+
     async def test_shared_group_participant_ingress_tools_and_cross_user_confirmation(self):
         """Участник работает с общими данными; любой назначенный пользователь принимает кнопку один раз."""
         self.config = replace(self.config, allowed_users=("456",))
@@ -295,7 +379,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             except stop:
                 pass
         denied = [self.update(owner=456), self.update(chat="-1009876543211"),
-                  self.update(chat="123", chat_type="private"), self.update(sender_chat=NS(id=int(GROUP))),
+                  self.update(chat="456", chat_type="private"), self.update(sender_chat=NS(id=int(GROUP))),
                   self.update(business_connection_id="business"), self.update(owner=None),
                   NS(effective_chat=None, effective_user=NS(id=123), effective_message=None)]
         denied.append(self.update())
@@ -308,6 +392,49 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.sent, [])
         await dispatch(self.update(), "owner")
         self.assertEqual(reached, ["owner"])
+
+    async def test_business_updates_reach_their_handler_without_brai_access(self):
+        """Business lifecycle проходит к своему плагину без publisher и общего owner turn."""
+        await self.set_group_route()
+        reached = []
+        for field in ("business_connection", "business_message", "edited_business_message",
+                      "deleted_business_messages"):
+            with self.subTest(field=field):
+                payload = (NS(user=NS(id=123, is_bot=False)) if field == "business_connection"
+                           else NS(business_connection_id="business", chat=NS(id=999, type="private")))
+                update = NS(effective_chat=getattr(payload, "chat", None),
+                            effective_user=None if field == "business_connection" else NS(id=999),
+                            effective_message=payload if field.endswith("message") else None,
+                            **{field: payload})
+                # Следующий native Business handler должен получить исходный update.
+                await self.app.handlers[0].callback(update, None)
+                reached.append(update)
+                self.assertIs(getattr(reached[-1], field), payload)
+        self.assertEqual(len(reached), 4)
+        for sender in (123, 456, 999):
+            source = NS(platform="telegram", chat_id=str(sender), user_id=str(sender), chat_type="dm")
+            event = self.event(source=source, media_urls=["/download/file.pdf"],
+                               raw_message=NS(business_connection_id="business"))
+            self.assertEqual((await self.plugin.incoming(event))["action"], "skip")
+        self.assertEqual(self.plugin.inbound_events, {})
+        self.assertEqual(self.bridge.calls, [])
+        self.assertEqual(self.bot.sent, [])
+
+    async def test_business_connection_requires_primary_owner_and_closed_guard_stops_updates(self):
+        """Участник Brai не может подключить свой Business-аккаунт; unload закрывает весь ingress."""
+        self.config = replace(self.config, allowed_users=("456",))
+        await self.set_group_route()
+        stop = sys.modules["telegram.ext"].ApplicationHandlerStop
+        for user in (NS(id=456), NS(id=999), NS(id=123, is_bot=True), None):
+            update = NS(business_connection=NS(user=user))
+            with self.subTest(user=user), self.assertRaises(stop):
+                await self.plugin.guard(update, None)
+        self.plugin.closed = True
+        for field in ("business_connection", "business_message", "edited_business_message",
+                      "deleted_business_messages"):
+            payload = NS(user=NS(id=123, is_bot=False))
+            with self.subTest(field=field), self.assertRaises(stop):
+                await self.plugin.guard(NS(**{field: payload}), None)
 
     async def test_group_ingress_route_owner_and_idempotent_attachment_namespace(self):
         await self.set_group_route()
@@ -345,9 +472,10 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.sent[-1]["chat_id"], int(GROUP))
 
     async def test_route_change_rejects_same_message_id_and_cancels_old_pending_on_restart(self):
-        data = await self.request()
         await self.set_group_route()
-        query = FakeQuery(data, chat=int(GROUP), chat_type="supergroup")
+        data = await self.request()
+        await self.set_group_route("-1009876543211")
+        query = FakeQuery(data, chat=-1009876543211, chat_type="supergroup")
         await self.plugin.callback(NS(callback_query=query), None)
         for _ in range(100):
             if not self.plugin.tokens.pending():
@@ -356,7 +484,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.tokens.pending(), [])
         self.assertFalse(any(method == "actions.complete" for method, _ in self.bridge.calls))
         self.assertTrue(any(method == "actions.cancel" for method, _ in self.bridge.calls))
-        self.assertEqual(self.bot.sent[-1]["chat_id"], 123)
+        self.assertEqual(self.bot.sent[-1]["chat_id"], int(GROUP))
 
     async def test_group_restart_keeps_old_button_without_deadline(self):
         await self.set_group_route()
@@ -934,7 +1062,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(method == "actions.result" for method, _ in self.bridge.calls), 1)
 
     async def test_terminal_session_fails_only_observed_exact_agent_attempt(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"),
@@ -945,7 +1073,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [])
 
     async def test_successful_turn_preserves_claim_for_live_exact_session_delegation(self):
-        self.plugin.observe_agent_move(tool_name="mcp__brai__elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="mcp__brai__game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         api = ModuleType("tools.async_delegation")
@@ -959,7 +1087,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.plugin.tokens.agent_attempts("123", "native-session-1")), 1)
 
     async def test_successful_turn_preserves_claim_for_exact_pending_delivery_only(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         api = ModuleType("tools.async_delegation")
@@ -984,7 +1112,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         for terminal in ({"completed": False, "failed": True, "interrupted": False},
                          {"completed": False, "failed": False, "interrupted": True}):
             with self.subTest(terminal=terminal):
-                self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+                self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
                     result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
                     session_id="native-session-1", status="ok")
                 api = ModuleType("tools.async_delegation")
@@ -997,22 +1125,22 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                 self.bridge.calls.clear()
 
     async def test_namespaced_claim_and_completion_are_tracked_but_foreign_prefix_is_ignored(self):
-        self.plugin.observe_agent_move(tool_name="mcp__other__elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="mcp__other__game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [])
-        self.plugin.observe_agent_move(tool_name="mcp__brai__elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="mcp__brai__game_core_move_claim", args={"move_id": MOVE},
             result=json.dumps({"result": json.dumps({"attempt": {
                 "id": ATTEMPT, "status": "running", "executor_kind": "agent"}})}),
             session_id="native-session-1", status="ok")
         self.assertEqual(len(self.plugin.tokens.agent_attempts("123", "native-session-1")), 1)
-        self.plugin.observe_agent_move(tool_name="mcp__brai__elements_move_complete", args={"attempt_id": ATTEMPT},
+        self.plugin.observe_agent_move(tool_name="mcp__brai__game_core_move_complete", args={"attempt_id": ATTEMPT},
             result=json.dumps({"result": json.dumps({"attempt": {"id": ATTEMPT, "status": "succeeded"}})}),
             session_id="native-session-1", status="ok")
         self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [])
 
     async def test_factory_reconnect_does_not_mark_live_claim_as_startup_orphan(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         self.plugin.factory(self.app, object())
@@ -1022,7 +1150,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(method == "actions.fail_agent" for method, _ in self.bridge.calls))
 
     async def test_durable_agent_failure_is_retried_during_startup_recovery(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         self.bridge.fail = "actions.fail_agent"
@@ -1048,7 +1176,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         plugin.close()
 
     async def test_terminal_cleanup_preserves_claims_from_other_session_or_owner(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         await self.plugin.on_session_end(session_id="other-session", platform="telegram", completed=True)
@@ -1056,7 +1184,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.plugin.tokens.agent_attempts("123", "other-session")), 0)
 
     async def test_owner_incoming_does_not_fail_active_claim_in_same_or_other_session(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         other_attempt = "00000000-0000-4000-8000-000000000088"
@@ -1066,7 +1194,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.plugin.tokens.agent_attempts("123")), 2)
 
     async def test_terminal_outage_retries_on_later_owner_incoming(self):
-        self.plugin.observe_agent_move(tool_name="elements_move_claim", args={"move_id": MOVE},
+        self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
         self.bridge.fail = "actions.fail_agent"
@@ -1314,6 +1442,19 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         outgoing = self.plugin.outgoing(result["markdown"], platform="telegram")
         self.assertIn(f'MEDIA:"{result["image"]}"', outgoing)
         self.assertNotIn(payload["image"], outgoing)
+
+    async def test_private_generated_image_uses_actual_chat_identity(self):
+        """Одна native image identity в разных личках получает разные publisher keys."""
+        await self.set_private_participant()
+        payload = self.generated_image()
+        self.image_context.update(HERMES_SESSION_USER_ID="456", HERMES_SESSION_CHAT_ID="456")
+        self.assertTrue(json.loads(self.publish_image(payload))["success"])
+        self.image_context.update(HERMES_SESSION_USER_ID="789", HERMES_SESSION_CHAT_ID="789")
+        self.assertTrue(json.loads(self.publish_image(payload))["success"])
+        self.assertNotEqual(self.bridge.calls[0][1]["requestId"], self.bridge.calls[1][1]["requestId"])
+        self.image_context["HERMES_SESSION_USER_ID"] = "456"
+        self.assertFalse(json.loads(self.publish_image(payload))["success"])
+        self.assertEqual(len(self.bridge.calls), 2)
 
     async def test_generated_image_replay_uses_same_key_and_new_call_has_new_key(self):
         payload = self.generated_image()

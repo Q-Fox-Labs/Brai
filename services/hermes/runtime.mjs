@@ -5,7 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { connect, ServiceErrorHeader, ServiceErrorCodeHeader } from 'nats';
-import { compileInput, natsTools, elementsNames, historyNames, transcriptionNames } from './catalog.mjs';
+import { compileInput, natsTools, gameCoreNames, historyNames, transcriptionNames } from './catalog.mjs';
 import { planningReadTool, readPlanningPacket } from './planning-read.mjs';
 
 const MAX_REQUEST_BYTES = 65_536, MAX_RESPONSE_BYTES = 1_048_576;
@@ -14,16 +14,31 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 /** Создаёт безопасную ошибку порта без адресов, credentials или содержимого входа. */
 export function fault(code, details = {}) { return Object.assign(new Error(code), { code, ...details }); }
 
-/** Извлекает owner DTO; upstream MCP ошибки сохраняют только безопасный код. */
-export function unwrap(result) {
+/** Принимает только ограниченную диагностику планирования, без произвольных полей владельца. */
+export function planningDiagnostic(value) {
+  if (!object(value) || Object.keys(value).length !== 2 ||
+      !['input', 'bind', 'build', 'review', 'expand'].includes(value.phase) ||
+      typeof value.reason !== 'string' || !value.reason.trim() || value.reason.length > 500) return undefined;
+  return { phase: value.phase, reason: value.reason };
+}
+
+/** Извлекает owner DTO; только GameCore planning может передать безопасную диагностику отказа. */
+export function unwrap(result, { planning = false } = {}) {
   if (result.isError) {
-    let code = 'UPSTREAM_ERROR';
+    let code = 'UPSTREAM_ERROR', diagnostic;
     for (const item of result.content ?? []) {
       if (item.type !== 'text') continue;
-      try { const parsed = JSON.parse(item.text); if (/^[A-Z][A-Z0-9_]{0,80}$/.test(parsed.code ?? parsed.errorCode)) code = parsed.code ?? parsed.errorCode; }
-      catch { if (/^[A-Z][A-Z0-9_]{0,80}$/.test(item.text)) code = item.text; }
+      try {
+        const parsed = JSON.parse(item.text);
+        if (/^[A-Z][A-Z0-9_]{0,80}$/.test(parsed.code ?? parsed.errorCode)) {
+          code = parsed.code ?? parsed.errorCode;
+          diagnostic = planning && code === 'INVALID_ARGUMENT' ? planningDiagnostic(parsed.diagnostic) : undefined;
+        }
+      } catch {
+        if (/^[A-Z][A-Z0-9_]{0,80}$/.test(item.text)) { code = item.text; diagnostic = undefined; }
+      }
     }
-    throw fault(code);
+    throw fault(code, diagnostic ? { diagnostic } : {});
   }
   if (object(result.structuredContent)) return result.structuredContent;
   const text = result.content?.find(item => item.type === 'text')?.text;
@@ -82,7 +97,7 @@ export async function connectPorts(config) {
   let nc;
   try {
     const endpoints = {};
-    for (const name of ['elements', 'history', 'transcription']) {
+    for (const name of ['gameCore', 'history', 'transcription']) {
       const endpoint = config[name];
       const endpointClient = await connectMcpEndpoint(endpoint, { timeout, callTimeout: config.longRequestTimeoutMs ?? 300_000 });
       clients.push(endpointClient);
@@ -103,7 +118,7 @@ export async function connectPorts(config) {
       async mcp(name, tool, args, signal) {
         return unwrap(await (name === 'publisher'
           ? endpoints[name].callTool({ name: tool, arguments: args }, undefined, { signal, timeout: 1_800_000 })
-          : endpoints[name].call(tool, args, signal)));
+          : endpoints[name].call(tool, args, signal)), { planning: name === 'gameCore' && tool.startsWith('game_core_planning_') });
       },
       async request(subject, payload, signal, requestTimeout = timeout) {
         signal?.throwIfAborted();
@@ -141,11 +156,11 @@ function hasOwner(value) { return ['ownerId', 'owner_id', 'userId', 'user_id', '
 /** Собирает owner-bound каталог; подставные порты позволяют проверить запреты без живых соседей. */
 export async function createBraiTools(config, ports) {
   const remote = new Map(), tools = [];
-  for (const [endpoint, allow] of [['elements', elementsNames], ['history', historyNames], ['transcription', transcriptionNames], ['publisher', new Set(['publish_file', 'fetch_file'])]]) {
+  for (const [endpoint, allow] of [['gameCore', gameCoreNames], ['history', historyNames], ['transcription', transcriptionNames], ['publisher', new Set(['publish_file', 'fetch_file'])]]) {
     for (const tool of await ports.list(endpoint)) {
       if (!allow.has(tool.name)) continue;
       const visible = structuredClone(tool);
-      if (visible.name === 'elements_move_claim') {
+      if (visible.name === 'game_core_move_claim') {
         visible.inputSchema.properties.executor_kind = { const: 'agent' };
         delete visible.inputSchema.properties.executor_id;
       }
@@ -154,22 +169,22 @@ export async function createBraiTools(config, ports) {
     }
   }
   for (const definition of natsTools) tools.push({ name: definition.name, description: definition.description, inputSchema: definition.inputSchema });
-  const humanRequest = { name: 'elements_request_human_action', description: 'Прочитать Action для отправки подтверждения через brai_telegram_request_confirmation. Этот вызов не начинает и не подтверждает человеческую попытку.',
+  const humanRequest = { name: 'game_core_request_human_action', description: 'Прочитать Action для отправки подтверждения через brai_telegram_request_confirmation. Этот вызов не начинает и не подтверждает человеческую попытку.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['moveId'], properties: { moveId: { type: 'string', format: 'uuid' } } } };
   const validateHumanRequest = compileInput(humanRequest.inputSchema);
   tools.push(humanRequest);
   const validatePlanningRead = compileInput(planningReadTool.inputSchema);
-  if (remote.has('elements_planning_packet')) tools.push(planningReadTool);
+  if (remote.has('game_core_planning_packet')) tools.push(planningReadTool);
   let active = 0;
-  async function elementsCall(name, args, signal) { return ports.mcp('elements', name, args, signal); }
+  async function gameCoreCall(name, args, signal) { return ports.mcp('gameCore', name, args, signal); }
   async function graph(signal) {
-    const value = await elementsCall('elements_graph_get', {}, signal);
+    const value = await gameCoreCall('game_core_graph_get', {}, signal);
     if (!Array.isArray(value.moves) || !Array.isArray(value.attempts) || !Array.isArray(value.elements)) throw fault('INVALID_UPSTREAM_RESPONSE');
     if ((value.revisions ?? []).some(revision => revision.owner_id !== config.ownerId)) throw fault('OWNER_MISMATCH');
     return value;
   }
   return {
-    tools, elementsCall, graph,
+    tools, gameCoreCall, graph,
     /** Вызывает только объявленный инструмент; максимум восемь текущих вызовов, очереди нет. */
     async call(name, args = {}, signal) {
       if (!object(args) || hasOwner(args)) throw fault('INVALID_ARGUMENT');
@@ -179,9 +194,9 @@ export async function createBraiTools(config, ports) {
       let mutation = false;
       try {
         signal?.throwIfAborted();
-        if (name === planningReadTool.name && remote.has('elements_planning_packet')) {
+        if (name === planningReadTool.name && remote.has('game_core_planning_packet')) {
           if (!validatePlanningRead(args)) throw fault('INVALID_ARGUMENT');
-          const packet = await elementsCall('elements_planning_packet', { attempt_id: args.attempt_id }, signal);
+          const packet = await gameCoreCall('game_core_planning_packet', { attempt_id: args.attempt_id }, signal);
           return readPlanningPacket(packet, args, fault);
         }
         if (name === humanRequest.name) {
@@ -196,9 +211,9 @@ export async function createBraiTools(config, ports) {
         const upstream = remote.get(name);
         if (upstream) {
           if (!upstream.validate(args)) throw fault('INVALID_ARGUMENT');
-          if (name === 'elements_element_activate' && args.feedback !== undefined) throw fault('FORBIDDEN');
-          if (name === 'elements_move_claim' && args.executor_kind !== 'agent') throw fault('FORBIDDEN');
-          if (['elements_move_complete', 'elements_move_fail'].includes(name)) {
+          if (name === 'game_core_element_activate' && args.feedback !== undefined) throw fault('FORBIDDEN');
+          if (name === 'game_core_move_claim' && args.executor_kind !== 'agent') throw fault('FORBIDDEN');
+          if (['game_core_move_complete', 'game_core_move_fail'].includes(name)) {
             const value = await graph(signal), attempt = value.attempts.find(attempt => attempt.id === args.attempt_id);
             const move = value.moves.find(move => move.id === attempt?.moveId);
             if (!move) throw fault('NOT_FOUND');

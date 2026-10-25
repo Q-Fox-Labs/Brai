@@ -10,26 +10,9 @@ npm-пакетов, серверных runtime или daemon нет.
 sets → одна подготовка npm при необходимой работе → build/check/package →
 сверка исходников и output seals → GHCR → immutable digest proof в Actions.
 
-## Допуск без дополнительных расходов
+## Допуск CI
 
-Job проверяет **до выделения runner** repository variables
-`CODEWORKS_ZERO_EXTRA_POLICY=account-wide-actions-usd0-stop-usage` и
-`CODEWORKS_BILLING_CONFIRMED_AT=<UTC время подтверждения>`. Оператор задаёт их
-только после проверки или прямого подтверждения владельцем аккаунта: account-wide
-Actions product budget — USD 0, **Stop usage** включён. Это подтверждение
-оператора, не API-доказательство. Repository admin права не доказывают тариф,
-остаток minutes/storage или hard stop. Агент не включает допуск по предположению.
-
-Larger runners, paid overage и платное расширение хранения не запрашиваются.
-Блокировка hard stop сохраняет `awaiting_ci`; billing/spending-limit annotation
-даёт `CI_BILLING_BLOCKED`. Причина может быть и ошибкой оплаты, поэтому это не
-доказательство именно исчерпания minutes. Недоступный остаток квоты обозначается
-`unavailable-to-workflow-token`, без вымышленного числа.
-
-На 2026-10-21 [документация GitHub](https://docs.github.com/en/billing/concepts/product-billing/github-packages)
-указывает бесплатные storage/bandwidth GHCR. Это текущая политика, которую
-нужно проверять перед новым включением CI. [Budgets](https://docs.github.com/en/billing/how-tos/set-up-budgets)
-объясняют Stop usage: без него бюджет только уведомляет о перерасходе.
+Оператор задаёт разрешение запуска через переменные workflow. Без принятой политики job не выделяет runner. Настройки бюджета, авторизация и порядок включения принадлежат оператору экземпляра.
 
 ## Ключи и повторное использование
 
@@ -95,14 +78,7 @@ verifier независимо проверяет этот catalog ключом �
 подмена repo var/каталога обычным агентом не создаёт trusted evidence. Подпись
 не заменяет первую exact Actions/run/recipe/digest проверку.
 
-Private key `/etc/brai-dev/codeworks-ci/identity.pem` создаёт Ansible один раз;
-owner задаёт `CODEWORKS_REUSE_PRIVATE_KEY_FILE`. Public PEM закрепляют и в policy
-`reuse_public_key`, и в repo var `CODEWORKS_REUSE_PUBLIC_KEY`. Ключ не передаётся
-CI. Доступ к файлу ограничен штатными правами владельца и mode0600;
-Codeworks не добавляет sandbox агента и не ограничивает его файловые инструменты.
-При reinstall сохраняются key и PG; backup/restore возвращает прежнюю пару и
-`verified_ci`, не генерирует замену. Потеря ключа требует явной ротации policy.
-[Операция Ansible и backup scope](/srv/projects/admin/docs/CODEWORKS_AGENTS.md).
+Private key хранится у оператора и не передаётся CI. Public key закрепляется в policy и настройках workflow. Ротация требует согласованной смены доверенной конфигурации; backup возвращает прежнюю пару и verified_ci.
 
 Owner проверяет произвольный готовый exact run (в том числе до PR) через
 `src/verify-ci.mjs <registered project id> <exact SHA>`; connection приходит из

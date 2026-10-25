@@ -19,8 +19,8 @@ export function validateConfig(value, trustedOwnerId) {
   if (!object(value.nats) || !Array.isArray(value.nats.servers) || !value.nats.servers.length ||
     value.nats.servers.some(server => typeof server !== 'string' || !server.trim()) ||
     ['user', 'password', 'inboxPrefix'].some(key => value.nats[key] !== undefined && typeof value.nats[key] !== 'string')) invalid();
-  for (const name of ['elements', 'history', 'transcription']) endpoint(value[name]);
-  if (value.elements.ownerId !== value.ownerId) invalid();
+  for (const name of ['gameCore', 'history', 'transcription']) endpoint(value[name]);
+  if (value.gameCore.ownerId !== value.ownerId) invalid();
   if (!object(value.publisher) || typeof value.publisher.configPath !== 'string' || !isAbsolute(value.publisher.configPath) ||
     value.publisher.entrypoint !== undefined && (typeof value.publisher.entrypoint !== 'string' || !isAbsolute(value.publisher.entrypoint))) invalid();
   for (const [name, maximum] of [['requestTimeoutMs', 60_000], ['longRequestTimeoutMs', 1_800_000]]) {

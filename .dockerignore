@@ -19,3 +19,6 @@ tmp/
 .agents/
 .codex/
 .aws/
+
+# Личные инструкции не входят даже в контекст сборки.
+docs/user-agent/usercustom

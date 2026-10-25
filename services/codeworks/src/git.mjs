@@ -4,24 +4,30 @@ import { spawn } from 'node:child_process';
 import { lstat, realpath, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Fault } from './errors.mjs';
+import {executionContext} from './execution-context.mjs';
 const relative=value=>value==='.'||(!path.isAbsolute(value)&&!value.split('/').some(p=>!p||p==='.'||p==='..')&&!value.includes('\\'));
 async function exists(file) { try { return await lstat(file); } catch(error) { if(error.code==='ENOENT') return null; throw error; } }
-/** Запускает фиксированный executable без shell; наследует flock FD только в worker. */
+/** Запускает фиксированный executable без shell; наследует flock FD только в локальном Git helper или legacy worker. */
 export async function command(executable,args,{cwd,allowFailure=false,timeout=120000,input,env={}}={}) {
   return new Promise((resolve,reject)=>{
-    let stdout='',stderr='',overflow=false;
+    let stdout='',stderr='',overflow=false,abortKill;
+    const signal=executionContext()?.signal;signal?.throwIfAborted();
     const inherited=process.env.CODEWORKS_LOCK_HELD==='1';
     const child=spawn(executable,args,{cwd,env:{...process.env,...env,GIT_TERMINAL_PROMPT:'0'},stdio:inherited?[input===undefined?'ignore':'pipe','pipe','pipe',3]:[input===undefined?'ignore':'pipe','pipe','pipe']});
     if(input!==undefined){child.stdin.on('error',()=>{});child.stdin.end(input);}
+    const abort=()=>{child.kill('SIGTERM');abortKill=setTimeout(()=>child.kill('SIGKILL'),5000);};
+    signal?.addEventListener('abort',abort,{once:true});
+    if(signal?.aborted)abort();
+    const dispose=()=>{if(abortKill)clearTimeout(abortKill);signal?.removeEventListener('abort',abort);};
     const timer=setTimeout(()=>child.kill('SIGTERM'),timeout);
     const killTimer=setTimeout(()=>child.kill('SIGKILL'),timeout+5000);
     child.stdout.on('data',chunk=>{if(overflow)return;stdout+=chunk; if(Buffer.byteLength(stdout)>1048576){overflow=true;child.kill('SIGTERM');}});
     child.stderr.on('data',chunk=>{if(stderr.length<65536)stderr+=chunk;});
-    child.once('error',()=>{clearTimeout(timer);clearTimeout(killTimer);reject(new Fault('GIT_FAILED','External command could not start.'));});
-    child.once('close',code=>{clearTimeout(timer);clearTimeout(killTimer); if(overflow||(!allowFailure&&code!==0))reject(new Fault('GIT_FAILED','Git operation failed; owned resources and intent were preserved.'));else resolve({code,stdout:stdout.trim(),stderr});});
+    child.once('error',()=>{dispose();clearTimeout(timer);clearTimeout(killTimer);reject(new Fault('GIT_FAILED','External command could not start.'));});
+    child.once('close',code=>{dispose();clearTimeout(timer);clearTimeout(killTimer); if(signal?.aborted)reject(signal.reason);else if(overflow||(!allowFailure&&code!==0))reject(new Fault('GIT_FAILED','Git operation failed; owned resources and intent were preserved.'));else resolve({code,stdout:stdout.trim(),stderr});});
   });
 }
-/** Адаптер Git/preparer; изменение вызывается только worker под проектным flock. */
+/** Адаптер Git/preparer; локальные мутации требуют унаследованный flock FD 3. */
 export function createGit({flowGit}={}) {
   const git=(project,args,options={})=>command('git',['-C',project.repo_path,...args],options);
   const local=(w,args,options={})=>command('git',['-C',w.path,...args],options);
@@ -91,17 +97,24 @@ export function createGit({flowGit}={}) {
       if((await local(w,['symbolic-ref','--short','HEAD'])).stdout!==w.branch)throw new Fault('OWNERSHIP_CONFLICT');
       return {head:(await local(w,['rev-parse','HEAD'])).stdout,branch:w.branch,dirty:!!(await local(w,['status','--porcelain=v1','--untracked-files=all'])).stdout};
     },
-    /** Убирает только clean own worktree после доказанного слияния всех release legs. */
-    async cleanup(project,w,heads) {
-      requireLock();await topology(project);
+    /** Убирает clean own worktree и ветку выпуска; remote удаляет до потери локального ownership. */
+    async cleanup(project,w,heads,acceptedHead,{remoteOnly=false,localOnly=false}={}) {
+      if(!remoteOnly)requireLock();await topology(project);
       if(!heads.length||!w.path.startsWith(project.workspace_root+'/')||w.path===project.repo_path)return false;
-      const head=await branches(project,w);if(!head)return !await exists(w.path);
+      const head=await branches(project,w);
+      const flow=project.github?(flowGit??(await import('./git-flow.mjs')).createFlowGit()):null;
+      if(!head)return !await exists(w.path)&&(localOnly||!flow||await flow.remote(project,w.branch)===null);
+      if(flow&&head!==acceptedHead)return false;
       for(const target of heads)if(!/^[0-9a-f]{40}$/.test(target)||(await git(project,['merge-base','--is-ancestor',head,target],{allowFailure:true})).code!==0)return false;
-      if(await registration(project,w)){
-        if((await this.inspect(project,w)).dirty)return false;
+      const registered=await registration(project,w);
+      if(registered){if((await this.inspect(project,w)).dirty)return false;}
+      else if(await exists(w.path))return false;
+      if(flow&&!localOnly)await flow.removeBranch(project,w.branch,acceptedHead);
+      if(remoteOnly)return true;
+      if(registered){
         await git(project,['worktree','unlock',w.path]);
         try{await git(project,['worktree','remove',w.path]);}catch(error){await git(project,['worktree','lock','--reason','codeworks:'+w.ownership_token,w.path],{allowFailure:true});throw error;}
-      }else if(await exists(w.path))return false;
+      }
       const proof=(await git(project,['rev-parse',ownershipRef(w)])).stdout;
       await git(project,['update-ref','--stdin'],{input:'start\ndelete refs/heads/'+w.branch+' '+head+'\ndelete '+ownershipRef(w)+' '+proof+'\nprepare\ncommit\n'});
       return true;
@@ -115,8 +128,8 @@ export function createGit({flowGit}={}) {
       const blob=(await git(project,['hash-object','-w','--stdin'],{input:ownership(w)})).stdout;
       await git(project,['update-ref','--stdin'],{input:'start\ncreate '+ownershipRef(w)+' '+blob+'\ncreate refs/heads/'+w.branch+' '+w.base_sha+'\nprepare\ncommit\n'});
     },
-    /** Возобновляет только свой checkout, заполняя отсутствующие файлы без перезаписи существующих. */
-    async checkout(project,w) {
+    /** Создаёт или сверяет только свою регистрацию worktree под общим Git flock. */
+    async registerCheckout(project,w) {
       requireLock(); await topology(project);
       if(await branches(project,w)!==w.base_sha)throw new Fault('OWNERSHIP_CONFLICT');
       const registered=await registration(project,w);
@@ -127,6 +140,10 @@ export function createGit({flowGit}={}) {
         await git(project,['worktree','add','--no-checkout','--lock','--reason','codeworks:'+w.ownership_token,w.path,w.branch]);
       }
       if(!await registration(project,w))throw new Fault('OWNERSHIP_CONFLICT');
+    },
+    /** Заполняет только индекс и файлы собственного дерева; общая регистрация уже завершена. */
+    async checkout(project,w,{registered=false}={}) {
+      requireLock();if(registered){await topology(project);if(!await registration(project,w))throw new Fault('OWNERSHIP_CONFLICT');}else await this.registerCheckout(project,w);
       const index=(await local(w,['rev-parse','--path-format=absolute','--git-path','index'])).stdout;
       if(!await exists(index))await local(w,['read-tree',w.base_sha]);
       const indexTree=(await local(w,['write-tree'])).stdout;

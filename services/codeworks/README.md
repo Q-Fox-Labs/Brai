@@ -1,36 +1,23 @@
-# Codeworks
+# Codeworks: техническое устройство
 
-Codeworks хранит рабочие области и выполняет операции с ветками, GitHub, CI и
-выпусками. Codex работает штатно, без запуска через Codeworks и посредника
-для файлов или команд. Чтение и диагностика доступны независимо от сервиса.
+Codeworks хранит рабочие области и координирует операции с Git, GitHub, CI и выпусками. Он не запускает агента и не меняет его разрешения.
 
-Перед первой правкой кода агент создаёт область с коротким названием задачи
-в workspace_key, например codeworks-auto-cleanup; ветка будет feature/codeworks-auto-cleanup.
-UUID и хэши не используются как названия новых веток. Фича начинается от DEV,
-хотфикс — от установленного PROD. Все итерации проходят в своём дереве.
-После явного «принято» в чате агент вызывает release. Успешный CI обязателен
-для слияния и установки; кеши и готовые артефакты переиспользуются по хэшам.
+[Контракт](CONTRACT.md) описывает lifecycle и API; [дескрипторы компонентов](components/README.md) — discovery, проверки, сборку и поставки; [CI](ci/README.md) — доказательства происхождения артефактов; [Temporal](TEMPORAL.md) — исполнение, восстановление и обновление.
 
-```sh
-codeworks --request-json '{"action":"prepare","project_id":"brai","workspace_key":"my-task","kind":"feature","request_key":"my-task-prepare"}'
-codeworks --request-json '{"action":"status","project_id":"brai","workspace_key":"my-task"}'
-```
+## Клиент и конфигурация
 
-Дождитесь ready, затем используйте возвращённый path обычными инструментами.
-Для sync/release нужны workspace_id, точный commit_sha и стабильный request_key;
-после успешного выпуска cleanup ставится автоматически. Его идентификатор —
-cleanup_operation_id в статусе выпуска. Если очистка сохранила дерево с ошибкой,
-устраните причину и повторите cleanup с новым request_key. Справка и схемы:
-`codeworks --help`, `codeworks --schema`.
+CLI предоставляет prepare, status, sync, release, cleanup, lifecycle.status, release.close и workspace.cancel. Схемы доступны через --schema, справка — через --help. После изменяющего запроса клиент сохраняет ID операции и читает status; неизвестный исход не разрешает повтор с новым ключом.
 
-Подключение: CODEWORKS_CLIENT_CONFIG — публичный JSON с server, credsFile,
-executorId. credsFile указывает существующий защищённый NATS options JSON
-(servers, user, pass, inboxPrefix) либо стандартный .creds. CODEWORKS_NATS_URL,
-CODEWORKS_NATS_CONFIG / CODEWORKS_NATS_CREDS_FILE и CODEWORKS_EXECUTOR_ID
-перекрывают соответствующие значения. Credentials в запросы не включаются.
+CODEWORKS_CLIENT_CONFIG указывает JSON с server, credsFile и executorId. credsFile ссылается на защищённый NATS options JSON либо .creds. Переменные CODEWORKS_NATS_URL, CODEWORKS_NATS_CONFIG / CODEWORKS_NATS_CREDS_FILE и CODEWORKS_EXECUTOR_ID переопределяют соответствующие значения.
 
-Небольшой хук помогает при забытом переходе в дерево; его ошибки не блокируют
-чтение. Настройка RTK сохраняется. Глобальное подключение хука и включение
-службы выполняются отдельно после согласования.
+## Политика проекта
 
-[Контракт и переход](CONTRACT.md) · [Кеши и CI](ci/README.md)
+Регистрация проекта задаёт допустимые пути, Git flow и исключения documentation_paths. Каталог в исключениях охватывает вложенные файлы; обычный файл — только его путь. Hook использует ту же политику для распознанных правок. Смешанная правка исключённого документа и защищённого кода требует рабочей области.
+
+Это возможности механизма. Обязанности агента, порядок приёмки и настройки конкретной команды задаются вне продуктового контракта.
+
+## Связанные материалы
+
+- [CONTRACT.md](CONTRACT.md).
+- [ci/README.md](ci/README.md).
+- [components/README.md](components/README.md).

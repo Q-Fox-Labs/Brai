@@ -127,3 +127,21 @@ test('invalid new task key asks for a readable name without creating a second ar
   assert.match(result.hookSpecificOutput.additionalContext,/осмысленным workspace_key/);
   assert.match(result.hookSpecificOutput.additionalContext,/status/);
 });
+
+test('Brai documentation policy excludes docs and exact root AGENTS only',async()=>{
+  const policy={projects:[{id:'demo',repo_path:root,documentation_paths:['docs','AGENTS.md']}]};
+  for(const target of ['docs/README.md','docs/new/deep.md','AGENTS.md']) {
+    const f=fixture({config:policy});
+    assert.deepEqual(await runHook(patch('*** Update File: '+target+'\n@@\n-a\n+b'),f.options),{});
+    assert.equal(f.calls.length,0);
+  }
+  for(const target of ['services/hermes/README.md','deploy/README.md','dependencies/README.md','docs-other/a.md','AGENTS.md-other']) {
+    const f=fixture({config:policy});
+    const result=await runHook(patch('*** Update File: '+target+'\n@@\n-a\n+b'),f.options);
+    assert.equal(result.hookSpecificOutput.permissionDecision,'deny');
+    assert.equal(f.calls.length,1);
+  }
+  const f=fixture({config:policy});
+  await runHook(patch('*** Update File: docs/README.md\n@@\n-a\n+b\n*** Update File: services/hermes/tools.mjs\n@@\n-a\n+b'),f.options);
+  assert.equal(f.calls.length,1);
+});

@@ -65,3 +65,11 @@ Operational Gemma использует ctx/batch/ubatch 2048, parallel 1, thread
 Профиль включается необязательным `runtime.silero_pytorch` и соответствующим canonical `installer.seedDirectories.silero_pytorch`. Runtime требует закрытый набор `executable`, `cwd`, `args`, `env`, `startupTimeoutMs`, `requestTimeoutMs`, `stopGraceMs`, `maxLineBytes`, `threads`, `ffmpegExecutable`. `args` должны точно совпадать с профилем, `threads` — 4, `requestTimeoutMs` — 180000; executable, cwd и FFmpeg задаются абсолютными путями. Python использует существующую среду GigaAM с torch 2.8.0+cpu и numpy 2.2.6; отдельная служба или установка пакетов не нужны. В release payload входят runner и его RPC-схемы, веса остаются вне образа.
 
 Установка закреплённого `v5_5_ru.pt` проходит через installer с проверкой точного trusted URL, размера и SHA-256. До регистрации готовой установки произвольная копия весов не считается установленной моделью. При отсутствии обоих Silero-разделов прежняя конфигурация и карточки допустимы без миграции.
+
+## Связанные материалы
+
+- [CONTRACT.md](CONTRACT.md).
+- [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+- [release/README.md](release/README.md).
+- [runners/resources/README.md](runners/resources/README.md).
+- [runners/silero/CONTRACT.md](runners/silero/CONTRACT.md).

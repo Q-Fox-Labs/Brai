@@ -33,6 +33,14 @@ function fixture(t,{checkScript='export {};',mutateAfterCheck,build=false}={}) {
   if(build)put('services/probe/build.mjs',"import{mkdirSync,writeFileSync}from'node:fs';mkdirSync('dist',{recursive:true});writeFileSync('dist/main.mjs','export const value=1;\\n');\n");
   else put('services/probe/main.mjs','export const value=1;\n');
   put('services/probe/check.mjs',checkScript);
+  put('AGENTS.md','[Документация](docs/README.md)\n');
+  put('.gitignore','/docs/user-agent/usercustom/\n');
+  put('docs/README.md','[Компоненты](components/README.md) [Окружение](environment/README.md) [Агент](user-agent/README.md)\n');
+  put('docs/components/README.md','[probe](probe.md) [web](web.md)\n');
+  put('docs/environment/README.md','# Окружение\n');
+  put('docs/user-agent/README.md','# Агент\n');
+  put('services/probe/README.md','# Технический компонент\n');
+  for(const id of ['probe','web'])put('docs/components/'+id+'.md','[Технический README](../../services/probe/README.md)\n');
   const git=(...args)=>execFileSync('git',['-C',root,...args],{stdio:'pipe'});
   git('init','-q');git('add','.');
   git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture');

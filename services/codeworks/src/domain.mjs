@@ -2,12 +2,14 @@
 // ABOUTME: Не управляет агентами; release агент вызывает после принятия пользователем в чате.
 import { randomUUID, createHash } from 'node:crypto';
 import path from 'node:path';
-import { canonical, methods, validate, outputNames } from './contracts.mjs';
+import { canonical, methods, validate, outputNames, schema } from './contracts.mjs';
 import { Fault, safeFault } from './errors.mjs';
 const dto=value=>JSON.parse(JSON.stringify(value));
-const workspaceDTO=row=>{const {ownership_token,legacy_writer,...rest}=row;return dto(rest);};
+const publicDTO=(name,row)=>dto(Object.fromEntries(Object.keys(schema.definitions[name].properties).filter(key=>key in row).map(key=>[key,row[key]])));
+const workspaceDTO=row=>publicDTO('workspace',row);
+const operationDTO=row=>publicDTO('operation',row);
 /** Принимает пять операций рабочего цикла и административную регистрацию проекта. */
-export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowedRepositories=[]}={}) {
+export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowedRepositories=[],requireTemporal=false}={}) {
   async function project(db,id,executor) {
     const p=await db.project(id);
     if(!p)throw new Fault('NOT_FOUND');
@@ -29,7 +31,7 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         if(!old)await db.insertProject(args.project);
         return {project:args.project};
       });
-    } else if(['project.get','status'].includes(method)) {
+    } else if(['project.get','status','lifecycle.status'].includes(method)) {
       value=await store.read(args.project_id,async db=>{
         const p=await project(db,args.project_id,executorId);
         if(method==='project.get')return {project:p};
@@ -39,17 +41,34 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         const w=id?await db.workspace(p.id,id):args.workspace_key?await db.workspaceByKey(p.id,args.workspace_key):null;
         if((id||args.workspace_key)&&!w)throw new Fault('NOT_FOUND');
         if(operation&&w&&operation.workspace_id!==w.id)throw new Fault('CONFLICT');
-        if(!w)return operation?{operation:dto(operation)}:{workspaces:(await db.workspaces(p.id)).map(workspaceDTO)};
+        if(method==='lifecycle.status'){
+          const lifecycle=await db.lifecycle(w.id);
+          return {workspace_id:w.id,task_status:w.removed_at?'removed':lifecycle?.lifecycle??'historical',workflow:lifecycle?{id:lifecycle.workflow_id,status:lifecycle.state,generation:Number(lifecycle.generation),executor_state:lifecycle.state!=='completed'&&Date.now()-new Date(lifecycle.updated_at).getTime()>120000?'unavailable':lifecycle.executor_state,last_confirmed_stage:lifecycle.last_stage,blocked_reason:lifecycle.blocked_reason}:null,blockers:await db.blockers(w.id)};
+        }
+        if(!w)return operation?{operation:operationDTO(operation)}:{workspaces:(await db.workspaces(p.id)).map(workspaceDTO)};
         const latest=operation??await db.latestOperation(w.id);
-        const result={workspace:workspaceDTO(w),operation:latest?dto(latest):null,git:null};
+        const result={workspace:workspaceDTO(w),operation:latest?operationDTO(latest):null,git:null};
         if(w.preparation_state==='ready'&&!w.removed_at){
           try{result.git=await git.inspect(p,w);}catch(error){result.inspection_error=safeFault(error).dto();}
         }
         return result;
       });
     } else {
+      // AIDEV-NOTE: Git и сеть не входят в транзакцию приёма. Повтор ключа не зависит от нынешнего состояния дерева.
+      const snapshot=await store.read(args.project_id,async db=>{
+        const p=await project(db,args.project_id,executorId);
+        const old=await db.request(p.id,executorId,args.request_key);
+        const w=old?null:method==='prepare'?await db.workspaceByKey(p.id,args.workspace_key):await db.workspace(p.id,args.workspace_id);
+        return {project:dto(p),workspace:w?dto(w):null,repeated:!!old};
+      });
+      let baseSHA,inspection;
+      if(!snapshot.repeated){
+        if(method==='prepare'&&!snapshot.workspace)baseSHA=await git.readBase(snapshot.project,args.kind??'feature');
+        if(['sync','release'].includes(method)&&snapshot.workspace&&!snapshot.workspace.removed_at&&snapshot.workspace.preparation_state==='ready')inspection=await git.inspect(snapshot.project,snapshot.workspace);
+      }
       value=await store.transaction(args.project_id,async db=>{
         const p=await project(db,args.project_id,executorId);
+        if(canonical(p)!==canonical(snapshot.project))throw new Fault('CONFLICT','Project changed during admission; inspect status before retry.');
         const digest=createHash('sha256').update(canonical({method,args})).digest('hex');
         const old=await db.request(p.id,executorId,args.request_key);
         if(old){
@@ -58,6 +77,7 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
           if(method==='prepare'&&w.removed_at)throw new Fault('CONFLICT','Task workspace was removed; use a new workspace key for a new task.');
           return {operation_id:old.operation_id,workspace_id:w.id,path:w.path,branch:w.branch};
         }
+        if(requireTemporal&&(await db.executionControl(p.id))?.owner!=='temporal')throw new Fault('BUSY','Temporal ownership transition is not complete.');
         let w;
         if(method==='prepare') {
           w=await db.workspaceByKey(p.id,args.workspace_key);
@@ -67,7 +87,8 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
           }else{
             const key=args.workspace_key;
             if(key.length>64||!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(key)||/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i.test(key)||/^[0-9a-f]{12,}$/i.test(key))throw new Fault('INVALID_ARGUMENT','New workspace_key must be a short descriptive task name, e.g. codeworks-auto-cleanup; UUIDs and commit hashes are not task names.');
-            const base_sha=await git.readBase(p,kind);
+            const base_sha=baseSHA;
+            if(!base_sha)throw new Fault('CONFLICT','Workspace changed during admission.');
             if(kind==='hotfix'&&(await db.currentEvidence(p.id,'prod'))?.commit_sha!==base_sha)throw new Fault('PRODUCTION_BASE_MISMATCH');
             const id=randomUUID();
             w={id,project_id:p.id,workspace_key:args.workspace_key,kind,base_ref:p.git_flow[kind+'_base'],base_sha,branch:p.git_flow[kind+'_prefix']+args.workspace_key,path:path.join(p.workspace_root,id),ownership_token:randomUUID()};
@@ -76,15 +97,24 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         }else{
           w=await db.workspace(p.id,args.workspace_id);
           if(!w)throw new Fault('NOT_FOUND');
+          if(w.removed_at)throw new Fault('CONFLICT','Task workspace was removed.');
           if(w.kind==='promotion')throw new Fault('CONFLICT','Historical promotion workspaces are read-only.');
-          if(method!=='cleanup'){
+          if(['sync','release'].includes(method)){
             if(w.preparation_state!=='ready'||w.removed_at)throw new Fault('CONFLICT','Workspace must be prepared first.');
-            const state=await git.inspect(p,w);
+            const state=inspection;
+            if(!state||snapshot.workspace?.id!==w.id||['path','branch','base_sha','ownership_token'].some(key=>snapshot.workspace[key]!==w[key]))throw new Fault('CONFLICT','Workspace changed during admission.');
             if(state.dirty||state.head!==args.commit_sha)throw new Fault('CONFLICT','Operation requires the current clean workspace commit.');
             if(await db.activeRelease(w.id))throw new Fault('CONFLICT','Workspace has an unfinished release; inspect its status first.');
           }
           if(method==='cleanup'&&!await db.successfulRelease(w.id))throw new Fault('CONFLICT','Cleanup requires a completed release.');
           if(method==='release'&&!p.github)throw new Fault('CONFLICT','GitHub release is not configured.');
+        }
+        const lifecycle=await db.lifecycle?.(w.id);
+        if(lifecycle&&(lifecycle.state!=='open'||lifecycle.lifecycle!=='active'))throw new Fault('CONFLICT','Task no longer accepts commands.');
+        if(method==='release.close'){
+          const attempt=await db.releaseOperation(args.release_operation_id,w.id);
+          if(!attempt)throw new Fault('NOT_FOUND');
+          if(attempt.state==='succeeded')throw new Fault('CONFLICT','Successful release cannot be closed.');
         }
         let existing=method==='prepare'?await db.latestPreparation(w.id):null;
         if(existing?.status==='failed')existing=null;
@@ -92,7 +122,7 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         if(!existing){
           await db.insertOperation({id,project_id:p.id,workspace_id:w.id,executor_id:executorId,kind:method,status:'pending',step:'intent',request:args,result:null});
           if(method==='release'){
-            let details={};
+            let details={},retryOf=null;
             const previous=await db.latestRelease(w.id);
             if(previous?.state==='failed'&&previous.requested_sha===args.commit_sha){
               const candidate=structuredClone(previous.details);let retry=false;
@@ -103,9 +133,9 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
                 }
               }
               // AIDEV-NOTE: Новый ключ разрешает одну попытку установки; повторы старого ключа остаются неизменны.
-              if(retry)details=candidate;
+              if(retry){details=candidate;retryOf=previous.operation_id;}
             }
-            await db.release({id:randomUUID(),workspace_id:w.id,operation_id:id,target:w.kind==='feature'?'dev':'prod',requested_sha:args.commit_sha,state:'pending',details});
+            await db.release({id:randomUUID(),workspace_id:w.id,operation_id:id,target:w.kind==='feature'?'dev':'prod',requested_sha:args.commit_sha,state:'pending',details,retry_of:retryOf});
           }
         }
         await db.insertRequest({project_id:p.id,executor_id:executorId,key:args.request_key,digest,operation_id:id});

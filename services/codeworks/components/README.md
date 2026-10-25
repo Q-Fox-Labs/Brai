@@ -75,7 +75,7 @@ CLI по умолчанию сравнивает с `refs/remotes/origin/dev`; �
 каталога с прежним ID сохраняет идентичность. Tombstone не запускает и не удаляет
 службу: фактическое отключение — отдельный reviewed rollout оператора.
 
-Описаны web, auth, timer, history, alerts, artifacts (включая MCP), elements,
+Описаны web, auth, timer, history, alerts, artifacts (включая MCP), game-core,
 transcription, local-ai, agent, providers, supabase-mcp, hermes, codeworks и
 codeworks-agent (retired; прежний контроллер не поставляется). Transcription сохраняет coordinator/helper/local/external как
 четыре executable одного владельца. Caddy, NATS, Temporal и Supabase — внешние
@@ -101,32 +101,7 @@ runtime остаётся по `services/local-ai/release.json`; полная OCI
 node --test --test-isolation=none services/codeworks/components/*.test.mjs
 ```
 
-Текущий инвентарь unit IDs (параметры экземпляров и enable/disable принадлежат оператору):
-
-| Компонент | DEV / staged unit IDs | PROD unit IDs |
-| --- | --- | --- |
-| web | brai-dev-web | web |
-| auth | auth, auth-migrate | auth, auth-migrate |
-| timer | timer, timer-migrate | timer, timer-migrate |
-| history | history, history-migrate | brai-history.service, history |
-| alerts | alerts, alerts-migrate | brai-alerts.service, alerts |
-| artifacts | brai-dev-artifacts, artifacts-mcp | brai-artifacts.service, brai-artifacts-mcp.service, artifacts, artifacts-mcp |
-| elements | elements, elements-migrate | нет отдельного действующего unit |
-| transcription | transcription, transcription-migrate | brai-transcription.service, transcription |
-| local-ai | local-ai, local-ai-migrate | brai-local-ai-operation3-production.service |
-| agent | общий brai-agent.service | общий brai-agent.service |
-| supabase-mcp | supabase-mcp | brai-supabase-mcp.service, supabase-mcp |
-| hermes | brai-hermes-dev.service, brai-hermes-dev-intake.service, brai-hermes-dev-embeddings.service, brai-hermes-dev-codex-bridge.service | нет отдельного unit |
-| codeworks | brai-codeworks.service (выключен до отдельного согласования) | нет |
-| codeworks-agent | retired: прежние controller units не устанавливаются | нет |
-| providers | Compose providers / brai-dev-providers; внешний proxy litellm / brai-dev-providers-litellm | отдельного действующего unit нет |
-| instaloader | внешний on-demand рецепт, service instaloader | отдельного действующего unit нет |
-
-Это 15 first-party компонентов и один внешний рецепт. Корень npm workspaces —
-организация репозитория, а не ещё одна исполняемая поставка. Отдельных retired
-компонентов в исходной принятой базе нет. Внутренние workers, MCP endpoints и
-четыре Transcription executable перечислены у своих владельцев, без копий задач
-или состояния Element/Move/Attempt.
+Конкретные unit IDs, включённость компонентов и сведения установки принадлежат оператору. Дескрипторы содержат поддерживаемые цели, но не подтверждают их состояние.
 
 Hermes payload включает собственные MemOS embedding adapter и codex_bridge.py,
 а также pinned bridge requirements. Python bridge-venv, operator bridge_runtime.py
@@ -141,3 +116,9 @@ Executable gate проверяет объявленные package bin, runtime s
 conventional main/runner и файлы с shebang и executable mode независимо от имени/каталога.
 Новый такой файл требует executableSources владельца; bin/runtime scripts также
 требуют delivery.entrypoints. Generated outputs проверяются после сборки.
+
+## Документация в проверках компонентов
+
+Тот же graph/CLI проверяет обязательные индексы, карточки по существующим ID, технические README, ссылки и локальные якоря. Активные документы должны быть достижимы от [главного README](../../../docs/README.md). Архивы, vendor и тестовые fixtures не требуют переписывания; принятые правила GameCore сверяются по baseline.
+
+Проверка выполняется также при планировании и исполнении CI, даже при полном попадании в кеш. Личные файлы docs/user-agent/usercustom не читаются из исходников и запрещены в составе поставки. Самостоятельного сервиса или второго реестра компонентов нет.

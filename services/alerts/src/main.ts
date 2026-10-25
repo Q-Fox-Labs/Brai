@@ -7,7 +7,7 @@ import { limits, subjects } from '../contracts/index.mjs';
 import { createAlertsHandlers } from './domain.js';
 import { createPostgresStore } from './storage.js';
 import { createLoadGate } from './load.js';
-import { connectNats, runElementsEvents, runNats } from './nats.js';
+import { connectNats, runGameCoreEvents, runNats } from './nats.js';
 
 /** Запускает runtime только с готовыми миграциями и предсозданным JetStream durable. */
 export async function startAlertsRuntime(cfg: Config = config()) {
@@ -16,14 +16,14 @@ export async function startAlertsRuntime(cfg: Config = config()) {
   const gate = createLoadGate();
   let nc: Awaited<ReturnType<typeof connectNats>> | undefined;
   let runtime: Awaited<ReturnType<typeof runNats>> | undefined;
-  let elementsRuntime: Awaited<ReturnType<typeof runElementsEvents>> | undefined;
+  let gameCoreRuntime: Awaited<ReturnType<typeof runGameCoreEvents>> | undefined;
   const handlers = createAlertsHandlers(createPostgresStore(pools[0], pools[1]), { cursorKey: cfg.cursorKey, changed(user_id) { nc!.publish(subjects.changed, Buffer.from(JSON.stringify({ user_id }))); } });
   const closePools = () => Promise.all(pools.map(pool => pool.end()));
-  try { nc = await connectNats(cfg); runtime = await runNats(nc, handlers, gate); if (cfg.elementsEventsEnabled) elementsRuntime = await runElementsEvents(nc, handlers, gate); }
-  catch (error) { gate.stopAccepting(); await elementsRuntime?.stop().catch(() => {}); await runtime?.stop().catch(() => {}); await gate.drain(); await nc?.close().catch(() => {}); await closePools(); throw error; }
+  try { nc = await connectNats(cfg); runtime = await runNats(nc, handlers, gate); if (cfg.gameCoreEventsEnabled) gameCoreRuntime = await runGameCoreEvents(nc, handlers, gate); }
+  catch (error) { gate.stopAccepting(); await gameCoreRuntime?.stop().catch(() => {}); await runtime?.stop().catch(() => {}); await gate.drain(); await nc?.close().catch(() => {}); await closePools(); throw error; }
   let stopping: Promise<void> | undefined;
   return { handlers, gate, connection: nc, service: runtime.service, finished: runtime.finished,
-    stop() { return stopping ??= (async () => { gate.stopAccepting(); try { await elementsRuntime?.stop(); await runtime!.stop(); } finally { await gate.drain(); try { await nc!.drain(); } finally { await closePools(); } } })(); },
+    stop() { return stopping ??= (async () => { gate.stopAccepting(); try { await gameCoreRuntime?.stop(); await runtime!.stop(); } finally { await gate.drain(); try { await nc!.drain(); } finally { await closePools(); } } })(); },
   };
 }
 async function runProcess(): Promise<void> {

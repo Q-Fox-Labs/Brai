@@ -1,6 +1,7 @@
 // ABOUTME: Читает PR и проверки точного SHA, создаёт PR через установленный GitHub CLI.
 // ABOUTME: Не сливает через REST без target guard, не создаёт статусы CI и не меняет защиту веток.
 import { command } from './git.mjs';
+import {executionFetch} from './execution-context.mjs';
 import { Fault } from './errors.mjs';
 import { verifyCI,downloadProof } from './ci-verifier.mjs';
 import { createRegistry } from '../ci/registry.mjs';
@@ -73,13 +74,13 @@ export function createGitHub({run=command,registryFactory=createRegistry,evidenc
           rows=checks.map(c=>({name:c.name,app_id:c.app?.id,sha:c.head_sha,status:c.status,conclusion:c.conclusion}));
           // AIDEV-NOTE: Токен остаётся в памяти owner process; не аргумент команды и не часть результата.
           const auth=await run('gh',['auth','token']);
-          const registry=registryFactory({repository:project.github.repository,username:project.github.repository.split('/')[0],token:auth.stdout.trim()});
+          const registry=registryFactory({repository:project.github.repository,username:project.github.repository.split('/')[0],token:auth.stdout.trim(),fetcher:executionFetch});
           const files=new Map(),read=endpoint=>{
             if(!/^contents\/.+\?ref=[0-9a-f]{40}$/.test(endpoint))return api(project,endpoint);
             if(!files.has(endpoint))files.set(endpoint,api(project,endpoint));
             return files.get(endpoint);
           };
-          verification=await verifyCI(project,sha,checks,{api:read,registry,readProof:artifact=>downloadProof({repository:project.github.repository,token:auth.stdout.trim()},artifact),readVerified:(id,attempt)=>evidenceStore?.read(project,id,attempt)??null,saveVerified:proof=>evidenceStore?.save(project,proof)});
+          verification=await verifyCI(project,sha,checks,{api:read,registry,readProof:artifact=>downloadProof({repository:project.github.repository,token:auth.stdout.trim()},artifact,{fetcher:executionFetch}),readVerified:(id,attempt)=>evidenceStore?.read(project,id,attempt)??null,saveVerified:proof=>evidenceStore?.save(project,proof)});
           if(verification.verified&&evidenceStore&&project.github.ci.reuse_public_key) {
             const key=readCatalogKey(catalogKeyFile,project.github.ci.reuse_public_key);
             await publishCatalog(project,evidenceStore,registry,key);

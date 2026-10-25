@@ -10,7 +10,7 @@ import AgentScreen from "./agent/screen";
 import TelegramAgentEntry from "./agent/telegram-entry";
 import DoScreen from "./do/screen";
 import Navigation from "./navigation";
-import ElementsScreen from "./elements/screen";
+import GameCoreScreen from "./game-core/screen";
 import { AlertsProvider } from "./alerts/provider";
 import AlertsScreen from "./alerts/screen";
 import "./navigation.css";
@@ -25,7 +25,7 @@ export default function Account({ initialSession, agentMode = "dev_agent", teleg
 /** Управляет подтверждённой сервером сессией без хранения токена в браузере. */
 function AccountSession({ initialSession, agentMode, telegramBotUsername, timerElapsed, onTimerElapsed }: { initialSession: InitialSession; agentMode: WebAgentMode; telegramBotUsername: string | null; timerElapsed: string | null; onTimerElapsed: (elapsed: string | null) => void }) {
  const pathname = usePathname();
- const view = pathname === "/elements" ? "elements" : pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : pathname === "/alerts" ? "alerts" : "timer";
+ const view = pathname === "/game-core" ? "game-core" : pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : pathname === "/alerts" ? "alerts" : "timer";
  const [user, setUser] = useState<User | null>(() => initialSession.status === "authenticated" ? initialSession.user : null), [ready, setReady] = useState(initialSession.status !== "unavailable"), [exiting, setExiting] = useState(false);
  const [busy, setBusy] = useState(false), [message, setMessage] = useState("");
  const locked = useRef(false);
@@ -93,13 +93,13 @@ function AccountSession({ initialSession, agentMode, telegramBotUsername, timerE
 }
 
 /** Сохраняет состояние посещённых экранов; выход или смена пользователя удаляют их. */
-function AccountScreens({ view, user, agentMode, telegramBotUsername, onLogout, onUnauthorized, accountMessage, onTimerElapsed }: { view: "agent" | "timer" | "do" | "alerts" | "elements"; user: User; agentMode: WebAgentMode; telegramBotUsername: string | null; onLogout: () => void; onUnauthorized: () => void; accountMessage: string; onTimerElapsed: (elapsed: string | null) => void }) {
+function AccountScreens({ view, user, agentMode, telegramBotUsername, onLogout, onUnauthorized, accountMessage, onTimerElapsed }: { view: "agent" | "timer" | "do" | "alerts" | "game-core"; user: User; agentMode: WebAgentMode; telegramBotUsername: string | null; onLogout: () => void; onUnauthorized: () => void; accountMessage: string; onTimerElapsed: (elapsed: string | null) => void }) {
  const [visitedDo, setVisitedDo] = useState(view === "do");
  useEffect(() => { if (view === "do") setVisitedDo(true); }, [view]);
  const props = { userId: user.id, email: user.email, onLogout, onUnauthorized, accountMessage };
  // AIDEV-NOTE: Базовые состояния Agent и Timer подключены после входа; hidden сохраняет клиентов.
  return <>
-  <div className="workspace-screen" hidden={view !== "elements"}>{view === "elements" && <ElementsScreen userId={user.id} />}</div>
+  <div className="workspace-screen" hidden={view !== "game-core"}>{view === "game-core" && <GameCoreScreen userId={user.id} />}</div>
   <div className="workspace-screen" hidden={view !== "alerts"}><AlertsScreen active={view === "alerts"} /></div>
   <div className="workspace-screen" hidden={view !== "agent"}>{agentMode === "hermes_telegram" ? <TelegramAgentEntry username={telegramBotUsername} /> : <AgentScreen {...props} active={view === "agent"} />}</div>
   <div className="workspace-screen workspace-timer" hidden={view !== "timer"}><Timer userId={user.id} onUnauthorized={onUnauthorized} accountMessage={accountMessage} onElapsed={onTimerElapsed} /></div>

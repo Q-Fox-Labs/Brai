@@ -3,7 +3,7 @@
 import {existsSync,mkdirSync,readFileSync,writeFileSync,cpSync,rmSync,mkdtempSync} from 'node:fs';
 import {join,resolve,dirname,posix} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
-import {discover,fingerprints,json,digestFiles} from '../components/graph.mjs';
+import {discover,fingerprints,json,digestFiles,validateDocumentation} from '../components/graph.mjs';
 import {buildOutputDigest,verifyBuildReceipt} from '../components/cli.mjs';
 import {verifyPackage,packageComponent} from '../components/package-runtime.mjs';
 import {createRegistry,run,sha256} from './registry.mjs';
@@ -64,6 +64,7 @@ async function plan(cfg,registry) {
   const toolchain=json(join(root,'services/codeworks/ci/toolchain.json'));
   if(process.versions.node!==toolchain.node||`${process.platform}/${process.arch==='x64'?'amd64':process.arch}`!==toolchain.platform)throw Error('TOOLCHAIN_MISMATCH');
   const graph=discover(root,{base:process.env.CODEWORKS_BASE_REF??'refs/remotes/origin/dev',allowMissingBuildOutputs:true});
+  validateDocumentation(root,graph);
   const docker=await run('docker',['version','--format','{{.Client.Version}}/{{.Server.Version}}'],{quiet:true});
   const buildx=await run('docker',['buildx','version'],{quiet:true});
   const dockerToolchain=docker.stdout.trim()+';'+buildx.stdout.trim();
@@ -117,6 +118,7 @@ export async function executePlan(cfg,registry,plan,{repositoryRoot=root,command
   const root=repositoryRoot;
   if(plan.source!==cfg.source||plan.recipe!==digestFiles(root,recipeFiles))throw Error('PLAN_INPUTS_CHANGED');
   const started=Date.now(),graph=discover(root,{allowMissingBuildOutputs:true}),finished=new Set(),prepared=new Map();
+  validateDocumentation(root,graph);
   // AIDEV-NOTE: Restore только generated outputs. Исходники и node_modules из чужого receipt не перезаписываются.
   const restored=new Map();
   const ensureOutputs=item=>{if(!restored.has(item.id))restored.set(item.id,restoreOutputs(item,graph.components.get(item.id),root,commands));return restored.get(item.id);};

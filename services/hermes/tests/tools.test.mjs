@@ -22,13 +22,13 @@ const owner = 'trusted-owner';
 const ids = Array.from({ length: 8 }, (_, index) => `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`);
 const schema = properties => ({ type: 'object', additionalProperties: false, properties });
 const tools = {
-  elements: [
-    { name: 'elements_graph_get', inputSchema: schema({}) },
-    { name: 'elements_move_claim', inputSchema: { ...schema({ move_id: { type: 'string' }, idempotency_key: { type: 'string' }, executor_kind: { enum: ['agent', 'human', 'system'] }, executor_id: { type: 'string' }, input_resource_ids: { type: 'array' } }), required: ['move_id', 'idempotency_key', 'executor_kind', 'input_resource_ids'] } },
-    { name: 'elements_move_complete', inputSchema: schema({ attempt_id: { type: 'string' }, result: { type: 'object' } }) },
-    { name: 'elements_move_fail', inputSchema: schema({ attempt_id: { type: 'string' }, error_code: { type: 'string' } }) },
-    { name: 'elements_element_reclassify', description: 'reclassify', inputSchema: schema({ element_id: { type: 'string' }, expected_revision_id: { type: 'string' }, target_kind: { enum: ['task', 'goal', 'quest'] }, idempotency_key: { type: 'string' }, reason: { type: 'string' } }) },
-    { name: 'elements_planning_expand_repeat', description: 'expand', inputSchema: schema({ move_id: { type: 'string' }, revision_id: { type: 'string' }, resource_id: { type: 'string' }, items: { type: 'array' }, idempotency_key: { type: 'string' } }) },
+  gameCore: [
+    { name: 'game_core_graph_get', inputSchema: schema({}) },
+    { name: 'game_core_move_claim', inputSchema: { ...schema({ move_id: { type: 'string' }, idempotency_key: { type: 'string' }, executor_kind: { enum: ['agent', 'human', 'system'] }, executor_id: { type: 'string' }, input_resource_ids: { type: 'array' } }), required: ['move_id', 'idempotency_key', 'executor_kind', 'input_resource_ids'] } },
+    { name: 'game_core_move_complete', inputSchema: schema({ attempt_id: { type: 'string' }, result: { type: 'object' } }) },
+    { name: 'game_core_move_fail', inputSchema: schema({ attempt_id: { type: 'string' }, error_code: { type: 'string' } }) },
+    { name: 'game_core_element_reclassify', description: 'reclassify', inputSchema: schema({ element_id: { type: 'string' }, expected_revision_id: { type: 'string' }, target_kind: { enum: ['task', 'goal', 'quest'] }, idempotency_key: { type: 'string' }, reason: { type: 'string' } }) },
+    { name: 'game_core_planning_expand_repeat', description: 'expand', inputSchema: schema({ move_id: { type: 'string' }, revision_id: { type: 'string' }, resource_id: { type: 'string' }, items: { type: 'array' }, idempotency_key: { type: 'string' } }) },
   ],
   publisher: [{ name: 'publish_file', inputSchema: schema({ path: { type: 'string' }, requestId: { type: 'string' } }) }, { name: 'fetch_file', inputSchema: schema({ artifactId: { type: 'string' } }) }],
   history: [{ name: 'history_search', inputSchema: schema({}) }, { name: 'history_append', inputSchema: schema({}) }, { name: 'history_categories_list', inputSchema: schema({}) }],
@@ -38,18 +38,18 @@ function fixture(overrides = {}) {
   const calls = [], graph = { elements: [{ id: ids[0], revision: ids[1] }], moves: [{ id: ids[2], kind: 'action', targetId: ids[0], attemptId: ids[3], executor: 'human', status: 'claimed', title: 'Подтвердить', input: [] }], attempts: [{ id: ids[3], moveId: ids[2], status: 'running' }], revisions: [{ owner_id: owner }] };
   const ports = {
     list: async endpoint => tools[endpoint],
-    mcp: async (endpoint, name, args) => { calls.push({ endpoint, name, args }); if (name === 'elements_graph_get') return graph; return { artifactId: ids[4], localPath: `/results/${ids[4]}/report.txt` }; },
+    mcp: async (endpoint, name, args) => { calls.push({ endpoint, name, args }); if (name === 'game_core_graph_get') return graph; return { artifactId: ids[4], localPath: `/results/${ids[4]}/report.txt` }; },
     request: async (subject, payload) => { calls.push({ subject, payload }); return { userId: owner }; },
     publish: async (subject, payload) => { calls.push({ subject, payload }); },
     close: async () => {}, ...overrides,
   };
   return { calls, graph, ports };
 }
-const config = { ownerId: owner, nats: { servers: ['nats://internal:4222'] }, elements: { url: 'http://elements:8080/mcp', ownerId: owner }, history: { url: 'http://history:8080/mcp' }, transcription: { url: 'http://transcription:8080/mcp', token: 'private' }, publisher: { configPath: '/private/publisher.json' } };
+const config = { ownerId: owner, nats: { servers: ['nats://internal:4222'] }, gameCore: { url: 'http://game-core:8080/mcp', ownerId: owner }, history: { url: 'http://history:8080/mcp' }, transcription: { url: 'http://transcription:8080/mcp', token: 'private' }, publisher: { configPath: '/private/publisher.json' } };
 
 test('доверенный owner обязателен; адреса и bearer не принимают URL credentials', () => {
   assert.equal(validateConfig(config, owner), config);
-  for (const value of [{ ...config, ownerId: 'other' }, { ...config, elements: { ...config.elements, ownerId: 'other' } }, { ...config, transcription: { url: 'http://user:secret@host/mcp' } }]) assert.throws(() => validateConfig(value, owner), /INVALID_HERMES_CONFIG/);
+  for (const value of [{ ...config, ownerId: 'other' }, { ...config, gameCore: { ...config.gameCore, ownerId: 'other' } }, { ...config, transcription: { url: 'http://user:secret@host/mcp' } }]) assert.throws(() => validateConfig(value, owner), /INVALID_HERMES_CONFIG/);
 });
 
 test('Timer v2 сохраняет owner, исходные commandId и timestamps; PubAck не считается исполнением', async () => {
@@ -82,28 +82,28 @@ test('History читает user scope, не выставляет админис�
 
 test('Hermes owner catalog exposes only the reclassify and repeat expansion MCP contracts', async () => {
   const { ports, calls } = fixture(), runtime = await createBraiTools(config, ports);
-  assert.deepEqual(runtime.tools.filter(tool => tool.name.includes('reclassify') || tool.name.includes('expand_repeat')).map(tool => tool.name).sort(), ['elements_element_reclassify', 'elements_planning_expand_repeat']);
-  await runtime.call('elements_element_reclassify', { element_id: ids[0], expected_revision_id: ids[1], target_kind: 'quest', idempotency_key: 'classify-1', reason: 'Contains multiple independently accepted goals.' });
-  await runtime.call('elements_planning_expand_repeat', { move_id: ids[2], revision_id: ids[1], resource_id: ids[3], items: [{ id: ids[4], label: 'First' }], idempotency_key: 'repeat-1' });
-  assert.deepEqual(calls.slice(-2).map(call => call.name), ['elements_element_reclassify', 'elements_planning_expand_repeat']);
-  await assert.rejects(runtime.call('elements_element_reclassify', { element_id: ids[0], expected_revision_id: ids[1], target_kind: 'level', idempotency_key: 'bad', reason: 'bad' }), /INVALID_ARGUMENT/);
+  assert.deepEqual(runtime.tools.filter(tool => tool.name.includes('reclassify') || tool.name.includes('expand_repeat')).map(tool => tool.name).sort(), ['game_core_element_reclassify', 'game_core_planning_expand_repeat']);
+  await runtime.call('game_core_element_reclassify', { element_id: ids[0], expected_revision_id: ids[1], target_kind: 'quest', idempotency_key: 'classify-1', reason: 'Contains multiple independently accepted goals.' });
+  await runtime.call('game_core_planning_expand_repeat', { move_id: ids[2], revision_id: ids[1], resource_id: ids[3], items: [{ id: ids[4], label: 'First' }], idempotency_key: 'repeat-1' });
+  assert.deepEqual(calls.slice(-2).map(call => call.name), ['game_core_element_reclassify', 'game_core_planning_expand_repeat']);
+  await assert.rejects(runtime.call('game_core_element_reclassify', { element_id: ids[0], expected_revision_id: ids[1], target_kind: 'level', idempotency_key: 'bad', reason: 'bad' }), /INVALID_ARGUMENT/);
 });
 
 test('reclassify and repeat expansion preserve unknown mutation outcome without automatic retry', async () => {
   let calls = 0;
   const { ports } = fixture({ mcp: async () => { calls++; throw fault('TIMEOUT'); } });
   const runtime = await createBraiTools(config, ports);
-  await assert.rejects(runtime.call('elements_planning_expand_repeat', { move_id: ids[2], revision_id: ids[1], resource_id: ids[3],
+  await assert.rejects(runtime.call('game_core_planning_expand_repeat', { move_id: ids[2], revision_id: ids[1], resource_id: ids[3],
     items: [{ id: ids[4], label: 'First' }], idempotency_key: 'repeat-1' }), /OUTCOME_UNKNOWN/);
   assert.equal(calls, 1);
 });
 
 test('модель не может claim/complete человеческую попытку; файлы проходят через publisher MCP', async () => {
   const { ports, calls } = fixture(), runtime = await createBraiTools(config, ports);
-  await assert.rejects(runtime.call('elements_move_claim', { move_id: ids[2], executor_kind: 'human', idempotency_key: 'key', input_resource_ids: [] }), /INVALID_ARGUMENT|FORBIDDEN/);
-  await assert.rejects(runtime.call('elements_move_complete', { attempt_id: ids[3], result: { resources: [] } }), /FORBIDDEN/);
-  assert.equal(calls.some(call => call.name === 'elements_move_complete'), false);
-  const instruction = await runtime.call('elements_request_human_action', { moveId: ids[2] });
+  await assert.rejects(runtime.call('game_core_move_claim', { move_id: ids[2], executor_kind: 'human', idempotency_key: 'key', input_resource_ids: [] }), /INVALID_ARGUMENT|FORBIDDEN/);
+  await assert.rejects(runtime.call('game_core_move_complete', { attempt_id: ids[3], result: { resources: [] } }), /FORBIDDEN/);
+  assert.equal(calls.some(call => call.name === 'game_core_move_complete'), false);
+  const instruction = await runtime.call('game_core_request_human_action', { moveId: ids[2] });
   assert.equal(instruction.nextTool, 'brai_telegram_request_confirmation');
   assert.equal(instruction.revisionId, ids[1]);
   await runtime.call('fetch_file', { artifactId: ids[4] });
@@ -114,7 +114,7 @@ test('модель не может claim/complete человеческую по�
 test('owner mismatch в ответе и oversized arguments отклоняются', async () => {
   const { ports, graph } = fixture(), runtime = await createBraiTools(config, ports);
   graph.revisions[0].owner_id = 'other';
-  await assert.rejects(runtime.call('elements_request_human_action', { moveId: ids[2] }), /OWNER_MISMATCH/);
+  await assert.rejects(runtime.call('game_core_request_human_action', { moveId: ids[2] }), /OWNER_MISMATCH/);
   await assert.rejects(runtime.call('fetch_file', { artifactId: 'x'.repeat(70_000) }), /REQUEST_TOO_LARGE/);
 });
 
@@ -122,8 +122,8 @@ test('trusted prepare привязывает human attempt; stale revision и ч
   const { ports, graph, calls } = fixture();
   ports.mcp = async (endpoint, name, args) => {
     calls.push({ endpoint, name, args });
-    if (name === 'elements_graph_get') return graph;
-    if (name === 'elements_move_claim') return { attempt: { id: ids[3], executor_kind: 'human', status: 'running' } };
+    if (name === 'game_core_graph_get') return graph;
+    if (name === 'game_core_move_claim') return { attempt: { id: ids[3], executor_kind: 'human', status: 'running' } };
     return { attempt: { id: ids[3], status: 'succeeded' } };
   };
   const human = createHumanActions(await createBraiTools(config, ports));
@@ -149,8 +149,8 @@ test('integrated decision-only Actions derive canonical stage and write review/c
     graph.moves[0].fields = { planning: { decision, revision_id: ids[1], output_contracts: [{ key: ids[6] }] } };
     ports.mcp = async (endpoint, name, args) => {
       calls.push({ endpoint, name, args });
-      if (name === 'elements_graph_get') return graph;
-      if (name === 'elements_move_claim') return { attempt: { id: ids[3], executor_kind: 'human', status: 'running' } };
+      if (name === 'game_core_graph_get') return graph;
+      if (name === 'game_core_move_claim') return { attempt: { id: ids[3], executor_kind: 'human', status: 'running' } };
       // Same accepted pairs as current game-core; no database or model involved.
       const metadata = args.result.resources[0].metadata;
       assert.ok(metadata.stage === stage && metadata.outcome === positive || metadata.stage === 'review' && metadata.outcome === 'changes');
@@ -166,9 +166,9 @@ test('integrated decision-only Actions derive canonical stage and write review/c
     await human.complete({ ...args, decision: 'changes', comment: 'Исправить итог' });
     assert.equal(calls.at(-1).args.result.resources[0].metadata.stage, 'review');
     assert.equal(calls.at(-1).args.result.resources[0].content, 'Исправить итог');
-    const count = calls.filter(call => call.name === 'elements_move_complete').length;
+    const count = calls.filter(call => call.name === 'game_core_move_complete').length;
     await assert.rejects(human.complete({ ...args, decision: positive === 'approved' ? 'success' : 'approved' }), /INVALID_ARGUMENT/);
-    assert.equal(calls.filter(call => call.name === 'elements_move_complete').length, count);
+    assert.equal(calls.filter(call => call.name === 'game_core_move_complete').length, count);
     assert.equal(validateAction({ ...prepared, confirmationStage: 'review' }), false);
   }
 });
@@ -180,8 +180,8 @@ test('practical human output Actions claim only through native owner path; decis
     graph.moves[0].fields = { planning: { decision, output_contracts: Array.from({ length: count }, (_, index) => ({ key: ids[6 + index] })) } };
     ports.mcp = async (endpoint, name, args) => {
       calls.push({ endpoint, name, args });
-      if (name === 'elements_graph_get') return graph;
-      if (name === 'elements_move_claim') return { attempt: { id: ids[3], executor_kind: 'human', status: 'running' } };
+      if (name === 'game_core_graph_get') return graph;
+      if (name === 'game_core_move_claim') return { attempt: { id: ids[3], executor_kind: 'human', status: 'running' } };
       return { status: 'failed' };
     };
     const runtime = await createBraiTools(config, ports), human = createHumanActions(runtime);
@@ -189,26 +189,26 @@ test('practical human output Actions claim only through native owner path; decis
     assert.equal((await human.read({ moveId: ids[2] })).confirmationStage, decision === 'final' ? 'final' : null);
     if (decision === 'confirm') {
       await assert.rejects(human.prepare(args), /HUMAN_OUTPUT_REQUIRED/);
-      assert.equal(calls.filter(call => call.name === 'elements_move_claim').length, 0);
+      assert.equal(calls.filter(call => call.name === 'game_core_move_claim').length, 0);
       const dispatch = createTrustedDispatcher(runtime);
       const rejected = await dispatch(JSON.stringify({ jsonrpc: '2.0', id: 'unsupported', method: 'actions.prepare', params: args }));
       assert.equal(rejected.error.data.code, 'HUMAN_OUTPUT_REQUIRED');
-      assert.equal(calls.filter(call => call.name === 'elements_move_claim').length, 0);
+      assert.equal(calls.filter(call => call.name === 'game_core_move_claim').length, 0);
       continue;
     }
     const prepared = await human.prepare(args);
     assert.equal(prepared.status, 'running');
-    assert.equal(calls.filter(call => call.name === 'elements_move_claim').length, 1);
+    assert.equal(calls.filter(call => call.name === 'game_core_move_claim').length, 1);
     graph.moves[0].status = 'claimed';
     const recovered = await human.prepare(args);
     assert.equal(recovered.attemptId, ids[3]);
     assert.equal(recovered.confirmationStage, decision === 'final' ? 'final' : null);
     if (decision === null) {
       await assert.rejects(human.complete({ moveId: ids[2], revisionId: ids[1], attemptId: ids[3], stage: 'final', decision: 'success' }), /HUMAN_OUTPUT_REQUIRED/);
-      assert.equal(calls.filter(call => call.name === 'elements_move_complete').length, 0);
+      assert.equal(calls.filter(call => call.name === 'game_core_move_complete').length, 0);
     }
     await human.cancel({ moveId: ids[2], revisionId: ids[1], attemptId: recovered.attemptId, reason: 'cancelled' });
-    assert.equal(calls.at(-1).name, 'elements_move_fail');
+    assert.equal(calls.at(-1).name, 'game_core_move_fail');
   }
 });
 
@@ -216,7 +216,7 @@ test('legacy Action retains requested positive stage without a planning DTO fiel
   const { ports, graph, calls } = fixture();
   ports.mcp = async (endpoint, name, args) => {
     calls.push({ endpoint, name, args });
-    return name === 'elements_graph_get' ? graph : { attempt: { id: ids[3], status: 'succeeded' } };
+    return name === 'game_core_graph_get' ? graph : { attempt: { id: ids[3], status: 'succeeded' } };
   };
   const human = createHumanActions(await createBraiTools(config, ports));
   assert.equal(Object.hasOwn(await human.read({ moveId: ids[2] }), 'confirmationStage'), false);
@@ -252,8 +252,8 @@ test('final confirmation shows only required actual resources, not all available
   ];
   ports.mcp = async (endpoint, name, args) => {
     calls.push({ name, args });
-    if (name === 'elements_graph_get') return graph;
-    if (name === 'elements_moves_available') return { items: [{ id: ids[2], required_resource_ids: [ids[4]], available_resource_ids: [ids[4], ids[6]] }] };
+    if (name === 'game_core_graph_get') return graph;
+    if (name === 'game_core_moves_available') return { items: [{ id: ids[2], required_resource_ids: [ids[4]], available_resource_ids: [ids[4], ids[6]] }] };
     return { attempt: { id: ids[3], executor_kind: 'human', status: 'running' } };
   };
   const human = createHumanActions(await createBraiTools(config, ports));
@@ -300,6 +300,30 @@ test('настоящий MCP SDK передаёт tool catalogue и ошибки
   } finally { await client.close(); await service.close(); }
 });
 
+test('Hermes MCP сохраняет диагностику только GameCore planning без автоматического повтора', async () => {
+  const diagnostic={phase:'bind',reason:'Нет основания требования'};
+  const failure={isError:true,content:[{type:'text',text:JSON.stringify({code:'INVALID_ARGUMENT',message:'INVALID_ARGUMENT',diagnostic,privateValue:'hidden'})}]};
+  assert.throws(()=>unwrap(failure),error=>!error.diagnostic);
+  for(const invalid of [{...diagnostic,extra:'hidden'},{...diagnostic,phase:'unknown'},{...diagnostic,reason:'x'.repeat(501)},null]) {
+    assert.throws(()=>unwrap({...failure,content:[{type:'text',text:JSON.stringify({code:'INVALID_ARGUMENT',diagnostic:invalid})}]},{planning:true}),error=>!error.diagnostic);
+  }
+  let calls=0;
+  const {ports}=fixture({
+    list:async endpoint=>endpoint==='gameCore'?[{name:'game_core_planning_bind',inputSchema:schema({attempt_id:{type:'string'},baseline:{type:'object'}})}]:tools[endpoint],
+    mcp:async()=>{calls++;return unwrap(failure,{planning:true});},
+  });
+  const runtime=await createBraiTools(config,ports);
+  const [clientTransport,serverTransport]=InMemoryTransport.createLinkedPair();
+  const service=await serveTools(runtime,serverTransport),client=new Client({name:'diagnostic-test',version:'1.0.0'});
+  try {
+    await client.connect(clientTransport);
+    const rejected=await client.callTool({name:'game_core_planning_bind',arguments:{attempt_id:ids[0],baseline:{}}});
+    assert.equal(rejected.isError,true);
+    assert.deepEqual(JSON.parse(rejected.content[0].text),{code:'INVALID_ARGUMENT',message:'INVALID_ARGUMENT',diagnostic});
+    assert.equal(calls,1);
+  } finally {await client.close();await service.close();}
+});
+
 test('LocalAI synthesize использует новый owner контракт и фиксированные ограничения голоса', () => {
   const tool = natsTools.find(tool => tool.name === 'local_ai_invoke_synthesize');
   const args = { requestId: ids[0], operationId: ids[1], model: { modelId: 'silero-tts-ru-v5_5', revision: '50081637b602126ee06cb3bc8a744d25651d2da1', profileId: 'silero_pytorch' }, deadlineAt: '2026-10-19T13:00:00Z', text: 'Тест', voice: 'eugene' };
@@ -317,7 +341,7 @@ test('cancel и expiry завершают только exact human attempt и р
   await assert.rejects(human.cancel({ ...args, attemptId: ids[4] }), /STALE_ACTION/);
   graph.attempts[0].status = 'failed';
   await assert.rejects(human.cancel(args), /STALE_ACTION/);
-  assert.equal(calls.filter(call => call.name === 'elements_move_fail').length, 1);
+  assert.equal(calls.filter(call => call.name === 'game_core_move_fail').length, 1);
 });
 
 test('voice CLI adapter получает owner artifact и копирует точные bytes; большие входы и output conflict не запускают compute', async () => {
@@ -380,8 +404,8 @@ test('trusted text feedback writes actual remarks and delegates cancellation wit
   graph.moves[0].fields = { planning: { decision: 'confirm', revision_id: ids[1], output_contracts: [{ key: ids[6] }] } };
   ports.mcp = async (endpoint, name, args) => {
     calls.push({ endpoint, name, args });
-    if (name === 'elements_graph_get') return graph;
-    if (name === 'elements_element_activate') return { id: ids[0], status: 'cancelled', element_ids: [ids[0]] };
+    if (name === 'game_core_graph_get') return graph;
+    if (name === 'game_core_element_activate') return { id: ids[0], status: 'cancelled', element_ids: [ids[0]] };
     return { attempt: { id: ids[3], status: 'succeeded' } };
   };
   const human = createHumanActions(await createBraiTools(config, ports));
@@ -393,7 +417,7 @@ test('trusted text feedback writes actual remarks and delegates cancellation wit
   assert.deepEqual(decision.metadata.source, feedback.source);
   assert.equal(decision.metadata.outcome, 'changes');
   await human.feedback({ ...args, decision: 'cancelled' });
-  assert.equal(calls.at(-1).name, 'elements_element_activate');
+  assert.equal(calls.at(-1).name, 'game_core_element_activate');
   assert.deepEqual(calls.at(-1).args, { element_id: ids[0], revision_id: ids[1], cancel: true, feedback });
   await assert.rejects(human.feedback({ ...args, decision: 'approved' }), /INVALID_ARGUMENT/);
   await assert.rejects(human.feedback({ ...args, elementId: ids[5], decision: 'cancelled' }), /NOT_FOUND/);
@@ -405,13 +429,13 @@ test('clarification feedback completes only the real clarification Action with a
     status: 'claimed', title: 'Уточнить поручение', input: [], instructions: 'Какой результат считать готовым?',
     fields: { planning: { decision: 'clarify', output_contracts: [{ key: 'answer' }] } } };
   graph.attempts[0] = { id: ids[3], moveId: ids[2], status: 'running' };
-  const human = createHumanActions({ graph: async () => graph, elementsCall: async (name, args) => {
+  const human = createHumanActions({ graph: async () => graph, gameCoreCall: async (name, args) => {
     calls.push({ name, args }); return { attempt: { id: ids[3], status: 'succeeded' } };
   } });
   const feedback = { id: ids[7], content: 'Письменное подтверждение от поставщика.', source: { platform: 'telegram', message_id: '43' } };
   await human.feedback({ elementId: ids[0], revisionId: ids[1], moveId: ids[2], decision: 'clarify', feedback });
   const result = calls[0].args.result.resources[0];
-  assert.equal(calls[0].name, 'elements_move_complete');
+  assert.equal(calls[0].name, 'game_core_move_complete');
   assert.equal(result.content, feedback.content);
   assert.deepEqual(result.metadata, { element_id: ids[0], revision_id: ids[1], stage: 'clarification', outcome: 'answered', source: feedback.source });
   await assert.rejects(human.feedback({ elementId: ids[0], revisionId: ids[1], moveId: ids[2], decision: 'changes', feedback }), /HUMAN_OUTPUT_REQUIRED/);
@@ -425,7 +449,7 @@ test('practical final result needs an explicit human decision and records both r
   graph.attempts[0] = { id: ids[3], moveId: ids[2], status: 'running', executorKind: 'human' };
   ports.mcp = async (endpoint, name, args) => {
     calls.push({ endpoint, name, args });
-    if (name === 'elements_graph_get') return graph;
+    if (name === 'game_core_graph_get') return graph;
     return { attempt: { id: ids[3], status: 'succeeded' } };
   };
   const human = createHumanActions(await createBraiTools(config, ports));
@@ -433,7 +457,7 @@ test('practical final result needs an explicit human decision and records both r
   const result = await human.result({ moveId: ids[2], revisionId: ids[1], content: 'Забрал и проверил часы.', source: { message_id: '41' },
     decisionText: 'Всё принимаю.', decisionSource: { message_id: '42' } });
   assert.equal(result.attempt.status, 'succeeded');
-  const payload = calls.filter(call => call.name === 'elements_move_complete').at(-1).args.result.resources[0];
+  const payload = calls.filter(call => call.name === 'game_core_move_complete').at(-1).args.result.resources[0];
   assert.equal(payload.content, 'Забрал и проверил часы.');
   assert.equal(payload.output_key, 'result');
   assert.equal(payload.metadata.outcome, 'success');
@@ -445,9 +469,9 @@ test('native stop recovery fails only the exact running agent Operation attempt'
   const { graph } = fixture(), calls = [];
   graph.moves[0] = { id: ids[2], kind: 'operation', targetId: ids[0], attemptId: ids[3], executor: 'agent', status: 'claimed' };
   graph.attempts[0] = { id: ids[3], moveId: ids[2], status: 'running', executor_kind: 'agent' };
-  const human = createHumanActions({ graph: async () => graph, elementsCall: async (name, args) => { calls.push({ name, args }); return { attempt: { id: ids[3], status: 'failed' } }; } });
+  const human = createHumanActions({ graph: async () => graph, gameCoreCall: async (name, args) => { calls.push({ name, args }); return { attempt: { id: ids[3], status: 'failed' } }; } });
   await human.failAgent({ moveId: ids[2], attemptId: ids[3] });
-  assert.deepEqual(calls, [{ name: 'elements_move_fail', args: { attempt_id: ids[3], error_code: 'AGENT_STOPPED' } }]);
+  assert.deepEqual(calls, [{ name: 'game_core_move_fail', args: { attempt_id: ids[3], error_code: 'AGENT_STOPPED' } }]);
   graph.moves[0].attemptId = ids[4];
   graph.attempts.push({ id: ids[4], moveId: ids[2], status: 'running', executor_kind: 'agent' });
   const replaced = await human.failAgent({ moveId: ids[2], attemptId: ids[3] });
@@ -491,12 +515,12 @@ async function restartedOwner(t, invalidStatus = 404) {
     if (body.method === 'initialize') { initializes++; reply({ protocolVersion: body.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'synthetic-owner', version: '1' } }); return; }
     if (req.headers['mcp-session-id'] !== String(generation)) { res.writeHead(invalidStatus).end('Bad Request: Server not initialized'); return; }
     if (body.method === 'tools/list') { reply({ tools: [
-      { name: 'elements_planning_build', inputSchema: schema({ attempt_id: { type: 'string' }, candidate: { type: 'object' } }) },
-      { name: 'elements_timeline_get', inputSchema: schema({}) },
+      { name: 'game_core_planning_build', inputSchema: schema({ attempt_id: { type: 'string' }, candidate: { type: 'object' } }) },
+      { name: 'game_core_timeline_get', inputSchema: schema({}) },
     ] }); return; }
     calls.push(body.params.name);
     if (hold) { waiting.push(() => { res.writeHead(500).end('synthetic transport failure'); }); return; }
-    if (body.params.name === 'elements_planning_build') {
+    if (body.params.name === 'game_core_planning_build') {
       effects++;
       if (drop) { drop = false; req.socket.destroy(); return; }
     }
@@ -505,7 +529,7 @@ async function restartedOwner(t, invalidStatus = 404) {
   await new Promise(resolve => http.listen(0, '127.0.0.1', resolve));
   const endpoint = await connectMcpEndpoint({ url: `http://127.0.0.1:${http.address().port}/mcp` }, { timeout: 1000, callTimeout: 1000 });
   t.after(async () => { await endpoint.close(); http.closeAllConnections(); await new Promise(resolve => http.close(resolve)); });
-  const runtime = await createBraiTools(config, { list: async name => name === 'elements' ? (await endpoint.list()).tools : [],
+  const runtime = await createBraiTools(config, { list: async name => name === 'gameCore' ? (await endpoint.list()).tools : [],
     mcp: async (_, name, args, signal) => unwrap(await endpoint.call(name, args, signal)), close: async () => {} });
   return { runtime, endpoint, calls, waiting, restart: () => { generation++; }, dropReply: () => { drop = true; }, hold: () => { hold = true; },
     release: () => { hold = false; }, counts: () => ({ initializes, effects }) };
@@ -514,30 +538,30 @@ async function restartedOwner(t, invalidStatus = 404) {
 for (const status of [400, 404]) test(`owner session HTTP ${status} never replays mutation; next explicit read reconnects`, async t => {
   const owner = await restartedOwner(t, status);
   owner.restart();
-  await assert.rejects(owner.runtime.call('elements_planning_build', { attempt_id: ids[0], candidate: {} }), error => error.code === 'OUTCOME_UNKNOWN' && error.requestId === ids[0]);
+  await assert.rejects(owner.runtime.call('game_core_planning_build', { attempt_id: ids[0], candidate: {} }), error => error.code === 'OUTCOME_UNKNOWN' && error.requestId === ids[0]);
   assert.deepEqual(owner.counts(), { initializes: 1, effects: 0 });
-  assert.deepEqual(await owner.runtime.call('elements_timeline_get', {}), { effects: 0 });
+  assert.deepEqual(await owner.runtime.call('game_core_timeline_get', {}), { effects: 0 });
   assert.deepEqual(owner.counts(), { initializes: 2, effects: 0 });
-  assert.deepEqual(owner.calls, ['elements_timeline_get']);
+  assert.deepEqual(owner.calls, ['game_core_timeline_get']);
 });
 
 test('lost mutation reply stays unknown; explicit reconciliation sees one persisted effect', async t => {
   const owner = await restartedOwner(t); owner.dropReply();
-  await assert.rejects(owner.runtime.call('elements_planning_build', { attempt_id: ids[0], candidate: {} }), /OUTCOME_UNKNOWN/);
-  assert.deepEqual(await owner.runtime.call('elements_timeline_get', {}), { effects: 1 });
+  await assert.rejects(owner.runtime.call('game_core_planning_build', { attempt_id: ids[0], candidate: {} }), /OUTCOME_UNKNOWN/);
+  assert.deepEqual(await owner.runtime.call('game_core_timeline_get', {}), { effects: 1 });
   assert.deepEqual(owner.counts(), { initializes: 2, effects: 1 });
-  assert.deepEqual(owner.calls, ['elements_planning_build', 'elements_timeline_get']);
+  assert.deepEqual(owner.calls, ['game_core_planning_build', 'game_core_timeline_get']);
 });
 
 test('late old-generation failure preserves a replacement client during concurrent calls', async t => {
   const owner = await restartedOwner(t); owner.hold();
-  const first = owner.endpoint.call('elements_timeline_get', {}).catch(error => error);
-  const second = owner.endpoint.call('elements_timeline_get', {}).catch(error => error);
+  const first = owner.endpoint.call('game_core_timeline_get', {}).catch(error => error);
+  const second = owner.endpoint.call('game_core_timeline_get', {}).catch(error => error);
   while (owner.waiting.length !== 2) await new Promise(resolve => setTimeout(resolve, 1));
   owner.waiting[0](); await first;
   owner.release();
-  assert.deepEqual(unwrap(await owner.endpoint.call('elements_timeline_get', {})), { effects: 0 });
+  assert.deepEqual(unwrap(await owner.endpoint.call('game_core_timeline_get', {})), { effects: 0 });
   owner.waiting[1](); await second;
-  assert.deepEqual(unwrap(await owner.endpoint.call('elements_timeline_get', {})), { effects: 0 });
+  assert.deepEqual(unwrap(await owner.endpoint.call('game_core_timeline_get', {})), { effects: 0 });
   assert.equal(owner.counts().initializes, 2);
 });

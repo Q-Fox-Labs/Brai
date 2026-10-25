@@ -1,5 +1,5 @@
-// ABOUTME: Выполняет ограниченные Git шаги выпусков под существующим project flock.
-// ABOUTME: Только обычный push, без force, удаления refs, checkout чужой ветки или уборки worktree.
+// ABOUTME: Выполняет Git шаги с immutable объектами и атомарной проверкой remote refs.
+// ABOUTME: Публикует без перезаписи истории; удаляет только ветку задачи с точным ожидаемым SHA.
 import { command } from './git.mjs';
 import { Fault } from './errors.mjs';
 const sha=value=>/^[0-9a-f]{40}$/.test(value);
@@ -25,8 +25,11 @@ export function createFlowGit({run=command,localRemote=false,requireLock=()=>{if
   async function ancestor(p,a,b){if(!sha(a)||!sha(b))throw new Fault('INVALID_ARGUMENT');return (await git(p,['merge-base','--is-ancestor',a,b],{allowFailure:true})).code===0;}
   async function fetch(p,b,expected) {
     locked();await origin(p);if(!branch(b)||!sha(expected))throw new Fault('INVALID_ARGUMENT');
-    await git(p,['fetch','--no-tags','origin','refs/heads/'+b]);
-    if((await git(p,['rev-parse','FETCH_HEAD'])).stdout!==expected)throw new Fault('TARGET_CHANGED');
+    // AIDEV-NOTE: FETCH_HEAD и общие tracking refs нельзя использовать как результат параллельного fetch.
+    if(await remote(p,b)!==expected)throw new Fault('TARGET_CHANGED');
+    await git(p,['fetch','--no-tags','--no-write-fetch-head','--no-auto-maintenance','--refmap=','origin',expected]);
+    if(await remote(p,b)!==expected)throw new Fault('TARGET_CHANGED');
+    await git(p,['cat-file','-e',expected+'^{commit}']);
   }
   return {
     remote,ancestor,
@@ -58,6 +61,14 @@ export function createFlowGit({run=command,localRemote=false,requireLock=()=>{if
     async push(p,b,head) {
       locked();await origin(p);if(!branch(b)||!sha(head))throw new Fault('INVALID_ARGUMENT');
       await git(p,['push','--porcelain','origin',head+':refs/heads/'+b]);
+    },
+    /** Удаляет только feature/hotfix ref с ожидаемым SHA; отсутствие после сбоя означает успех. */
+    async removeBranch(p,b,expected) {
+      locked();if(!branch(b)||!b.startsWith('feature/')&&!b.startsWith('hotfix/')||!sha(expected))throw new Fault('INVALID_ARGUMENT');
+      const current=await remote(p,b);if(current===null)return;
+      if(current!==expected)throw new Fault('TARGET_CHANGED','Task branch changed after release; cleanup preserved it.');
+      await git(p,['push','--porcelain','--force-with-lease=refs/heads/'+b+':'+expected,'origin',':refs/heads/'+b]);
+      if(await remote(p,b)!==null)throw new Fault('TARGET_CHANGED','Task branch still exists; retry cleanup after inspection.');
     },
     /** Доказывает точные parents слияния и наличие commit в фактическом remote target. */
     async verifyMerge(p,leg) {

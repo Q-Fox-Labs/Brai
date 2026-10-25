@@ -285,3 +285,51 @@ test('target advancement after merge blocks installation and retry without block
     assert.equal(await f.git.remote(f.project,'dev'),advanced);
   }
 });
+
+test('task branch deletion protects targets and rejects a concurrent remote update',async t=>{
+  const f=await fixture(t);await f.git.push(f.project,f.branch,f.head);
+  for(const branch of ['dev','main'])await assert.rejects(f.git.removeBranch(f.project,branch,f.head),{code:'INVALID_ARGUMENT'});
+  assert.equal(await f.git.remote(f.project,'dev'),f.dev);assert.equal(await f.git.remote(f.project,'main'),f.base);
+  await writeFile(path.join(f.repo,'after-release'),'new work\n');await f.g('add','.');await f.g('commit','-m','New task change');
+  const advanced=(await f.g('rev-parse','HEAD')).stdout;
+  const racing=createFlowGit({localRemote:true,requireLock:()=>{},run:async(exe,args,options)=>{
+    if(args.includes('push')&&args.at(-1)===':refs/heads/'+f.branch)await f.git.push(f.project,f.branch,advanced);
+    return command(exe,args,options);
+  }});
+  await assert.rejects(racing.removeBranch(f.project,f.branch,f.head),{code:'GIT_FAILED'});
+  assert.equal(await f.git.remote(f.project,f.branch),advanced);
+  await assert.rejects(f.git.removeBranch(f.project,f.branch,f.head),{code:'TARGET_CHANGED'});
+});
+test('lost deletion response reconciles absence and rejects a changed origin',async t=>{
+  const f=await fixture(t);await f.git.push(f.project,f.branch,f.head);let deletes=0;
+  const lost=createFlowGit({localRemote:true,requireLock:()=>{},run:async(exe,args,options)=>{
+    const result=await command(exe,args,options);
+    if(args.includes('push')&&args.at(-1)===':refs/heads/'+f.branch){deletes++;throw new Error('delete response lost');}
+    return result;
+  }});
+  await assert.rejects(lost.removeBranch(f.project,f.branch,f.head),/delete response lost/);
+  await lost.removeBranch(f.project,f.branch,f.head);assert.equal(deletes,1);
+  assert.equal(await f.git.remote(f.project,f.branch),null);
+  await f.g('remote','set-url','--push','origin','https://github.com/foreign/repository.git');
+  await assert.rejects(f.git.removeBranch(f.project,f.branch,f.head),{code:'OWNERSHIP_CONFLICT'});
+});
+
+test('Temporal admission checks head CI before queue and pins target only after FIFO acquisition',async t=>{
+  const f=await fixture(t);let acquired=false,requests=0;
+  const acquire=async()=>{requests++;return acquired;};
+  assert.equal((await f.advance({acquire})).reason,'HEAD_CHECKS_REQUIRED');assert.equal(requests,0);assert.equal(f.prs.length,0);assert.equal(f.release.details.primary,undefined);
+  f.good(f.head);assert.equal((await f.advance({acquire})).reason,'TARGET_QUEUE');assert.equal(f.release.details.primary,undefined);
+  await f.g('checkout','dev');await writeFile(path.join(f.repo,'before-acquisition'),'new base\n');await f.g('add','.');await f.g('commit','-m','Advance before queue');await f.g('push','origin','dev');
+  const next=await f.git.remote(f.project,'dev');acquired=true;
+  assert.equal((await f.advance({acquire})).reason,'MERGE_CHECKS_REQUIRED');assert.equal(f.release.details.primary.target_sha,next);
+});
+test('confirmed PROD remains successful while DEV waits even when a newer PROD receipt appears',async t=>{
+  const f=await fixture(t,'hotfix'),released=[];f.good(f.head);
+  const ports={acquire:async()=>true,releaseLane:async target=>released.push(target)};
+  assert.equal((await f.advance(ports)).reason,'MERGE_CHECKS_REQUIRED');const primary=f.release.details.primary;f.good(primary.merge_sha);f.installed('prod',primary.merge_sha);
+  assert.equal((await f.advance(ports)).reason,'MERGE_CHECKS_REQUIRED');assert.ok(released.includes('prod'));
+  const confirmed=f.release.details.primary.deployment_evidence_id;
+  const back=f.release.details.backport;f.proofs.set('prod',{id:randomUUID(),commit_sha:'f'.repeat(40)});
+  assert.equal((await f.advance({...ports,deploy:()=>assert.fail('confirmed PROD must not be installed again')})).reason,'MERGE_CHECKS_REQUIRED');
+  assert.equal(f.release.details.primary.deployment_evidence_id,confirmed);assert.equal(back.target,'dev');
+});

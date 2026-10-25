@@ -1,0 +1,66 @@
+{
+  "openrpc": "1.3.2",
+  "info": {
+    "title": "Codeworks local Git step",
+    "version": "1.0.0"
+  },
+  "methods": [
+    {
+      "name": "git.mutate",
+      "summary": "Execute one admitted local Git change with inherited flock FD 3.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "method",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "branch",
+              "registerCheckout",
+              "checkout",
+              "dependencies",
+              "cleanupLocal"
+            ]
+          }
+        },
+        {
+          "name": "project",
+          "required": true,
+          "schema": {
+            "type": "object"
+          }
+        },
+        {
+          "name": "workspace",
+          "required": true,
+          "schema": {
+            "type": "object"
+          }
+        },
+        {
+          "name": "args",
+          "required": false,
+          "schema": {
+            "type": "array"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Git mutation failed; data.code identifies the preserved domain failure."
+        }
+      ]
+    }
+  ]
+}
