@@ -4,7 +4,8 @@
   "type": "program",
   "status": "active",
   "environments": [
-    "dev"
+    "dev",
+    "prod"
   ],
   "executableSources": [
     "services/hermes/runtime.mjs",
