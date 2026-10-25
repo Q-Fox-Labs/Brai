@@ -43,6 +43,7 @@ def product(manifest):
     m['copies']={}
     m['extra_sources']=[]
     m.pop('socraticode_image',None)
+    m.pop('hf_cache_helper_sha256',None)
     m.pop('hermes_uid',None);m.pop('hermes_gid',None)
     infra=m['projects']['brai-infrastructure']['document']
     proxy=infra['services']['caddy']
@@ -66,7 +67,7 @@ def product(manifest):
                 if mount['type']=='bind':bound.add(mount['source'])
                 else:volumes.add(doc.get('volumes',{}).get(mount['source'],{}).get('name',mount['source']))
     m['images']={k:v for k,v in m['images'].items() if k in images}
-    m['runtime_images']={k:v for k,v in m['runtime_images'].items() if k in images}
+    m['runtime_images']={}
     m['networks']={k:v for k,v in m['networks'].items() if k in networks}
     m['volumes']=[v for v in m['volumes'] if v in volumes]
     m['volume_permissions']={k:v for k,v in m['volume_permissions'].items() if k in volumes}

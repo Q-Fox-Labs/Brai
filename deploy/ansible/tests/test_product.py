@@ -51,9 +51,12 @@ class ProductBoundary(unittest.TestCase):
         self.assertEqual(self.manifest['extra_sources'],[])
 
     def test_dev_change_does_not_change_product(self):
-        full=fixture();before=partition.product(full)
+        full=fixture();full['runtime_images']={'web':{'name':'prod','references':['same-image']}}
+        before=partition.product(full)
         full['source_revisions']['dev']='e'*40
         full['installed']['dev']['web']='sha256:'+'e'*64
+        full['hf_cache_helper_sha256']='e'*64
+        full['runtime_images']['web']['name']='dev'
         full['components'].append({'id':'web','artifact':{'digest':'sha256:'+'e'*64}})
         self.assertEqual(before,partition.product(full))
 

@@ -15,7 +15,23 @@
     owner: root
     group: root
     mode: '{{ "0644" if item == "transcription-launch.mjs" else "0600" }}'
-  loop: [install_server.py, install_models.mjs, validate_render.py, prepare-transformers-cache.py, transcription-launch.mjs, partition.py, prepare_state.py, configure_mcp.py]
+  loop: [install_server.py, install_models.mjs, validate_render.py, prepare-transformers-cache.py, transcription-launch.mjs, partition.py, prepare_state.py, configure_mcp.py, mcp_config.py, mcp-idle-proxy.py]
+
+- name: Create the public MCP launcher directory
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+
+- name: Install the product MCP lifecycle launcher
+  ansible.builtin.copy:
+    src: mcp-idle-proxy.py
+    dest: /usr/local/libexec/mcp-idle-proxy
+    owner: root
+    group: root
+    mode: '0755'
 
 - name: Install explicit administrative runner
   ansible.builtin.copy:

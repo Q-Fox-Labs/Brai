@@ -24,6 +24,7 @@ import urllib.error
 
 ROOT = Path('/var/lib/brai-install')
 PROJECTS = ROOT/'projects'
+RUNTIME_IMAGES = Path('/var/lib/nodejs-security/brai-runtime-images.json')
 IMAGE_NODE = 'node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205'
 FORBIDDEN = ('/sessions/', '/conversations/', '/memories/', '/usercustom/AGENTS', '.sqlite', '/db/data/')
 STAGES = ('inputs', 'sources', 'infrastructure', 'databases', 'migrations', 'applications', 'models', 'host_services', 'verify')
@@ -217,7 +218,8 @@ class Installer:
         for c in self.m['components']:
             dest=payload_path(c)
             if c['artifact']['metadata']['deliveryKind']=='external-cli':
-                docker('pull',c['artifact']['reference']); continue
+                self.prepare_external_cli(c,dest)
+                continue
             if not dest.exists():
                 docker('pull',c['artifact']['reference'])
                 cid=docker('create','--entrypoint','/not-executed',c['artifact']['reference']).stdout.strip()
@@ -241,19 +243,84 @@ class Installer:
             require(hashlib.sha256(data).hexdigest() == source['sha256'], 'INSTALL_SOURCE_DOWNLOAD_INVALID')
             write(path, data, source['mode'])
             self.changed = True
-        for unit, program in self.m['programs'].items():
-            c=self.component(program['environment'],program['component'])
-            self.link(program['link'],payload_path(c))
+        self.prepare_program_links()
         for repo in self.m.get('npm_repositories', ['/srv/projects/brai']):
             if not Path(repo+'/node_modules/.package-lock.json').exists():
                 run(['/usr/sbin/runuser', '-u', 'agent', '--', '/usr/bin/env', '--chdir='+repo,
                      '/usr/local/bin/npm', 'ci', '--no-audit', '--no-fund'])
                 self.changed = True
         self.build_images()
+        self.record_runtime_images()
         self.prepare_local_ai_assets()
         self.extra_sources()
         self.render_projects()
         run(['/usr/bin/python3','-B',str(ROOT/'validate_render.py'),str(ROOT/'baseline.json'),str(ROOT/'inputs.json')])
+
+    def prepare_program_links(self):
+        """Разложить все установленные native payload, включая программы без запуска unit."""
+        for target,environment in self.m['operator']['environments'].items():
+            for name,instances in environment['components'].items():
+                if name not in self.m['installed'].get(target,{}):continue
+                for instance in instances:
+                    if instance['kind']=='program':
+                        self.link(instance['link'],payload_path(self.component(target,name)))
+
+    def prepare_external_cli(self,component,destination):
+        """Проверить CLI из immutable image до записи настоящего descriptor."""
+        descriptor=destination/'external.json'
+        expected={'artifact':component['artifact'],'verified':True}
+        if descriptor.exists():
+            require(json.loads(descriptor.read_text())==expected,'INSTALL_EXTERNAL_DESCRIPTOR_CHANGED')
+        reference=component['artifact']['reference']
+        if docker('image','inspect',reference,optional=True).returncode:
+            docker('pull',reference)
+            self.changed=True
+        docker('run','--rm','--pull=never','--network=none','--read-only',
+               '--cap-drop=ALL','--security-opt=no-new-privileges:true',
+               '--tmpfs','/tmp:rw,nosuid,nodev,size=16m',reference,'--help')
+        self.changed |= json_write(descriptor,expected,only_new=True)
+
+    def record_runtime_images(self):
+        """Записать измеренные image IDs и рецепты для последующего штатного выпуска."""
+        recipes={}
+        for recipe in self.m['images'].values():
+            if recipe['kind']=='owner':continue
+            identity=json.loads(docker('image','inspect',recipe['reference']).stdout)[0]['Id']
+            require(re.fullmatch(r'sha256:[0-9a-f]{64}',identity),'INSTALL_RUNTIME_IMAGE_INVALID')
+            if identity in recipes:require(recipes[identity]==recipe,'INSTALL_RUNTIME_RECIPE_CONFLICT')
+            recipes[identity]=recipe
+        json_write(ROOT/'runtime-recipes.json',{'format':'brai-clean-install-runtime-recipes-v1',
+                   'manifest':sha(ROOT/'baseline.json'),'images':recipes})
+        records={}
+        version=run(['/usr/local/bin/node','--version']).stdout.strip().removeprefix('v')
+        checked=set()
+        for target,environment in self.m['operator']['environments'].items():
+            for name,instances in environment['components'].items():
+                if not any(i['kind']=='compose' and not i.get('deliveryImage') for i in instances):continue
+                component=self.component(target,name)
+                meta=json.loads((payload_path(component)/'artifact-manifest.json').read_text())
+                if 'Node.js '+version not in meta.get('systemRequirements',[]):continue
+                for instance in instances:
+                    if instance['kind']!='compose' or instance.get('deliveryImage'):continue
+                    service=self.documents[instance['project']]['services'][instance['service']]
+                    recipe=self.m['images'].get(service['image'])
+                    reference=recipe['reference'] if recipe else service['image']
+                    identity=json.loads(docker('image','inspect',reference).stdout)[0]['Id']
+                    require(re.fullmatch(r'sha256:[0-9a-f]{64}',identity),'INSTALL_RUNTIME_IMAGE_INVALID')
+                    if identity not in checked:
+                        measured=docker('run','--rm','--network=none','--read-only','--cap-drop=ALL',
+                                        '--entrypoint','/usr/local/bin/node',reference,'--version').stdout.strip()
+                        require(measured=='v'+version,'INSTALL_NODE_RUNTIME_VERSION_MISMATCH')
+                        checked.add(identity)
+                    records[instance['container']]={'version':version,'base':identity,'image':identity}
+        provenance=RUNTIME_IMAGES
+        if provenance.exists():
+            info=provenance.lstat()
+            require(stat.S_ISREG(info.st_mode) and info.st_uid==0 and info.st_gid==0
+                    and stat.S_IMODE(info.st_mode)==0o600,'INSTALL_RUNTIME_PROVENANCE_PERMISSIONS')
+            old=json.loads(provenance.read_text())
+            require(all(records.get(key)==value for key,value in old.items()),'INSTALL_RUNTIME_PROVENANCE_CHANGED')
+        json_write(provenance,records)
 
     def component(self,target,component):
         digest=self.m['installed'][target][component]
@@ -296,14 +363,18 @@ class Installer:
             with tempfile.TemporaryDirectory(prefix='build-',dir=ROOT) as tmp:
                 context=Path(tmp)
                 if recipe['kind']=='local-ai':
-                    source=payload_path(self.component(next(iter(self.m['source_revisions'])), 'local-ai'))/'services/local-ai/runners/gigaam/requirements.lock'
+                    source=self.local_ai_source()/'runners/gigaam/requirements.lock'
                     shutil.copyfile(source,context/'requirements.lock')
                 write(context/'Dockerfile',recipe['dockerfile'].encode())
                 docker('build','--pull','--tag',tag,tmp)
                 self.changed=True
 
+    def local_ai_source(self):
+        """Брать общие runtime assets из принятого PROD независимо от порядка сред."""
+        return payload_path(self.component('prod','local-ai'))/'services/local-ai'
+
     def prepare_local_ai_assets(self):
-        profile = payload_path(self.component(next(iter(self.m['source_revisions'])), 'local-ai'))/'services/local-ai/profiles/gigaam_pytorch.json'
+        profile = self.local_ai_source()/'profiles/gigaam_pytorch.json'
         for aux in json.loads(profile.read_text())['auxiliarySources']:
             directory = Path('/var/lib/brai/local-ai/vad')/aux['revision']
             directory.mkdir(parents=True, exist_ok=True)
@@ -342,7 +413,7 @@ class Installer:
 
     def prepare_hf_cache(self):
         recipe = next(r for r in self.m['images'].values() if r['kind'] == 'local-ai')
-        profile = payload_path(self.component(next(iter(self.m['source_revisions'])), 'local-ai'))/'services/local-ai/profiles/gigaam_pytorch.json'
+        profile = self.local_ai_source()/'profiles/gigaam_pytorch.json'
         meta = json.loads(profile.read_text())
         model = Path('/var/lib/brai/local-ai/models')/meta['modelId']/meta['source']['revision']/meta['profileId']
         source = ROOT/'prepare-transformers-cache.py'
@@ -410,15 +481,61 @@ class Installer:
                 os.chown(volume,permissions['uid'],permissions['gid'])
                 os.chmod(volume,permissions['mode'])
                 self.changed=True
+        self.prepare_artifacts_volume()
         # Applications and Caddy are started only after owner schemas exist.
         infra=self.documents['brai-infrastructure']['services']
         compose('brai-infrastructure','up','--detach','--no-deps','supabase-db')
-        for attempt in range(120):
-            if not docker('exec','--user','postgres','supabase-db','pg_isready','-U','supabase_admin',optional=True).returncode: break
-            time.sleep(2)
-        else: raise ValueError('INSTALL_POSTGRES_NOT_READY')
+        self.wait_postgres()
         if 'nats' in infra: compose('brai-infrastructure','up','--detach','--no-deps','nats')
         self.extra_infrastructure()
+
+    def prepare_artifacts_volume(self):
+        """Создать owner-подкаталоги до монтирования files subpath; данные не менять."""
+        project=self.documents.get('brai-artifacts')
+        if not project:return
+        service=project['services']['artifacts']
+        mount=next(v for v in service['volumes'] if v['target']=='/var/lib/brai-artifacts')
+        volume=project['volumes'][mount['source']]['name']
+        root=Path(json.loads(docker('volume','inspect',volume).stdout)[0]['Mountpoint'])
+        require(not root.is_symlink(),'INSTALL_ARTIFACTS_VOLUME_UNSAFE')
+        folders={'files':0o750,'tmp':0o700}
+        present=list(root.iterdir())
+        require(all(p.name in folders and p.is_dir() and not p.is_symlink() for p in present),'INSTALL_ARTIFACTS_VOLUME_UNSAFE')
+        if all((root/name).is_dir() for name in folders):
+            require(all((root/name).stat().st_uid==1000 and (root/name).stat().st_gid==1000
+                        and stat.S_IMODE((root/name).stat().st_mode)==mode for name,mode in folders.items()),
+                    'INSTALL_ARTIFACTS_VOLUME_PERMISSIONS')
+            return
+        require(all(not any(p.iterdir()) for p in present),'INSTALL_ARTIFACTS_PARTIAL_VOLUME_HAS_DATA')
+        source="""const f=require('node:fs/promises');const root='/var/lib/brai-artifacts';
+(async()=>{await f.mkdir(root,{recursive:true});
+for(const [name,mode] of [['files',0o750],['tmp',0o700]]){
+const path=root+'/'+name;await f.mkdir(path,{recursive:true});await f.chown(path,1000,1000);await f.chmod(path,mode);}
+await f.chown(root,1000,1000);await f.chmod(root,0o750);})().catch(()=>process.exit(1));"""
+        docker('run','--rm','--network=none','--user','0:0','--volume',volume+':/var/lib/brai-artifacts',
+               '--entrypoint','/usr/local/bin/node',service['image'],'-e',source)
+        require(all((root/name).is_dir() for name in folders),'INSTALL_ARTIFACTS_VOLUME_NOT_READY')
+        self.changed=True
+
+    @staticmethod
+    def wait_postgres():
+        """Дождаться готовности PostgreSQL после первого запуска или смены HBA path."""
+        for attempt in range(120):
+            if not docker('exec','--user','postgres','supabase-db','pg_isready','-U','supabase_admin',optional=True).returncode:return
+            time.sleep(2)
+        raise ValueError('INSTALL_POSTGRES_NOT_READY')
+
+    def activate_hba(self,setting):
+        """Применить postmaster-настройку до приложений и проверить прочтение HBA."""
+        if self.sql('SHOW hba_file;') != setting:
+            self.sql("ALTER SYSTEM SET hba_file = '"+setting+"';")
+            docker('restart','supabase-db')
+            self.wait_postgres()
+            self.changed=True
+        require(self.sql('SHOW hba_file;')==setting,'INSTALL_POSTGRES_HBA_NOT_ACTIVE')
+        self.sql('SELECT pg_reload_conf();')
+        require(self.sql('SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL;')=='0',
+                'INSTALL_POSTGRES_HBA_INVALID')
 
     @staticmethod
     def sql(statement,database='postgres'):
@@ -446,10 +563,7 @@ class Installer:
         # MemOS later adds its new block through its own owner lifecycle.
         if not hba.exists(): write(hba,self.m['postgres_hba'].encode(),0o644)
         setting='/etc/postgresql-custom/brai-clean-install-hba.conf'
-        if self.sql('SHOW hba_file;') != setting:
-            self.sql("ALTER SYSTEM SET hba_file = '"+setting+"';")
-            self.sql('SELECT pg_reload_conf();')
-            self.changed=True
+        self.activate_hba(setting)
         run(['/usr/local/bin/node',str(ROOT/'install_models.mjs'),'brokers',str(ROOT/'inputs.json'),str(ROOT/'baseline.json')])
 
     def migrations_stage(self):

@@ -51,6 +51,11 @@
       - /usr/bin/python3
       - -B
       - -c
-      - '{{ "import sys,types; module=types.ModuleType(\"partition\"); exec(" + (lookup("file", role_path + "/files/partition.py") | to_json) + ", module.__dict__); sys.modules[\"partition\"]=module\n" + lookup("file", role_path + "/files/prepare_state.py") }}'
+      - |
+        import base64,sys,types
+        module=types.ModuleType('partition')
+        exec(base64.b64decode('{{ lookup("file", role_path + "/files/partition.py") | b64encode }}'),module.__dict__)
+        sys.modules['partition']=module
+        exec(base64.b64decode('{{ lookup("file", role_path + "/files/prepare_state.py") | b64encode }}'))
     stdin: '{{ {"root":brai_install_root,"manifest":brai_install_manifest,"inputs":brai_install_inputs,"administrative":brai_install_administrative} | to_json }}'
-  no_log: true\n
+  no_log: true

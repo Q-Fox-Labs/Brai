@@ -266,8 +266,16 @@
       "owner": "brai_auth_owner"
     },
     {
+      "name": "brai_codeworks_temporal_test",
+      "owner": "brai_codeworks_temporal_owner"
+    },
+    {
       "name": "service_history",
       "owner": "history_owner"
+    },
+    {
+      "name": "brai_codeworks_restore_test",
+      "owner": "brai_codeworks_test_owner"
     },
     {
       "name": "brai_artifacts",
@@ -284,6 +292,14 @@
     {
       "name": "local_ai",
       "owner": "local_ai_owner"
+    },
+    {
+      "name": "brai_codeworks_temporal_restore_test",
+      "owner": "brai_codeworks_temporal_owner"
+    },
+    {
+      "name": "brai_codeworks_test",
+      "owner": "brai_codeworks_test_owner"
     }
   ],
   "directories": {
@@ -429,7 +445,6 @@
     "/etc/brai/caddy/",
     "/var/lib/brai-install/"
   ],
-  "hf_cache_helper_sha256": "4b9fb584360c3c0c82cadad84564359254f67424e423ceae9fbf06382924a72f",
   "images": {
     "caddy:2.11.4-alpine": {
       "kind": "pull",
@@ -926,7 +941,7 @@
       }
     }
   },
-  "postgres_hba": "# BEGIN BRAI DEV PROVIDERS ROLE ISOLATION\n# END BRAI DEV PROVIDERS ROLE ISOLATION\n# BEGIN BRAI DEV ROLE ISOLATION\n# BEGIN BRAI DEV DIALOGUES ROLE ISOLATION\n# END BRAI DEV DIALOGUES ROLE ISOLATION\n# BEGIN BRAI CODEWORKS NORMAL ROLE ISOLATION\n# END BRAI CODEWORKS NORMAL ROLE ISOLATION\n# END BRAI DEV ROLE ISOLATION\n# ABOUTME: Ограничивает роли auth и timer собственной БД.\n# ABOUTME: Остальные роли сохраняют исходные правила Supabase.\nlocal brai_auth brai_auth_owner,brai_auth_app scram-sha-256\nhost brai_auth brai_auth_owner,brai_auth_app 0.0.0.0/0 scram-sha-256\nhost brai_auth brai_auth_owner,brai_auth_app ::/0 scram-sha-256\nlocal timer timer_owner,timer_app scram-sha-256\nhost timer timer_owner,timer_app 0.0.0.0/0 scram-sha-256\nhost timer timer_owner,timer_app ::/0 scram-sha-256\nlocal all brai_auth_owner,brai_auth_app,timer_owner,timer_app reject\nhost all brai_auth_owner,brai_auth_app,timer_owner,timer_app 0.0.0.0/0 reject\nhost all brai_auth_owner,brai_auth_app,timer_owner,timer_app ::/0 reject\ninclude /etc/postgresql/pg_hba.conf\n",
+  "postgres_hba": "# BEGIN CODEWORKS TEMPORAL FIXTURE\n# END CODEWORKS TEMPORAL FIXTURE\n# BEGIN BRAI DEV PROVIDERS ROLE ISOLATION\n# END BRAI DEV PROVIDERS ROLE ISOLATION\n# BEGIN BRAI DEV ROLE ISOLATION\n# BEGIN BRAI DEV DIALOGUES ROLE ISOLATION\n# END BRAI DEV DIALOGUES ROLE ISOLATION\n# BEGIN BRAI CODEWORKS NORMAL ROLE ISOLATION\n# END BRAI CODEWORKS NORMAL ROLE ISOLATION\n# END BRAI DEV ROLE ISOLATION\n# ABOUTME: Ограничивает роли auth и timer собственной БД.\n# ABOUTME: Остальные роли сохраняют исходные правила Supabase.\nlocal brai_auth brai_auth_owner,brai_auth_app scram-sha-256\nhost brai_auth brai_auth_owner,brai_auth_app 0.0.0.0/0 scram-sha-256\nhost brai_auth brai_auth_owner,brai_auth_app ::/0 scram-sha-256\nlocal timer timer_owner,timer_app scram-sha-256\nhost timer timer_owner,timer_app 0.0.0.0/0 scram-sha-256\nhost timer timer_owner,timer_app ::/0 scram-sha-256\nlocal all brai_auth_owner,brai_auth_app,timer_owner,timer_app reject\nhost all brai_auth_owner,brai_auth_app,timer_owner,timer_app 0.0.0.0/0 reject\nhost all brai_auth_owner,brai_auth_app,timer_owner,timer_app ::/0 reject\ninclude /etc/postgresql/pg_hba.conf\n",
   "programs": {
     "brai-agent.service": {
       "active": true,
@@ -1876,24 +1891,6 @@
             "volumes": [
               {
                 "read_only": false,
-                "source": "/opt/supabase/deployment/volumes/db/webhooks.sql",
-                "target": "/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql",
-                "type": "bind"
-              },
-              {
-                "read_only": false,
-                "source": "/opt/supabase/deployment/volumes/db/logs.sql",
-                "target": "/docker-entrypoint-initdb.d/migrations/99-logs.sql",
-                "type": "bind"
-              },
-              {
-                "read_only": false,
-                "source": "/opt/supabase/deployment/volumes/db/data",
-                "target": "/var/lib/postgresql/data",
-                "type": "bind"
-              },
-              {
-                "read_only": false,
                 "source": "/opt/supabase/deployment/volumes/db/jwt.sql",
                 "target": "/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql",
                 "type": "bind"
@@ -1927,6 +1924,24 @@
                 "source": "supabase_db-config",
                 "target": "/etc/postgresql-custom",
                 "type": "volume"
+              },
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/db/webhooks.sql",
+                "target": "/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql",
+                "type": "bind"
+              },
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/db/logs.sql",
+                "target": "/docker-entrypoint-initdb.d/migrations/99-logs.sql",
+                "type": "bind"
+              },
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/db/data",
+                "target": "/var/lib/postgresql/data",
+                "type": "bind"
               }
             ],
             "working_dir": "/"
@@ -2549,86 +2564,7 @@
       "role": "history_web"
     }
   ],
-  "runtime_images": {
-    "sha256:149ba12428cc3ed0d120615decea5d9b1b97020fcc20db247cdc0bb35b2d099d": {
-      "name": "supabase-storage",
-      "references": [
-        "node-security/supabase-storage@sha256:149ba12428cc3ed0d120615decea5d9b1b97020fcc20db247cdc0bb35b2d099d"
-      ]
-    },
-    "sha256:464b93a60ba8c96bc06dad7f241562d6613b2a994922307717b05f432ae415c2": {
-      "name": "supabase-pooler",
-      "references": [
-        "supabase/supavisor@sha256:464b93a60ba8c96bc06dad7f241562d6613b2a994922307717b05f432ae415c2"
-      ]
-    },
-    "sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4": {
-      "name": "supabase-envoy",
-      "references": [
-        "envoyproxy/envoy@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4"
-      ]
-    },
-    "sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b": {
-      "name": "caddy",
-      "references": [
-        "caddy@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b"
-      ]
-    },
-    "sha256:73c5dda13199745b0d2d00e4149d4a589c5b2e205dbf335ca05eca8276b54712": {
-      "name": "supabase-imgproxy",
-      "references": [
-        "darthsim/imgproxy@sha256:73c5dda13199745b0d2d00e4149d4a589c5b2e205dbf335ca05eca8276b54712"
-      ]
-    },
-    "sha256:88dc4f4e9b8a6da5795e8f1af1ff04bbf4d46114854364c6a357ea535e699be8": {
-      "name": "supabase-meta",
-      "references": [
-        "node-security/supabase-meta@sha256:88dc4f4e9b8a6da5795e8f1af1ff04bbf4d46114854364c6a357ea535e699be8"
-      ]
-    },
-    "sha256:c0c25187a6b835e65a6f6e6c6b39d090e832d40e6de5186f2c038e0411944232": {
-      "name": "supabase-auth",
-      "references": [
-        "supabase/gotrue@sha256:c0c25187a6b835e65a6f6e6c6b39d090e832d40e6de5186f2c038e0411944232"
-      ]
-    },
-    "sha256:c9dc201e555f5d8e37e7f39cdd4df0229774996e213bfd7de8d10ac609030f2c": {
-      "name": "supabase-rest",
-      "references": [
-        "postgrest/postgrest@sha256:c9dc201e555f5d8e37e7f39cdd4df0229774996e213bfd7de8d10ac609030f2c"
-      ]
-    },
-    "sha256:cbcc6a7986fc28b6dcffa798b077d5fb9c69cd25500371ab49147a86d7edbb03": {
-      "name": "realtime-dev.supabase-realtime",
-      "references": [
-        "supabase/realtime@sha256:cbcc6a7986fc28b6dcffa798b077d5fb9c69cd25500371ab49147a86d7edbb03"
-      ]
-    },
-    "sha256:cd3fcd4ecdda44e3a66728a5334af0a959bc3979b32810e033d1c547241cd0f4": {
-      "name": "nats",
-      "references": [
-        "nats@sha256:cd3fcd4ecdda44e3a66728a5334af0a959bc3979b32810e033d1c547241cd0f4"
-      ]
-    },
-    "sha256:edd22bef4477b900d5c300e287ce9b18bff9b81a0291bee14ee0b7c7b71a2899": {
-      "name": "supabase-edge-functions",
-      "references": [
-        "supabase/edge-runtime@sha256:edd22bef4477b900d5c300e287ce9b18bff9b81a0291bee14ee0b7c7b71a2899"
-      ]
-    },
-    "sha256:f046b512ba69f5d27e7a601b9c83887a9b46f7c92342187cad17424787f89a26": {
-      "name": "brai-local-ai-op3-main-8683b1d1",
-      "references": [
-        "node-security/brai-local-ai-op3-main-8683b1d1@sha256:f046b512ba69f5d27e7a601b9c83887a9b46f7c92342187cad17424787f89a26"
-      ]
-    },
-    "sha256:f371b5f3f2ac0a05703f33d6e6134515fb2498cab708fb948a0aeb7481467c00": {
-      "name": "supabase-db",
-      "references": [
-        "supabase/postgres@sha256:f371b5f3f2ac0a05703f33d6e6134515fb2498cab708fb948a0aeb7481467c00"
-      ]
-    }
-  },
+  "runtime_images": {},
   "scope": "product",
   "source_revisions": {
     "prod": "c8ff46145618c44f3103dd8caa7cb26debc34fb5"
