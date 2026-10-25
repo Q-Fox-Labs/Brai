@@ -113,6 +113,10 @@ def product(manifest):
     m['role_memberships']=[v for v in m['role_memberships'] if not any(x.startswith(('brai_dev_', 'brai_codeworks')) for x in v.values())]
     m['postgres_hba']='\n'.join(l for l in m['postgres_hba'].splitlines() if 'brai_dev' not in l and ('brai_codeworks' not in l or 'codeworks' in m['installed']['prod']))+'\n'
     production['components']={k:v for k,v in production['components'].items() if k in m['installed']['prod']}
+    # AIDEV-NOTE: Host-controller hooks принадлежат Admin; клиент выполняет свои models/native stages.
+    for item in [*(item for values in production['components'].values() for item in values),*m['programs'].values()]:
+        item.pop('beforeStartCommand',None)
+        item.pop('afterStartCommand',None)
     for name,p in production['projects'].items():
         p['accepted']='/var/lib/brai-install/accepted/'+name+'.json'
         p.pop('command',None)
