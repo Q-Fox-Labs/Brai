@@ -65,6 +65,25 @@ class ProductBoundary(unittest.TestCase):
         full['source_revisions']['prod']='b'*40
         self.assertNotEqual(before,partition.product(full))
 
+    def test_host_hooks_are_excluded_without_mutating_admin_manifest(self):
+        """Клиентские compose и program mappings используют собственные lifecycle stages."""
+        full=fixture()
+        before=['/usr/bin/python3','-B','/srv/projects/admin/native.py','prepare-activation']
+        after=['/usr/local/bin/node','/srv/projects/admin/models.mjs']
+        compose={'kind':'compose','project':'brai','service':'web','beforeStartCommand':before,'afterStartCommand':after}
+        program={'kind':'program','environment':'prod','unit':'brai-agent.service',
+                 'beforeStartCommand':before,'afterStartCommand':after,'healthCommand':['/usr/bin/true']}
+        full['operator']['environments']['prod']['components']['web']=[compose,copy.deepcopy(program)]
+        full['programs']['brai-agent.service']=program
+        original=copy.deepcopy(full)
+        client=partition.product(full)
+        self.assertTrue(partition.validate_product(client))
+        for item in [*client['operator']['environments']['prod']['components']['web'],*client['programs'].values()]:
+            self.assertNotIn('beforeStartCommand',item)
+            self.assertNotIn('afterStartCommand',item)
+        self.assertEqual(client['programs']['brai-agent.service']['healthCommand'],['/usr/bin/true'])
+        self.assertEqual(full,original)
+
     def test_health_credentials_remain_runtime_values(self):
         document={'services':{'db':{'healthcheck':{'test':['CMD-SHELL','curl -H eyJabc.def.ghi']}}}}
         partition.sanitize_health(document)
