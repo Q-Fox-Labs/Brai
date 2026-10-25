@@ -11,6 +11,32 @@ import sys
 EXCLUDED=('/srv/projects/admin','/srv/projects/brai-dev','/etc/brai-dev','/var/lib/brai-dev','/etc/geminitix','/opt/geminitix','/srv/projects/Brai-old')
 
 
+def standalone_native(manifest):
+    """Заменить только explicit shared-host Hermes dependency независимой установкой."""
+    specs=manifest.get('native_runtimes',{})
+    if not specs:return
+    assert set(specs)=={'hermes'},'PRODUCT_UNKNOWN_NATIVE_RUNTIME'
+    spec=specs['hermes']
+    assert spec['format']=='brai-hermes-native-v1' and spec['environment']=='prod','PRODUCT_NATIVE_FORMAT'
+    previous=copy.deepcopy(spec)
+    spec.update(owner='brai-hermes-production',home='/var/lib/brai/hermes-owner',
+                tokenEnvironmentFile='/etc/brai/hermes/telegram-token.env',
+                chrome='/opt/brai-hermes-browser/chrome-linux64/chrome',
+                software={'mode':'install','core':'/var/lib/brai/hermes/hermes-agent',
+                          'custom':'/var/lib/brai/hermes/usercustom/hermescustom'})
+    replacements={previous['home']:spec['home'],previous['owner']:spec['owner'],
+                  previous['home']+'/.codex':spec['home']+'/.codex',
+                  previous['software']['core']:spec['software']['core'],
+                  previous['software']['custom']:spec['software']['custom']}
+    instances=manifest['operator']['environments']['prod']['components']['hermes']
+    for item in [*instances,*manifest['programs'].values()]:
+        if item.get('nativeRuntime')!='hermes':continue
+        item.pop('environmentFiles',None)
+        item.pop('beforeStartCommand',None)
+        for key,value in item.get('requiredEnvironment',{}).items():
+            item['requiredEnvironment'][key]=replacements.get(value,value)
+
+
 def encoded(value):
     """Вернуть канонические байты публичного описания."""
     return (json.dumps(value,ensure_ascii=False,sort_keys=True,indent=2)+'\n').encode()
@@ -36,6 +62,7 @@ def product(manifest):
     projects=set(production['projects'])|{'brai-infrastructure'}
     m['projects']={k:v for k,v in m['projects'].items() if k in projects}
     m['programs']={k:v for k,v in m['programs'].items() if v['environment']=='prod'}
+    standalone_native(m)
     m['local_ai']={k:v for k,v in m['local_ai'].items() if k.split('/')[0] in projects}
     m['streams']={'prod':m['streams']['prod']}
     m['broker_configs']=['/etc/brai/alerts-candidate/nats.conf']
@@ -109,6 +136,10 @@ def product_inputs(full_manifest, inputs, public_origin):
     result['files']={p:copy.deepcopy(inputs['files'][p]) for p in m['config_paths']}
     result['environments']={k:copy.deepcopy(v) for k,v in inputs['environments'].items() if k.split('/')[0] in m['projects']}
     result['program_environment']={k:copy.deepcopy(v) for k,v in inputs.get('program_environment',{}).items() if k in m['programs']}
+    if m.get('native_runtimes',{}).get('hermes'):
+        result['native_hermes']=copy.deepcopy(inputs['native_hermes'])
+        # OAuth and bot token are client-owned mandatory separate inputs, never copied from DEV.
+        result['required_external_inputs']=['native_hermes_auth.content','native_hermes_token_environment']
     result['roles']=[r for r in inputs['roles'] if not r['name'].startswith('brai_dev_') and (r['name']!='brai_codeworks_owner' and r['name']!='brai_codeworks_app' or 'codeworks' in m['installed']['prod'])]
     result['manifest_sha256']=hashlib.sha256(encoded(m)).hexdigest()
     result['public_origin']=public_origin

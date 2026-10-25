@@ -1,0 +1,131 @@
+# ABOUTME: Устанавливает системные prerequisites независимого native Hermes PROD.
+# ABOUTME: Shared-host Admin dependency не переносится в клиентский состав.
+- name: Require the standalone native descriptor
+  ansible.builtin.assert:
+    that:
+      - brai_install_manifest.native_runtimes.hermes.format == 'brai-hermes-native-v1'
+      - brai_install_manifest.native_runtimes.hermes.software.mode == 'install' or brai_install_administrative | bool
+- name: Require separate client-owned canonical auth and Telegram input before changes
+  ansible.builtin.assert:
+    that:
+      - brai_install_inputs.native_hermes_auth.content | default('') | length > 0
+      - brai_install_inputs.native_hermes_token_environment | default('') | length > 0
+    fail_msg: 'HERMES_PRODUCTION_CLIENT_AUTH_AND_BOT_INPUT_REQUIRED'
+  when: brai_install_manifest.native_runtimes.hermes.software.mode == 'install'
+  no_log: true
+- name: Install native build, media and Chrome prerequisites
+  ansible.builtin.apt:
+    name: [git, python3-venv, python3-pip, python3-yaml, build-essential, libatomic1, ffmpeg, libsndfile1, unzip, fonts-liberation, libasound2t64, libatk-bridge2.0-0t64, libatk1.0-0t64, libatspi2.0-0t64, libcups2t64, libdbus-1-3, libdrm2, libgbm1, libglib2.0-0t64, libgtk-3-0t64, libnspr4, libnss3, libx11-6, libxcb1, libxcomposite1, libxdamage1, libxext6, libxfixes3, libxkbcommon0, libxrandr2]
+    state: present
+- name: Create standalone Hermes group
+  ansible.builtin.group:
+    name: brai-hermes-production
+    system: true
+  when: brai_install_manifest.native_runtimes.hermes.software.mode == 'install'
+- name: Create standalone Hermes account without Docker access
+  ansible.builtin.user:
+    name: brai-hermes-production
+    group: brai-hermes-production
+    home: /var/lib/brai/hermes-owner
+    create_home: true
+    system: true
+    shell: /bin/bash
+    groups: ''
+    append: false
+  when: brai_install_manifest.native_runtimes.hermes.software.mode == 'install'
+- name: Protect standalone canonical HOME
+  ansible.builtin.file:
+    path: /var/lib/brai/hermes-owner
+    state: directory
+    owner: brai-hermes-production
+    group: brai-hermes-production
+    mode: '0700'
+  when: brai_install_manifest.native_runtimes.hermes.software.mode == 'install'
+- name: Create pinned browser and native library directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop: [/opt/brai-hermes-browser, /usr/local/lib/brai-hermes]
+- name: Inspect separately supplied secret destinations without following links
+  ansible.builtin.stat:
+    path: '{{ item }}'
+    follow: false
+    get_checksum: false
+    get_mime: false
+  loop: [/var/lib/brai/hermes-owner/.codex/auth.json, /etc/brai/hermes/telegram-token.env]
+  register: hermes_client_secret_metadata
+  when: brai_install_manifest.native_runtimes.hermes.software.mode == 'install'
+- name: Reject unsafe existing secret destinations
+  ansible.builtin.assert:
+    that:
+      - not item.stat.exists or (item.stat.isreg and item.stat.nlink == 1 and item.stat.mode == '0600' and item.stat.pw_name == ('root' if item.item == '/etc/brai/hermes/telegram-token.env' else 'brai-hermes-production'))
+    fail_msg: HERMES_PRODUCTION_CANONICAL_AUTH_METADATA
+  loop: '{{ hermes_client_secret_metadata.results }}'
+  when: brai_install_manifest.native_runtimes.hermes.software.mode == 'install'
+- name: Create the sole client-owned canonical Codex directory
+  ansible.builtin.file:
+    path: /var/lib/brai/hermes-owner/.codex
+    state: directory
+    owner: brai-hermes-production
+    group: brai-hermes-production
+    mode: '0700'
+  when: brai_install_manifest.native_runtimes.hermes.software.mode == 'install'
+- name: Install only separately provided client-owned canonical auth
+  ansible.builtin.copy:
+    dest: /var/lib/brai/hermes-owner/.codex/auth.json
+    content: '{{ brai_install_inputs.native_hermes_auth.content | b64decode }}'
+    owner: brai-hermes-production
+    group: brai-hermes-production
+    mode: '0600'
+    force: false
+  when: brai_install_manifest.native_runtimes.hermes.software.mode == 'install'
+  no_log: true
+  diff: false
+- name: Prepare the root-controlled native configuration directory
+  ansible.builtin.file:
+    path: /etc/brai/hermes
+    state: directory
+    owner: root
+    group: brai-hermes-production
+    mode: '0750'
+  when: brai_install_manifest.native_runtimes.hermes.software.mode == 'install'
+- name: Install only separately provided client-owned Telegram token environment
+  ansible.builtin.copy:
+    dest: /etc/brai/hermes/telegram-token.env
+    content: '{{ brai_install_inputs.native_hermes_token_environment }}'
+    owner: root
+    group: root
+    mode: '0600'
+    force: false
+  when: brai_install_manifest.native_runtimes.hermes.software.mode == 'install'
+  no_log: true
+  diff: false
+- name: Download pinned Chrome without package-manager updates
+  ansible.builtin.get_url:
+    url: https://storage.googleapis.com/chrome-for-testing-public/154.0.8037.92/linux64/chrome-linux64.zip
+    dest: /var/cache/brai-hermes-chrome-154.0.8037.92.zip
+    checksum: sha256:ff43322f335e436b2f4dcdfeeec5db032299e335a7e8c1c618b326e100ce8732
+    owner: root
+    group: root
+    mode: '0644'
+  when: brai_install_manifest.native_runtimes.hermes.software.mode == 'install'
+- name: Unpack the pinned native browser
+  ansible.builtin.unarchive:
+    src: /var/cache/brai-hermes-chrome-154.0.8037.92.zip
+    dest: /opt/brai-hermes-browser
+    remote_src: true
+    creates: /opt/brai-hermes-browser/chrome-linux64/chrome
+    owner: root
+    group: root
+  when: brai_install_manifest.native_runtimes.hermes.software.mode == 'install'
+- name: Install public native lifecycle code without credentials
+  ansible.builtin.copy:
+    src: '{{ item }}'
+    dest: '/usr/local/lib/brai-hermes/{{ item }}'
+    owner: root
+    group: root
+    mode: '0644'
+  loop: [native_hermes.py, hermes_memos.py, hermes_memos_settings.json, hermes_memory_acceptance.py, hermes-memos-postgres.patch, hermes_ytdlp.py, hermes_video_workflow.py, hermes-media-constraints.txt, hermes-instaloader-requirements.txt]

@@ -15,7 +15,11 @@
     owner: root
     group: root
     mode: '{{ "0644" if item == "transcription-launch.mjs" else "0600" }}'
-  loop: [install_server.py, install_models.mjs, validate_render.py, prepare-transformers-cache.py, transcription-launch.mjs, partition.py, prepare_state.py, configure_mcp.py, mcp_config.py, mcp-idle-proxy.py]
+  loop: [install_server.py, install_models.mjs, validate_render.py, prepare-transformers-cache.py, transcription-launch.mjs, partition.py, prepare_state.py, configure_mcp.py, mcp_config.py, mcp-idle-proxy.py, native_hermes.py, hermes_memos.py, hermes_memos_settings.json, hermes_memory_acceptance.py, hermes-memos-postgres.patch, hermes_ytdlp.py, hermes_video_workflow.py, hermes-media-constraints.txt, hermes-instaloader-requirements.txt]
+
+- name: Prepare explicitly declared native Hermes host prerequisites
+  ansible.builtin.include_tasks: native_hermes.yml
+  when: brai_install_manifest.native_runtimes.hermes is defined
 
 - name: Create the public MCP launcher directory
   ansible.builtin.file:

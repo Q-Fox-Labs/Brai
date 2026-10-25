@@ -43,13 +43,13 @@ async function models(target){
  const nc=await broker(target);
  try{
   let ready=false;
-  for(let i=0;i<90;i++){try{await rpc(nc,subjects.modelsList,{});ready=true;break;}catch{await pause(2000);}}
+  for(let i=0;i<90;i++){try{await rpc(nc,subjects.modelsList,{filter:{}});ready=true;break;}catch{await pause(2000);}}
   must(ready);
   for(const profileId of Object.keys(cfg.runtime)){
    const p=JSON.parse(fs.readFileSync(root+'/profiles/'+profileId+'.json'));
    const key=target+'/'+profileId;
    const card=await rpc(nc,subjects.modelsGet,{modelId:p.modelId});
-   if(card.installationState==='installed'&&card.revision===p.source.revision)continue;
+   if(!(card.installationState==='installed'&&card.revision===p.source.revision)){
    if(!journal[key]){journal[key]={requestId:randomUUID(),ownerId:'brai-first-install',deadlineAt:new Date(Date.now()+3500000).toISOString()};save();}
    const state=journal[key];
    if(!state.operationId){
@@ -63,6 +63,16 @@ async function models(target){
     must(['accepted','running'].includes(op.status));await pause(1500);
    }
    must(done);
+   }
+   // AIDEV-NOTE: Explicit model settings belong to installation inputs, including already installed models.
+   const settings=m.local_ai[name].settings??{};
+   if(Object.hasOwn(settings,profileId)){
+    const declared=settings[profileId];
+    must(declared&&Object.keys(declared).length===1&&Object.hasOwn(declared,'idleUnloadSeconds'));
+    must(declared.idleUnloadSeconds===null||Number.isSafeInteger(declared.idleUnloadSeconds)&&declared.idleUnloadSeconds>0&&declared.idleUnloadSeconds<=2147483647);
+    const configured=await rpc(nc,subjects.modelsConfigure,{modelId:p.modelId,revision:p.source.revision,profileId,ownerId:'brai-first-install',idleUnloadSeconds:declared.idleUnloadSeconds});
+    must(configured.idleUnloadSeconds===declared.idleUnloadSeconds);
+   }
   }
  }finally{await nc.close();}
 }
