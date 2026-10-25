@@ -4,8 +4,7 @@
   "type": "program",
   "status": "active",
   "environments": [
-    "dev",
-    "prod"
+    "dev"
   ],
   "executableSources": [
     "services/codeworks/components/cli.mjs",
