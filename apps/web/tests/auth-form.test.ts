@@ -35,7 +35,7 @@ function formOperations() {
  return form.props;
 }
 
-test("successful verify with unavailable session unlocks form and never repeats verify automatically", async () => {
+test("accepted code is not consumed again when session temporarily fails and the user retries", async () => {
  const originalFetch = globalThis.fetch;
  const calls: string[] = [];
  let unavailable = true;
@@ -50,12 +50,14 @@ test("successful verify with unavailable session unlocks form and never repeats 
  };
  try {
   const form = formOperations();
-  await assert.rejects(form.onVerifyOtp("synthetic@example.test", "001234"), error => error instanceof AuthRequestError && error.message.startsWith("Код принят, но подтвердить сессию не удалось"));
+  await assert.rejects(form.onVerifyOtp("synthetic@example.test", "001234"), error => error instanceof AuthRequestError && error.message.startsWith("Код принят."));
   assert.deepEqual(calls, ["/api/auth/verify-code", "/api/auth/session"]);
-  assert.deepEqual(await form.onRequestOtp("synthetic@example.test"), { expires_in_seconds: 300, resend_after_seconds: 60, resend_strategy: "replace" });
   unavailable = false;
   await form.onVerifyOtp("synthetic@example.test", "001234");
-  assert.equal(calls.filter(url => url.endsWith("verify-code")).length, 2);
+  assert.equal(calls.filter(url => url.endsWith("verify-code")).length, 1, "accepted code is never verified twice");
+  assert.deepEqual(await form.onRequestOtp("synthetic@example.test"), { expires_in_seconds: 300, resend_after_seconds: 60, resend_strategy: "replace" });
+  await form.onVerifyOtp("synthetic@example.test", "001234");
+  assert.equal(calls.filter(url => url.endsWith("verify-code")).length, 2, "fresh send permits verification again");
  } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -80,6 +82,52 @@ test("auth failures distinguish invalid, expired, exhausted and unavailable code
   for (const body of ["upstream unavailable", "null"]) {
    globalThis.fetch = async () => new Response(body, { status: 503 });
    await assert.rejects(formOperations().onVerifyOtp("synthetic@example.test", "001234"), /Сервис входа временно недоступен/);
+  }
+ } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test("unknown verify outcome and network loss recover only through session until a new code is sent", async () => {
+ const originalFetch = globalThis.fetch;
+ try {
+  for (const networkLoss of [false, true]) {
+   const calls: string[] = [];
+   let available = false;
+   globalThis.fetch = async input => {
+    const url = String(input); calls.push(url);
+    if (url.endsWith("verify-code")) {
+     if (networkLoss) throw new Error("connection lost");
+     return Response.json({code:"AUTH_OUTCOME_UNKNOWN"},{status:503});
+    }
+    return available ? Response.json({user:{id:"fixture",email:"synthetic@example.test"}}) : Response.json({}, {status:503});
+   };
+   const form = formOperations();
+   await assert.rejects(form.onVerifyOtp("synthetic@example.test", "001234"), /Результат входа уточняется/);
+   await assert.rejects(form.onVerifyOtp("synthetic@example.test", "001234"), /Результат входа уточняется/);
+   available = true;
+   await form.onVerifyOtp("synthetic@example.test", "001234");
+   assert.equal(calls.filter(url => url.endsWith("verify-code")).length, 1);
+   assert.equal(calls.filter(url => url.endsWith("session")).length, 3);
+  }
+ } finally { globalThis.fetch = originalFetch; }
+});
+
+
+test("accepted code with absent or different-account session never triggers another verify", async () => {
+ const originalFetch = globalThis.fetch;
+ try {
+  for (const sessionReply of [() => Response.json({}, {status:401}), () => Response.json({user:{id:"other",email:"other@example.test"}})]) {
+   let verifies = 0;
+   globalThis.fetch = async input => {
+    if (String(input).endsWith("verify-code")) { verifies++; return Response.json({success:true}); }
+    if (String(input).endsWith("send-code")) return Response.json({}, {status:503});
+    return sessionReply();
+   };
+   const form = formOperations();
+   await assert.rejects(form.onVerifyOtp("synthetic@example.test", "001234"), /Код принят/);
+   await assert.rejects(form.onRequestOtp("synthetic@example.test"), /Сервис входа временно недоступен/);
+   await assert.rejects(form.onVerifyOtp("synthetic@example.test", "001234"), /Код принят/);
+   assert.equal(verifies, 1, "failed resend cannot reactivate a consumed code");
   }
  } finally { globalThis.fetch = originalFetch; }
 });

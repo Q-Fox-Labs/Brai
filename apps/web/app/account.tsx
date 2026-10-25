@@ -29,17 +29,19 @@ function AccountSession({ initialSession, agentMode, telegramBotUsername, timerE
  const [user, setUser] = useState<User | null>(() => initialSession.status === "authenticated" ? initialSession.user : null), [ready, setReady] = useState(initialSession.status !== "unavailable"), [exiting, setExiting] = useState(false);
  const [busy, setBusy] = useState(false), [message, setMessage] = useState("");
  const locked = useRef(false);
+ const verificationPending = useRef<{ email: string; accepted: boolean } | null>(null);
  useEffect(() => { if (pathname === "/auth" && user) window.location.replace("/"); else if (pathname !== "/auth" && ready && !user && !exiting) window.location.replace("/auth"); }, [pathname, user, ready, exiting]);
  const generation = useRef(0);
  const refreshRequest = useRef<AbortController | null>(null);
- const refresh = useCallback(async () => {
+ const refresh = useCallback(async (expectedEmail?: string) => {
+  expectedEmail ??= verificationPending.current?.email;
   if (refreshRequest.current) return false;
   const current = generation.current;
   const request = new AbortController(); refreshRequest.current = request;
   try {
    const response = await fetch("/api/auth/session", { cache: "no-store", signal: request.signal });
    if (current !== generation.current) return false;
-   if (response.ok) { const data = await response.json() as { user: User }; if (current !== generation.current) return false; setUser(previous => previous?.id === data.user.id ? previous : data.user); setReady(true); return true; }
+   if (response.ok) { const data = await response.json() as { user: User }; if (current !== generation.current) return false; if (expectedEmail && data.user.email.trim().toLowerCase() !== expectedEmail.trim().toLowerCase()) return false; setUser(previous => previous?.id === data.user.id ? previous : data.user); setReady(true); return true; }
    else if (response.status === 401) { setUser(null); setReady(true); }
   } catch { /* Потеря связи не превращает подтверждённый вход в успешный выход. */ }
   finally { if (refreshRequest.current === request) refreshRequest.current = null; }
@@ -56,19 +58,36 @@ function AccountSession({ initialSession, agentMode, telegramBotUsername, timerE
   if (locked.current) throw new AuthRequestError("Подождите…"); locked.current = true; setBusy(true); setMessage("");
   if (operation === "verify-code") { generation.current++; refreshRequest.current?.abort(); refreshRequest.current = null; }
   try {
+   // AIDEV-NOTE: После принятого или неопределённого verify код может быть уже израсходован.
+   // Повтор кнопки читает сессию; только новая успешная отправка разрешает следующий verify.
+   if (operation === "verify-code" && verificationPending.current) {
+    if (await refresh(verificationPending.current.email)) return {};
+    throw pendingSignInError(verificationPending.current.accepted);
+   }
+   if (operation === "verify-code") verificationPending.current = { email, accepted: false };
    const response = await fetch(`/api/auth/${operation}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(operation === "send-code" ? { email } : { email, otp: code }) });
    if (!response.ok) {
     const data: unknown = await response.json().catch(() => null);
     const code = data && typeof data === "object" && "code" in data && typeof data.code === "string" ? data.code : undefined;
-    if (operation === "verify-code" && code === "AUTH_OUTCOME_UNKNOWN") { await refresh(); throw new AuthRequestError("Результат входа уточняется. Если страница не открылась, запросите новый код."); }
-    throw new AuthRequestError(authFailureMessage(operation, response.status, code));
+    if (operation === "verify-code" && code === "AUTH_OUTCOME_UNKNOWN") {
+     if (await refresh(email)) return {};
+     throw pendingSignInError(false);
+    }
+    if (operation === "verify-code" && response.status < 500) verificationPending.current = null;
+    throw new AuthRequestError(authFailureMessage(operation, response.status, code), operation === "verify-code" && response.status >= 500);
    }
-   if (operation === "verify-code" && !await refresh()) throw new AuthRequestError("Код принят, но подтвердить сессию не удалось. Обновите страницу. Если вход не сохранился, запросите новый код.");
+   if (operation === "verify-code") {
+    verificationPending.current = { email, accepted: true };
+    if (!await refresh(email)) throw pendingSignInError(true);
+   } else verificationPending.current = null;
    // AIDEV-NOTE: HTTP send-code скрывает upstream metadata; сроки заданы контрактом auth владельца.
    return { expires_in_seconds: 300, resend_after_seconds: 60, resend_strategy: "replace" };
   } catch (error) {
    if (error instanceof AuthRequestError) throw error;
-   if (operation === "verify-code") await refresh();
+   if (operation === "verify-code") {
+    if (await refresh(email)) return {};
+    throw pendingSignInError(false);
+   }
    throw new AuthRequestError("Связь прервалась. Проверьте почту или состояние входа перед повтором.");
   }
   finally { locked.current = false; setBusy(false); }
@@ -119,4 +138,11 @@ function authFailureMessage(operation: "send-code" | "verify-code", status: numb
   return "Не удалось проверить код. Обновите страницу и повторите вход.";
  }
  return "Не удалось отправить код. Повторите позже.";
+}
+
+/** Сохраняет режим проверки сессии, пока пользователь не запросит новый код. */
+function pendingSignInError(accepted: boolean): AuthRequestError {
+ return new AuthRequestError(accepted
+  ? "Код принят. Нажмите «Проверить вход». Если вход не подтвердится, запросите новый код."
+  : "Результат входа уточняется. Нажмите «Проверить вход» или запросите новый код.", true);
 }
