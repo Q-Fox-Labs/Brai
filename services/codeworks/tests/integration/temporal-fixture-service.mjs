@@ -39,7 +39,10 @@ async function start(p){
 }
 if(action==='prepare'){
   const original=fs.realpathSync(c.original);ensure(original.startsWith(fs.realpathSync(c.source)+'/tmp/component-packages/codeworks-'),'FIXTURE_ARTIFACT_REQUIRED');verifyPackage(original,'codeworks');
-  for(const key of ['artifactA','artifactB']){ensure(/^\/tmp\/codeworks-temporal-artifact-[a-f0-9-]{36}-[ab]$/.test(c[key]),'ISOLATED_PAYLOAD_REQUIRED');fs.cpSync(original,c[key],{recursive:true});}
+  const previous=c.previousArtifact?fs.realpathSync(c.previousArtifact):original;
+  if(c.previousArtifact)ensure(/^\/opt\/brai-components\/codeworks\/[a-f0-9]{64}$/.test(previous),'INSTALLED_PREVIOUS_ARTIFACT_REQUIRED');
+  verifyPackage(previous,'codeworks');
+  for(const key of ['artifactA','artifactB']){ensure(/^\/tmp\/codeworks-temporal-artifact-[a-f0-9-]{36}-[ab]$/.test(c[key]),'ISOLATED_PAYLOAD_REQUIRED');fs.cpSync(key==='artifactA'?previous:original,c[key],{recursive:true});}
   const bundle='services/codeworks/dist/workflows.js';fs.copyFileSync(c.nextBundle,c.artifactB+'/'+bundle);
   const m=json(c.artifactB+'/artifact-manifest.json'),file=m.files.find(v=>v.path===bundle),bytes=fs.readFileSync(c.artifactB+'/'+bundle);
   file.sha256=createHash('sha256').update(bytes).digest('hex');file.size=bytes.length;file.mode=fs.statSync(c.artifactB+'/'+bundle).mode&0o777;
