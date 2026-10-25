@@ -1,0 +1,12 @@
+/* ABOUTME: Оформляет штатную Telegram Mini App форму приёма Groq key. */
+/* ABOUTME: Использует тему Telegram без изменения содержимого страницы. */
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; background: var(--tg-theme-bg-color, #17212b); color: var(--tg-theme-text-color, #eef3f8); }
+main { max-width: 38rem; margin: auto; padding: 1.5rem; }
+p { line-height: 1.5; }
+form { display: grid; gap: 1rem; }
+input, button { font: inherit; padding: .85rem; border-radius: .4rem; }
+input { width: 100%; box-sizing: border-box; }
+button { cursor: pointer; background: var(--tg-theme-button-color, #2587d3); color: var(--tg-theme-button-text-color, white); border: 0; }
+button:disabled { opacity: .55; }
+#status { padding: 1rem 0; font-weight: 600; }

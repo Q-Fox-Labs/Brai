@@ -16,6 +16,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
@@ -23,6 +24,10 @@ import urllib.request
 import urllib.error
 
 ROOT = Path('/var/lib/brai-install')
+# Workers run as the isolated runtime owner, so their public code must not live
+# below the root-only installation receipt directory.
+if Path('/usr/local/lib/brai-hermes/native_hermes.py').is_file():
+    sys.path.insert(0, '/usr/local/lib/brai-hermes')
 PROJECTS = ROOT/'projects'
 RUNTIME_IMAGES = Path('/var/lib/nodejs-security/brai-runtime-images.json')
 IMAGE_NODE = 'node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205'
@@ -85,7 +90,8 @@ def broker_config(data, principal):
                '$JS.API.CONSUMER.INFO.*.*', '$JS.API.CONSUMER.CREATE.*.>',
                '$JS.API.CONSUMER.DURABLE.CREATE.*.*',
                'brai.local_ai.v1.models.list', 'brai.local_ai.v1.models.get',
-               'brai.local_ai.v1.models.install', 'brai.local_ai.v1.operations.get']
+               'brai.local_ai.v1.models.install', 'brai.local_ai.v1.operations.get',
+               'brai.local_ai.v1.models.configure']
     entry = json.dumps({'user': principal['user'], 'password': principal['password'],
                         'permissions': {'publish': {'allow': allowed},
                                         'subscribe': {'allow': ['_INBOX.brai_install.>']}}})
@@ -131,6 +137,11 @@ def compose(name, *args):
 class Installer:
     def __init__(self, manifest, inputs):
         self.m, self.inputs = manifest, inputs
+        if manifest.get('native_runtimes',{}).get('hermes',{}).get('software',{}).get('mode')=='install':
+            import native_hermes
+            native_hermes.validate_client_access(inputs)
+            native_spec=native_hermes.validate(manifest['native_runtimes']['hermes'])
+            native_hermes.validate_inputs(native_spec,inputs.get('native_hermes',{}))
         self.documents = {k: copy.deepcopy(v['document']) for k,v in manifest['projects'].items()}
         self.changed = False
         self.prepare_documents()
@@ -158,7 +169,17 @@ class Installer:
                         runtime['env']['LD_LIBRARY_PATH'] = runtime['cwd']+':/usr/lib/x86_64-linux-gnu'
                 env['LOCAL_AI_CONFIG_JSON'] = json.dumps(config, separators=(',', ':'))
                 self.inputs['environments'][name+'/'+service] = env
-                svc['volumes'] = [v for v in svc['volumes'] if '/runtime/embeddinggemma2/' not in v['source']]
+                gemma = config['runtime'].get('embeddinggemma2_llama_cpp')
+                if gemma:
+                    # AIDEV-NOTE: Клиентский image уже содержит pinned /app; пустой host mount скрыл бы его.
+                    native_root = str(Path(gemma['cwd']).parent)
+                    require(native_root.startswith('/opt/brai/local-ai/runtime/embeddinggemma2/'), 'INSTALL_GEMMA_RUNTIME_PATH_INVALID')
+                    expected_copy = 'COPY --from=gemma /app ' + gemma['cwd'] + '\n'
+                    require(any(r.get('kind') == 'local-ai' and expected_copy in r.get('dockerfile', '') for r in self.m['images'].values()), 'INSTALL_GEMMA_IMAGE_ASSET_REQUIRED')
+                    for mount in svc['volumes']:
+                        if mount.get('target') == native_root:
+                            require(mount.get('source') == native_root and mount.get('read_only') is True, 'INSTALL_GEMMA_NATIVE_MOUNT_CONFLICT')
+                    svc['volumes'] = [v for v in svc['volumes'] if v.get('target') != native_root]
 
     def inputs_stage(self):
         require(all(Path(p).is_file() for p in PACKAGED_BINDS), 'INSTALL_PACKAGED_EXECUTABLE_MISSING')
@@ -244,6 +265,11 @@ class Installer:
             write(path, data, source['mode'])
             self.changed = True
         self.prepare_program_links()
+        for spec in self.m.get('native_runtimes', {}).values():
+            import native_hermes
+            if spec['software']['mode'] == 'install':
+                self.changed |= native_hermes.install_software(spec, self.inputs['native_hermes'],
+                    askpass=ROOT/'git-askpass.py', install_root=ROOT)
         for repo in self.m.get('npm_repositories', ['/srv/projects/brai']):
             if not Path(repo+'/node_modules/.package-lock.json').exists():
                 run(['/usr/sbin/runuser', '-u', 'agent', '--', '/usr/bin/env', '--chdir='+repo,
@@ -593,6 +619,13 @@ await f.chown(root,1000,1000);await f.chmod(root,0o750);})().catch(()=>process.e
             if services: compose(name,'up','--detach','--no-build','--pull','never','--no-deps',*services)
         run(['/usr/bin/systemctl','daemon-reload'])
         for unit,program in self.m['programs'].items():
+            if program.get('nativeRuntime'):
+                require(program['nativeRuntime'] == 'hermes', 'INSTALL_NATIVE_RUNTIME_UNKNOWN')
+                import native_hermes
+                spec=self.m['native_runtimes']['hermes']
+                if spec['software']['mode']=='install':
+                    self.changed |= native_hermes.prepare(spec, self.inputs['native_hermes'])
+                continue
             runtime=Path(program['link'])
             env=self.inputs.get('program_environment',{}).get(unit,{})
             content=''.join(k+'='+json.dumps(v,ensure_ascii=False)+'\n' for k,v in env.items())
@@ -625,11 +658,23 @@ await f.chown(root,1000,1000);await f.chmod(root,0o750);})().catch(()=>process.e
         """Hook независимой проверки дополнения оператора."""
 
     def host_services_stage(self):
+        self.activate_native_runtimes()
         mcp=run(['/usr/bin/python3','-B',str(ROOT/'configure_mcp.py')])
         if 'INSTALL_PRODUCT_MCP_CHANGED' in mcp.stdout: run(['/usr/bin/systemctl','restart','codex-native-agent.service'])
         run(['/usr/bin/systemctl','daemon-reload'])
         for unit in self.m['programs']: run(['/usr/bin/systemctl','enable','--now',unit])
         for name in self.documents: run(['/usr/bin/systemctl','enable','--now','brai-install-'+name+'.service'])
+
+    def activate_native_runtimes(self):
+        """Завершить явную клиентскую установку после models и real native acceptance."""
+        if self.m.get('native_runtimes', {}).get('hermes'):
+            import native_hermes
+            spec=self.m['native_runtimes']['hermes'];inputs=self.inputs['native_hermes']
+            native_hermes.operate('prepare',spec,inputs,start=True)
+            native_hermes.wait_dependencies()
+            memos=native_hermes.memory(spec)
+            if not memos.ACCEPTANCE.exists():native_hermes.operate('accept-memory',spec,inputs)
+            native_hermes.operate('activate',spec,inputs)
 
     def check_https(self):
         interfaces=json.loads(run(['/usr/sbin/ip','-j','address','show','scope','global']).stdout)

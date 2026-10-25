@@ -1,0 +1,93 @@
+diff --git a/src/memos/graph_dbs/postgres.py b/src/memos/graph_dbs/postgres.py
+index 594f7e6..b9bed34 100644
+--- a/src/memos/graph_dbs/postgres.py
++++ b/src/memos/graph_dbs/postgres.py
+@@ -118,8 +118,13 @@ class PostgresGraphDB(BaseGraphDB):
+         conn = self._get_conn()
+         try:
+             with conn.cursor() as cur:
+-                # Create schema
+-                cur.execute(f"CREATE SCHEMA IF NOT EXISTS {self.schema}")
++                # A pre-provisioned schema must work without database CREATE privileges.
++                cur.execute(
++                    "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = %s)",
++                    (self.schema,),
++                )
++                if not cur.fetchone()[0]:
++                    cur.execute(f"CREATE SCHEMA IF NOT EXISTS {self.schema}")
+ 
+                 # Enable pgvector
+                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+@@ -436,7 +441,8 @@ class PostgresGraphDB(BaseGraphDB):
+             "metadata": props,
+         }
+         if include_embedding and len(row) > 5:
+-            result["metadata"]["embedding"] = row[5]
++            embedding = json.loads(row[5]) if isinstance(row[5], str) else row[5]
++            result["metadata"]["embedding"] = embedding
+         return result
+ 
+     @staticmethod
+diff --git a/tests/graph_dbs/test_postgres_schema.py b/tests/graph_dbs/test_postgres_schema.py
+new file mode 100644
+index 0000000..a88b28e
+--- /dev/null
++++ b/tests/graph_dbs/test_postgres_schema.py
+@@ -0,0 +1,57 @@
++from unittest.mock import MagicMock
++
++from memos.configs.graph_db import PostgresGraphDBConfig
++from memos.graph_dbs.postgres import PostgresGraphDB
++
++
++def make_store(schema_exists):
++    store = object.__new__(PostgresGraphDB)
++    store.schema = "memos"
++    store.config = PostgresGraphDBConfig(
++        host="localhost",
++        user="test",
++        password="test",
++        db_name="test",
++        schema_name="memos",
++        user_name="test",
++        embedding_dimension=768,
++    )
++    conn = MagicMock()
++    cursor = conn.cursor.return_value.__enter__.return_value
++    cursor.fetchone.return_value = (schema_exists,)
++    store._get_conn = MagicMock(return_value=conn)
++    store._put_conn = MagicMock()
++    return store, cursor
++
++
++def test_existing_schema_does_not_require_database_create():
++    store, cursor = make_store(True)
++    store._init_schema()
++    calls = [str(call.args[0]) for call in cursor.execute.call_args_list]
++    assert not any("CREATE SCHEMA" in query for query in calls)
++    assert cursor.execute.call_args_list[0].args[1] == ("memos",)
++
++
++def test_missing_schema_is_still_created():
++    store, cursor = make_store(False)
++    store._init_schema()
++    calls = [str(call.args[0]) for call in cursor.execute.call_args_list]
++    assert any("CREATE SCHEMA" in query for query in calls)
++    store._put_conn.assert_called_once()
++
++
++def test_pgvector_text_is_decoded_for_memory_validation():
++    from memos.memories.textual.item import TextualMemoryItem
++
++    store, _ = make_store(True)
++    row = (
++        "12345678-1234-4234-9234-123456789abc",
++        "synthetic memory",
++        {},
++        None,
++        None,
++        "[0.1,0.2,0.3]",
++    )
++    parsed = store._parse_row(row, include_embedding=True)
++    assert parsed["metadata"]["embedding"] == [0.1, 0.2, 0.3]
++    assert TextualMemoryItem.model_validate(parsed).metadata.embedding == [0.1, 0.2, 0.3]
