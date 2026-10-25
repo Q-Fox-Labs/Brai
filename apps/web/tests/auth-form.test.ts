@@ -50,11 +50,36 @@ test("successful verify with unavailable session unlocks form and never repeats 
  };
  try {
   const form = formOperations();
-  await assert.rejects(form.onVerifyOtp("synthetic@example.test", "001234"), error => error instanceof AuthRequestError && error.message.startsWith("Результат входа уточняется"));
+  await assert.rejects(form.onVerifyOtp("synthetic@example.test", "001234"), error => error instanceof AuthRequestError && error.message.startsWith("Код принят, но подтвердить сессию не удалось"));
   assert.deepEqual(calls, ["/api/auth/verify-code", "/api/auth/session"]);
   assert.deepEqual(await form.onRequestOtp("synthetic@example.test"), { expires_in_seconds: 300, resend_after_seconds: 60, resend_strategy: "replace" });
   unavailable = false;
   await form.onVerifyOtp("synthetic@example.test", "001234");
   assert.equal(calls.filter(url => url.endsWith("verify-code")).length, 2);
+ } finally { globalThis.fetch = originalFetch; }
+});
+
+test("auth failures distinguish invalid, expired, exhausted and unavailable codes without retrying verify", async () => {
+ const originalFetch = globalThis.fetch;
+ try {
+  for (const [status, code, message] of [
+   [400, "INVALID_OTP", "Код не подошёл или уже использован"],
+   [400, "OTP_EXPIRED", "Срок действия кода истёк"],
+   [403, "TOO_MANY_ATTEMPTS", "Попытки для этого кода исчерпаны. Запросите новый код."],
+   [429, undefined, "Слишком много попыток"],
+   [503, "AUTH_UNAVAILABLE", "Сервис входа временно недоступен"],
+   [500, "INVALID_OTP", "Сервис входа временно недоступен"],
+   [403, "INVALID_ORIGIN", "Не удалось проверить код"],
+   [400, "UNRECOGNIZED", "Не удалось проверить код"],
+  ] as const) {
+   const calls: string[] = [];
+   globalThis.fetch = async input => { calls.push(String(input)); return Response.json({ code }, { status }); };
+   await assert.rejects(formOperations().onVerifyOtp("synthetic@example.test", "001234"), error => error instanceof AuthRequestError && error.message.startsWith(message));
+   assert.deepEqual(calls, ["/api/auth/verify-code"]);
+  }
+  for (const body of ["upstream unavailable", "null"]) {
+   globalThis.fetch = async () => new Response(body, { status: 503 });
+   await assert.rejects(formOperations().onVerifyOtp("synthetic@example.test", "001234"), /Сервис входа временно недоступен/);
+  }
  } finally { globalThis.fetch = originalFetch; }
 });

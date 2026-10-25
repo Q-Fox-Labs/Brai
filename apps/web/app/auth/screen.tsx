@@ -86,7 +86,7 @@ export function AuthPanel({
       onAuthenticated?.();
       authenticated = true;
     } catch (error) {
-      setError(error instanceof AuthRequestError ? error.message : otpSent ? "Код не подошел" : "Не удалось отправить код");
+      setError(error instanceof AuthRequestError ? error.message : otpSent ? "Не удалось проверить код" : "Не удалось отправить код");
     } finally {
       if (!authenticated) {
         submittingRef.current = false;

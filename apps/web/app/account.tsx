@@ -58,11 +58,12 @@ function AccountSession({ initialSession, agentMode, telegramBotUsername, timerE
   try {
    const response = await fetch(`/api/auth/${operation}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(operation === "send-code" ? { email } : { email, otp: code }) });
    if (!response.ok) {
-    const data = await response.json() as { code?: string };
-    if (operation === "verify-code" && data.code === "AUTH_OUTCOME_UNKNOWN") { await refresh(); throw new AuthRequestError("Результат входа уточняется. Если страница не открылась, запросите новый код."); }
-    throw new AuthRequestError(response.status === 429 ? "Слишком много попыток. Подождите и повторите." : operation === "verify-code" ? "Код не подошел" : "Не удалось отправить код");
+    const data: unknown = await response.json().catch(() => null);
+    const code = data && typeof data === "object" && "code" in data && typeof data.code === "string" ? data.code : undefined;
+    if (operation === "verify-code" && code === "AUTH_OUTCOME_UNKNOWN") { await refresh(); throw new AuthRequestError("Результат входа уточняется. Если страница не открылась, запросите новый код."); }
+    throw new AuthRequestError(authFailureMessage(operation, response.status, code));
    }
-   if (operation === "verify-code" && !await refresh()) throw new AuthRequestError("Результат входа уточняется. Если страница не открылась, запросите новый код.");
+   if (operation === "verify-code" && !await refresh()) throw new AuthRequestError("Код принят, но подтвердить сессию не удалось. Обновите страницу. Если вход не сохранился, запросите новый код.");
    // AIDEV-NOTE: HTTP send-code скрывает upstream metadata; сроки заданы контрактом auth владельца.
    return { expires_in_seconds: 300, resend_after_seconds: 60, resend_strategy: "replace" };
   } catch (error) {
@@ -105,4 +106,17 @@ function AccountScreens({ view, user, agentMode, telegramBotUsername, onLogout, 
   <div className="workspace-screen workspace-timer" hidden={view !== "timer"}><Timer userId={user.id} onUnauthorized={onUnauthorized} accountMessage={accountMessage} onElapsed={onTimerElapsed} /></div>
   <div className="workspace-screen" hidden={view !== "do"}>{(visitedDo || view === "do") && <DoScreen {...props} active={view === "do"} />}</div>
  </>;
+}
+
+/** Различает отказ кода, исчерпание попыток и сбой сервиса; не показывает upstream текст. */
+function authFailureMessage(operation: "send-code" | "verify-code", status: number, code?: string): string {
+ if (status === 429) return "Слишком много попыток. Подождите и повторите.";
+ if (status >= 500) return "Сервис входа временно недоступен. Повторите позже.";
+ if (operation === "verify-code") {
+  if (code === "INVALID_OTP") return "Код не подошёл или уже использован. Проверьте последнее письмо или запросите новый код.";
+  if (code === "OTP_EXPIRED") return "Срок действия кода истёк. Запросите новый код.";
+  if (code === "TOO_MANY_ATTEMPTS") return "Попытки для этого кода исчерпаны. Запросите новый код.";
+  return "Не удалось проверить код. Обновите страницу и повторите вход.";
+ }
+ return "Не удалось отправить код. Повторите позже.";
 }
