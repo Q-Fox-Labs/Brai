@@ -1,0 +1,2764 @@
+{
+  "broker_configs": [
+    "/etc/brai/alerts-candidate/nats.conf"
+  ],
+  "components": [
+    {
+      "artifact": {
+        "bytes": 86090019,
+        "digest": "sha256:abfeb1e45c7ad0624f49165eb4cef41e5f8ad7dd2dbf3c0c5ee0b5f66c514de4",
+        "metadata": {
+          "attempt": "1",
+          "componentType": "container",
+          "deliveryKind": "oci-context",
+          "format": "brai-ci-object-v1",
+          "key": "16793c4526dbefee802fb36b0243dac6491059c3eb4954ff0df20b0d1c1fb930",
+          "kind": "runtime",
+          "payloadHash": "4085f09af5e01361252c8df76c79627b17a7e0437c85856f2bda496c5ec0aa96",
+          "recipe": "0a483fb92cdbde44d5cbd099959ad256dc6ab5b99e7b556990f2eb14e0024076",
+          "repository": "Q-Fox-Labs/Brai",
+          "runId": "39952197962",
+          "source": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+        },
+        "reference": "ghcr.io/q-fox-labs/brai-components/artifacts@sha256:abfeb1e45c7ad0624f49165eb4cef41e5f8ad7dd2dbf3c0c5ee0b5f66c514de4"
+      },
+      "id": "artifacts"
+    },
+    {
+      "artifact": {
+        "bytes": 4226833,
+        "digest": "sha256:6e46c4ce97780f32f7c7d6808fb3d1f42c8e7569ed0d87d6dfdccd2d90aefbe3",
+        "metadata": {
+          "attempt": "1",
+          "componentType": "program",
+          "deliveryKind": "ready-files",
+          "format": "brai-ci-object-v1",
+          "key": "4a0217ee1fda4af6745f86d2e4b9b3888c2770904ac39d8b0473722e26fb3293",
+          "kind": "runtime",
+          "payloadHash": "47c49b0ece632e457c9b50531d4fa33663dcd70bd2814771e662c2d973140bef",
+          "recipe": "0a483fb92cdbde44d5cbd099959ad256dc6ab5b99e7b556990f2eb14e0024076",
+          "repository": "Q-Fox-Labs/Brai",
+          "runId": "39952197962",
+          "source": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+        },
+        "reference": "ghcr.io/q-fox-labs/brai-components/agent@sha256:6e46c4ce97780f32f7c7d6808fb3d1f42c8e7569ed0d87d6dfdccd2d90aefbe3"
+      },
+      "id": "agent"
+    },
+    {
+      "artifact": {
+        "bytes": 82772069,
+        "digest": "sha256:cca70508effd213cff550bb313cd5be76b84c8064a61be459785f3fd5f70f86e",
+        "metadata": {
+          "attempt": "1",
+          "componentType": "container",
+          "deliveryKind": "oci-context",
+          "format": "brai-ci-object-v1",
+          "key": "5f7f5a3526338118f5b1f15bf35eb378b593e34c556eae5eb80249f7c1d33fb6",
+          "kind": "runtime",
+          "payloadHash": "9572c485001fd3db29282174ae22bb448a48e0c3d66862ca466f4cf1ff419350",
+          "recipe": "0a483fb92cdbde44d5cbd099959ad256dc6ab5b99e7b556990f2eb14e0024076",
+          "repository": "Q-Fox-Labs/Brai",
+          "runId": "39952197962",
+          "source": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+        },
+        "reference": "ghcr.io/q-fox-labs/brai-components/timer@sha256:cca70508effd213cff550bb313cd5be76b84c8064a61be459785f3fd5f70f86e"
+      },
+      "id": "timer"
+    },
+    {
+      "artifact": {
+        "bytes": 87403812,
+        "digest": "sha256:07bc2c8f36dee571fe90b911bcb20af3a94303b16d6e89d7e23b3d291944a342",
+        "metadata": {
+          "attempt": "1",
+          "componentType": "container",
+          "deliveryKind": "oci-context",
+          "format": "brai-ci-object-v1",
+          "key": "a0941ac1e048e28229f8ef4c57f42de916d714edf0618ca24dd7c5f6a480af11",
+          "kind": "runtime",
+          "payloadHash": "89a6f011fa05a1b1a9e0a1b06f318e1e8a9917c0ce6000fb0a8152508fb5bb4e",
+          "recipe": "0a483fb92cdbde44d5cbd099959ad256dc6ab5b99e7b556990f2eb14e0024076",
+          "repository": "Q-Fox-Labs/Brai",
+          "runId": "39952197962",
+          "source": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+        },
+        "reference": "ghcr.io/q-fox-labs/brai-components/auth@sha256:07bc2c8f36dee571fe90b911bcb20af3a94303b16d6e89d7e23b3d291944a342"
+      },
+      "id": "auth"
+    },
+    {
+      "artifact": {
+        "bytes": 86094164,
+        "digest": "sha256:29fc8c2d4c053488c130b4424bbb7c10467aec67d3782416fb7686313d97fd4c",
+        "metadata": {
+          "attempt": "1",
+          "componentType": "container",
+          "deliveryKind": "oci-context",
+          "format": "brai-ci-object-v1",
+          "key": "7808013284b6840676c29f44b6bf89149ca10f904f6eec1b1458110a28440bc2",
+          "kind": "runtime",
+          "payloadHash": "e9bf8de325a0e769bcf08af80895b48a111ad4c7c61ffcfe49468d4197b1cc05",
+          "recipe": "0a483fb92cdbde44d5cbd099959ad256dc6ab5b99e7b556990f2eb14e0024076",
+          "repository": "Q-Fox-Labs/Brai",
+          "runId": "39952197962",
+          "source": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+        },
+        "reference": "ghcr.io/q-fox-labs/brai-components/history@sha256:29fc8c2d4c053488c130b4424bbb7c10467aec67d3782416fb7686313d97fd4c"
+      },
+      "id": "history"
+    },
+    {
+      "artifact": {
+        "bytes": 82775632,
+        "digest": "sha256:e79697480b8baf3fe0f7db0b5475006bcb47e515a39c2ddb7089f62eff603dca",
+        "metadata": {
+          "attempt": "1",
+          "componentType": "container",
+          "deliveryKind": "oci-context",
+          "format": "brai-ci-object-v1",
+          "key": "8ba716339b8ae7a1b588b4e887d5307797a31e45f0dbe6a550174473653f3d6b",
+          "kind": "runtime",
+          "payloadHash": "d5bfa8ca943cef8426a15ce0f69d4339b1195673ca12666c6ab748996c65bcf9",
+          "recipe": "0a483fb92cdbde44d5cbd099959ad256dc6ab5b99e7b556990f2eb14e0024076",
+          "repository": "Q-Fox-Labs/Brai",
+          "runId": "39952197962",
+          "source": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+        },
+        "reference": "ghcr.io/q-fox-labs/brai-components/alerts@sha256:e79697480b8baf3fe0f7db0b5475006bcb47e515a39c2ddb7089f62eff603dca"
+      },
+      "id": "alerts"
+    },
+    {
+      "artifact": {
+        "bytes": 258032060,
+        "digest": "sha256:bbd83049320633ba2d847f98f2724fa8efc08e7a437d089d7aa1d8db04fed733",
+        "layerCacheHits": 0,
+        "metadata": {
+          "attempt": "1",
+          "componentType": "container",
+          "deliveryKind": "oci-context",
+          "format": "brai-ci-object-v1",
+          "key": "5f60f20e2867c8463936c46e0ebe892e3b42df3050061d1c2a1dfb2a62e04e0f",
+          "kind": "runtime",
+          "payloadHash": "f8fc45b010634e4f173d4e6f6a411ca24734a8abe643c31637476b5c867e5033",
+          "recipe": "0a483fb92cdbde44d5cbd099959ad256dc6ab5b99e7b556990f2eb14e0024076",
+          "repository": "Q-Fox-Labs/Brai",
+          "runId": "40039474095",
+          "source": "c8ff46145618c44f3103dd8caa7cb26debc34fb5"
+        },
+        "publicationMs": 33061,
+        "reference": "ghcr.io/q-fox-labs/brai-components/web@sha256:bbd83049320633ba2d847f98f2724fa8efc08e7a437d089d7aa1d8db04fed733"
+      },
+      "id": "web"
+    },
+    {
+      "artifact": {
+        "bytes": 967445,
+        "digest": "sha256:b8443ee9371e0841a660c00ce22f0a57f484c7b8da07b52722e0707fced0d74a",
+        "metadata": {
+          "attempt": "1",
+          "componentType": "container",
+          "deliveryKind": "ready-files",
+          "format": "brai-ci-object-v1",
+          "key": "af21684afcf44686ff9b2f9647eb8700a3c12216f7d5eea2e6c6261aba87ae9b",
+          "kind": "runtime",
+          "payloadHash": "03230e4f3ce904c438ad01e11b3c3f1ed825969fe68ad5815319f39b4339bb43",
+          "recipe": "0a483fb92cdbde44d5cbd099959ad256dc6ab5b99e7b556990f2eb14e0024076",
+          "repository": "Q-Fox-Labs/Brai",
+          "runId": "39952197962",
+          "source": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+        },
+        "reference": "ghcr.io/q-fox-labs/brai-components/local-ai@sha256:b8443ee9371e0841a660c00ce22f0a57f484c7b8da07b52722e0707fced0d74a"
+      },
+      "id": "local-ai"
+    },
+    {
+      "artifact": {
+        "bytes": 86127666,
+        "digest": "sha256:ee7afc97026f491e2cce8582543843247621c95f6b049271ddb12f7b847cca83",
+        "metadata": {
+          "attempt": "1",
+          "componentType": "container",
+          "deliveryKind": "oci-context",
+          "format": "brai-ci-object-v1",
+          "key": "e8dc1aa9c77732e992e20f8fb538ca6cba3d3207d08e0c6c7d5a953bebd2b567",
+          "kind": "runtime",
+          "payloadHash": "3c9cf0eb18f1fa0c0968c3a57660c401261f999b7a5e3ddcf78534c1ff7ff7e7",
+          "recipe": "0a483fb92cdbde44d5cbd099959ad256dc6ab5b99e7b556990f2eb14e0024076",
+          "repository": "Q-Fox-Labs/Brai",
+          "runId": "39952197962",
+          "source": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+        },
+        "reference": "ghcr.io/q-fox-labs/brai-components/transcription@sha256:ee7afc97026f491e2cce8582543843247621c95f6b049271ddb12f7b847cca83"
+      },
+      "id": "transcription"
+    },
+    {
+      "artifact": {
+        "bytes": 85722268,
+        "digest": "sha256:7c4c418ac19e9e99335adffb21fb4a53ce204be5f22ce5fec8c3e478417d9f00",
+        "metadata": {
+          "attempt": "1",
+          "componentType": "container",
+          "deliveryKind": "oci-context",
+          "format": "brai-ci-object-v1",
+          "key": "b0c4328655532bfaa10bb2131f6e677b0a066b96ef03082d7fd950a0a9b9e744",
+          "kind": "runtime",
+          "payloadHash": "4258a79522aa31bf7ac513c88e5734e923caedad1ce8d6c32b1963ddd3803170",
+          "recipe": "0a483fb92cdbde44d5cbd099959ad256dc6ab5b99e7b556990f2eb14e0024076",
+          "repository": "Q-Fox-Labs/Brai",
+          "runId": "39952197962",
+          "source": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+        },
+        "reference": "ghcr.io/q-fox-labs/brai-components/supabase-mcp@sha256:7c4c418ac19e9e99335adffb21fb4a53ce204be5f22ce5fec8c3e478417d9f00"
+      },
+      "id": "supabase-mcp"
+    }
+  ],
+  "config_paths": [
+    "/etc/brai-agent/config.json",
+    "/etc/brai-agent/publisher.json",
+    "/etc/brai/alerts-candidate/nats.conf",
+    "/etc/brai/alerts.env",
+    "/etc/brai/application.env",
+    "/etc/brai/dependencies.env",
+    "/etc/brai/supabase-mcp.json",
+    "/etc/brai/transcription/release.env",
+    "/home/agent/.codex/auth.json",
+    "/srv/projects/brai/.secrets/alerts_cursor_hmac_key",
+    "/srv/projects/brai/.secrets/alerts_migration.env",
+    "/srv/projects/brai/.secrets/alerts_runtime.env",
+    "/srv/projects/brai/.secrets/artifacts_mcp.env",
+    "/srv/projects/brai/.secrets/artifacts_migration.env",
+    "/srv/projects/brai/.secrets/artifacts_runtime.env",
+    "/srv/projects/brai/.secrets/auth_migration.env",
+    "/srv/projects/brai/.secrets/auth_runtime.env",
+    "/srv/projects/brai/.secrets/history_cursor_hmac_key",
+    "/srv/projects/brai/.secrets/history_migration.env",
+    "/srv/projects/brai/.secrets/history_runtime.env",
+    "/srv/projects/brai/.secrets/local_ai_production_migration.env",
+    "/srv/projects/brai/.secrets/nats_admin.env",
+    "/srv/projects/brai/.secrets/nats_agent.env",
+    "/srv/projects/brai/.secrets/nats_alerts.env",
+    "/srv/projects/brai/.secrets/nats_artifacts.env",
+    "/srv/projects/brai/.secrets/nats_auth.env",
+    "/srv/projects/brai/.secrets/nats_history.env",
+    "/srv/projects/brai/.secrets/nats_local_ai.env",
+    "/srv/projects/brai/.secrets/nats_server.env",
+    "/srv/projects/brai/.secrets/nats_timer.env",
+    "/srv/projects/brai/.secrets/nats_web.env",
+    "/srv/projects/brai/.secrets/resend_api_key.env",
+    "/srv/projects/brai/.secrets/supabase_mcp_password.env",
+    "/srv/projects/brai/.secrets/timer_migration.env",
+    "/srv/projects/brai/.secrets/timer_runtime.env",
+    "/srv/projects/brai/.secrets/transcription_production_migration.env",
+    "/srv/projects/brai/.secrets/web_runtime.env"
+  ],
+  "copies": {},
+  "databases": [
+    {
+      "name": "service_transcription",
+      "owner": "brai_transcription_owner"
+    },
+    {
+      "name": "brai_auth",
+      "owner": "brai_auth_owner"
+    },
+    {
+      "name": "brai_codeworks_temporal_test",
+      "owner": "brai_codeworks_temporal_owner"
+    },
+    {
+      "name": "service_history",
+      "owner": "history_owner"
+    },
+    {
+      "name": "brai_codeworks_restore_test",
+      "owner": "brai_codeworks_test_owner"
+    },
+    {
+      "name": "brai_artifacts",
+      "owner": "brai_artifacts_owner"
+    },
+    {
+      "name": "brai_alerts",
+      "owner": "brai_alerts_owner"
+    },
+    {
+      "name": "timer",
+      "owner": "timer_owner"
+    },
+    {
+      "name": "local_ai",
+      "owner": "local_ai_owner"
+    },
+    {
+      "name": "brai_codeworks_temporal_restore_test",
+      "owner": "brai_codeworks_temporal_owner"
+    },
+    {
+      "name": "brai_codeworks_test",
+      "owner": "brai_codeworks_test_owner"
+    }
+  ],
+  "directories": {
+    "/etc/brai": {
+      "gid": 0,
+      "mode": 488,
+      "uid": 0
+    },
+    "/etc/brai-agent": {
+      "gid": 1002,
+      "mode": 488,
+      "uid": 0
+    },
+    "/etc/brai/alerts-candidate": {
+      "gid": 0,
+      "mode": 448,
+      "uid": 0
+    },
+    "/etc/brai/caddy/extra": {
+      "gid": 0,
+      "mode": 493,
+      "uid": 0
+    },
+    "/etc/brai/transcription": {
+      "gid": 0,
+      "mode": 448,
+      "uid": 0
+    },
+    "/home/agent": {
+      "gid": 1002,
+      "mode": 488,
+      "uid": 1002
+    },
+    "/home/agent/.codex": {
+      "gid": 1002,
+      "mode": 509,
+      "uid": 1002
+    },
+    "/opt/supabase/deployment/volumes/db/data": {
+      "gid": 0,
+      "mode": 448,
+      "uid": 100
+    },
+    "/opt/supabase/deployment/volumes/functions": {
+      "gid": 0,
+      "mode": 493,
+      "uid": 0
+    },
+    "/opt/supabase/deployment/volumes/storage": {
+      "gid": 0,
+      "mode": 493,
+      "uid": 0
+    },
+    "/srv/projects/brai": {
+      "gid": 1002,
+      "mode": 493,
+      "uid": 1002
+    },
+    "/srv/projects/brai/.secrets": {
+      "gid": 1002,
+      "mode": 456,
+      "uid": 0
+    }
+  },
+  "downloads": {
+    "/opt/supabase/deployment/volumes/api/envoy/cds.yaml": {
+      "mode": 420,
+      "sha256": "1d7514b891370ed27c25911df008887402e16ab09273e6e433225bb7f09f7905",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/api/envoy/cds.yaml"
+    },
+    "/opt/supabase/deployment/volumes/api/envoy/docker-entrypoint.sh": {
+      "mode": 493,
+      "sha256": "8a0c9503764de32ba39e0d81e73629457b13ec42ef19897e30e4918c996d0508",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/api/envoy/docker-entrypoint.sh"
+    },
+    "/opt/supabase/deployment/volumes/api/envoy/envoy.yaml": {
+      "mode": 420,
+      "sha256": "3697f23b0be9ec5b829f937c600eb9b878f1f778ab510b42ad5e4f14742447e9",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/api/envoy/envoy.yaml"
+    },
+    "/opt/supabase/deployment/volumes/api/envoy/lds.template.yaml": {
+      "mode": 420,
+      "sha256": "9d9a6d6ea0a372be99e165d995f012d383d5cc8473b92a06b7aa0bbd73566c3d",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/api/envoy/lds.template.yaml"
+    },
+    "/opt/supabase/deployment/volumes/db/_supabase.sql": {
+      "mode": 420,
+      "sha256": "9dce462adc04137d6afabcf28efa60a6c355270a4b32d7af58891ac4eb964c5f",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/db/_supabase.sql"
+    },
+    "/opt/supabase/deployment/volumes/db/jwt.sql": {
+      "mode": 420,
+      "sha256": "c1d3f5c01e44646c2e533c5a1c111821cc49cb5a4c2534e08cddad61d8fb0339",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/db/jwt.sql"
+    },
+    "/opt/supabase/deployment/volumes/db/logs.sql": {
+      "mode": 420,
+      "sha256": "f0463ce5030907acef49326d2bffd36002df0718035071be7c99bd7fc897c63d",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/db/logs.sql"
+    },
+    "/opt/supabase/deployment/volumes/db/pooler.sql": {
+      "mode": 420,
+      "sha256": "df97ebe148d94cfb92a5e37ebf972dfd496be195f0915ecf14396b2cf50efecb",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/db/pooler.sql"
+    },
+    "/opt/supabase/deployment/volumes/db/realtime.sql": {
+      "mode": 420,
+      "sha256": "7e9e442e7fc4dae05544c07b67bede37a00d84644304dfce4d937134cb4c8f88",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/db/realtime.sql"
+    },
+    "/opt/supabase/deployment/volumes/db/roles.sql": {
+      "mode": 420,
+      "sha256": "3ad717b225daa38aa982da26750f35641eb404e1eb5e69a763c22236ab96c1b2",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/db/roles.sql"
+    },
+    "/opt/supabase/deployment/volumes/db/webhooks.sql": {
+      "mode": 420,
+      "sha256": "05a61316b899374253891cbba66ce073d9273f33983c3f47961eda3aa26c2823",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/db/webhooks.sql"
+    },
+    "/opt/supabase/deployment/volumes/functions/hello/index.ts": {
+      "mode": 420,
+      "sha256": "65e7d7ce5d898dd285e660cbab54521fca4bf990c41370f51fad5b4d4cae5f42",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/functions/hello/index.ts"
+    },
+    "/opt/supabase/deployment/volumes/functions/main/index.ts": {
+      "mode": 420,
+      "sha256": "9b7978abd7fd4af39e4f407f8a956137aa99e6ffaeb2190a5e29c8e1787d2da6",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/functions/main/index.ts"
+    },
+    "/opt/supabase/deployment/volumes/pooler/pooler.exs": {
+      "mode": 420,
+      "sha256": "d844e49f8915021ccbf6af6b769fef7909a723346bfc8f94ddb0433a328e49b1",
+      "url": "https://raw.githubusercontent.com/supabase/supabase/564eab8ad7840b13324f68b1bfac074ef8d51c21/docker/volumes/pooler/pooler.exs"
+    }
+  },
+  "extra_sources": [],
+  "format": "brai-clean-install-v1",
+  "generated_prefixes": [
+    "/opt/brai-components/",
+    "/var/lib/brai/local-ai/",
+    "/opt/brai/local-ai/",
+    "/etc/brai/caddy/",
+    "/var/lib/brai-install/"
+  ],
+  "images": {
+    "caddy:2.11.4-alpine": {
+      "kind": "pull",
+      "reference": "caddy@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b"
+    },
+    "sha256:149ba12428cc3ed0d120615decea5d9b1b97020fcc20db247cdc0bb35b2d099d": {
+      "dockerfile": "FROM node:24.22.1-alpine3.23@sha256:0468540aa58203ff9e40c2aab3907c52644ab818af6176b1c70a026137dc92a2 AS node\nFROM supabase/storage-api:v1.74.0\nCOPY --from=node /usr/local/bin/node /usr/local/bin/node\nCOPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm\n",
+      "kind": "node-patch",
+      "reference": "brai-install/node-patch:4a188e69c42f2d1aaf04"
+    },
+    "sha256:464b93a60ba8c96bc06dad7f241562d6613b2a994922307717b05f432ae415c2": {
+      "kind": "pull",
+      "reference": "supabase/supavisor@sha256:464b93a60ba8c96bc06dad7f241562d6613b2a994922307717b05f432ae415c2"
+    },
+    "sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4": {
+      "kind": "pull",
+      "reference": "envoyproxy/envoy@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4"
+    },
+    "sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b": {
+      "kind": "pull",
+      "reference": "caddy@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b"
+    },
+    "sha256:73c5dda13199745b0d2d00e4149d4a589c5b2e205dbf335ca05eca8276b54712": {
+      "kind": "pull",
+      "reference": "darthsim/imgproxy@sha256:73c5dda13199745b0d2d00e4149d4a589c5b2e205dbf335ca05eca8276b54712"
+    },
+    "sha256:88dc4f4e9b8a6da5795e8f1af1ff04bbf4d46114854364c6a357ea535e699be8": {
+      "dockerfile": "FROM node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS node\nFROM supabase/postgres-meta:v0.99.0\nCOPY --from=node /usr/local/bin/node /usr/local/bin/node\nCOPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm\n",
+      "kind": "node-patch",
+      "reference": "brai-install/node-patch:ba72e0abe9440450054c"
+    },
+    "sha256:c0c25187a6b835e65a6f6e6c6b39d090e832d40e6de5186f2c038e0411944232": {
+      "kind": "pull",
+      "reference": "supabase/gotrue@sha256:c0c25187a6b835e65a6f6e6c6b39d090e832d40e6de5186f2c038e0411944232"
+    },
+    "sha256:c9dc201e555f5d8e37e7f39cdd4df0229774996e213bfd7de8d10ac609030f2c": {
+      "kind": "pull",
+      "reference": "postgrest/postgrest@sha256:c9dc201e555f5d8e37e7f39cdd4df0229774996e213bfd7de8d10ac609030f2c"
+    },
+    "sha256:cbcc6a7986fc28b6dcffa798b077d5fb9c69cd25500371ab49147a86d7edbb03": {
+      "kind": "pull",
+      "reference": "supabase/realtime@sha256:cbcc6a7986fc28b6dcffa798b077d5fb9c69cd25500371ab49147a86d7edbb03"
+    },
+    "sha256:cd3fcd4ecdda44e3a66728a5334af0a959bc3979b32810e033d1c547241cd0f4": {
+      "kind": "pull",
+      "reference": "nats@sha256:cd3fcd4ecdda44e3a66728a5334af0a959bc3979b32810e033d1c547241cd0f4"
+    },
+    "sha256:edd22bef4477b900d5c300e287ce9b18bff9b81a0291bee14ee0b7c7b71a2899": {
+      "kind": "pull",
+      "reference": "supabase/edge-runtime@sha256:edd22bef4477b900d5c300e287ce9b18bff9b81a0291bee14ee0b7c7b71a2899"
+    },
+    "sha256:f046b512ba69f5d27e7a601b9c83887a9b46f7c92342187cad17424787f89a26": {
+      "dockerfile": "FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS node\nFROM ghcr.io/ggml-org/llama.cpp@sha256:7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571 AS llama\nFROM ghcr.io/ggml-org/llama.cpp@sha256:5ec15705b9563b306df98dfcb30bd6b29b060484c2a4ceb4199e251a4137c0a1 AS gemma\nFROM ubuntu@sha256:496754492fb28b4d3049432f2ca787449331e23fb14f0dd3fffea86bf5a93eb4\nRUN apt-get update && apt-get install -y --no-install-recommends python3.12 python3.12-venv ffmpeg libgomp1 libsndfile1 ca-certificates && rm -rf /var/lib/apt/lists/*\nCOPY --from=node /usr/local/bin/node /usr/local/bin/node\nCOPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm\nCOPY --from=llama /app /opt/brai/local-ai/runtime/llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/app\nCOPY --from=gemma /app /opt/brai/local-ai/runtime/embeddinggemma2/5ec15705b9563b306df98dfcb30bd6b29b060484c2a4ceb4199e251a4137c0a1/app\nCOPY requirements.lock /tmp/requirements.lock\nRUN python3.12 -m venv /opt/brai/local-ai/runtime/gigaam_pytorch/.venv && /opt/brai/local-ai/runtime/gigaam_pytorch/.venv/bin/pip install --require-hashes --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple -r /tmp/requirements.lock && rm /tmp/requirements.lock\nRUN mkdir -p /opt/brai/local-ai/runtime/node-v24.21.0-linux-x64/bin /opt/brai/local-ai/runtime/node-v24.22.1-linux-x64/bin /opt/brai/local-ai/runtime/ffmpeg/bin && ln -s /usr/local/bin/node /opt/brai/local-ai/runtime/node-v24.21.0-linux-x64/bin/node && ln -s /usr/local/bin/node /opt/brai/local-ai/runtime/node-v24.22.1-linux-x64/bin/node && ln -s /usr/bin/ffmpeg /opt/brai/local-ai/runtime/ffmpeg/bin/ffmpeg && ln -s /usr/bin/ffprobe /opt/brai/local-ai/runtime/ffmpeg/bin/ffprobe\nWORKDIR /opt/brai/local-ai/app/services/local-ai\nENTRYPOINT [\"/usr/local/bin/node\",\"src/main.mjs\"]\n",
+      "kind": "local-ai",
+      "reference": "brai-install/local-ai:95b61849c93f7ba86109"
+    },
+    "sha256:f371b5f3f2ac0a05703f33d6e6134515fb2498cab708fb948a0aeb7481467c00": {
+      "kind": "pull",
+      "reference": "supabase/postgres@sha256:f371b5f3f2ac0a05703f33d6e6134515fb2498cab708fb948a0aeb7481467c00"
+    }
+  },
+  "installed": {
+    "prod": {
+      "agent": "sha256:6e46c4ce97780f32f7c7d6808fb3d1f42c8e7569ed0d87d6dfdccd2d90aefbe3",
+      "alerts": "sha256:e79697480b8baf3fe0f7db0b5475006bcb47e515a39c2ddb7089f62eff603dca",
+      "artifacts": "sha256:abfeb1e45c7ad0624f49165eb4cef41e5f8ad7dd2dbf3c0c5ee0b5f66c514de4",
+      "auth": "sha256:07bc2c8f36dee571fe90b911bcb20af3a94303b16d6e89d7e23b3d291944a342",
+      "history": "sha256:29fc8c2d4c053488c130b4424bbb7c10467aec67d3782416fb7686313d97fd4c",
+      "local-ai": "sha256:b8443ee9371e0841a660c00ce22f0a57f484c7b8da07b52722e0707fced0d74a",
+      "supabase-mcp": "sha256:7c4c418ac19e9e99335adffb21fb4a53ce204be5f22ce5fec8c3e478417d9f00",
+      "timer": "sha256:cca70508effd213cff550bb313cd5be76b84c8064a61be459785f3fd5f70f86e",
+      "transcription": "sha256:ee7afc97026f491e2cce8582543843247621c95f6b049271ddb12f7b847cca83",
+      "web": "sha256:bbd83049320633ba2d847f98f2724fa8efc08e7a437d089d7aa1d8db04fed733"
+    }
+  },
+  "local_ai": {
+    "brai-local-ai-op3-8683b1d1/local_ai": {
+      "installer": {
+        "hubRequestTimeoutMs": 5000,
+        "maxDownloadBytes": 1073741824,
+        "maxFiles": 8,
+        "maxOperationMs": 30000,
+        "maxPageSize": 20,
+        "maxParallel": 2,
+        "maxQueryLength": 200,
+        "rootDirectory": "/var/lib/brai/local-ai/operation3/production/30e6c4c8bd19850e94b73f50192ad8b7310a0b92/8683b1d1-5222-473e-b9be-3445432f22e4/models",
+        "seedDirectories": {
+          "gigaam_pytorch": "/var/lib/brai/local-ai/operation3/production/30e6c4c8bd19850e94b73f50192ad8b7310a0b92/8683b1d1-5222-473e-b9be-3445432f22e4/models/gigaam-v3-e2e-ctc/cec030b4c4f35d928e4a9044a3bdb29ebd499fac/gigaam_pytorch",
+          "llama_cpp": "/var/lib/brai/local-ai/operation3/production/30e6c4c8bd19850e94b73f50192ad8b7310a0b92/8683b1d1-5222-473e-b9be-3445432f22e4/models/giga-embeddings-480m-q8/34da7d5d7e8dd454e7f40bc5dca98b00a5086c3d/llama_cpp"
+        }
+      },
+      "runtime": {
+        "gigaam_pytorch": {
+          "args": [
+            "runners/gigaam/runner.py",
+            "--model-path",
+            "{{modelPath}}",
+            "--vad-model-path",
+            "{{vadModelPath}}",
+            "--longform-max-seconds",
+            "{{longformMaximumSeconds}}",
+            "--audio-decode-timeout-seconds",
+            "{{audioDecodeTimeoutSeconds}}",
+            "--threads",
+            "{{threads}}"
+          ],
+          "audioDecodeTimeoutSeconds": 30,
+          "cwd": "/opt/brai/local-ai/app/services/local-ai",
+          "executable": "/opt/brai/local-ai/runtime/gigaam_pytorch/.venv/bin/python",
+          "longformMaximumSeconds": 180,
+          "maxLineBytes": 1048576,
+          "requestTimeoutMs": 240000,
+          "startupTimeoutMs": 60000,
+          "stopGraceMs": 30000,
+          "threads": 4,
+          "vadModelPath": "/var/lib/brai/local-ai/vad/e66f3d3b9eb0873085418a7b813d3b369bf160bb",
+          "vadRevision": "e66f3d3b9eb0873085418a7b813d3b369bf160bb"
+        },
+        "llama_cpp": {
+          "args": [
+            "--model",
+            "{{modelPath}}",
+            "--alias",
+            "giga-embeddings-480m-q8",
+            "--embedding",
+            "--pooling",
+            "mean",
+            "--embd-normalize",
+            "2",
+            "--ctx-size",
+            "2048",
+            "--batch-size",
+            "2048",
+            "--ubatch-size",
+            "2048",
+            "--parallel",
+            "1",
+            "--threads",
+            "4",
+            "--threads-batch",
+            "4",
+            "--n-gpu-layers",
+            "0",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "{{port}}",
+            "--no-webui"
+          ],
+          "contextTokens": 2048,
+          "cwd": "/opt/brai/local-ai/runtime/llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/app",
+          "dimensions": 1024,
+          "executable": "/opt/brai/local-ai/runtime/llama_cpp/7533d5f6c853a3f3284ffa8763bb89db346c8156831a009b6e23ea32be9b9571/app/llama-server",
+          "host": "127.0.0.1",
+          "maxBatchTokens": 2048,
+          "maxLineBytes": 1048576,
+          "port": 19476,
+          "queryInstruction": "Given a query, retrieve relevant passages",
+          "requestTimeoutMs": 240000,
+          "startupTimeoutMs": 30000,
+          "stopGraceMs": 30000
+        }
+      }
+    }
+  },
+  "networks": {
+    "brai_artifacts_private": {
+      "driver": "bridge",
+      "internal": false,
+      "ipam": [
+        {
+          "Gateway": "172.30.58.1",
+          "IPRange": "",
+          "Subnet": "172.30.58.0/24"
+        }
+      ],
+      "options": {}
+    },
+    "brai_database_private": {
+      "driver": "bridge",
+      "internal": true,
+      "ipam": [
+        {
+          "Gateway": "172.23.0.1",
+          "IPRange": "172.23.128.0/24",
+          "Subnet": "172.23.0.0/16"
+        }
+      ],
+      "options": {}
+    },
+    "brai_frontend": {
+      "driver": "bridge",
+      "internal": false,
+      "ipam": [
+        {
+          "Gateway": "172.22.0.1",
+          "IPRange": "",
+          "Subnet": "172.22.0.0/16"
+        }
+      ],
+      "options": {}
+    },
+    "brai_mcp": {
+      "driver": "bridge",
+      "internal": false,
+      "ipam": [
+        {
+          "Gateway": "172.26.0.1",
+          "IPRange": "",
+          "Subnet": "172.26.0.0/16"
+        }
+      ],
+      "options": {}
+    },
+    "brai_nats_private": {
+      "driver": "bridge",
+      "internal": false,
+      "ipam": [
+        {
+          "Gateway": "172.21.0.1",
+          "IPRange": "172.21.128.0/24",
+          "Subnet": "172.21.0.0/16"
+        }
+      ],
+      "options": {}
+    },
+    "brai_supabase": {
+      "driver": "bridge",
+      "internal": false,
+      "ipam": [
+        {
+          "Gateway": "172.20.0.1",
+          "IPRange": "172.20.128.0/24",
+          "Subnet": "172.20.0.0/16"
+        }
+      ],
+      "options": {}
+    }
+  },
+  "npm_repositories": [
+    "/srv/projects/brai"
+  ],
+  "operator": {
+    "environments": {
+      "prod": {
+        "components": {
+          "agent": [
+            {
+              "active": true,
+              "healthCommand": [
+                "/usr/local/bin/node",
+                "/opt/brai-codeworks/prod-agent/services/agent/dist/health.js"
+              ],
+              "healthEnv": {
+                "BRAI_AGENT_CONFIG": "/etc/brai-agent/config.json"
+              },
+              "kind": "program",
+              "link": "/opt/brai-codeworks/prod-agent",
+              "program": {
+                "entrypoint": "services/agent/dist/main.js",
+                "workingDir": "services/agent"
+              },
+              "unit": "brai-agent.service"
+            }
+          ],
+          "alerts": [
+            {
+              "auxiliary": [
+                "alerts-migrate"
+              ],
+              "container": "brai-alerts-alerts-1",
+              "deliveryImage": true,
+              "kind": "compose",
+              "migration": "alerts-migrate",
+              "project": "brai-alerts",
+              "service": "alerts",
+              "target": "/payload",
+              "workingDir": "/payload/services/alerts"
+            }
+          ],
+          "artifacts": [
+            {
+              "auxiliary": [
+                "artifacts-migrate",
+                "artifacts-mcp"
+              ],
+              "auxiliaryContainers": [
+                "brai-artifacts-artifacts-mcp-1"
+              ],
+              "commands": {
+                "artifacts-mcp": [
+                  "node",
+                  "dist/mcp.js"
+                ]
+              },
+              "container": "brai-artifacts-artifacts-1",
+              "deliveryImage": true,
+              "kind": "compose",
+              "migration": "artifacts-migrate",
+              "project": "brai-artifacts",
+              "service": "artifacts",
+              "target": "/payload",
+              "workingDir": "/payload/services/artifacts"
+            }
+          ],
+          "auth": [
+            {
+              "auxiliary": [
+                "auth-migrate"
+              ],
+              "container": "brai-auth-1",
+              "deliveryImage": true,
+              "kind": "compose",
+              "migration": "auth-migrate",
+              "project": "brai",
+              "service": "auth",
+              "target": "/payload",
+              "workingDir": "/payload/services/auth"
+            }
+          ],
+          "history": [
+            {
+              "auxiliary": [
+                "history-migrate"
+              ],
+              "container": "brai-history-history-1",
+              "deliveryImage": true,
+              "kind": "compose",
+              "migration": "history-migrate",
+              "project": "brai-history",
+              "service": "history",
+              "target": "/payload",
+              "workingDir": "/payload/services/history"
+            }
+          ],
+          "local-ai": [
+            {
+              "container": "brai-local-ai-op3-main-8683b1d1",
+              "healthCommand": [
+                "/opt/brai/local-ai/runtime/node-v24.21.0-linux-x64/bin/node",
+                "--input-type=module",
+                "-e",
+                "import {readFileSync} from 'node:fs';import {connect} from 'nats';const c=JSON.parse(process.env.LOCAL_AI_CONFIG_JSON??readFileSync(process.env.LOCAL_AI_CONFIG,'utf8'));const n=await connect({servers:c.nats.servers,user:c.nats.user,pass:c.nats.password,inboxPrefix:c.nats.inboxPrefix});try{const r=await n.request('brai.local_ai.v1.status',Buffer.from('{}'),{timeout:5000});const s=JSON.parse(Buffer.from(r.data));if(s.state!=='ready')process.exitCode=1;}finally{await n.close();}"
+              ],
+              "kind": "compose",
+              "ownerContainer": {
+                "command": [
+                  "services/local-ai/dist/storage/migrate.js"
+                ],
+                "env": "/srv/projects/brai/.secrets/local_ai_production_migration.env",
+                "network": "brai_database_private",
+                "node": "/opt/brai/local-ai/runtime/node-v24.21.0-linux-x64/bin/node"
+              },
+              "project": "brai-local-ai-op3-8683b1d1",
+              "service": "local_ai",
+              "target": "/opt/brai/local-ai/app"
+            }
+          ],
+          "supabase-mcp": [
+            {
+              "container": "brai-supabase-mcp-1",
+              "deliveryImage": true,
+              "kind": "compose",
+              "project": "brai",
+              "service": "supabase-mcp",
+              "target": "/payload",
+              "workingDir": "/payload/services/supabase-mcp"
+            }
+          ],
+          "timer": [
+            {
+              "auxiliary": [
+                "timer-migrate"
+              ],
+              "container": "brai-timer-1",
+              "deliveryImage": true,
+              "kind": "compose",
+              "migration": "timer-migrate",
+              "project": "brai",
+              "service": "timer",
+              "target": "/payload",
+              "workingDir": "/payload/services/timer"
+            }
+          ],
+          "transcription": [
+            {
+              "commands": {
+                "transcription": [
+                  "node",
+                  "/run/codeworks-transcription.mjs"
+                ]
+              },
+              "container": "brai-transcription-production",
+              "deliveryImage": true,
+              "extraVolumes": [
+                {
+                  "read_only": true,
+                  "source": "/usr/local/libexec/brai-codeworks-transcription.mjs",
+                  "target": "/run/codeworks-transcription.mjs",
+                  "type": "bind"
+                }
+              ],
+              "healthCommand": [
+                "node",
+                "-e",
+                "const b=JSON.parse(process.env.TRANSCRIPTION_AUTH_BINDINGS_JSON).find(x=>x.principal.ownerId==='brai-transcription-production');fetch('http://127.0.0.1:19342/v1/transcription/settings.get',{method:'POST',headers:{'content-type':'application/json',Authorization:'Bearer '+b.token},body:'{}',signal:AbortSignal.timeout(5000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+              ],
+              "kind": "compose",
+              "ownerContainer": {
+                "command": [
+                  "services/transcription/dist/helper/migrate.js"
+                ],
+                "env": "/srv/projects/brai/.secrets/transcription_production_migration.env",
+                "network": "brai_database_private"
+              },
+              "project": "brai-transcription-production",
+              "removeTargets": [
+                "/app"
+              ],
+              "service": "transcription",
+              "target": "/payload",
+              "workingDir": "/payload"
+            }
+          ],
+          "web": [
+            {
+              "container": "brai-web-1",
+              "deliveryImage": true,
+              "kind": "compose",
+              "project": "brai",
+              "service": "web",
+              "target": "/payload",
+              "workingDir": "/payload/apps/web"
+            }
+          ]
+        },
+        "enabled": true,
+        "projects": {
+          "brai": {
+            "accepted": "/var/lib/brai-install/accepted/brai.json",
+            "runtimeUnit": "brai-application.service",
+            "runtimeUnits": [
+              {
+                "services": [
+                  "auth",
+                  "timer",
+                  "web"
+                ],
+                "unit": "brai-application.service"
+              },
+              {
+                "services": [
+                  "supabase-mcp"
+                ],
+                "unit": "brai-supabase-mcp.service"
+              }
+            ]
+          },
+          "brai-alerts": {
+            "accepted": "/var/lib/brai-install/accepted/brai-alerts.json",
+            "runtimeUnit": "brai-alerts.service"
+          },
+          "brai-artifacts": {
+            "accepted": "/var/lib/brai-install/accepted/brai-artifacts.json",
+            "runtimeUnit": "brai-artifacts.service",
+            "runtimeUnits": [
+              {
+                "services": [
+                  "artifacts"
+                ],
+                "unit": "brai-artifacts.service"
+              },
+              {
+                "services": [
+                  "artifacts-mcp"
+                ],
+                "unit": "brai-artifacts-mcp.service"
+              }
+            ]
+          },
+          "brai-history": {
+            "accepted": "/var/lib/brai-install/accepted/brai-history.json",
+            "runtimeUnit": "brai-history.service"
+          },
+          "brai-local-ai-op3-8683b1d1": {
+            "accepted": "/var/lib/brai-install/accepted/brai-local-ai-op3-8683b1d1.json",
+            "runtimeUnit": "brai-local-ai-operation3-production.service"
+          },
+          "brai-transcription-production": {
+            "accepted": "/var/lib/brai-install/accepted/brai-transcription-production.json",
+            "runtimeUnit": "brai-transcription.service"
+          }
+        }
+      }
+    }
+  },
+  "postgres_hba": "# BEGIN CODEWORKS TEMPORAL FIXTURE\n# END CODEWORKS TEMPORAL FIXTURE\n# BEGIN BRAI DEV PROVIDERS ROLE ISOLATION\n# END BRAI DEV PROVIDERS ROLE ISOLATION\n# BEGIN BRAI DEV ROLE ISOLATION\n# BEGIN BRAI DEV DIALOGUES ROLE ISOLATION\n# END BRAI DEV DIALOGUES ROLE ISOLATION\n# BEGIN BRAI CODEWORKS NORMAL ROLE ISOLATION\n# END BRAI CODEWORKS NORMAL ROLE ISOLATION\n# END BRAI DEV ROLE ISOLATION\n# ABOUTME: Ограничивает роли auth и timer собственной БД.\n# ABOUTME: Остальные роли сохраняют исходные правила Supabase.\nlocal brai_auth brai_auth_owner,brai_auth_app scram-sha-256\nhost brai_auth brai_auth_owner,brai_auth_app 0.0.0.0/0 scram-sha-256\nhost brai_auth brai_auth_owner,brai_auth_app ::/0 scram-sha-256\nlocal timer timer_owner,timer_app scram-sha-256\nhost timer timer_owner,timer_app 0.0.0.0/0 scram-sha-256\nhost timer timer_owner,timer_app ::/0 scram-sha-256\nlocal all brai_auth_owner,brai_auth_app,timer_owner,timer_app reject\nhost all brai_auth_owner,brai_auth_app,timer_owner,timer_app 0.0.0.0/0 reject\nhost all brai_auth_owner,brai_auth_app,timer_owner,timer_app ::/0 reject\ninclude /etc/postgresql/pg_hba.conf\n",
+  "programs": {
+    "brai-agent.service": {
+      "active": true,
+      "component": "agent",
+      "environment": "prod",
+      "environmentFiles": [],
+      "healthCommand": [
+        "/usr/local/bin/node",
+        "/opt/brai-codeworks/prod-agent/services/agent/dist/health.js"
+      ],
+      "healthEnv": {
+        "BRAI_AGENT_CONFIG": "/etc/brai-agent/config.json"
+      },
+      "kind": "program",
+      "link": "/opt/brai-codeworks/prod-agent",
+      "program": {
+        "entrypoint": "services/agent/dist/main.js",
+        "workingDir": "services/agent"
+      },
+      "unit": "brai-agent.service"
+    }
+  },
+  "projects": {
+    "brai": {
+      "document": {
+        "name": "brai",
+        "networks": {
+          "database": {
+            "external": true,
+            "name": "brai_database_private"
+          },
+          "frontend": {
+            "external": true,
+            "name": "brai_frontend"
+          },
+          "mcp": {
+            "external": true,
+            "name": "brai_mcp"
+          },
+          "messaging": {
+            "external": true,
+            "name": "brai_nats_private"
+          }
+        },
+        "services": {
+          "auth": {
+            "command": null,
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai/auth.env"
+            ],
+            "image": "ghcr.io/q-fox-labs/brai-components/auth@sha256:07bc2c8f36dee571fe90b911bcb20af3a94303b16d6e89d7e23b3d291944a342",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:07bc2c8f36dee571fe90b911bcb20af3a94303b16d6e89d7e23b3d291944a342",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "networks": {
+              "database": null,
+              "messaging": null
+            },
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/auth/07bc2c8f36dee571fe90b911bcb20af3a94303b16d6e89d7e23b3d291944a342",
+                "target": "/payload",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/payload/services/auth"
+          },
+          "auth-migrate": {
+            "command": [
+              "node",
+              "dist/migrate.js"
+            ],
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai/auth-migrate.env"
+            ],
+            "image": "ghcr.io/q-fox-labs/brai-components/auth@sha256:07bc2c8f36dee571fe90b911bcb20af3a94303b16d6e89d7e23b3d291944a342",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:07bc2c8f36dee571fe90b911bcb20af3a94303b16d6e89d7e23b3d291944a342",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "networks": {
+              "database": null
+            },
+            "profiles": [
+              "migration"
+            ],
+            "pull_policy": "never",
+            "restart": "no",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/auth/07bc2c8f36dee571fe90b911bcb20af3a94303b16d6e89d7e23b3d291944a342",
+                "target": "/payload",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/payload/services/auth"
+          },
+          "supabase-mcp": {
+            "command": null,
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai/supabase-mcp.env"
+            ],
+            "image": "ghcr.io/q-fox-labs/brai-components/supabase-mcp@sha256:7c4c418ac19e9e99335adffb21fb4a53ce204be5f22ce5fec8c3e478417d9f00",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:7c4c418ac19e9e99335adffb21fb4a53ce204be5f22ce5fec8c3e478417d9f00",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "networks": {
+              "database": null,
+              "mcp": null
+            },
+            "ports": [
+              {
+                "host_ip": "127.0.0.1",
+                "mode": "ingress",
+                "protocol": "tcp",
+                "published": "19320",
+                "target": 3001
+              }
+            ],
+            "profiles": [
+              "supabase-mcp"
+            ],
+            "pull_policy": "never",
+            "read_only": true,
+            "restart": "unless-stopped",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/supabase-mcp/7c4c418ac19e9e99335adffb21fb4a53ce204be5f22ce5fec8c3e478417d9f00",
+                "target": "/payload",
+                "type": "bind"
+              },
+              {
+                "bind": {},
+                "read_only": true,
+                "source": "/srv/projects/brai/.secrets/supabase_mcp_password.env",
+                "target": "/run/secrets/postgres_password",
+                "type": "bind"
+              },
+              {
+                "bind": {},
+                "read_only": true,
+                "source": "/etc/brai/supabase-mcp.json",
+                "target": "/run/supabase-mcp/config.json",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/payload/services/supabase-mcp"
+          },
+          "timer": {
+            "command": null,
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai/timer.env"
+            ],
+            "image": "ghcr.io/q-fox-labs/brai-components/timer@sha256:cca70508effd213cff550bb313cd5be76b84c8064a61be459785f3fd5f70f86e",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:cca70508effd213cff550bb313cd5be76b84c8064a61be459785f3fd5f70f86e",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "networks": {
+              "database": null,
+              "messaging": null
+            },
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/timer/cca70508effd213cff550bb313cd5be76b84c8064a61be459785f3fd5f70f86e",
+                "target": "/payload",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/payload/services/timer"
+          },
+          "timer-migrate": {
+            "command": [
+              "node",
+              "dist/migrate.js"
+            ],
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai/timer-migrate.env"
+            ],
+            "image": "ghcr.io/q-fox-labs/brai-components/timer@sha256:cca70508effd213cff550bb313cd5be76b84c8064a61be459785f3fd5f70f86e",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:cca70508effd213cff550bb313cd5be76b84c8064a61be459785f3fd5f70f86e",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "networks": {
+              "database": null
+            },
+            "profiles": [
+              "migration"
+            ],
+            "pull_policy": "never",
+            "restart": "no",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/timer/cca70508effd213cff550bb313cd5be76b84c8064a61be459785f3fd5f70f86e",
+                "target": "/payload",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/payload/services/timer"
+          },
+          "web": {
+            "command": null,
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai/web.env"
+            ],
+            "healthcheck": {
+              "interval": "30s",
+              "retries": 3,
+              "start_period": "10s",
+              "test": [
+                "CMD",
+                "node",
+                "-e",
+                "fetch('http://127.0.0.1:3000/', {signal: AbortSignal.timeout(5000)}).then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1))"
+              ],
+              "timeout": "6s"
+            },
+            "image": "ghcr.io/q-fox-labs/brai-components/web@sha256:bbd83049320633ba2d847f98f2724fa8efc08e7a437d089d7aa1d8db04fed733",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:bbd83049320633ba2d847f98f2724fa8efc08e7a437d089d7aa1d8db04fed733",
+              "org.opencontainers.image.revision": "c8ff46145618c44f3103dd8caa7cb26debc34fb5"
+            },
+            "networks": {
+              "frontend": null,
+              "messaging": null
+            },
+            "ports": [
+              {
+                "host_ip": "127.0.0.1",
+                "mode": "ingress",
+                "protocol": "tcp",
+                "published": "3000",
+                "target": 3000
+              }
+            ],
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/web/bbd83049320633ba2d847f98f2724fa8efc08e7a437d089d7aa1d8db04fed733",
+                "target": "/payload",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/payload/apps/web"
+          }
+        }
+      },
+      "group": "applications"
+    },
+    "brai-alerts": {
+      "document": {
+        "name": "brai-alerts",
+        "networks": {
+          "database": {
+            "external": true,
+            "name": "brai_database_private"
+          },
+          "messaging": {
+            "external": true,
+            "name": "brai_nats_private"
+          }
+        },
+        "services": {
+          "alerts": {
+            "command": null,
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai-alerts/alerts.env"
+            ],
+            "image": "ghcr.io/q-fox-labs/brai-components/alerts@sha256:e79697480b8baf3fe0f7db0b5475006bcb47e515a39c2ddb7089f62eff603dca",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:e79697480b8baf3fe0f7db0b5475006bcb47e515a39c2ddb7089f62eff603dca",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "networks": {
+              "database": null,
+              "messaging": null
+            },
+            "pull_policy": "never",
+            "read_only": true,
+            "restart": "unless-stopped",
+            "user": "1000:1000",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/alerts/e79697480b8baf3fe0f7db0b5475006bcb47e515a39c2ddb7089f62eff603dca",
+                "target": "/payload",
+                "type": "bind"
+              },
+              {
+                "bind": {},
+                "read_only": true,
+                "source": "/srv/projects/brai/.secrets/alerts_cursor_hmac_key",
+                "target": "/run/secrets/alerts_cursor_hmac_key",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/payload/services/alerts"
+          },
+          "alerts-migrate": {
+            "command": [
+              "node",
+              "dist/migrate.js"
+            ],
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai-alerts/alerts-migrate.env"
+            ],
+            "image": "ghcr.io/q-fox-labs/brai-components/alerts@sha256:e79697480b8baf3fe0f7db0b5475006bcb47e515a39c2ddb7089f62eff603dca",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:e79697480b8baf3fe0f7db0b5475006bcb47e515a39c2ddb7089f62eff603dca",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "networks": {
+              "database": null
+            },
+            "profiles": [
+              "migration"
+            ],
+            "pull_policy": "never",
+            "restart": "no",
+            "user": "1000:1000",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/alerts/e79697480b8baf3fe0f7db0b5475006bcb47e515a39c2ddb7089f62eff603dca",
+                "target": "/payload",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/payload/services/alerts"
+          }
+        }
+      },
+      "group": "applications"
+    },
+    "brai-artifacts": {
+      "document": {
+        "name": "brai-artifacts",
+        "networks": {
+          "artifacts_private": {
+            "external": true,
+            "name": "brai_artifacts_private"
+          },
+          "database": {
+            "external": true,
+            "name": "brai_database_private"
+          },
+          "mcp": {
+            "external": true,
+            "name": "brai_mcp"
+          },
+          "messaging": {
+            "external": true,
+            "name": "brai_nats_private"
+          }
+        },
+        "services": {
+          "artifacts": {
+            "command": null,
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai-artifacts/artifacts.env"
+            ],
+            "image": "ghcr.io/q-fox-labs/brai-components/artifacts@sha256:abfeb1e45c7ad0624f49165eb4cef41e5f8ad7dd2dbf3c0c5ee0b5f66c514de4",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:abfeb1e45c7ad0624f49165eb4cef41e5f8ad7dd2dbf3c0c5ee0b5f66c514de4",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "networks": {
+              "artifacts_private": null,
+              "database": null,
+              "messaging": null
+            },
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/artifacts/abfeb1e45c7ad0624f49165eb4cef41e5f8ad7dd2dbf3c0c5ee0b5f66c514de4",
+                "target": "/payload",
+                "type": "bind"
+              },
+              {
+                "source": "artifacts_data",
+                "target": "/var/lib/brai-artifacts",
+                "type": "volume"
+              }
+            ],
+            "working_dir": "/payload/services/artifacts"
+          },
+          "artifacts-files": {
+            "command": [
+              "caddy",
+              "run",
+              "--config",
+              "/etc/caddy/Caddyfile",
+              "--adapter",
+              "caddyfile"
+            ],
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai-artifacts/artifacts-files.env"
+            ],
+            "healthcheck": {
+              "interval": "30s",
+              "retries": 3,
+              "start_period": "5s",
+              "test": [
+                "CMD-SHELL",
+                "wget -q -O /dev/null http://127.0.0.1:9080/health"
+              ],
+              "timeout": "6s"
+            },
+            "image": "caddy:2.11.4-alpine",
+            "init": true,
+            "networks": {
+              "artifacts_private": null
+            },
+            "ports": [
+              {
+                "host_ip": "172.30.58.1",
+                "mode": "ingress",
+                "protocol": "tcp",
+                "published": "9080",
+                "target": 9080
+              }
+            ],
+            "pull_policy": "never",
+            "read_only": true,
+            "restart": "unless-stopped",
+            "tmpfs": [
+              "/config:uid=1000,gid=1000,mode=0750",
+              "/data:uid=1000,gid=1000,mode=0750"
+            ],
+            "user": "1000:1000",
+            "volumes": [
+              {
+                "bind": {},
+                "read_only": true,
+                "source": "/srv/projects/brai/deploy/Caddyfile.artifacts-files",
+                "target": "/etc/caddy/Caddyfile",
+                "type": "bind"
+              },
+              {
+                "read_only": true,
+                "source": "artifacts_data",
+                "target": "/srv/artifacts",
+                "type": "volume",
+                "volume": {
+                  "subpath": "files"
+                }
+              }
+            ]
+          },
+          "artifacts-mcp": {
+            "command": [
+              "node",
+              "dist/mcp.js"
+            ],
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai-artifacts/artifacts-mcp.env"
+            ],
+            "image": "ghcr.io/q-fox-labs/brai-components/artifacts@sha256:abfeb1e45c7ad0624f49165eb4cef41e5f8ad7dd2dbf3c0c5ee0b5f66c514de4",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:abfeb1e45c7ad0624f49165eb4cef41e5f8ad7dd2dbf3c0c5ee0b5f66c514de4",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "networks": {
+              "mcp": null,
+              "messaging": null
+            },
+            "ports": [
+              {
+                "host_ip": "127.0.0.1",
+                "mode": "ingress",
+                "protocol": "tcp",
+                "published": "3005",
+                "target": 3005
+              }
+            ],
+            "profiles": [
+              "artifacts-mcp"
+            ],
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/artifacts/abfeb1e45c7ad0624f49165eb4cef41e5f8ad7dd2dbf3c0c5ee0b5f66c514de4",
+                "target": "/payload",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/payload/services/artifacts"
+          },
+          "artifacts-migrate": {
+            "command": [
+              "node",
+              "dist/migrate.js"
+            ],
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai-artifacts/artifacts-migrate.env"
+            ],
+            "image": "ghcr.io/q-fox-labs/brai-components/artifacts@sha256:abfeb1e45c7ad0624f49165eb4cef41e5f8ad7dd2dbf3c0c5ee0b5f66c514de4",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:abfeb1e45c7ad0624f49165eb4cef41e5f8ad7dd2dbf3c0c5ee0b5f66c514de4",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "networks": {
+              "database": null
+            },
+            "profiles": [
+              "migration"
+            ],
+            "pull_policy": "never",
+            "restart": "no",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/artifacts/abfeb1e45c7ad0624f49165eb4cef41e5f8ad7dd2dbf3c0c5ee0b5f66c514de4",
+                "target": "/payload",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/payload/services/artifacts"
+          }
+        },
+        "volumes": {
+          "artifacts_data": {
+            "external": true,
+            "name": "brai_artifacts_data"
+          }
+        }
+      },
+      "group": "applications"
+    },
+    "brai-history": {
+      "document": {
+        "name": "brai-history",
+        "networks": {
+          "database": {
+            "external": true,
+            "name": "brai_database_private"
+          },
+          "messaging": {
+            "external": true,
+            "name": "brai_nats_private"
+          }
+        },
+        "services": {
+          "history": {
+            "command": null,
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai-history/history.env"
+            ],
+            "image": "ghcr.io/q-fox-labs/brai-components/history@sha256:29fc8c2d4c053488c130b4424bbb7c10467aec67d3782416fb7686313d97fd4c",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:29fc8c2d4c053488c130b4424bbb7c10467aec67d3782416fb7686313d97fd4c",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "networks": {
+              "database": null,
+              "messaging": null
+            },
+            "ports": [
+              {
+                "host_ip": "127.0.0.1",
+                "mode": "ingress",
+                "protocol": "tcp",
+                "published": "19341",
+                "target": 3006
+              }
+            ],
+            "pull_policy": "never",
+            "read_only": true,
+            "restart": "unless-stopped",
+            "user": "1000:1000",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/history/29fc8c2d4c053488c130b4424bbb7c10467aec67d3782416fb7686313d97fd4c",
+                "target": "/payload",
+                "type": "bind"
+              },
+              {
+                "bind": {},
+                "read_only": true,
+                "source": "/srv/projects/brai/.secrets/history_cursor_hmac_key",
+                "target": "/run/secrets/history_cursor_hmac_key",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/payload/services/history"
+          },
+          "history-migrate": {
+            "command": [
+              "node",
+              "dist/migrate.js"
+            ],
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai-history/history-migrate.env"
+            ],
+            "image": "ghcr.io/q-fox-labs/brai-components/history@sha256:29fc8c2d4c053488c130b4424bbb7c10467aec67d3782416fb7686313d97fd4c",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:29fc8c2d4c053488c130b4424bbb7c10467aec67d3782416fb7686313d97fd4c",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "networks": {
+              "database": null
+            },
+            "profiles": [
+              "migration"
+            ],
+            "pull_policy": "never",
+            "restart": "no",
+            "user": "1000:1000",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/history/29fc8c2d4c053488c130b4424bbb7c10467aec67d3782416fb7686313d97fd4c",
+                "target": "/payload",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/payload/services/history"
+          }
+        }
+      },
+      "group": "applications"
+    },
+    "brai-infrastructure": {
+      "document": {
+        "networks": {
+          "brai_artifacts_private": {
+            "external": true,
+            "name": "brai_artifacts_private"
+          },
+          "brai_database_private": {
+            "external": true,
+            "name": "brai_database_private"
+          },
+          "brai_frontend": {
+            "external": true,
+            "name": "brai_frontend"
+          },
+          "brai_nats_private": {
+            "external": true,
+            "name": "brai_nats_private"
+          },
+          "brai_supabase": {
+            "external": true,
+            "name": "brai_supabase"
+          }
+        },
+        "services": {
+          "caddy": {
+            "command": [
+              "caddy",
+              "run",
+              "--config",
+              "/etc/caddy/Caddyfile",
+              "--adapter",
+              "caddyfile"
+            ],
+            "container_name": "caddy",
+            "env_file": [
+              "/etc/brai-install/env/brai-infrastructure/caddy.env"
+            ],
+            "extra_hosts": [
+              "host.docker.internal:host-gateway"
+            ],
+            "image": "sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b",
+            "networks": {
+              "brai_artifacts_private": {
+                "aliases": [],
+                "ipv4_address": "172.30.58.5"
+              },
+              "brai_frontend": {
+                "aliases": [],
+                "ipv4_address": "172.22.0.3"
+              }
+            },
+            "ports": [
+              {
+                "host_ip": "0.0.0.0",
+                "protocol": "tcp",
+                "published": "443",
+                "target": 443
+              },
+              {
+                "host_ip": "0.0.0.0",
+                "protocol": "udp",
+                "published": "443",
+                "target": 443
+              },
+              {
+                "host_ip": "0.0.0.0",
+                "protocol": "tcp",
+                "published": "80",
+                "target": 80
+              }
+            ],
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "shm_size": 67108864,
+            "volumes": [
+              {
+                "read_only": false,
+                "source": "caddy_caddy_config",
+                "target": "/config",
+                "type": "volume"
+              },
+              {
+                "read_only": false,
+                "source": "caddy_caddy_data",
+                "target": "/data",
+                "type": "volume"
+              },
+              {
+                "read_only": true,
+                "source": "/etc/brai/caddy/Caddyfile",
+                "target": "/etc/caddy/Caddyfile",
+                "type": "bind"
+              },
+              {
+                "read_only": true,
+                "source": "/srv/projects/brai/deploy/Caddyfile.agent-attachments",
+                "target": "/etc/caddy/artifact-attachments.caddy",
+                "type": "bind"
+              },
+              {
+                "read_only": true,
+                "source": "/etc/brai/caddy/extra",
+                "target": "/etc/caddy/extra",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/srv"
+          },
+          "nats": {
+            "command": [
+              "-c",
+              "/etc/nats/nats.conf"
+            ],
+            "container_name": "nats",
+            "entrypoint": [
+              "/nats-server"
+            ],
+            "env_file": [
+              "/etc/brai-install/env/brai-infrastructure/nats.env"
+            ],
+            "image": "sha256:cd3fcd4ecdda44e3a66728a5334af0a959bc3979b32810e033d1c547241cd0f4",
+            "networks": {
+              "brai_nats_private": {
+                "aliases": [],
+                "ipv4_address": "172.21.0.3"
+              }
+            },
+            "ports": [
+              {
+                "host_ip": "127.0.0.1",
+                "protocol": "tcp",
+                "published": "4222",
+                "target": 4222
+              }
+            ],
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "shm_size": 67108864,
+            "volumes": [
+              {
+                "read_only": false,
+                "source": "nats_nats_data",
+                "target": "/data",
+                "type": "volume"
+              },
+              {
+                "read_only": true,
+                "source": "/etc/brai/alerts-candidate/nats.conf",
+                "target": "/etc/nats/nats.conf",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/"
+          },
+          "realtime-dev.supabase-realtime": {
+            "command": [
+              "/app/bin/server"
+            ],
+            "container_name": "realtime-dev.supabase-realtime",
+            "entrypoint": [
+              "/usr/bin/tini",
+              "-s",
+              "-g",
+              "--",
+              "/app/run.sh"
+            ],
+            "env_file": [
+              "/etc/brai-install/env/brai-infrastructure/realtime-dev.supabase-realtime.env"
+            ],
+            "healthcheck": {
+              "interval": "30000000000ns",
+              "retries": 3,
+              "start_period": "10000000000ns",
+              "test": [
+                "CMD-SHELL",
+                "curl -sSfL --head -o /dev/null -H \"Authorization: Bearer $$ANON_KEY\" http://localhost:4000/api/tenants/realtime-dev/health"
+              ],
+              "timeout": "5000000000ns"
+            },
+            "image": "sha256:cbcc6a7986fc28b6dcffa798b077d5fb9c69cd25500371ab49147a86d7edbb03",
+            "networks": {
+              "brai_supabase": {
+                "aliases": [
+                  "realtime"
+                ],
+                "ipv4_address": "172.20.0.7"
+              }
+            },
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "shm_size": 67108864,
+            "volumes": [],
+            "working_dir": "/app"
+          },
+          "supabase-auth": {
+            "command": [
+              "auth"
+            ],
+            "container_name": "supabase-auth",
+            "env_file": [
+              "/etc/brai-install/env/brai-infrastructure/supabase-auth.env"
+            ],
+            "healthcheck": {
+              "interval": "5000000000ns",
+              "retries": 3,
+              "test": [
+                "CMD",
+                "wget",
+                "--no-verbose",
+                "--tries=1",
+                "--spider",
+                "http://localhost:9999/health"
+              ],
+              "timeout": "5000000000ns"
+            },
+            "image": "sha256:c0c25187a6b835e65a6f6e6c6b39d090e832d40e6de5186f2c038e0411944232",
+            "networks": {
+              "brai_supabase": {
+                "aliases": [
+                  "auth"
+                ],
+                "ipv4_address": "172.20.0.9"
+              }
+            },
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "shm_size": 67108864,
+            "user": "supabase",
+            "volumes": [],
+            "working_dir": "/"
+          },
+          "supabase-db": {
+            "command": [
+              "postgres",
+              "-c",
+              "config_file=/etc/postgresql/postgresql.conf",
+              "-c",
+              "log_min_messages=fatal"
+            ],
+            "container_name": "supabase-db",
+            "entrypoint": [
+              "docker-entrypoint.sh"
+            ],
+            "env_file": [
+              "/etc/brai-install/env/brai-infrastructure/supabase-db.env"
+            ],
+            "healthcheck": {
+              "interval": "5000000000ns",
+              "retries": 10,
+              "test": [
+                "CMD",
+                "pg_isready",
+                "-U",
+                "postgres",
+                "-h",
+                "localhost"
+              ],
+              "timeout": "5000000000ns"
+            },
+            "image": "sha256:f371b5f3f2ac0a05703f33d6e6134515fb2498cab708fb948a0aeb7481467c00",
+            "networks": {
+              "brai_database_private": {
+                "aliases": [
+                  "db"
+                ],
+                "ipv4_address": "172.23.0.7"
+              },
+              "brai_supabase": {
+                "aliases": [
+                  "db"
+                ],
+                "ipv4_address": "172.20.0.4"
+              }
+            },
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "shm_size": 67108864,
+            "volumes": [
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/db/webhooks.sql",
+                "target": "/docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql",
+                "type": "bind"
+              },
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/db/jwt.sql",
+                "target": "/docker-entrypoint-initdb.d/init-scripts/99-jwt.sql",
+                "type": "bind"
+              },
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/db/roles.sql",
+                "target": "/docker-entrypoint-initdb.d/init-scripts/99-roles.sql",
+                "type": "bind"
+              },
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/db/_supabase.sql",
+                "target": "/docker-entrypoint-initdb.d/migrations/97-_supabase.sql",
+                "type": "bind"
+              },
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/db/logs.sql",
+                "target": "/docker-entrypoint-initdb.d/migrations/99-logs.sql",
+                "type": "bind"
+              },
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/db/pooler.sql",
+                "target": "/docker-entrypoint-initdb.d/migrations/99-pooler.sql",
+                "type": "bind"
+              },
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/db/realtime.sql",
+                "target": "/docker-entrypoint-initdb.d/migrations/99-realtime.sql",
+                "type": "bind"
+              },
+              {
+                "read_only": false,
+                "source": "supabase_db-config",
+                "target": "/etc/postgresql-custom",
+                "type": "volume"
+              },
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/db/data",
+                "target": "/var/lib/postgresql/data",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/"
+          },
+          "supabase-edge-functions": {
+            "command": [
+              "start",
+              "--main-service",
+              "/home/deno/functions/main"
+            ],
+            "container_name": "supabase-edge-functions",
+            "entrypoint": [
+              "edge-runtime"
+            ],
+            "env_file": [
+              "/etc/brai-install/env/brai-infrastructure/supabase-edge-functions.env"
+            ],
+            "healthcheck": {
+              "interval": "5000000000ns",
+              "retries": 3,
+              "test": [
+                "CMD-SHELL",
+                "timeout 1 bash -c '</dev/tcp/127.0.0.1/9000'"
+              ],
+              "timeout": "5000000000ns"
+            },
+            "image": "sha256:edd22bef4477b900d5c300e287ce9b18bff9b81a0291bee14ee0b7c7b71a2899",
+            "networks": {
+              "brai_supabase": {
+                "aliases": [
+                  "functions"
+                ],
+                "ipv4_address": "172.20.0.12"
+              }
+            },
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "shm_size": 67108864,
+            "volumes": [
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/functions",
+                "target": "/home/deno/functions",
+                "type": "bind"
+              },
+              {
+                "read_only": false,
+                "source": "supabase_deno-cache",
+                "target": "/root/.cache/deno",
+                "type": "volume"
+              }
+            ]
+          },
+          "supabase-envoy": {
+            "container_name": "supabase-envoy",
+            "entrypoint": [
+              "/bin/sh",
+              "/docker-entrypoint.sh"
+            ],
+            "env_file": [
+              "/etc/brai-install/env/brai-infrastructure/supabase-envoy.env"
+            ],
+            "healthcheck": {
+              "interval": "10000000000ns",
+              "retries": 3,
+              "test": [
+                "CMD-SHELL",
+                "timeout 1 bash -c '</dev/tcp/127.0.0.1/8000'"
+              ],
+              "timeout": "5000000000ns"
+            },
+            "image": "sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4",
+            "networks": {
+              "brai_supabase": {
+                "aliases": [
+                  "api-gw",
+                  "envoy",
+                  "kong"
+                ],
+                "ipv4_address": "172.20.0.11"
+              }
+            },
+            "ports": [
+              {
+                "host_ip": "127.0.0.1",
+                "protocol": "tcp",
+                "published": "8000",
+                "target": 8000
+              }
+            ],
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "shm_size": 67108864,
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/supabase/deployment/volumes/api/envoy/docker-entrypoint.sh",
+                "target": "/docker-entrypoint.sh",
+                "type": "bind"
+              },
+              {
+                "read_only": true,
+                "source": "/opt/supabase/deployment/volumes/api/envoy/cds.yaml",
+                "target": "/etc/envoy/cds.yaml",
+                "type": "bind"
+              },
+              {
+                "read_only": true,
+                "source": "/opt/supabase/deployment/volumes/api/envoy/envoy.yaml",
+                "target": "/etc/envoy/envoy.yaml",
+                "type": "bind"
+              },
+              {
+                "read_only": true,
+                "source": "/opt/supabase/deployment/volumes/api/envoy/lds.template.yaml",
+                "target": "/etc/envoy/lds.template.yaml",
+                "type": "bind"
+              }
+            ]
+          },
+          "supabase-imgproxy": {
+            "command": [
+              "imgproxy"
+            ],
+            "container_name": "supabase-imgproxy",
+            "entrypoint": [
+              "entrypoint.sh"
+            ],
+            "env_file": [
+              "/etc/brai-install/env/brai-infrastructure/supabase-imgproxy.env"
+            ],
+            "healthcheck": {
+              "interval": "5000000000ns",
+              "retries": 3,
+              "test": [
+                "CMD",
+                "imgproxy",
+                "health"
+              ],
+              "timeout": "5000000000ns"
+            },
+            "image": "sha256:73c5dda13199745b0d2d00e4149d4a589c5b2e205dbf335ca05eca8276b54712",
+            "networks": {
+              "brai_supabase": {
+                "aliases": [
+                  "imgproxy"
+                ],
+                "ipv4_address": "172.20.0.5"
+              }
+            },
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "shm_size": 67108864,
+            "user": "999",
+            "volumes": [
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/storage",
+                "target": "/var/lib/storage",
+                "type": "bind"
+              }
+            ]
+          },
+          "supabase-meta": {
+            "command": [
+              "node",
+              "dist/server/server.js"
+            ],
+            "container_name": "supabase-meta",
+            "entrypoint": [
+              "docker-entrypoint.sh"
+            ],
+            "env_file": [
+              "/etc/brai-install/env/brai-infrastructure/supabase-meta.env"
+            ],
+            "healthcheck": {
+              "interval": "5000000000ns",
+              "retries": 3,
+              "test": [
+                "CMD-SHELL",
+                "node -e \"fetch('http://localhost:8080/health').then((r) => {if (r.status !== 200) throw new Error(r.status)})\""
+              ],
+              "timeout": "5000000000ns"
+            },
+            "image": "sha256:88dc4f4e9b8a6da5795e8f1af1ff04bbf4d46114854364c6a357ea535e699be8",
+            "networks": {
+              "brai_supabase": {
+                "aliases": [
+                  "meta"
+                ],
+                "ipv4_address": "172.20.0.3"
+              }
+            },
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "shm_size": 67108864,
+            "volumes": [],
+            "working_dir": "/usr/src/app"
+          },
+          "supabase-pooler": {
+            "command": [
+              "/bin/sh",
+              "-c",
+              "/app/bin/migrate && /app/bin/supavisor eval \"$(cat /etc/pooler/pooler.exs)\" && /app/bin/server"
+            ],
+            "container_name": "supabase-pooler",
+            "entrypoint": [
+              "/usr/bin/tini",
+              "-s",
+              "-g",
+              "--",
+              "/app/limits.sh"
+            ],
+            "env_file": [
+              "/etc/brai-install/env/brai-infrastructure/supabase-pooler.env"
+            ],
+            "healthcheck": {
+              "interval": "10000000000ns",
+              "retries": 10,
+              "start_period": "30000000000ns",
+              "test": [
+                "CMD",
+                "curl",
+                "-sSfL",
+                "--head",
+                "-o",
+                "/dev/null",
+                "http://127.0.0.1:4000/api/health"
+              ],
+              "timeout": "5000000000ns"
+            },
+            "image": "sha256:464b93a60ba8c96bc06dad7f241562d6613b2a994922307717b05f432ae415c2",
+            "networks": {
+              "brai_supabase": {
+                "aliases": [
+                  "supavisor"
+                ],
+                "ipv4_address": "172.20.0.8"
+              }
+            },
+            "ports": [
+              {
+                "host_ip": "127.0.0.1",
+                "protocol": "tcp",
+                "published": "5432",
+                "target": 5432
+              },
+              {
+                "host_ip": "127.0.0.1",
+                "protocol": "tcp",
+                "published": "6543",
+                "target": 6543
+              }
+            ],
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "shm_size": 67108864,
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/supabase/deployment/volumes/pooler/pooler.exs",
+                "target": "/etc/pooler/pooler.exs",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/app"
+          },
+          "supabase-rest": {
+            "command": [
+              "postgrest"
+            ],
+            "container_name": "supabase-rest",
+            "env_file": [
+              "/etc/brai-install/env/brai-infrastructure/supabase-rest.env"
+            ],
+            "healthcheck": {
+              "interval": "5000000000ns",
+              "retries": 3,
+              "test": [
+                "CMD",
+                "postgrest",
+                "--ready"
+              ],
+              "timeout": "5000000000ns"
+            },
+            "image": "sha256:c9dc201e555f5d8e37e7f39cdd4df0229774996e213bfd7de8d10ac609030f2c",
+            "networks": {
+              "brai_supabase": {
+                "aliases": [
+                  "rest"
+                ],
+                "ipv4_address": "172.20.0.6"
+              }
+            },
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "shm_size": 67108864,
+            "user": "1000",
+            "volumes": []
+          },
+          "supabase-storage": {
+            "command": [
+              "node",
+              "dist/start/server.js"
+            ],
+            "container_name": "supabase-storage",
+            "entrypoint": [
+              "docker-entrypoint.sh"
+            ],
+            "env_file": [
+              "/etc/brai-install/env/brai-infrastructure/supabase-storage.env"
+            ],
+            "healthcheck": {
+              "interval": "5000000000ns",
+              "retries": 3,
+              "start_period": "10000000000ns",
+              "test": [
+                "CMD",
+                "wget",
+                "--no-verbose",
+                "--tries=1",
+                "--spider",
+                "http://storage:5000/status"
+              ],
+              "timeout": "5000000000ns"
+            },
+            "image": "sha256:149ba12428cc3ed0d120615decea5d9b1b97020fcc20db247cdc0bb35b2d099d",
+            "networks": {
+              "brai_supabase": {
+                "aliases": [
+                  "storage"
+                ],
+                "ipv4_address": "172.20.0.2"
+              }
+            },
+            "pull_policy": "never",
+            "restart": "unless-stopped",
+            "shm_size": 67108864,
+            "volumes": [
+              {
+                "read_only": false,
+                "source": "/opt/supabase/deployment/volumes/storage",
+                "target": "/var/lib/storage",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/app"
+          }
+        },
+        "volumes": {
+          "caddy_caddy_config": {
+            "external": true,
+            "name": "caddy_caddy_config"
+          },
+          "caddy_caddy_data": {
+            "external": true,
+            "name": "caddy_caddy_data"
+          },
+          "nats_nats_data": {
+            "external": true,
+            "name": "nats_nats_data"
+          },
+          "supabase_db-config": {
+            "external": true,
+            "name": "supabase_db-config"
+          },
+          "supabase_deno-cache": {
+            "external": true,
+            "name": "supabase_deno-cache"
+          }
+        }
+      },
+      "group": "infrastructure"
+    },
+    "brai-local-ai-op3-8683b1d1": {
+      "document": {
+        "name": "brai-local-ai-op3-8683b1d1",
+        "networks": {
+          "artifacts": {
+            "external": true,
+            "name": "brai_artifacts_private"
+          },
+          "database": {
+            "external": true,
+            "name": "brai_database_private"
+          },
+          "nats": {
+            "external": true,
+            "name": "brai_nats_private"
+          }
+        },
+        "services": {
+          "local_ai": {
+            "cap_drop": [
+              "ALL"
+            ],
+            "command": null,
+            "container_name": "brai-local-ai-op3-main-8683b1d1",
+            "cpus": 4,
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai-local-ai-op3-8683b1d1/local_ai.env"
+            ],
+            "image": "sha256:f046b512ba69f5d27e7a601b9c83887a9b46f7c92342187cad17424787f89a26",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:b8443ee9371e0841a660c00ce22f0a57f484c7b8da07b52722e0707fced0d74a",
+              "com.brai.local-ai.release": "65dbcd2559464ab3f08fac5a1d7ecee85f889a09",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "mem_limit": "6442450944",
+            "memswap_limit": "6442450944",
+            "networks": {
+              "artifacts": {},
+              "database": {},
+              "nats": {}
+            },
+            "pids_limit": 128,
+            "platform": "linux/amd64",
+            "pull_policy": "never",
+            "read_only": true,
+            "restart": "unless-stopped",
+            "security_opt": [
+              "no-new-privileges:true"
+            ],
+            "tmpfs": [
+              "/var/lib/brai/local-ai/tmp:rw,noexec,nosuid,nodev,size=100663296,uid=1000,gid=1000,mode=0700"
+            ],
+            "user": "1000:1000",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/local-ai/b8443ee9371e0841a660c00ce22f0a57f484c7b8da07b52722e0707fced0d74a",
+                "target": "/opt/brai/local-ai/app",
+                "type": "bind"
+              },
+              {
+                "source": "/var/lib/brai/local-ai/operation3/production/30e6c4c8bd19850e94b73f50192ad8b7310a0b92/8683b1d1-5222-473e-b9be-3445432f22e4/home",
+                "target": "/var/lib/brai/local-ai/operation3/production/30e6c4c8bd19850e94b73f50192ad8b7310a0b92/8683b1d1-5222-473e-b9be-3445432f22e4/home",
+                "type": "bind"
+              },
+              {
+                "read_only": true,
+                "source": "/var/lib/brai/local-ai/releases/production/23c7a3be-c3c6-4c4f-9a96-b03fbba6c59c/accepted-hf/context/payload/hf-modules-cache",
+                "target": "/var/lib/brai/local-ai/operation3/production/30e6c4c8bd19850e94b73f50192ad8b7310a0b92/8683b1d1-5222-473e-b9be-3445432f22e4/home/huggingface/modules",
+                "type": "bind"
+              },
+              {
+                "source": "/var/lib/brai/local-ai/operation3/production/30e6c4c8bd19850e94b73f50192ad8b7310a0b92/8683b1d1-5222-473e-b9be-3445432f22e4/models",
+                "target": "/var/lib/brai/local-ai/operation3/production/30e6c4c8bd19850e94b73f50192ad8b7310a0b92/8683b1d1-5222-473e-b9be-3445432f22e4/models",
+                "type": "bind"
+              },
+              {
+                "read_only": true,
+                "source": "/var/lib/brai/local-ai/vad/e66f3d3b9eb0873085418a7b813d3b369bf160bb",
+                "target": "/var/lib/brai/local-ai/vad/e66f3d3b9eb0873085418a7b813d3b369bf160bb",
+                "type": "bind"
+              }
+            ]
+          }
+        }
+      },
+      "group": "applications"
+    },
+    "brai-transcription-production": {
+      "document": {
+        "name": "brai-transcription-production",
+        "networks": {
+          "database": {
+            "external": true,
+            "name": "brai_database_private"
+          },
+          "messaging": {
+            "external": true,
+            "name": "brai_nats_private"
+          }
+        },
+        "services": {
+          "transcription": {
+            "cap_drop": [
+              "ALL"
+            ],
+            "command": [
+              "node",
+              "/run/codeworks-transcription.mjs"
+            ],
+            "container_name": "brai-transcription-production",
+            "cpus": 1,
+            "entrypoint": null,
+            "env_file": [
+              "/etc/brai-install/env/brai-transcription-production/transcription.env"
+            ],
+            "healthcheck": {
+              "interval": "10s",
+              "retries": 12,
+              "start_period": "15s",
+              "test": [
+                "CMD",
+                "node",
+                "-e",
+                "const b=JSON.parse(process.env.TRANSCRIPTION_AUTH_BINDINGS_JSON).find(x=>x.principal.ownerId==='brai-transcription-production');fetch('http://127.0.0.1:19342/v1/transcription/settings.get',{method:'POST',headers:{'content-type':'application/json',Authorization:'Bearer '+b.token},body:'{}',signal:AbortSignal.timeout(5000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+              ],
+              "timeout": "8s"
+            },
+            "image": "ghcr.io/q-fox-labs/brai-components/transcription@sha256:ee7afc97026f491e2cce8582543843247621c95f6b049271ddb12f7b847cca83",
+            "init": true,
+            "labels": {
+              "app.brai.codeworks.digest": "sha256:ee7afc97026f491e2cce8582543843247621c95f6b049271ddb12f7b847cca83",
+              "org.opencontainers.image.revision": "78fd658d88d3ecb812bb72f844f2b19a61663225"
+            },
+            "mem_limit": "536870912",
+            "networks": {
+              "database": null,
+              "messaging": null
+            },
+            "pids_limit": 128,
+            "ports": [
+              {
+                "host_ip": "127.0.0.1",
+                "mode": "ingress",
+                "protocol": "tcp",
+                "published": "19342",
+                "target": 19342
+              }
+            ],
+            "pull_policy": "never",
+            "read_only": true,
+            "restart": "unless-stopped",
+            "security_opt": [
+              "no-new-privileges:true"
+            ],
+            "tmpfs": [
+              "/tmp:size=16777216,mode=1777"
+            ],
+            "user": "1000:1000",
+            "volumes": [
+              {
+                "read_only": true,
+                "source": "/opt/brai-components/transcription/ee7afc97026f491e2cce8582543843247621c95f6b049271ddb12f7b847cca83",
+                "target": "/payload",
+                "type": "bind"
+              },
+              {
+                "read_only": true,
+                "source": "/var/lib/brai-install/transcription-launch.mjs",
+                "target": "/run/codeworks-transcription.mjs",
+                "type": "bind"
+              }
+            ],
+            "working_dir": "/payload"
+          }
+        }
+      },
+      "group": "applications"
+    }
+  },
+  "role_memberships": [
+    {
+      "member": "postgres",
+      "role": "pg_read_all_data"
+    },
+    {
+      "member": "postgres",
+      "role": "pg_monitor"
+    },
+    {
+      "member": "postgres",
+      "role": "pg_signal_backend"
+    },
+    {
+      "member": "postgres",
+      "role": "pg_create_subscription"
+    },
+    {
+      "member": "postgres",
+      "role": "authenticator"
+    },
+    {
+      "member": "postgres",
+      "role": "supabase_functions_admin"
+    },
+    {
+      "member": "authenticator",
+      "role": "authenticated"
+    },
+    {
+      "member": "postgres",
+      "role": "authenticated"
+    },
+    {
+      "member": "authenticator",
+      "role": "anon"
+    },
+    {
+      "member": "postgres",
+      "role": "anon"
+    },
+    {
+      "member": "authenticator",
+      "role": "service_role"
+    },
+    {
+      "member": "postgres",
+      "role": "service_role"
+    },
+    {
+      "member": "postgres",
+      "role": "supabase_privileged_role"
+    },
+    {
+      "member": "postgres",
+      "role": "history_owner"
+    },
+    {
+      "member": "postgres",
+      "role": "history_app"
+    },
+    {
+      "member": "postgres",
+      "role": "history_web"
+    }
+  ],
+  "runtime_images": {},
+  "scope": "product",
+  "source_revisions": {
+    "prod": "c8ff46145618c44f3103dd8caa7cb26debc34fb5"
+  },
+  "streams": {
+    "prod": [
+      {
+        "config": {
+          "allow_direct": false,
+          "allow_msg_ttl": false,
+          "allow_rollup_hdrs": false,
+          "compression": "none",
+          "consumer_limits": {},
+          "deny_delete": false,
+          "deny_purge": false,
+          "discard": "new",
+          "duplicate_window": 120000000000,
+          "max_age": 0,
+          "max_bytes": 268435456,
+          "max_consumers": -1,
+          "max_msg_size": 65536,
+          "max_msgs": -1,
+          "max_msgs_per_subject": -1,
+          "metadata": {
+            "_nats.req.level": "0"
+          },
+          "mirror_direct": false,
+          "name": "BRAI_ALERTS_INGEST_V1",
+          "num_replicas": 1,
+          "retention": "workqueue",
+          "sealed": false,
+          "storage": "file",
+          "subjects": [
+            "brai.alerts.v1.ingest"
+          ]
+        },
+        "consumers": [
+          {
+            "ack_policy": "explicit",
+            "ack_wait": 30000000000,
+            "deliver_policy": "all",
+            "durable_name": "alerts_ingest",
+            "filter_subject": "brai.alerts.v1.ingest",
+            "max_ack_pending": 8,
+            "max_deliver": -1,
+            "max_waiting": 512,
+            "metadata": {
+              "_nats.req.level": "0"
+            },
+            "name": "alerts_ingest",
+            "num_replicas": 0,
+            "replay_policy": "instant"
+          }
+        ]
+      },
+      {
+        "config": {
+          "allow_direct": false,
+          "allow_msg_ttl": false,
+          "allow_rollup_hdrs": false,
+          "compression": "none",
+          "consumer_limits": {},
+          "deny_delete": false,
+          "deny_purge": false,
+          "discard": "new",
+          "duplicate_window": 120000000000,
+          "max_age": 0,
+          "max_bytes": 268435456,
+          "max_consumers": -1,
+          "max_msg_size": -1,
+          "max_msgs": -1,
+          "max_msgs_per_subject": -1,
+          "metadata": {
+            "_nats.req.level": "0"
+          },
+          "mirror_direct": false,
+          "name": "BRAI_TIMER_COMMANDS_V2",
+          "num_replicas": 1,
+          "retention": "workqueue",
+          "sealed": false,
+          "storage": "file",
+          "subjects": [
+            "brai.timer.v2.command.*"
+          ]
+        },
+        "consumers": [
+          {
+            "ack_policy": "explicit",
+            "ack_wait": 30000000000,
+            "deliver_policy": "all",
+            "durable_name": "timer_commands",
+            "filter_subject": "brai.timer.v2.command.*",
+            "max_ack_pending": 1,
+            "max_deliver": -1,
+            "max_waiting": 512,
+            "metadata": {
+              "_nats.req.level": "0"
+            },
+            "name": "timer_commands",
+            "num_replicas": 0,
+            "replay_policy": "instant"
+          }
+        ]
+      },
+      {
+        "config": {
+          "allow_direct": false,
+          "allow_msg_ttl": false,
+          "allow_rollup_hdrs": false,
+          "compression": "none",
+          "consumer_limits": {},
+          "deny_delete": false,
+          "deny_purge": false,
+          "discard": "old",
+          "duplicate_window": 120000000000,
+          "max_age": 604800000000000,
+          "max_bytes": 67108864,
+          "max_consumers": -1,
+          "max_msg_size": -1,
+          "max_msgs": -1,
+          "max_msgs_per_subject": -1,
+          "metadata": {
+            "_nats.req.level": "0"
+          },
+          "mirror_direct": false,
+          "name": "BRAI_TIMER_EVENTS_V2",
+          "num_replicas": 1,
+          "retention": "limits",
+          "sealed": false,
+          "storage": "file",
+          "subjects": [
+            "brai.timer.v2.event.*"
+          ]
+        },
+        "consumers": [
+          {
+            "ack_policy": "explicit",
+            "ack_wait": 30000000000,
+            "deliver_policy": "all",
+            "durable_name": "web_events",
+            "filter_subject": "brai.timer.v2.event.*",
+            "max_ack_pending": 64,
+            "max_deliver": -1,
+            "max_waiting": 512,
+            "metadata": {
+              "_nats.req.level": "0"
+            },
+            "name": "web_events",
+            "num_replicas": 0,
+            "replay_policy": "instant"
+          }
+        ]
+      }
+    ]
+  },
+  "unresolved": [],
+  "volume_permissions": {
+    "brai_artifacts_data": {
+      "gid": 1000,
+      "mode": 488,
+      "uid": 1000
+    },
+    "caddy_caddy_config": {
+      "gid": 0,
+      "mode": 493,
+      "uid": 0
+    },
+    "caddy_caddy_data": {
+      "gid": 0,
+      "mode": 493,
+      "uid": 0
+    },
+    "nats_nats_data": {
+      "gid": 0,
+      "mode": 493,
+      "uid": 0
+    },
+    "supabase_db-config": {
+      "gid": 101,
+      "mode": 493,
+      "uid": 100
+    },
+    "supabase_deno-cache": {
+      "gid": 0,
+      "mode": 493,
+      "uid": 0
+    }
+  },
+  "volumes": [
+    "brai_artifacts_data",
+    "caddy_caddy_config",
+    "caddy_caddy_data",
+    "nats_nats_data",
+    "supabase_db-config",
+    "supabase_deno-cache"
+  ]
+}
