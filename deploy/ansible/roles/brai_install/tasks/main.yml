@@ -1,0 +1,62 @@
+# ABOUTME: Выполняет общие этапы установки продукта и его явных дополнений.
+# ABOUTME: Рецепты PROD используются обоими плейбуками без копирования.
+---
+- name: Admit the installation before applying configuration
+  ansible.builtin.import_tasks: admission.yml
+
+- name: Install minimum client host prerequisites
+  ansible.builtin.include_tasks: bootstrap.yml
+  when: brai_install_bootstrap | bool
+
+- name: Install shared runtime helpers
+  ansible.builtin.copy:
+    src: '{{ item }}'
+    dest: '{{ brai_install_root }}/{{ item }}'
+    owner: root
+    group: root
+    mode: '{{ "0644" if item == "transcription-launch.mjs" else "0600" }}'
+  loop: [install_server.py, install_models.mjs, validate_render.py, prepare-transformers-cache.py, transcription-launch.mjs, partition.py, prepare_state.py, configure_mcp.py]
+
+- name: Install explicit administrative runner
+  ansible.builtin.copy:
+    src: '{{ brai_install_admin_runner }}'
+    dest: '{{ brai_install_root }}/install_admin.py'
+    owner: root
+    group: root
+    mode: '0600'
+  when: brai_install_administrative | bool
+
+- name: Install explicit administrative migration helper
+  ansible.builtin.copy:
+    src: '{{ brai_install_admin_runner | dirname }}/initialize_codeworks.mjs'
+    dest: '{{ brai_install_root }}/initialize_codeworks.mjs'
+    owner: root
+    group: root
+    mode: '0600'
+  when: brai_install_administrative | bool
+
+- name: Run the common ordered installation stages
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, -B, '{{ brai_install_root }}/{{ "install_admin.py" if brai_install_administrative else "install_server.py" }}', '{{ item }}', --manifest, '{{ brai_install_root }}/baseline.json', --inputs, '{{ brai_install_root }}/inputs.json', --root, '{{ brai_install_root }}']
+  loop: [inputs, sources, infrastructure, databases, migrations, applications, models]
+  no_log: true
+
+- name: Complete and verify standalone product services
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, -B, '{{ brai_install_root }}/install_server.py', '{{ item }}', --manifest, '{{ brai_install_root }}/baseline.json', --inputs, '{{ brai_install_root }}/inputs.json', --root, '{{ brai_install_root }}']
+  loop: [host_services, verify]
+  when: not brai_install_administrative | bool
+  no_log: true
+
+- name: Record standalone completion only after readiness succeeds
+  ansible.builtin.copy:
+    dest: '{{ brai_install_root }}/completed.json'
+    content: '{{ {"format":"brai-clean-install-complete-v1","manifest":brai_install_inputs.manifest_sha256} | to_json }}'
+    owner: root
+    group: root
+    mode: '0600'
+  when: not brai_install_administrative | bool
+
+- name: Install the common read-only verification timer
+  ansible.builtin.include_tasks: verification.yml
+  when: not brai_install_administrative | bool

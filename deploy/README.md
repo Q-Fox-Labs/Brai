@@ -1,5 +1,7 @@
 # Production образы Brai
 
+Установка всего клиентского экземпляра на чистую Ubuntu: [deploy/ansible](ansible/README.md).
+
 `compose.production.yml` собирает web, auth и timer из корня репозитория и запускает их в раздельных контейнерах. Сборка требует закреплённые Node.js и npm из корневого `package.json`. Внешние сети NATS, базы данных и reverse proxy создаёт инфраструктура до запуска стека.
 
 Web подключается к сети NATS и к сети reverse proxy. Auth и timer подключаются к NATS и закрытой сети базы данных. Внешний прокси должен направлять запросы к `web:3000`. Compose публикует web только на loopback хоста. Auth и timer не публикуют порты.

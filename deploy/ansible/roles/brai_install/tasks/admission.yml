@@ -1,0 +1,56 @@
+# ABOUTME: Выполняет общие этапы установки из объявленных источников.
+# ABOUTME: Административный плейбук переиспользует эти задачи с явным дополнением.
+---
+- name: Refuse existing unowned databases before bootstrap
+  ansible.builtin.raw: |
+    set -eu
+    if test ! -f {{ brai_install_root | quote }}/owner.json; then
+      test ! -e /opt/supabase/deployment/volumes/db/data/PG_VERSION
+      test ! -e /etc/brai-dev/codeworks/normal-enabled
+      if command -v docker >/dev/null 2>&1; then test -z "$(docker ps -aq --filter name='^supabase-db$')"; fi
+    fi
+  changed_when: false
+
+- name: Bootstrap Python on clean supported Ubuntu
+  ansible.builtin.raw: |
+    set -eu
+    . /etc/os-release
+    test "$ID" = ubuntu && test "$VERSION_ID" = 24.04 && test "$(uname -m)" = x86_64
+    if ! /usr/bin/python3 -c 'import apt' >/dev/null 2>&1; then
+      apt-get update -qq
+      DEBIAN_FRONTEND=noninteractive apt-get install -y python3 python3-apt
+      echo BRAI_PYTHON_INSTALLED
+    fi
+  register: brai_python
+  changed_when: "'BRAI_PYTHON_INSTALLED' in brai_python.stdout"
+
+- name: Validate sources before accepting private inputs
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, -B, -c, '{{ lookup("file", role_path + "/files/install_server.py") }}', validate, --manifest, /dev/stdin]
+    stdin: '{{ brai_install_manifest | to_json }}'
+  changed_when: false
+
+- name: Require only PROD in a standalone product installation
+  ansible.builtin.assert:
+    that:
+      - brai_install_manifest.scope | default('') == 'product'
+      - brai_install_manifest.installed.keys() | list == ['prod']
+  when: not brai_install_administrative | bool
+
+- name: Require protected settings and model source access
+  ansible.builtin.assert:
+    that:
+      - brai_install_inputs is mapping
+      - brai_install_inputs.hf_token | default('') | length > 0
+      - brai_install_administrative or brai_install_inputs.public_origin | default('') is match('^https://[a-zA-Z0-9.-]+(:[0-9]+)?$')
+  no_log: true
+
+- name: Accept fresh inputs or verify a compatible administrative extension
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -B
+      - -c
+      - '{{ "import sys,types; module=types.ModuleType(\"partition\"); exec(" + (lookup("file", role_path + "/files/partition.py") | to_json) + ", module.__dict__); sys.modules[\"partition\"]=module\n" + lookup("file", role_path + "/files/prepare_state.py") }}'
+    stdin: '{{ {"root":brai_install_root,"manifest":brai_install_manifest,"inputs":brai_install_inputs,"administrative":brai_install_administrative} | to_json }}'
+  no_log: true\n

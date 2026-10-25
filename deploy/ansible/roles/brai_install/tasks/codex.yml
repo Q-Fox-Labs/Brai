@@ -1,0 +1,64 @@
+# ABOUTME: Устанавливает standalone и daemon Codex из официального закреплённого выпуска.
+# ABOUTME: Существующий другой выпуск сохраняет и требует явной операции обновления.
+---
+- name: Inspect installed Codex package selections
+  ansible.builtin.command:
+    argv: ['/home/agent/.codex/packages/{{ item }}/current/bin/codex', --version]
+  become_user: agent
+  loop: [standalone, app-server-daemon]
+  register: bootstrap_codex_packages
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Preserve existing Codex releases instead of implicitly upgrading or downgrading
+  ansible.builtin.assert:
+    that: item.rc != 0 or item.stdout == 'codex-cli ' + recovery_codex_install_version
+    fail_msg: Existing Codex differs from the installation manifest; use the explicit update operation.
+  loop: '{{ bootstrap_codex_packages.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+
+- name: Create official installer cache
+  ansible.builtin.file:
+    path: /var/cache/codex-bootstrap
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Download checksum-pinned official Codex installer
+  ansible.builtin.get_url:
+    url: https://chatgpt.com/codex/install.sh
+    dest: /var/cache/codex-bootstrap/install.sh
+    checksum: 'sha256:{{ recovery_codex_installer_sha256 }}'
+    owner: root
+    group: root
+    mode: '0644'
+  when: bootstrap_codex_packages.results | selectattr('rc', 'ne', 0) | list | length > 0
+
+- name: Install only absent Codex packages with no interactive prompts
+  ansible.builtin.command:
+    argv: [/bin/bash, /var/cache/codex-bootstrap/install.sh, --release, '{{ recovery_codex_install_version }}']
+  become_user: agent
+  environment:
+    HOME: /home/agent
+    CODEX_HOME: /home/agent/.codex
+    CODEX_NON_INTERACTIVE: '1'
+    CODEX_INSTALL_DAEMON_ONLY: '{{ "1" if item.item == "app-server-daemon" else "0" }}'
+    PATH: /usr/local/bin:/usr/bin:/bin
+  loop: '{{ bootstrap_codex_packages.results }}'
+  loop_control:
+    label: '{{ item.item }}'
+  when: item.rc != 0
+  changed_when: true
+
+- name: Verify installed Codex binaries report the pinned release
+  ansible.builtin.command:
+    argv: ['/home/agent/.codex/packages/{{ item }}/current/bin/codex', --version]
+  become_user: agent
+  loop: [standalone, app-server-daemon]
+  register: bootstrap_codex_verified
+  changed_when: false
+  failed_when: bootstrap_codex_verified.stdout != 'codex-cli ' + recovery_codex_install_version
+  when: not ansible_check_mode
