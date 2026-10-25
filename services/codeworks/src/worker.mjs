@@ -22,7 +22,7 @@ async function executionSession(pool,work){
   finally{db.removeListener('error',disconnect);db.release(lost.signal.aborted?new Error('EXECUTION_CONNECTION_LOST'):undefined);}
 }
 /** Продолжает одну операцию; прерванные шаги сверяет по фактическому Git/GitHub. */
-export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[],flowGit=createFlowGit(),github,deploymentAdapter=createDeploymentAdapter(),workflowId=process.env.CODEWORKS_WORKFLOW_ID,generation=process.env.CODEWORKS_WORKFLOW_GENERATION,scoped=false,expectedKind,prepareStep}={}) {
+export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[],flowGit=createFlowGit(),github,deploymentAdapter=createDeploymentAdapter(),workflowId=process.env.CODEWORKS_WORKFLOW_ID,generation=process.env.CODEWORKS_WORKFLOW_GENERATION,scoped=false,expectedKind,prepareStep,codeIndex}={}) {
   return executionSession(pool,async(db,signal)=>{
   const originalSignalCheckpoint=checkpoint;
   checkpoint=async step=>{signal.throwIfAborted();await originalSignalCheckpoint(step);};
@@ -118,6 +118,11 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
         if(legs.some(leg=>!leg?.merged||!leg.deployment_evidence_id))throw new Fault('CONFLICT');
         const removed=await git.cleanup(project,w,legs.map(l=>l.merge_sha),release.requested_sha);
         if(!removed)throw new Fault('CONFLICT','Cleanup preserved the workspace: check uncommitted or unmerged changes, then retry cleanup with a new request key.');
+        if(w.code_index){
+          if(!codeIndex)throw Error('INDEX_CLEANUP_ADAPTER_REQUIRED');
+          await checkpoint('before-index-cleanup');
+          await codeIndex.remove(project,w);
+        }
         await db.query('UPDATE codeworks.workspaces SET removed_at=COALESCE(removed_at,now()) WHERE id=$1',[w.id]);
         await finish('succeeded','removed',{removed});return;
       }
