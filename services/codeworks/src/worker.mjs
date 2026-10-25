@@ -10,6 +10,7 @@ import { advanceRelease, advanceSync } from './release.mjs';
 import { Fault,safeFault } from './errors.mjs';
 import {enqueueDeployment,advanceDeployment,createDeploymentAdapter} from './deployment.mjs';
 import {createCIEvidence} from './ci-evidence.mjs';
+import {authorizeCommand,acquireTarget,releaseTarget,closeRelease,cancelWorkspace} from './lifecycle.mjs';
 /** Продолжает одну операцию; прерванные шаги сверяет по фактическому Git/GitHub. */
 export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[],flowGit=createFlowGit(),github,deploymentAdapter=createDeploymentAdapter()}={}) {
   const db=await pool.connect();
@@ -19,22 +20,62 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
     if(verifierPool)verifier=await verifierPool.connect();
     github??=createGitHub({evidenceStore:createCIEvidence(verifier)});
     const first=(await db.query('SELECT * FROM codeworks.operations WHERE id=$1',[operationId])).rows[0];
-    if(!first||first.archived||!['prepare','sync','release','rollout','cleanup'].includes(first.kind))return;
+    if(!first||first.archived||!['prepare','sync','release','rollout','cleanup','release.close','workspace.cancel'].includes(first.kind))return;
     await db.query('SELECT pg_advisory_lock(hashtextextended($1,0))',[first.project_id]);locked=true;
     const op=(await db.query('SELECT * FROM codeworks.operations WHERE id=$1',[operationId])).rows[0];
-    if(op.archived||!['pending','running','awaiting_ci','awaiting_deployment','awaiting_reconciliation'].includes(op.status))return;
+    const admission=(await db.query('SELECT * FROM codeworks.commands WHERE operation_id=$1',[operationId])).rows[0];
+    const ownership=(await db.query("SELECT owner FROM codeworks.workflow_registry WHERE workspace_id=$1",[op.workspace_id])).rows[0];
+    if(admission){
+      const saved=await authorizeCommand(db,op.id,process.env.CODEWORKS_WORKFLOW_ID,process.env.CODEWORKS_WORKFLOW_GENERATION);
+      if(saved.state!=='pending')return;
+      const originalCheckpoint=checkpoint;
+      checkpoint=async step=>{const current=await authorizeCommand(db,op.id,process.env.CODEWORKS_WORKFLOW_ID,process.env.CODEWORKS_WORKFLOW_GENERATION);if(current.state!=='pending')throw new Fault('FORBIDDEN');await originalCheckpoint(step);};
+    }else if(ownership?.owner==='temporal')throw new Fault('FORBIDDEN');
+
+    if(op.archived||!['pending','running','awaiting_execution','awaiting_ci','awaiting_deployment','awaiting_reconciliation'].includes(op.status))return;
     const project=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1',[op.project_id])).rows[0].config;
     const w=(await db.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[op.workspace_id])).rows[0];
     await db.query("UPDATE codeworks.operations SET status='running',updated_at=now() WHERE id=$1",[op.id]);
     const finish=(status,step,result)=>db.query('UPDATE codeworks.operations SET status=$2,step=$3,result=$4,error=NULL,updated_at=now() WHERE id=$1',[op.id,status,step,result]);
     try {
       if(!allowedRepositories.includes(project.repo_path))throw new Fault('FORBIDDEN');
+      if(op.kind==='workspace.cancel'){
+        const outcome=await cancelWorkspace(db,op);await finish(outcome.status,outcome.reason,outcome);return;
+      }
+      if(op.kind==='release.close'){
+        const outcome=await closeRelease(db,op,project,w,{flowGit,github,reconcileDeployment:async id=>{
+          const deployment=(await db.query('SELECT * FROM codeworks.operations WHERE id=$1',[id])).rows[0];
+          if(deployment&&!['failed','succeeded'].includes(deployment.status)&&deploymentAdapter?.inspect){
+            let outcome=await advanceDeployment(verifier,deployment,deploymentAdapter.inspect);
+            if(outcome.reason==='ANSIBLE_ROLLOUT_UNSTARTED'){
+              await db.query('BEGIN');
+              try{
+                await db.query('UPDATE codeworks.deployments SET receipt=$2 WHERE operation_id=$1',[id,{status:'failed',operation_id:id,code:'RELEASE_CLOSED_BEFORE_INSTALLATION'}]);
+                await db.query("UPDATE codeworks.operations SET status='failed',step='RELEASE_CLOSED_BEFORE_INSTALLATION',updated_at=now() WHERE id=$1",[id]);
+                await db.query("UPDATE codeworks.commands SET state='done',updated_at=now() WHERE operation_id=$1",[id]);
+                await db.query('COMMIT');
+              }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}
+              outcome={status:'failed',reason:'RELEASE_CLOSED_BEFORE_INSTALLATION'};
+            }
+            await db.query('UPDATE codeworks.operations SET status=$2,step=$3,updated_at=now() WHERE id=$1',[id,outcome.status,outcome.reason]);
+          }
+        }});
+        await finish(outcome.status,outcome.reason,outcome);return;
+      }
       if(op.kind==='rollout'){
+        const d=(await db.query('SELECT * FROM codeworks.deployments WHERE operation_id=$1',[op.id])).rows[0];
+        if(admission){
+          if(d.release_operation_id){
+            const permitted=(await db.query("SELECT 1 FROM codeworks.release_queue q JOIN codeworks.releases r ON r.operation_id=q.operation_id WHERE q.operation_id=$1 AND q.target=$2 AND q.state='held' AND r.closed_at IS NULL AND (r.details->'primary'->>'merge_sha'=$3 OR r.details->'backport'->>'merge_sha'=$3)",[d.release_operation_id,d.target,d.commit_sha])).rowCount;
+            if(!permitted){await finish('awaiting_reconciliation','RELEASE_LANE_REQUIRED',op.result);return;}
+          }else if(!await acquireTarget(db,project.id,d.target,op.id,d.retry_of)){await finish('awaiting_deployment','TARGET_QUEUE',op.result);return;}
+        }
         let outcome;
         try{outcome=await advanceDeployment(verifier,op,deploymentAdapter);}catch(error){
-          if(error.code!=='GIT_FAILED')throw error;
+          if(admission||error.code!=='GIT_FAILED')throw error;
           outcome={status:'awaiting_deployment',reason:'ANSIBLE_ROLLOUT_RECONCILIATION_REQUIRED'};
         }
+        if(admission&&!d.release_operation_id&&outcome.status==='succeeded')await releaseTarget(db,op.id,d.target);
         await finish(outcome.status,outcome.reason,outcome);return;
       }
       if(op.kind==='cleanup'){
@@ -62,12 +103,13 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
         };
         let outcome;
         try {
-          outcome=await advanceRelease({project,workspace:w,operation:op,release},{git:flowGit,github,inspect:(...a)=>git.inspect(...a),save,evidence,checkpoint,deploy:deploymentAdapter?async(target,sha,proof,retryOf)=>{
-            const operation_id=await enqueueDeployment(db,project,target,sha,proof,verifier,{retryOf});
+          outcome=await advanceRelease({project,workspace:w,operation:op,release},{git:flowGit,github,inspect:(...a)=>git.inspect(...a),save,evidence,checkpoint,...(admission?{acquire:target=>acquireTarget(db,project.id,target,op.id,release.retry_of),releaseLane:target=>releaseTarget(db,op.id,target),verifyEvidence:async(id,target,sha)=>(await db.query('SELECT 1 FROM codeworks.deployment_evidence WHERE id=$1 AND project_id=$2 AND target=$3 AND commit_sha=$4',[id,project.id,target,sha])).rowCount===1}:{}),deploy:deploymentAdapter?async(target,sha,proof,retryOf)=>{
+            const operation_id=await enqueueDeployment(db,project,target,sha,proof,verifier,{retryOf,releaseOperationId:admission?op.id:null});
             const deployment=(await db.query('SELECT status FROM codeworks.operations WHERE id=$1',[operation_id])).rows[0];
             return {operation_id,status:deployment.status};
           }:undefined});
         }catch(error){
+          if(admission&&['GITHUB_UNAVAILABLE','GIT_FAILED'].includes(error?.code))throw error;
           if(['GITHUB_UNAVAILABLE','GIT_FAILED'].includes(error?.code))outcome={status:'awaiting_reconciliation',reason:error.code};
           else throw error;
         }
@@ -93,7 +135,12 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
       await db.query("UPDATE codeworks.workspaces SET preparation_state='ready' WHERE id=$1",[w.id]);
       await finish('succeeded','ready',{workspace_id:w.id});
     }catch(error){
-      if(error?.code==='TEST_INTERRUPTION')throw error;
+      if(error?.code==='TEST_INTERRUPTION'||(admission&&(!error?.code||['GIT_FAILED','GITHUB_UNAVAILABLE'].includes(error.code)||/^08|^57/.test(error.code))))throw error;
+      if(admission&&op.kind==='release'){
+        const r=(await db.query('SELECT details FROM codeworks.releases WHERE operation_id=$1',[op.id])).rows[0];
+        if(!r?.details.primary&&!r?.details.backport)await db.query("UPDATE codeworks.release_queue SET state='closed',updated_at=now() WHERE operation_id=$1 AND state IN ('held','queued')",[op.id]);
+        for(const leg of [r?.details.primary,r?.details.backport].filter(Boolean))if(!leg.merge_push_attempted)await releaseTarget(db,op.id,leg.target==='main'?'prod':'dev','closed');
+      }
       if(op.kind==='prepare')await db.query("UPDATE codeworks.workspaces SET preparation_state='failed' WHERE id=$1",[w.id]);
       if(op.kind==='release')await db.query("UPDATE codeworks.releases SET state='failed' WHERE operation_id=$1",[op.id]);
       await db.query("UPDATE codeworks.operations SET status='failed',error=$2,updated_at=now() WHERE id=$1",[op.id,safeFault(error).dto()]);

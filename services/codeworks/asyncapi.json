@@ -33,6 +33,15 @@
         },
         "cleanupResponse": {
           "$ref": "#/components/messages/cleanupResponse"
+        },
+        "lifecycle_statusResponse": {
+          "$ref": "#/components/messages/lifecycle_statusResponse"
+        },
+        "release_closeResponse": {
+          "$ref": "#/components/messages/release_closeResponse"
+        },
+        "workspace_cancelResponse": {
+          "$ref": "#/components/messages/workspace_cancelResponse"
         }
       }
     },
@@ -124,6 +133,45 @@
       "messages": {
         "cleanupRequest": {
           "$ref": "#/components/messages/cleanupRequest"
+        }
+      }
+    },
+    "lifecycle_status": {
+      "address": "brai.codeworks.v2.{executor}.lifecycle.status",
+      "parameters": {
+        "executor": {
+          "description": "ACL-protected transport identity, never taken from request payload."
+        }
+      },
+      "messages": {
+        "lifecycle_statusRequest": {
+          "$ref": "#/components/messages/lifecycle_statusRequest"
+        }
+      }
+    },
+    "release_close": {
+      "address": "brai.codeworks.v2.{executor}.release.close",
+      "parameters": {
+        "executor": {
+          "description": "ACL-protected transport identity, never taken from request payload."
+        }
+      },
+      "messages": {
+        "release_closeRequest": {
+          "$ref": "#/components/messages/release_closeRequest"
+        }
+      }
+    },
+    "workspace_cancel": {
+      "address": "brai.codeworks.v2.{executor}.workspace.cancel",
+      "parameters": {
+        "executor": {
+          "description": "ACL-protected transport identity, never taken from request payload."
+        }
+      },
+      "messages": {
+        "workspace_cancelRequest": {
+          "$ref": "#/components/messages/workspace_cancelRequest"
         }
       }
     }
@@ -359,6 +407,105 @@
           "bindingVersion": "0.1.0"
         }
       }
+    },
+    "lifecycle_status": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/lifecycle_status"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/lifecycle_status/messages/lifecycle_statusRequest"
+        }
+      ],
+      "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/serviceReply"
+        },
+        "description": "Native NATS reply subject.",
+        "x-nats-reply-subject": "message.reply",
+        "messages": [
+          {
+            "$ref": "#/channels/serviceReply/messages/lifecycle_statusResponse"
+          },
+          {
+            "$ref": "#/channels/serviceReply/messages/ServiceError"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "service_codeworks",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "release_close": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/release_close"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/release_close/messages/release_closeRequest"
+        }
+      ],
+      "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/serviceReply"
+        },
+        "description": "Native NATS reply subject.",
+        "x-nats-reply-subject": "message.reply",
+        "messages": [
+          {
+            "$ref": "#/channels/serviceReply/messages/release_closeResponse"
+          },
+          {
+            "$ref": "#/channels/serviceReply/messages/ServiceError"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "service_codeworks",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "workspace_cancel": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/workspace_cancel"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/workspace_cancel/messages/workspace_cancelRequest"
+        }
+      ],
+      "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/serviceReply"
+        },
+        "description": "Native NATS reply subject.",
+        "x-nats-reply-subject": "message.reply",
+        "messages": [
+          {
+            "$ref": "#/channels/serviceReply/messages/workspace_cancelResponse"
+          },
+          {
+            "$ref": "#/channels/serviceReply/messages/ServiceError"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "service_codeworks",
+          "bindingVersion": "0.1.0"
+        }
+      }
     }
   },
   "components": {
@@ -465,6 +612,42 @@
       },
       "cleanupResponse": {
         "name": "cleanupResponse",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/accepted"
+        }
+      },
+      "lifecycle_statusRequest": {
+        "name": "lifecycle_statusRequest",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/lifecycle.status"
+        }
+      },
+      "lifecycle_statusResponse": {
+        "name": "lifecycle_statusResponse",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/lifecycleResponse"
+        }
+      },
+      "release_closeRequest": {
+        "name": "release_closeRequest",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/release.close"
+        }
+      },
+      "release_closeResponse": {
+        "name": "release_closeResponse",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/accepted"
+        }
+      },
+      "workspace_cancelRequest": {
+        "name": "workspace_cancelRequest",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/workspace.cancel"
+        }
+      },
+      "workspace_cancelResponse": {
+        "name": "workspace_cancelResponse",
         "payload": {
           "$ref": "./schemas/api.schema.json#/definitions/accepted"
         }

@@ -13,7 +13,6 @@ import {createStore} from '../../src/storage.mjs';
 import {runOperation} from '../../src/worker.mjs';
 import {migrate} from '../../src/migrate.mjs';
 import {recordDeployment} from '../../src/deployment-evidence.mjs';
-import {startRuntime} from '../../src/runtime.mjs';
 const prepare=(p,key='area',extra={})=>({project_id:p.id,request_key:key,workspace_key:key,...extra});
 test('real PostgreSQL/Git acceptance',{skip:!configured,timeout:fixtureTimeout(process.env.CODEWORKS_TEST_TIMEOUT_MS)},async t=>{
   const own=fixtureLifecycle(t.signal);let fixture;
@@ -65,13 +64,9 @@ test('real PostgreSQL/Git acceptance',{skip:!configured,timeout:fixtureTimeout(p
     const initial=await area(accepted.workspace_id);
     const interrupted=await f.worker(p,accepted.operation_id,step);assert.equal(interrupted.signal,'SIGKILL');
     assert.equal((await op(p,accepted.operation_id)).status,'running');
-    // Обычный runtime самостоятельно обнаруживает running после рестарта, без новой команды prepare.
-    const runtime=await startRuntime({databaseURL:f.config.app_url,allowedRepositories:[p.repo_path]});
-    try {
-      const until=Date.now()+10000;
-      while((await op(p,accepted.operation_id)).status==='running'&&Date.now()<until)await new Promise(r=>setTimeout(r,25));
-      assert.equal((await op(p,accepted.operation_id)).status,'succeeded');
-    } finally {await runtime.close();}
+    // Legacy fixtures продолжают исходную операцию до handoff; новый Temporal recovery проверяется отдельным настоящим worker.
+    await f.worker(p,accepted.operation_id);
+    assert.equal((await op(p,accepted.operation_id)).status,'succeeded');
     const w=await area(initial.id);assert.equal(w.base_sha,initial.base_sha);assert.equal(w.branch,initial.branch);assert.equal(w.path,initial.path);
   });
   await subtest('base SHA stays frozen when remote dev advances; hotfix uses remote main',async()=>{
@@ -215,7 +210,7 @@ test('real PostgreSQL/Git acceptance',{skip:!configured,timeout:fixtureTimeout(p
       assert.equal((await owner.query('SELECT archived FROM codeworks.deployments WHERE operation_id=$1',[freshRollout])).rows[0].archived,false);
       assert.deepEqual((await owner.query('SELECT archived,composition,receipt FROM codeworks.deployments WHERE operation_id=$1',[rollout])).rows[0],{archived:true,composition,receipt});
       assert.deepEqual((await owner.query('SELECT archived,status,step,request FROM codeworks.operations WHERE id=$1',[operation])).rows[0],archived);
-      assert.equal((await owner.query('SELECT count(*)::int AS count FROM public.codeworks_migrations')).rows[0].count,7);
+      assert.equal((await owner.query('SELECT count(*)::int AS count FROM public.codeworks_migrations')).rows[0].count,8);
     }finally{
       await owner.query('DROP SCHEMA IF EXISTS codeworks CASCADE; DROP TABLE IF EXISTS public.codeworks_migrations');
       await owner.end();

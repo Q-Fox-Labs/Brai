@@ -229,3 +229,22 @@ test('reference documentation leaves runtime keys unchanged while packaged instr
  const changed=fingerprints(root,discover(root).components.get('probe'));
  assert.notEqual(changed.runtime,before.runtime);assert.notEqual(changed.artifact,before.artifact);
 });
+
+test('cold source plan excludes generated bundle; built delivery admits its exact runtime reference',async t=>{
+ const root=fixture(t),d=add(root,'probe');
+ put(root,'services/probe/main.mjs',"export const bundle=new URL('./dist/workflows.js',import.meta.url);\n");
+ put(root,'services/probe/build.mjs',"import{mkdirSync,writeFileSync}from'node:fs';mkdirSync('dist',{recursive:true});writeFileSync('dist/workflows.js','module.exports={};');\n");
+ d.delivery.files.push('services/probe/dist/workflows.js');save(root,'probe',d);
+ assert.throws(()=>discover(root),/DELIVERY_NOT_FOUND/);
+ const cold=(await execute(root,'plan',['probe']))[0];
+ await execute(root,'build',['probe']);
+ const built=(await execute(root,'plan',['probe']))[0];
+ for(const key of ['build','artifact','checks'])assert.equal(cold[key],built[key]);
+ assert.notEqual(cold.runtime,built.runtime);
+ assert.deepEqual(discover(root).order,['probe']);
+ const pkg=(await execute(root,'package',['probe']))[0];
+ assert.equal(readFileSync(join(pkg.artifact.path,'services/probe/dist/workflows.js'),'utf8'),'module.exports={};');
+ put(root,'services/probe/dist/other.js','module.exports={};');
+ put(root,'services/probe/main.mjs',"export const bundle=new URL('./dist/other.js',import.meta.url);\n");
+ assert.throws(()=>discover(root),/UNDECLARED_LOCAL_INPUT/);
+});

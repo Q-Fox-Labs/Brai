@@ -11,10 +11,11 @@ import {enqueueDeployment} from '../../src/deployment.mjs';
 const configured=process.env.CODEWORKS_STAGE6_TEST_CONFIG;
 test('real PG explicit failed retry is concurrent-idempotent and preserves original terminal receipt',{skip:!configured},async()=>{
  const c=JSON.parse(await readFile(configured,'utf8'));
- for(const key of ['owner_url','app_url','verifier_url'])assert.equal(new URL(c[key]).pathname,'/brai_codeworks_stage6_test');
+ for(const key of ['owner_url','app_url','verifier_url'])assert.equal(new URL(c[key]).pathname,c.fixture==='temporal'?'/brai_codeworks_temporal_test':'/brai_codeworks_stage6_test');
  const owner=new Pool({connectionString:c.owner_url,max:1}),app=new Pool({connectionString:c.app_url,max:6}),verifier=new Pool({connectionString:c.verifier_url,max:6});
  try{
   await migrate(owner,c.app_role,c.verifier_role);await migrate(owner,c.app_role,c.verifier_role);
+  await assert.rejects(app.query("INSERT INTO codeworks.verified_ci(project_id,run_id,attempt,policy_sha256,proof) VALUES('forbidden','1','1',$1,'{}')",['a'.repeat(64)]),{code:'42501'});
   const project={id:'retry_'+randomUUID(),github:{ci:{recipe_sha256:'b'.repeat(64)}}};
   await owner.query('INSERT INTO codeworks.projects(id,config) VALUES($1,$2)',[project.id,project]);
   const sha='a'.repeat(40),digest='sha256:'+'c'.repeat(64),composition={source:sha,recipe:project.github.ci.recipe_sha256,runId:'123',attempt:'1',components:[]},evidence={head_sha:sha,run_id:'123',attempt:1,composition_digest:digest};

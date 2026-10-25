@@ -12,7 +12,7 @@ export function deploymentDiff(composition,actual) {
   return {bootstrap:!actual,changed:composition.components.filter(c=>known.get(c.id)!==c.artifact.digest).map(c=>c.id),unchanged:composition.components.filter(c=>known.get(c.id)===c.artifact.digest).map(c=>c.id)};
 }
 /** Вызывается worker после exact CI gate; proof загружается из owner store, не из запроса. */
-export async function enqueueDeployment(db,project,target,sha,evidence,evidenceDB=db,{retryOf=null}={}) {
+export async function enqueueDeployment(db,project,target,sha,evidence,evidenceDB=db,{retryOf=null,releaseOperationId=null}={}) {
   if(!['dev','prod'].includes(target)||evidence?.head_sha!==sha)throw Error('DEPLOYMENT_CI_REQUIRED');
   const proof=await createCIEvidence(evidenceDB).read(project,evidence.run_id,evidence.attempt),c=proof?.composition;
   if(!c||c.source!==sha||c.recipe!==project.github.ci.recipe_sha256||proof.published?.digest!==evidence.composition_digest)throw Error('DEPLOYMENT_OWNER_PROOF_REQUIRED');
@@ -29,7 +29,7 @@ export async function enqueueDeployment(db,project,target,sha,evidence,evidenceD
     if(old){await db.query('COMMIT');return old.operation_id;}
     const id=randomUUID();
     await db.query("INSERT INTO codeworks.operations(id,project_id,executor_id,kind,status,step,request) VALUES($1,$2,'codeworks_owner','rollout','pending','verified-ci',$3)",[id,project.id,{target,commit_sha:sha,ci:evidence}]);
-    await db.query('INSERT INTO codeworks.deployments(operation_id,project_id,target,commit_sha,run_id,attempt,composition_digest,composition,retry_of) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',[id,project.id,target,sha,String(evidence.run_id),String(evidence.attempt),evidence.composition_digest,c,retryOf]);
+    await db.query('INSERT INTO codeworks.deployments(operation_id,project_id,target,commit_sha,run_id,attempt,composition_digest,composition,retry_of,release_operation_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',[id,project.id,target,sha,String(evidence.run_id),String(evidence.attempt),evidence.composition_digest,c,retryOf,releaseOperationId]);
     await db.query('COMMIT');return id;
   }catch(error){await db.query('ROLLBACK');throw error;}
 }
@@ -40,11 +40,17 @@ export function createDeploymentAdapter(configFile=process.env.CODEWORKS_DEPLOYM
   if(!info.isFile()||info.uid!==0||(info.mode&0o022))throw Error('UNTRUSTED_DEPLOYMENT_ADAPTER');
   const cfg=JSON.parse(readFileSync(configFile,'utf8'));
   if(!Array.isArray(cfg.command)||!cfg.command.length||!cfg.command[0].startsWith('/')||cfg.command.some(a=>typeof a!=='string'||a.includes('\0')))throw Error('DEPLOYMENT_ADAPTER_INVALID');
-  return async id=>{
+  const invoke=commandLine=>async id=>{
     if(!/^[0-9a-f-]{36}$/.test(id))throw Error('DEPLOYMENT_ID_INVALID');
-    const result=await command(cfg.command[0],[...cfg.command.slice(1),id],{timeout:120000});
+    const result=await command(commandLine[0],[...commandLine.slice(1),id],{timeout:120000});
     return JSON.parse(result.stdout);
   };
+  const adapter=invoke(cfg.command);
+  if(cfg.inspect_command){
+    if(!Array.isArray(cfg.inspect_command)||!cfg.inspect_command.length||!cfg.inspect_command[0].startsWith('/')||cfg.inspect_command.some(a=>typeof a!=='string'||a.includes('\0')))throw Error('DEPLOYMENT_INSPECT_INVALID');
+    adapter.inspect=invoke(cfg.inspect_command);
+  }
+  return adapter;
 }
 /** Binds the actual active subset to exact owner-verified component objects; disabled refs stay provenance only. */
 export function installedComposition(composition,receipt) {
@@ -69,6 +75,7 @@ export async function advanceDeployment(db,op,adapter) {
   const d=(await db.query('SELECT * FROM codeworks.deployments WHERE operation_id=$1',[op.id])).rows[0];
   const result=await adapter(op.id);
   if(result.status==='running')return {status:'awaiting_deployment',reason:'ANSIBLE_ROLLOUT_RUNNING'};
+  if(['unknown','unstarted'].includes(result.status))return {status:'awaiting_reconciliation',reason:result.status==='unknown'?'ANSIBLE_ROLLOUT_RESULT_UNKNOWN':'ANSIBLE_ROLLOUT_UNSTARTED'};
   if(result.status==='failed') {
     await db.query('UPDATE codeworks.deployments SET receipt=$2 WHERE operation_id=$1',[op.id,result]);
     return {status:'failed',reason:'ANSIBLE_ROLLOUT_FAILED'};
