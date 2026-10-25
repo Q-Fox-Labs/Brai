@@ -1,0 +1,22 @@
+<!doctype html>
+<!-- ABOUTME: Показывает форму однократной передачи Groq key владельцем Telegram. -->
+<!-- ABOUTME: Не создаёт поле ключа до проверки подписи сервером. -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Подключить Groq</title>
+<link rel="stylesheet" href="/connect/groq/style.css">
+<script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+<script src="/connect/groq/app.js" defer></script>
+</head>
+<body><main>
+<h1>Подключить Groq</h1>
+<p>Не отправляйте API-ключ в сообщения Telegram. Эта форма принимает ключ напрямую на сервер по HTTPS и проверяет его через Groq. Ключ не передаётся модели или истории чата.</p>
+<p>Доступ разрешён только владельцу бота. Форма одноразовая и действует не более 10 минут. Существующий ключ не перезаписывается. Настройки Hermes и распознавания речи не меняются.</p>
+<p>Администратор сервера и Groq могут иметь доступ к ключу. Не вводите здесь пароли или ключи других сервисов.</p>
+<p id="status" role="status" aria-live="polite">Проверяем авторизацию Telegram…</p>
+<section id="form-area" aria-label="Форма подключения"></section>
+<noscript>Для проверки авторизации Telegram требуется JavaScript.</noscript>
+</main></body></html>
