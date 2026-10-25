@@ -128,4 +128,12 @@
     owner: root
     group: root
     mode: '0644'
-  loop: [native_hermes.py, hermes_memos.py, hermes_memos_settings.json, hermes_memory_acceptance.py, hermes-memos-postgres.patch, hermes_ytdlp.py, hermes_video_workflow.py, hermes-media-constraints.txt, hermes-instaloader-requirements.txt]
+  loop: [native_hermes.py, hermes_memos.py, hermes_memos_settings.json, hermes_memory_acceptance.py, hermes-memos-postgres.patch, hermes_ytdlp.py, hermes_video_workflow.py, hermes-media-constraints.txt, hermes-instaloader-requirements.txt, hermes_intake.py]
+- name: Install the public intake frontend without credential state
+  ansible.builtin.copy:
+    src: hermes_intake_assets/
+    dest: /usr/local/lib/brai-hermes/hermes_intake_assets/
+    owner: root
+    group: root
+    mode: '0644'
+    directory_mode: '0755'

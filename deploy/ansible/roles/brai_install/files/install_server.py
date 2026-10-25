@@ -140,6 +140,8 @@ class Installer:
         if manifest.get('native_runtimes',{}).get('hermes',{}).get('software',{}).get('mode')=='install':
             import native_hermes
             native_hermes.validate_client_access(inputs)
+            native_spec=native_hermes.validate(manifest['native_runtimes']['hermes'])
+            native_hermes.validate_inputs(native_spec,inputs.get('native_hermes',{}))
         self.documents = {k: copy.deepcopy(v['document']) for k,v in manifest['projects'].items()}
         self.changed = False
         self.prepare_documents()

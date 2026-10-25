@@ -6,6 +6,7 @@ import argparse
 import copy
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,8 @@ import stat
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 
 CORE = '517b5e10febd619ce30bb22580e29b160266eb43'
 CUSTOM = 'e0b72f2a982b0f87dded09b11533bffada7ed07d'
@@ -124,7 +127,7 @@ def descriptor(shared=False):
             'tokenEnvironmentFile': ('/srv/projects/brai/.secrets/hermes_production_telegram.env' if shared
                                      else str(CONFIG / 'telegram-token.env')),
             'databaseNetwork': 'brai_database_private', 'filesNetwork': 'brai_files',
-            'gatewayHost': '192.168.16.1', 'chrome': ('/opt/agent-browser-tools/chrome/154.0.8037.92/chrome-linux64/chrome'
+            'gatewayHost': '172.23.0.1', 'chrome': ('/opt/agent-browser-tools/chrome/154.0.8037.92/chrome-linux64/chrome'
                                                     if shared else '/opt/brai-hermes-browser/chrome-linux64/chrome'),
             'memosImage': 'brai-hermes-production-memos:' + MEMOS}
 
@@ -143,7 +146,12 @@ def validate(spec):
             and spec.get('home') == expected['home']
             and spec.get('tokenEnvironmentFile') == expected['tokenEnvironmentFile'],
             'HERMES_PRODUCTION_SOFTWARE_INVALID')
-    require(spec.get('gatewayHost') == '192.168.16.1' and spec.get('databaseNetwork') == 'brai_database_private'
+    try:
+        gateway = ipaddress.IPv4Address(spec.get('gatewayHost'))
+    except (ValueError, TypeError):
+        raise ValueError('HERMES_PRODUCTION_NETWORK_INVALID') from None
+    require(gateway.is_private and not gateway.is_loopback and str(gateway) != '192.168.16.1'
+            and spec.get('databaseNetwork') == 'brai_database_private'
             and re.fullmatch(r'[A-Za-z0-9_.-]+', spec.get('filesNetwork', '')),
             'HERMES_PRODUCTION_NETWORK_INVALID')
     require(all(isinstance(spec.get(key), str) and spec[key].startswith('/')
@@ -242,6 +250,7 @@ def units(spec, python):
                'Environment=BRAI_TELEGRAM_STATE_DIR=' + str(PROFILE / 'brai-telegram') + '\n'
                'Environment=BRAI_TELEGRAM_RESULT_ROOT=' + str(PROFILE / 'results') + '\n'
                'Environment=HERMES_MEDIA_DOWNLOAD_ROOT=' + str(PROFILE / 'media/downloads') + '\n'
+               'Environment=GROQ_VOICE_SECRET_FILE=' + str(CONFIG / 'secrets/groq.env') + '\n'
                'Environment=BROWSER_CDP_URL=http://127.0.0.1:19374\nEnvironment=BU_CDP_URL=http://127.0.0.1:19374\n'
                'EnvironmentFile=' + str(CONFIG / 'telegram.env') + '\n'
                'EnvironmentFile=' + spec['tokenEnvironmentFile'] + '\n'
@@ -263,9 +272,18 @@ def units(spec, python):
              'Requires=docker.service brai-hermes-production-codex-bridge.service brai-hermes-production-embeddings.service\n'
              '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/docker compose -f ' + str(CONFIG / 'memos/compose.json') + ' up -d --pull never\n'
              'ExecStop=/usr/bin/docker compose -f ' + str(CONFIG / 'memos/compose.json') + ' stop\nTimeoutStartSec=180\n[Install]\nWantedBy=multi-user.target\n')
+    intake = ('[Unit]\nDescription=Brai production owner-only secret intake\nAfter=network-online.target\n' + base +
+              'WorkingDirectory=' + str(PROFILE / 'intake') + '\n'
+              'EnvironmentFile=' + spec['tokenEnvironmentFile'] + '\n'
+              'ExecStart=/usr/bin/python3 -B /usr/local/lib/brai-hermes/hermes_intake.py --config=' + str(CONFIG / 'intake.json') + '\n'
+              'ProtectSystem=strict\nReadWritePaths=' + str(CONFIG / 'secrets') + '\n'
+              'PrivateDevices=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectControlGroups=true\n'
+              'RestrictSUIDSGID=true\nLockPersonality=true\nRestrictRealtime=true\n'
+              'RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\nCapabilityBoundingSet=\nLimitCORE=0\n'
+              'TasksMax=64\nMemoryMax=128M\nStandardOutput=null\nStandardError=journal\n[Install]\nWantedBy=multi-user.target\n')
     return {'brai-hermes-production.service': gateway, 'brai-hermes-production-codex-bridge.service': bridge,
             'brai-hermes-production-embeddings.service': embedding, 'brai-hermes-production-browser.service': browser,
-            'brai-hermes-production-memos.service': memos}
+            'brai-hermes-production-memos.service': memos, 'brai-hermes-production-intake.service': intake}
 
 
 def bridge_launcher(spec):
@@ -337,7 +355,7 @@ def python_runtime(spec):
 
 def validate_inputs(spec, inputs):
     """Проверить production owner и endpoints без раскрытия bearer/NATS паролей."""
-    require(set(inputs) == {'ownerId', 'tools', 'publisher', 'settings', 'telegram'},
+    require(set(inputs) == {'ownerId', 'tools', 'publisher', 'settings', 'telegram', 'intake'},
             'HERMES_PRODUCTION_INPUT_SHAPE')
     owner = inputs['ownerId']
     tools, publisher = inputs['tools'], inputs['publisher']
@@ -367,6 +385,38 @@ def validate_inputs(spec, inputs):
             and re.fullmatch('-?[1-9][0-9]*', str(telegram['chatId']))
             and (str(telegram['chatId']).startswith('-') or str(telegram['chatId']) == str(telegram['ownerId'])),
             'HERMES_PRODUCTION_TELEGRAM_ROUTE')
+    intake = inputs['intake']
+    require(set(intake) == {'bind', 'port', 'origin'} and intake.get('bind') == spec['gatewayHost']
+            and intake.get('port') == 19379 and isinstance(intake.get('origin'), str)
+            and re.fullmatch(r'https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?', intake['origin'])
+            and 'dev.brai.one' not in intake['origin'], 'HERMES_PRODUCTION_INTAKE_INPUT')
+
+
+def intake_config(inputs):
+    """Описать только новый listener и owner-private каталог секретов."""
+    return dict(inputs['intake'], owner_id=int(inputs['telegram']['ownerId']), secret_dir=str(CONFIG / 'secrets'))
+
+
+def verify_intake(inputs):
+    """Проверить реальные assets и отказ неавторизованной формы без Telegram/Groq."""
+    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    base='http://'+inputs['intake']['bind']+':'+str(inputs['intake']['port'])+'/connect/groq/'
+    try:
+        with opener.open(base,timeout=5) as response:
+            expected=Path(__file__).with_name('hermes_intake_assets').joinpath('index.html').read_bytes()
+            require(response.status==200 and response.read(len(expected)+1)==expected
+                    and response.headers.get('Cache-Control')=='no-store, max-age=0',
+                    'HERMES_PRODUCTION_INTAKE_HEALTH')
+        request=urllib.request.Request(base+'authorize',data=b'{"init_data":""}',method='POST',
+            headers={'Content-Type':'application/json','Origin':inputs['intake']['origin']})
+        try:
+            opener.open(request,timeout=5).close()
+        except urllib.error.HTTPError as error:
+            code=error.code;error.close()
+            require(code==403,'HERMES_PRODUCTION_INTAKE_AUTH_GUARD')
+        else:raise ValueError('HERMES_PRODUCTION_INTAKE_AUTH_GUARD')
+    except (OSError,urllib.error.URLError):
+        raise ValueError('HERMES_PRODUCTION_INTAKE_HEALTH') from None
 
 
 def validate_client_access(inputs):
@@ -494,16 +544,18 @@ def prepare(spec, inputs):
     source_state(spec)
     root, manifest = payload()
     for host in ['127.0.0.1', spec['gatewayHost']]:
-        for port in PORTS.values():
+        for port in [*PORTS.values(), 19379]:
             with socket.socket() as probe:
                 require(probe.connect_ex((host, port)) != 0, 'HERMES_PRODUCTION_PORT_IN_USE')
     directory(PROFILE, identity)
     for relative in ['workspace', 'results', 'brai-telegram', 'browser', 'bin', 'cache', 'cache/generated',
-                     'cache/generated/images', 'media', 'media/downloads', 'usercustom', 'memos', 'memos/worker']:
+                     'cache/generated/images', 'media', 'media/downloads', 'usercustom', 'memos', 'memos/worker', 'intake']:
         directory(PROFILE / relative, identity)
     directory(CONFIG, type('Account', (), {'pw_uid': 0, 'pw_gid': identity.pw_gid})(), 0o750)
     put(CONFIG / 'codeworks-instance.json', encoded(spec))
     put(CONFIG / 'native-inputs.json', encoded(inputs))
+    directory(CONFIG / 'secrets', identity)
+    put(CONFIG / 'intake.json', encoded(intake_config(inputs)), identity)
     put(CONFIG / 'tools.json', encoded(inputs['tools']), identity)
     put(CONFIG / 'publisher.json', encoded(inputs['publisher']), identity)
     put(CONFIG / 'runtime.env', ('BRAI_HERMES_OWNER_ID=' + inputs['ownerId'] + '\n').encode(), identity)
@@ -575,6 +627,12 @@ def verify(spec, inputs, *, running=False, activation=False):
     require(json.loads(private(CONFIG / 'tools.json', identity.pw_uid, identity.pw_gid)) == inputs['tools']
             and json.loads(private(CONFIG / 'publisher.json', identity.pw_uid, identity.pw_gid)) == inputs['publisher'],
             'HERMES_PRODUCTION_RUNTIME_INPUTS_CHANGED')
+    require(json.loads(private(CONFIG / 'intake.json', identity.pw_uid, identity.pw_gid)) == intake_config(inputs),
+            'HERMES_PRODUCTION_INTAKE_INPUTS_CHANGED')
+    secret_metadata=(CONFIG / 'secrets').lstat()
+    require(stat.S_ISDIR(secret_metadata.st_mode) and secret_metadata.st_uid == identity.pw_uid
+            and secret_metadata.st_gid == identity.pw_gid and stat.S_IMODE(secret_metadata.st_mode) == 0o700,
+            'HERMES_PRODUCTION_INTAKE_SECRET_METADATA')
     import yaml
     config = yaml.safe_load(private(PROFILE / 'config.yaml', identity.pw_uid, identity.pw_gid))
     require(config == (native_config(spec, inputs['settings'], root) | {
@@ -598,11 +656,12 @@ def verify(spec, inputs, *, running=False, activation=False):
         require(config.get('enabled') is True and config.get('frozen') is False,
                 'HERMES_PRODUCTION_MEMORY_NOT_ACTIVATED')
     if running:
-        for name in ['codex-bridge', 'embeddings', 'memos', 'browser']:
+        for name in ['codex-bridge', 'embeddings', 'memos', 'browser', 'intake']:
             run(['/usr/bin/systemctl', 'is-active', '--quiet', 'brai-hermes-production-' + name + '.service'])
         state = json.loads(run(['/usr/bin/docker', 'inspect', 'brai-hermes-production-memos']).stdout)[0]
         require(state['State']['Running'] and state['State'].get('Health', {}).get('Status') == 'healthy',
                 'HERMES_PRODUCTION_MEMOS_UNHEALTHY')
+        verify_intake(inputs)
     return True
 
 
@@ -695,7 +754,7 @@ def operate(action, spec, inputs, *, running=False, start=False, activated=False
     if action == 'prepare':
         changed = prepare(spec, inputs)
         if start:
-            for name in ['codex-bridge', 'embeddings', 'memos', 'browser']:
+            for name in ['codex-bridge', 'embeddings', 'memos', 'browser', 'intake']:
                 run(['/usr/bin/systemctl', 'enable', '--now', 'brai-hermes-production-' + name + '.service'])
             changed = True
         return {'changed': changed, 'prepared': True, 'functionalAcceptance': False}

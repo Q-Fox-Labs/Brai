@@ -76,7 +76,7 @@ class NativeHermes(unittest.TestCase):
              patch.object(native,'run',side_effect=lambda argv,**kw:events.append(argv)):
             result=native.operate('prepare',spec,{},start=True)
         self.assertFalse(result['functionalAcceptance'])
-        self.assertEqual(len(events),4)
+        self.assertEqual(len(events),5)
         self.assertTrue(all(argv[-1]!='brai-hermes-production.service' for argv in events))
         memos=SimpleNamespace(activate=lambda:events.append('memory-activated'))
         with patch.object(native,'validate_inputs'),patch.object(native,'verify'),\
@@ -90,7 +90,8 @@ class NativeHermes(unittest.TestCase):
                  'beforeStartCommand':['/srv/projects/admin/native.py'],
                  'requiredEnvironment':{'HOME':shared['home'],'CODEX_HOME':shared['home']+'/.codex',
                                         'HERMES_ROOT':shared['software']['core']}}
-        manifest={'native_runtimes':{'hermes':shared},'programs':{'brai-hermes-production.service':copy.deepcopy(mapping)},
+        manifest={'native_runtimes':{'hermes':shared},'networks':{'brai_database_private':{'ipam':[{'Gateway':'172.23.0.1'}]}},
+                  'programs':{'brai-hermes-production.service':copy.deepcopy(mapping)},
                   'operator':{'environments':{'prod':{'components':{'hermes':[copy.deepcopy(mapping)]}}}}}
         exclusions=partition.EXCLUDED
         partition.standalone_native(manifest)
@@ -98,6 +99,9 @@ class NativeHermes(unittest.TestCase):
         self.assertEqual(partition.EXCLUDED,exclusions)
         self.assertNotIn('beforeStartCommand',manifest['programs']['brai-hermes-production.service'])
         self.assertFalse(any(value in json.dumps(manifest) for value in exclusions))
+        manifest['networks']['brai_database_private']['ipam'][0]['Gateway']='172.23.42.1'
+        partition.standalone_native(manifest)
+        self.assertEqual(manifest['native_runtimes']['hermes']['gatewayHost'],'172.23.42.1')
 
     def test_accepted_telegram_overlays_are_mandatory(self):
         spec=native.descriptor()

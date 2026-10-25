@@ -3,6 +3,7 @@
 import base64
 import copy
 import hashlib
+import ipaddress
 import json
 from pathlib import Path
 import re
@@ -24,6 +25,10 @@ def standalone_native(manifest):
                 chrome='/opt/brai-hermes-browser/chrome-linux64/chrome',
                 software={'mode':'install','core':'/var/lib/brai/hermes/hermes-agent',
                           'custom':'/var/lib/brai/hermes/usercustom/hermescustom'})
+    network=manifest['networks'][spec['databaseNetwork']]
+    gateways=[item['Gateway'] for item in network['ipam'] if item.get('Gateway')]
+    assert len(gateways)==1 and ipaddress.IPv4Address(gateways[0]).is_private,'PRODUCT_NATIVE_GATEWAY_REQUIRED'
+    spec['gatewayHost']=gateways[0]
     replacements={previous['home']:spec['home'],previous['owner']:spec['owner'],
                   previous['home']+'/.codex':spec['home']+'/.codex',
                   previous['software']['core']:spec['software']['core'],
@@ -138,6 +143,9 @@ def product_inputs(full_manifest, inputs, public_origin):
     result['program_environment']={k:copy.deepcopy(v) for k,v in inputs.get('program_environment',{}).items() if k in m['programs']}
     if m.get('native_runtimes',{}).get('hermes'):
         result['native_hermes']=copy.deepcopy(inputs['native_hermes'])
+        gateway=m['native_runtimes']['hermes']['gatewayHost']
+        result['native_hermes']['tools']['embedding']['host']=gateway
+        result['native_hermes']['intake']['bind']=gateway
         # OAuth and bot token are client-owned mandatory separate inputs, never copied from DEV.
         result['required_external_inputs']=['native_hermes_auth.content','native_hermes_token_environment']
     result['roles']=[r for r in inputs['roles'] if not r['name'].startswith('brai_dev_') and (r['name']!='brai_codeworks_owner' and r['name']!='brai_codeworks_app' or 'codeworks' in m['installed']['prod'])]
@@ -159,6 +167,8 @@ def product_inputs(full_manifest, inputs, public_origin):
         if old_origin:data=data.replace(old_origin.encode(),public_origin.encode())
         item['content']=base64.b64encode(data).decode()
     if old_origin:
+        if result.get('native_hermes'):
+            result['native_hermes']=json.loads(json.dumps(result['native_hermes']).replace(old_origin,public_origin))
         result['environments']=json.loads(json.dumps(result['environments']).replace(old_origin,public_origin))
         result['program_environment']=json.loads(json.dumps(result['program_environment']).replace(old_origin,public_origin))
     # The inspect health command used an interpolated token. Keep it private at runtime.

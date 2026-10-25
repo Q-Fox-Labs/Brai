@@ -64,7 +64,7 @@ async function models(target){
    }
    must(done);
    }
-   // AIDEV-NOTE: Explicit model settings belong to installation inputs, including already installed models.
+   // AIDEV-NOTE: Явные настройки модели принадлежат inputs и применяются также к уже установленной модели.
    const settings=m.local_ai[name].settings??{};
    if(Object.hasOwn(settings,profileId)){
     const declared=settings[profileId];
