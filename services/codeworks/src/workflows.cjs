@@ -17,7 +17,20 @@ async function codeworksWorkspace(state={generation:1,position:0}) {
     if(batch.completed)return;
     if(patched('codeworks-checkpoint-references-v1'))state.checkpoint=batch.checkpoint;
     for(const command of batch.commands){
-      try{await execution.executeCommand(command.operation_id,state.generation);}
+      try{
+        if(patched('codeworks-scoped-activities-v1')&&command.kind){
+          if(command.kind==='prepare'){
+            const steps=[['prepareBranch','branch'],['prepareCheckout','checkout'],['prepareDependencies','dependencies'],['confirmWorkspace','ready']];
+            for(const [name,stage] of steps){
+              const result=await execution[name](command.operation_id,state.generation);
+              if(result.status==='failed'||['branch','checkout','dependencies','ready'].indexOf(result.preparation_state)<['branch','checkout','dependencies','ready'].indexOf(stage))break;
+            }
+          }else{
+            const names={sync:'synchronizeBranch',release:'advanceRelease',rollout:'reconcileRollout',cleanup:'cleanupWorkspace','release.close':'closeRelease','workspace.cancel':'cancelWorkspace'};
+            await execution[names[command.kind]](command.operation_id,state.generation);
+          }
+        }else await execution.executeCommand(command.operation_id,state.generation);
+      }
       catch{await resilient(()=>activities.requireReconciliation(command.operation_id,state.generation));}
       state.position=Math.max(state.position,Number(command.sequence));
     }

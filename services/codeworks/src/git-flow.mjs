@@ -1,4 +1,4 @@
-// ABOUTME: Выполняет ограниченные Git шаги выпусков под существующим project flock.
+// ABOUTME: Выполняет Git шаги с immutable объектами и атомарной проверкой remote refs.
 // ABOUTME: Публикует без перезаписи истории; удаляет только ветку задачи с точным ожидаемым SHA.
 import { command } from './git.mjs';
 import { Fault } from './errors.mjs';
@@ -25,8 +25,11 @@ export function createFlowGit({run=command,localRemote=false,requireLock=()=>{if
   async function ancestor(p,a,b){if(!sha(a)||!sha(b))throw new Fault('INVALID_ARGUMENT');return (await git(p,['merge-base','--is-ancestor',a,b],{allowFailure:true})).code===0;}
   async function fetch(p,b,expected) {
     locked();await origin(p);if(!branch(b)||!sha(expected))throw new Fault('INVALID_ARGUMENT');
-    await git(p,['fetch','--no-tags','origin','refs/heads/'+b]);
-    if((await git(p,['rev-parse','FETCH_HEAD'])).stdout!==expected)throw new Fault('TARGET_CHANGED');
+    // AIDEV-NOTE: FETCH_HEAD и общие tracking refs нельзя использовать как результат параллельного fetch.
+    if(await remote(p,b)!==expected)throw new Fault('TARGET_CHANGED');
+    await git(p,['fetch','--no-tags','--no-write-fetch-head','--no-auto-maintenance','--refmap=','origin',expected]);
+    if(await remote(p,b)!==expected)throw new Fault('TARGET_CHANGED');
+    await git(p,['cat-file','-e',expected+'^{commit}']);
   }
   return {
     remote,ancestor,
