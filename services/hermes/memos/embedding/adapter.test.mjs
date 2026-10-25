@@ -23,9 +23,11 @@ function localAiResponse(invocation, vectors) {
   return { requestId: invocation.requestId, operationId: invocation.operationId, model: invocation.model, vectors };
 }
 
-test('accepts only the DEV loopback NATS listener on port 4223', () => {
+test('accepts DEV and PROD loopback NATS listeners and rejects other endpoints', () => {
   assert.equal(validateConfig(config).nats.servers[0], 'nats://127.0.0.1:4223');
-  assert.throws(() => validateConfig({ ...config, nats: { servers: ['nats://127.0.0.1:4222'] } }), /port 4223/);
+  assert.equal(validateConfig({ ...config, nats: { servers: ['nats://127.0.0.1:4222'] } }).nats.servers[0], 'nats://127.0.0.1:4222');
+  assert.throws(() => validateConfig({ ...config, nats: { servers: ['nats://127.0.0.1:4224'] } }), /4222 or 4223/);
+  assert.throws(() => validateConfig({ ...config, nats: { servers: ['nats://example.com:4222'] } }), /loopback/);
 });
 
 test('rejects malformed input and a request for another model before invoking NATS', async () => {

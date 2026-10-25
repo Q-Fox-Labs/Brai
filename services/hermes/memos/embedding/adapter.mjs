@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { connect } from 'nats';
 
 const MODEL_ID = 'embeddinggemma-2-q8';
@@ -20,7 +21,7 @@ export async function loadConfig(configPath = process.env.BRAI_HERMES_CONFIG) {
   return validateConfig(value);
 }
 
-/** Validate owner, DEV NATS endpoint, pinned model, and listener settings. */
+/** Validate owner, local NATS endpoint, pinned model, and listener settings. */
 export function validateConfig(value) {
   const nats = value?.nats;
   const embedding = value?.embedding;
@@ -29,9 +30,9 @@ export function validateConfig(value) {
     throw new Error('Invalid Hermes owner configuration');
   }
   if (!Array.isArray(nats?.servers) || nats.servers.length === 0
-    || !nats.servers.every(isDevNatsServer)
+    || !nats.servers.every(isLocalNatsServer)
     || (nats.user && !nats.password) || (!nats.user && nats.password)) {
-    throw new Error('Hermes NATS servers must target the DEV loopback listener on port 4223');
+    throw new Error('Hermes NATS servers must target a loopback listener on port 4222 or 4223');
   }
   if (model?.modelId !== MODEL_ID || model?.revision !== MODEL_REVISION || model?.profileId !== PROFILE_ID) {
     throw new Error('Hermes embedding model must match the pinned LocalAI profile');
@@ -49,13 +50,13 @@ export function validateConfig(value) {
   return { ownerId: value.ownerId, nats: { ...nats }, embedding: { host, port, timeoutMs, apiKey, model: { modelId: MODEL_ID, revision: MODEL_REVISION, profileId: PROFILE_ID } } };
 }
 
-function isDevNatsServer(server) {
+function isLocalNatsServer(server) {
   if (typeof server !== 'string') return false;
   try {
     const url = new URL(server);
     return ['nats:', 'tls:'].includes(url.protocol)
       && ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname.toLowerCase())
-      && url.port === '4223'
+      && ['4222', '4223'].includes(url.port)
       && (url.pathname === '' || url.pathname === '/')
       && !url.username && !url.password && !url.search && !url.hash;
   } catch {
@@ -248,7 +249,7 @@ async function healthCheck(config) {
   process.stdout.write(JSON.stringify({ status: body.status, model: body.model, dimensions: body.dimensions }) + '\n');
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try {
     const config = await loadConfig();
     if (process.argv.includes('--health')) await healthCheck(config);
