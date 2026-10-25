@@ -4,7 +4,8 @@
   "type": "container",
   "status": "active",
   "environments": [
-    "dev"
+    "dev",
+    "prod"
   ],
   "executableSources": [
     "services/game-core/planning/runner.py",
