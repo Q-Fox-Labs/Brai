@@ -1,9 +1,0 @@
-# ABOUTME: Устанавливает самостоятельный клиентский Brai из принятого состава PROD.
-# ABOUTME: Не требует Admin, DEV или архива сервера; секреты поступают отдельным файлом.
----
-- name: Install the accepted Brai product on clean Ubuntu
-  hosts: managed
-  become: true
-  gather_facts: false
-  roles:
-    - role: brai_install
