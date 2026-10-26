@@ -28,9 +28,18 @@ function resolved(value, cwd) {
 // Только литеральные слова и простые разделители: это не интерпретатор shell.
 function shellTokens(command) {
   const tokens = [];
-  let word = '', active = false, dynamic = false, quote;
+  let word = '', active = false, dynamic = false, quote, delimiter;
+  const heredocs = [];
+  let invalid = false;
   const flush = () => {
-    if (active) tokens.push({word, dynamic});
+    if (active) {
+      tokens.push({word, dynamic});
+      if (delimiter) {
+        if (dynamic) invalid = true;
+        heredocs.push({word, stripTabs: delimiter.stripTabs});
+        delimiter = undefined;
+      }
+    }
     word = ''; active = false; dynamic = false;
   };
   for (let i = 0; i < command.length; i++) {
@@ -45,16 +54,48 @@ function shellTokens(command) {
       while (i + 1 < command.length && command[i + 1] !== '\n') i++;
       continue;
     }
+    if (c === '<' && command[i + 1] === '<') {
+      flush();
+      if (delimiter) return [];
+      if (command[i + 2] === '<') {
+        tokens.push({operator: '<<<'}); i += 2;
+      } else {
+        delimiter = {stripTabs: command[i + 2] === '-'};
+        tokens.push({operator: '<<'}); i += delimiter.stripTabs ? 2 : 1;
+      }
+      continue;
+    }
     if (';|&<>\n'.includes(c)) {
       flush();
-      const operator = command[i + 1] === c ? c + command[++i] : c;
-      tokens.push({operator}); continue;
+      const operator = c !== '\n' && command[i + 1] === c ? c + command[++i] : c;
+      tokens.push({operator});
+      if (c === '\n') {
+        if (delimiter || invalid) return [];
+        // AIDEV-NOTE: Тело here-document — данные stdin, а не команды shell.
+        // Заголовок и команды после разделителя остаются в проверке записи.
+        for (const document of heredocs) {
+          let start = i + 1, matched = false;
+          while (start <= command.length) {
+            const end = command.indexOf('\n', start);
+            const line = command.slice(start, end === -1 ? command.length : end);
+            if ((document.stripTabs ? line.replace(/^\t+/, '') : line) === document.word) {
+              i = end === -1 ? command.length : end;
+              matched = true; break;
+            }
+            if (end === -1) break;
+            start = end + 1;
+          }
+          if (!matched) return [];
+        }
+        heredocs.length = 0;
+      }
+      continue;
     }
     if (/\s/.test(c)) { flush(); continue; }
     if ('$`\\*?(){}'.includes(c)) dynamic = true;
     word += c; active = true;
   }
-  if (quote) return [];
+  if (quote || delimiter || heredocs.length || invalid) return [];
   flush();
   return tokens;
 }
@@ -118,8 +159,9 @@ export function writePaths(event) {
   return [];
 }
 
-function denied(context) {
-  return {hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'Запись в основную копию требует рабочей области Codeworks.', additionalContext: context}};
+function denied(context, projects) {
+  const scope = JSON.stringify(projects.map(({id, repo_path}) => ({id, repo_path})));
+  return {hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `Запись в основную копию требует рабочей области Codeworks. Защищённые проекты: ${scope}.`, additionalContext: context}};
 }
 
 /** Возвращает официальный PreToolUse DTO; подключается только для распознанной защищённой записи. */
@@ -138,8 +180,9 @@ export async function runHook(event, {env = process.env, config, connect = conne
     return files.some(file => inside(root, file) && ![...(project.documentation_paths ?? []), ...(project.excluded_paths ?? [])].some(exception => inside(resolved(exception, root), file)));
   });
   if (!projects.length) return {};
+  const deny = context => denied(context, projects);
   const workspaceKey = env.CODEWORKS_WORKSPACE_KEY || env.CODEX_THREAD_ID || env.CODEX_SESSION_ID || event.thread_id || event.session_id;
-  if (projects.length !== 1 || !workspaceKey) return denied('Задайте CODEWORKS_WORKSPACE_KEY и выберите один проект. Найдите существующие области через status с project_id. Чтение и диагностика доступны.');
+  if (projects.length !== 1 || !workspaceKey) return deny('Задайте CODEWORKS_WORKSPACE_KEY и выберите один проект. Найдите существующие области через status с project_id. Чтение и диагностика доступны.');
   const project = projects[0];
   const kind = env.CODEWORKS_WORKSPACE_KIND || 'feature';
   const requestKey = 'hook-prepare-' + createHash('sha256').update(JSON.stringify([project.id, workspaceKey, kind])).digest('hex');
@@ -148,10 +191,10 @@ export async function runHook(event, {env = process.env, config, connect = conne
   try {
     client = await connect(await loadClientConfig(env));
     const result = await client.call('prepare', args);
-    return denied(`Область Codeworks: ${JSON.stringify(result)}. Дождитесь ready через status с project_id=${project.id}, workspace_id=${result.workspace_id}, operation_id=${result.operation_id}. Затем повторите исходную запись штатным инструментом по path области, с её рабочим каталогом. Ветка: ${result.branch}. Hook не переносит правки автоматически. workspace_key=${workspaceKey}; request_key=${requestKey}.`);
+    return deny(`Область Codeworks: ${JSON.stringify(result)}. Дождитесь ready через status с project_id=${project.id}, workspace_id=${result.workspace_id}, operation_id=${result.operation_id}. Затем повторите исходную запись штатным инструментом по path области, с её рабочим каталогом. Ветка: ${result.branch}. Hook не переносит правки автоматически. workspace_key=${workspaceKey}; request_key=${requestKey}.`);
   } catch (error) {
-    if(error?.code==='INVALID_ARGUMENT')return denied('Для новой задачи вызовите prepare с коротким осмысленным workspace_key, например codeworks-auto-cleanup; ID чата не является названием задачи. Для продолжения найдите прежнюю область через status. Затем повторите запись в возвращённом дереве.');
-    return denied(`Codeworks недоступен или prepare завершился ошибкой. Исходная запись остановлена; чтение и диагностика доступны. Проверьте status с project_id=${project.id}, workspace_key=${workspaceKey}; повтор prepare использует тот же запрос ${JSON.stringify(args)}. Ошибка ожидания не отменяет операцию.`);
+    if(error?.code==='INVALID_ARGUMENT')return deny('Для новой задачи вызовите prepare с коротким осмысленным workspace_key, например codeworks-auto-cleanup; ID чата не является названием задачи. Для продолжения найдите прежнюю область через status. Затем повторите запись в возвращённом дереве.');
+    return deny(`Codeworks недоступен или prepare завершился ошибкой. Исходная запись остановлена; чтение и диагностика доступны. Проверьте status с project_id=${project.id}, workspace_key=${workspaceKey}; повтор prepare использует тот же запрос ${JSON.stringify(args)}. Ошибка ожидания не отменяет операцию.`);
   } finally {
     try { await client?.close(); } catch { /* Не скрываем решение hook при ошибке закрытия соединения. */ }
   }
