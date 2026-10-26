@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import html
 import importlib
 import logging
@@ -785,6 +786,8 @@ class TelegramPlugin:
         self.inbound_events[key] = event
         if len(self.inbound_events) > 128:
             self.inbound_events.pop(next(iter(self.inbound_events)))
+        if "brai_files" in sys.modules:
+            return None  # Файлы обрабатывает обязательная общая граница после native auth.
         paths = getattr(event, "media_urls", [])
         if not paths:
             return None
@@ -836,6 +839,8 @@ class TelegramPlugin:
 
     def tool_result(self, tool_name, result, session_id="", tool_call_id="", **kwargs):
         """Опубликовать готовую native image_generate картинку до попадания в model context."""
+        if "brai_files" in sys.modules:
+            return None
         if tool_name != "image_generate":
             return None
         try:
@@ -882,6 +887,8 @@ class TelegramPlugin:
 
     def outgoing(self, response_text, platform=None, session_id="", turn_id="", **kwargs):
         """Передавать явные файлы через publisher; неизменённый ответ оставить потоку."""
+        if "brai_files" in sys.modules:
+            return None
         if _platform(platform) != "telegram":
             return None
         deadline, seen, paths, count = time.monotonic() + OUTPUT_TIMEOUT, set(), set(), 0
@@ -1362,8 +1369,17 @@ class TelegramPlugin:
         await self._notify(notice, row["chat_id"], row["thread_id"])
 
 
+def file_rpc(method, params, timeout):
+    """Внутренний файловый порт owner MCP без полномочий human actions."""
+    if method not in {'files.configuration', 'files.publish', 'files.fetch', 'files.get', 'files.list', 'files.prepare'}:
+        raise BridgeError('FORBIDDEN')
+    return sys.modules['_brai_codeworks_gateway'].call_plugin(method, params, timeout)
+
+
 def register(ctx):
     """Подключить плагин через публичный API закреплённого Hermes."""
+    from types import SimpleNamespace
+    sys.modules['_brai_hermes_file_port'] = SimpleNamespace(call=file_rpc)
     plugin = TelegramPlugin(Config.from_env(), inject_message=getattr(ctx, "inject_message", None))
     ctx.register_telegram_handler(plugin.factory)
     ctx.register_hook("pre_gateway_dispatch", plugin.incoming)

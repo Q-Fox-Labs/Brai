@@ -1,13 +1,13 @@
 # Инструменты Hermes
 
-Владелец этой границы — `services/hermes`. Программа `tools.mjs` предоставляет MCP stdio по официальному SDK. Её входные схемы берутся из MCP владельца или опубликованных JSON Schemas соседей. Собственных таблиц, очереди и универсального транспорта команд нет. Историю изменений сохраняют владельцы; мост не создаёт дублирующих History фактов.
+Владелец этой границы — `services/hermes`. Программа `tools.mjs` предоставляет MCP stdio по официальному SDK. Её входные схемы берутся из MCP владельца или опубликованных JSON Schemas соседей. Бизнес-данные и команды остаются у владельцев; служебные сведения файловых наборов и доставки принадлежат общему адаптеру Hermes. Историю изменений сохраняют владельцы; мост не создаёт дублирующих History фактов.
 
 ## Связи и доверие
 
 | Вход Hermes | Порт владельца | Ограничение |
 | --- | --- | --- |
 | `game_core_*` | [game-core MCP](../game-core/CONTRACT.md) | Owner-bound endpoint; human claim/complete/fail модели запрещены. |
-| `publish_file`, `fetch_file` | [publisher MCP stdio](../agent/PUBLISHER.md) | Независим от основного Agent. Metadata NATS, байты HTTP, owner/ready/SHA-256 проверяются publisher. |
+| `publish_file`, `fetch_file`, `files_get`, `files_list`, `files_prepare` | [publisher MCP stdio](../agent/PUBLISHER.md) | Независим от основного Agent. Metadata NATS, байты HTTP, owner/ready/SHA-256 проверяются publisher. |
 | `timer_*` | [Timer v2](../timer/README.md) | Команды JetStream; чтение NATS Services; userId добавляет мост. |
 | `history_list`, `history_get` | [History scoped queries](../history/CONTRACT.md) | Только user scope текущего owner, без SQL/произвольного scope. |
 | Три инструмента справочника History | Готовый History MCP | Только categories_list, types_list, type_get; административные инструменты скрыты. |
@@ -15,7 +15,7 @@
 | `transcription_*` | [Transcription MCP](../transcription/CONTRACT.md) | Trusted bearer с фиксированным principal; обычные локальные расшифровки идут через coordinator. |
 | `local_ai_*` | [Local AI owner API](../local-ai/CONTRACT.md) | Каталог, install/state/configure/load/unload/remove, embed, synthesize, cancel/status. OwnerId добавляет мост. |
 
-Поток файла: Hermes working file → publisher snapshot → Artifacts prepare → HTTP bytes → подтверждение ready/hash → неизменяемая локальная копия → Telegram native upload. Входящий Telegram файл проходит тот же publish; последующие потребители получают Artifact ID. Модель не получает произвольный NATS/SQL инструмент, upload URL или право читать чужой артефакт.
+Поток файла: Hermes working file → publisher snapshot → Artifacts prepare → HTTP bytes → подтверждение ready/hash → неизменяемая локальная копия → представление нужного канала. Общая модель описана в [контракте адаптера](files/CONTRACT.md). Входящий Telegram файл проходит тот же publish; последующие потребители получают Artifact ID. Модель не получает произвольный NATS/SQL инструмент, upload URL или право читать чужой артефакт.
 
 Запуск требует защищённого JSON и отдельного доверенного `BRAI_HERMES_OWNER_ID`. Они должны совпадать. NATS identity Hermes имеет только необходимые subjects и свой inbox; старые связи сервисов не меняются. Credentials не включаются в ошибки. Конфигурация экземпляра отвечает за owner binding GameCore endpoint и Transcription bearer. Подмена owner во входе отвергается.
 

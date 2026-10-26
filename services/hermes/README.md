@@ -56,6 +56,10 @@ node services/hermes/tools.mjs
 
 Конфигурация publisher описана в [PUBLISHER.md](../agent/PUBLISHER.md). Его `resultRoot` должен совпадать с `BRAI_TELEGRAM_RESULT_ROOT`; `allowedReadRoots` включают только рабочие каталоги Hermes, которые можно публиковать. Не добавляйте секретные каталоги. Веса моделей и базы сервисов не относятся к результатам агента.
 
+## Файлы во всех режимах
+
+Все пользовательские файлы постоянно хранятся в Artifacts. Общий адаптер и обязательный patch движка подключаются Ansible из принятой поставки для каналов, CLI/API, cron и дочерних агентов. Явные наборы сохраняют порядок, подписи и способ выдачи. [Контракт и приёмка](files/CONTRACT.md).
+
 ## Telegram и голос
 
 Доверенный Telegram плагин запускает `node services/hermes/trusted.mjs` с теми же двумя переменными окружения. Он использует ограниченный JSON-RPC stdio, описанный в [CONTRACT.md](CONTRACT.md) и [trusted.openrpc.json](trusted.openrpc.json). Этот процесс нельзя регистрировать как инструмент модели.

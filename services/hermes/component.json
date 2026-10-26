@@ -13,7 +13,10 @@
     "services/hermes/tools.mjs",
     "services/hermes/trusted.mjs",
     "services/hermes/memos/embedding/adapter.mjs",
-    "services/hermes/memos/bridge/codex_bridge.py"
+    "services/hermes/memos/bridge/codex_bridge.py",
+    "services/hermes/files/native.py",
+    "services/hermes/files/install.py",
+    "services/hermes/files/migrate.py"
   ],
   "inputs": {
     "build": [],
@@ -112,7 +115,18 @@
       "docs/user-agent/instructions/hermes/skills/software-development/requesting-code-review/references/guide-checks.md",
       "docs/user-agent/instructions/hermes/skills/software-development/requesting-code-review/references/guide-patterns.md",
       "docs/user-agent/instructions/hermes/skills/software-development/requesting-code-review/references/guide-reviewer.md",
-      "docs/user-agent/instructions/hermes/skills/software-development/requesting-code-review/references/guide-verdict.md"
+      "docs/user-agent/instructions/hermes/skills/software-development/requesting-code-review/references/guide-verdict.md",
+      "services/hermes/files/__init__.py",
+      "services/hermes/files/bridge.py",
+      "services/hermes/files/bootstrap.py",
+      "services/hermes/files/native.py",
+      "services/hermes/files/store.py",
+      "services/hermes/files/metadata.mjs",
+      "services/hermes/files/configuration.mjs",
+      "services/hermes/files/install.py",
+      "services/hermes/files/migrate.py",
+      "services/hermes/files/native.patch",
+      "services/hermes/files/CONTRACT.md"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
@@ -120,7 +134,10 @@
       "services/hermes/tests/confirmation.test.mjs",
       "services/hermes/tests/tools.test.mjs",
       "services/hermes/tests/transcribe.test.mjs",
-      "services/hermes/tests/planning-read.test.mjs"
+      "services/hermes/tests/planning-read.test.mjs",
+      "services/hermes/tests/files.test.mjs",
+      "services/hermes/files/tests/test_files.py",
+      "services/hermes/files/tests/test_engine.py"
     ]
   },
   "dependencies": [
@@ -300,7 +317,18 @@
       "docs/user-agent/instructions/hermes/skills/software-development/requesting-code-review/references/guide-checks.md",
       "docs/user-agent/instructions/hermes/skills/software-development/requesting-code-review/references/guide-patterns.md",
       "docs/user-agent/instructions/hermes/skills/software-development/requesting-code-review/references/guide-reviewer.md",
-      "docs/user-agent/instructions/hermes/skills/software-development/requesting-code-review/references/guide-verdict.md"
+      "docs/user-agent/instructions/hermes/skills/software-development/requesting-code-review/references/guide-verdict.md",
+      "services/hermes/files/__init__.py",
+      "services/hermes/files/bridge.py",
+      "services/hermes/files/bootstrap.py",
+      "services/hermes/files/native.py",
+      "services/hermes/files/store.py",
+      "services/hermes/files/metadata.mjs",
+      "services/hermes/files/configuration.mjs",
+      "services/hermes/files/install.py",
+      "services/hermes/files/migrate.py",
+      "services/hermes/files/native.patch",
+      "services/hermes/files/CONTRACT.md"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",

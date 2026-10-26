@@ -7,6 +7,8 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { connect, ServiceErrorHeader, ServiceErrorCodeHeader } from 'nats';
 import { compileInput, natsTools, gameCoreNames, historyNames, transcriptionNames } from './catalog.mjs';
 import { planningReadTool, readPlanningPacket } from './planning-read.mjs';
+import { fileMetadataTools, fileMetadata } from './files/metadata.mjs';
+import { fileConfiguration } from './files/configuration.mjs';
 
 const MAX_REQUEST_BYTES = 65_536, MAX_RESPONSE_BYTES = 1_048_576;
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -169,6 +171,8 @@ export async function createBraiTools(config, ports) {
     }
   }
   for (const definition of natsTools) tools.push({ name: definition.name, description: definition.description, inputSchema: definition.inputSchema });
+  const metadata = new Map(fileMetadataTools.map(tool => [tool.name, compileInput(tool.inputSchema)]));
+  tools.push(...fileMetadataTools);
   const humanRequest = { name: 'game_core_request_human_action', description: 'Прочитать Action для отправки подтверждения через brai_telegram_request_confirmation. Этот вызов не начинает и не подтверждает человеческую попытку.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['moveId'], properties: { moveId: { type: 'string', format: 'uuid' } } } };
   const validateHumanRequest = compileInput(humanRequest.inputSchema);
@@ -185,6 +189,7 @@ export async function createBraiTools(config, ports) {
   }
   return {
     tools, gameCoreCall, graph,
+    filesConfiguration: () => fileConfiguration(config, fault),
     /** Вызывает только объявленный инструмент; максимум восемь текущих вызовов, очереди нет. */
     async call(name, args = {}, signal) {
       if (!object(args) || hasOwner(args)) throw fault('INVALID_ARGUMENT');
@@ -207,6 +212,10 @@ export async function createBraiTools(config, ports) {
           const target = value.elements.find(element => element.id === move.targetId);
           if (!target) throw fault('INVALID_UPSTREAM_RESPONSE');
           return { moveId: move.id, revisionId: target.revision, targetId: target.id, title: move.title, nextTool: 'brai_telegram_request_confirmation' };
+        }
+        if (metadata.has(name)) {
+          if (!metadata.get(name)(args)) throw fault('INVALID_ARGUMENT');
+          return await fileMetadata(name, args, config.ownerId, ports.request.bind(ports), fault, signal);
         }
         const upstream = remote.get(name);
         if (upstream) {
