@@ -1,0 +1,57 @@
+# ABOUTME: Проверяет версию, права, службу и отсутствие веб-интерфейса Duplicati.
+# ABOUTME: Не читает секреты, не меняет состояние и не запускает резервные копии.
+import hashlib
+import http.client
+from pathlib import Path
+import stat
+import subprocess
+
+VERSION = {{ duplicati_version | to_json }}
+UNIT_SHA256 = {{ lookup('template', 'duplicati.service.j2') | hash('sha256') | to_json }}
+
+
+def output(*args):
+    return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL).strip()
+
+
+def require(condition, code):
+    if not condition:
+        raise ValueError(code)
+
+
+def status(path):
+    connection = http.client.HTTPConnection('127.0.0.1', 8200, timeout=10)
+    try:
+        connection.request('GET', path)
+        return connection.getresponse().status
+    finally:
+        connection.close()
+
+
+def verify():
+    require(output('/usr/bin/dpkg-query', '-W', '-f=${Version}', 'duplicati') == VERSION, 'DUPLICATI_VERSION')
+    for name, mode in [('/etc/duplicati', 0o700), ('/etc/duplicati/server.env', 0o600),
+                       ('/var/lib/duplicati', 0o700), ('/var/backups/brai-duplicati', 0o700)]:
+        info = Path(name).lstat()
+        expected_type = stat.S_ISREG if name.endswith('.env') else stat.S_ISDIR
+        require(expected_type(info.st_mode) and info.st_uid == 0 and info.st_gid == 0
+                and stat.S_IMODE(info.st_mode) == mode, 'DUPLICATI_PRIVATE_PATH')
+    unit = Path('/etc/systemd/system/duplicati.service').read_bytes()
+    require(hashlib.sha256(unit).hexdigest() == UNIT_SHA256, 'DUPLICATI_UNIT')
+    require(output('/usr/bin/systemctl', 'is-active', 'duplicati.service') == 'active', 'DUPLICATI_ACTIVE')
+    require(output('/usr/bin/systemctl', 'is-enabled', 'duplicati.service') == 'enabled', 'DUPLICATI_ENABLED')
+    listeners = output('/usr/bin/ss', '-H', '-ltn', 'sport = :8200').splitlines()
+    require(bool(listeners) and all(line.split()[3] in ('127.0.0.1:8200', '[::1]:8200')
+                                   for line in listeners), 'DUPLICATI_LISTENERS')
+    for path in ['/', '/ngclient/index.html', '/ngclient/login', '/ngax/index.html']:
+        require(status(path) == 404, 'DUPLICATI_WEB_DISABLED')
+    require(status('/api/v1/backups') == 401, 'DUPLICATI_API_AUTH')
+
+
+if __name__ == '__main__':
+    try:
+        verify()
+        print('DUPLICATI_VERIFIED')
+    except Exception:
+        # Only a fixed diagnostic: no URLs, environment or child output.
+        raise SystemExit('DUPLICATI_VERIFICATION_FAILED')

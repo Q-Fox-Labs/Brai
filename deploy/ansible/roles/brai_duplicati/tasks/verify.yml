@@ -1,0 +1,21 @@
+# ABOUTME: Проверяет клиентскую службу без чтения секретов или запуска копирования.
+# ABOUTME: Использует ту же независимую проверку, что и ежедневный установочный аудит.
+---
+- name: Read installed backup verification program
+  ansible.builtin.slurp:
+    src: /usr/local/libexec/brai-verify-duplicati
+  register: duplicati_verifier
+
+- name: Require the declared backup verification program
+  ansible.builtin.assert:
+    that: (duplicati_verifier.content | b64decode) == lookup('template', 'verify-duplicati.py.j2')
+
+- name: Verify installed backup service without changing it
+  ansible.builtin.command:
+    argv: [/usr/bin/python3, -B, /usr/local/libexec/brai-verify-duplicati]
+  register: duplicati_verification
+  until: duplicati_verification.rc == 0
+  retries: 12
+  delay: 2
+  changed_when: false
+  check_mode: false

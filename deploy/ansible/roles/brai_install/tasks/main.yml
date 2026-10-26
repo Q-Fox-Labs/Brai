@@ -8,6 +8,12 @@
   ansible.builtin.include_tasks: bootstrap.yml
   when: brai_install_bootstrap | bool
 
+- name: Install the shared client backup service
+  ansible.builtin.include_role:
+    name: '{{ role_path | dirname }}/brai_duplicati'
+  vars:
+    duplicati_initialize_secrets: true
+
 - name: Install shared runtime helpers
   ansible.builtin.copy:
     src: '{{ item }}'

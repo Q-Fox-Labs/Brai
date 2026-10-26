@@ -1,0 +1,14 @@
+# ABOUTME: Подготавливает или проверяет клиентскую службу резервного копирования.
+# ABOUTME: Не подключает Google Drive и не создаёт заданий или дампов.
+---
+- name: Manage the client backup service
+  hosts: managed
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Run the shared backup recipe
+      ansible.builtin.include_role:
+        name: brai_duplicati
+        tasks_from: main
+      vars:
+        duplicati_initialize_secrets: true

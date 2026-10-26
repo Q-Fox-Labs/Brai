@@ -1,0 +1,119 @@
+# ABOUTME: Устанавливает закреплённый Duplicati как закрытую системную службу.
+# ABOUTME: Не создаёт облачных заданий; при восстановлении требует прежние ключи.
+---
+- name: Create shared verification executable directory
+  ansible.builtin.file:
+    path: /usr/local/libexec
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create private Duplicati directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+  loop: [/etc/duplicati, /var/lib/duplicati, /var/backups/brai-duplicati]
+
+- name: Inspect protected Duplicati environment
+  ansible.builtin.stat:
+    path: /etc/duplicati/server.env
+    get_checksum: false
+    get_mime: false
+    follow: false
+  register: duplicati_environment
+
+- name: Require restored secrets unless first initialization is explicit
+  ansible.builtin.assert:
+    that:
+      - duplicati_environment.stat.exists or duplicati_initialize_secrets | default(false) | bool
+      - not duplicati_environment.stat.exists or (duplicati_environment.stat.isreg | default(false) and duplicati_environment.stat.uid == 0 and duplicati_environment.stat.gid == 0 and duplicati_environment.stat.mode == '0600')
+    fail_msg: Restore /etc/duplicati/server.env; generating new keys cannot restore existing Duplicati settings.
+
+- name: Generate new private settings key and local API password only once
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import os, secrets
+        path = '/etc/duplicati/server.env'
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w') as output:
+            output.write('SETTINGS_ENCRYPTION_KEY=' + secrets.token_hex(32) + '\n')
+            output.write('DUPLICATI__WEBSERVICE_PASSWORD=' + secrets.token_urlsafe(32) + '\n')
+    creates: /etc/duplicati/server.env
+  no_log: true
+  when: duplicati_initialize_secrets | default(false) | bool
+
+- name: Create pinned package cache
+  ansible.builtin.file:
+    path: /opt/duplicati
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Download verified official CLI package including web server
+  ansible.builtin.get_url:
+    url: 'https://github.com/duplicati/duplicati/releases/download/v{{ duplicati_release }}/duplicati-{{ duplicati_release }}-linux-x64-cli.deb'
+    dest: '/opt/duplicati/duplicati-{{ duplicati_release }}.deb'
+    checksum: 'sha256:{{ duplicati_package_sha256 }}'
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Install Duplicati without starting the vendor default service
+  ansible.builtin.apt:
+    deb: '/opt/duplicati/duplicati-{{ duplicati_release }}.deb'
+    policy_rc_d: 101
+  register: duplicati_package
+
+- name: Install private loopback-only service
+  ansible.builtin.template:
+    src: duplicati.service.j2
+    dest: /etc/systemd/system/duplicati.service
+    owner: root
+    group: root
+    mode: '0644'
+  register: duplicati_unit
+
+- name: Install independent read-only backup service verification
+  ansible.builtin.template:
+    src: verify-duplicati.py.j2
+    dest: /usr/local/libexec/brai-verify-duplicati
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Create common daily verification drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/brai-install-verify.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Add the client backup check to the shared daily verification
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/brai-install-verify.service.d/duplicati.conf
+    content: |
+      # Managed by the product brai_duplicati role.
+      [Service]
+      ExecStartPost=/usr/bin/python3 -B /usr/local/libexec/brai-verify-duplicati
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Enable and start configured Duplicati
+  ansible.builtin.systemd_service:
+    name: duplicati.service
+    daemon_reload: true
+    enabled: true
+    state: '{{ "restarted" if (duplicati_unit.changed or duplicati_package.changed) else "started" }}'
+
+- name: Verify the prepared backup service
+  ansible.builtin.import_tasks: verify.yml

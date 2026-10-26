@@ -1,0 +1,7 @@
+# ABOUTME: Закрепляет клиентскую службу резервного копирования Duplicati.
+# ABOUTME: Новые секреты разрешены только при явно выбранной первой установке.
+---
+duplicati_version: '2.4.0.1'
+duplicati_release: '2.4.0.1_stable_2026-10-07'
+duplicati_package_sha256: e3c563a894ba3f7d7ee42e422e0a43386e36687dda2dc9aa95913c3085d422c7
+duplicati_initialize_secrets: false
