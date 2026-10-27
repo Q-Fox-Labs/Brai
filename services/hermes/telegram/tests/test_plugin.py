@@ -731,7 +731,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.call = reject
         result = json.loads(await self.plugin.request_confirmation({"moveId": MOVE, "revisionId": REVISION}))
         self.assertFalse(result["ok"])
-        self.assertIn("отправьте результат сообщением", result["message"])
+        self.assertIn("настоящие результаты работы человека", result["message"])
         self.assertEqual([method for method, _ in self.bridge.calls], ["actions.prepare", "actions.read"])
         self.assertEqual(self.plugin.tokens.pending(), [])
         self.assertEqual(self.bot.sent, [])
@@ -885,7 +885,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.callback(NS(callback_query=FakeQuery(data)), None)
         await self.plugin.callback(NS(callback_query=FakeQuery(data)), None)
         self.assertEqual(sum(method == "actions.complete" for method, _ in self.bridge.calls), 1)
-        self.assertIn("администратору", self.bot.sent[-1]["text"])
+        self.assertIn("не подтверждена", self.bot.sent[-1]["text"])
         self.assertTrue(self.plugin.tokens.pending()[0]["consumed"])
 
     async def test_cancelled_callback_releases_active_marker_and_cleans_attempt(self):
@@ -961,7 +961,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(facts, dict(elementId=TARGET, moveId=MOVE, revisionId=REVISION,
                                     attemptId=ATTEMPT, stage="planning", decision="approved"))
         self.assertNotIn(data.split(":")[1], content)
-        self.assertIn("Передаю задачу на продолжение", self.bot.sent[-1]["text"])
+        self.assertIn("автоматическое продолжение работы", self.bot.sent[-1]["text"])
         self.plugin.observe_resume(session_id="other-session", user_message=content)
         with self.plugin.tokens._connect() as db:
             self.assertEqual(db.execute("SELECT resume_outcome FROM tokens").fetchone()[0], "submitted")
@@ -1235,8 +1235,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             self.plugin.inject_message = None if outcome is None else inject
             await self.plugin.callback(NS(callback_query=FakeQuery(data, message_id=len(self.bot.sent))), None)
             self.assertEqual(len(attempted), 0 if outcome is None else 1)
-            self.assertNotIn("Передаю задачу на продолжение", self.bot.sent[-1]["text"])
-            self.assertIn("администратору", self.bot.sent[-1]["text"])
+            self.assertNotIn("автоматическое продолжение работы", self.bot.sent[-1]["text"])
+            self.assertRegex(self.bot.sent[-1]["text"], "не принял|недоступно|недоступна|неизвестен")
             await self.plugin.callback(NS(callback_query=FakeQuery(data, message_id=len(self.bot.sent) - 1)), None)
             self.assertEqual(len(attempted), 0 if outcome is None else 1)
 
@@ -1249,10 +1249,10 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.01)
         self.assertEqual(len(self.injections), 1)
         self.assertEqual(self.bridge.calls, calls)
-        self.assertIn("не знаю, продолжилась ли работа", self.bot.sent[-1]["text"])
+        self.assertIn("исход автоматического продолжения не подтверждён", self.bot.sent[-1]["text"])
         self.plugin.factory(self.app, object())
         await asyncio.sleep(0.01)
-        self.assertEqual(sum("перезапустился" in sent["text"] for sent in self.bot.sent), 1)
+        self.assertEqual(sum("был перезапущен" in sent["text"] for sent in self.bot.sent), 1)
 
     async def test_atomic_reserve_survives_crash_before_public_inject(self):
         data = await self.request()
@@ -1265,7 +1265,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.factory(self.app, object())
         await asyncio.sleep(0.01)
         self.assertEqual(self.injections, [])
-        self.assertIn("перезапустился", self.bot.sent[-1]["text"])
+        self.assertIn("перезапущен", self.bot.sent[-1]["text"])
 
     async def test_unknown_complete_never_resumes_even_when_remote_effect_succeeded(self):
         data = await self.request()
@@ -1599,7 +1599,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.fail = "files.publish"
         raw = "/profile/usercustom/userdata/files/exports/report.pdf"
         text = self.plugin.outgoing(f"MEDIA:{raw}", platform="telegram", session_id="s", turn_id="t")
-        self.assertIn("Не удалось отправить файл", text)
+        self.assertIn("не отправлен", text)
         self.assertNotIn(raw, text)
         self.assertNotIn("MEDIA:", text)
         self.assertEqual(len(self.bridge.calls), 1)
@@ -1654,7 +1654,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             self.bridge.file.update(artifactId=artifact, localPath=local)
             text = self.plugin.outgoing(self.markdown, platform="telegram")
             self.assertNotIn("MEDIA:", text)
-            self.assertIn("Не удалось отправить файл", text)
+            self.assertIn("не отправлен", text)
 
 
 class BridgeTests(unittest.TestCase):
