@@ -1,6 +1,8 @@
 # ABOUTME: Исполняет обязательные границы на функциях из проверочной копии pinned Hermes.
 # ABOUTME: Не вызывает модель или сеть; использует настоящий файловый адаптер и SQLite.
 import ast
+import base64
+import importlib.util
 import asyncio
 from contextlib import nullcontext
 import json
@@ -8,6 +10,8 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import struct
+import zlib
 from types import SimpleNamespace, ModuleType
 import unittest
 from unittest.mock import patch
@@ -116,6 +120,90 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(called, [])
         finally:
             native._prepared_inbound.reset(ticket)
+
+    async def album_event(self):
+        """Принять два реальных PNG через общий адаптер до native vision builder."""
+        source = SimpleNamespace(platform='telegram', chat_id='1', thread_id=None, user_id='2', profile=None)
+        def chunk(kind, data):
+            return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+        events = []
+        for index in range(2):
+            color = bytes((255 if index == 0 else 0, 0, 255 if index == 1 else 0))
+            png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+                   + chunk(b'IDAT', zlib.compress(b'\0' + color)) + chunk(b'IEND', b''))
+            path = self.input / ('image-' + str(index) + '.png')
+            path.write_bytes(png)
+            event = SimpleNamespace(source=source, message_id=str(10 + index), text='caption',
+                raw_message=SimpleNamespace(media_group_id='album'), media_urls=[str(path)],
+                media_types=['image/png'], metadata={})
+            await native.accept_event(event, admit=False)
+            events.append(event)
+        native.merge_events(events[0], events[1])
+        events[0].media_urls.extend(events[1].media_urls)
+        await native.accept_event(events[0])
+        return events[0]
+
+    def image_builder(self, event):
+        """Исполнить точный gateway builder и настоящую image_routing из pinned engine."""
+        spec = importlib.util.spec_from_file_location('real_image_routing', ENGINE / 'agent/image_routing.py')
+        routing = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(routing)
+        scope = {}
+        function('gateway/run_turn_runner.py', ['_native_image_run_message'], scope)
+        runner = SimpleNamespace(_ctx=SimpleNamespace(message=event.text, session_key='album'),
+            _runner=SimpleNamespace(_consume_pending_native_image_paths=lambda _: list(event.media_urls)))
+        return scope['_native_image_run_message'], runner, routing
+
+    async def test_actual_gateway_image_album_reaches_loop_without_reupload(self):
+        event = await self.album_event()
+        publications = sum(method == 'files.publish' for method, _ in self.backend.calls)
+        build, runner, routing = self.image_builder(event)
+        seen = []
+        run, ports = self.loop(lambda agent, message, **kwargs: seen.append(message) or {'final_response': 'ok'})
+        try:
+            with patch.dict(sys.modules, {**ports, 'agent.image_routing': routing}):
+                message = build(runner)
+                images = [part['image_url']['url'] for part in message if part.get('type') == 'image_url']
+                self.assertEqual(len(images), 2)
+                self.assertTrue(all(url.startswith('data:image/png;base64,') for url in images))
+                self.assertNotEqual(images[0], images[1])
+                for url, path in zip(images, event.media_urls):
+                    self.assertEqual(base64.b64decode(url.split(',', 1)[1]), Path(path).read_bytes())
+                with self.assertRaisesRegex(FileError, 'ARTIFACT_REQUIRED'):
+                    native.input_text(message, 'direct-api')
+                with native.inbound_handoff(event.source, event.message_id, inline_images=runner._brai_inline_images):
+                    run(SimpleNamespace(session_id='album', platform='telegram'), message)
+                    for field, url in [('image_url', images[0] + 'changed'), ('file_url', images[0]),
+                                       ('image_url', 'https://example.test/image.png')]:
+                        with self.assertRaisesRegex(FileError, 'ARTIFACT_REQUIRED'):
+                            native.input_text([{'type': field, field: {'url': url}}], 'forged')
+                with self.assertRaisesRegex(FileError, 'ARTIFACT_REQUIRED'):
+                    native.input_text(message, 'after-handoff')
+                with native.inbound_handoff(event.source, 'another-message', inline_images=runner._brai_inline_images):
+                    with self.assertRaisesRegex(FileError, 'ARTIFACT_REQUIRED'):
+                        native.input_text(message, 'wrong-ticket')
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(sum(method == 'files.publish' for method, _ in self.backend.calls), publications)
+            with self.store.db() as db:
+                self.assertEqual(len(json.loads(db.execute('SELECT admitted FROM groups').fetchone()[0])), 2)
+        finally:
+            native.release_event(event)
+
+    async def test_actual_gateway_rejects_partial_image_album_before_admission(self):
+        event = await self.album_event()
+        build, runner, routing = self.image_builder(event)
+        original = routing._file_to_data_url
+        skipped = Path(event.media_urls[-1])
+        try:
+            with patch.dict(sys.modules, {'brai_files': native, 'agent.image_routing': routing}), \
+                 patch.object(routing, '_file_to_data_url', side_effect=lambda path: None if path == skipped else original(path)):
+                with self.assertRaisesRegex(FileError, 'NATIVE_IMAGE_INPUT_UNAVAILABLE'):
+                    build(runner)
+            with self.store.db() as db:
+                self.assertIsNone(db.execute('SELECT admitted FROM groups').fetchone()[0])
+            self.assertEqual(runner._brai_inline_images, ())
+        finally:
+            native.release_event(event)
 
     def test_actual_loop_has_no_fail_open_when_artifacts_fail(self):
         self.backend.fail_publish = True

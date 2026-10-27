@@ -375,13 +375,48 @@
      if task_id:
 --- a/gateway/run_turn_runner.py
 +++ b/gateway/run_turn_runner.py
-@@ -1720,7 +1720,8 @@
+@@ -1665,21 +1665,22 @@
+     def _native_image_run_message(self):
+         """Wrap the user turn as an OpenAI-style multimodal content list when
+         _prepare_inbound_message_text buffered image paths; consume-and-clear so later turns on the
+-        same runner never re-attach stale images. Falls back to plain text when nothing is readable."""
+-        ctx = self._ctx
++        same runner never re-attach stale images. Rejects incomplete image preparation."""
++        ctx = self._ctx
++        self._brai_inline_images = ()
+         native_imgs = self._runner._consume_pending_native_image_paths(ctx.session_key)
+         if not native_imgs:
+             return ctx.message
+-        try:
+-            from agent.image_routing import build_native_content_parts
+-            parts, skipped = build_native_content_parts(ctx.message, native_imgs)
+-            if skipped:
+-                logger.warning("Native image attachment: skipped %d unreadable path(s): %s", len(skipped), skipped)
+-            if any(p.get("type") == "image_url" for p in parts):
+-                return parts
+-        except Exception as exc:
+-            logger.warning("Native image attachment failed, falling back to text: %s", exc)
+-        return ctx.message
++        import brai_files
++        from agent.image_routing import build_native_content_parts
++        parts, skipped = build_native_content_parts(ctx.message, native_imgs)
++        if skipped or not any(p.get("type") == "image_url" for p in parts):
++            raise brai_files.FileError("NATIVE_IMAGE_INPUT_UNAVAILABLE")
++        self._brai_inline_images = tuple(
++            p["image_url"]["url"] for p in parts
++            if p.get("type") == "image_url" and p.get("image_url", {}).get("url", "").startswith("data:image/")
++        )
++        return parts
+
+     def _run_conversation_with_approval(self, agent, agent_history, observed_group_context,
+                                         persist_user_message_override, persist_user_timestamp_override):
+@@ -1720,7 +1721,8 @@
              if ctx.inbound_message_id is not None:
                  kwargs["persist_user_platform_id"] = str(ctx.inbound_message_id)
              from agent.notification_presentation import notification_turn
 -            with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""):
 +            import brai_files
-+            with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""), brai_files.inbound_handoff(ctx.source, ctx.inbound_message_id):
++            with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""), brai_files.inbound_handoff(ctx.source, ctx.inbound_message_id, inline_images=getattr(self, "_brai_inline_images", ())):
                  return agent.run_conversation(api_message, **kwargs)
          finally:
              unregister_gateway_notify(session_key)

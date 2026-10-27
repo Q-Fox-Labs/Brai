@@ -21,6 +21,7 @@ _operation = ContextVar('brai_file_operation', default=None)
 _sending = ContextVar('brai_file_sending', default=False)
 _inbound = ContextVar('brai_file_inbound', default=None)
 _prepared_inbound = ContextVar('brai_file_prepared_inbound', default=None)
+_inline_images = ContextVar('brai_file_inline_images', default=frozenset())
 _MEDIA = re.compile(r'MEDIA:\s*(?:"([^"\n]+)"|\x27([^\x27\n]+)\x27|([^\s<>]+))')
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
@@ -173,15 +174,18 @@ def reject_proxy_inbound(source, message_id):
 
 
 @contextmanager
-def inbound_handoff(source, message_id):
+def inbound_handoff(source, message_id, *, inline_images=()):
     """Связать входящий набор с фактическим входом в обработчик агента."""
     holder = type('AdmissionEvent', (), {'source': source})()
     prepared = _prepared_inbound.get()
     ticket = prepared[2] if prepared and prepared[:2] == (source_of(holder), str(message_id)) else None
     token = _inbound.set((source, message_id, ticket))
+    # Только внутреннее кодирование уже принятого набора; API не задаёт это разрешение.
+    images_token = _inline_images.set(frozenset(inline_images) if ticket else frozenset())
     try:
         yield
     finally:
+        _inline_images.reset(images_token)
         _inbound.reset(token)
 
 
@@ -244,6 +248,9 @@ def input_text(value, operation):
                 elif url.startswith('artifact:'):
                     value = resolve_artifact(url.split(':', 1)[1].lstrip('/'), operation)
                     item[field] = {**item[field], 'url': 'file://' + value['localPath']}
+                elif field == 'image_url' and url.startswith('data:image/') and url in _inline_images.get():
+                    # Native gateway уже сохранил оригинал и закодировал временную копию для vision.
+                    pass
                 elif url:
                     raise FileError('ARTIFACT_REQUIRED')
             result.append(item)
