@@ -256,6 +256,53 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(native.should_queue_inbound_set(fresh))
         native.release_event(fresh)
 
+    async def test_primary_busy_entrypoint_queues_albums_without_interrupt_or_ack(self):
+        """Реальный busy handler BaseAdapter ставит набор в FIFO без steer/interrupt/ack."""
+        event = await self.album_event()
+        scope = {'MessageType': SimpleNamespace(TEXT='text'), 'os': os,
+                 'time': __import__('time'), 'logger': SimpleNamespace(debug=lambda *a:None)}
+        function('gateway/run_busy.py', ['_handle_active_session_busy_message'], scope)
+        queued, interrupted, acknowledged, steered = [], [], [], []
+        async def approval(*args):return False
+        async def resolve(*args):
+            steered.append(args)
+            return SimpleNamespace(effective_mode='interrupt', redirected=False, steered=False,
+                                   demoted_for_subagents=False, demoted_for_compression=False)
+        async def interrupt(*args):interrupted.append(args)
+        async def ack(*args):acknowledged.append(args)
+        state = SimpleNamespace(turn=SimpleNamespace(agent=object(), busy_ack_ts=0))
+        runner = SimpleNamespace(_is_user_authorized_for_source=lambda s:True,
+            _admit_bot_message_for_source=lambda s:True, _effective_busy_input_mode=lambda s:'interrupt',
+            _draining=False, _route_plaintext_approval_while_busy=approval,
+            _delivery_adapter_for=lambda s:object(),
+            _queue_or_replace_pending_event=lambda key,ev:queued.append((key,ev)),
+            _peek_session_state=lambda key:state, _session_state=lambda key:state,
+            _resolve_busy_steer_or_redirect=resolve, _interrupt_running_agent_for_busy_event=interrupt,
+            _compose_busy_ack_message=lambda *a,**kw:'busy interrupt', _send_busy_ack_reply=ack)
+        event.internal=False
+        event.allow_gateway_control=True
+        ports={'brai_files':native,'gateway.run':module(_AGENT_PENDING_SENTINEL=object())}
+        try:
+            with patch.dict(sys.modules,ports), patch.dict(os.environ,{'HERMES_GATEWAY_BUSY_ACK_ENABLED':'true'}):
+                for kind in ['photo','video','document']:
+                    event.message_type=kind
+                    self.assertTrue(await scope['_handle_active_session_busy_message'](runner,event,'session'))
+                self.assertEqual(queued,[('session',event)]*3)
+                self.assertEqual((steered,interrupted,acknowledged),([],[],[]))
+                # Одиночный новый файл сохраняет обычную политику занятой сессии.
+                with patch.object(native,'should_queue_inbound_set',return_value=False):
+                    await scope['_handle_active_session_busy_message'](runner,event,'session')
+                self.assertEqual(len(interrupted),1)
+                self.assertEqual(len(acknowledged),1)
+                # Обработка подтверждений по-прежнему предшествует очереди файлов.
+                async def handled_approval(*args):return True
+                runner._route_plaintext_approval_while_busy=handled_approval
+                before=len(queued)
+                await scope['_handle_active_session_busy_message'](runner,event,'session')
+                self.assertEqual(len(queued),before)
+        finally:
+            native.release_event(event)
+
     async def test_actual_gateway_rewrite_releases_original_and_replaced_event(self):
         """dataclasses.replace не теряет cleanup при успехе, ошибке и отмене."""
         @dataclasses.dataclass

@@ -503,3 +503,16 @@
  def build_update_processor(extra, name: str) -> PerChatUpdateProcessor:
      """``platforms.telegram.extra.max_concurrent_updates`` (default 32); bad values warn and fall back."""
      raw = extra.get("max_concurrent_updates", DEFAULT_MAX_CONCURRENT_UPDATES)
+--- a/gateway/run_busy.py
++++ b/gateway/run_busy.py
+@@ -846,6 +846,10 @@
+         if getattr(event, "internal", False):
+             self._queue_or_replace_pending_event(session_key, event)
+             return True
++        import brai_files
++        if brai_files.should_queue_inbound_set(event):
++            self._queue_or_replace_pending_event(session_key, event)
++            return True
+         if (
+             event.message_type == MessageType.TEXT
+             and self._effective_busy_text_mode(event.source) == "queue"
