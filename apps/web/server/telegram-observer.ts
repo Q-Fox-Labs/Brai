@@ -91,7 +91,7 @@ function observerEvents(request: Request, after: number, sessionId: string): Res
       void poll();
     },
     cancel() { close(); },
-  });
+  }, { highWaterMark: 2 * 1_048_576, size: chunk => chunk.byteLength });
   return new Response(body, { headers: { ...noStore, "Content-Type": "text/event-stream; charset=utf-8", "X-Accel-Buffering": "no" } });
 }
 

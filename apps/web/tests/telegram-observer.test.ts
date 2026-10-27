@@ -20,7 +20,7 @@ test("наблюдение доступно всем сессиям DEV, фай�
   const nats = { async request(subject: string, data: Uint8Array) {
     const input = JSON.parse(Buffer.from(data).toString());
     if (input.action === "changes") observedAfter = input.after;
-    const value = input.action === "changes" ? { cursor: input.after + 1, changes: [{ change_seq: input.after + 1, identity: "message" }] }
+    const value = input.action === "changes" ? { cursor: input.after + 3, changes: [1, 2, 3].map(offset => ({ change_seq: input.after + offset, identity: `message-${offset}` })) }
       : subject.endsWith(".query") ? { allowed, cursor: 0, chats: [] } : { ownerId: owner, status: "ready", filename: "image.png", mimeType: "image/png" };
     return { data: Buffer.from(JSON.stringify(value)), headers: { has: () => false } };
   } };
@@ -49,6 +49,8 @@ test("наблюдение доступно всем сессиям DEV, фай�
     const reader = stream.body!.getReader(), chunk = await reader.read();
     assert.match(new TextDecoder().decode(chunk.value), /id: 8\nevent: message/);
     assert.equal(observedAfter, 7);
+    assert.match(new TextDecoder().decode((await reader.read()).value), /id: 9\nevent: message/);
+    assert.match(new TextDecoder().decode((await reader.read()).value), /id: 10\nevent: message/);
     await reader.cancel();
     const streams = await Promise.all(Array.from({ length: 64 }, () => module.exports.observerGet(new Request("https://dev.test/api/telegram-observer/events?after=7"))));
     assert.ok(streams.every((response: Response) => response.status === 200));
