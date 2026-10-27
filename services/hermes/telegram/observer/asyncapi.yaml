@@ -1,0 +1,101 @@
+# ABOUTME: Описывает NATS Services чтение журнала Telegram-наблюдения.
+# ABOUTME: Контракт не содержит мутаций, credential или пользовательских файловых путей.
+asyncapi: 3.0.0
+info:
+  title: Brai Hermes Telegram observer
+  version: 1.0.0
+defaultContentType: application/json
+channels:
+  query:
+    address: brai.hermes.telegram.observer.v1.query
+    messages:
+      request:
+        payload:
+          $ref: '#/components/schemas/Request'
+  replies:
+    address: null
+    x-nats-reply-subject: message.reply
+    messages:
+      response:
+        payload:
+          $ref: '#/components/schemas/Response'
+operations:
+  read:
+    action: receive
+    channel:
+      $ref: '#/channels/query'
+    messages:
+      - $ref: '#/channels/query/messages/request'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+      messages:
+        - $ref: '#/channels/replies/messages/response'
+x-nats-service:
+  name: brai_hermes_telegram_observer
+  version: 1.0.0
+  queueGroup: brai_hermes_telegram_observer
+components:
+  schemas:
+    Request:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [action]
+          properties:
+            action: {const: status}
+        - type: object
+          additionalProperties: false
+          required: [action]
+          properties:
+            action: {const: chats}
+            before: {type: integer, minimum: 0}
+            limit: {type: integer, minimum: 1, maximum: 100}
+        - type: object
+          additionalProperties: false
+          required: [action, chatId, threadId]
+          properties:
+            action: {const: messages}
+            chatId: {type: string, minLength: 1, maxLength: 256}
+            threadId: {type: string, maxLength: 256}
+            before: {type: integer, minimum: 0}
+            limit: {type: integer, minimum: 1, maximum: 100}
+        - type: object
+          additionalProperties: false
+          required: [action, after]
+          properties:
+            action: {const: changes}
+            after: {type: integer, minimum: 0}
+            limit: {type: integer, minimum: 1, maximum: 100}
+        - type: object
+          additionalProperties: false
+          required: [action, identity, artifactId]
+          properties:
+            action: {const: attachment}
+            identity: {type: string, minLength: 1, maxLength: 256}
+            artifactId: {type: string, format: uuid}
+    Response:
+      oneOf:
+        - type: object
+          required: [cursor]
+          properties:
+            cursor: {type: integer, minimum: 0}
+            changes: {type: array, items: {type: object}}
+        - type: object
+          required: [chats, before]
+          properties:
+            chats: {type: array, items: {type: object}}
+            before: {type: [integer, 'null']}
+        - type: object
+          required: [messages, before]
+          properties:
+            messages: {type: array, items: {type: object}}
+            before: {type: [integer, 'null']}
+        - type: object
+          required: [allowed]
+          properties:
+            allowed: {type: boolean}
+        - type: object
+          required: [code]
+          properties:
+            code: {enum: [INVALID_ARGUMENT, PAYLOAD_TOO_LARGE, UNAVAILABLE]}

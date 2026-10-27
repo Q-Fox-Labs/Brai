@@ -14,6 +14,11 @@ export function hermesTelegramBotUsername(value = process.env.BRAI_HERMES_TELEGR
   return username && /^[A-Za-z0-9_]{5,32}$/.test(username) ? username : null;
 }
 
+/** Включает общий просмотр только в явно настроенном Telegram-режиме экземпляра. */
+export function telegramObserverEnabled(): boolean {
+  return process.env.BRAI_ENVIRONMENT === "dev" && webAgentMode() === "hermes_telegram" && process.env.BRAI_WEB_TELEGRAM_OBSERVER_ENABLED === "1";
+}
+
 /** Возвращает no-store 404 до обращения к выключенному DEV Agent. */
 export function disabledAgentResponse(): Response | null {
   return webAgentMode() === "hermes_telegram"

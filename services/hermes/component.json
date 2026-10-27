@@ -16,7 +16,9 @@
     "services/hermes/memos/bridge/codex_bridge.py",
     "services/hermes/files/native.py",
     "services/hermes/files/install.py",
-    "services/hermes/files/migrate.py"
+    "services/hermes/files/migrate.py",
+    "services/hermes/telegram/observer/server.mjs",
+    "services/hermes/telegram/observer/history.py"
   ],
   "inputs": {
     "build": [],
@@ -195,7 +197,13 @@
       "services/hermes/extensions/tools/prepare_user_data.py",
       "services/hermes/extensions/tools/verify_runtime.py",
       "services/hermes/extensions/manifest.json",
-      "services/hermes/extensions/profile/SOUL.template.txt"
+      "services/hermes/extensions/profile/SOUL.template.txt",
+      "services/hermes/telegram/observer/__init__.py",
+      "services/hermes/telegram/observer/journal.py",
+      "services/hermes/telegram/observer/history.py",
+      "services/hermes/telegram/observer/server.mjs",
+      "services/hermes/telegram/observer/CONTRACT.md",
+      "services/hermes/telegram/observer/asyncapi.yaml"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
@@ -209,7 +217,9 @@
       "services/hermes/files/tests/test_engine.py",
       "services/hermes/tests/extensions.test.mjs",
       "services/hermes/extensions/**/*.py",
-      "services/hermes/extensions/tests/**"
+      "services/hermes/extensions/tests/**",
+      "services/hermes/telegram/tests/test_observer.py",
+      "services/hermes/tests/telegram-observer.test.mjs"
     ]
   },
   "dependencies": [
@@ -469,7 +479,13 @@
       "services/hermes/extensions/tools/prepare_user_data.py",
       "services/hermes/extensions/tools/verify_runtime.py",
       "services/hermes/extensions/manifest.json",
-      "services/hermes/extensions/profile/SOUL.template.txt"
+      "services/hermes/extensions/profile/SOUL.template.txt",
+      "services/hermes/telegram/observer/__init__.py",
+      "services/hermes/telegram/observer/journal.py",
+      "services/hermes/telegram/observer/history.py",
+      "services/hermes/telegram/observer/server.mjs",
+      "services/hermes/telegram/observer/CONTRACT.md",
+      "services/hermes/telegram/observer/asyncapi.yaml"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",
@@ -477,7 +493,8 @@
       "services/hermes/telegram/__init__.py",
       "services/hermes/trusted.mjs",
       "services/hermes/memos/embedding/adapter.mjs",
-      "services/hermes/memos/bridge/codex_bridge.py"
+      "services/hermes/memos/bridge/codex_bridge.py",
+      "services/hermes/telegram/observer/server.mjs"
     ],
     "smokeImports": [
       "services/hermes/catalog.mjs",

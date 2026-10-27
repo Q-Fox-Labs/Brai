@@ -239,7 +239,11 @@
       "apps/web/server/hub.ts",
       "apps/web/server/request-body.ts",
       "apps/web/server/runtime.ts",
-      "apps/web/server/web-config.ts"
+      "apps/web/server/web-config.ts",
+      "apps/web/app/agent/telegram-observer.css",
+      "apps/web/app/api/telegram-observer/[...path]/route.ts",
+      "apps/web/app/api/telegram-observer/file-auth/route.ts",
+      "apps/web/server/telegram-observer.ts"
     ],
     "checks": [
       "apps/web/tests/account-render.test.ts",
@@ -284,7 +288,8 @@
       "apps/web/tests/timeline.test.ts",
       "apps/web/tests/timer-history.test.ts",
       "apps/web/tests/timer-http.test.ts",
-      "apps/web/tests/workspace-link.test.ts"
+      "apps/web/tests/workspace-link.test.ts",
+      "apps/web/tests/telegram-observer.test.ts"
     ]
   },
   "dependencies": [

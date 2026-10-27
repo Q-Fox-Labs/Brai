@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
+from functools import wraps
 import inspect
+import logging
 import shutil
 import shlex
 import json
@@ -16,6 +18,7 @@ from urllib.parse import unquote, urlparse
 from .store import FileStore, FileError, canonical, key, deliver, workspace_in_use
 
 _store = None
+_telegram_observer = None
 _recovery_targets = {}
 _operation = ContextVar('brai_file_operation', default=None)
 _sending = ContextVar('brai_file_sending', default=False)
@@ -26,6 +29,32 @@ _event_cleanup = ContextVar('brai_file_event_cleanup', default=None)
 _MEDIA = re.compile(r'MEDIA:\s*(?:"([^"\n]+)"|\x27([^\x27\n]+)\x27|([^\s<>]+))')
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
+
+
+def register_telegram_observer(observer):
+    """Подключить наблюдателя Telegram к общей файловой границе текущего gateway."""
+    global _telegram_observer
+    _telegram_observer = observer
+
+
+async def _notify_observer(method, *args, **kwargs):
+    if _telegram_observer is None:
+        return
+    try:
+        await getattr(_telegram_observer, method)(*args, **kwargs)
+    except Exception:
+        logging.getLogger(__name__).warning('BRAI_TELEGRAM_OBSERVER_WRITE_FAILED')
+
+
+async def observe_queued_delivery(identity, payload, state):
+    """Отразить подтверждение или ошибку существующей очереди доставки Telegram."""
+    from types import SimpleNamespace
+    route = payload.get('route') or {}
+    artifact = payload.get('artifact')
+    refs = [{key: artifact[key] for key in ('artifactId', 'filename', 'mimeType', 'sizeBytes') if key in artifact}] if isinstance(artifact, dict) and artifact.get('artifactId') else []
+    result = SimpleNamespace(success=state.get('status') == 'sent', message_id=state.get('message_id'), raw_response=state)
+    await _notify_observer('observe_send', route.get('chat_id'), route,
+        payload.get('content') or payload.get('caption') or '', result, refs, str(identity))
 
 
 def configure(config, backend):
@@ -67,7 +96,12 @@ async def capture(adapter, event):
             or not getattr(event.source, 'user_id', None) or getattr(event.source, 'is_bot', False)
             or getattr(raw, 'sender_chat', None) or getattr(raw, 'business_connection_id', None)):
         raise FileError('FILES_NOT_AUTHORIZED')
-    await accept_event(event, admit=False)
+    try:
+        await accept_event(event, admit=False)
+    except Exception:
+        await _notify_observer('observe_files', event, 'failed')
+        raise
+    await _notify_observer('observe_files', event, 'ready')
     if not getattr(event, '_brai_capture_leases', None) and event.metadata.get('_brai_artifacts'):
         refs = [item['file'] for item in event.metadata['_brai_artifacts']]
         lease = store().materialize(refs, ['capture', source_of(event), str(event.message_id)])
@@ -123,6 +157,7 @@ async def accept_event(event, admit=True):
             except Exception as error:
                 failures.append(error)
         if failures:
+            await _notify_observer('observe_files', event, 'failed', refs)
             event.media_urls = []
             event.metadata['fileSetStatus'] = 'incomplete'
             raise FileError('INCOMPLETE_FILE_SET') from None
@@ -624,6 +659,23 @@ async def send_set(adapter, chat_id, items, mode, metadata=None, identity=None):
     with guard:
         identity = str(explicit) if explicit else store().direct_delivery_identity(fingerprint)
         result = await deliver(store(), identity, items, sender, mode, supports_album=platform == 'telegram')
+    if platform == 'telegram' and _telegram_observer is not None:
+        from types import SimpleNamespace
+        receipts = result.get('receipts', [])
+        remaining = list(enumerate(items))
+        for receipt in receipts:
+            match = next(((index, item) for index, item in remaining if item['file']['artifactId'] == receipt['artifactId']), None)
+            if match is None:
+                continue
+            remaining.remove(match)
+            index, item = match
+            await _notify_observer('observe_send', chat_id, metadata, item.get('caption', ''),
+                SimpleNamespace(success=True, message_id=receipt['messageId']), [item['file']], f'{identity}:{index}')
+        if result['state'] != 'sent':
+            for index, item in remaining:
+                status = 'failed' if result['state'] == 'failed' else 'pending'
+                await _notify_observer('observe_send', chat_id, metadata, item.get('caption', ''),
+                    SimpleNamespace(success=False, message_id=None, raw_response={'status': status}), [item['file']], f'{identity}:{index}')
     result['deliveryId'] = identity
     if result['state'] == 'sent':
         for set_id in set_ids:
@@ -648,6 +700,21 @@ async def deliver_attachments(adapter, event, media_files, local_files, metadata
 
 def install_adapter(adapter):
     """Охватить прямые отправки cron/send_message вне final response."""
+    send = getattr(adapter, 'send', None)
+    if send is not None:
+        @wraps(send)
+        async def observe_text(*args, **kwargs):
+            bound = inspect.signature(send).bind(*args, **kwargs)
+            bound.apply_defaults()
+            result = await send(*args, **kwargs)
+            if str(getattr(adapter.platform, 'value', adapter.platform)) == 'telegram' and _telegram_observer is not None:
+                data = bound.arguments
+                response = getattr(result, 'raw_response', None)
+                identity = response.get('delivery_id') if isinstance(response, dict) else None
+                await _notify_observer('observe_send', data.get('chat_id'), data.get('metadata'),
+                    data.get('content') or '', result, identity=str(identity or uuid.uuid4()))
+            return result
+        adapter.send = observe_text
     for name, field in [('send_image_file', 'image_path'), ('send_image', 'image_url'), ('send_video', 'video_path'),
                         ('send_document', 'file_path'), ('send_voice', 'audio_path'), ('send_animation', 'animation_url'),
                         ('send_multiple_images', 'images')]:

@@ -13,7 +13,7 @@ const filename = new URL("../app/account.tsx", import.meta.url);
 const source = readFileSync(filename, "utf8");
 const require = createRequire(filename);
 const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
-const module = { exports: {} as { default: ComponentType<{ initialSession: AccountSession; agentMode?: "dev_agent" | "hermes_telegram"; telegramBotUsername?: string | null }> } };
+const module = { exports: {} as { default: ComponentType<{ initialSession: AccountSession; agentMode?: "dev_agent" | "hermes_telegram"; telegramBotUsername?: string | null; telegramObserverEnabled?: boolean }> } };
 const control = ({ children }: { children?: ReactNode }) => createElement("div", null, children);
 const screen = () => createElement("main", null, "workspace content");
 new Function("require", "module", "exports", output)((name: string) => {
@@ -24,7 +24,7 @@ new Function("require", "module", "exports", output)((name: string) => {
   if (name === "./shell/login-galaxy") return { LoginGalaxy: control };
   if (name.startsWith("@/components/ui/")) return new Proxy({}, { get: () => control });
   if (name === "./agent/screen") return { default: () => createElement("main", null, "DEV Agent client") };
-  if (name === "./agent/telegram-entry") return { default: () => createElement("main", null, "Telegram entry") };
+  if (name === "./agent/telegram-entry") return { default: ({ enabled }: { enabled: boolean }) => createElement("main", null, enabled ? "Telegram observer" : "Telegram entry") };
   if (name.startsWith("./")) return { default: screen };
   return require(name);
 }, module, module.exports);
@@ -55,5 +55,14 @@ test("Hermes mode replaces the DEV Agent screen with the Telegram workspace entr
     telegramBotUsername: "brai_hermes_bot",
   }));
   assert.ok(html.includes("Telegram entry"));
+  assert.ok(!html.includes("DEV Agent client"));
+});
+
+test("enabled DEV observer opens without mounting the Codex client", () => {
+  const html = renderToStaticMarkup(createElement(module.exports.default, {
+    initialSession: { status: "authenticated", user: { id: "other", email: "other@example.test" } },
+    agentMode: "hermes_telegram", telegramObserverEnabled: true,
+  }));
+  assert.ok(html.includes("Telegram observer"));
   assert.ok(!html.includes("DEV Agent client"));
 });

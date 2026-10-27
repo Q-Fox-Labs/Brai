@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import type { AccountSession as InitialSession } from "@/server/account-session";
 import type { WebAgentMode } from "@/server/web-config";
 import Timer from "./timer";
+// AIDEV-NOTE: Codex не подключается в Telegram-режиме; прежний режим остаётся доступным отдельно.
 import AgentScreen from "./agent/screen";
 import TelegramAgentEntry from "./agent/telegram-entry";
 import DoScreen from "./do/screen";
@@ -18,12 +19,12 @@ import { Button } from "@/components/ui/button";
 import { AuthRequestError, AuthScreen, type OtpSendResult } from "./auth/screen";
 type User = { id: string; email: string };
 /** Собирает общую оболочку; таймер явно передаёт отсчёт в навигацию текущего аккаунта. */
-export default function Account({ initialSession, agentMode = "dev_agent", telegramBotUsername = null }: { initialSession: InitialSession; agentMode?: WebAgentMode; telegramBotUsername?: string | null }) {
+export default function Account({ initialSession, agentMode = "dev_agent", telegramBotUsername = null, telegramObserverEnabled = false }: { initialSession: InitialSession; agentMode?: WebAgentMode; telegramBotUsername?: string | null; telegramObserverEnabled?: boolean }) {
  const [timerElapsed, setTimerElapsed] = useState<string | null>(null);
- return <AccountSession initialSession={initialSession} agentMode={agentMode} telegramBotUsername={telegramBotUsername} timerElapsed={timerElapsed} onTimerElapsed={setTimerElapsed} />;
+ return <AccountSession initialSession={initialSession} agentMode={agentMode} telegramBotUsername={telegramBotUsername} telegramObserverEnabled={telegramObserverEnabled} timerElapsed={timerElapsed} onTimerElapsed={setTimerElapsed} />;
 }
 /** Управляет подтверждённой сервером сессией без хранения токена в браузере. */
-function AccountSession({ initialSession, agentMode, telegramBotUsername, timerElapsed, onTimerElapsed }: { initialSession: InitialSession; agentMode: WebAgentMode; telegramBotUsername: string | null; timerElapsed: string | null; onTimerElapsed: (elapsed: string | null) => void }) {
+function AccountSession({ initialSession, agentMode, telegramBotUsername, telegramObserverEnabled, timerElapsed, onTimerElapsed }: { initialSession: InitialSession; agentMode: WebAgentMode; telegramBotUsername: string | null; telegramObserverEnabled: boolean; timerElapsed: string | null; onTimerElapsed: (elapsed: string | null) => void }) {
  const pathname = usePathname();
  const view = pathname === "/game-core" ? "game-core" : pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : pathname === "/alerts" ? "alerts" : "timer";
  const [user, setUser] = useState<User | null>(() => initialSession.status === "authenticated" ? initialSession.user : null), [ready, setReady] = useState(initialSession.status !== "unavailable"), [exiting, setExiting] = useState(false);
@@ -86,14 +87,14 @@ function AccountSession({ initialSession, agentMode, telegramBotUsername, timerE
  if (user && pathname === "/auth") return <main role="status" className="p-8">Открываем Brai…</main>;
  if (user && !exiting) return <AlertsProvider key={user.id} userId={user.id} onUnauthorized={unauthorized}><div className="workspace-shell brai-workspace-shell">
   <Navigation key={user.id} timerElapsed={timerElapsed} email={user.email} onLogout={() => { void logout(); }} />
-  <div className="workspace-content"><AccountScreens key={user.id} view={view} user={user} agentMode={agentMode} telegramBotUsername={telegramBotUsername} onLogout={() => { void logout(); }} onUnauthorized={unauthorized} accountMessage={message} onTimerElapsed={onTimerElapsed} /></div>
+  <div className="workspace-content"><AccountScreens key={user.id} view={view} user={user} agentMode={agentMode} telegramBotUsername={telegramBotUsername} telegramObserverEnabled={telegramObserverEnabled} onLogout={() => { void logout(); }} onUnauthorized={unauthorized} accountMessage={message} onTimerElapsed={onTimerElapsed} /></div>
  </div></AlertsProvider>;
  if (exiting) return <div className="workspace-shell brai-workspace-shell"><main className="p-8" role="status">Выходим…</main></div>;
  return <AuthScreen busy={busy} onRequestOtp={email => submit("send-code", email)} onVerifyOtp={async (email, otp) => { await submit("verify-code", email, otp); }} />;
 }
 
 /** Сохраняет состояние посещённых экранов; выход или смена пользователя удаляют их. */
-function AccountScreens({ view, user, agentMode, telegramBotUsername, onLogout, onUnauthorized, accountMessage, onTimerElapsed }: { view: "agent" | "timer" | "do" | "alerts" | "game-core"; user: User; agentMode: WebAgentMode; telegramBotUsername: string | null; onLogout: () => void; onUnauthorized: () => void; accountMessage: string; onTimerElapsed: (elapsed: string | null) => void }) {
+function AccountScreens({ view, user, agentMode, telegramBotUsername, telegramObserverEnabled, onLogout, onUnauthorized, accountMessage, onTimerElapsed }: { view: "agent" | "timer" | "do" | "alerts" | "game-core"; user: User; agentMode: WebAgentMode; telegramBotUsername: string | null; telegramObserverEnabled: boolean; onLogout: () => void; onUnauthorized: () => void; accountMessage: string; onTimerElapsed: (elapsed: string | null) => void }) {
  const [visitedDo, setVisitedDo] = useState(view === "do");
  useEffect(() => { if (view === "do") setVisitedDo(true); }, [view]);
  const props = { userId: user.id, email: user.email, onLogout, onUnauthorized, accountMessage };
@@ -101,7 +102,11 @@ function AccountScreens({ view, user, agentMode, telegramBotUsername, onLogout, 
  return <>
   <div className="workspace-screen" hidden={view !== "game-core"}>{view === "game-core" && <GameCoreScreen userId={user.id} />}</div>
   <div className="workspace-screen" hidden={view !== "alerts"}><AlertsScreen active={view === "alerts"} /></div>
-  <div className="workspace-screen" hidden={view !== "agent"}>{agentMode === "hermes_telegram" ? <TelegramAgentEntry username={telegramBotUsername} /> : <AgentScreen {...props} active={view === "agent"} />}</div>
+  <div className="workspace-screen" hidden={view !== "agent"}>
+   {/* AIDEV-NOTE: Прежнее подключение сохранено до возвращения чатов Codex. */}
+   {/* {agentMode === "hermes_telegram" ? <TelegramAgentEntry username={telegramBotUsername} /> : <AgentScreen {...props} active={view === "agent"} />} */}
+   {agentMode === "hermes_telegram" ? <TelegramAgentEntry username={telegramBotUsername} active={view === "agent"} enabled={telegramObserverEnabled} /> : <AgentScreen {...props} active={view === "agent"} />}
+  </div>
   <div className="workspace-screen workspace-timer" hidden={view !== "timer"}><Timer userId={user.id} onUnauthorized={onUnauthorized} accountMessage={accountMessage} onElapsed={onTimerElapsed} /></div>
   <div className="workspace-screen" hidden={view !== "do"}>{(visitedDo || view === "do") && <DoScreen {...props} active={view === "do"} />}</div>
  </>;
