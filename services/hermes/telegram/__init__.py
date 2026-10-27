@@ -6,6 +6,7 @@ import asyncio
 import sys
 import html
 import importlib
+import importlib.util
 import logging
 from dataclasses import dataclass
 from contextlib import contextmanager
@@ -30,6 +31,28 @@ RPC_TIMEOUT = 15
 OUTPUT_TIMEOUT = 20
 HUMAN_OUTPUT_REQUIRED = "Для этого действия нужны настоящие результаты работы человека. Кнопка решения их не создаёт; сначала выполните работу и сохраните её результаты штатным способом."
 FAILURE = "Операция Brai не подтверждена. Проверьте состояние и явно запросите новую кнопку."
+
+
+def _observer_source(config, name):
+    root = Path(os.environ.get("BRAI_TELEGRAM_OBSERVER_ROOT") or Path(config.entry).parent)
+    if not root.is_absolute():
+        raise ValueError("TELEGRAM_OBSERVER_UNAVAILABLE")
+    return root / "telegram/observer" / name
+
+
+def _open_journal(config):
+    if os.environ.get("BRAI_TELEGRAM_OBSERVER_ENABLED") != "1":
+        return None
+    # AIDEV-NOTE: Плагин копируется отдельно; модуль журнала задаётся оператором из принятого runtime.
+    path = _observer_source(config, "journal.py")
+    spec = importlib.util.spec_from_file_location("_brai_telegram_observer_journal", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("TELEGRAM_OBSERVER_UNAVAILABLE")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.TelegramJournal(config.state_dir)
+
+
 CONFIRMATION_DESCRIPTION = (
     "Ask the owner to confirm a human Action in the configured Telegram chat. First create "
     "the Element and Action with the available game-core structure/create tools, or use existing ones. "
@@ -470,6 +493,12 @@ class TelegramPlugin:
         self.feedback_results = {}
         self.feedback_inflight = set()
         self.startup_attempt_recovery_initialized = False
+        # AIDEV-NOTE: Наблюдение включается отдельно только в DEV; обычный gateway не требует журнала.
+        try:
+            self.journal = _open_journal(config)
+        except Exception:
+            self.journal = None
+            logging.getLogger(__name__).warning("BRAI_TELEGRAM_OBSERVER_START_FAILED")
         self.descriptor = re.compile(
             r"!?\[(?:\\[^\r\n]|[^\]\\\r\n])*\]\(<" + re.escape(config.result_root.rstrip("/")) + r"/(?P<id>" + UUID
             + r")/(?P<name>[^<>/\r\n]+)>\)")
@@ -493,6 +522,12 @@ class TelegramPlugin:
         handler = CallbackQueryHandler(self.callback, pattern=r"^brai:")
         app.add_handler(handler)
         self.handlers.append((app, handler, 0))
+        if self.journal is not None and "brai_files" in sys.modules:
+            sys.modules["brai_files"].register_telegram_observer(self)
+        if self.journal is not None:
+            task = self.loop.create_task(self._recover_history())
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
         for row in self.tokens.uncertain_resumes():
             task = self.loop.create_task(self._report_unknown_resume(row))
             self.tasks.add(task)
@@ -525,6 +560,71 @@ class TelegramPlugin:
 
         if self.loop and self.loop.is_running():
             self.loop.call_soon_threadsafe(cleanup)
+
+    async def observe_files(self, event, state, published=None):
+        """Привязать к исходному Telegram message проверенные файлы общей границы."""
+        if self.journal is None or self.closed:
+            return
+        source = getattr(event, "source", None)
+        if not self._route_matches(getattr(source, "chat_id", None), getattr(source, "chat_type", None),
+                                   getattr(source, "user_id", "")):
+            return
+        refs = [entry["file"] for entry in (published if published is not None else (getattr(event, "metadata", None) or {}).get("_brai_artifacts", []))
+                if isinstance(entry, dict) and isinstance(entry.get("file"), dict)]
+        try:
+            await asyncio.to_thread(self.journal.attachments, source.chat_id, event.message_id, refs, state)
+        except Exception:
+            logging.getLogger(__name__).warning("BRAI_TELEGRAM_OBSERVER_WRITE_FAILED")
+
+    def _import_history(self):
+        """Импортировать только разрешённые Telegram-сессии через read-only native API."""
+        if self.journal.history_complete():
+            return
+        from hermes_state import SessionDB
+        path = _observer_source(self.config, "history.py")
+        spec = importlib.util.spec_from_file_location("_brai_telegram_observer_history", path)
+        if spec is None or spec.loader is None:
+            raise ValueError("TELEGRAM_OBSERVER_UNAVAILABLE")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        alias_path = self.config.state_dir.parent / "brai-files/files.sqlite"
+        aliases = sqlite3.connect(f"file:{alias_path}?mode=ro", uri=True) if alias_path.is_file() else None
+        source = SessionDB(read_only=True)
+        try:
+            def allows(session):
+                return self._route_matches(session.get("chat_id"), session.get("chat_type"), session.get("user_id"))
+            module.import_history(source, self.journal, allows, self.config.result_root, aliases)
+            self.journal.mark_history_complete()
+        finally:
+            source.close()
+            if aliases is not None:
+                aliases.close()
+
+    async def _recover_history(self):
+        """Повторять только безопасное чтение истории после временного отказа."""
+        while not self.closed:
+            try:
+                await asyncio.to_thread(self._import_history)
+                return
+            except Exception:
+                logging.getLogger(__name__).warning("BRAI_TELEGRAM_OBSERVER_HISTORY_UNAVAILABLE")
+                await asyncio.sleep(30)
+
+    async def observe_send(self, chat_id, metadata, text, result, attachments=(), identity=None):
+        """Записать итог доставки только в разрешённую группу или личку."""
+        if self.journal is None or self.closed or not self._saved_route_matches(chat_id):
+            return
+        route = metadata or {}
+        thread_id = route.get("message_thread_id") or route.get("thread_id") or ""
+        message_id = getattr(result, "message_id", None)
+        raw = getattr(result, "raw_response", None)
+        raw_state = raw.get("status") if isinstance(raw, dict) else None
+        state = "sent" if getattr(result, "success", False) and message_id else "failed" if raw_state == "failed" else "pending"
+        try:
+            await asyncio.to_thread(self.journal.outgoing, chat_id, thread_id, text, message_id, state,
+                                    attachments, identity)
+        except Exception:
+            logging.getLogger(__name__).warning("BRAI_TELEGRAM_OBSERVER_WRITE_FAILED")
 
     def _schedule_cleanup(self, token):
         previous = self.cleanup_tasks.get(token)
@@ -587,14 +687,24 @@ class TelegramPlugin:
                 or not self.config.allows(getattr(user, "id", "")) or getattr(user, "is_bot", False)
                 or getattr(message, "sender_chat", None) or getattr(message, "business_connection_id", None)):
             raise ApplicationHandlerStop
+        original = getattr(update, "message", None) or getattr(update, "edited_message", None)
+        if self.journal is not None and original is not None:
+            try:
+                await asyncio.to_thread(self.journal.incoming, original, chat, user)
+            except Exception:
+                # Ошибка наблюдения не меняет Telegram dispatch; диагностируется без содержимого.
+                logging.getLogger(__name__).warning("BRAI_TELEGRAM_OBSERVER_WRITE_FAILED")
 
     async def _notify(self, text, chat_id=None, thread_id=""):
         # Telegram sendMessage rejects the canonical forum General thread ID 1.
         if self.bot is None:
             raise BridgeError("TELEGRAM_UNAVAILABLE")
         route = {"message_thread_id": int(thread_id)} if thread_id and str(thread_id) != "1" else {}
-        await self.bot.send_message(chat_id=int(chat_id or self.config.chat), text=text, **route,
-                                    connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
+        sent = await self.bot.send_message(chat_id=int(chat_id or self.config.chat), text=text, **route,
+                                           connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
+        from types import SimpleNamespace
+        await self.observe_send(chat_id or self.config.chat, route, text,
+                                SimpleNamespace(success=True, message_id=getattr(sent, "message_id", None)))
 
     async def _report_unknown_resume(self, row):
         """Сообщить restart-неопределённость один раз, не повторяя работу."""
@@ -791,7 +901,7 @@ class TelegramPlugin:
         paths = getattr(event, "media_urls", [])
         if not paths:
             return None
-        descriptors = []
+        descriptors, observed = [], []
         try:
             if len(paths) > MAX_ATTACHMENTS or not re.fullmatch(r"[1-9][0-9]*", str(event.message_id)):
                 raise BridgeError("ATTACHMENT_LIMIT")
@@ -804,10 +914,23 @@ class TelegramPlugin:
                 if not match or match["id"] != result["artifactId"]:
                     raise BridgeError("RPC_MALFORMED")
                 descriptors.append(result["markdown"])
+                observed.append({"artifactId": result["artifactId"], "filename": result.get("filename") or match["name"],
+                                 "mimeType": result.get("mimeType") or "application/octet-stream",
+                                 "sizeBytes": result.get("sizeBytes")})
+            if self.journal is not None:
+                try:
+                    await asyncio.to_thread(self.journal.attachments, source.chat_id, event.message_id, observed, "ready")
+                except Exception:
+                    logging.getLogger(__name__).warning("BRAI_TELEGRAM_OBSERVER_WRITE_FAILED")
             return {"action": "rewrite", "text": "\n\n".join([event.text or "", *descriptors]).strip()}
         except Exception as error:
             code = str(error) if isinstance(error, BridgeError) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,80}", str(error)) else "UNEXPECTED_ERROR"
             logging.getLogger(__name__).warning("BRAI_INBOUND_FILE_NOT_STORED code=%s count=%d", code, len(paths))
+            if self.journal is not None:
+                try:
+                    await asyncio.to_thread(self.journal.attachments, source.chat_id, event.message_id, observed, "failed")
+                except Exception:
+                    logging.getLogger(__name__).warning("BRAI_TELEGRAM_OBSERVER_WRITE_FAILED")
             if code == "ATTACHMENT_LIMIT":
                 try:
                     await self._on_native_loop(self._notify("Не удалось обработать вложения. В одном сообщении должно быть не больше десяти файлов.",
@@ -887,6 +1010,17 @@ class TelegramPlugin:
 
     def outgoing(self, response_text, platform=None, session_id="", turn_id="", **kwargs):
         """Передавать явные файлы через publisher; неизменённый ответ оставить потоку."""
+        if self.journal is not None and _platform(platform) == "telegram":
+            try:
+                from gateway.session_context import get_session_env
+                entry = self._owner_session(session_id)
+                chat_id = get_session_env("HERMES_SESSION_CHAT_ID")
+                message_id = get_session_env("HERMES_SESSION_MESSAGE_ID")
+                if (entry is not None and get_session_env("HERMES_SESSION_ID") == session_id
+                        and str(entry.origin.chat_id) == str(chat_id) and message_id):
+                    self.journal.link_session(chat_id, message_id, session_id)
+            except Exception:
+                logging.getLogger(__name__).warning("BRAI_TELEGRAM_OBSERVER_SESSION_UNAVAILABLE")
         if "brai_files" in sys.modules:
             return None
         if _platform(platform) != "telegram":
@@ -1234,6 +1368,10 @@ class TelegramPlugin:
                     message = await self.bot.send_message(chat_id=int(self.tokens.unresolved(token)["chat_id"]), text=chunk, **route,
                         parse_mode="HTML", **keyboard, connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
                     self.tokens.bind(token, message.message_id)
+                from types import SimpleNamespace
+                sent_id = existing["message_id"] if existing and len(chunks) == 1 else message.message_id
+                await self.observe_send(self.tokens.unresolved(token)["chat_id"], route, source_chunk,
+                                        SimpleNamespace(success=True, message_id=sent_id))
             return json.dumps({"ok": True, "status": "awaiting_owner", "moveId": action["moveId"],
                                "attemptId": action["attemptId"], "revisionId": action["revisionId"]})
         except Exception as error:
