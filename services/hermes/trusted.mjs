@@ -14,8 +14,12 @@ const error = (id, code, message, data) => ({ jsonrpc: '2.0', id, error: { code,
 export function createTrustedDispatcher(runtime) {
   const human = createHumanActions(runtime);
   const methods = {
+    'files.configuration': args => { if (Object.keys(args).length) throw Object.assign(new Error('INVALID_ARGUMENT'), { code: 'INVALID_ARGUMENT' }); return runtime.filesConfiguration(); },
     'files.publish': args => runtime.call('publish_file', args),
     'files.fetch': args => runtime.call('fetch_file', args),
+    'files.get': args => runtime.call('files_get', args),
+    'files.list': args => runtime.call('files_list', args),
+    'files.prepare': args => runtime.call('files_prepare', args),
     'actions.read': args => human.read(args),
     'actions.prepare': args => human.prepare(args),
     'actions.complete': args => human.complete(args),

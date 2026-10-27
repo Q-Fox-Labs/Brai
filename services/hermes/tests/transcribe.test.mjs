@@ -2,7 +2,7 @@
 // ABOUTME: Подтверждает один submit, фиксированную модель, срок и сохранность output при отказе.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -119,5 +119,21 @@ test('native command entry executes through a stable symlink and reports only a 
       const child = spawnSync(process.execPath, [path, '--input', '/missing/input', '--output', '/missing/output'], { env: { PATH: process.env.PATH }, encoding: 'utf8', timeout: 5000 });
       assert.equal(child.status, 1); assert.equal(child.stdout, ''); assert.equal(child.stderr.trim(), 'INVALID_HERMES_CONFIG');
     }
+  });
+});
+
+test('published audio uses the existing artifact ID without another upload', async () => {
+  await fixture(async ({ directory, input, output, runtime, calls, responses }) => {
+    const cache = join(directory, 'results');
+    const cachedInput = join(cache, artifactId, 'voice.ogg');
+    await mkdir(join(cache, artifactId), { recursive: true });
+    await writeFile(cachedInput, await readFile(input));
+    const publisher = join(directory, 'publisher.json');
+    await writeFile(publisher, JSON.stringify({ resultRoot: cache }));
+    responses.fetch_file = () => ({ artifactId, localPath: cachedInput, mimeType: 'audio/ogg' });
+    await transcribeFile({ ...config, publisher: { configPath: publisher } }, runtime, { input: cachedInput, output });
+    assert.equal(calls[0].name, 'fetch_file');
+    assert.equal(calls.some(call => call.name === 'publish_file'), false);
+    assert.equal(calls.find(call => call.name === 'transcription_request_submit').args.audioArtifactId, artifactId);
   });
 });

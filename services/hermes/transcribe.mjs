@@ -1,9 +1,9 @@
 // ABOUTME: Подключает нативный command STT Hermes к owner-bound Transcription через Artifacts.
 // ABOUTME: Публикует вход один раз, не повторяет submit и не заменяет выбранную модель.
 import { randomUUID } from 'node:crypto';
-import { lstat, open } from 'node:fs/promises';
+import { lstat, open, readFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, dirname, basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { validateDto } from '../transcription/contracts/index.mjs';
@@ -48,7 +48,18 @@ export async function transcribeFile(config, runtime, { input, output, timeoutMs
   try { await bounded(lstat(output), signal); throw fault('OUTPUT_EXISTS'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
 
-  const published = await call('publish_file', { path: input, requestId: `hermes-stt:${randomUUID()}` }, true);
+  // AIDEV-NOTE: Вход общего адаптера уже опубликован; сохранённый ID передаётся
+  // в Transcription без повторной публикации и изменения состава набора.
+  let cachedId;
+  if (config.publisher?.configPath) {
+    const publisher = JSON.parse(await bounded(readFile(config.publisher.configPath, 'utf8'), signal));
+    const candidate = basename(dirname(input));
+    if (validateDto('Uuid', candidate) && input === join(publisher.resultRoot, candidate, basename(input))) cachedId = candidate;
+  }
+  const published = cachedId
+    ? await call('fetch_file', { artifactId: cachedId })
+    : await call('publish_file', { path: input, requestId: `hermes-stt:${randomUUID()}` }, true);
+  if (cachedId && (published.artifactId !== cachedId || published.localPath !== input)) throw fault('INVALID_UPSTREAM_RESPONSE');
   if (!validateDto('Uuid', published?.artifactId) || !AUDIO_TYPES.has(published.mimeType)) throw fault('INVALID_UPSTREAM_RESPONSE');
   const requestedModel = { route: 'local', selection: 'required', modelId: model.modelId };
   const submitted = await call('transcription_request_submit', {
