@@ -2,7 +2,7 @@
 # ABOUTME: Сохраняет состав наборов и квитанции; локальные байты используются временно.
 from __future__ import annotations
 import asyncio
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 import inspect
 import shutil
@@ -22,6 +22,7 @@ _sending = ContextVar('brai_file_sending', default=False)
 _inbound = ContextVar('brai_file_inbound', default=None)
 _prepared_inbound = ContextVar('brai_file_prepared_inbound', default=None)
 _inline_images = ContextVar('brai_file_inline_images', default=frozenset())
+_event_cleanup = ContextVar('brai_file_event_cleanup', default=None)
 _MEDIA = re.compile(r'MEDIA:\s*(?:"([^"\n]+)"|\x27([^\x27\n]+)\x27|([^\s<>]+))')
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
@@ -76,6 +77,8 @@ async def capture(adapter, event):
 
 async def accept_event(event, admit=True):
     """Сохранить весь принятый состав и допустить только новые готовые элементы."""
+    if admit:
+        track_inbound(event)
     if (getattr(event, 'metadata', None) or {}).get('fileSetStatus') == 'incomplete':
         raise FileError('INCOMPLETE_FILE_SET')
     paths = list(getattr(event, 'media_urls', []) or [])
@@ -151,6 +154,32 @@ async def accept_event(event, admit=True):
     return True
 
 
+def should_queue_inbound_set(event):
+    """Альбом или дополнение набора ждёт занятый ход без прерывания."""
+    refs = (getattr(event, 'metadata', None) or {}).get('_brai_artifacts', [])
+    if len(refs) > 1:
+        return True
+    if not refs:
+        return False
+    with store().db() as db:
+        for group in {item['groupId'] for item in refs}:
+            row = db.execute('SELECT admitted FROM groups WHERE identity=?', (group,)).fetchone()
+            if row and row[0] and json.loads(row[0]):
+                return True
+            origin = db.execute('SELECT source FROM items WHERE group_key=? LIMIT 1', (group,)).fetchone()
+            if origin and json.loads(origin[0]).get('mediaGroupId') is not None:
+                return True
+    return False
+
+
+def track_inbound(event):
+    """Освободить также новый объект события после авторизованного plugin rewrite."""
+    cleanup = _event_cleanup.get()
+    if cleanup is not None and id(event) not in cleanup[1]:
+        cleanup[1].add(id(event))
+        cleanup[0].callback(release_event, event)
+
+
 def commit_inbound(source, message_id, ticket=None):
     """Зафиксировать набор только непосредственно перед запуском агента."""
     holder = type('AdmissionEvent', (), {'source': source})()
@@ -197,6 +226,21 @@ def merge_events(existing, event):
     existing._brai_capture_leases = (getattr(existing, '_brai_capture_leases', [])
                                     + getattr(event, '_brai_capture_leases', []))
     event._brai_capture_leases = []
+
+
+@contextmanager
+def inbound_events(event):
+    """Освободить исходное и переписанные plugin hook события при любом исходе хода."""
+    if event is None:
+        yield
+        return
+    with ExitStack() as cleanup:
+        cleanup.callback(release_event, event)
+        token = _event_cleanup.set((cleanup, {id(event)}))
+        try:
+            yield
+        finally:
+            _event_cleanup.reset(token)
 
 
 def release_event(event):
@@ -795,6 +839,8 @@ def result_envelope(result, agent=None):
     if not isinstance(result, dict):
         return result
     response = result.get('final_response', '')
+    if not isinstance(response, str):
+        return result
     paths = []
     def found(match):
         paths.append(next(value for value in match.groups() if value is not None))

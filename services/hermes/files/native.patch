@@ -68,31 +68,42 @@
  def _elapsed_ms(start: float) -> int:
 --- a/gateway/run_inbound.py
 +++ b/gateway/run_inbound.py
-@@ -258,6 +258,8 @@
+@@ -258,6 +258,9 @@
          # The busy path charged this event on arrival; a drained follow-up must not pay twice.
          if not getattr(event, "_bot_loop_admitted", False) and not self._admit_bot_message_for_source(source):
              return None
 +        import brai_files
 +        await brai_files.accept_event(event, admit=False)
++        brai_files.track_inbound(event)
          return event, source, False
  
      def _hm_estop_turn_allowed(self, event: "MessageEvent", source: SessionSource) -> bool:
-@@ -1283,6 +1285,14 @@
+@@ -612,6 +615,11 @@
+             # Any recognized slash command dispatches per its declared busy_policy (dispatch /
+             # interrupt_then_dispatch / reject). Unrecognized commands and plain text fall through.
+             return True, await self._dispatch_busy_slash_command(event, _cmd_def_inner, _quick_key, source)
++
++        import brai_files
++        if brai_files.should_queue_inbound_set(event):
++            self._hm_merge_pending_for_source(source, _quick_key, event, merge_text=True)
++            return True, None
+
+         # Telegram photo bursts arrive as near-simultaneous updates — never interrupt for a
+         # photo-only follow-up; adapter-level batching absorbs them.
+@@ -1283,6 +1291,12 @@
              return event, source, is_internal
  
      async def _handle_message(self, event: MessageEvent) -> Optional[str]:
 +        """Удержать входные копии до окончания обработки и доставки."""
 +        import brai_files
-+        try:
++        with brai_files.inbound_events(event):
 +            return await self._brai_handle_message(event)
-+        finally:
-+            brai_files.release_event(event)
 +
 +    async def _brai_handle_message(self, event: MessageEvent) -> Optional[str]:
          """Handle an incoming message from any platform: auth → command check → running-agent
          interrupt → get/create session → build context → run agent → return response."""
          from gateway.run import _AGENT_PENDING_SENTINEL
-@@ -1715,6 +1725,9 @@
+@@ -1715,6 +1729,9 @@
          @ references behave the same. Side effect: buffers per-session native image paths when the
          model supports native vision; the caller consumes that buffer at ``run_conversation``."""
          rehome_inbound_media(event)  # before any consumer (vision, STT, document notes) reads media_urls
@@ -177,7 +188,33 @@
                                metadata: Optional[dict]) -> Optional[asyncio.Task]:
 --- a/plugins/platforms/telegram/adapter.py
 +++ b/plugins/platforms/telegram/adapter.py
-@@ -6657,6 +6657,8 @@
+@@ -6591,6 +6591,14 @@
+         event = None
+         try:
+             await asyncio.sleep(delay)
++            if where == "media-group":
++                album_event = pending.get(key)
++                app = self._app
++                wait_for_chat = getattr(getattr(app, "update_processor", None), "wait_for_chat_idle", None)
++                if not callable(wait_for_chat):
++                    app = None
++                elif album_event is not None:
++                    await wait_for_chat(int(album_event.source.chat_id))
+             # Superseded flush (a newer chunk re-armed the timer while our sleep was already done):
+             # CancelledError only lands at the next await, so check synchronously before the pop.
+             owner = tasks.get(key)
+@@ -6599,7 +6607,9 @@
+             event = pending.pop(key, None)
+             if not event:
+                 return
+-            if self._should_drop_delayed_delivery():
++            if self._should_drop_delayed_delivery() or (
++                where == "media-group" and (app is None or app is not self._app)
++            ):
+                 self._hold_inbound_event(event, where=f"{where}-flush")
+                 event = None
+                 return
+@@ -6657,6 +6667,8 @@
          if existing is None:
              pending[key] = event
              return
@@ -186,7 +223,7 @@
          existing.media_urls.extend(event.media_urls)
          existing.media_types.extend(event.media_types)
          if event.text:
-@@ -6678,6 +6680,8 @@
+@@ -6678,6 +6690,8 @@
          """Album items debounce on media_group_id; singles go through the photo burst batcher."""
          if self._drop_unresolved(event):  # identity FIRST: the batch lane is derived from it
              return
@@ -195,7 +232,7 @@
          media_group_id = getattr(msg, "media_group_id", None)
          if media_group_id:
              await self._queue_media_group_event(str(media_group_id), event)
-@@ -6714,6 +6718,8 @@
+@@ -6714,6 +6728,8 @@
                  cached_path = await cache_audio_from_bytes_async(bytes(data), ext=ext)
              event.media_urls = [cached_path]
              event.media_types = [mime]
@@ -204,7 +241,7 @@
              logger.info("[Telegram] Cached user %s at %s", kind, cached_path)
          except Exception as e:
              logger.warning("[Telegram] Failed to cache %s: %s", kind, _redact_telegram_error_text(e), exc_info=True)
-@@ -6782,7 +6788,7 @@
+@@ -6782,7 +6798,7 @@
                  self._set_cached_media(
                      event, await cache_video_from_bytes_async(bytes(video_bytes), ext=ext), SUPPORTED_VIDEO_TYPES[ext], MessageType.VIDEO,
                      "[Telegram] Cached user video document at %s")
@@ -213,7 +250,7 @@
                  return True
              # Any file type is accepted (authorization is the gate, not the extension); unknown types get
              # application/octet-stream. Image documents already returned above.
-@@ -6794,6 +6800,8 @@
+@@ -6794,6 +6810,8 @@
                  return await self._dispatch_with_text(event, f"Document '{display}' could not be cached.")
              event.media_urls = [cached.path]
              event.media_types = [cached.media_type]
@@ -222,7 +259,7 @@
              event.media_text_inlined = [False]  # flipped below once the text is actually injected
              if cached.kind == "audio":
                  event.message_type = MessageType.AUDIO
-@@ -6880,6 +6888,9 @@
+@@ -6880,6 +6898,9 @@
          if self._should_drop_delayed_delivery():
              self._hold_inbound_event(event, where="media-group-enqueue")
              return
@@ -232,7 +269,7 @@
          self._merge_into_pending(self._media_group_events, media_group_id, event)
          self._accept_update()
          prior_task = self._media_group_tasks.get(media_group_id)
-@@ -6912,6 +6923,10 @@
+@@ -6912,6 +6933,10 @@
              file_obj = await sticker.get_file()
              image_bytes = await file_obj.download_as_bytearray()
              cached_path = await cache_image_from_bytes_async(bytes(image_bytes), ext=".webp")
@@ -422,7 +459,24 @@
              unregister_gateway_notify(session_key)
 --- a/gateway/run_turn.py
 +++ b/gateway/run_turn.py
-@@ -4279,6 +4279,8 @@
+@@ -3812,6 +3812,16 @@
+         self, turn_ctx: TurnContext, adapter: Any, pending: Optional[str], pending_event: Any,
+         response: Any, result: Any, stream_task: Any,
+     ) -> Any:
++        """Удержать копии очереди до окончания обработки, включая error/cancel."""
++        import brai_files
++        with brai_files.inbound_events(pending_event):
++            return await self._brai_run_agent_queued_followup(
++                turn_ctx, adapter, pending, pending_event, response, result, stream_task)
++
++    async def _brai_run_agent_queued_followup(
++        self, turn_ctx: TurnContext, adapter: Any, pending: Optional[str], pending_event: Any,
++        response: Any, result: Any, stream_task: Any,
++    ) -> Any:
+         """Run the queued / interrupting follow-up as the next turn (recursive ``_run_agent``)."""
+         from gateway.platforms.base import merge_pending_message_event
+         from gateway.run import _preserve_queued_followup_history_offset
+@@ -4279,6 +4289,8 @@
  
          Keys: "final_response", "messages", "api_calls", "completed"."""
          if self._get_proxy_url():
@@ -431,3 +485,21 @@
              return await self._run_agent_via_proxy(
                  message=message, context_prompt=context_prompt, history=history, source=source,
                  session_id=session_id, session_key=session_key, run_generation=run_generation,
+--- a/plugins/platforms/telegram/update_admission.py
++++ b/plugins/platforms/telegram/update_admission.py
+@@ -167,6 +167,15 @@
+                 prev.add_done_callback(release)
+
+
++    async def wait_for_chat_idle(self, chat_id: int) -> None:
++        """Keep album debounce behind already admitted updates of this chat.
++
++        A newer album item cancels the old flush; shield preserves the FIFO tail.
++        """
++        while (tail := self._tails.get(chat_id)) is not None:
++            await asyncio.shield(tail)
++
++
+ def build_update_processor(extra, name: str) -> PerChatUpdateProcessor:
+     """``platforms.telegram.extra.max_concurrent_updates`` (default 32); bad values warn and fall back."""
+     raw = extra.get("max_concurrent_updates", DEFAULT_MAX_CONCURRENT_UPDATES)
