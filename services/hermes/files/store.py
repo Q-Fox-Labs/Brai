@@ -65,7 +65,9 @@ class FileStore:
                   position INTEGER NOT NULL, caption TEXT NOT NULL, path TEXT NOT NULL,
                   artifact TEXT, ref TEXT);
                 CREATE TABLE IF NOT EXISTS groups (identity TEXT PRIMARY KEY, admitted TEXT);
+                CREATE TABLE IF NOT EXISTS admissions (identity TEXT PRIMARY KEY, route TEXT NOT NULL, groups TEXT NOT NULL, state TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS deliveries (identity TEXT PRIMARY KEY, payload TEXT NOT NULL, state TEXT NOT NULL, receipts TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS delivery_latest (fingerprint TEXT PRIMARY KEY, identity TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS leases (operation TEXT NOT NULL, artifact TEXT NOT NULL, pid INTEGER NOT NULL, started TEXT NOT NULL, PRIMARY KEY(operation, artifact));
                 CREATE TABLE IF NOT EXISTS aliases (path TEXT PRIMARY KEY, artifact TEXT NOT NULL, ref TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS publications (identity TEXT PRIMARY KEY, path TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0);
@@ -197,7 +199,7 @@ class FileStore:
                 db.execute("UPDATE items SET artifact=?,ref=? WHERE identity=?", (ref["artifactId"], canonical(ref), identity))
             return {"groupId": group, "itemId": identity, "file": ref, "localPath": result["localPath"]}
 
-    def admit(self, group):
+    def admit(self, group, *, defer=False):
         """Вернуть только новую готовую версию набора; прежнюю работу не запускать снова."""
         with self.lock(group):
             with self.db() as db:
@@ -213,9 +215,77 @@ class FileStore:
                     return {"groupId": group, "version": version, "duplicate": True, "items": []}
                 for row in rows:
                     self.fetch(row["artifact"])
-                db.execute("UPDATE groups SET admitted=? WHERE identity=?", (canonical(current), group))
+                if not defer:
+                    db.execute("UPDATE groups SET admitted=? WHERE identity=?", (canonical(current), group))
             return {"groupId": group, "version": version, "duplicate": False, "supplement": bool(previous),
+                    "_previous": previous, "_current": current,
                     "items": [{"file": json.loads(row["ref"]), "caption": row["caption"], "source": json.loads(row["source"])} for row in added]}
+
+    def prepare_admission(self, source, message_id, sets):
+        """Сохранить состав до запуска агента; готовые bytes и leases уже проверены."""
+        groups = [{"id": item["groupId"], "previous": item["_previous"], "current": item["_current"]}
+                  for item in sets if not item["duplicate"]]
+        if not groups:
+            return None
+        route = key([self.owner, source, str(message_id)])
+        ticket = key([route, groups])
+        with self.db() as db:
+            db.execute("INSERT OR IGNORE INTO admissions VALUES (?,?,?,'pending')", (ticket, route, canonical(groups)))
+            row = db.execute("SELECT state FROM admissions WHERE identity=?", (ticket,)).fetchone()
+            if row["state"] != "pending":
+                raise FileError("FILE_SET_ALREADY_ADMITTED")
+        return ticket
+
+    def commit_admission(self, source, message_id, *, ticket=None):
+        """Атомарно передать готовые наборы агенту; повторная передача запрещена."""
+        if not message_id:
+            return False
+        route = key([self.owner, source, str(message_id)])
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if ticket is None:
+                rows = db.execute("SELECT * FROM admissions WHERE route=? AND state='pending'", (route,)).fetchall()
+            else:
+                rows = db.execute("SELECT * FROM admissions WHERE route=? AND identity=? AND state='pending'",
+                                  (route, ticket)).fetchall()
+                if not rows:
+                    raise FileError("FILE_SET_ALREADY_ADMITTED")
+            if len(rows) > 1:
+                raise FileError("FILE_SET_ADMISSION_CONFLICT")
+            if not rows:
+                if db.execute("SELECT 1 FROM admissions WHERE route=? AND state='committed'", (route,)).fetchone():
+                    raise FileError("FILE_SET_ALREADY_ADMITTED")
+                return False
+            row = rows[0]
+            groups = json.loads(row["groups"])
+            for item in groups:
+                current = db.execute("SELECT admitted FROM groups WHERE identity=?", (item["id"],)).fetchone()
+                if current is None or (json.loads(current[0]) if current[0] else []) != item["previous"]:
+                    raise FileError("FILE_SET_ADMISSION_CONFLICT")
+            for item in groups:
+                db.execute("UPDATE groups SET admitted=? WHERE identity=?", (canonical(item["current"]), item["id"]))
+            db.execute("UPDATE admissions SET state='committed' WHERE identity=?", (row["identity"],))
+            # Старые подготовки больше не должны блокировать восстановление набора.
+            pending = db.execute("SELECT identity,groups FROM admissions WHERE route=? AND state='pending'", (route,)).fetchall()
+            completed = {item["id"]: set(item["current"]) for item in groups}
+            for candidate in pending:
+                other = json.loads(candidate["groups"])
+                if all(item["id"] in completed and set(item["current"]) <= completed[item["id"]] for item in other):
+                    db.execute("UPDATE admissions SET state='superseded' WHERE identity=?", (candidate["identity"],))
+        return True
+
+    def direct_delivery_identity(self, fingerprint):
+        """Не создавать новую попытку для совпадающей неопределённой прямой отправки."""
+        with self.db() as db:
+            row = db.execute("SELECT identity FROM delivery_latest WHERE fingerprint=?", (fingerprint,)).fetchone()
+            identity = row["identity"] if row else None
+            previous = db.execute("SELECT state FROM deliveries WHERE identity=?", (identity,)).fetchone() if identity else None
+            if identity is None or (previous and previous["state"] == "sent"):
+                identity = key([self.owner, "direct", fingerprint, str(uuid.uuid4())])
+                db.execute("INSERT INTO delivery_latest VALUES (?,?) ON CONFLICT(fingerprint) DO UPDATE SET identity=excluded.identity",
+                           (fingerprint, identity))
+            return identity
+
 
     def resolve(self, path, identity):
         """Восстановить старую ссылку или сохранить явно выбранный результат обработки."""
@@ -341,23 +411,23 @@ class FileStore:
             db.execute("DELETE FROM leases WHERE operation=?", ("task:" + key([self.owner, operation]),))
 
 
-def delivery_plan(items, mode="files"):
+def delivery_plan(items, mode="files", *, supports_album=True):
     """Детерминированно разбить набор без перестановки и без молчаливой потери подписей."""
     if mode not in {"files", "album"} or not items:
         raise FileError("INVALID_FILE_SET")
     kinds = [item.get("presentation", "photo" if item["file"]["mimeType"] in {"image/jpeg", "image/png", "image/webp"} else
                        "video" if item["file"]["mimeType"].startswith("video/") else "document") for item in items]
     compatible = (set(kinds) <= {"photo", "video"} or len(set(kinds)) == 1 and kinds[0] in {"document", "audio"})
-    album = mode == "album" and compatible
+    album = mode == "album" and compatible and supports_album
     chunks = [items[i:i+10] for i in range(0, len(items), 10)] if album else [[item] for item in items]
-    return {"fallback": mode == "album" and not compatible,
+    return {"fallback": mode == "album" and (not compatible or not supports_album),
             "batches": [{"kind": "album" if album and len(chunk) > 1 else "single", "items": chunk} for chunk in chunks]}
 
 
-async def deliver(store, delivery_id, items, sender, mode="files"):
+async def deliver(store, delivery_id, items, sender, mode="files", *, supports_album=True):
     """Отправить подготовленный набор; неизвестный исход никогда автоматически не повторяется."""
     payload = canonical({"items": items, "mode": mode})
-    plan = delivery_plan(items, mode)
+    plan = delivery_plan(items, mode, supports_album=supports_album)
     # Nonblocking lock не останавливает event loop второго отправителя.
     with store.lock(["delivery", delivery_id], blocking=False):
         with store.db() as db:

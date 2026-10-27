@@ -2,7 +2,7 @@
 # ABOUTME: Сохраняет состав наборов и квитанции; локальные байты используются временно.
 from __future__ import annotations
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import inspect
 import shutil
@@ -16,8 +16,11 @@ from urllib.parse import unquote, urlparse
 from .store import FileStore, FileError, canonical, key, deliver, workspace_in_use
 
 _store = None
+_recovery_targets = {}
 _operation = ContextVar('brai_file_operation', default=None)
 _sending = ContextVar('brai_file_sending', default=False)
+_inbound = ContextVar('brai_file_inbound', default=None)
+_prepared_inbound = ContextVar('brai_file_prepared_inbound', default=None)
 _MEDIA = re.compile(r'MEDIA:\s*(?:"([^"\n]+)"|\x27([^\x27\n]+)\x27|([^\s<>]+))')
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
@@ -78,6 +81,7 @@ async def accept_event(event, admit=True):
     if not paths:
         paths = [item['localPath'] for item in (getattr(event, 'metadata', None) or {}).get('_brai_artifacts', [])]
     if not paths:
+        _prepared_inbound.set(None)
         return True
     files = store()
     event.metadata = dict(getattr(event, 'metadata', None) or {})
@@ -127,7 +131,7 @@ async def accept_event(event, admit=True):
     if not admit:
         return True
     groups = list(dict.fromkeys(item['groupId'] for item in refs))
-    accepted = [await asyncio.to_thread(files.admit, group) for group in groups]
+    accepted = [await asyncio.to_thread(files.admit, group, defer=True) for group in groups]
     if all(value['duplicate'] for value in accepted):
         event.media_urls = []
         return False
@@ -137,11 +141,48 @@ async def accept_event(event, admit=True):
     event._brai_file_lease = lease
     event.media_urls = [value['localPath'] for value in copies]
     event.media_types = [value['mimeType'] for value in copies]
-    event.metadata['fileSets'] = accepted
+    ticket = files.prepare_admission(source_of(event), str(event.message_id), accepted)
+    _prepared_inbound.set((source_of(event), str(event.message_id), ticket))
+    event.metadata['fileSets'] = [{key: value for key, value in item.items() if not key.startswith('_')} for item in accepted]
     if any(value.get('supplement') for value in accepted):
         event.text = '[Дополнение к прежнему набору; ранее обработанные элементы не повторяются.]\n' + (event.text or '')
     event.text = (event.text or '') + '\n' + '\n'.join('[artifactId=' + item['file']['artifactId'] + '] ' + item['caption'] for item in items)
     return True
+
+
+def commit_inbound(source, message_id, ticket=None):
+    """Зафиксировать набор только непосредственно перед запуском агента."""
+    holder = type('AdmissionEvent', (), {'source': source})()
+    route = source_of(holder)
+    try:
+        return store().commit_admission(route, message_id, ticket=ticket)
+    except FileError as error:
+        if str(error) == 'FILE_SET_ADMISSION_CONFLICT':
+            for loop, adapter in list(_recovery_targets.values()):
+                if str(getattr(adapter.platform, 'value', adapter.platform)) == route['platform'] and not loop.is_closed():
+                    loop.call_soon_threadsafe(schedule_recovery, adapter)
+        raise
+
+
+def reject_proxy_inbound(source, message_id):
+    """Не пересылать пользовательские файлы через proxy без подтверждаемого протокола."""
+    holder = type('AdmissionEvent', (), {'source': source})()
+    pending = _prepared_inbound.get()
+    if pending and pending[:2] == (source_of(holder), str(message_id)):
+        raise FileError('FILES_PROXY_UNSUPPORTED')
+
+
+@contextmanager
+def inbound_handoff(source, message_id):
+    """Связать входящий набор с фактическим входом в обработчик агента."""
+    holder = type('AdmissionEvent', (), {'source': source})()
+    prepared = _prepared_inbound.get()
+    ticket = prepared[2] if prepared and prepared[:2] == (source_of(holder), str(message_id)) else None
+    token = _inbound.set((source, message_id, ticket))
+    try:
+        yield
+    finally:
+        _inbound.reset(token)
 
 
 def merge_events(existing, event):
@@ -220,7 +261,11 @@ def conversation(agent, user_message, task_id=None):
     with store().db() as db:
         db.execute('INSERT OR REPLACE INTO tasks VALUES (?,?)', (task, operation))
     try:
-        yield input_text(user_message, operation)
+        prepared = input_text(user_message, operation)
+        inbound = _inbound.get()
+        if inbound is not None:
+            commit_inbound(*inbound)
+        yield prepared
     finally:
         _operation.reset(token)
         if not workspace_in_use(Path(agent._brai_workspace)):
@@ -489,7 +534,8 @@ async def send_set(adapter, chat_id, items, mode, metadata=None, identity=None):
     platform = str(getattr(adapter.platform, 'value', adapter.platform))
     set_ids = {item['_setId'] for item in items if '_setId' in item}
     items = [{key: value for key, value in item.items() if key != '_setId'} for item in items]
-    identity = identity or (metadata or {}).get('brai_delivery_id') or key([platform, str(chat_id), _operation.get() or str(uuid.uuid4()), metadata or {}, items])
+    explicit = identity or (metadata or {}).get('brai_delivery_id')
+    fingerprint = key([store().owner, platform, str(chat_id), metadata or {}, items, mode]) if not explicit else None
     announced = False
     async def sender(kind, prepared, fallback):
         nonlocal announced
@@ -523,8 +569,11 @@ async def send_set(adapter, chat_id, items, mode, metadata=None, identity=None):
             _sending.reset(token)
     if platform == 'telegram':
         validate_telegram(items)
-    result = await deliver(store(), str(identity), items, sender, mode)
-    result['deliveryId'] = str(identity)
+    guard = store().lock(['direct-delivery', fingerprint], blocking=False) if fingerprint else nullcontext()
+    with guard:
+        identity = str(explicit) if explicit else store().direct_delivery_identity(fingerprint)
+        result = await deliver(store(), identity, items, sender, mode, supports_album=platform == 'telegram')
+    result['deliveryId'] = identity
     if result['state'] == 'sent':
         for set_id in set_ids:
             release_set(set_id)
@@ -662,9 +711,19 @@ async def recover(adapter):
 
 
 def schedule_recovery(adapter):
-    """Подключать восстановление после установки обработчика gateway."""
-    if getattr(adapter, '_brai_recovery_task', None) is None:
-        adapter._brai_recovery_task = asyncio.create_task(recover(adapter))
+    """Подключать восстановление и повторять его при гонке готовых версий."""
+    loop = asyncio.get_running_loop()
+    _recovery_targets[id(adapter)] = (loop, adapter)
+    task = getattr(adapter, '_brai_recovery_task', None)
+    if task is not None and not task.done():
+        adapter._brai_recovery_again = True
+        return
+    adapter._brai_recovery_again = False
+    task = adapter._brai_recovery_task = loop.create_task(recover(adapter))
+    def finished(_):
+        if getattr(adapter, '_brai_recovery_again', False):
+            schedule_recovery(adapter)
+    task.add_done_callback(finished)
 
 
 def workspace_for(task_id):

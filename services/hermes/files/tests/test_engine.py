@@ -85,6 +85,38 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(Path(self.store.fetch(aid)['localPath']).read_text(), channel)
             self.assertFalse(Path(agent._brai_workspace).exists())
 
+    def test_actual_loop_commits_inbound_only_after_input_preparation(self):
+        source = SimpleNamespace(platform='telegram', chat_id='1', thread_id=None, user_id='2', profile=None)
+        calls = []
+        run, ports = self.loop(lambda *a, **kw: calls.append('turn') or {'final_response': 'ok'})
+        agent = SimpleNamespace(session_id='handoff', platform='telegram')
+        with patch.dict(sys.modules, ports), patch.object(native, 'commit_inbound', side_effect=lambda *a: calls.append('commit')):
+            self.backend.fail_publish = True
+            with native.inbound_handoff(source, 'message'), self.assertRaisesRegex(FileError, 'ARTIFACTS_UNAVAILABLE'):
+                run(agent, '@file:' + str(self.input_file()))
+            self.assertEqual(calls, [])
+            self.backend.fail_publish = False
+            with native.inbound_handoff(source, 'message'):
+                run(agent, '@file:' + str(self.input_file()))
+            self.assertEqual(calls, ['commit', 'turn'])
+
+    async def test_proxy_gateway_refuses_unconfirmed_file_handoff(self):
+        scope = {}
+        function('gateway/run_turn.py', ['_run_agent_inner'], scope)
+        source = SimpleNamespace(platform='telegram', chat_id='1', thread_id=None, user_id='2', profile=None)
+        called = []
+        async def proxy(**kwargs):
+            called.append(kwargs)
+        gateway = SimpleNamespace(_get_proxy_url=lambda: 'https://proxy.invalid', _run_agent_via_proxy=proxy)
+        event = SimpleNamespace(source=source)
+        ticket = native._prepared_inbound.set((native.source_of(event), '10', 'ticket'))
+        try:
+            with patch.dict(sys.modules, {'brai_files': native}), self.assertRaisesRegex(FileError, 'FILES_PROXY_UNSUPPORTED'):
+                await scope['_run_agent_inner'](gateway, 'file', '', [], source, 'session', inbound_message_id='10')
+            self.assertEqual(called, [])
+        finally:
+            native._prepared_inbound.reset(ticket)
+
     def test_actual_loop_has_no_fail_open_when_artifacts_fail(self):
         self.backend.fail_publish = True
         called = []

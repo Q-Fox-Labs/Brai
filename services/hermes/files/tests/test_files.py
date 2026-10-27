@@ -161,6 +161,132 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             groups.append(self.store.ingest({**self.source, **changes}, '1', self.file(1), 1, '', 'same')['groupId'])
         self.assertEqual(len(set(groups)), len(groups))
 
+    async def test_inbound_failure_and_restart_before_handoff_do_not_lose_set(self):
+        event = self.event('91')
+        await native.accept_event(event, admit=False)
+        original = self.store.fetch
+        calls = 0
+        def fail_second(artifact):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise FileError('ARTIFACTS_UNAVAILABLE')
+            return original(artifact)
+        with patch.object(self.store, 'fetch', side_effect=fail_second):
+            with self.assertRaisesRegex(FileError, 'ARTIFACTS_UNAVAILABLE'):
+                await native.accept_event(event)
+        group = event.metadata['_brai_artifacts'][0]['groupId']
+        with self.store.db() as db:
+            self.assertIsNone(db.execute('SELECT admitted FROM groups WHERE identity=?', (group,)).fetchone()[0])
+        self.assertTrue(await native.accept_event(event))
+        with self.store.db() as db:
+            self.assertIsNone(db.execute('SELECT admitted FROM groups WHERE identity=?', (group,)).fetchone()[0])
+        native.release_event(event)
+        native.configure(self.config, self.backend)
+        replay = self.event('91')
+        self.assertTrue(await native.accept_event(replay))
+        self.assertTrue(native.commit_inbound(replay.source, replay.message_id))
+        with self.assertRaisesRegex(FileError, 'ALREADY_ADMITTED'):
+            native.commit_inbound(replay.source, replay.message_id)
+        native.release_event(replay)
+        duplicate = self.event('91')
+        self.assertFalse(await native.accept_event(duplicate))
+
+    async def test_pending_album_with_late_element_after_restart(self):
+        first = self.event('10')
+        self.assertTrue(await native.accept_event(first))
+        old_ticket = native._prepared_inbound.get()[2]
+        native.release_event(first)
+        late = self.event('11')
+        await native.accept_event(late, admit=False)
+        native.configure(self.config, self.backend)
+        recovered = self.event('10')
+        self.assertTrue(await native.accept_event(recovered))
+        group = recovered.metadata['fileSets'][0]
+        self.assertEqual(len(group['items']), 2)
+        new_ticket = native._prepared_inbound.get()[2]
+        self.assertNotEqual(old_ticket, new_ticket)
+        with native.inbound_handoff(recovered.source, recovered.message_id):
+            with native.conversation(SimpleNamespace(session_id='recovery'), recovered.text):
+                pass
+        with self.assertRaisesRegex(FileError, 'ALREADY_ADMITTED'):
+            native.commit_inbound(first.source, first.message_id, old_ticket)
+        native.release_event(recovered)
+        self.assertFalse(await native.accept_event(self.event('11')))
+
+    async def test_conflicting_pending_album_schedules_recovery_without_restart(self):
+        first = self.event('10')
+        await native.accept_event(first)
+        first_ticket = native._prepared_inbound.get()[2]
+        late = self.event('11')
+        await native.accept_event(late, admit=False)
+        combined = self.event('10')
+        await native.accept_event(combined)
+        combined_ticket = native._prepared_inbound.get()[2]
+        recovered = asyncio.Event()
+        async def fake_recover(adapter):
+            recovered.set()
+        adapter = SimpleNamespace(platform='telegram')
+        try:
+            with patch.object(native, 'recover', side_effect=fake_recover):
+                native.schedule_recovery(adapter)
+                await asyncio.wait_for(recovered.wait(), 2)
+                await adapter._brai_recovery_task
+                recovered.clear()
+                native.commit_inbound(first.source, first.message_id, first_ticket)
+                with self.assertRaisesRegex(FileError, 'ADMISSION_CONFLICT'):
+                    native.commit_inbound(combined.source, combined.message_id, combined_ticket)
+                await asyncio.wait_for(recovered.wait(), 2)
+                await adapter._brai_recovery_task
+        finally:
+            native._recovery_targets.pop(id(adapter), None)
+            native.release_event(first)
+            native.release_event(combined)
+
+    async def test_conflict_recovery_processes_only_late_item(self):
+        first = self.event('10')
+        await native.accept_event(first)
+        first_ticket = native._prepared_inbound.get()[2]
+        late = self.event('11')
+        await native.accept_event(late, admit=False)
+        combined = self.event('10')
+        await native.accept_event(combined)
+        combined_ticket = native._prepared_inbound.get()[2]
+        observed = []
+        class Adapter:
+            platform = 'telegram'
+            async def handle_message(self, event):
+                if await native.accept_event(event):
+                    observed.extend(event.metadata['fileSets'][0]['items'])
+                    with native.inbound_handoff(event.source, event.message_id):
+                        with native.conversation(SimpleNamespace(session_id='recovery'), event.text):
+                            pass
+                    native.release_event(event)
+        adapter = Adapter()
+        config = ModuleType('gateway.config'); config.Platform = lambda value: value
+        session = ModuleType('gateway.session'); session.SessionSource = lambda **kwargs: SimpleNamespace(**kwargs)
+        event = ModuleType('gateway.platforms.event')
+        event.MessageType = SimpleNamespace(DOCUMENT='document')
+        event.MessageEvent = lambda **kwargs: SimpleNamespace(**kwargs, raw_message=SimpleNamespace(media_group_id='album'))
+        ports = {'gateway.config': config, 'gateway.session': session, 'gateway.platforms.event': event}
+        native._recovery_targets[id(adapter)] = (asyncio.get_running_loop(), adapter)
+        try:
+            native.commit_inbound(first.source, first.message_id, first_ticket)
+            with patch.dict(sys.modules, ports):
+                with self.assertRaisesRegex(FileError, 'ADMISSION_CONFLICT'):
+                    native.commit_inbound(combined.source, combined.message_id, combined_ticket)
+                await asyncio.sleep(0)
+                await adapter._brai_recovery_task
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0]['source']['messageId'], '11')
+            with self.store.db() as db:
+                admitted = json.loads(db.execute('SELECT admitted FROM groups').fetchone()[0])
+            self.assertEqual(len(admitted), 2)
+        finally:
+            native._recovery_targets.pop(id(adapter), None)
+            native.release_event(first)
+            native.release_event(combined)
+
     async def test_partial_storage_never_uses_raw_cache(self):
         one = self.event('10')
         await native.accept_event(one, admit=False)
@@ -219,6 +345,75 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(value['receipts']), 10)
         self.assertEqual(calls, ['album', 'single'])
 
+    async def test_direct_send_unknown_is_reused_after_restart_and_success_allows_new_send(self):
+        class Result(SimpleNamespace):
+            pass
+        base = ModuleType('gateway.platforms.base')
+        base.SendResult = Result
+        items = self.items(1)
+        adapter = SimpleNamespace(platform='telegram')
+        calls = []
+        async def lost(*args):
+            calls.append('sent')
+            raise TimeoutError('accepted but acknowledgement lost')
+        with patch.dict(sys.modules, {'gateway.platforms.base': base}), patch.object(native, 'telegram_sender', side_effect=lost):
+            first = await native.send_set(adapter, '42', items, 'files')
+            self.assertFalse(first.success)
+            native.configure(self.config, self.backend)
+            second = await native.send_set(adapter, '42', items, 'files')
+            self.assertFalse(second.success)
+            self.assertEqual(first.raw_response['deliveryId'], second.raw_response['deliveryId'])
+            self.assertEqual(calls, ['sent'])
+        async def sent(*args):
+            calls.append('confirmed')
+            return [123]
+        other = self.items(1, '.png')
+        with patch.dict(sys.modules, {'gateway.platforms.base': base}), patch.object(native, 'telegram_sender', side_effect=sent):
+            one = await native.send_set(adapter, '42', other, 'files')
+            two = await native.send_set(adapter, '42', other, 'files')
+            self.assertTrue(one.success and two.success)
+            self.assertNotEqual(one.raw_response['deliveryId'], two.raw_response['deliveryId'])
+            self.assertEqual(calls.count('confirmed'), 2)
+
+    async def test_non_telegram_adapter_records_partial_receipts(self):
+        class Result(SimpleNamespace):
+            pass
+        base = ModuleType('gateway.platforms.base')
+        base.SendResult = Result
+        calls = []
+        async def notice(*args, **kwargs):
+            return Result(success=True)
+        async def send_image_file(*args, **kwargs):
+            calls.append(kwargs['image_path'])
+            if len(calls) == 2:
+                raise TimeoutError('ack lost')
+            return Result(success=True, message_id='first')
+        adapter = SimpleNamespace(platform='matrix', send=notice, send_image_file=send_image_file)
+        items = self.items(3)
+        with patch.dict(sys.modules, {'gateway.platforms.base': base}):
+            result = await native.send_set(adapter, '42', items, 'album', identity='partial-matrix')
+        self.assertFalse(result.success)
+        self.assertEqual(result.raw_response['state'], 'unknown')
+        self.assertEqual(result.raw_response['receipts'], [{'artifactId': items[0]['file']['artifactId'], 'messageId': 'first'}])
+        self.assertEqual(len(calls), 2)
+
+    async def test_partial_non_album_channel_persists_each_confirmed_receipt(self):
+        items, calls = self.items(3), []
+        async def sender(kind, prepared, fallback):
+            calls.append((kind, len(prepared), fallback))
+            if len(calls) == 2:
+                raise TimeoutError('second response lost')
+            return ['confirmed-1']
+        result = await deliver(self.store, 'non-album-partial', items, sender, 'album', supports_album=False)
+        self.assertEqual(result['state'], 'unknown')
+        self.assertEqual(result['receipts'], [{'artifactId': items[0]['file']['artifactId'], 'messageId': 'confirmed-1'}])
+        self.assertEqual(calls, [('single', 1, True), ('single', 1, True)])
+        restored = FileStore(self.store.root, self.cache, 'owner', self.backend)
+        repeated = await deliver(restored, 'non-album-partial', items, sender, 'album', supports_album=False)
+        self.assertTrue(repeated['repeated'])
+        self.assertEqual(repeated['receipts'], result['receipts'])
+        self.assertEqual(len(calls), 2)
+
     async def test_concurrent_delivery_does_not_block_event_loop(self):
         items = self.items(2)
         started, finish = asyncio.Event(), asyncio.Event()
@@ -266,11 +461,13 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(origin['mediaGroupId'], 'album')
         self.assertEqual(origin['messageId'], '10')
         self.assertEqual(origin['attachmentId'], '0')
+        native.commit_inbound(first.source, first.message_id)
         native.release_event(first)
         late = self.event('12')
         self.assertTrue(await native.accept_event(late))
         self.assertEqual(len(late.metadata['fileSets'][0]['items']), 1)
         self.assertIn('Дополнение', late.text)
+        native.commit_inbound(late.source, late.message_id)
         native.release_event(late)
         repeated = self.event('12')
         self.assertFalse(await native.accept_event(repeated))

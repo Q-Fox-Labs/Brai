@@ -373,3 +373,26 @@
      if mode != "project":
          return staging_dir
      if task_id:
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -1720,7 +1720,8 @@
+             if ctx.inbound_message_id is not None:
+                 kwargs["persist_user_platform_id"] = str(ctx.inbound_message_id)
+             from agent.notification_presentation import notification_turn
+-            with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""):
++            import brai_files
++            with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""), brai_files.inbound_handoff(ctx.source, ctx.inbound_message_id):
+                 return agent.run_conversation(api_message, **kwargs)
+         finally:
+             unregister_gateway_notify(session_key)
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -4279,6 +4279,8 @@
+ 
+         Keys: "final_response", "messages", "api_calls", "completed"."""
+         if self._get_proxy_url():
++            import brai_files
++            brai_files.reject_proxy_inbound(source, inbound_message_id)
+             return await self._run_agent_via_proxy(
+                 message=message, context_prompt=context_prompt, history=history, source=source,
+                 session_id=session_id, session_key=session_key, run_generation=run_generation,
