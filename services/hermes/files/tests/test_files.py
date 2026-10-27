@@ -15,7 +15,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from files.store import FileStore, FileError, deliver, delivery_plan
-from files import native
+from files import native, install
 
 
 class Backend:
@@ -89,6 +89,32 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         return SimpleNamespace(message_id=message, raw_message=SimpleNamespace(media_group_id=group), source=s,
                                text='подпись ' + message, media_urls=[str(path or self.file(message))],
                                media_types=['image/jpeg'], metadata={})
+
+    def test_installation_plans_bind_two_separate_engines_and_nodes(self):
+        plans = []
+        for account in ('dev', 'prod'):
+            root = self.root / account
+            for name in ('engine', 'profile', 'runtime/services/hermes/files', 'config'):
+                (root / name).mkdir(parents=True, exist_ok=True)
+            (root / 'runtime/services/hermes/files/bootstrap.py').write_text("CONFIG = '__BRAI_FILES_CONFIG__'\\n")
+            publisher_path = root / 'config/publisher.json'
+            publisher_path.write_text('{}')
+            tools = root / 'config/tools.json'
+            tools.write_text(json.dumps({'publisher': {'configPath': str(publisher_path)}}))
+            publisher = {'resultRoot': str(root / 'profile/results'), 'allowedReadRoots': []}
+            identity = SimpleNamespace(pw_uid=123, pw_gid=456)
+            plan = install.configuration_plan(root / 'engine', root / 'profile', root / 'runtime',
+                root / 'config/files.json', tools, account, 'owner-' + account, 'brai-' + account,
+                str(root / 'private/node'), account == 'dev', publisher, identity)
+            config = json.loads(plan[1][1])
+            self.assertEqual(config['engineRoot'], str(root / 'engine'))
+            self.assertEqual(config['node'], str(root / 'private/node'))
+            self.assertEqual(config['ownerId'], 'owner-' + account)
+            self.assertEqual(plan[0][0], root / 'engine/brai_files.py')
+            self.assertEqual(plan[0][-1], 0o440 if account == 'dev' else 0o644)
+            self.assertIn(str(root / 'config/files.json').encode(), plan[0][1])
+            plans.append({str(row[0]) for row in plan})
+        self.assertFalse(plans[0].intersection(plans[1]))
 
     async def test_sizes_receive_send_and_restore(self):
         for count in [1, 2, 10, 11]:

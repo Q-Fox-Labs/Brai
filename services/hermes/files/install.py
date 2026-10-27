@@ -66,10 +66,44 @@ def baseline_hashes(engine, patch):
         return {name: sha256((staging / name).read_bytes()).hexdigest() for name in paths}
 
 
-def install(engine, profile, runtime, config_path, tools_path, owner_name, owner_id, account, check=False):
+def configuration_plan(engine, profile, runtime, config_path, tools_path, owner_name, owner_id, account,
+                       node, sealed_engine, publisher, identity):
+    """Составить точные файлы и права до изменения выбранного экземпляра."""
+    state, work, cache = profile / 'brai-files', profile / 'brai-files/work', Path(publisher['resultRoot'])
+    extra = [work, profile / 'media/downloads', profile / 'images', profile / 'cache/generated/images',
+             *[profile / 'cache' / name for name in ('audio', 'documents', 'images', 'screenshots', 'videos')],
+             profile / 'usercustom/userdata/projects', profile / 'usercustom/userdata/files']
+    publisher = dict(publisher)
+    roots = list(dict.fromkeys([*publisher['allowedReadRoots'], *map(str, extra)]))
+    files = runtime / 'services/hermes/files'
+    publisher_path = Path(json.loads(tools_path.read_text())['publisher']['configPath'])
+    config = {'ownerId': owner_id, 'runtimeUser': owner_name, 'account': account, 'stateRoot': str(state), 'resultRoot': str(cache),
+              'moduleRoot': str(files), 'engineRoot': str(engine), 'toolsConfig': str(tools_path), 'node': str(node),
+              'entry': str(runtime / 'services/hermes/trusted.mjs'), 'readRoots': roots,
+              'legacyRoots': [str(profile / 'usercustom/userdata/projects'), str(profile / 'usercustom/userdata/files'), str(profile / 'workspace')],
+              'temporaryRoots': [str(work), str(cache), str(profile / 'media/downloads'), str(profile / 'images'),
+                  *[str(profile / 'cache' / name) for name in ('audio', 'documents', 'images', 'screenshots', 'videos')],
+                  str(profile / 'cache/generated/images')],
+              'serviceRoots': [str(engine), str(runtime), str(profile / 'docs'), str(profile / 'config.yaml'), str(profile / '.env'),
+                  str(profile / 'skills'), str(profile / 'prompts'), str(profile / 'scripts'),
+                  str(profile / 'usercustom/hermescustom'), str(profile / 'usercustom/userdata/instructions'),
+                  str(profile / 'usercustom/userdata/skills')]}
+    encode = lambda value: (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode()
+    publisher['allowedReadRoots'] = roots
+    bootstrap_uid, bootstrap_mode = (0, 0o440) if sealed_engine else (identity.pw_uid, 0o644)
+    plan = [(engine / 'brai_files.py', (files / 'bootstrap.py').read_text().replace(repr('__BRAI_FILES_CONFIG__'), repr(str(config_path))).encode(), bootstrap_uid, identity.pw_gid, bootstrap_mode),
+            (config_path, encode(config), 0, identity.pw_gid, 0o640),
+            (publisher_path, encode(publisher), publisher_path.stat().st_uid, publisher_path.stat().st_gid, publisher_path.stat().st_mode & 0o777)]
+    return plan
+
+
+def install(engine, profile, runtime, config_path, tools_path, owner_name, owner_id, account, check=False, *,
+            node='/opt/node-v24.22.1-linux-x64/bin/node', sealed_engine=False):
     """Подготовить обязательный адаптер на отдельном движке данного экземпляра."""
     engine, profile, runtime, config_path, tools_path = map(Path, (engine, profile, runtime, config_path, tools_path))
     require(all(p.is_absolute() and p.resolve() == p for p in (engine, profile, runtime, config_path, tools_path)), 'FILES_PATH_REJECTED')
+    require(Path(node).is_absolute() and Path(node).resolve() == Path(node), 'FILES_NODE_PATH_REJECTED')
+    require(type(sealed_engine) is bool, 'FILES_ENGINE_MODE_REJECTED')
     config_parent = config_path.parent.stat()
     require(config_parent.st_uid == 0 and not config_parent.st_mode & 0o022, 'FILES_INSTANCE_CONFIG_REJECTED')
     identity = pwd.getpwnam(owner_name)
@@ -125,25 +159,13 @@ def install(engine, profile, runtime, config_path, tools_path, owner_name, owner
             if acl is not None:
                 os.setxattr(path, 'system.posix_acl_access', acl)
         changed = True
-    config = {'ownerId': owner_id, 'runtimeUser': owner_name, 'account': account, 'stateRoot': str(state), 'resultRoot': str(cache),
-              'moduleRoot': str(files), 'engineRoot': str(engine), 'toolsConfig': str(tools_path), 'node': '/usr/local/bin/node',
-              'entry': str(runtime / 'services/hermes/trusted.mjs'), 'readRoots': roots,
-              'legacyRoots': [str(profile / 'usercustom/userdata/projects'), str(profile / 'usercustom/userdata/files'), str(profile / 'workspace')],
-              'temporaryRoots': [str(work), str(cache), str(profile / 'media/downloads'), str(profile / 'images'),
-                  *[str(profile / 'cache' / name) for name in ('audio', 'documents', 'images', 'screenshots', 'videos')],
-                  str(profile / 'cache/generated/images')],
-              'serviceRoots': [str(engine), str(runtime), str(profile / 'docs'), str(profile / 'config.yaml'), str(profile / '.env'),
-                  str(profile / 'skills'), str(profile / 'prompts'), str(profile / 'scripts'),
-                  str(profile / 'usercustom/hermescustom'), str(profile / 'usercustom/userdata/instructions'),
-                  str(profile / 'usercustom/userdata/skills')]}
-    encode = lambda value: (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode()
-    publisher['allowedReadRoots'] = roots
-    plan = [(engine / 'brai_files.py', (files / 'bootstrap.py').read_text().replace(repr('__BRAI_FILES_CONFIG__'), repr(str(config_path))).encode(), identity.pw_uid, identity.pw_gid, 0o644),
-            (config_path, encode(config), 0, identity.pw_gid, 0o640),
-            (publisher_path, encode(publisher), publisher_path.stat().st_uid, publisher_path.stat().st_gid, publisher_path.stat().st_mode & 0o777)]
+    plan = configuration_plan(engine, profile, runtime, config_path, tools_path, owner_name, owner_id,
+                              account, node, sealed_engine, publisher, identity)
     for path, content, uid, gid, mode in plan:
         if check:
-            require(path.is_file() and path.read_bytes() == content, 'FILES_INSTALL_DRIFT')
+            require(not path.is_symlink() and path.is_file() and path.read_bytes() == content, 'FILES_INSTALL_DRIFT')
+            info = path.stat()
+            require(info.st_uid == uid and info.st_gid == gid and info.st_mode & 0o777 == mode, 'FILES_METADATA_DRIFT')
         else:
             changed = atomic(path, content, uid, gid, mode) or changed
     return {'changed': changed, 'enginePin': PIN, 'patchSha256': sha256(patch.read_bytes()).hexdigest()}
