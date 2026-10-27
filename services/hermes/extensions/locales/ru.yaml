@@ -1,0 +1,159 @@
+slash:
+  help:
+    description: "Показать справку по командам"
+  new:
+    description: "Начать новый разговор с чистого листа"
+  stop:
+    description: "Остановить текущую работу и фоновые задачи"
+  status:
+    description: "Показать настройки и состояние этого разговора"
+  egress:
+    description: "Проверить доступ к интернету для изолированных задач"
+  resume:
+    description: "Продолжить ранее сохранённый разговор"
+  sessions:
+    description: "Найти и открыть прошлые разговоры"
+  model:
+    description: "Выбрать, какая модель ИИ будет отвечать"
+  debug:
+    description: "Создать отчёт об ошибках для отправки в поддержку"
+  restart:
+    description: "Перезапустить бота, дождавшись завершения его задач"
+  update:
+    description: "Обновить программу бота до новой версии"
+  commands:
+    description: "Показать полный список команд и возможностей"
+  approve:
+    description: "Разрешить действие, которое требует вашего согласия"
+  deny:
+    description: "Запретить действие, которое ждёт вашего согласия"
+  queue:
+    description: "Добавить задание в очередь или изменить очередь"
+  steer:
+    description: "Дать уточнение боту, пока он выполняет задание"
+  bg:
+    description: "Запустить отдельное задание, не занимая этот разговор"
+  btw:
+    description: "Задать попутный вопрос, не прерывая основную работу"
+  reasoning:
+    description: "Настроить глубину обдумывания и показ рассуждений"
+  usage:
+    description: "Посмотреть расход ИИ и доступные лимиты"
+  platform:
+    description: "Проверить или приостановить подключения к мессенджерам"
+  profile:
+    description: "Показать, какой набор настроек бота используется"
+  whoami:
+    description: "Узнать, какие команды вам разрешено выполнять"
+  start:
+    description: "Служебный запуск бота без ответного сообщения"
+  topic:
+    description: "Настроить отдельные темы разговоров в личном чате"
+  save:
+    description: "Сохранить этот разговор в файл"
+  retry:
+    description: "Попросить бота заново ответить на последнее сообщение"
+  undo:
+    description: "Вернуться на несколько сообщений назад"
+  title:
+    description: "Дать этому разговору название"
+  branch:
+    description: "Продолжить этот разговор в отдельной ветке"
+  compress:
+    description: "Сократить историю для ИИ, сохранив главное"
+  rollback:
+    description: "Вернуть изменённые файлы к сохранённой версии"
+  pause:
+    description: "Приостановить новые задания или возобновить работу"
+  agents:
+    description: "Показать работающих ИИ-помощников и их задания"
+  goal:
+    description: "Задать цель, над которой бот будет работать дальше"
+  heartbeat:
+    description: "Задать регулярное задание на время, когда бот свободен"
+  refine:
+    description: "Разобрать этот разговор и запомнить полезные уроки"
+  review:
+    description: "Поручить другому ИИ проверить результат работы"
+  loop:
+    description: "Повторять задание через заданные промежутки времени"
+  plan:
+    description: "Составить и сохранить план, пока ничего не выполняя"
+  initiate-setup:
+    description: "Познакомиться с вами и настроить бота под ваши задачи"
+  moa:
+    description: "Поручить один вопрос нескольким ИИ для общего ответа"
+  subgoal:
+    description: "Добавить условия и шаги для достижения вашей цели"
+  context:
+    description: "Показать, сколько места занимает история для ИИ"
+  sethome:
+    description: "Выбрать этот чат для уведомлений бота"
+  codex-runtime:
+    description: "Выбрать способ подключения моделей OpenAI и Codex"
+  personality:
+    description: "Выбрать стиль общения и характер бота"
+  diff:
+    description: "Посмотреть, что изменилось в файлах проекта"
+  footer:
+    description: "Показывать или скрывать служебные сведения под ответами"
+  yolo:
+    description: "Включить или выключить опасные действия без подтверждения"
+  approvals:
+    description: "Настроить, когда бот должен спрашивать ваше разрешение"
+  fast:
+    description: "Настроить ускоренные ответы ИИ: возможна доплата"
+  voice:
+    description: "Включить или выключить голосовые ответы"
+  busy:
+    description: "Выбрать, что делать с сообщениями, пока бот занят"
+  memory:
+    description: "Проверить, что бот хочет запомнить, и дать разрешение"
+  bundles:
+    description: "Показать готовые наборы возможностей бота"
+  learn:
+    description: "Научить бота новому по примеру, файлам или разговору"
+  init:
+    description: "Создать или обновить правила работы бота с проектом"
+  suggestions:
+    description: "Посмотреть идеи автоматизации и выбрать нужные"
+  blueprint:
+    description: "Настроить автоматическую работу по готовому шаблону"
+
+# Дополнительные понятные подписи Hermes
+"gateway.kanban.wake.completed": "завершена"
+"gateway.kanban.wake.gave_up": "не выполнена: попытки исчерпаны"
+"gateway.kanban.wake.crashed": "прервана из-за сбоя; будет повторная попытка"
+"gateway.kanban.wake.timed_out": "не завершена вовремя; будет повторная попытка"
+"gateway.kanban.wake.blocked": "приостановлена; нужна помощь"
+"gateway.kanban.wake.review_requested": "передана на проверку; выполнение завершено"
+"gateway.kanban.wake.changes_requested": "требует исправлений по результатам проверки (BLOCK); работа не одобрена"
+"gateway.kanban.wake.block_loop_detected": "передана на разбор после повторных отказов; нужно вмешательство"
+"gateway.kanban.wake.status_default": "изменила состояние"
+"gateway.kanban.wake.message": "[Доска задач] Задача {task_id}: {status}.\nНазвание: {title}\nИсполнитель: @{assignee}\nДоска: {board}\n\nПроверьте результат или выберите следующий шаг."
+"gateway.kanban.wake.handoff": "Результат: {summary}"
+"gateway.kanban.wake.review_detail": "Замечания проверки: {reason}\nПосмотрите существующую карточку и текущую проверку. Верните исправления в ту же задачу. BLOCK не означает одобрение; не создавайте дубликат задачи."
+"gateway.kanban.wake.guidance": "Это автоматическое уведомление о состоянии задачи. Перед созданием новых задач проверьте текущую доску. Не создавайте повторно существующие задачи и связи."
+"gateway.kanban.ping.head": "{board_tag}{assignee_tag}Задача {task_id}"
+"gateway.status.matrix_scope_room": "  Комната: {room}"
+"gateway.status.matrix_scope_room_id": "  Номер комнаты: {room_id}"
+"gateway.status.matrix_scope_thread": "  Номер темы: {thread_id}"
+"gateway.status.matrix_scope_mode": "  Область разговора: {scope}"
+"gateway.status.matrix_scope_key": "  Ключ разговора: {session_key}"
+"cli.billing.plan_free": "Бесплатный"
+"cli.shared.label_off_upper": "ВЫКЛ"
+"cli.voice.state_off": "ВЫКЛ"
+"cli.voice.label_tts": "  Озвучивание: {value}"
+"cli.status_bar.voice_stt": "◉ Распознавание речи"
+"cli.status_bar.ctx_unknown": "контекст --"
+"cli.status_bar.yolo_badge": "⚠ Без подтверждений"
+"cli.commands.fast.feature_anthropic": "Ускоренный режим Anthropic"
+"cli.commands.fast.feature_openai": "Приоритетная обработка"
+"cli.commands.fast.feature_ultrafast": "Максимальная скорость OpenAI"
+"cli.commands.cron.id": "Номер: {job_id}"
+"cli.commands.cron.status_delivery_failed": "Не удалось доставить: {error}"
+"cli.commands.curator.failed": "(._.) Обслуживание навыков: {error}"
+"cli.commands.btw.title_suffix": "(попутный вопрос)"
+"display.cute.verb.grep": "ищу в тексте"
+"display.cute.verb.cron": "планирую"
+"display.cute.verb.exec": "выполняю"

@@ -1,0 +1,277 @@
+diff --git a/agent/auxiliary_client.py b/agent/auxiliary_client.py
+index 7b5d3c4..d4caacc 100644
+--- a/agent/auxiliary_client.py
++++ b/agent/auxiliary_client.py
+@@ -2108,6 +2108,11 @@ def _resolve_codex_credential_and_base() -> tuple[Optional[str], str]:
+     it belongs to (#121486): the profile-scoped ``HERMES_CODEX_BASE_URL`` wins; otherwise a pooled
+     key goes where that pool entry routes (row URL / ``model.base_url``) and the auth.json OAuth
+     token goes to the ChatGPT default. ``(None, <base>)`` without a usable token."""
++    from hermes_cli.codex_cli_owner import enabled
++    if enabled():
++        from hermes_cli.auth import resolve_codex_runtime_credentials
++        creds = resolve_codex_runtime_credentials()
++        return creds["api_key"], creds["base_url"]
+     override = _codex_base_url_override()
+     pool_present, entry = _select_pool_entry("openai-codex")
+     if pool_present:
+diff --git a/hermes_cli/auth_codex.py b/hermes_cli/auth_codex.py
+index cdad0c0..c74a80a 100644
+--- a/hermes_cli/auth_codex.py
++++ b/hermes_cli/auth_codex.py
+@@ -606,6 +606,14 @@ def resolve_codex_runtime_credentials(
+     backup — gets a bare HTTP 401 ``Missing Authentication header`` from the wire instead of a usable
+     credential. See issue #32992.
+     """
++    from hermes_cli.codex_cli_owner import enabled, resolve
++    if enabled():
++        try:
++            return resolve(force_refresh=force_refresh, refresh_if_expiring=refresh_if_expiring,
++                           refresh_skew_seconds=refresh_skew_seconds, read_only=read_only)
++        except ValueError:
++            # Explicit one-owner mode must never fall back to Hermes OAuth or auto-login.
++            raise _codex_err("Codex credential owner unavailable", "codex_cli_owner_unavailable", relogin=False) from None
+     from hermes_cli.auth import (
+         _auth_store_lock, _codex_access_token_is_expiring, _probe_codex_quota_restored,
+         _read_codex_tokens)
+diff --git a/hermes_cli/codex_cli_owner.py b/hermes_cli/codex_cli_owner.py
+new file mode 100644
+index 0000000..d8395dd
+--- /dev/null
++++ b/hermes_cli/codex_cli_owner.py
+@@ -0,0 +1,222 @@
++# ABOUTME: Получает только access credential собственного Codex CLI для native Hermes.
++# ABOUTME: Refresh выполняет штатный CLI под общим flock; OAuth state не копируется.
++"""Explicit codex-cli credential-owner adapter; no login or credential persistence."""
++import asyncio
++import base64
++from contextlib import asynccontextmanager, contextmanager
++import fcntl
++import json
++import os
++from pathlib import Path
++import selectors
++import stat
++import subprocess
++import time
++
++HOME = Path('/var/lib/brai-dev/hermes-owner')
++
++
++def owner_paths(home, codex_home):
++    """Accept explicit absolute owner paths without reading ambient credentials."""
++    home, codex_home = Path(home), Path(codex_home)
++    if not home.is_absolute() or codex_home != home / '.codex':
++        raise ValueError('CODEX_OWNER_REJECTED')
++    return home, codex_home
++
++
++def installation_owner_paths(legacy_home):
++    """Use the engine binding when present; older engines retain their owner."""
++    engine = Path(__file__).resolve().parent.parent
++    if not os.path.lexists(engine / '.brai-runtime.json'):
++        return owner_paths(legacy_home, legacy_home / '.codex')
++    # AIDEV-NOTE: Existing binding must never fall back if the PM overlay is missing.
++    from pm.environments import bound_runtime_root
++    runtime = bound_runtime_root(engine)
++    if runtime is None:
++        raise ValueError('CODEX_OWNER_REJECTED')
++    home = runtime / 'owner'
++    return owner_paths(home, home / '.codex')
++
++
++HOME, CODEX_HOME = installation_owner_paths(HOME)
++BINARY = HOME / '.local/bin/codex'
++LOCK = CODEX_HOME / 'hermes-owner.lock'
++BASE_URL = 'https://chatgpt.com/backend-api/codex'
++
++
++class OwnerError(ValueError):
++    """Fixed safe error; neither token nor account identity is included."""
++
++
++def require(value, code='CODEX_OWNER_REJECTED'):
++    """Reject metadata or protocol drift without reflecting upstream data."""
++    if not value:
++        raise OwnerError(code)
++
++
++def enabled():
++    """Only an explicit profile setting selects this credential owner."""
++    from hermes_cli.config import load_config_readonly
++    return load_config_readonly().get('auth', {}).get('codex_credential_owner') == 'codex-cli'
++
++
++def roots():
++    """Reject shared or symlinked credential roots and ambient HOME overrides."""
++    require(Path(os.environ.get('HOME', '')) == HOME
++            and Path(os.environ.get('CODEX_HOME', '')) == CODEX_HOME)
++    for path in (HOME, CODEX_HOME):
++        item = path.lstat()
++        require(stat.S_ISDIR(item.st_mode) and item.st_uid == os.geteuid()
++                and item.st_gid == os.getegid() and stat.S_IMODE(item.st_mode) == 0o700)
++
++
++def checked_fd(path, flags):
++    """Open a single private owner file, never following a final symlink."""
++    descriptor = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
++    try:
++        item = os.fstat(descriptor)
++        require(stat.S_ISREG(item.st_mode) and item.st_uid == os.geteuid()
++                and item.st_gid == os.getegid() and item.st_nlink == 1
++                and stat.S_IMODE(item.st_mode) == 0o600 and item.st_size <= 1024 * 1024)
++        return descriptor
++    except BaseException:
++        os.close(descriptor)
++        raise
++
++
++def snapshot():
++    """Read access/account only; refresh tokens are neither returned nor retained."""
++    roots()
++    with os.fdopen(checked_fd(CODEX_HOME / 'auth.json', os.O_RDONLY)) as source:
++        value = json.load(source)
++    tokens = value.get('tokens', {})
++    token, account = tokens.get('access_token'), tokens.get('account_id')
++    require(isinstance(token, str) and len(token.split('.')) == 3
++            and isinstance(account, str) and bool(account) and not any(c.isspace() for c in account))
++    payload = token.split('.')[1]
++    claims = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
++    expiry = claims.get('exp')
++    require(type(expiry) is int and expiry > 0
++            and claims.get('https://api.openai.com/auth', {}).get('chatgpt_account_id') == account)
++    return {'api_key': token, 'account_id': account, 'expires_at': expiry}
++
++
++def lock_open():
++    """Use one protected advisory lock for helper refresh and memory CLI lifetime."""
++    roots()
++    return checked_fd(LOCK, os.O_RDWR | os.O_CREAT)
++
++
++@contextmanager
++def owner_lock(timeout=15):
++    """Bound synchronous refresh serialization; process death releases flock."""
++    descriptor = lock_open()
++    deadline = time.monotonic() + timeout
++    try:
++        while True:
++            try:
++                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
++                break
++            except BlockingIOError:
++                require(time.monotonic() < deadline, 'CODEX_OWNER_BUSY')
++                time.sleep(0.05)
++        yield deadline
++    finally:
++        os.close(descriptor)
++
++
++@asynccontextmanager
++async def owner_lock_async(timeout=180):
++    """Wait without blocking the bridge event loop; cancellation releases the lock."""
++    descriptor = lock_open()
++    deadline = time.monotonic() + timeout
++    try:
++        while True:
++            try:
++                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
++                break
++            except BlockingIOError:
++                require(time.monotonic() < deadline, 'CODEX_OWNER_BUSY')
++                await asyncio.sleep(0.05)
++        yield
++    finally:
++        os.close(descriptor)
++
++
++def refresh(deadline):
++    """Ask installed Codex account/read to refresh its own store; never start login."""
++    require(BINARY.is_file() and os.access(BINARY, os.X_OK))
++    process = subprocess.Popen([str(BINARY), 'app-server', '--listen', 'stdio://'],
++                               cwd=HOME, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
++                               stderr=subprocess.DEVNULL, start_new_session=True)
++    selector = selectors.DefaultSelector()
++    selector.register(process.stdout, selectors.EVENT_READ)
++    buffer = b''
++    read_bytes = 0
++
++    def send(value):
++        process.stdin.write((json.dumps(value) + '\n').encode())
++        process.stdin.flush()
++
++    def rpc(identifier, method, params):
++        nonlocal buffer, read_bytes
++        send({'id': identifier, 'method': method, 'params': params})
++        while True:
++            while b'\n' not in buffer:
++                remaining = deadline - time.monotonic()
++                require(remaining > 0 and selector.select(remaining), 'CODEX_OWNER_TIMEOUT')
++                data = os.read(process.stdout.fileno(), 65536)
++                read_bytes += len(data)
++                require(bool(data) and read_bytes <= 1024 * 1024, 'CODEX_OWNER_RPC_REJECTED')
++                buffer += data
++            line, buffer = buffer.split(b'\n', 1)
++            event = json.loads(line)
++            if 'method' in event and 'id' in event:
++                # No approval, tool callback or automatic authentication is accepted here.
++                raise OwnerError('CODEX_OWNER_RPC_REJECTED')
++            if event.get('id') == identifier:
++                require('error' not in event and isinstance(event.get('result'), dict),
++                        'CODEX_OWNER_REFRESH_REJECTED')
++                return event['result']
++    try:
++        rpc(1, 'initialize', {'clientInfo': {'name': 'hermes-access-only', 'version': '1.0.0'}})
++        send({'method': 'initialized'})
++        result = rpc(2, 'account/read', {'refreshToken': True})
++        require(isinstance(result.get('account'), dict)
++                and result['account'].get('type') == 'chatgpt', 'CODEX_OWNER_LOGIN_REQUIRED')
++    finally:
++        selector.close()
++        if process.poll() is None:
++            process.terminate()
++        try:
++            process.wait(timeout=1)
++        except subprocess.TimeoutExpired:
++            process.kill()
++            process.wait(timeout=1)
++        process.stdin.close()
++        process.stdout.close()
++
++
++def resolve(*, force_refresh=False, refresh_if_expiring=True, refresh_skew_seconds=120, read_only=False):
++    """Return an in-memory native credential; fail closed without Hermes OAuth fallback."""
++    try:
++        value = snapshot()
++        skew = max(120, int(refresh_skew_seconds))
++        expired = value['expires_at'] <= time.time() + skew
++        if read_only:
++            require(not expired, 'CODEX_OWNER_ACCESS_EXPIRED')
++        elif force_refresh or (refresh_if_expiring and expired):
++            observed = value['api_key']
++            with owner_lock() as deadline:
++                value = snapshot()
++                if (force_refresh and value['api_key'] == observed) or value['expires_at'] <= time.time() + skew:
++                    refresh(deadline)
++                    value = snapshot()
++                    require(not force_refresh or value['api_key'] != observed, 'CODEX_OWNER_REFRESH_REJECTED')
++        require(value['expires_at'] > time.time() + 120, 'CODEX_OWNER_ACCESS_EXPIRED')
++        return {**value, 'provider': 'openai-codex', 'base_url': BASE_URL,
++                'source': 'codex-cli-single-owner', 'last_refresh': None, 'auth_mode': 'chatgpt'}
++    except OwnerError:
++        raise
++    except Exception:
++        raise OwnerError('CODEX_OWNER_UNAVAILABLE') from None
+diff --git a/hermes_cli/runtime_provider.py b/hermes_cli/runtime_provider.py
+index 07936db..dc917a6 100644
+--- a/hermes_cli/runtime_provider.py
++++ b/hermes_cli/runtime_provider.py
+@@ -647,6 +647,9 @@ def _exchange_copilot_pool_entry(entry: Any, pool_api_key: str) -> str:
+ def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: dict[str, Any], explicit_api_key, explicit_base_url,
+                        target_model) -> Optional[dict[str, Any]]:
+     """Runtime from the provider's credential pool, or None to continue down the ladder."""
++    from hermes_cli.codex_cli_owner import enabled
++    if provider == "openai-codex" and enabled():
++        return None  # Sole owner is resolved by the native OAuth rung, never a stale pool row.
+     should_use_pool = provider != "openrouter" or _openrouter_should_use_pool(requested_provider, model_cfg, explicit_api_key,
+                                                                              explicit_base_url)
+     try:

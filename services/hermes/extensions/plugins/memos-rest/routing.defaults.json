@@ -1,0 +1,20 @@
+{
+  "base_url": "http://127.0.0.1:8001",
+  "user_id": "root",
+  "cube_id": "main",
+  "routing_enabled": true,
+  "deployment_phase": "setup",
+  "memory_epoch": "REPLACE_WITH_A_FRESH_SETUP_EPOCH",
+  "generation": 1,
+  "enabled": false,
+  "frozen": true,
+  "suspended": false,
+  "router": {
+    "base_url": "http://172.19.0.1:8012",
+    "model": "gpt-6-luna",
+    "env_file": "/etc/.secrets/memos/codex-bridge.env",
+    "api_key_env": "MEMOS_BRIDGE_TOKEN",
+    "timeout": 90
+  },
+  "bulk_clear_locked": true
+}

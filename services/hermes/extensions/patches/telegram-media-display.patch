@@ -1,0 +1,109 @@
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -3358,12 +3358,31 @@
+ 
+     @staticmethod
+     def strip_media_directives_for_display(text: str) -> str:
+-        """Strip MEDIA: directives from streamed/display text. Known-extension tags are
+-        removed unconditionally (as ``MEDIA_TAG_CLEANUP_RE``); extension-less tags only when
+-        ``validate_media_delivery_path`` accepts the path, so undeliverable paths stay visible."""
+-        if not _has_media_directives(text):
++        """Hide delivery instructions in visible text without changing attachment extraction.
++
++        Display never needs a file to exist. Keep examples masked; withhold unfinished
++        directives while their streamed path or closing quote is still arriving.
++        """
++        if not text:
+             return text
+-        return re.sub(r'\n{3,}', '\n\n', _strip_media_tag_directives(text)).rstrip()
++        masked = _mask_media_scan_text(text)
++        spans = [m.span() for m in MEDIA_TAG_CLEANUP_RE.finditer(masked)]
++        spans.extend(m.span() for m in MEDIA_EXTENSIONLESS_TAG_RE.finditer(masked))
++        spans.extend(m.span() for m in re.finditer(
++            r"\[\[(?:audio_as_voice|as_document)\]\]", masked))
++        # Local Markdown destinations are not usable links in chat. Show their label only.
++        for match in re.finditer(
++                r'!?\[(?P<label>[^\]\n]*)\]\((?:<(?:file://)?/[^>\n]*(?:>(?:\)|\Z)|\Z)|(?:file://)?/[^\n)]*(?:\)|\Z))', masked):
++            spans.extend([(match.start(), match.start("label")), (match.end("label"), match.end())])
++        # An unterminated quoted path or an empty MEDIA: must not flash in a preview.
++        tail = re.search(r"(?i)(?<!\w)MEDIA:[ \t]*(?:[`\"']?(?:~/|/|[A-Za-z]:[/\\])[^\n]*|[`\"']?)\Z", masked)
++        if tail and not any(a <= tail.start() < b for a, b in spans):
++            spans.append(tail.span())
++        tail = re.search(r"\[\[[a-z_]*\]?\]?\Z", masked)
++        if tail and any(tag.startswith(tail.group()) for tag in
++                        ("[[audio_as_voice]]", "[[as_document]]")):
++            spans.append(tail.span())
++        return re.sub(r'\n{3,}', '\n\n', _delete_spans(text, spans)).rstrip()
+ 
+     @staticmethod
+     def extract_local_files(content: str) -> tuple[list[str], str]:
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -3620,6 +3620,10 @@
+     async def send(
+         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None) -> SendResult:
+         """Send a message to a Telegram chat."""
++        raw_content = content
++        content = self.strip_media_directives_for_display(content)
++        if not content.strip() and raw_content and "MEDIA:" in raw_content and not (metadata or {}).get("_interim_send"):
++            content = "Вложение не отправлено: файл недоступен."
+         if not self._bot:
+             live = self._replacement_telegram_adapter()
+             if live is not None:
+@@ -3833,6 +3837,14 @@
+         Telegram caps a message at 4096 UTF-16 codeunits. Streaming replies that outgrow it must NOT be truncated
+         silently nor fail (the consumer would re-send a duplicate): edit with the first chunk, send the rest as
+         continuations, and return the final chunk's id as the next edit target."""
++        content = self.strip_media_directives_for_display(content).strip()
++        if not content:
++            # Media-only finals have no text bubble. Remove an existing preview, not the media.
++            if finalize:
++                deleted = await self.delete_message(chat_id, message_id)
++                return SendResult(success=deleted, message_id=None,
++                                  error=None if deleted else "preview_cleanup_failed")
++            return SendResult(success=True, message_id=message_id, raw_response={"skipped": True})
+         if not self._bot:
+             return SendResult(success=False, error="Not connected")
+         # Shared per-chat budget (#116312): an interim (preview) edit is SKIPPED when the slot is busy —
+@@ -4091,6 +4103,9 @@
+         ``sendMessageDraft``; reusing ``draft_id`` animates the preview. The caller sends the final text."""
+         if not self._bot:
+             return SendResult(success=False, error="not_connected")
++        content = self.strip_media_directives_for_display(content)
++        if not content.strip():
++            return SendResult(success=True, message_id=None)
+         # Rich draft fast-path; any failure degrades to the plain draft below. Drafts have no message_id.
+         if self._should_attempt_rich_draft(content) and await self._try_send_rich_draft(chat_id, draft_id, content, metadata):
+             return SendResult(success=True, message_id=None)
+@@ -4159,6 +4174,7 @@
+         self, chat_id: str, text: str, *, parse_mode: Any, thread_id: Optional[str], metadata: Optional[dict[str, Any]],
+         reply_markup: Any = None, reply_to_mode: Optional[str] = None):
+         """Send a control-style message (prompt/picker) with topic routing + thread fallback."""
++        text = self.strip_media_directives_for_display(text)
+         reply_to_id = self._reply_to_message_id_for_send(None, metadata, reply_to_mode=reply_to_mode)
+         kwargs: dict[str, Any] = {
+             "chat_id": normalize_telegram_chat_id(chat_id), "text": text, "parse_mode": parse_mode, **self._link_preview_kwargs()}
+@@ -4355,6 +4371,7 @@
+ 
+     async def _edit_result_text(self, query, result_text: str) -> None:
+         """Replace a picker message with ``result_text`` (MarkdownV2, then plain, then give up), keyboard removed."""
++        result_text = self.strip_media_directives_for_display(result_text)
+         try:
+             await query.edit_message_text(text=self.format_message(result_text), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=None)
+         except Exception:
+@@ -5150,6 +5167,7 @@
+ 
+     @staticmethod
+     def _caption_1024(caption: Optional[str]) -> Optional[str]:
++        caption = BasePlatformAdapter.strip_media_directives_for_display(caption) if caption else None
+         return caption[:1024] if caption else None
+ 
+     async def _send_voice_bubble(self, audio_file, chat_id, reply_to, metadata, caption, duration_secs):
+@@ -5159,6 +5177,7 @@
+         # literal *asterisks* and [links](...) without a parse_mode. Format to MarkdownV2 when it fits the
+         # 1024-char caption cap; fall back to the raw text (previous behaviour) when formatting would
+         # overflow or the Bot API rejects the entities.
++        caption = self.strip_media_directives_for_display(caption) if caption else None
+         _caption_variants: list[tuple] = []
+         if caption:
+             try:
