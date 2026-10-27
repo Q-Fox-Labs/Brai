@@ -206,6 +206,25 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertEqual(self.app.handlers, [])
 
+    async def test_observer_records_only_authorized_original_updates(self):
+        """Фиксация при guard охватывает сообщения независимо от последующего режима очереди."""
+        config = replace(self.config, entry=str(REPO / "services/hermes/trusted.mjs"))
+        with patch.dict(os.environ, {"BRAI_TELEGRAM_OBSERVER_ENABLED": "1"}):
+            observer = mod.TelegramPlugin(config, self.bridge, self.inject)
+        message = NS(message_id=91, text="Вход", date=None, edit_date=None)
+        update = NS(message=message, effective_message=message,
+                    effective_chat=NS(id=123, type="private"), effective_user=NS(id=123, full_name="Анна"))
+        await observer.guard(update, None)
+        await observer.guard(update, None)
+        with observer.journal.db() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM messages").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT text FROM messages").fetchone()[0], "Вход")
+        update.effective_user = NS(id=999, full_name="Чужой")
+        with self.assertRaises(sys.modules["telegram.ext"].ApplicationHandlerStop):
+            await observer.guard(update, None)
+        with observer.journal.db() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM messages").fetchone()[0], 1)
+
     async def set_group_route(self, chat=GROUP):
         """Перезапустить только плагин с прежним SQLite и новым защищённым route."""
         self.plugin.close()

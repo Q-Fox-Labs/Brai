@@ -345,6 +345,31 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(value['receipts']), 10)
         self.assertEqual(calls, ['album', 'single'])
 
+    async def test_telegram_observer_retains_each_file_of_partial_album(self):
+        base = ModuleType('gateway.platforms.base')
+        base.SendResult = SimpleNamespace
+        observed, calls = [], []
+        class Observer:
+            async def observe_send(self, chat_id, metadata, text, result, attachments, identity):
+                observed.append((identity, result.success, attachments[0]['artifactId']))
+        async def sender(*args):
+            calls.append(True)
+            if len(calls) == 2:
+                raise TimeoutError()
+            return list(range(100, 110))
+        items = self.items(11)
+        native.register_telegram_observer(Observer())
+        try:
+            with patch.dict(sys.modules, {'gateway.platforms.base': base}), patch.object(native, 'telegram_sender', side_effect=sender):
+                result = await native.send_set(SimpleNamespace(platform='telegram'), '42', items, 'album', identity='fixture')
+            self.assertFalse(result.success)
+            self.assertEqual(len(observed), 11)
+            self.assertEqual(len({row[0] for row in observed}), 11)
+            self.assertEqual(sum(row[1] for row in observed), 10)
+            self.assertEqual({row[2] for row in observed}, {item['file']['artifactId'] for item in items})
+        finally:
+            native.register_telegram_observer(None)
+
     async def test_direct_send_unknown_is_reused_after_restart_and_success_allows_new_send(self):
         class Result(SimpleNamespace):
             pass

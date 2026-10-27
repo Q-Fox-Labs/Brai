@@ -1,6 +1,32 @@
 # ABOUTME: Проверяет browser session до выдачи готового artifact файла.
 # ABOUTME: Заменяет клиентские identity headers и задаёт безопасные response headers.
 (artifact-attachment) {
+	@telegram_file path_regexp telegram_file ^/api/telegram-observer/files/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$
+	handle @telegram_file {
+		route {
+			@unsupported not method GET HEAD
+			respond @unsupported 405
+			request_header -X-Artifact-Content-Type
+			request_header -X-Artifact-Content-Disposition
+			forward_auth {$BRAI_WEB_UPSTREAM} {
+				uri /api/telegram-observer/file-auth
+				header_up Cookie {http.request.header.Cookie}
+				header_up X-Forwarded-Uri {http.request.uri}
+				header_up X-Forwarded-Method {http.request.method}
+				copy_headers Content-Type>X-Artifact-Content-Type Content-Disposition>X-Artifact-Content-Disposition
+			}
+			header {
+				>Content-Type {http.request.header.X-Artifact-Content-Type}
+				>Content-Disposition {http.request.header.X-Artifact-Content-Disposition}
+				>Cache-Control "private, no-store"
+				>X-Content-Type-Options nosniff
+				>Cross-Origin-Resource-Policy same-origin
+				>X-Frame-Options DENY
+			}
+			rewrite * /files/{re.telegram_file.1}
+			reverse_proxy {$BRAI_AGENT_RESULTS_FILE_SERVER}
+		}
+	}
 	@agent_upload path_regexp agent_upload ^/api/agent/uploads/([A-Za-z0-9_-]{16,512})$
 	handle @agent_upload {
 		route {
