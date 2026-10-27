@@ -1,0 +1,12 @@
+{
+  "upstream_hermes": "517b5e10febd619ce30bb22580e29b160266eb43",
+  "memos": "a7367d07e55db61099f7b4e2c1108bc5831a24f3",
+  "hermescustom_baseline": "dcf7d043fc071897074d6c36a4ae9c1c125b41af",
+  "hermescustom_latest": "8e0f30eb5a726d10471fdc7551adbfc1cf95c14c",
+  "standalone_overlay_order": [
+    "patches/hermes-core.patch",
+    "patches/runtime-isolation.patch",
+    "services/hermes/files/native.patch",
+    "patches/russian-failure-notice.patch"
+  ]
+}

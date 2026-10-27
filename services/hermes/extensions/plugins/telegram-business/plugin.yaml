@@ -1,0 +1,9 @@
+name: telegram-business
+version: 1.0.0
+description: >
+  Помощник Telegram Business. Готовит ответы на сообщения собеседников
+  и отправляет черновики владельцу с кнопками «Отправить», «Изменить»,
+  «Отклонить». Ответ отправляется собеседнику только после подтверждения
+  владельца. Автоматической отправки нет.
+author: "Nous Research"
+homepage: https://github.com/NousResearch/hermes-telegram-business
