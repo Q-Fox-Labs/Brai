@@ -1,0 +1,5 @@
+name: memos-rest
+version: 1.0.0
+description: "MemOS REST — existing Supabase/pgvector memory, verified dialogue archive and semantic recall."
+# Lifecycle hooks are provided by MemoryProvider, not the generic plugin hook bus.
+

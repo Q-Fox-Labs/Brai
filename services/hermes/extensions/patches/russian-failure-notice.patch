@@ -1,0 +1,171 @@
+diff --git a/gateway/run_turn.py b/gateway/run_turn.py
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -1,3 +1,5 @@
++# ABOUTME: Выполняет штатные ходы и готовит сообщения шлюза Hermes.
++# ABOUTME: Русские пояснения добавляются только при доставке готового сообщения о сбое.
+ """Agent-turn execution for GatewayRunner: _handle_message_with_agent, _run_agent*, proxy path,
+ background tasks, MCP reload. Bound onto ``GatewayRunner`` via the MRO; ``gateway.run`` internals
+ are imported lazily inside method bodies (import cycle) so ``patch("gateway.run.X")`` still works.
+@@ -87,6 +89,29 @@
+ def _unexpected_silence_reply() -> str:
+     """Reply when the model returned only a silence marker for a message that needed an answer."""
+     return t("gateway.errors.unexpected_silence")
++
++
++def _telegram_failure_explanation(response, source, *, result=None, exception=None, partial=False, failure_notice=None):
++    """Добавить русское пояснение только к уже готовому Telegram-ответу о сбое."""
++    try:
++        from gateway.run import _gateway_platform_value, _redact_gateway_user_facing_secrets
++        from agent.i18n import get_language
++        if _gateway_platform_value(source.platform) != "telegram" or get_language() != "ru":
++            return response
++        from agent.error_surface import build_error_surface_from_result, build_error_surface_from_exception
++        from gateway.russian_failure_notice import explain_failure
++        surface = (build_error_surface_from_result(result) if result is not None
++                   else build_error_surface_from_exception(exception))
++        diagnostic = (f"{type(exception).__name__}: {exception}" if exception is not None
++                      else result.get("error", "") if result is not None else "")
++        if failure_notice is not None:
++            partial = failure_notice(result) == PARTIAL_FAILED_TURN_NOTICE
++        return explain_failure(response, surface=surface, diagnostic=diagnostic, logger=logger,
++                               redact=_redact_gateway_user_facing_secrets, partial=partial,
++                               status_code=getattr(exception, "status_code", None),
++                               billing_unverified=bool(result and result.get("billing_unverified")))
++    except Exception:
++        return response
+ 
+ 
+ def _bg_prompt_preview(prompt: str, limit: int = 60) -> str:
+@@ -1955,6 +1980,11 @@
+                 event._streamed_final_response = str(response or "")
+             return None
+ 
++        if agent_result.get("failed") or (agent_result.get("partial") and agent_result.get("error")):
++            return _telegram_failure_explanation(
++                response, source, result=agent_result,
++                failure_notice=self._hmwa_failed_turn_notice,
++            )
+         return response
+ 
+     # Chat-side next steps keyed by HTTP status; Hermes commands only (/login is the gateway's own
+@@ -1977,7 +2007,10 @@
+             # Context overflow / payload too large: a deterministic rejection (#107567), and the same
+             # no-grow rule as the persist path (#1630) — nothing is written into an oversized session.
+             from gateway.run import _context_overflow_reply
+-            return _context_overflow_reply()
++            return _telegram_failure_explanation(
++                _context_overflow_reply(), source,
++                result={"failure_reason": "context_overflow"}, exception=e,
++            )
+         # Replay can coalesce inputs; only this input's durable marker establishes ownership.
+         try:
+             if prepared.message_text is not None and session_entry is not None:
+@@ -2017,9 +2050,10 @@
+                 status_hint = t("gateway.errors.hint_usage_limit")
+         elif status_code == 400:
+             status_hint = t("gateway.errors.hint_rejected")
+-        return self._hmwa_add_failed_turn_notice(
++        reply = self._hmwa_add_failed_turn_notice(
+             t("gateway.errors.generic_failed_with_hint", hint=status_hint), PARTIAL_FAILED_TURN_NOTICE,
+         )
++        return _telegram_failure_explanation(reply, source, exception=e, partial=True)
+ 
+     def _hmwa_discard_stale_result(self, source, _quick_key, run_generation):
+         """A newer run generation superseded this turn: drop its deferred post-delivery callback."""
+diff --git a/gateway/russian_failure_notice.py b/gateway/russian_failure_notice.py
+new file mode 100644
+--- /dev/null
++++ b/gateway/russian_failure_notice.py
+@@ -0,0 +1,91 @@
++# ABOUTME: Добавляет русское объяснение к штатному сообщению о сбое Hermes.
++# ABOUTME: Сохраняет исходное сообщение и использует готовую классификацию движка.
++"""Пояснения для Telegram; не управляют повторами, сессиями или доставкой."""
++
++from __future__ import annotations
++
++import json
++import logging
++import math
++import re
++import secrets
++import time
++
++
++_COPY = {
++    'rate_limit': ('⏳ **Достигнут лимит сервиса**', 'Дождитесь сброса лимита. Способы продолжения, которые предложил сервис, сохранены ниже.'),
++    'upstream_rate_limit': ('⏳ **Достигнут лимит сервиса**', 'Дождитесь сброса лимита. Способы продолжения, которые предложил сервис, сохранены ниже.'),
++    'auth': ('🔑 **Не удалось войти в сервис**', 'Нужно восстановить доступ к сервису. Следуйте подсказке ниже. Если для этого нужен доступ к настройкам сервера, перешлите сообщение администратору.'),
++    'auth_permanent': ('🔑 **Не удалось войти в сервис**', 'Нужно восстановить доступ к сервису. Следуйте подсказке ниже. Если для этого нужен доступ к настройкам сервера, перешлите сообщение администратору.'),
++    'billing': ('💳 **Сервис сообщил об ограничении оплаты или тарифа**', 'Проверьте доступный лимит сервиса или выберите другую модель командой /model. Если доступ настраивал администратор, обратитесь к нему.'),
++    'billing_unverified': ('⚠️ **Сервис отклонил запрос**', 'Причина ограничения требует проверки. Не пополняйте счёт только на основании этой ошибки. Если я отвечаю, попросите меня проверить причину.'),
++    'overloaded': ('⏳ **Сервис временно недоступен**', 'Попробуйте позже. Если ошибка повторяется, попросите меня проверить подключение, когда я снова буду отвечать.'),
++    'server_error': ('⚠️ **Сервис сообщил об ошибке**', 'Попробуйте позже. Если ошибка повторяется, попросите меня проверить причину, когда я снова буду отвечать.'),
++    'timeout': ('⏳ **Ответ не получен вовремя**', 'Сервис не успел ответить. Попробуйте позже; если проблема повторяется, попросите меня проверить подключение, когда я снова буду отвечать.'),
++    'context_overflow': ('📜 **Разговор стал слишком длинным**', 'Используйте /compress, чтобы сократить историю, или /new, чтобы начать новый разговор. Прежняя история сохраняется.'),
++    'payload_too_large': ('📎 **Запрос слишком большой**', 'Отправьте меньше текста или файлов за один раз. Дополнительные способы продолжения сохранены ниже.'),
++    'image_too_large': ('🖼 **Изображение слишком большое**', 'Отправьте изображение меньшего размера.'),
++    'image_corrupt': ('🖼 **Не удалось прочитать изображение**', 'Отправьте другой файл или, если я отвечаю, попросите меня проверить изображение.'),
++    'model_not_found': ('⚠️ **Выбранная модель недоступна**', 'Выберите доступную модель командой /model. Если подходящих моделей нет, перешлите сообщение администратору.'),
++    'model_entitlement': ('⚠️ **Нет доступа к выбранной модели**', 'Выберите доступную модель командой /model. Для изменения прав доступа обратитесь к администратору.'),
++    'content_policy_blocked': ('⚠️ **Сервис отклонил содержание запроса**', 'Попробуйте переформулировать запрос.'),
++    'format_error': ('⚠️ **Сервис не принял формат запроса**', 'Если я отвечаю, попросите меня проверить ошибку и исправить запрос. Если это не помогает, перешлите сообщение администратору.'),
++    'truncated': ('⚠️ **Ответ модели оборвался**', 'Способ продолжения и сведения о том, было ли действие выполнено, сохранены ниже. Можно попросить меня продолжить работу меньшими шагами.'),
++    'invalid_response': ('⚠️ **Модель вернула непонятный ответ**', 'Если я отвечаю, попросите меня проверить причину. Если ошибка повторяется или я не отвечаю, перешлите сообщение администратору.'),
++    'empty_response': ('⚠️ **Модель не сформировала ответ**', 'Попробуйте позже. Если ошибка повторяется, выберите другую модель командой /model или обратитесь к администратору.'),
++    'loop_error': ('⚠️ **Гермес остановился из-за ошибки**', 'Если я отвечаю, попросите меня проверить причину. Если проверка не помогла или я не отвечаю, перешлите сообщение администратору.'),
++    'session_busy': ('⏳ **Предыдущая работа ещё не завершена**', 'Дождитесь её завершения. Подробности сохранены ниже.'),
++    'interpreter_shutdown': ('⚠️ **Работа прервалась при остановке Гермеса**', 'После запуска вернитесь в этот разговор и следуйте подсказке ниже.'),
++}
++_ADMIN = ('⚠️ **Для восстановления нужна проверка сервера**', 'Обратитесь к администратору и перешлите ему это сообщение.')
++_UNKNOWN = ('⚠️ **Не удалось завершить работу**', 'Причина требует проверки. Если я отвечаю, попросите меня разобраться. Если проверка не помогла или я не отвечаю, перешлите сообщение администратору.')
++
++
++def explain_failure(original, *, surface, diagnostic, logger, redact, partial=False,
++                    status_code=None, billing_unverified=False, now=None):
++    """Добавить пояснение, сохранив исходный текст целиком и без изменений.
++
++    ``original`` уже должен пройти штатную очистку для чата. ``surface`` — результат
++    agent.error_surface, а не классификация по словам. В журнал с номером попадает
++    очищенное диагностическое сообщение; исходные запросы и настройки не читаются.
++    При любой ошибке пояснения возвращается ровно ``original``.
++    """
++    try:
++        if not isinstance(original, str) or not original or not isinstance(surface, dict):
++            return original
++        code = surface.get('code', 'unknown')
++        if not isinstance(code, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.:-]{0,79}', code):
++            code = 'unknown'
++        layer = surface.get('layer', 'unknown')
++        if layer not in {'provider', 'endpoint', 'streaming', 'auth', 'billing', 'gateway', 'disk'}:
++            layer = 'unknown'
++        display_code = 'billing_unverified' if code == 'billing' and billing_unverified else code
++        critical = layer == 'disk' or code == 'ssl_cert_verification' or code.startswith('session_persistence_failed:')
++        title, action = _ADMIN if critical else _COPY.get(display_code, _UNKNOWN)
++        lines = [title, action]
++        if code in {'overloaded', 'server_error', 'timeout'}:
++            lines.append('Если сервис долго не восстанавливается и я не отвечаю, перешлите сообщение администратору.')
++        resets_at = surface.get('resets_at')
++        clock = time.time() if now is None else now
++        if (code in {'rate_limit', 'upstream_rate_limit'} and type(resets_at) in (int, float)
++                and math.isfinite(resets_at) and 0 < resets_at - clock < 315360000):
++            minutes = max(1, math.ceil((resets_at - clock) / 60))
++            lines.append(f'До сброса лимита — примерно {minutes} мин.')
++        if partial:
++            lines.append('Некоторые действия могли уже выполниться. Перед повтором проверьте их результат.')
++        # AIDEV-NOTE: исходный текст сохраняет все конкретные команды, сроки и частичный результат.
++        lines.append('**Исходное сообщение и подробности:**\n' + original)
++        details = [f'Код: `{code}`']
++        http = status_code if type(status_code) is int and 400 <= status_code <= 599 else None
++        if http is not None:
++            details.append(f'Ответ сервиса: `HTTP {http}`')
++        if diagnostic and logger.isEnabledFor(logging.WARNING):
++            reference = secrets.token_hex(8)
++            safe_diagnostic = redact(str(diagnostic or ''))[:2048]
++            logger.warning('TELEGRAM_FAILURE reference=%s layer=%s code=%s http=%s detail=%s',
++                           reference, layer, code, http or '-', json.dumps(safe_diagnostic, ensure_ascii=False))
++            details.append(f'Номер в журнале: `{reference}`')
++        lines.append('**Данные для проверки:**\n' + '\n'.join(details))
++        return '\n\n'.join(lines)
++    except Exception:
++        return original

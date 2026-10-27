@@ -135,3 +135,20 @@ Fixture сначала использует фактически установ�
 
 Сверка действующего DEV после принятия SHA — отдельный шаг. До неё fixture-проверки
 не означают, что рабочие задачи уже переданы Temporal.
+
+## Индексы worktree
+
+Patch `codeworks-worktree-index-v1` добавляет необязательный фоновый maintainIndex.
+Один проход имеет heartbeat 10 секунд и предел 30 минут; ожидание источника
+возвращается сразу и повторяется durable таймером через 60 секунд. Ошибка прохода
+не переводит команды Git/выпуска в reconciliation. Отдельный пул из двух
+соединений обслуживает index guard и checkpoints, сохраняя прежний пул команд.
+Continue-As-New выполняется между проходами без незавершённой index Activity.
+Cleanup/cancel отменяют свой проход с WAIT_CANCELLATION_COMPLETED.
+
+Приёмка: Admin `test_codeworks_worktree_indexes.yml` с явным
+`codeworks_index_source`. Используются отдельный bounded Qdrant, тестовый HTTP
+embedding provider, копия SocratiCode, выделенные Temporal test DB и task queue.
+Исходные пакеты, config Codex и рабочие службы не меняются. Отдельная read-only
+сверка — `verify_codeworks_worktree_indexes.yml`. Контракт поведения находится
+в [CONTRACT.md](CONTRACT.md#необязательный-индекс-рабочей-области).

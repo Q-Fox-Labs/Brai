@@ -1,0 +1,73 @@
+diff --git a/pm/environments.py b/pm/environments.py
+index 59ef940..2b56653 100644
+--- a/pm/environments.py
++++ b/pm/environments.py
+@@ -12,6 +12,7 @@ import json
+ import os
+ import re
+ import shlex
++import stat
+ from pathlib import Path
+ 
+ from hermes_constants import get_default_hermes_root, project_venv_dir
+@@ -22,6 +23,40 @@ def install_key(project_root: Path) -> str:
+     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+ 
+ 
++def bound_runtime_root(project_root: Path) -> Path | None:
++    """Read the installation binding, rejecting an unsafe or invalid existing file."""
++    path = Path(project_root) / ".brai-runtime.json"
++    try:
++        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
++    except FileNotFoundError as exc:
++        if os.path.lexists(path):
++            raise ValueError("Invalid Hermes runtime binding") from exc
++        return None
++    except OSError as exc:
++        raise ValueError("Invalid Hermes runtime binding") from exc
++    try:
++        metadata = os.fstat(fd)
++        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid not in (0, os.geteuid())
++                or metadata.st_mode & 0o022 or metadata.st_nlink != 1 or metadata.st_size > 4096):
++            raise ValueError("Invalid Hermes runtime binding")
++        with os.fdopen(fd, "r", encoding="utf-8") as source:
++            fd = -1
++            data = json.load(source)
++        if (not isinstance(data, dict) or set(data) != {"format", "runtimeRoot"}
++                or data["format"] != "brai-hermes-runtime-v1"
++                or not isinstance(data["runtimeRoot"], str)):
++            raise ValueError("Invalid Hermes runtime binding")
++        value = data["runtimeRoot"]
++        if not value.startswith("/") or os.path.normpath(value) != value or value == "/":
++            raise ValueError("Invalid Hermes runtime binding")
++        return Path(value)
++    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
++        raise ValueError("Invalid Hermes runtime binding") from exc
++    finally:
++        if fd != -1:
++            os.close(fd)
++
++
+ def dependency_home_root() -> Path:
+     """Scope dependency state like a process launched in the active home."""
+     from hermes_constants import get_default_hermes_root, get_hermes_home_override
+@@ -31,7 +66,8 @@ def dependency_home_root() -> Path:
+ 
+ 
+ def installs_root() -> Path:
+-    return dependency_home_root() / "installs"
++    bound = bound_runtime_root(Path(__file__).resolve().parent.parent)
++    return (bound if bound is not None else dependency_home_root()) / "installs"
+ 
+ 
+ def install_state_dir(project_root: Path) -> Path:
+@@ -217,6 +253,9 @@ def store_root(project_root: Path, *, honor_runtime_override: bool = True) -> Pa
+     launcher) has to bind the store of the tree it serves, never a runtime
+     directory inherited through the environment.
+     """
++    bound = bound_runtime_root(Path(project_root).resolve())
++    if bound is not None:
++        return bound / "tools"
+     if honor_runtime_override:
+         override = os.environ.get("HERMES_RUNTIME_DIR")
+         if override:

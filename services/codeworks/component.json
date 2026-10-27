@@ -71,7 +71,10 @@
       "services/codeworks/src/git-steps.mjs",
       "services/codeworks/src/git-step.mjs",
       "services/codeworks/src/execution-context.mjs",
-      "services/codeworks/git-step.openrpc.json"
+      "services/codeworks/git-step.openrpc.json",
+      "services/codeworks/src/code-index.mjs",
+      "services/codeworks/src/code-index-engine.mjs",
+      "services/codeworks/migrations/009.sql"
     ],
     "checks": [
       "services/codeworks/components/cli.mjs",
@@ -110,7 +113,9 @@
       "docs/user-agent/instructions/**/*.md",
       "services/codeworks/tests/temporal*.test.mjs",
       "services/codeworks/tests/integration/temporal*.mjs",
-      "services/codeworks/tests/integration/deployment-retry.test.mjs"
+      "services/codeworks/tests/integration/deployment-retry.test.mjs",
+      "services/codeworks/tests/code-index*.test.mjs",
+      "services/codeworks/tests/integration/code-index*.mjs"
     ]
   },
   "dependencies": [],
@@ -158,7 +163,9 @@
       "services/codeworks/src/git-steps.mjs",
       "services/codeworks/src/git-step.mjs",
       "services/codeworks/src/execution-context.mjs",
-      "services/codeworks/git-step.openrpc.json"
+      "services/codeworks/git-step.openrpc.json",
+      "services/codeworks/src/code-index.mjs",
+      "services/codeworks/src/code-index-engine.mjs"
     ],
     "entrypoints": [
       "services/codeworks/src/main.mjs",

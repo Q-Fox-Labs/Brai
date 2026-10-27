@@ -78,6 +78,53 @@ test('unrecognized shell stays outside the hook contract', async () => {
   assert.deepEqual(await runHook(bash('python3 script.py'), fixture().options), {});
 });
 
+for (const marker of ['PY', "'PY'", '"PY"']) {
+  test(`heredoc ${marker} treats embedded HTML and shell words as stdin`, async () => {
+    const command = `python3 - <<${marker}\nfrom pathlib import Path\np = Path('/outside/admin/renderer.py')\ns = '<a href="'+url+'">'+label+'</a>'\ntouch src/not-a-shell-command\np.write_text(s)\nPY\n`;
+    const f = fixture({connect: () => assert.fail('stdin must not prepare a workspace')});
+    assert.deepEqual(writePaths(bash(command)), []);
+    assert.deepEqual(await runHook(bash(command), f.options), {});
+  });
+}
+
+test('multiple and tab-stripped heredocs preserve writes before and after stdin', () => {
+  const command = "touch src/before; cat <<'FIRST' <<-SECOND > src/output\nrm src/body1\nFIRST\n\ttee src/body2 > src/body3\n\tSECOND\ntouch src/after";
+  assert.deepEqual(writePaths(bash(command)), [root+'/src/before', root+'/src/output', root+'/src/after']);
+});
+
+test('heredoc with a real protected output still prepares and identifies its project', async () => {
+  const f = fixture();
+  const result = await runHook(bash("cat > src/output <<'EOF'\n<h1>not a command</h1>\nEOF"), f.options);
+  assert.equal(f.calls.length, 1);
+  assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(result.hookSpecificOutput.permissionDecisionReason, /"id":"demo","repo_path":"\/test\/main"/);
+});
+
+test('empty heredoc delimiter and here-string are distinct shell inputs', () => {
+  assert.deepEqual(writePaths(bash("cat <<''\n> src/body\n\ntouch src/after")), [root+'/src/after']);
+  assert.deepEqual(writePaths(bash("cat <<< '<h1>stdin</h1>' > src/output")), [root+'/src/output']);
+});
+
+test('quoted and commented heredoc syntax is data, not a delimiter', () => {
+  assert.deepEqual(writePaths(bash("echo '<<EOF'; # <<BAD\ntouch src/after")), [root+'/src/after']);
+});
+
+test('unsupported or unfinished heredoc does not classify its body as shell writes', () => {
+  for (const command of ["cat <<'EOF'\n> src/body", 'cat <<$MARKER\n> src/body\n$MARKER', 'cat <<\n> src/body']) {
+    assert.deepEqual(writePaths(bash(command)), []);
+  }
+});
+
+test('an unregistered repository stays independent of the chat project and backend availability', async () => {
+  const connect = () => assert.fail('an unregistered path must not connect to Codeworks');
+  for (const event of [
+    {...patch('*** Update File: /outside/admin/rules.md\n@@\n-a\n+b')},
+    {...bash('touch /outside/admin/rules.md')},
+    {...bash('touch rules.md'), tool_input: {cmd: 'touch rules.md', workdir: '/outside/admin'}, tool_name: 'exec_command'},
+    {...bash('cd /outside/admin && touch rules.md')},
+  ]) assert.deepEqual(await runHook(event, {config, env, connect}), {});
+});
+
 test('unavailable Codeworks blocks only the identified write and preserves stable retry key', async () => {
   const requests = [];
   const options = {...fixture().options, connect: async () => ({call: async (method, args) => { requests.push(args); throw new Error('private backend detail'); }, close() {}})};

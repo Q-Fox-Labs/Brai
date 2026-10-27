@@ -1,0 +1,518 @@
+--- a/agent/conversation_loop.py
++++ b/agent/conversation_loop.py
+@@ -1738,7 +1738,8 @@
+     agent._turn_user_intervened = False
+     # Images attached natively to this user turn stay visible to vision_analyze for the turn, so
+     # it does not embed the same pixels a second time into the same request (#76411).
+-    with native_turn_images(user_message):
++    import brai_files
++    with brai_files.conversation(agent, user_message, task_id) as user_message, native_turn_images(user_message):
+         try:
+             result = _run_conversation_turn(
+                 agent,
+@@ -1760,6 +1761,7 @@
+         finally:
+             end_voice_turn_route(agent)
+     result = export_current_turn_boundary(agent, result, user_message)
++    result = brai_files.result_envelope(result, agent)
+     if isinstance(result, dict):
+         result["user_intervened"] = bool(getattr(agent, "_turn_user_intervened", False))
+     _close_durable_failed_turn(agent, result)
+--- a/agent/turn_finalizer.py
++++ b/agent/turn_finalizer.py
+@@ -515,6 +515,10 @@
+         if isinstance(_hook_result, str) and _hook_result:
+             pre_transform, final_response, transformed = final_response, _hook_result, True
+             break
++    import brai_files
++    _stored = brai_files.final_text(final_response, turn_id)
++    if _stored != final_response:
++        pre_transform, final_response, transformed = final_response, _stored, True
+     agent._llm_output_transform = (turn_id, transformed, pre_transform)
+     return final_response, transformed, pre_transform
+ 
+--- a/model_tools.py
++++ b/model_tools.py
+@@ -786,6 +786,9 @@
+         if block_message is not None:
+             return function_args, (tool_error(block_message), "plugin_block", block_message)
+ 
++    import brai_files
++    function_args = brai_files.before_tool(function_name, function_args, **ids.hook_kwargs())
++
+     # ACP/Zed edit approval before any file mutation. The requester is bound
+     # via ContextVar only for ACP sessions, so CLI/gateway paths are unaffected.
+     try:
+@@ -845,7 +848,7 @@
+                                              **ids.hook_kwargs())
+ 
+ 
+-def _apply_transform_tool_result_hook(function_name: str, function_args: dict[str, Any], result: Any, duration_ms: int,
++def _brai_optional_transform_tool_result_hook(function_name: str, function_args: dict[str, Any], result: Any, duration_ms: int,
+                                       ids: _CallIds) -> Any:
+     """transform_tool_result: plugins may replace the final result string.
+ 
+@@ -863,6 +866,13 @@
+     except Exception as _hook_err:
+         logger.debug("transform_tool_result hook error: %s", _hook_err)
+     return result
++
++
++def _apply_transform_tool_result_hook(function_name, function_args, result, duration_ms, ids):
++    """Обязательное сохранение явного результата после необязательных plugin observers."""
++    import brai_files
++    result = _brai_optional_transform_tool_result_hook(function_name, function_args, result, duration_ms, ids)
++    return brai_files.after_tool(function_name, function_args, result, **ids.hook_kwargs())
+ 
+ 
+ def _elapsed_ms(start: float) -> int:
+--- a/gateway/run_inbound.py
++++ b/gateway/run_inbound.py
+@@ -258,6 +258,9 @@
+         # The busy path charged this event on arrival; a drained follow-up must not pay twice.
+         if not getattr(event, "_bot_loop_admitted", False) and not self._admit_bot_message_for_source(source):
+             return None
++        import brai_files
++        await brai_files.accept_event(event, admit=False)
++        brai_files.track_inbound(event)
+         return event, source, False
+ 
+     def _hm_estop_turn_allowed(self, event: "MessageEvent", source: SessionSource) -> bool:
+@@ -612,6 +615,11 @@
+             # Any recognized slash command dispatches per its declared busy_policy (dispatch /
+             # interrupt_then_dispatch / reject). Unrecognized commands and plain text fall through.
+             return True, await self._dispatch_busy_slash_command(event, _cmd_def_inner, _quick_key, source)
++
++        import brai_files
++        if brai_files.should_queue_inbound_set(event):
++            self._hm_merge_pending_for_source(source, _quick_key, event, merge_text=True)
++            return True, None
+
+         # Telegram photo bursts arrive as near-simultaneous updates — never interrupt for a
+         # photo-only follow-up; adapter-level batching absorbs them.
+@@ -1283,6 +1291,12 @@
+             return event, source, is_internal
+ 
+     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
++        """Удержать входные копии до окончания обработки и доставки."""
++        import brai_files
++        with brai_files.inbound_events(event):
++            return await self._brai_handle_message(event)
++
++    async def _brai_handle_message(self, event: MessageEvent) -> Optional[str]:
+         """Handle an incoming message from any platform: auth → command check → running-agent
+         interrupt → get/create session → build context → run agent → return response."""
+         from gateway.run import _AGENT_PENDING_SENTINEL
+@@ -1715,6 +1729,9 @@
+         @ references behave the same. Side effect: buffers per-session native image paths when the
+         model supports native vision; the caller consumes that buffer at ``run_conversation``."""
+         rehome_inbound_media(event)  # before any consumer (vision, STT, document notes) reads media_urls
++        import brai_files
++        if not await brai_files.accept_event(event):
++            return None
+         _pending_stt_prepared = hasattr(event, "_gateway_pending_stt_text")
+         message_text = (event._gateway_pending_stt_text if _pending_stt_prepared else event.text) or ""
+         # Prefer the caller's resolved session key so this write key matches the consume key at the
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -1824,6 +1824,8 @@
+         # side. Captions merge in every absorbing case.
+         if both_photo or existing.media_urls or incoming_has_media:
+             if both_photo or incoming_has_media:
++                import brai_files
++                brai_files.merge_events(existing, event)
+                 existing.media_urls.extend(event.media_urls)
+                 existing.media_types.extend(event.media_types)
+                 existing.media_text_inlined.extend(incoming_inline_flags)
+@@ -1966,6 +1968,8 @@
+     def __init__(self, config: PlatformConfig, platform: Platform):
+         self.config = config
+         self.platform = platform
++        import brai_files
++        brai_files.install_adapter(self)
+         self._message_handler: Optional[MessageHandler] = None
+         self._no_message_handler_logged: bool = False
+         self._reaction_handler: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None
+@@ -2359,6 +2363,8 @@
+     def set_message_handler(self, handler: MessageHandler) -> None:
+         """Set the incoming-message handler (MessageEvent -> optional response str)."""
+         self._message_handler = handler
++        import brai_files
++        brai_files.schedule_recovery(self)
+ 
+     def set_platform_event_handler(
+         self, handler: Optional[Callable[[dict[str, Any], Any], Awaitable[None]]]) -> None:
+@@ -2582,6 +2588,8 @@
+             if event.text:
+                 existing.text = _append_text(existing.text, event.text)
+             if event.media_urls:
++                import brai_files
++                brai_files.merge_events(existing, event)
+                 existing.media_urls.extend(event.media_urls)
+                 existing.media_types.extend(event.media_types)
+             existing.absorb_reply_expected(event)
+@@ -4075,6 +4083,9 @@
+             coerce_plaintext_gateway_command(event)
+         # Identity FIRST: every key below (routing check, guard lookup, batch lane) derives from it.
+         if self._drop_unresolved(event):
++            return
++        import brai_files
++        if not await brai_files.capture_authorized(self, event):
+             return
+         expected_session_key = str((event.metadata or {}).get("gateway_session_key") or "").strip()
+         # Explicitly routed events already name their destination; recovering a
+@@ -4465,20 +4476,10 @@
+         """Send extracted image URLs, MEDIA files and bare local files (human-paced),
+         then fail loudly if a non-empty response produced nothing deliverable. Attachment
+         results feed ``record_delivery`` so the turn outcome reflects them."""
+-        human_delay = self._get_human_delay()
+-        images, media_files, local_files = extracted.images, extracted.media_files, extracted.local_files
+-        if images:
+-            logger.info("[%s] Extracted %d image(s) to send as attachments", self.name, len(images))
+-            await self._send_image_batch(event, images, metadata, human_delay, record_delivery)
+-        await self._deliver_media_attachments(
+-            event, media_files, local_files,
+-            force_document_attachments=extracted.force_document_attachments,
+-            human_delay=human_delay, metadata=metadata, record_delivery=record_delivery)
+-        if not (anything_sent or images or local_files or media_files) and extracted.pre_extract.strip():
+-            logger.error("[%s] response_delivery_dropped: non-empty response "
+-                         "(%d chars) produced no delivered message or attachment "
+-                         "for %s (empty after extract, recovery yielded nothing).", self.name,
+-                         len(extracted.pre_extract), event.source.chat_id)
++        import brai_files
++        return await brai_files.deliver_attachments(
++            self, event, extracted.media_files, extracted.local_files, metadata, record_delivery,
++            extracted.force_document_attachments, extracted.images)
+ 
+     def _start_typing_refresh(self, event: MessageEvent, interrupt_event: asyncio.Event,
+                               metadata: Optional[dict]) -> Optional[asyncio.Task]:
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -6591,6 +6591,14 @@
+         event = None
+         try:
+             await asyncio.sleep(delay)
++            if where == "media-group":
++                album_event = pending.get(key)
++                app = self._app
++                wait_for_chat = getattr(getattr(app, "update_processor", None), "wait_for_chat_idle", None)
++                if not callable(wait_for_chat):
++                    app = None
++                elif album_event is not None:
++                    await wait_for_chat(int(album_event.source.chat_id))
+             # Superseded flush (a newer chunk re-armed the timer while our sleep was already done):
+             # CancelledError only lands at the next await, so check synchronously before the pop.
+             owner = tasks.get(key)
+@@ -6599,7 +6607,9 @@
+             event = pending.pop(key, None)
+             if not event:
+                 return
+-            if self._should_drop_delayed_delivery():
++            if self._should_drop_delayed_delivery() or (
++                where == "media-group" and (app is None or app is not self._app)
++            ):
+                 self._hold_inbound_event(event, where=f"{where}-flush")
+                 event = None
+                 return
+@@ -6657,6 +6667,8 @@
+         if existing is None:
+             pending[key] = event
+             return
++        import brai_files
++        brai_files.merge_events(existing, event)
+         existing.media_urls.extend(event.media_urls)
+         existing.media_types.extend(event.media_types)
+         if event.text:
+@@ -6678,6 +6690,8 @@
+         """Album items debounce on media_group_id; singles go through the photo burst batcher."""
+         if self._drop_unresolved(event):  # identity FIRST: the batch lane is derived from it
+             return
++        import brai_files
++        await brai_files.capture(self, event)
+         media_group_id = getattr(msg, "media_group_id", None)
+         if media_group_id:
+             await self._queue_media_group_event(str(media_group_id), event)
+@@ -6714,6 +6728,8 @@
+                 cached_path = await cache_audio_from_bytes_async(bytes(data), ext=ext)
+             event.media_urls = [cached_path]
+             event.media_types = [mime]
++            import brai_files
++            await brai_files.capture(self, event)
+             logger.info("[Telegram] Cached user %s at %s", kind, cached_path)
+         except Exception as e:
+             logger.warning("[Telegram] Failed to cache %s: %s", kind, _redact_telegram_error_text(e), exc_info=True)
+@@ -6782,7 +6798,7 @@
+                 self._set_cached_media(
+                     event, await cache_video_from_bytes_async(bytes(video_bytes), ext=ext), SUPPORTED_VIDEO_TYPES[ext], MessageType.VIDEO,
+                     "[Telegram] Cached user video document at %s")
+-                await self.handle_message(event)
++                await self._route_photo_event(msg, event)
+                 return True
+             # Any file type is accepted (authorization is the gate, not the extension); unknown types get
+             # application/octet-stream. Image documents already returned above.
+@@ -6794,6 +6810,8 @@
+                 return await self._dispatch_with_text(event, f"Document '{display}' could not be cached.")
+             event.media_urls = [cached.path]
+             event.media_types = [cached.media_type]
++            import brai_files
++            await brai_files.capture(self, event)
+             event.media_text_inlined = [False]  # flipped below once the text is actually injected
+             if cached.kind == "audio":
+                 event.message_type = MessageType.AUDIO
+@@ -6880,6 +6898,9 @@
+         if self._should_drop_delayed_delivery():
+             self._hold_inbound_event(event, where="media-group-enqueue")
+             return
++        import brai_files
++        await brai_files.capture(self, event)
++        media_group_id = brai_files.batch_key(event, media_group_id)
+         self._merge_into_pending(self._media_group_events, media_group_id, event)
+         self._accept_update()
+         prior_task = self._media_group_tasks.get(media_group_id)
+@@ -6912,6 +6933,10 @@
+             file_obj = await sticker.get_file()
+             image_bytes = await file_obj.download_as_bytearray()
+             cached_path = await cache_image_from_bytes_async(bytes(image_bytes), ext=".webp")
++            import brai_files
++            event.media_urls, event.media_types = [cached_path], ["image/webp"]
++            await brai_files.capture(self, event)
++            cached_path = event.media_urls[0]
+             logger.info("[Telegram] Analyzing sticker at %s", cached_path)
+             from tools.vision_tools import vision_analyze_tool
+             self._accept_update()  # Cancellation cannot undo an already submitted auxiliary LLM request.
+--- a/tools/send_message_tool.py
++++ b/tools/send_message_tool.py
+@@ -214,6 +214,8 @@
+     # (``agent/turn_finalizer.py::finalize_turn``, ``gateway/run.py``).
+     from agent.message_sanitization import _sanitize_surrogates
+     message = _sanitize_surrogates(message)
++    import brai_files
++    message = brai_files.final_text(message, str(args.get("request_id") or message))
+     platform_name, chat_id, thread_id, resolution_error = _resolve_tool_target(target)
+     if resolution_error:
+         return tool_error(resolution_error)
+@@ -483,42 +485,8 @@
+                                    force_document=False):
+     """Deliver text and every media descriptor through adapter media APIs; adapters that only
+     inherit the BasePlatformAdapter stub for a kind are unsupported, not no-op'd."""
+-    caption, separate_text = _media_caption_split(message, media_files, max_caption_len=_DEFAULT_CAPTION_LIMIT)
+-    last_result = None
+-    if separate_text and separate_text.strip():
+-        last_result = await adapter.send(chat_id=chat_id, content=separate_text, metadata=metadata)
+-        if not last_result.success:
+-            return {"error": f"Adapter send failed: {_bounded_send_error(last_result.error)}"}
+-    from gateway.platforms.base import BasePlatformAdapter
+-    total = len(media_files)
+-    for index, descriptor in enumerate(media_files):
+-        media_path = descriptor[0] if isinstance(descriptor, (list, tuple)) and descriptor else None
+-        if not isinstance(media_path, str) or not media_path:
+-            return {"error": f"Adapter media send failed: invalid media descriptor {index + 1}/{total}"}
+-        is_voice = len(descriptor) > 1 and bool(descriptor[1])
+-        if not os.path.exists(media_path):
+-            return {"error": f"Adapter media send failed: media file {index + 1}/{total} was not found"}
+-        ext = os.path.splitext(media_path)[1].lower()
+-        method_name, media_kind = _adapter_media_method(ext, is_voice or ext in _AUDIO_EXTS, force_document)
+-        adapter_method = getattr(type(adapter), method_name, None)
+-        if adapter_method is None or adapter_method is getattr(BasePlatformAdapter, method_name):
+-            return {"error": (f"Live adapter does not implement native {media_kind} delivery; "
+-                              f"media file {index + 1}/{total} was not sent")}
+-        try:
+-            last_result = await getattr(adapter, method_name)(
+-                chat_id, media_path, caption=caption if index == 0 else None, reply_to=thread_id, metadata=metadata)
+-        except asyncio.CancelledError:
+-            raise
+-        except Exception as exc:
+-            detail = _bounded_send_error(exc)
+-        else:
+-            if last_result.success:
+-                continue
+-            detail = _bounded_send_error(last_result.error or "media send failed")
+-        return {"error": f"Adapter media send failed after {index}/{total} files: {detail}"}
+-    if last_result is None:
+-        return {"error": _NO_DELIVERABLE}
+-    return {"success": True, "message_id": last_result.message_id, "media_delivered": True}
++    import brai_files
++    return await brai_files.live_send(adapter, chat_id, message, media_files, thread_id, metadata, force_document)
+ 
+ 
+ async def _dispatch_on_gateway_loop(runner, make_coro, log_message):
+@@ -694,6 +662,9 @@
+     from gateway.config import Platform
+     platform_name = platform.value if hasattr(platform, "value") else str(platform)
+     media_files = media_files or []
++    import brai_files
++    if media_files and platform == Platform.TELEGRAM:
++        return await brai_files.standalone_telegram(pconfig, chat_id, message, media_files, thread_id, force_document)
+     if platform == Platform.WEIXIN:
+         return await _send_weixin(pconfig, chat_id, message, media_files=media_files)
+     # Telegram chunks internally on the *formatted* text (escaping inflates length).
+--- a/tools/file_tools.py
++++ b/tools/file_tools.py
+@@ -612,6 +612,8 @@
+     → Hermes internal denylist → document extraction → binary-extension guard
+     → negative-result cache → dedup stub → real read.
+     """
++    import brai_files
++    path = brai_files.before_tool("read_file", {"path": path}, task_id=task_id)["path"]
+     try:
+         offset, limit = normalize_read_pagination(offset, limit)
+ 
+@@ -776,7 +778,9 @@
+     guard run before anything that could prompt the user, and ONE approval
+     prompt covers every path of a multi-file patch.
+     """
++    import brai_files
+     for p in paths:
++        brai_files.guard_write(p, task_id)
+         err = _check_sensitive_path(p, task_id) or (
+             None if cross_profile else _check_cross_profile_path(p, task_id))
+         if err:
+@@ -869,6 +873,8 @@
+     (unadvertised in the schema; the mirror rejection error teaches it — the
+     cross-PROFILE guard it was named for no longer exists).
+     """
++    import brai_files
++    path = brai_files.guard_write(path, task_id)
+     # write_file checks the binary-document guard before the mirror guard.
+     err = (_check_sensitive_path(path, task_id)
+            or _check_binary_document_write(path, task_id)
+--- a/tools/file_tools_paths.py
++++ b/tools/file_tools_paths.py
+@@ -255,6 +255,8 @@
+     SSH resolves in the remote namespace (callers passing *container_paths* have
+     already ruled SSH out).
+     """
++    import brai_files
++    return Path(brai_files.workspace_for(task_id))
+     if container_paths is None:
+         if _terminal_env_type_for_task(task_id) == "ssh":
+             return _resolve_ssh_path(".", task_id)
+--- a/tools/terminal_tool.py
++++ b/tools/terminal_tool.py
+@@ -1403,6 +1403,8 @@
+     ``_host_local`` forces the local backend for Hermes-owned control-plane
+     children (kept in a separate env cache from the configured backend).
+     """
++    import brai_files
++    workdir = brai_files.before_tool("terminal", {"workdir": workdir}, task_id=task_id)["workdir"]
+     from hermes_cli.observability.shared_metrics_loop import record_terminal_backend as _metered
+     plan = None
+     try:
+--- a/tools/code_execution_env.py
++++ b/tools/code_execution_env.py
+@@ -278,6 +278,9 @@
+ 
+     (#56047)
+     """
++    import brai_files
++    if mode == "project":
++        return brai_files.workspace_for(task_id)
+     if mode != "project":
+         return staging_dir
+     if task_id:
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -1665,21 +1665,22 @@
+     def _native_image_run_message(self):
+         """Wrap the user turn as an OpenAI-style multimodal content list when
+         _prepare_inbound_message_text buffered image paths; consume-and-clear so later turns on the
+-        same runner never re-attach stale images. Falls back to plain text when nothing is readable."""
+-        ctx = self._ctx
++        same runner never re-attach stale images. Rejects incomplete image preparation."""
++        ctx = self._ctx
++        self._brai_inline_images = ()
+         native_imgs = self._runner._consume_pending_native_image_paths(ctx.session_key)
+         if not native_imgs:
+             return ctx.message
+-        try:
+-            from agent.image_routing import build_native_content_parts
+-            parts, skipped = build_native_content_parts(ctx.message, native_imgs)
+-            if skipped:
+-                logger.warning("Native image attachment: skipped %d unreadable path(s): %s", len(skipped), skipped)
+-            if any(p.get("type") == "image_url" for p in parts):
+-                return parts
+-        except Exception as exc:
+-            logger.warning("Native image attachment failed, falling back to text: %s", exc)
+-        return ctx.message
++        import brai_files
++        from agent.image_routing import build_native_content_parts
++        parts, skipped = build_native_content_parts(ctx.message, native_imgs)
++        if skipped or not any(p.get("type") == "image_url" for p in parts):
++            raise brai_files.FileError("NATIVE_IMAGE_INPUT_UNAVAILABLE")
++        self._brai_inline_images = tuple(
++            p["image_url"]["url"] for p in parts
++            if p.get("type") == "image_url" and p.get("image_url", {}).get("url", "").startswith("data:image/")
++        )
++        return parts
+
+     def _run_conversation_with_approval(self, agent, agent_history, observed_group_context,
+                                         persist_user_message_override, persist_user_timestamp_override):
+@@ -1720,7 +1721,8 @@
+             if ctx.inbound_message_id is not None:
+                 kwargs["persist_user_platform_id"] = str(ctx.inbound_message_id)
+             from agent.notification_presentation import notification_turn
+-            with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""):
++            import brai_files
++            with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""), brai_files.inbound_handoff(ctx.source, ctx.inbound_message_id, inline_images=getattr(self, "_brai_inline_images", ())):
+                 return agent.run_conversation(api_message, **kwargs)
+         finally:
+             unregister_gateway_notify(session_key)
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -3812,6 +3812,16 @@
+         self, turn_ctx: TurnContext, adapter: Any, pending: Optional[str], pending_event: Any,
+         response: Any, result: Any, stream_task: Any,
+     ) -> Any:
++        """Удержать копии очереди до окончания обработки, включая error/cancel."""
++        import brai_files
++        with brai_files.inbound_events(pending_event):
++            return await self._brai_run_agent_queued_followup(
++                turn_ctx, adapter, pending, pending_event, response, result, stream_task)
++
++    async def _brai_run_agent_queued_followup(
++        self, turn_ctx: TurnContext, adapter: Any, pending: Optional[str], pending_event: Any,
++        response: Any, result: Any, stream_task: Any,
++    ) -> Any:
+         """Run the queued / interrupting follow-up as the next turn (recursive ``_run_agent``)."""
+         from gateway.platforms.base import merge_pending_message_event
+         from gateway.run import _preserve_queued_followup_history_offset
+@@ -4279,6 +4289,8 @@
+ 
+         Keys: "final_response", "messages", "api_calls", "completed"."""
+         if self._get_proxy_url():
++            import brai_files
++            brai_files.reject_proxy_inbound(source, inbound_message_id)
+             return await self._run_agent_via_proxy(
+                 message=message, context_prompt=context_prompt, history=history, source=source,
+                 session_id=session_id, session_key=session_key, run_generation=run_generation,
+--- a/plugins/platforms/telegram/update_admission.py
++++ b/plugins/platforms/telegram/update_admission.py
+@@ -167,6 +167,15 @@
+                 prev.add_done_callback(release)
+
+
++    async def wait_for_chat_idle(self, chat_id: int) -> None:
++        """Keep album debounce behind already admitted updates of this chat.
++
++        A newer album item cancels the old flush; shield preserves the FIFO tail.
++        """
++        while (tail := self._tails.get(chat_id)) is not None:
++            await asyncio.shield(tail)
++
++
+ def build_update_processor(extra, name: str) -> PerChatUpdateProcessor:
+     """``platforms.telegram.extra.max_concurrent_updates`` (default 32); bad values warn and fall back."""
+     raw = extra.get("max_concurrent_updates", DEFAULT_MAX_CONCURRENT_UPDATES)
+--- a/gateway/run_busy.py
++++ b/gateway/run_busy.py
+@@ -846,6 +846,10 @@
+         if getattr(event, "internal", False):
+             self._queue_or_replace_pending_event(session_key, event)
+             return True
++        import brai_files
++        if brai_files.should_queue_inbound_set(event):
++            self._queue_or_replace_pending_event(session_key, event)
++            return True
+         if (
+             event.message_type == MessageType.TEXT
+             and self._effective_busy_text_mode(event.source) == "queue"

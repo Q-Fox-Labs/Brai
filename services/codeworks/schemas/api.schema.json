@@ -403,6 +403,55 @@
             "string",
             "null"
           ]
+        },
+        "code_index": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "identity": {
+              "type": "string"
+            },
+            "source_path": {
+              "type": "string"
+            },
+            "source_sha": {
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "waiting",
+                "copying",
+                "ready",
+                "updating",
+                "error",
+                "skipped",
+                "removed"
+              ]
+            },
+            "last_success_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "identity",
+            "source_path",
+            "source_sha",
+            "state",
+            "last_success_at",
+            "error"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [

@@ -1,0 +1,98 @@
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -3814,6 +3814,13 @@
+         except Exception as fmt_err:
+             if "not modified" in str(fmt_err).lower():
+                 return True
++            # A transport refusal is independent of formatting. Retrying it as plain
++            # text spends the same flood budget and can leave the live preview frozen.
++            if not any(marker in str(fmt_err).lower() for marker in (
++                "can't parse entities", "cannot parse entities", "can't find end",
++                "unsupported start tag", "entity bounds", "parse entities",
++            )):
++                raise
+             logger.warning(warn_fmt, self.name, _redact_telegram_error_text(fmt_err))
+             await self._edit_text(chat_id, message_id, plain)
+         return False
+@@ -3884,7 +3891,9 @@
+             self._last_overflow_preview.pop(_preview_key, None)
+         try:
+             if not finalize:
+-                await self._edit_text(chat_id, message_id, content)
++                await self._edit_markdown_or_plain(
++                    chat_id, message_id, self.format_message(content), _strip_mdv2(content),
++                    "[%s] MarkdownV2 preview edit failed, falling back to plain text: %s")
+                 if _saturated_preview:
+                     self._last_overflow_preview[_preview_key] = content
+                 return SendResult(success=True, message_id=message_id)
+@@ -3915,16 +3924,22 @@
+             retry_after = getattr(e, "retry_after", None)
+             if retry_after is not None or "retry after" in err_str:
+                 wait = retry_after if retry_after else 1.0
+-                if wait > _FLOOD_INLINE_WAIT_CAP_SECS:
++                # A final edit replaces an existing preview; a fresh send would leave
++                # that preview beside the answer. Wait once, bounded to a minute, while
++                # other chats keep running. The gateway grants this finalize 125s.
++                wait_cap = 60.0 if finalize else _FLOOD_INLINE_WAIT_CAP_SECS
++                if wait > wait_cap:
+                     # Log AFTER the cap check: "waiting 33.0s" followed by no wait misled an investigation.
+                     logger.warning(
+                         "[%s] Telegram flood control, refusing edit (retry_after %.1fs > %.0fs inline cap)",
+-                        self.name, wait, _FLOOD_INLINE_WAIT_CAP_SECS)
++                        self.name, wait, wait_cap)
+                     return _flood_cap_result(wait)
+                 logger.warning("[%s] Telegram flood control, waiting %.1fs", self.name, wait)
+                 await asyncio.sleep(wait)
+                 try:
+-                    await self._edit_text(chat_id, message_id, content)
++                    await self._edit_markdown_or_plain(
++                        chat_id, message_id, self.format_message(content), _strip_mdv2(content),
++                        "[%s] MarkdownV2 retry edit failed, falling back to plain text: %s")
+                     return SendResult(success=True, message_id=message_id)
+                 except Exception as retry_err:
+                     safe_retry_error = _redact_telegram_error_text(retry_err)
+@@ -5556,6 +5571,10 @@
+         """Arm/re-arm this chat's slot after an actual send/edit API call fires."""
+         slot_until: dict[str, float] = self.__dict__.setdefault("_telegram_chat_outbound_slot_until", {})
+         budget = getattr(self, "_telegram_chat_outbound_slot_secs", _TELEGRAM_CHAT_OUTBOUND_BUDGET_SECS)
++        # Groups share a lower sustained allowance across sends and edits. Pace both
++        # with the same slot so progress plus streaming cannot exhaust it separately.
++        if isinstance(normalize_telegram_chat_id(chat_id), int) and normalize_telegram_chat_id(chat_id) < 0:
++            budget = max(3.2, budget)
+         slot_until[str(normalize_telegram_chat_id(chat_id))] = (
+             asyncio.get_running_loop().time() + max(0.0, budget))
+ 
+--- a/gateway/run_turn.py
++++ b/gateway/run_turn.py
+@@ -3266,10 +3266,10 @@
+             await asyncio.sleep(0.05)
+ 
+     @staticmethod
+-    async def _await_stream_task(stream_task) -> None:
+-        """Give the stream consumer task 5s to flush, then cancel it."""
++    async def _await_stream_task(stream_task, *, timeout: float = 5.0) -> None:
++        """Bound final delivery without cancelling a permitted platform retry."""
+         try:
+-            await asyncio.wait_for(stream_task, timeout=5.0)
++            await asyncio.wait_for(stream_task, timeout=timeout)
+         except (asyncio.TimeoutError, asyncio.CancelledError):
+             stream_task.cancel()
+             with suppress(asyncio.CancelledError):
+@@ -3743,7 +3743,7 @@
+         _sc = turn_ctx.stream_consumer_holder[0]
+         if _sc and stream_task:
+             try:
+-                await self._await_stream_task(stream_task)
++                await self._await_stream_task(stream_task, timeout=125.0 if turn_ctx.source.platform == Platform.TELEGRAM else 5.0)
+             except Exception as e:
+                 logger.debug("Stream consumer wait before queued message failed: %s", e)
+         # Delivery uses the finalized task result (empty/failure normalization), not raw ``result``.
+@@ -3993,7 +3993,7 @@
+                 with suppress(asyncio.CancelledError):
+                     await stream_task
+             else:
+-                await self._await_stream_task(stream_task)
++                await self._await_stream_task(stream_task, timeout=125.0 if turn_ctx.source.platform == Platform.TELEGRAM else 5.0)
+ 
+         # Abort + bounded wait for streaming TTS: covers paths where normal finalisation was skipped.
+         _stts_finally = turn_ctx.streaming_tts_consumer_holder[0]
