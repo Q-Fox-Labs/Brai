@@ -7,9 +7,9 @@ import { test } from "node:test";
 import ts from "typescript";
 
 test("наблюдение доступно всем сессиям DEV, файл требует связи и владельца", async () => {
-  const keys = ["BRAI_ENVIRONMENT", "BRAI_WEB_AGENT_MODE", "BRAI_WEB_TELEGRAM_OBSERVER_ENABLED", "BRAI_TELEGRAM_OBSERVER_OWNER_ID"];
+  const keys = ["BRAI_ENVIRONMENT", "BRAI_WEB_AGENT_MODE", "BRAI_WEB_TELEGRAM_OBSERVER_ENABLED"];
   const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
-  Object.assign(process.env, { BRAI_ENVIRONMENT: "dev", BRAI_WEB_AGENT_MODE: "hermes_telegram", BRAI_WEB_TELEGRAM_OBSERVER_ENABLED: "1", BRAI_TELEGRAM_OBSERVER_OWNER_ID: "owner" });
+  Object.assign(process.env, { BRAI_ENVIRONMENT: "dev", BRAI_WEB_AGENT_MODE: "hermes_telegram", BRAI_WEB_TELEGRAM_OBSERVER_ENABLED: "1" });
   const id = "11111111-1111-4111-8111-111111111111";
   let allowed = true, authenticated = true, owner = "owner", observedAfter = -1;
   class Failure extends Error {
@@ -21,7 +21,7 @@ test("наблюдение доступно всем сессиям DEV, фай�
     const input = JSON.parse(Buffer.from(data).toString());
     if (input.action === "changes") observedAfter = input.after;
     const value = input.action === "changes" ? { cursor: input.after + 3, changes: [1, 2, 3].map(offset => ({ change_seq: input.after + offset, identity: `message-${offset}` })) }
-      : subject.endsWith(".query") ? { allowed, cursor: 0, chats: [] } : { ownerId: owner, status: "ready", filename: "image.png", mimeType: "image/png" };
+      : subject.endsWith(".query") ? { allowed, ownerId: "owner", cursor: 0, chats: [] } : { ownerId: owner, status: "ready", filename: "image.png", mimeType: "image/png" };
     return { data: Buffer.from(JSON.stringify(value)), headers: { has: () => false } };
   } };
   const filename = new URL("../server/telegram-observer.ts", import.meta.url);

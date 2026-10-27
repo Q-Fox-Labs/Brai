@@ -75,7 +75,7 @@ export function queryJournal(db, request) {
 
 /** Запускает единственный NATS endpoint; каждый запрос открывает SQLite только на чтение. */
 export async function startObserver({ config, database }) {
-  if (!database?.startsWith('/')) throw bad('INVALID_CONFIGURATION');
+  if (!database?.startsWith('/') || typeof config.ownerId !== 'string' || !config.ownerId || config.ownerId.length > 128 || /\s/.test(config.ownerId)) throw bad('INVALID_CONFIGURATION');
   const nc = await connect({ servers: config.nats.servers, user: config.nats.user, pass: config.nats.password,
     inboxPrefix: config.nats.inboxPrefix, name: 'brai-hermes-telegram-observer', timeout: 5000 });
   const service = await nc.services.add({ name: 'brai_hermes_telegram_observer', version: '1.0.0', queue: 'brai_hermes_telegram_observer' });
@@ -87,7 +87,9 @@ export async function startObserver({ config, database }) {
       const input = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(message.data));
       db = new DatabaseSync(database, { readOnly: true });
       db.exec('PRAGMA busy_timeout=1000; PRAGMA query_only=ON');
-      const body = encoder.encode(JSON.stringify(queryJournal(db, input)));
+      const result = queryJournal(db, input);
+      if (input.action === 'attachment' && result.allowed) result.ownerId = config.ownerId;
+      const body = encoder.encode(JSON.stringify(result));
       if (body.length > 1_048_576) throw bad('PAYLOAD_TOO_LARGE');
       message.respond(body);
     } catch (error) {
@@ -107,10 +109,10 @@ if (isMain) {
     if (!path?.startsWith('/')) throw bad('INVALID_CONFIGURATION');
     const nats = JSON.parse(await readFile(path, 'utf8'));
     if (!nats || typeof nats !== 'object' || Array.isArray(nats) ||
-        Object.keys(nats).sort().join(',') !== 'inboxPrefix,password,servers,user' ||
+        Object.keys(nats).sort().join(',') !== 'inboxPrefix,ownerId,password,servers,user' ||
         !Array.isArray(nats.servers) || !nats.servers.length || nats.servers.some(value => typeof value !== 'string' || !value) ||
-        !['inboxPrefix', 'password', 'user'].every(key => typeof nats[key] === 'string' && nats[key])) throw bad('INVALID_CONFIGURATION');
-    const stop = await startObserver({ config: { nats }, database: process.env.BRAI_TELEGRAM_OBSERVER_DB });
+        !['inboxPrefix', 'ownerId', 'password', 'user'].every(key => typeof nats[key] === 'string' && nats[key])) throw bad('INVALID_CONFIGURATION');
+    const stop = await startObserver({ config: { nats, ownerId: nats.ownerId }, database: process.env.BRAI_TELEGRAM_OBSERVER_DB });
     for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { void stop(); });
   } catch { console.error('TELEGRAM_OBSERVER_START_FAILED'); process.exitCode = 1; }
 }

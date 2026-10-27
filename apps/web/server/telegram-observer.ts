@@ -8,7 +8,7 @@ const subject = "brai.hermes.telegram.observer.v1.query";
 const noStore = { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" };
 const maxStreams = 64;
 let activeStreams = 0;
-const enabled = () => process.env.BRAI_ENVIRONMENT === "dev" && process.env.BRAI_WEB_AGENT_MODE === "hermes_telegram" && process.env.BRAI_WEB_TELEGRAM_OBSERVER_ENABLED === "1";
+const enabled = () => process.env.BRAI_ENVIRONMENT === "dev" && process.env.BRAI_WEB_AGENT_MODE === "hermes_telegram" && process.env.BRAI_WEB_TELEGRAM_OBSERVER_ENABLED !== "0";
 const natural = (value: string | null): number | undefined => {
   if (value === null) return undefined;
   if (!/^(0|[1-9][0-9]{0,15})$/.test(value)) throw new GatewayError(400, "INVALID_ARGUMENT");
@@ -110,15 +110,15 @@ export async function observerFileAuth(request: Request): Promise<Response> {
     if (!match || !identity || identity.length > 256 || url.searchParams.getAll("message").length !== 1 ||
         url.searchParams.getAll("download").length > 1 || (download !== null && download !== "1") ||
         [...url.searchParams.keys()].some(key => key !== "message" && key !== "download")) throw new GatewayError(400, "INVALID_ARGUMENT");
-    const artifactId = match[1], ownerId = process.env.BRAI_TELEGRAM_OBSERVER_OWNER_ID;
-    if (!ownerId) throw new GatewayError(503, "UNAVAILABLE");
-    const linked = await observerQuery<{ allowed: boolean }>({ action: "attachment", identity, artifactId });
-    if (linked.allowed !== true || !validateRequest(artifacts.get, { artifactId })) throw new GatewayError(404, "NOT_FOUND");
+    const artifactId = match[1];
+    const linked = await observerQuery<{ allowed: boolean; ownerId?: unknown }>({ action: "attachment", identity, artifactId });
+    if (linked.allowed !== true || typeof linked.ownerId !== "string" || !linked.ownerId || linked.ownerId.length > 128 || /\s/.test(linked.ownerId) ||
+        !validateRequest(artifacts.get, { artifactId })) throw new GatewayError(404, "NOT_FOUND");
     // AIDEV-NOTE: Telegram-файлы Hermes принадлежат DEV Artifacts, а не общему хранилищу результатов Codex.
     const nc = await natsConnection(), reply = await nc.request(artifacts.get, Buffer.from(JSON.stringify({ artifactId })), { timeout: 5000 });
     if (reply.headers?.has("Nats-Service-Error")) throw new GatewayError(404, "NOT_FOUND");
     const item = JSON.parse(Buffer.from(reply.data).toString()) as { ownerId: string; status: string; filename: string; mimeType: string };
-    if (!validateResponse(artifacts.get, item) || item.ownerId !== ownerId || item.status !== "ready") throw new GatewayError(404, "NOT_FOUND");
+    if (!validateResponse(artifacts.get, item) || item.ownerId !== linked.ownerId || item.status !== "ready") throw new GatewayError(404, "NOT_FOUND");
     const inline = !download && ["image/png", "image/jpeg", "image/webp", "image/gif", "video/mp4", "video/webm", "audio/ogg", "audio/mpeg"].includes(item.mimeType);
     const encoded = encodeURIComponent(item.filename).replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
     return new Response(null, { headers: { ...noStore, "Content-Type": inline ? item.mimeType : "application/octet-stream",
