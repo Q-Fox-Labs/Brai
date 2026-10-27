@@ -2,17 +2,19 @@
 # ABOUTME: Не вызывает модель или сеть; использует настоящий файловый адаптер и SQLite.
 import ast
 import base64
+import dataclasses
 import importlib.util
 import asyncio
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
 import struct
+import threading
 import zlib
-from types import SimpleNamespace, ModuleType
+from types import SimpleNamespace, ModuleType, MethodType
 import unittest
 from unittest.mock import patch
 
@@ -88,6 +90,269 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             aid = result['fileSets'][0]['items'][0]['file']['artifactId']
             self.assertEqual(Path(self.store.fetch(aid)['localPath']).read_text(), channel)
             self.assertFalse(Path(agent._brai_workspace).exists())
+
+    def test_actual_loop_preserves_interrupted_and_failed_results_without_text(self):
+        """Неполный ход сохраняет исходную причину и не создаёт файловую доставку."""
+        for result in ({'final_response': None, 'interrupted': True},
+                       {'final_response': None, 'error': 'synthetic provider failure'},
+                       {'error': 'synthetic provider failure'},
+                       {'final_response': []}):
+            with self.subTest(result=result):
+                run, ports = self.loop(lambda *args, **kwargs: dict(result))
+                closed = []
+                run.__globals__['_close_durable_failed_turn'] = lambda a, r: closed.append(r)
+                with patch.dict(sys.modules, ports):
+                    actual = run(SimpleNamespace(session_id='no-text', platform='telegram'), 'test album')
+                self.assertEqual({k:v for k,v in actual.items() if k!='user_intervened'}, result)
+                self.assertEqual(closed, [actual])
+                self.assertNotIn('fileSets', actual)
+                self.assertEqual(self.backend.calls, [])
+
+    async def test_actual_telegram_album_waits_for_fifo_publication_before_dispatch(self):
+        """Три update одного альбома: медленный второй не создаёт отдельного хода."""
+        scope = {'asyncio': asyncio}
+        function('plugins/platforms/telegram/update_admission.py',
+                 ['do_process_update', 'wait_for_chat_idle'], scope)
+        processor = SimpleNamespace(_tails={})
+        processor.do_process_update = MethodType(scope['do_process_update'], processor)
+        real_wait = MethodType(scope['wait_for_chat_idle'], processor)
+        waiting = asyncio.Event()
+        async def wait(chat_id):
+            waiting.set()
+            await real_wait(chat_id)
+        processor.wait_for_chat_idle = wait
+        function('plugins/platforms/telegram/adapter.py',
+                 ['_queue_media_group_event', '_flush_media_group_event', '_flush_buffered', '_merge_into_pending'], scope)
+        dispatched, held, active = [], [], []
+        async def handle(event):
+            try:
+                if not await native.accept_event(event):
+                    return
+                data = event.metadata['fileSets'][0]['items']
+                native.commit_inbound(event.source, event.message_id)
+                dispatched.append(([i['source']['messageId'] for i in data], [i['caption'] for i in data]))
+            finally:
+                native.release_event(event)
+        adapter = SimpleNamespace(_media_group_events={}, _media_group_tasks={},
+            _app=SimpleNamespace(update_processor=processor), MEDIA_GROUP_WAIT_SECONDS=0.02,
+            _should_drop_delayed_delivery=lambda:False, _accept_update=lambda:None,
+            _hold_inbound_event=lambda event, **kw:held.append(event), handle_message=handle,
+            _merge_caption=lambda a,b:(a+'\n'+b if a else b),
+            gateway_runner=SimpleNamespace(_is_user_authorized_for_source=lambda source:True))
+        for name in ['_queue_media_group_event','_flush_media_group_event','_flush_buffered','_merge_into_pending']:
+            setattr(adapter,name,MethodType(scope[name],adapter))
+        source = SimpleNamespace(platform='telegram',chat_id='1',thread_id=None,user_id='2',profile=None)
+        def event(index):
+            path=self.input/('delayed-'+str(index)+'.jpg');path.write_bytes(('image-'+str(index)).encode())
+            return SimpleNamespace(source=source,message_id=str(10+index),text=['album caption','second caption','','late caption'][index],
+                raw_message=SimpleNamespace(media_group_id='one-album'),media_urls=[str(path)],media_types=['image/jpeg'],metadata={})
+        entered, release = threading.Event(), threading.Event()
+        original = self.backend.call
+        def backend(method,args,**kw):
+            if method=='files.publish' and Path(args['path']).name=='delayed-1.jpg':
+                entered.set()
+                if not release.wait(5):raise RuntimeError('synthetic publication timeout')
+            return original(method,args,**kw)
+        self.backend.call=backend
+        async def route(ev):
+            await adapter._queue_media_group_event('one-album',ev)
+        update = SimpleNamespace(effective_chat=SimpleNamespace(id=1))
+        try:
+            with patch.dict(sys.modules,{'brai_files':native}):
+                active=[asyncio.create_task(processor.do_process_update(update,route(event(i)))) for i in range(3)]
+                self.assertTrue(await asyncio.to_thread(entered.wait,2))
+                await asyncio.wait_for(waiting.wait(),2)
+                self.assertEqual(dispatched,[])
+                with self.store.db() as db:
+                    self.assertIsNone(db.execute('SELECT admitted FROM groups').fetchone()[0])
+                previous_flush=next(iter(adapter._media_group_tasks.values()))
+                other=[]
+                async def independent():other.append(True)
+                await asyncio.wait_for(processor.do_process_update(SimpleNamespace(effective_chat=SimpleNamespace(id=9)),independent()),2)
+                self.assertEqual(other,[True])
+                release.set()
+                await asyncio.wait_for(asyncio.gather(*active),3)
+                await asyncio.wait_for(asyncio.gather(*list(adapter._media_group_tasks.values())),3)
+                self.assertEqual(dispatched,[(['10','11','12'],['album caption','second caption',''])])
+                self.assertTrue(previous_flush.cancelled())
+                self.assertEqual(processor._tails,{})
+                self.assertEqual(held,[])
+                # Настоящее позднее дополнение получает только новый элемент.
+                await processor.do_process_update(update,route(event(3)))
+                await asyncio.wait_for(asyncio.gather(*list(adapter._media_group_tasks.values())),3)
+                self.assertEqual(dispatched[-1],(['13'],['late caption']))
+                # Другой update того же исходного message не создаёт публикацию/ход повторно.
+                await processor.do_process_update(update,route(event(3)))
+                await asyncio.wait_for(asyncio.gather(*list(adapter._media_group_tasks.values())),3)
+                self.assertEqual(len(dispatched),2)
+                self.assertEqual(sum(name=='files.publish' for name,_ in self.backend.calls),4)
+        finally:
+            release.set()
+            if active:await asyncio.gather(*active,return_exceptions=True)
+            for task in list(adapter._media_group_tasks.values()):task.cancel()
+            await asyncio.gather(*list(adapter._media_group_tasks.values()),return_exceptions=True)
+
+    async def test_actual_album_flush_holds_once_when_app_is_missing_or_dispatch_cancelled(self):
+        """Teardown и отмена после pop сохраняют событие без отправки или двойного hold."""
+        scope={'asyncio':asyncio}
+        function('plugins/platforms/telegram/adapter.py',['_flush_buffered'],scope)
+        for cancel in (False,True):
+            with self.subTest(cancel_after_pop=cancel):
+                entered=asyncio.Event();held=[]
+                event=SimpleNamespace(source=SimpleNamespace(chat_id='1'))
+                pending={'album':event};tasks={}
+                async def wait(chat_id):pass
+                async def handle(ev):
+                    entered.set()
+                    await asyncio.Event().wait()
+                adapter=SimpleNamespace(_app=SimpleNamespace(update_processor=SimpleNamespace(wait_for_chat_idle=wait)) if cancel else None,
+                    _should_drop_delayed_delivery=lambda:False,
+                    _hold_inbound_event=lambda event,**kw:held.append(event),handle_message=handle)
+                task=asyncio.create_task(scope['_flush_buffered'](adapter,pending,tasks,'album',0,'media-group'))
+                tasks['album']=task
+                if cancel:
+                    await asyncio.wait_for(entered.wait(),2)
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):await task
+                else:
+                    await asyncio.wait_for(task,2)
+                    self.assertFalse(entered.is_set())
+                self.assertEqual(held,[event])
+                self.assertEqual(pending,{})
+                self.assertEqual(tasks,{})
+
+    async def test_actual_busy_gateway_queues_album_continuation_before_interrupt(self):
+        """Фото/видео/документы того же набора не прерывают даже подготовку первого хода."""
+        event=await self.album_event()
+        scope={}
+        function('gateway/run_inbound.py',['_hm_busy_slash_or_photo','_hm_handle_running_session_message'],scope)
+        queued=[]
+        runner=SimpleNamespace(_hm_merge_pending_for_source=lambda *a,**kw:queued.append((a,kw)))
+        runner._hm_busy_slash_or_photo=MethodType(scope['_hm_busy_slash_or_photo'],runner)
+        ports={'brai_files':native,'hermes_cli.commands':module(resolve_command=lambda _:None),
+               'gateway.run':module(_AGENT_PENDING_SENTINEL=object())}
+        self.assertTrue(native.should_queue_inbound_set(event))
+        try:
+            with patch.dict(sys.modules,ports):
+                for phase in ['preparing','committed']:
+                    if phase=='committed':native.commit_inbound(event.source,event.message_id)
+                    late=SimpleNamespace(source=event.source,message_id='11',media_urls=[],
+                        metadata={'_brai_artifacts':event.metadata['_brai_artifacts'][-1:]},get_command=lambda:None)
+                    try:
+                        self.assertTrue(native.should_queue_inbound_set(late))
+                        for kind in ['photo','video','document']:
+                            late.message_type=kind
+                            self.assertIsNone(await scope['_hm_handle_running_session_message'](runner,late,late.source,'session'))
+                    finally:
+                        native.release_event(late)
+            self.assertEqual(len(queued),6)
+            self.assertTrue(all(kw=={'merge_text':True} for _,kw in queued))
+        finally:
+            native.release_event(event)
+        native.release_event(event)  # Освобождение идемпотентно.
+        fresh=SimpleNamespace(source=event.source,message_id='99',text='fresh file',
+            raw_message=SimpleNamespace(media_group_id=None),media_urls=[str(self.input_file())],media_types=['text/plain'],metadata={})
+        await native.accept_event(fresh,admit=False)
+        self.assertFalse(native.should_queue_inbound_set(fresh))
+        native.release_event(fresh)
+
+    async def test_actual_gateway_rewrite_releases_original_and_replaced_event(self):
+        """dataclasses.replace не теряет cleanup при успехе, ошибке и отмене."""
+        @dataclasses.dataclass
+        class Event:
+            source: object
+            message_id: str
+            text: str
+            metadata: dict
+            media_urls: list
+            media_types: list
+            raw_message: object
+        scope={'dataclasses':dataclasses}
+        function('gateway/run_inbound.py',['_handle_message','_hm_pre_gateway_dispatch_hook'],scope)
+        async def hook(*args,**kwargs):return [{'action':'rewrite','text':'rewritten caption'}]
+        ports={'brai_files':native,'hermes_cli.lifecycle':module(ainvoke_hook=hook)}
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id=None,user_id='2',profile=None)
+        for index,phase in enumerate(['success','failure','cancel']):
+            with self.subTest(phase=phase),patch.dict(sys.modules,ports):
+                original=Event(source,str(30+index),'caption',{},[str(self.input_file())],['text/plain'],
+                    SimpleNamespace(media_group_id='rewrite-'+phase))
+                adapter=SimpleNamespace(gateway_runner=SimpleNamespace(_is_user_authorized_for_source=lambda s:True))
+                await native.capture(adapter,original)
+                rewritten=[]
+                async def handle(event):
+                    changed=await scope['_hm_pre_gateway_dispatch_hook'](runner,event,event.source)
+                    self.assertIsNot(changed,event)
+                    rewritten.append(changed)
+                    native.track_inbound(changed)
+                    await native.accept_event(changed)
+                    with self.store.db() as db:self.assertGreater(db.execute('SELECT COUNT(*) FROM leases').fetchone()[0],0)
+                    if phase=='failure':raise RuntimeError('synthetic failed turn')
+                    if phase=='cancel':raise asyncio.CancelledError()
+                    return 'ok'
+                runner=SimpleNamespace(_brai_handle_message=handle)
+                call=scope['_handle_message'](runner,original)
+                if phase=='failure':
+                    with self.assertRaisesRegex(RuntimeError,'synthetic failed turn'):await call
+                elif phase=='cancel':
+                    with self.assertRaises(asyncio.CancelledError):await call
+                else:
+                    self.assertEqual(await call,'ok')
+                self.assertIsNone(rewritten[0]._brai_file_lease)
+                self.assertEqual(original._brai_capture_leases,[])
+                self.assertIsNone(native._event_cleanup.get())
+                with self.store.db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM leases').fetchone()[0],0)
+
+    async def test_actual_queued_followup_releases_files_without_parent_scope_or_gc(self):
+        """Реальный recursive followup восстанавливает ID и закрывает lease, пока event жив."""
+        scope={'asyncio':asyncio,'suppress':suppress,
+            'logger':SimpleNamespace(debug=lambda *a,**kw:None),
+            'display_kind_for_event':lambda e:'file','reply_expected_metadata':lambda e:{},
+            'diagnostic_metadata':lambda e:{},'ProcessingOutcome':SimpleNamespace(SUCCESS='ok',FAILURE='failed')}
+        function('gateway/run_turn.py',['_run_agent_queued_followup','_brai_run_agent_queued_followup'],scope)
+        async def noop(*args,**kwargs):pass
+        ports={'brai_files':native,
+            'gateway.platforms.base':module(merge_pending_message_event=lambda *a:None),
+            'gateway.run':module(_preserve_queued_followup_history_offset=lambda a,b:b),
+            'gateway.run_inbound':module(strip_discord_triggering_note=lambda e,t:t),
+            'gateway.run_turn_followup_ack':module(_run_followup_processing_hook=noop,_followup_cancel_outcome=lambda a:'cancel')}
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id=None,user_id='2',profile=None)
+        for index,phase in enumerate(['success','failure','cancel']):
+            with self.subTest(phase=phase),patch.dict(sys.modules,ports):
+                event=SimpleNamespace(source=source,message_id=str(70+index),text='queued caption',
+                    media_urls=[str(self.input_file())],media_types=['text/plain'],metadata={},
+                    raw_message=SimpleNamespace(media_group_id='queued-'+phase),
+                    reply_expected=True,channel_prompt=None,internal=False,message_type='document')
+                adapter=SimpleNamespace(gateway_runner=SimpleNamespace(_is_user_authorized_for_source=lambda s:True))
+                # Первоначальный busy handler уже закончил свой scope, event остаётся в очереди.
+                with native.inbound_events(event):await native.capture(adapter,event)
+                self.assertIsNone(native._event_cleanup.get())
+                async def prepare(**kwargs):
+                    self.assertTrue(await native.accept_event(kwargs['event']))
+                    return kwargs['event'].text
+                async def run(**kwargs):
+                    with self.store.db() as db:self.assertGreater(db.execute('SELECT COUNT(*) FROM leases').fetchone()[0],0)
+                    if phase=='failure':raise RuntimeError('synthetic queued failure')
+                    if phase=='cancel':raise asyncio.CancelledError()
+                    return {'final_response':'done'}
+                runner=SimpleNamespace(_MAX_INTERRUPT_DEPTH=5,_is_goal_continuation_event=lambda e:False,
+                    _session_key_for_source=lambda s:'session',_prepare_profile_scoped_inbound_message_text=prepare,
+                    _reply_anchor_for_event=lambda e:None,_pinned_channel_inputs=lambda k,p,s,**kw:(p,s),
+                    _persist_prompt_pins=noop,_delivery_adapter_for=lambda s:None,_intake_adapter_for=lambda s:None,
+                    _refresh_agent_cache_message_count=noop,_run_agent_deliver_first_response=noop,_run_agent=run)
+                runner._brai_run_agent_queued_followup=MethodType(scope['_brai_run_agent_queued_followup'],runner)
+                ctx=SimpleNamespace(source=source,session_id='session',session_key='session',run_generation=1,
+                    _interrupt_depth=0,history=[],_status_thread_metadata=None,context_prompt='context')
+                call=scope['_run_agent_queued_followup'](runner,ctx,adapter,'queued',event,'first',{'messages':[]},None)
+                if phase=='failure':
+                    with self.assertRaisesRegex(RuntimeError,'synthetic queued failure'):await call
+                elif phase=='cancel':
+                    with self.assertRaises(asyncio.CancelledError):await call
+                else:
+                    self.assertEqual((await call)['final_response'],'done')
+                # Ссылка event всё ещё удерживается этим тестом: GC не может скрыть утечку.
+                self.assertIsNone(event._brai_file_lease)
+                self.assertIsNone(native._event_cleanup.get())
+                with self.store.db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM leases').fetchone()[0],0)
 
     def test_actual_loop_commits_inbound_only_after_input_preparation(self):
         source = SimpleNamespace(platform='telegram', chat_id='1', thread_id=None, user_id='2', profile=None)
