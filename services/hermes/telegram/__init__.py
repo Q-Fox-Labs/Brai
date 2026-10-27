@@ -27,8 +27,8 @@ UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}
 MAX_ATTACHMENTS = 10
 RPC_TIMEOUT = 15
 OUTPUT_TIMEOUT = 20
-HUMAN_OUTPUT_REQUIRED = "Для этого действия нужны настоящие результаты работы человека. Кнопка решения их не создаёт; сначала выполните работу и сохраните её результаты штатным способом."
-FAILURE = "Операция Brai не подтверждена. Проверьте состояние и явно запросите новую кнопку."
+HUMAN_OUTPUT_REQUIRED = "Сначала выполните это задание и отправьте результат сообщением. Одного нажатия кнопки недостаточно."
+FAILURE = "Не удалось подтвердить решение. Обратитесь к администратору и перешлите ему это сообщение."
 CONFIRMATION_DESCRIPTION = (
     "Ask the owner to confirm a human Action in the configured Telegram chat. First create "
     "the Element and Action with the available game-core structure/create tools, or use existing ones. "
@@ -598,8 +598,8 @@ class TelegramPlugin:
     async def _report_unknown_resume(self, row):
         """Сообщить restart-неопределённость один раз, не повторяя работу."""
         try:
-            await self._notify("Hermes был перезапущен: исход автоматического продолжения не подтверждён. "
-                               "Повтор работы остановлен; требуется проверка состояния.", row["chat_id"], row["thread_id"])
+            await self._notify("Гермес перезапустился, и я не знаю, продолжилась ли работа. "
+                               "Чтобы случайно не выполнить её дважды, я остановился. Обратитесь к администратору и перешлите ему это сообщение.", row["chat_id"], row["thread_id"])
         except Exception:
             pass  # Без доступного Telegram доставку уведомления подтвердить нельзя.
 
@@ -621,24 +621,24 @@ class TelegramPlugin:
         """Один раз попросить native gateway продолжить исходную беседу."""
         row = self.tokens.reserve_resume(token)
         if row is None:
-            return "Автоматическое продолжение уже было запрошено; повтор работы остановлен."
+            return "Продолжение работы уже было запрошено. Я не буду запускать её повторно."
         try:
             if not callable(self.inject_message):
                 self.tokens.resume_outcome(token, "failed")
-                return "Решение записано, но автоматическое продолжение Hermes недоступно. Работа не запущена."
+                return "Решение сохранено, но продолжить работу не удалось. Обратитесь к администратору и перешлите ему это сообщение."
             if not await asyncio.to_thread(self._session_matches, row):
                 self.tokens.resume_outcome(token, "failed")
-                return "Решение записано, но исходная сессия Hermes недоступна или изменилась. Работа не запущена."
+                return "Решение сохранено, но продолжить работу в прежнем разговоре не удалось. Обратитесь к администратору и перешлите ему это сообщение."
             # AIDEV-NOTE: Public API pins session id при dispatch, не при этом read-check; /new race остаётся upstream.
             accepted = self.inject_message(_resume_message(row), session_key=row["session_key"])
             self.tokens.resume_outcome(token, "submitted" if accepted is True else "failed")
             if accepted is True:
-                return ("Изменения записаны. Запрашиваю обсуждение и доработку в Hermes."
-                        if row["decision"] == "changes" else "Принято. Запрашиваю автоматическое продолжение работы.")
-            return "Решение записано, но Hermes не принял автоматическое продолжение. Требуется проверка сессии."
+                return ("Замечания сохранены. Передаю их для обсуждения и доработки."
+                        if row["decision"] == "changes" else "Принято. Передаю задачу на продолжение.")
+            return "Решение сохранено, но продолжить работу не удалось. Обратитесь к администратору и перешлите ему это сообщение."
         except Exception:
             self.tokens.resume_outcome(token, "unknown")
-            return "Решение записано; исход автоматического продолжения неизвестен. Повтор работы остановлен."
+            return "Решение сохранено, но я не знаю, продолжилась ли работа. Чтобы не выполнить её дважды, я остановился. Обратитесь к администратору и перешлите ему это сообщение."
 
     def observe_resume(self, session_id="", user_message=None, **kwargs):
         """Наблюдать завершённый native turn без изменения ответа и повторного dispatch."""
@@ -717,7 +717,7 @@ class TelegramPlugin:
             if notify:
                 entry = self._owner_session(row["session_id"])
                 if entry is not None:
-                    await self._notify("Hermes остановил работу, но Brai не подтвердил завершение начатого Хода. Проверьте его состояние.",
+                    await self._notify("Работа остановилась, но её завершение не подтверждено. Обратитесь к администратору и перешлите ему это сообщение.",
                                        str(entry.origin.chat_id), thread_id)
 
     async def recover_durable_agent_attempts(self):
@@ -936,7 +936,7 @@ class TelegramPlugin:
                 voice = "[[audio_as_voice]]\n" if Path(path).suffix.lower() in {".ogg", ".opus"} else ""
                 return f'\n{voice}MEDIA:"{path}"\n'
             except Exception:
-                return "[Файл не отправлен: Brai не подтвердил доступ к артефакту.]"
+                return "[Не удалось отправить файл. Обратитесь к администратору и перешлите ему это сообщение.]"
 
         rewritten = self.output_files.sub(replace, response_text)
         # Native Hermes treats any string as a transformed final, even if equal.
@@ -985,7 +985,7 @@ class TelegramPlugin:
             code = str(error) if isinstance(error, BridgeError) and str(error) in {
                 "INVALID_ARGUMENT", "SESSION_CONTEXT_INVALID", "TELEGRAM_UNAVAILABLE",
                 "HUMAN_OUTPUT_REQUIRED", "SEND_UNCONFIRMED"} else "CONFIRMATION_FAILED"
-            message = HUMAN_OUTPUT_REQUIRED if code == "HUMAN_OUTPUT_REQUIRED" else "Кнопки не отправлены. Подтверждение пользователя не получено."
+            message = HUMAN_OUTPUT_REQUIRED if code == "HUMAN_OUTPUT_REQUIRED" else "Не удалось отправить кнопку подтверждения. Обратитесь к администратору и перешлите ему это сообщение."
             return json.dumps({"ok": False, "code": code, "message": message}, ensure_ascii=False)
 
     async def submit_feedback(self, args, **kwargs):
@@ -1016,8 +1016,8 @@ class TelegramPlugin:
                 "INVALID_ARGUMENT", "HUMAN_FINAL_DECISION_REQUIRED", "HUMAN_OUTPUT_MAPPING_REQUIRED",
                 "STALE_ACTION", "OWNER_MESSAGE_REQUIRED", "OUTCOME_UNKNOWN"} else "RESULT_UNCONFIRMED"
             message = ("Напиши явно: «принимаю результат» или «нужно доработать»." if code == "HUMAN_FINAL_DECISION_REQUIRED"
-                else "Для нескольких результатов пришли JSON с точными названиями всех выходов и отдельным полем decision (success или changes)." if code == "HUMAN_OUTPUT_MAPPING_REQUIRED"
-                else "Практический результат не подтверждён. Проверь текущий Ход и его состояние.")
+                else "Не удалось сохранить несколько результатов. Обратитесь к администратору и перешлите ему это сообщение." if code == "HUMAN_OUTPUT_MAPPING_REQUIRED"
+                else "Не удалось сохранить результат. Обратитесь к администратору и перешлите ему это сообщение.")
             return json.dumps({"ok": False, "code": code, "message": message}, ensure_ascii=False)
 
     async def _result(self, args, context):
@@ -1290,14 +1290,14 @@ class TelegramPlugin:
             try:
                 cancelled = await self._cleanup(row, "cancelled")
                 self.tokens.resolve(token)
-                notice = ("Незавершённая попытка отправки отменена. Запросите кнопки ещё раз." if cancelled
-                          else "Кнопка Brai больше не активна. Состояние Action уже изменилось.")
+                notice = ("Не удалось отправить кнопку. Попросите меня отправить её ещё раз." if cancelled
+                          else "Эта кнопка больше не работает: состояние задачи изменилось.")
                 await self._notify(notice, row["chat_id"], row["thread_id"])
                 return
             except Exception:
                 if not warned:
                     try:
-                        await self._notify("Кнопка Brai неактивна; отмена попытки не подтверждена. Проверьте Action.", row["chat_id"])
+                        await self._notify("Кнопка больше не работает, но отмена не подтверждена. Обратитесь к администратору и перешлите ему это сообщение.", row["chat_id"])
                     except Exception:
                         pass
                     warned = True
@@ -1338,7 +1338,7 @@ class TelegramPlugin:
             if not await asyncio.to_thread(self._session_matches, row) or not await self._current(row):
                 await self._cancel(row, "cancelled")
                 self.tokens.resolve(match[1])
-                notice = "Задача, версия или исходная беседа изменились. Работа не запущена."
+                notice = "Задача или разговор изменились, поэтому работа не началась. Попросите меня проверить задачу и отправить новую кнопку."
             else:
                 self.tokens.decide(match[1], decision)
                 result = await asyncio.to_thread(self.bridge.call, "actions.complete", {
