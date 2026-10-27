@@ -6,8 +6,10 @@ import { usePathname } from "next/navigation";
 import type { AccountSession as InitialSession } from "@/server/account-session";
 import type { WebAgentMode } from "@/server/web-config";
 import Timer from "./timer";
-// AIDEV-NOTE: Codex не подключается в Telegram-режиме; прежний режим остаётся доступным отдельно.
-import AgentScreen from "./agent/screen";
+// AIDEV-NOTE: Прежний импорт сохранён для будущего возврата Codex в Telegram-режим.
+// import AgentScreen from "./agent/screen";
+// Отдельный dev_agent продолжает использовать существующий экран.
+import ExistingAgentScreen from "./agent/screen";
 import TelegramAgentEntry from "./agent/telegram-entry";
 import DoScreen from "./do/screen";
 import Navigation from "./navigation";
@@ -105,7 +107,7 @@ function AccountScreens({ view, user, agentMode, telegramBotUsername, telegramOb
   <div className="workspace-screen" hidden={view !== "agent"}>
    {/* AIDEV-NOTE: Прежнее подключение сохранено до возвращения чатов Codex. */}
    {/* {agentMode === "hermes_telegram" ? <TelegramAgentEntry username={telegramBotUsername} /> : <AgentScreen {...props} active={view === "agent"} />} */}
-   {agentMode === "hermes_telegram" ? <TelegramAgentEntry username={telegramBotUsername} active={view === "agent"} enabled={telegramObserverEnabled} /> : <AgentScreen {...props} active={view === "agent"} />}
+   {agentMode === "hermes_telegram" ? <TelegramAgentEntry username={telegramBotUsername} active={view === "agent"} enabled={telegramObserverEnabled} /> : <ExistingAgentScreen {...props} active={view === "agent"} />}
   </div>
   <div className="workspace-screen workspace-timer" hidden={view !== "timer"}><Timer userId={user.id} onUnauthorized={onUnauthorized} accountMessage={accountMessage} onElapsed={onTimerElapsed} /></div>
   <div className="workspace-screen" hidden={view !== "do"}>{(visitedDo || view === "do") && <DoScreen {...props} active={view === "do"} />}</div>
