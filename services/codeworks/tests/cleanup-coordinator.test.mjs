@@ -62,6 +62,27 @@ test('неподтверждённая доставка не закрывает�
   assert.equal(result.state,'waiting_decision');assert.equal(inspected,false);
 });
 
+test('потеря подтверждения после внешней проверки не завершает транзакцию очистки',async()=>{
+  const publication={project_id:'project',workspace_id:'workspace',original_attempt_id:'a',source_accepted_sha:'source',installed_commit:'installed',deployment_evidence_id:'evidence',deployment_operation_id:'rollout',delivery_release_operation_id:'b'};
+  const item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',outcome:'released',step:'inspect',state:'pending',expected:{},evidence:{publication}};
+  const composition={components:[]},receipt={verified:true,operation_id:'rollout',project_id:'project',target:'dev',commit_sha:'installed',composition_digest:'digest',composition};
+  const row={requested_sha:'source',closed_at:'2026-01-01',state:'failed',original_status:'failed',installed_operation_id:'rollout',commit_sha:'installed',target:'dev',project_id:'project',composition_digest:'digest',composition,receipt,rollout_status:'succeeded',evidence_at:'2026-01-02',delivery_release_id:'b',delivery_release_state:'succeeded',delivery_operation_status:'succeeded',delivery_release_details:{primary:{target:'dev',merged:true,merge_sha:'installed',deployment_evidence_id:'evidence'}}};
+  const empty={branch:{oid:null},ownership:{oid:null},remote:{known:true,oid:null},tracking:{oid:null},worktree:{registered:false,pathExists:false}};
+  let reads=0,removed=false,rolledBack=false;
+  const db={query:async(sql)=>{
+    if(sql.includes('SELECT a.requested_sha'))return {rows:++reads===1?[row]:[]};
+    if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};
+    if(sql.includes('SELECT 1 FROM codeworks.write_calls')||sql.includes('SELECT 1 FROM codeworks.release_queue')||sql.includes('SELECT 1 FROM codeworks.operations'))return {rowCount:0};
+    if(sql.includes('SELECT * FROM codeworks.cleanup_obligations'))return {rows:[item]};
+    if(sql==='ROLLBACK')rolledBack=true;
+    if(sql.includes('UPDATE codeworks.workspaces SET removed_at'))removed=true;
+    if(sql.includes('UPDATE codeworks.cleanup_obligations'))return {rowCount:1,rows:[{state:'waiting_decision'}]};
+    return {rowCount:0,rows:[]};
+  }};
+  const result=await advanceCleanup(db,item,{id:'project'},{id:'workspace',project_id:'project',kind:'feature'},{git:{inspectResources:async()=>empty},codeIndex:{inspect:async()=>({complete:true,owner:{present:false},resources:{collections:[],metadataPoints:[]}})}});
+  assert.equal(reads,2);assert.equal(rolledBack,true);assert.equal(removed,false);assert.equal(result.state,'waiting_decision');
+});
+
 test('историческую область удаляют только после повторной проверки разрешённого архива',async()=>{
   for(const [outcome,valid] of [['cancelled',false],['cancelled',true],['released',true],['unused',true],['transferred',true]]){
     const archive={path:'/backup/area.bundle',sha256:'a'.repeat(64),heads:[{ref:'refs/heads/task',oid:'b'.repeat(40)}],authorization_ref:'approved'};

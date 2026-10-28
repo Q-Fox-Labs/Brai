@@ -58,6 +58,10 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
       }
       const locked=(await db.query('SELECT * FROM codeworks.cleanup_obligations WHERE id=$1 FOR UPDATE',[id])).rows[0];
       if(!locked||Number(locked.epoch)!==epoch||locked.owner_workflow_id!==owner||!['pending','running','retry'].includes(locked.state))throw Error('CLEANUP_FENCE_LOST');
+      if(locked.outcome==='released'&&locked.evidence?.publication&&!await recheckPublication(db,project,workspace,locked.evidence.publication,{ignoreOperationId:locked.source_operation_id,lock:true})){
+        await db.query('ROLLBACK');
+        return await wait('DELIVERY_PROOF_CHANGED');
+      }
       if(obligation.workspace_id){
         await db.query('UPDATE codeworks.workspaces SET removed_at=COALESCE(removed_at,now()) WHERE id=$1',[workspace.id]);
         await db.query("UPDATE codeworks.workflow_registry SET lifecycle='removed',updated_at=now() WHERE workspace_id=$1",[workspace.id]);
