@@ -141,8 +141,18 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
           if(method==='cleanup'&&!await db.successfulRelease(w.id)&&!(await db.query("SELECT 1 FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state<>'done'",[w.id])).rowCount)throw new Fault('CONFLICT','Cleanup requires a saved finalization obligation.');
           if(method==='release'&&!p.github)throw new Fault('CONFLICT','GitHub release is not configured.');
         }
+        // AIDEV-NOTE: Допуск команд и hook писателя используют один порядок блокировок.
+        await db.query?.('SELECT id FROM codeworks.workspaces WHERE id=$1 FOR UPDATE',[w.id]);
+        await db.query?.('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[w.id]);
         const lifecycle=await db.lifecycle?.(w.id);
-        if(lifecycle&&(lifecycle.state!=='open'||lifecycle.lifecycle!=='active')&&!(method==='cleanup'&&lifecycle.lifecycle==='closing'&&lifecycle.state==='draining'))throw new Fault('CLEANUP_ALREADY_STARTED','Task no longer accepts new changes.');
+        let superseded=null;
+        if(lifecycle?.lifecycle==='closing'&&['workspace.cancel','workspace.transfer'].includes(method)){
+          superseded=(await db.query("SELECT * FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state='waiting_decision' AND step='inspect' AND evidence->>'route_pending'='true' FOR UPDATE",[w.id])).rows[0];
+          if(!superseded)throw new Fault('CLEANUP_ALREADY_STARTED','Cleanup already began; reconcile the saved route.');
+          const guard=(await db.query('SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired',['execution:workspace:'+w.id])).rows[0];
+          if(!guard?.acquired)throw new Fault('BUSY','The previous route is being reconciled.');
+        }
+        if(lifecycle&&(lifecycle.state!=='open'||lifecycle.lifecycle!=='active')&&!superseded&&!(method==='cleanup'&&lifecycle.lifecycle==='closing'&&lifecycle.state==='draining'))throw new Fault('CLEANUP_ALREADY_STARTED','Task no longer accepts new changes.');
         if(method==='release.close'){
           const attempt=await db.releaseOperation(args.release_operation_id,w.id);
           if(!attempt)throw new Fault('NOT_FOUND');
@@ -153,6 +163,16 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         const id=existing?.id??randomUUID();
         if(!existing){
           await db.insertOperation({id,project_id:p.id,workspace_id:w.id,executor_id:executorId,kind:method,status:'pending',step:'intent',request:args,result:null});
+          if(['workspace.cancel','workspace.transfer'].includes(method)&&lifecycle){
+            const outcome=method==='workspace.cancel'?'cancelled':'transferred';
+            if(superseded){
+              const history=[...(superseded.evidence?.route_history??[]),{operation_id:superseded.source_operation_id,outcome:superseded.outcome}];
+              await db.query("UPDATE codeworks.cleanup_obligations SET source_operation_id=$2,outcome=$3,evidence=$4::jsonb,epoch=epoch+1,blocker='ROUTE_RECONCILIATION_REQUIRED',updated_at=now() WHERE id=$1",[superseded.id,id,outcome,JSON.stringify({route_pending:true,route_history:history})]);
+              await db.query("UPDATE codeworks.operations SET status='failed',step='ROUTE_SUPERSEDED',updated_at=now() WHERE id=$1 AND status<>'succeeded'",[superseded.source_operation_id]);
+              await db.query("UPDATE codeworks.commands SET state='done',updated_at=now() WHERE operation_id=$1",[superseded.source_operation_id]);
+            }else await db.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,source_operation_id,outcome,step,state,evidence,owner_workflow_id,epoch,blocker) VALUES($1,$2,$3,$4,$5,$6,'inspect','waiting_decision',$7::jsonb,$8,1,'ROUTE_RECONCILIATION_REQUIRED')",[randomUUID(),p.id,w.id,'workspace:'+w.id,id,outcome,JSON.stringify({route_pending:true}),lifecycle.workflow_id]);
+            await db.query("UPDATE codeworks.workflow_registry SET state='draining',lifecycle='closing',outcome=$2,updated_at=now() WHERE workspace_id=$1",[w.id,outcome]);
+          }
           if(method==='release'){
             let details={},retryOf=null;
             const previous=await db.latestRelease(w.id);

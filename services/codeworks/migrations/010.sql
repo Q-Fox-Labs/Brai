@@ -77,7 +77,10 @@ BEGIN
     VALUES(identity,NEW.project_id,NEW.workspace_id,CASE WHEN NEW.workspace_id IS NULL THEN NEW.id END,'temporal') ON CONFLICT(workflow_id) DO NOTHING;
   SELECT * INTO registry FROM codeworks.workflow_registry WHERE workflow_id=identity FOR UPDATE;
   IF registry.owner <> 'temporal' OR NOT ((registry.state='open' AND registry.lifecycle='active') OR
-     (NEW.kind='cleanup' AND registry.state='draining' AND registry.lifecycle='closing')) THEN
+     (NEW.kind='cleanup' AND registry.state='draining' AND registry.lifecycle='closing') OR
+     (NEW.kind IN ('workspace.cancel','workspace.transfer') AND registry.state='draining' AND registry.lifecycle='closing'
+      AND EXISTS(SELECT 1 FROM codeworks.cleanup_obligations o WHERE o.workspace_id=NEW.workspace_id AND o.step='inspect'
+        AND o.state='waiting_decision' AND o.evidence->>'route_pending'='true'))) THEN
     RAISE EXCEPTION 'CODEWORKS_TASK_CLOSED' USING ERRCODE='23505';
   END IF;
   UPDATE codeworks.workflow_registry SET next_sequence=next_sequence+1,updated_at=now() WHERE workflow_id=identity RETURNING * INTO registry;
