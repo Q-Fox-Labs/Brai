@@ -10,7 +10,7 @@ def register_cli(subparser):
     flush = commands.add_parser("flush", help="Retry and verify pending MemOS writes")
     flush.add_argument("--timeout", type=float, default=30)
     flush.set_defaults(func=cmd_flush)
-    for name in ('prepare', 'freeze', 'resume', 'purge', 'handoff', 'handoff-empty'):
+    for name in ('prepare', 'freeze', 'resume', 'purge', 'handoff', 'handoff-empty', 'quality-plan', 'quality-apply'):
         admin = commands.add_parser(name, help='Explicit configured profile/owner/managed-cubes memory maintenance')
         profile_choices = {'choices': ['default']} if name in ('purge', 'handoff') else {}
         owner_choices = {'choices': ['root']} if name in ('purge', 'handoff') else {}
@@ -23,6 +23,9 @@ def register_cli(subparser):
             admin.add_argument('--new-epoch')
         if name == 'handoff-empty':
             admin.add_argument('--new-epoch', required=True)
+        if name == 'quality-apply':
+            admin.add_argument('--plan-id', required=True)
+            admin.add_argument('--plan-sha', required=True)
         if name == 'prepare':
             admin.add_argument('--memory-epoch')
             admin.add_argument('--router-url')
@@ -76,6 +79,10 @@ def cmd_admin(args):
             if value is not None:
                 router[key] = value
         result = admin.prepare(scope, router, args.memory_epoch)
+    elif name == 'quality-plan':
+        result = admin.quality_plan(scope)
+    elif name == 'quality-apply':
+        result = admin.quality_apply(scope, args.plan_id, args.plan_sha, args.timeout)
     elif name == 'handoff-empty':
         result = admin.handoff_empty(scope, args.new_epoch, args.timeout)
     elif name in ('purge', 'handoff'):

@@ -141,14 +141,19 @@ class Client:
         return next((row for row in rows if row.get("id") == memory_id
                      and (include_private or not business_private(row))), None)
 
-    def search(self, query, session_id, *, top_k=6, relativity=0.45):
+    def search(self, query, session_id, *, top_k=None, relativity=0.45):
+        """Искать без скрытого лимита; None выбирает все хранимые кандидаты."""
+        if top_k is None:
+            top_k = len(self.get({}))
+        if not top_k:
+            return []
         result = self.request("/product/search", {
             "user_id": self.user_id, "readable_cube_ids": [self.cube_id],
             "session_id": session_id or None, "query": query, "top_k": top_k,
             "mode": "fast", "relativity": relativity, "rerank": True, "dedup": "mmr",
             "include_preference": False, "search_tool_memory": False, "include_skill_memory": False,
             "internet_search": False, "chat_history": [],
-        }, timeout=min(self.timeout, 5))
+        }, timeout=self.timeout)
         return [row for row in memory_rows(result)
                 if (row.get("metadata") or {}).get("user_id") == self.user_id and not business_private(row)]
 

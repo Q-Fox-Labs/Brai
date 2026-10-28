@@ -129,7 +129,9 @@ class MemOSProvider(MemoryProvider):
     @staticmethod
     def _validate(config):
         Client(config)
-        for key, low, high in (("top_k", 1, 20), ("relativity", 0, 1), ("context_chars", 1000, 20000),
+        if type(config['top_k']) is not int or config['top_k'] < 1:
+            raise ValueError('Invalid MemOS setting: top_k')
+        for key, low, high in (("relativity", 0, 1), ("context_chars", 1000, 20000),
                                ("excerpt_chars", 200, 6000), ("request_timeout", 1, 120),
                                ("tool_write_timeout", 1, 60), ("flush_timeout", 1, 60)):
             if not low <= float(config[key]) <= high:
@@ -427,8 +429,11 @@ class MemOSProvider(MemoryProvider):
             query = str(args.get("query") or "").strip()
             if not query:
                 raise ValueError("query is required")
-            top_k = max(1, min(20, int(args.get("top_k", self.config["top_k"]))))
-            rows = (self.routing.search(query, sid, top_k, args.get('project'), args.get('cubes'))
+            top_k = args.get('top_k')
+            if top_k is not None and (type(top_k) is not int or top_k < 1):
+                raise ValueError('top_k must be a positive integer or omitted for all matches')
+            rows = (self.routing.search(query, sid, top_k, args.get('project'), args.get('cubes'),
+                                        bool(args.get('include_archive', False)))
                     if self.routing else self._search(query, sid, top_k))
             return {"status": "ok", "memories": [public_memory(row) for row in rows]}
         if tool_name == "memos_remember":

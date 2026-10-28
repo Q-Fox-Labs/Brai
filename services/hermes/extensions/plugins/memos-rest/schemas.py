@@ -1,3 +1,5 @@
+# ABOUTME: Описывает инструменты памяти, доступные модели Hermes.
+# ABOUTME: Явный поиск не ограничивается размером автоматической подстановки контекста.
 """Provider tools, separate from Hermes's built-in memory tool."""
 
 
@@ -9,7 +11,7 @@ def schema(name, description, properties=None, required=()):
 TOOLS = [
     schema("memos_search", "Search the existing MemOS memory across sessions. Returns ranked fragments with IDs and provenance.", {
         "query": {"type": "string", "description": "Question or information to recall."},
-        "top_k": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Maximum results, default 6."},
+        "top_k": {"type": "integer", "minimum": 1, "description": "Optional result count, e.g. 1000; omitted returns all relevant matches. No fixed upper cap."},
     }, ("query",)),
     schema("memos_remember", "Explicitly store a fact, preference or decision in MemOS. Reports verified only after reading the saved record back; pending means delivery is still queued.", {
         "content": {"type": "string", "description": "Text to remember. Never intentionally include credentials or other secrets."},
@@ -31,6 +33,7 @@ for tool in ROUTED_TOOLS:
     if tool['name'] in ('memos_search', 'memos_remember'):
         tool['parameters']['properties']['project'] = {'type': 'string', 'description': 'Explicit approved project catalog ID; overrides session binding.'}
     if tool['name'] == 'memos_search':
+        tool['parameters']['properties']['include_archive'] = {'type': 'boolean', 'description': 'Also search original dialogue, including pending or rejected material. Default false: only useful extracted facts.'}
         tool['parameters']['properties']['cubes'] = {'type': 'array', 'items': {'type': 'string'}, 'description': 'Optional approved initial cube scope; may widen only inside authorized scope.'}
     if tool['name'] == 'memos_remember':
         tool['parameters']['properties']['operation_id'] = {'type': 'string', 'description': 'Optional stable request ID for repeat/recovery.'}

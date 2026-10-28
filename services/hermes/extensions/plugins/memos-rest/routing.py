@@ -1,9 +1,11 @@
+# ABOUTME: Доставляет проверенные факты и ищет их в разрешённых кубах памяти.
+# ABOUTME: Переписка хранится отдельно от фактов; автор и область проверяются локально.
 """Profile-local multi-cube worker. Durable jobs pin extraction before delivery."""
 import json
 from pathlib import Path
 
 from .client import Client, MemOSError
-from .router import Catalog, SemanticRouter, stable_id
+from .router import Catalog, SemanticRouter, stable_id, QUALITY_VERSION
 
 
 class RoutedRuntime:
@@ -107,6 +109,28 @@ class RoutedRuntime:
         self.writable(job)
         return self.client(cube, job).execute(unit, lambda value: checkpoint(job))
 
+    def conversation_context(self, job):
+        """Восстановить назначение из реплик того же автора в той же сессии.
+
+        Контекст не становится источником цитат нового факта. Сохраняются
+        начальные цели и последние уточнения, без доступа к чужим сообщениям.
+        """
+        body = job['body']
+        rows = self.scoped_rows('main', {'session_id': body['session_id']}, body['info']['hermes_author_id'])
+        seen, context = set(), []
+        for row in rows:
+            info = row['metadata']['info']
+            event = info.get('hermes_event_id')
+            if info.get('hermes_kind') not in ('turn', 'explicit', 'native') or event in seen:
+                continue
+            seen.add(event)
+            context.extend(m['content'] for m in info.get('hermes_messages', []) if m.get('role') == 'user')
+        if not context:
+            context = [m['content'] for m in body['messages'] if m.get('role') == 'user']
+        selected = context if sum(map(len, context)) <= 48000 else context[:2] + context[-12:]
+        return [text if len(text) <= 4000 else text[:2000] + '\n[context excerpt]\n' + text[-2000:]
+                for text in selected]
+
     def execute(self, job, checkpoint):
         self.writable(job)
         if job.get('operation') == 'scoped_delete':
@@ -139,15 +163,22 @@ class RoutedRuntime:
             job['archive'] = {'body': job['body']}
             checkpoint(job)
         archive_ids = self._deliver('main', job['archive'], job, checkpoint)
+        if 'facts' in job and job.get('quality_version') != QUALITY_VERSION:
+            # AIDEV-NOTE: Сохранённый старым worker план не должен занести мусор
+            # после обновления. Старые частичные копии удаляются только после нового read-back.
+            job['stale_quality'] = True
+            job.pop('facts'); job.pop('units', None)
+            checkpoint(job)
         if 'facts' not in job:
             from .provider import scrub
-            facts = scrub(self.router.extract(job['body']['messages'], job.get('project')))
+            facts = scrub(self.router.extract(job['body']['messages'], job.get('project'), self.conversation_context(job)))
             if job.get('replacement_id') and len(facts) != 1:
                 raise MemOSError('A logical correction must produce exactly one grounded fact')
             if job.get('shared_infra') and (not facts or any('infra' not in f['memberships'] for f in facts)):
                 raise MemOSError('Shared infrastructure requires grounded infra membership')
             job['facts'] = facts
             job['classification'] = 'classified'
+            job['quality_version'] = QUALITY_VERSION
             checkpoint(job)
         ids = list(archive_ids)
         units = job.setdefault('units', {})
@@ -160,8 +191,9 @@ class RoutedRuntime:
                 key = logical_id + ':' + cube
                 if key not in units:
                     info = {**job['body']['info'], 'hermes_kind': 'fact', 'hermes_classification': 'classified',
-                            'hermes_logical_id': logical_id, 'hermes_event_id': stable_id([logical_id, cube, job['event_id']]),
+                            'hermes_logical_id': logical_id, 'hermes_event_id': stable_id([logical_id, cube, job['event_id'], QUALITY_VERSION]),
                             'hermes_source_event': job['event_id'], 'hermes_source_ids': archive_ids,
+                            'hermes_quality_version': QUALITY_VERSION,
                             'hermes_source': fact['source'], 'hermes_status': fact['status'],
                             'hermes_spheres': fact['spheres'], 'hermes_projects': fact['projects'],
                             'hermes_memberships': fact['memberships'], 'hermes_primary_cube': fact['memberships'][0],
@@ -175,6 +207,13 @@ class RoutedRuntime:
                                          'messages': [{'role': 'user', 'content': fact['text']}], 'info': info}}
                     checkpoint(job)
                 ids.extend(self._deliver(cube, units[key], job, checkpoint))
+        if job.get('stale_quality'):
+            author = job['body']['info']['hermes_author_id']
+            for cube in self.catalog.cubes:
+                self.writable(job)
+                rows = self.scoped_rows(cube, {'hermes_source_event': job['event_id']}, author)
+                self.client(cube).delete([r['id'] for r in rows
+                    if r['metadata']['info'].get('hermes_kind') == 'fact' and r['id'] not in ids])
         if job.get('replacement_id'):
             author = job['body']['info']['hermes_author_id']
             for cube in self.catalog.cubes:
@@ -228,7 +267,8 @@ class RoutedRuntime:
             row['_classification'] = ('classified' if receipt.get('fact_count') else 'unclassified') if receipt else 'pending/unclassified'
         return row
 
-    def search(self, query, sid, top_k, project=None, cubes=None):
+    def search(self, query, sid, top_k=None, project=None, cubes=None, include_archive=False):
+        """Вернуть релевантные факты без скрытого потолка; архив включается явно."""
         config = self.reload()
         if not config.get('enabled', True) or config.get('suspended', False):
             return []
@@ -245,21 +285,26 @@ class RoutedRuntime:
         selected = selected or self.catalog.cubes
         candidates = {}
         def collect(cube):
-            for row in self.client(cube).search(query, sid, top_k=20, relativity=float(config.get('relativity', .45))):
+            client = self.client(cube)
+            # AIDEV-NOTE: Лимит до фильтра автора/дедупликации теряет воспоминания.
+            count = len(client.get({}))
+            if not count:
+                return
+            for row in client.search(query, sid, top_k=count, relativity=float(config.get('relativity', .45))):
                 if not self.allowed(row, config):
                     continue
                 info = row['metadata']['info']
                 if info.get('hermes_kind') == 'checkpoint':
                     continue
-                decorated = self.decorate(row)
-                if info.get('hermes_kind') != 'fact' and decorated.get('_classification') == 'classified':
+                if info.get('hermes_kind') != 'fact' and not include_archive:
                     continue
+                decorated = self.decorate(row)
                 key = info.get('hermes_logical_id') or row['id']
                 if key not in candidates:
                     candidates[key] = decorated
         for cube in selected:
             collect(cube)
-        if len(candidates) < top_k:
+        if top_k is None or len(candidates) < top_k:
             for cube in self.catalog.cubes:
                 if cube not in selected:
                     collect(cube)
