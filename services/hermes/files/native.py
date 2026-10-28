@@ -196,6 +196,8 @@ def should_queue_inbound_set(event):
         return True
     if not refs:
         return False
+    if (getattr(event, 'metadata', None) or {}).get('recovered'):
+        return True
     with store().db() as db:
         for group in {item['groupId'] for item in refs}:
             row = db.execute('SELECT admitted FROM groups WHERE identity=?', (group,)).fetchone()
@@ -281,6 +283,10 @@ def inbound_events(event):
 def release_event(event):
     """Освободить входные копии после обработки и доставки."""
     lease = getattr(event, '_brai_file_lease', None)
+    if (lease is None and not getattr(event, '_brai_capture_leases', [])
+            and not getattr(event, 'media_urls', [])
+            and not (getattr(event, 'metadata', None) or {}).get('_brai_artifacts')):
+        return
     if lease:
         lease.__exit__(None, None, None)
         event._brai_file_lease = None
@@ -495,9 +501,10 @@ def final_text(text, operation):
         for item in data['items']:
             if set(item) - {'artifactId', 'caption', 'presentation'} or not isinstance(item.get('caption', ''), str):
                 raise FileError('INVALID_FILE_SET')
-            value = files.fetch(item['artifactId'])
-            items.append({'file': files.checked(value), 'caption': item.get('caption', ''),
-                          'presentation': item.get('presentation') or presentation(value)})
+            with files.lock('cache'):
+                value = files.fetch(item['artifactId'])
+                items.append({'file': files.checked(value), 'caption': item.get('caption', ''),
+                              'presentation': item.get('presentation') or presentation(value)})
         replacements.append((match.start(), match.end(), list(range(len(items)))))
         masked = text[:match.start()] + ' ' * (match.end() - match.start()) + text[match.end():]
     else:
@@ -505,9 +512,10 @@ def final_text(text, operation):
     def add(match, path, caption=''):
         if explicit:
             raise FileError('MIXED_FILE_SET_FORMAT')
-        value = files.resolve(local_path(path), ['final', operation, path])
-        index = len(items)
-        items.append({'file': files.checked(value), 'caption': caption, 'presentation': presentation(value)})
+        with files.lock('cache'):
+            value = files.resolve(local_path(path), ['final', operation, path])
+            index = len(items)
+            items.append({'file': files.checked(value), 'caption': caption, 'presentation': presentation(value)})
         replacements.append((match.start(), match.end(), [index]))
         return match.group(0)
     active_sub(_MEDIA, lambda match: add(match, next(v for v in match.groups() if v is not None)), masked)
@@ -558,9 +566,10 @@ def output_items(paths, captions=None):
     if row:
         data = json.loads(row['payload'])
         return [{**item, '_setId': row['identity']} for item in data['items']], data['mode']
-    values = [files.resolve(path, ['delivery', _operation.get(), path]) for path in paths]
-    return [{'file': files.checked(value), 'caption': (captions or [''] * len(paths))[index],
-             'presentation': presentation(value)} for index, value in enumerate(values)], 'files'
+    with files.lock('cache'):
+        values = [files.resolve(path, ['delivery', _operation.get(), path]) for path in paths]
+        return [{'file': files.checked(value), 'caption': (captions or [''] * len(paths))[index],
+                 'presentation': presentation(value)} for index, value in enumerate(values)], 'files'
 
 
 def release_set(identity):
@@ -700,6 +709,46 @@ async def deliver_attachments(adapter, event, media_files, local_files, metadata
 
 def install_adapter(adapter):
     """Охватить прямые отправки cron/send_message вне final response."""
+    while_active = getattr(adapter, '_handle_message_while_active', None)
+    if while_active is not None:
+        @wraps(while_active)
+        async def defer_recovered_input(event, session_key):
+            if not (getattr(event, 'metadata', None) or {}).get('recovered'):
+                return await while_active(event, session_key)
+            # Keep restored files out of the pending slot holding new user text.
+            task = getattr(adapter, '_session_tasks', {}).get(session_key)
+            if task is not None:
+                waiting = getattr(adapter, '_brai_recovery_waiting', None)
+                if waiting is None:
+                    waiting = adapter._brai_recovery_waiting = set()
+                if task not in waiting:
+                    waiting.add(task)
+                    def finished(done):
+                        waiting.discard(done)
+                        schedule_recovery(adapter)
+                    task.add_done_callback(finished)
+            elif getattr(adapter, '_brai_recovery_delay', None) is None:
+                def retry():
+                    adapter._brai_recovery_delay = None
+                    schedule_recovery(adapter)
+                adapter._brai_recovery_delay = asyncio.get_running_loop().call_later(1, retry)
+            await asyncio.to_thread(release_event, event)
+            return None
+        adapter._handle_message_while_active = defer_recovered_input
+    notify_error = getattr(adapter, '_notify_turn_error', None)
+    if notify_error is not None:
+        @wraps(notify_error)
+        async def notify_file_error(event, error):
+            # A restored attachment belongs to its old turn, not the current text reply.
+            if (getattr(event, 'metadata', None) or {}).get('recovered') and isinstance(error, FileError):
+                code = str(error)
+                logging.getLogger(__name__).warning('BRAI_FILES_RECOVERED_INPUT_FAILED code=%s',
+                    code if re.fullmatch(r'[A-Z_]{1,80}', code) else 'FILE_OPERATION_FAILED')
+                await _notify_observer('observe_files', event, 'failed',
+                    (getattr(event, 'metadata', None) or {}).get('_brai_artifacts', []))
+                return None
+            return await notify_error(event, error)
+        adapter._notify_turn_error = notify_file_error
     send = getattr(adapter, 'send', None)
     if send is not None:
         @wraps(send)
