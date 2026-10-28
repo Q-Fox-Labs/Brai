@@ -77,6 +77,7 @@
       "services/codeworks/src/code-index-engine.mjs",
       "services/codeworks/migrations/009.sql",
       "services/codeworks/migrations/010.sql",
+      "services/codeworks/migrations/011.sql",
       "services/codeworks/src/write-admission.mjs",
       "services/codeworks/src/cleanup-coordinator.mjs",
       "services/codeworks/src/reconciler.mjs",
@@ -212,7 +213,7 @@
       "Git with merge-tree --write-tree; flock (util-linux)",
       "GitHub CLI (gh), operator authentication; origin HTTPS matches registered repository",
       "Existing GitHub OAuth operator identity with repo, workflow, read:packages/write:packages; Ed25519 identity in a protected file; durable Codeworks PG evidence backup; first owner catalog-v1 publication links the repository and inherits its Actions read access",
-      "Temporal server compatible with SDK 1.24.0; configured namespace and task queue; Codeworks migration 010"
+      "Temporal server compatible with SDK 1.24.0; configured namespace and task queue; Codeworks migration 011"
     ]
   },
   "deploy": {
