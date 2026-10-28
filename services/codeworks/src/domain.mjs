@@ -147,7 +147,7 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         const lifecycle=await db.lifecycle?.(w.id);
         let superseded=null;
         if(lifecycle?.lifecycle==='closing'&&['workspace.cancel','workspace.transfer'].includes(method)){
-          superseded=(await db.query("SELECT * FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state='waiting_decision' AND step='inspect' AND evidence->>'route_pending'='true' FOR UPDATE",[w.id])).rows[0];
+          superseded=(await db.query("SELECT * FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state IN ('pending','retry','waiting_decision') AND step='inspect' AND expected='{}'::jsonb FOR UPDATE",[w.id])).rows[0];
           if(!superseded)throw new Fault('CLEANUP_ALREADY_STARTED','Cleanup already began; reconcile the saved route.');
           const guard=(await db.query('SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired',['execution:workspace:'+w.id])).rows[0];
           if(!guard?.acquired)throw new Fault('BUSY','The previous route is being reconciled.');
@@ -162,11 +162,14 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         if(existing?.status==='failed')existing=null;
         const id=existing?.id??randomUUID();
         if(!existing){
+          // AIDEV-NOTE: Новый маршрут атомарно возвращает не начатую очистку в сверку; запись не открывается.
+          if(superseded)await db.query("UPDATE codeworks.cleanup_obligations SET state='waiting_decision',evidence=jsonb_set(evidence,'{route_pending}','true'::jsonb),updated_at=now() WHERE id=$1",[superseded.id]);
           await db.insertOperation({id,project_id:p.id,workspace_id:w.id,executor_id:executorId,kind:method,status:'pending',step:'intent',request:args,result:null});
           if(['workspace.cancel','workspace.transfer'].includes(method)&&lifecycle){
             const outcome=method==='workspace.cancel'?'cancelled':'transferred';
             if(superseded){
-              const history=[...(superseded.evidence?.route_history??[]),{operation_id:superseded.source_operation_id,outcome:superseded.outcome}];
+              const {route_history:priorHistory,...priorEvidence}=superseded.evidence??{};
+              const history=[...(priorHistory??[]),{operation_id:superseded.source_operation_id,outcome:superseded.outcome,evidence:priorEvidence}];
               await db.query("UPDATE codeworks.cleanup_obligations SET source_operation_id=$2,outcome=$3,evidence=$4::jsonb,epoch=epoch+1,blocker='ROUTE_RECONCILIATION_REQUIRED',updated_at=now() WHERE id=$1",[superseded.id,id,outcome,JSON.stringify({route_pending:true,route_history:history})]);
               await db.query("UPDATE codeworks.operations SET status='failed',step='ROUTE_SUPERSEDED',updated_at=now() WHERE id=$1 AND status<>'succeeded'",[superseded.source_operation_id]);
               await db.query("UPDATE codeworks.commands SET state='done',updated_at=now() WHERE operation_id=$1",[superseded.source_operation_id]);
