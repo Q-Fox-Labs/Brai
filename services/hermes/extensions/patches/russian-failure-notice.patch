@@ -549,7 +549,7 @@ new file mode 100644
 +            details.append(f'Номер в журнале: `{reference}`')
 +        except Exception:
 +            pass
-+    lines.append('**Данные для проверки:**\n' + '\n'.join(details))
++    lines.append('\n'.join(details))
 +    if delivered_partial:
 +        lines.insert(0, delivered_partial)
 +    return '\n\n'.join(lines)
