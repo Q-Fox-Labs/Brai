@@ -130,3 +130,12 @@ test('owner verifier uses the same conservative foreground classifier',()=>{
  assert.equal(foregroundCommand('node services/codeworks/components/cli.mjs run codeworks > tmp/out.log 2>&1'),true);
  for(const command of ['node --test tests/a &','node script.mjs > tmp/out','node --test tests/a > $(evil)','nohup node --test tests/a']) assert.equal(foregroundCommand(command),false,command);
 });
+
+test('literal two-file cp completes while dynamic, multi-source and background variants remain protected',async()=>{
+ for(const command of ['cp services/codeworks/src/example.mjs services/codeworks/tests/example.mjs','cp -- services/codeworks/src/example.mjs services/codeworks/tests/example.mjs']) {
+  assert.equal(foregroundCommand(command),true);
+  const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:{exit_code:0}},f.options);assert.equal(f.calls[0]?.method,'write.finish');
+ }
+ for(const command of ['cp a b c','cp -r a b','cp a b &','cp $(evil) b','cp a "$DEST"','cp a b; python3 x','cp -- -r b']) assert.equal(foregroundCommand(command),false,command);
+ const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'cp a b'},tool_response:{session_id:23}},f.options);assert.equal(f.calls.length,0);
+});

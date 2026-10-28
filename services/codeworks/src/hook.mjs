@@ -148,6 +148,11 @@ export function foregroundCommand(command) {
     const words=segment.map(t=>t.word);
     const literal=words.map(w=>"'"+w.replaceAll("'", "'\\''")+"'").join(' ');
     if (readOnlyShell(literal) || synchronousGit(literal)) return true;
+    if (words[0]==='cp') {
+      const operands=words.slice(1);
+      if (operands[0]==='--') operands.shift();
+      return operands.length===2 && operands.every(w=>w.length>0 && !w.startsWith('-'));
+    }
     if (words[0]==='head' || words[0]==='tail') return words.slice(1).every(w=>!w.startsWith('-') || /^-(?:n)?[0-9]+$/.test(w) || w==='-n');
     if (words[0]==='sed') return words[1]==='-n' && /^\d+(?:,\d+)?p$/.test(words[2]??'') && words.slice(3).every(w=>!w.startsWith('-'));
     if (words[0]!=='node') return false;
