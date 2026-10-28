@@ -108,3 +108,16 @@ test('adoption cursor reaches later obligations when the first 32 guards are hel
     await held.query('ROLLBACK');
   }finally{held.release();}
 });
+
+test('legacy removed timestamp remains closing while a cleanup obligation is unresolved',{timeout:120000},async t=>{
+  assert.ok(configured,'explicit disposable PostgreSQL is required');
+  const f=await setup();t.after(()=>f.close());const p=await f.project();
+  const area=await f.prepare({project_id:p.id,workspace_key:'legacy-pending',request_key:'legacy-pending'});await f.worker(p,area.operation_id);
+  const owner='fixture/'+randomUUID(),id=randomUUID(),due='2030-01-01T00:00:00.000Z';
+  await f.owner.query('UPDATE codeworks.workspaces SET removed_at=now() WHERE id=$1',[area.workspace_id]);
+  await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner,state,lifecycle,outcome) VALUES($1,$2,$3,'temporal','completed','removed','released')",[owner,p.id,area.workspace_id]);
+  await f.owner.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,owner_workflow_id,epoch,state,step,blocker,next_attempt_at) VALUES($1,$2,$3,$4,'released',$5,2,'waiting_decision','index','INDEX_UNAVAILABLE',$6)",[id,p.id,area.workspace_id,'workspace:'+area.workspace_id,owner,due]);
+  const state=await f.h.call('lifecycle.status',{project_id:p.id,workspace_id:area.workspace_id},'codex');
+  assert.equal(state.task_status,'closing');assert.equal(state.cleanup.id,id);assert.equal(state.cleanup.owner_workflow_id,owner);
+  assert.equal(state.cleanup.blocker,'INDEX_UNAVAILABLE');assert.equal(state.cleanup.next_attempt_at,due);assert.equal(state.workflow.blocked_reason,'INDEX_UNAVAILABLE');
+});

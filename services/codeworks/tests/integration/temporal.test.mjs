@@ -80,14 +80,15 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
     await stop('SIGKILL');
     let history=await client.workflow.getHandle(row.workflow_id).fetchHistory();
     // Continue-As-New может уже открыть пустой run: replay проверяет именно run с исполненной подготовкой.
+    const preparationHistory=history=>history.events.some(e=>['executeCommand','prepareBranch','prepareCheckout','prepareDependencies','confirmWorkspace'].includes(e.activityTaskScheduledEventAttributes?.activityType?.name));
     for(;;){
       const previous=history.events[0]?.workflowExecutionStartedEventAttributes?.continuedExecutionRunId;
-      if(history.events.some(e=>e.activityTaskScheduledEventAttributes?.activityType?.name==='executeCommand')||!previous)break;
+      if(preparationHistory(history)||!previous)break;
       history=await client.workflow.getHandle(row.workflow_id,previous).fetchHistory();
     }
     const serialized=temporal.api.history.v1.History.toObject(history,{longs:String,enums:String,bytes:String});
     await writeFile(path.join(root,'history.json'),JSON.stringify(serialized));
-    if(process.env.CODEWORKS_PREVIOUS_WORKFLOW_BUNDLE)assert.ok(history.events.some(e=>e.activityTaskScheduledEventAttributes?.activityType?.name==='executeCommand'),'replay must cover the installed coarse Activity history');
+    if(process.env.CODEWORKS_PREVIOUS_WORKFLOW_BUNDLE)assert.ok(preparationHistory(history),'replay must cover preparation executed by the installed worker');
     const bundle=fileURLToPath(new URL('../../dist/workflows.js',import.meta.url));
     await Worker.runReplayHistory({workflowBundle:{codePath:bundle}},temporal.api.history.v1.History.fromObject(serialized),row.workflow_id);
     const generated=fileURLToPath(new URL('../../../../tmp/codeworks-temporal/',import.meta.url));await mkdir(generated,{recursive:true});
