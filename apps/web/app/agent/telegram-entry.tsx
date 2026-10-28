@@ -3,11 +3,12 @@
 // ABOUTME: Не отправляет сообщения, решения или команды агенту.
 import { useCallback, useEffect, useRef, useState } from "react";
 import Markdown from "./markdown";
+import { telegramText, updateTelegramMessage } from "./telegram-display";
 import "./telegram-observer.css";
 
 type Chat = { chat_id: string; thread_id: string; chat_type: string; chat_name: string | null; last_text: string; last_at: string | null; last_row: number };
-type Attachment = { artifactId: string; filename: string; mimeType: string; sizeBytes?: number };
-type Message = { row_id: number; identity: string; chat_id: string; thread_id: string; author_name: string; direction: "in" | "out";
+type Attachment = { artifactId: string; filename: string; mimeType: string; sizeBytes?: number; width?: number; height?: number };
+type Message = { row_id: number; identity: string; chat_id: string; thread_id: string; telegram_id?: string | null; author_name: string; direction: "in" | "out";
   text: string; occurred_at: string | null; edited_at: string | null; delivery: string; attachment_state: string; attachments: Attachment[] };
 type Page = { messages: Message[]; before: number | null };
 const keyOf = (chat: Pick<Chat, "chat_id" | "thread_id">) => `${chat.chat_id}:${chat.thread_id}`;
@@ -21,7 +22,7 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   if (!response.ok) throw new Error("UNAVAILABLE");
   return response.json() as Promise<T>;
 }
-function chatName(chat: Chat) { return chat.chat_name || (chat.chat_id.startsWith("-") ? "Группа Telegram" : `Пользователь ${chat.chat_id}`); }
+function chatName(chat: Chat) { return chat.chat_name || (chat.chat_id.startsWith("-") ? "Группа Telegram" : "Неизвестный чат"); }
 function time(value: string | null) {
   if (!value || Number.isNaN(Date.parse(value))) return "";
   return new Intl.DateTimeFormat("ru", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
@@ -33,13 +34,17 @@ function fileUrl(message: Message, item: Attachment, download = false) {
 }
 
 function TelegramAttachment({ message, item }: { message: Message; item: Attachment }) {
-  const [unavailable, setUnavailable] = useState(false);
+  const [imageState, setImageState] = useState<"loading" | "loaded" | "failed">("loading");
+  const ratio = item.width && item.height && item.width > 0 && item.height > 0 ? `${item.width} / ${item.height}` : undefined;
   return <figure>
-    {item.mimeType.startsWith("image/") && (unavailable ? <p className="tg-muted" role="status">Предпросмотр изображения недоступен.</p> :
-      <a href={fileUrl(message, item)} target="_blank" rel="noopener noreferrer"><img src={fileUrl(message, item)} alt={item.filename} loading="lazy" onError={() => setUnavailable(true)} /></a>)}
+    {item.mimeType.startsWith("image/") && <a className="tg-image-preview" data-state={imageState} style={ratio ? { aspectRatio: ratio } : undefined}
+      href={fileUrl(message, item)} target="_blank" rel="noopener noreferrer" aria-label={imageState === "failed" ? "Изображение недоступно" : "Открыть изображение"}>
+      {imageState !== "loaded" && <span className="tg-image-placeholder" role="status">{imageState === "failed" ? "Изображение недоступно" : "Загрузка изображения…"}</span>}
+      {imageState !== "failed" && <img src={fileUrl(message, item)} alt={item.filename || "Изображение"} loading="lazy" onLoad={() => setImageState("loaded")} onError={() => setImageState("failed")} />}
+    </a>}
     {item.mimeType.startsWith("audio/") && <audio controls preload="none" src={fileUrl(message, item)} />}
     {item.mimeType.startsWith("video/") && <video controls preload="metadata" src={fileUrl(message, item)} />}
-    <figcaption><a href={fileUrl(message, item, true)} download={item.filename}>{item.filename || "Скачать файл"}</a></figcaption>
+    {!item.mimeType.startsWith("image/") && !item.mimeType.startsWith("audio/") && <figcaption><a href={fileUrl(message, item, true)} download={item.filename}>{item.filename || "Скачать файл"}</a></figcaption>}
   </figure>;
 }
 
@@ -104,8 +109,8 @@ function TelegramObserver({ username, active }: { username: string | null; activ
             refreshChats();
             if (!selectedRef.current || keyOf(selectedRef.current) !== keyOf(value)) return;
             setMessages(previous => {
-              const index = previous.findIndex(item => item.identity === value.identity);
-              if (index >= 0) { const updated = previous.slice(); updated[index] = value; return updated; }
+              const updated = updateTelegramMessage(previous, value);
+              if (updated) return updated;
               if (previous.length && compareMessages(value, previous[0]) < 0) return previous;
               if (!nearBottom.current) setNewCount(count => count + 1);
               return [...previous, value].sort(compareMessages);
@@ -169,25 +174,24 @@ function TelegramObserver({ username, active }: { username: string | null; activ
     <section className="tg-main" data-list-visible={showList} aria-label="Переписка">
       <header className="tg-header"><button type="button" className="tg-back" onClick={() => setShowList(true)} aria-label="Показать список чатов">←</button>
         <div><strong>{selected ? chatName(selected) : "Переписка"}</strong><span>{selected?.thread_id ? `Тема ${selected.thread_id} · ` : ""}Только просмотр</span></div>
-        <span className="tg-header-status">{connection === "live" ? "Обновляется" : "Подключаемся…"}</span></header>
+      </header>
       {error && <p className="tg-error" role="status">{error}</p>}
       <div ref={scroll} className="tg-conversation" onScroll={event => { const el = event.currentTarget; nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; if (nearBottom.current) setNewCount(0); }}>
         {!selected ? <div className="tg-empty"><span className="tg-empty-mark">✦</span><h2>Выберите чат</h2><p>Здесь появятся сообщения и файлы из Telegram.</p></div> :
           <div className="tg-timeline">{before !== null && <button className="tg-older" type="button" disabled={loading} onClick={() => { void older(); }}>Показать более ранние</button>}
             {loading && !messages.length && <p className="tg-muted" role="status">Загружаем сообщения…</p>}
             {messages.map(message => <article className="tg-message" data-direction={message.direction} key={message.identity}>
-              <div className="tg-message-meta"><strong>{message.author_name || (message.direction === "out" ? "Brai" : "Пользователь")}</strong><time>{time(message.occurred_at)}</time>{message.edited_at && <span>изменено</span>}</div>
-              {message.text && <Markdown text={message.text} />}
+              <div className="tg-message-meta"><strong>{message.author_name || (message.direction === "out" ? "Brai" : selected && !selected.chat_id.startsWith("-") ? chatName(selected) : "Отправитель не указан")}</strong><time>{time(message.occurred_at)}</time>{message.edited_at && <span>изменено</span>}</div>
+              {telegramText(message.text, message.attachments) && <Markdown text={telegramText(message.text, message.attachments)} />}
               {message.attachments.length > 0 && <div className="tg-attachments">{message.attachments.map(item => <TelegramAttachment key={item.artifactId} message={message} item={item} />)}</div>}
               {message.attachment_state === "pending" && <p className="tg-muted">Сохраняем вложения…</p>}
               {message.attachment_state === "failed" && <p className="tg-muted">Сохранение вложений не подтверждено.</p>}
               {message.attachment_state === "unavailable" && <p className="tg-muted">Вложение из старой истории недоступно.</p>}
-              {message.direction === "out" && message.delivery !== "sent" && <p className="tg-muted">{message.delivery === "failed" ? "Не удалось доставить сообщение." : message.delivery === "pending" ? "Ожидает доставки." : "Доставка не подтверждена."}</p>}
+              {message.direction === "out" && (message.delivery === "failed" || message.delivery === "pending") && <p className="tg-muted">{message.delivery === "failed" ? "Не удалось доставить сообщение." : "Ожидает доставки."}</p>}
             </article>)}
           </div>}
       </div>
       {newCount > 0 && <button type="button" className="tg-new" onClick={() => { nearBottom.current = true; setNewCount(0); if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }}>Новые сообщения: {newCount} ↓</button>}
-      <footer className="tg-readonly">Сообщения отправляются в Telegram</footer>
     </section>
   </main>;
 }

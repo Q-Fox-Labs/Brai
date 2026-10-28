@@ -7,6 +7,8 @@ import fcntl
 import asyncio
 from hashlib import sha256
 import json
+import logging
+import re
 import os
 from pathlib import Path
 import shutil
@@ -119,7 +121,10 @@ class FileStore:
         """Не повторять RPC при ошибке или неизвестном исходе."""
         try:
             return self.backend.call(method, args, timeout=1800 if method in {"files.fetch", "files.publish"} else 30)
-        except Exception:
+        except Exception as error:
+            reason = str(error)
+            logging.getLogger(__name__).warning('BRAI_FILE_RPC_FAILED method=%s code=%s', method,
+                reason if re.fullmatch(r'[A-Z_]{1,80}', reason) else type(error).__name__)
             raise FileError("ARTIFACTS_UNAVAILABLE") from None
 
     def checked(self, result):
@@ -149,32 +154,34 @@ class FileStore:
 
     def fetch(self, aid):
         """Каждый доступ подтверждает ready/owner у publisher; локальный кэш не authority."""
-        aid = artifact_id(aid)
-        result = self.call("files.fetch", {"artifactId": aid})
-        if result.get("artifactId") != aid:
-            raise FileError("INVALID_FILE_RESULT")
-        ref = self.checked(result)
-        with self.db() as db:
-            db.execute("INSERT OR REPLACE INTO aliases VALUES (?,?,?)", (result["localPath"], ref["artifactId"], canonical(ref)))
-        return result
+        with self.lock("cache"):
+            aid = artifact_id(aid)
+            result = self.call("files.fetch", {"artifactId": aid})
+            if result.get("artifactId") != aid:
+                raise FileError("INVALID_FILE_RESULT")
+            ref = self.checked(result)
+            with self.db() as db:
+                db.execute("INSERT OR REPLACE INTO aliases VALUES (?,?,?)", (result["localPath"], ref["artifactId"], canonical(ref)))
+            return result
 
     def publish(self, path, identity):
         """Опубликовать конкретный файл, а не содержимое каталога; receipt переживает restart."""
-        path = Path(path)
-        resolved = path.resolve(strict=True)
-        if not any(resolved.is_relative_to(root) for root in self.read_roots):
-            raise FileError("READ_ROOT_DENIED")
-        publication = key([self.owner, identity])
-        with self.db() as db:
-            db.execute("INSERT OR IGNORE INTO publications VALUES (?,?,0)", (publication, str(path)))
-        result = self.call("files.publish", {"path": str(path), "requestId": "hermes-file:" + publication})
-        ref = self.checked(result)
-        with self.db() as db:
-            db.execute("UPDATE publications SET confirmed=1 WHERE identity=?", (publication,))
-            db.execute("INSERT INTO aliases VALUES (?,?,?) ON CONFLICT(path) DO UPDATE SET artifact=excluded.artifact,ref=excluded.ref",
-                       (str(path), ref["artifactId"], canonical(ref)))
-            db.execute("INSERT OR REPLACE INTO aliases VALUES (?,?,?)", (result["localPath"], ref["artifactId"], canonical(ref)))
-        return result
+        with self.lock("cache"):
+            path = Path(path)
+            resolved = path.resolve(strict=True)
+            if not any(resolved.is_relative_to(root) for root in self.read_roots):
+                raise FileError("READ_ROOT_DENIED")
+            publication = key([self.owner, identity])
+            with self.db() as db:
+                db.execute("INSERT OR IGNORE INTO publications VALUES (?,?,0)", (publication, str(path)))
+            result = self.call("files.publish", {"path": str(path), "requestId": "hermes-file:" + publication})
+            ref = self.checked(result)
+            with self.db() as db:
+                db.execute("UPDATE publications SET confirmed=1 WHERE identity=?", (publication,))
+                db.execute("INSERT INTO aliases VALUES (?,?,?) ON CONFLICT(path) DO UPDATE SET artifact=excluded.artifact,ref=excluded.ref",
+                           (str(path), ref["artifactId"], canonical(ref)))
+                db.execute("INSERT OR REPLACE INTO aliases VALUES (?,?,?)", (result["localPath"], ref["artifactId"], canonical(ref)))
+            return result
 
     def ingest(self, source, item_id, path, position=0, caption="", group_id=None):
         """Сохранить элемент по исходной identity до сборки альбома; порядок не входит в ключ файла."""
@@ -185,7 +192,7 @@ class FileStore:
             raise FileError("INVALID_SOURCE")
         identity = key([self.owner, source, item_id])
         group = key([self.owner, source, group_id if group_id is not None else item_id])
-        with self.lock(identity):
+        with self.lock(identity), self.lock("cache"):
             with self.db() as db:
                 row = db.execute("SELECT * FROM items WHERE identity=?", (identity,)).fetchone()
                 if row and (row["group_key"] != group or row["caption"] != caption):
@@ -345,6 +352,16 @@ class FileStore:
 
     def cleanup(self, operation, cache=True):
         """Удалить только свою завершённую рабочую область и незакреплённые подтверждённые кэши."""
+        if not cache:
+            with self.db() as db:
+                if db.execute("SELECT 1 FROM deliveries WHERE identity=? AND state='unknown'", (operation if isinstance(operation, str) else key(operation),)).fetchone():
+                    return
+                pending = [row[0] for row in db.execute("SELECT path FROM items WHERE artifact IS NULL UNION SELECT path FROM publications WHERE confirmed=0")]
+            work = self.work / key([self.owner, operation])
+            if (not workspace_in_use(work) and work.exists()
+                    and not any(Path(path).is_relative_to(work) for path in pending)):
+                shutil.rmtree(work)
+            return
         with self.lock("cache"):
             with self.db() as db:
                 if db.execute("SELECT 1 FROM deliveries WHERE identity=? AND state='unknown'", (operation if isinstance(operation, str) else key(operation),)).fetchone():
@@ -371,8 +388,6 @@ class FileStore:
                         and any(path.resolve().is_relative_to(root) for root in self.temporary_roots)
                         and not any(path.resolve().is_relative_to(root) for root in self.service_roots)):
                     path.unlink()
-            if not cache:
-                return
             for row in cached:
                 aid = artifact_id(row[0])
                 directory = self.cache / aid
@@ -386,17 +401,18 @@ class FileStore:
 
     def resume_publications(self):
         """Восстановить неизвестные публикации только с прежним ключом и сохранёнными байтами."""
-        with self.db() as db:
-            pending = db.execute("SELECT identity,path FROM publications WHERE confirmed=0").fetchall()
-        for row in pending:
-            result = self.call("files.publish", {"path": row["path"], "requestId": "hermes-file:" + row["identity"]})
-            ref = self.checked(result)
+        with self.lock("cache"):
             with self.db() as db:
-                db.execute("UPDATE publications SET confirmed=1 WHERE identity=?", (row["identity"],))
-                db.execute("INSERT OR REPLACE INTO aliases VALUES (?,?,?)", (row["path"], ref["artifactId"], canonical(ref)))
-                db.execute("INSERT OR REPLACE INTO aliases VALUES (?,?,?)", (result["localPath"], ref["artifactId"], canonical(ref)))
-                db.execute("UPDATE items SET artifact=?,ref=? WHERE path=? AND artifact IS NULL",
-                           (ref["artifactId"], canonical(ref), row["path"]))
+                pending = db.execute("SELECT identity,path FROM publications WHERE confirmed=0").fetchall()
+            for row in pending:
+                result = self.call("files.publish", {"path": row["path"], "requestId": "hermes-file:" + row["identity"]})
+                ref = self.checked(result)
+                with self.db() as db:
+                    db.execute("UPDATE publications SET confirmed=1 WHERE identity=?", (row["identity"],))
+                    db.execute("INSERT OR REPLACE INTO aliases VALUES (?,?,?)", (row["path"], ref["artifactId"], canonical(ref)))
+                    db.execute("INSERT OR REPLACE INTO aliases VALUES (?,?,?)", (result["localPath"], ref["artifactId"], canonical(ref)))
+                    db.execute("UPDATE items SET artifact=?,ref=? WHERE path=? AND artifact IS NULL",
+                               (ref["artifactId"], canonical(ref), row["path"]))
 
     def pin_operation(self, ref, operation):
         """Удержать файл операции также в worker, где нет ContextVar родителя."""
@@ -407,8 +423,12 @@ class FileStore:
 
     def release_operation(self, operation):
         """Освободить leases завершившегося агента, сохранив дочерние операции."""
+        token = "task:" + key([self.owner, operation])
+        with self.db() as db:
+            if not db.execute("SELECT 1 FROM leases WHERE operation=?", (token,)).fetchone():
+                return
         with self.lock("cache"), self.db() as db:
-            db.execute("DELETE FROM leases WHERE operation=?", ("task:" + key([self.owner, operation]),))
+            db.execute("DELETE FROM leases WHERE operation=?", (token,))
 
 
 def delivery_plan(items, mode="files", *, supports_album=True):

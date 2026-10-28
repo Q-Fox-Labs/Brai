@@ -721,6 +721,120 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
                 process.wait(timeout=5)
 
 
+    async def test_text_cleanup_cannot_delete_a_file_being_fetched(self):
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        import threading
+        value = self.store.publish(self.file('download', '.ogg'), 'download')
+        path = Path(value['localPath'])
+        body = path.read_bytes()
+        entered, release = threading.Event(), threading.Event()
+        def fetching(method, args, **kwargs):
+            self.assertEqual(method, 'files.fetch')
+            staged = path.parent / '.download'
+            path.unlink(missing_ok=True)
+            staged.write_bytes(body)
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError('test fetch was not released')
+            staged.replace(path)
+            return value
+        with patch.object(self.backend, 'call', side_effect=fetching), ThreadPoolExecutor(max_workers=2) as pool:
+            pending = pool.submit(self.store.fetch, value['artifactId'])
+            self.assertTrue(entered.wait(5))
+            cleanup = pool.submit(self.store.cleanup, 'unrelated-text')
+            try:
+                with self.assertRaises(TimeoutError):
+                    cleanup.result(timeout=0.1)
+            finally:
+                release.set()
+            self.assertEqual(pending.result(timeout=5)['artifactId'], value['artifactId'])
+            cleanup.result(timeout=5)
+
+    async def test_plain_text_never_needs_artifacts(self):
+        event = self.event('plain')
+        event.media_urls = []
+        event.media_types = []
+        event.text = 'ordinary text'
+        with patch.object(self.store, 'call', side_effect=AssertionError('text must not call Artifacts')):
+            self.assertTrue(await native.accept_event(event))
+            agent = SimpleNamespace(session_id='plain-text')
+            with native.conversation(agent, event.text) as text:
+                self.assertEqual(text, 'ordinary text')
+                self.assertEqual(native.final_text('ordinary reply', 'plain-text'), 'ordinary reply')
+            native.release_event(event)
+
+    async def test_plain_text_cleanup_does_not_wait_for_another_file_transfer(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        event = self.event('text-during-download')
+        event.media_urls = []
+        event.media_types = []
+        entered, release = threading.Event(), threading.Event()
+        def transfer():
+            with self.store.lock('cache'):
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError('test transfer was not released')
+        def text_turn():
+            with native.conversation(SimpleNamespace(session_id='text-only'), 'ordinary text') as text:
+                self.assertEqual(text, 'ordinary text')
+            native.release_event(event)
+            return 'done'
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            transfer_future = pool.submit(transfer)
+            self.assertTrue(entered.wait(5))
+            try:
+                self.assertEqual(pool.submit(text_turn).result(timeout=2), 'done')
+            finally:
+                release.set()
+            transfer_future.result(timeout=5)
+
+    async def test_recovered_single_attachment_queues_without_interrupting(self):
+        event = self.event('recovered')
+        event.metadata = {'recovered': True, '_brai_artifacts': [{'groupId': 'not-admitted'}]}
+        with patch.object(self.store, 'db', side_effect=AssertionError('recovered attachment must queue')):
+            self.assertTrue(native.should_queue_inbound_set(event))
+
+    async def test_recovered_files_do_not_merge_into_pending_user_text(self):
+        seen, scheduled = [], []
+        async def busy(event, session_key):
+            seen.append(event)
+        task = asyncio.get_running_loop().create_future()
+        adapter = SimpleNamespace(_handle_message_while_active=busy, _session_tasks={'chat': task})
+        native.install_adapter(adapter)
+        recovered = self.event('restored')
+        recovered.metadata = {'recovered': True}
+        text = self.event('new-text')
+        text.media_urls = []
+        with patch.object(native, 'release_event') as release, patch.object(native, 'schedule_recovery', side_effect=scheduled.append):
+            await adapter._handle_message_while_active(recovered, 'chat')
+            await adapter._handle_message_while_active(recovered, 'chat')
+            self.assertEqual(seen, [])
+            self.assertEqual(release.call_count, 2)
+            await adapter._handle_message_while_active(text, 'chat')
+            self.assertEqual(seen, [text])
+            task.set_result(None)
+            await asyncio.sleep(0)
+            self.assertEqual(scheduled, [adapter])
+
+    async def test_recovery_file_error_does_not_notify_unrelated_text_chat(self):
+        seen = []
+        async def notify(event, error):
+            seen.append((event, error))
+            return {'thread': 'metadata'}
+        adapter = SimpleNamespace(_notify_turn_error=notify)
+        native.install_adapter(adapter)
+        recovered = self.event('recovered')
+        recovered.metadata = {'recovered': True}
+        with self.assertLogs(native.logging.getLogger(native.__name__), level='WARNING'):
+            self.assertIsNone(await adapter._notify_turn_error(recovered, FileError('ARTIFACTS_UNAVAILABLE')))
+        self.assertEqual(seen, [])
+        direct = self.event('direct')
+        self.assertEqual(await adapter._notify_turn_error(direct, FileError('ARTIFACTS_UNAVAILABLE')), {'thread': 'metadata'})
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(await adapter._notify_turn_error(recovered, RuntimeError('other failure')), {'thread': 'metadata'})
+        self.assertEqual(len(seen), 2)
+
     async def test_publisher_markdown_keeps_unicode_labels_and_parentheses(self):
         path = self.input / 'картинка (выбор).png'
         path.write_bytes(b'image')

@@ -119,7 +119,7 @@ export async function observerFileAuth(request: Request): Promise<Response> {
     if (reply.headers?.has("Nats-Service-Error")) throw new GatewayError(404, "NOT_FOUND");
     const item = JSON.parse(Buffer.from(reply.data).toString()) as { ownerId: string; status: string; filename: string; mimeType: string };
     if (!validateResponse(artifacts.get, item) || item.ownerId !== linked.ownerId || item.status !== "ready") throw new GatewayError(404, "NOT_FOUND");
-    const inline = !download && ["image/png", "image/jpeg", "image/webp", "image/gif", "video/mp4", "video/webm", "audio/ogg", "audio/mpeg"].includes(item.mimeType);
+    const inline = !download && ["image/png", "image/jpeg", "image/webp", "image/gif", "video/mp4", "video/webm", "audio/ogg", "audio/opus", "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/webm", "audio/wav"].includes(item.mimeType);
     const encoded = encodeURIComponent(item.filename).replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
     return new Response(null, { headers: { ...noStore, "Content-Type": inline ? item.mimeType : "application/octet-stream",
       "Content-Disposition": inline ? "inline" : `attachment; filename="download"; filename*=UTF-8''${encoded}`,

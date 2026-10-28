@@ -107,6 +107,8 @@ class Bridge:
                 code = error.get("data", {}).get("code") if isinstance(error.get("data"), dict) else None
                 if method == "files.publish" and isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,80}", code):
                     logging.getLogger(__name__).warning("BRAI_FILE_PUBLISH_REJECTED code=%s", code)
+                elif method.startswith("files.") and isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,80}", code):
+                    logging.getLogger(__name__).warning("BRAI_FILE_RPC_REJECTED method=%s code=%s", method, code)
                 raise BridgeError("RPC_REJECTED")
             if not isinstance(response["result"], dict):
                 raise BridgeError("RPC_MALFORMED")
