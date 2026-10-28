@@ -4,6 +4,7 @@ import {gitResourcesAbsent,command} from './git.mjs';
 import {verifyDisposition} from './disposition.mjs';
 import {verifyCleanupArchive} from './cleanup-archive.mjs';
 import {canonical} from './contracts.mjs';
+import {recheckPublication} from './publication.mjs';
 
 const steps=['remote','worktree','local_refs','index','verify'];
 const indexAbsent=value=>value?.complete===true && value.owner?.present===false && Array.isArray(value.resources?.collections) && !value.resources.collections.length && Array.isArray(value.resources?.metadataPoints) && !value.resources.metadataPoints.length;
@@ -86,6 +87,9 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
     if(observed.worktree.dirty!==false && observed.worktree.pathExists)return wait('DIRTY_WORKTREE');
     if(['unused','cancelled'].includes(obligation.outcome)){
       if((head && head!==workspace.base_sha)||(observed.branch.oid && observed.branch.oid!==workspace.base_sha)||(observed.remote.oid && observed.remote.oid!==workspace.base_sha))return wait('UNIQUE_CHANGES');
+    }else if(obligation.outcome==='released'&&obligation.evidence?.publication){
+      const delivery=obligation.evidence.publication;
+      if(canonical(observed)!==canonical(delivery.resources)||!await recheckPublication(db,project,workspace,delivery,{ignoreOperationId:obligation.source_operation_id}))return wait('DELIVERY_PROOF_CHANGED');
     }else if(obligation.outcome==='released'&&!obligation.evidence?.verified_disposition){
       const release=await releaseProof();
       if(!release || (head&&head!==release.requested_sha) || (observed.branch.oid&&observed.branch.oid!==release.requested_sha) || (observed.remote.oid&&observed.remote.oid!==release.requested_sha))return wait('RELEASE_PROOF_MISMATCH');
@@ -116,6 +120,11 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
     }
   }else if(['unused','cancelled'].includes(obligation.outcome)){
     if((fixedHead&&fixedHead!==workspace.base_sha)||(expected.branch?.oid&&expected.branch.oid!==workspace.base_sha)||(expected.remote?.oid&&expected.remote.oid!==workspace.base_sha)||(expected.tracking?.oid&&expected.tracking.oid!==workspace.base_sha))return wait('UNIQUE_CHANGES');
+  }else if(obligation.outcome==='released'&&obligation.evidence?.publication){
+    const delivery=obligation.evidence.publication;
+    if(canonical(expected)!==canonical(delivery.resources)||!await recheckPublication(db,project,workspace,delivery,{ignoreOperationId:obligation.source_operation_id}))return wait('DELIVERY_PROOF_CHANGED');
+    if(!flowGit)return wait('DELIVERY_PROOF_CHANGED');
+    for(const sha of [expected.worktree?.head,expected.branch?.oid,expected.remote?.oid,expected.tracking?.oid].filter(Boolean))if(!await flowGit.ancestor(project,sha,delivery.installed_commit))return wait('DELIVERY_PROOF_CHANGED');
   }else if(obligation.outcome==='released'){
     const release=await releaseProof();
     if(!release||(fixedHead&&fixedHead!==release.requested_sha)||(expected.branch?.oid&&expected.branch.oid!==release.requested_sha)||(expected.remote?.oid&&expected.remote.oid!==release.requested_sha)||(expected.tracking?.oid&&expected.tracking.oid!==release.requested_sha))return wait('RELEASE_PROOF_MISMATCH');
