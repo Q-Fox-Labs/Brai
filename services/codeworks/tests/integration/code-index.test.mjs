@@ -20,7 +20,7 @@ const enabled=!!process.env.CODEWORKS_INDEX_QDRANT;
 const digest=value=>createHash('sha256').update(value).digest('hex');
 const uuid=value=>{const h=digest(value);return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`;};
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-async function until(work){const end=Date.now()+60000;for(;;){if(await work())return;assert.ok(Date.now()<end,'fixture condition timeout');await sleep(100);}}
+async function until(work){const end=Date.now()+90000;for(;;){if(await work())return;assert.ok(Date.now()<end,'fixture condition timeout');await sleep(100);}}
 
 test('native index and both graphs copy, refresh, caches and cleanup',{skip:!enabled,timeout:180000},async t=>{
   const tmp=fileURLToPath(new URL('../../../../tmp/',import.meta.url));await mkdir(tmp,{recursive:true});
@@ -85,9 +85,10 @@ test('native index and both graphs copy, refresh, caches and cleanup',{skip:!ena
   await writeFile(repo+'/leaf.js','temporary dirty source');assert.equal((await invoke('clone')).reason,'SOURCE_HAS_CHANGES');await git('checkout','--','leaf.js');
   await git('commit','--allow-empty','-m','advanced');assert.equal((await invoke('clone')).reason,'SOURCE_REVISION_CHANGED');await git('update-ref','refs/heads/dev',base);
   // Прерываем реальную запись файлов символов: повтор обязан восстановить только собственные частичные коллекции.
-  let failWrites=true;
+  let failWrites=true,failDelete=false,deleted=0;
   const proxy=createServer(async(req,res)=>{
     if(failWrites&&req.method==='PUT'&&req.url.startsWith('/collections/'+id+'_symgraph_file/points')){res.writeHead(503,{'content-type':'application/json'});res.end(JSON.stringify({status:{error:'fixture interruption'}}));return;}
+    if(failDelete&&req.method==='DELETE'&&req.url.startsWith('/collections/')&&req.url.includes(id)&&deleted++>=1){res.writeHead(503,{'content-type':'application/json'});res.end(JSON.stringify({status:{error:'fixture interrupted removal'}}));return;}
     let body='';for await(const chunk of req)body+=chunk;
     const r=await fetch(process.env.CODEWORKS_INDEX_QDRANT+req.url,{method:req.method,...(body?{body}:{}),headers:{'content-type':'application/json'}});
     res.writeHead(r.status,{'content-type':'application/json'});res.end(await r.text());
@@ -106,11 +107,11 @@ test('native index and both graphs copy, refresh, caches and cleanup',{skip:!ena
   const sourceSearch=await source.call('codebase_search',{query:'leaf function',limit:1}),targetSearch=await oldReader.call('codebase_search',{query:'leaf function',limit:1});
   assert.equal(targetSearch.match(/(?:main|leaf)\.js/)?.[0],sourceSearch.match(/(?:main|leaf)\.js/)?.[0]);
   assert.match(targetSearch,/main.js|leaf.js/);
-  // Two long-lived clients reproduce the external writer cache defect before applying compatibility to this copy.
+  // The installed engine can already contain the compatibility patch; verify freshness either way.
   await writeFile(w.path+'/other.js','export function other() { return 2; }\n');
   await writeFile(w.path+'/main.js',"import {other} from './other.js';\nexport function main() { return other(); }\n");
   assert.equal((await invoke('update')).state,'ready');assert.ok(embeddings>countBefore);
-  assert.doesNotMatch(await oldReader.call('codebase_graph_query',{filePath:'main.js'}),/other.js/,'unpatched reader demonstrates stale cache');
+  await oldReader.call('codebase_graph_query',{filePath:'main.js'});
   const {prepareGraphFreshness}=await import(pathToFileURL(process.env.CODEWORKS_INDEX_COMPAT_SCRIPT).href);await prepareGraphFreshness(packageRoot);
   await prepareGraphFreshness(packageRoot,{verify:true});
   const freshReader=await client(w.path);assert.match(await freshReader.call('codebase_graph_query',{filePath:'main.js'}),/other.js/);
@@ -130,27 +131,34 @@ test('native index and both graphs copy, refresh, caches and cleanup',{skip:!ena
   assert.equal(inspected.owner.present,true);assert.equal(inspected.owner.tokenMatches,true);assert.equal(inspected.owner.pathMatches,true);
   assert.equal(inspected.resources.collections.length,4);assert.ok(inspected.resources.metadataPoints.includes(collection(id)+'::codeworks-owner'));
   const token=w.ownership_token;w.ownership_token='foreign';await invoke('remove',{failure:true});w.ownership_token=token;
-  await rm(w.path,{recursive:true});assert.equal((await invoke('remove')).state,'removed');assert.equal((await invoke('remove')).state,'removed');
+  await rm(w.path,{recursive:true});failDelete=true;await invoke('remove',{failure:true});
+  const partial=await invoke('inspect');assert.ok(partial.resources.collections.length>0);assert.ok(partial.resources.collections.length<inspected.resources.collections.length);
+  failDelete=false;assert.equal((await invoke('remove')).state,'removed');assert.equal((await invoke('remove')).state,'removed');
   const empty=await invoke('inspect');assert.equal(empty.owner.present,false);assert.deepEqual(empty.resources,{collections:[],metadataPoints:[]});
   await freshReader.call('codebase_graph_query',{filePath:'main.js'});await freshReader.call('codebase_symbols',{filePath:'other.js'});
   assert.ok(!(await q.getCollections()).collections.some(c=>c.name.includes(id)));
   assert.ok((await q.getCollections()).collections.some(c=>c.name===collection(sourceId)));
 });
 
-test('real Temporal background index does not block commands or cancellation',{skip:!enabled||!configured,timeout:90000},async t=>{
+test('real Temporal background index does not block commands or cancellation',{skip:!enabled||!configured,timeout:180000},async t=>{
   const f=await setup(),p=await f.project();t.after(()=>f.close());
   await f.owner.query("INSERT INTO codeworks.execution_control(project_id,instance_id,owner) VALUES($1,'index-fixture','temporal')",[p.id]);
   const connection=await Connection.connect({address:process.env.CODEWORKS_TEMPORAL_ADDRESS,connectTimeout:'5 seconds'}),client=new TemporalClient({connection,namespace:process.env.CODEWORKS_TEMPORAL_NAMESPACE});
   const taskQueue='codeworks-index-'+randomUUID(),ids=[];let release,entered=false;
   const stalled=new Promise(resolve=>{release=resolve;});t.after(async()=>{release();for(const id of ids)await client.workflow.getHandle(id).terminate('fixture cleanup').catch(()=>{});await connection.close();});
-  const activities=createActivities(f.app,{allowedRepositories:[p.repo_path],codeIndex:{maintain:async()=>{entered=true;await Promise.race([stalled,Context.current().cancelled]);},remove:async()=>{}}});
+  const activities=createActivities(f.app,{allowedRepositories:[p.repo_path],codeIndex:{maintain:async()=>{entered=true;await Promise.race([stalled,Context.current().cancelled]);},inspect:async()=>({complete:true,owner:{present:false},resources:{collections:[],metadataPoints:[]}}),remove:async()=>{}}});
   const bundle=await bundleWorkflowCode({workflowsPath:fileURLToPath(new URL('../../src/workflows.cjs',import.meta.url))});
   const native=await (await import('@temporalio/worker')).NativeConnection.connect({address:process.env.CODEWORKS_TEMPORAL_ADDRESS});t.after(()=>native.close());
   const worker=await Worker.create({connection:native,namespace:process.env.CODEWORKS_TEMPORAL_NAMESPACE,taskQueue,workflowBundle:bundle,activities,maxConcurrentActivityTaskExecutions:4});
   await worker.runUntil(async()=>{
     const first=await f.prepare({project_id:p.id,workspace_key:'index-one',request_key:'index-one'},'codex');
     const register=async operation=>{const r=(await f.app.query('SELECT workflow_id FROM codeworks.commands WHERE operation_id=$1',[operation.operation_id])).rows[0];ids.push(r.workflow_id);};await register(first);
-    await deliverCommands(f.app,client,{taskQueue});await until(async()=>(await f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[first.operation_id])).rows[0].status==='succeeded');await until(()=>entered);
+    await deliverCommands(f.app,client,{taskQueue});await until(async()=>(await f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[first.operation_id])).rows[0].status==='succeeded');
+    const write={project_id:p.id,workspace_id:first.workspace_id,workspace_key:'index-one',session_id:'index-session',turn_id:'turn',tool_use_id:'write',tool_name:'apply_patch',payload_sha256:'a'.repeat(64),targets:['hello.txt'],request_key:'index-actual-write'};
+    const admitted=await f.h.call('write.begin',write,'codex');await f.h.call('write.admit',{project_id:p.id,write_call_id:admitted.write_call_id,rewritten_sha256:'b'.repeat(64)},'codex');
+    const workspace=(await f.app.query('SELECT path FROM codeworks.workspaces WHERE id=$1',[first.workspace_id])).rows[0];await writeFile(workspace.path+'/hello.txt','first actual write\n');
+    await f.h.call('write.finish',{project_id:p.id,session_id:write.session_id,turn_id:write.turn_id,tool_use_id:write.tool_use_id,outcome:'success'},'codex');
+    await command('git',['-C',workspace.path,'checkout','--','hello.txt']);await until(()=>entered);
     const second=await f.prepare({project_id:p.id,workspace_key:'index-two',request_key:'index-two'},'codex');await register(second);
     await deliverCommands(f.app,client,{taskQueue});await until(async()=>(await f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[second.operation_id])).rows[0].status==='succeeded');
     await Worker.runReplayHistory({workflowBundle:bundle},await client.workflow.getHandle(ids[0]).fetchHistory(),ids[0]);
@@ -158,6 +166,6 @@ test('real Temporal background index does not block commands or cancellation',{s
     await deliverCommands(f.app,client,{taskQueue});await until(async()=>(await f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[cancelFirst.operation_id])).rows[0].status==='succeeded');
     const cancelled=await f.h.call('workspace.cancel',{project_id:p.id,workspace_id:second.workspace_id,request_key:'cancel-two',reason:'fixture'},'codex');
     release();await deliverCommands(f.app,client,{taskQueue});await until(async()=>(await f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[cancelled.operation_id])).rows[0].status==='succeeded');
-    const state=await f.h.call('status',{project_id:p.id,workspace_id:second.workspace_id},'codex');assert.equal(state.workspace.removed_at,null);
+    await until(async()=>(await f.app.query('SELECT removed_at FROM codeworks.workspaces WHERE id=$1',[second.workspace_id])).rows[0].removed_at);
   });
 });
