@@ -71,6 +71,7 @@ export function createGit({flowGit}={}) {
   }
   async function inspectResources(project,w,{manifest}={}) {
     await topology(project);
+    if(manifest){const root=path.dirname(w.path);if(!(project.legacy_workspace_roots??[]).includes(root)||await realpath(root)!==root)throw new Fault('OWNERSHIP_CONFLICT');}
     const branchRef='refs/heads/'+w.branch, ownerRef=manifest?.ownership?.ref??ownershipRef(w);
     if(!/^refs\/codeworks\/ownership\/[A-Za-z0-9-]+$/.test(ownerRef))throw new Fault('OWNERSHIP_CONFLICT');
     const readRef=async ref=>{const r=await git(project,['rev-parse','--verify','--quiet',ref],{allowFailure:true});if(r.code===1)return null;if(r.code!==0)throw new Fault('GIT_FAILED');return r.stdout;};
