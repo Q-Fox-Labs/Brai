@@ -1,7 +1,8 @@
 // ABOUTME: Принимает проверенный манифест исторической очистки в реестр Codeworks.
 // ABOUTME: Проверяет фактические снимки и не удаляет ресурсы и не запускает старый workflow.
 import {readFile,realpath} from 'node:fs/promises';
-import {readFileSync} from 'node:fs';
+import {readFileSync,constants} from 'node:fs';
+import {open} from 'node:fs/promises';
 import {createHash,randomUUID} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import path from 'node:path';
@@ -11,6 +12,7 @@ import {createCodeIndex} from './code-index.mjs';
 import {createFlowGit} from './git-flow.mjs';
 import {verifyCleanupArchive} from './cleanup-archive.mjs';
 import {createBranchCleanup} from './branch-cleanup.mjs';
+import {attestNativeCompletion,assertRootDirectory,importNativeCompletion} from './write-completion.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 /** Канонический JSON сортирует ключи рекурсивно; массивы сохраняют порядок. */
@@ -167,11 +169,33 @@ export function parseArgs(args){
   const out={preflight:args[0]==='cleanup-preflight'};for(let i=1;i<args.length;i++){const name=args[i];if(name==='--dry-run'){if(out.dryRun||out.preflight)throw Error('INVALID_ARGUMENT');out.dryRun=true;continue;}if(!['--project','--manifest'].includes(name)||out[name]!==undefined||!args[i+1]||args[i+1].startsWith('--'))throw Error('INVALID_ARGUMENT');out[name]=args[++i];}
   if(!out['--project']||!path.isAbsolute(out['--manifest']??''))throw Error('INVALID_ARGUMENT');return out;
 }
+/** Разбирает только owner-команды и не позволяет подменять политику UID. */
+export function parseCompletionArgs(args){
+ const method=args[0];if(!['write-completion-attest','write-completion-import'].includes(method))throw Error('INVALID_ARGUMENT');const out={method};
+ for(let i=1;i<args.length;i++){const key=args[i];if(!['--call','--source','--receipt'].includes(key)||out[key]!==undefined||!args[i+1]||args[i+1].startsWith('--'))throw Error('INVALID_ARGUMENT');out[key]=args[++i];}
+ if(!path.isAbsolute(out['--receipt']??'')||method==='write-completion-attest'&&(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(out['--call']??'')||!path.isAbsolute(out['--source']??''))||method==='write-completion-import'&&(out['--call']||out['--source']))throw Error('INVALID_ARGUMENT');return out;
+}
+/** Root проверяет известный журнал и создаёт отдельную неизменяемую receipt только один раз. */
+export async function createCompletionReceipt(pool,args,{allowedRepositories}={}){
+ if(process.geteuid?.()!==0)throw Error('OWNER_REQUIRED');
+ const call=(await pool.query('SELECT * FROM codeworks.write_calls WHERE id=$1',[args['--call']])).rows[0];if(!call)throw Error('NATIVE_COMPLETION_UNVERIFIED');
+ const project=(await pool.query('SELECT config FROM codeworks.projects WHERE id=$1',[call.project_id])).rows[0]?.config;
+ const workspace=(await pool.query('SELECT * FROM codeworks.workspaces WHERE id=$1 AND project_id=$2',[call.workspace_id,call.project_id])).rows[0];
+ if(!project||!workspace||!allowedRepositories?.includes(project.repo_path))throw Error('NATIVE_COMPLETION_UNVERIFIED');
+ const proof=await attestNativeCompletion({sourcePath:args['--source'],call,project,workspace}),target=args['--receipt'];
+ if(!path.isAbsolute(target)||path.normalize(target)!==target)throw Error('INVALID_ARGUMENT');await assertRootDirectory(path.dirname(target));
+ const handle=await open(target,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
+ try{await handle.writeFile(JSON.stringify(proof)+'\n');await handle.sync();}finally{await handle.close();}
+ return {write_call_id:call.id,created:true};
+}
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   let pool;try{
-    const args=parseArgs(process.argv.slice(2));const manifest=JSON.parse(await readFile(args['--manifest'],'utf8'));
+    const raw=process.argv.slice(2),completion=raw[0]?.startsWith('write-completion-'),args=completion?parseCompletionArgs(raw):parseArgs(raw);
     const databaseURL=process.env.CODEWORKS_DATABASE_URL??JSON.parse(readFileSync(process.env.CODEWORKS_DATABASE_CONFIG_FILE,'utf8')).app_url;
     pool=new Pool({connectionString:databaseURL,max:3,connectionTimeoutMillis:3000,statement_timeout:10000});
-    const result=await importCleanup(pool,args['--project'],manifest,{git:{...createGit(),inspectBranchResources:createBranchCleanup().inspect},codeIndex:createCodeIndex(pool),dryRun:args.dryRun||args.preflight,preflight:args.preflight,allowedRepositories:JSON.parse(process.env.CODEWORKS_ALLOWED_REPOSITORIES??'[]')});console.log(JSON.stringify(result));
-  }catch(error){console.error('Cleanup import failed: '+(/^[A-Z_]+$/.test(error.message)?error.message:'UNAVAILABLE'));process.exitCode=1;}finally{await pool?.end();}
+    const allowedRepositories=JSON.parse(process.env.CODEWORKS_ALLOWED_REPOSITORIES??'[]');let result;
+    if(completion){result=args.method==='write-completion-attest'?await createCompletionReceipt(pool,args,{allowedRepositories}):await importNativeCompletion(pool,args['--receipt'],{allowedRepositories});}
+    else{const manifest=JSON.parse(await readFile(args['--manifest'],'utf8'));result=await importCleanup(pool,args['--project'],manifest,{git:{...createGit(),inspectBranchResources:createBranchCleanup().inspect},codeIndex:createCodeIndex(pool),dryRun:args.dryRun||args.preflight,preflight:args.preflight,allowedRepositories});}
+    console.log(JSON.stringify(result));
+  }catch(error){console.error('Owner operation failed: '+(/^[A-Z_]+$/.test(error.message)?error.message:'UNAVAILABLE'));process.exitCode=1;}finally{await pool?.end();}
 }
