@@ -3,28 +3,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {mkdtemp,rm} from 'node:fs/promises';
+import {mkdtemp,rm,mkdir,symlink,access} from 'node:fs/promises';
+import {assertCleanupRoot} from '../src/git.mjs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {canonical,validateManifest,parseArgs,importCleanup,verifyRetained} from '../src/operator.mjs';
 const digest=x=>createHash('sha256').update(x).digest('hex');
 const sign=m=>({...m,manifest_sha256:digest(canonical(m))});
-async function fixture(t,{active=false,duplicate=false}={}){
+async function fixture(t,{active=false,duplicate=false,existing=null,busy=false}={}){
  const root=await mkdtemp(path.join(tmpdir(),'cleanup-operator-'));t.after(()=>rm(root,{recursive:true,force:true}));
  const sha='a'.repeat(40),w={id:'00000000-0000-4000-8000-000000000001',project_id:'p',branch:'feature/example',path:root+'/work',base_sha:sha,kind:'feature',ownership_token:'token'};
  const record={id:w.id,project_id:w.project_id,branch:w.branch,path:w.path,base_sha:w.base_sha};
  const snapshot={branch:{ref:'refs/heads/'+w.branch,oid:sha},ownership:{ref:'refs/codeworks/ownership/'+w.id,oid:null,matches:false},remote:{ref:'refs/heads/'+w.branch,oid:null,known:true},tracking:{ref:'refs/remotes/origin/'+w.branch,oid:null},worktree:{path:w.path,registered:false,pathExists:false,head:null,dirty:null,owned:false,lock:null}};
  const m=sign({manifestVersion:1,reviewed:true,project_id:'p',common_dir:root+'/git',workspace_id:w.id,protected_task_ids:[],branch:snapshot.branch,ownership:snapshot.ownership,remote:snapshot.remote,tracking:snapshot.tracking,worktree:snapshot.worktree,index:{identity:'fixture',collections:[],metadataPoints:[],ownerRecordHash:null},provenance:[{kind:'workspace-record',ref:w.id,sha256:digest(canonical(record))}],disposition:{type:'unused'}});
- const project={id:'p',common_dir:root+'/git',repo_path:root,workspace_root:root,legacy_workspace_roots:[root]};let inserts=0;
+ const project={id:'p',common_dir:root+'/git',repo_path:root,workspace_root:root,legacy_workspace_roots:[root]};let inserts=0,updates=0;
  const db={query:async(sql)=>{
+  if(sql.startsWith('SELECT pg_try_advisory_xact_lock'))return {rows:[{acquired:!busy}],rowCount:1};
   if(sql.startsWith('SELECT config'))return {rows:[{config:project}],rowCount:1};
   if(sql.startsWith('SELECT * FROM codeworks.workspaces'))return {rows:[w],rowCount:1};
   if(sql.startsWith('SELECT 1 FROM codeworks.workflow_registry'))return {rows:[],rowCount:active?1:0};
-  if(sql.startsWith('SELECT id,evidence'))return {rows:duplicate?[{id:'existing',evidence:{manifest:m}}]:[],rowCount:duplicate?1:0};
+  if(sql.startsWith('SELECT * FROM codeworks.cleanup_obligations'))return {rows:duplicate?[{id:'existing',state:'pending',blocker:null,evidence:{manifest:m}}]:existing?[existing]:[],rowCount:duplicate||existing?1:0};
+  if(sql.startsWith('UPDATE codeworks.cleanup_obligations')){updates++;return {rows:[{id:'existing'}],rowCount:1};}
   if(sql.startsWith('INSERT INTO codeworks.cleanup_obligations'))inserts++;
   return {rows:[],rowCount:0};
  },release(){}};
- return {m,allowedRepositories:[root],pool:{connect:async()=>db},git:{inspectResources:async()=>snapshot},codeIndex:{inspect:async()=>({complete:true})},inserts:()=>inserts};
+ return {m,allowedRepositories:[root],pool:{connect:async()=>db},git:{inspectResources:async()=>snapshot},codeIndex:{inspect:async()=>({complete:true})},inserts:()=>inserts,updates:()=>updates};
 }
 test('digest, provenance and command arguments are strict',()=>{
  assert.throws(()=>validateManifest({manifestVersion:1},'p'),/INVALID_MANIFEST/);
@@ -38,7 +41,7 @@ test('invalid digest and provenance never admit a cleanup',async t=>{
 });
 test('active work is protected and duplicate import is idempotent',async t=>{
  const a=await fixture(t,{active:true});await assert.rejects(importCleanup(a.pool,'p',a.m,a),/ACTIVE_OR_PENDING_WORK/);assert.equal(a.inserts(),0);
- const b=await fixture(t,{duplicate:true});const result=await importCleanup(b.pool,'p',b.m,b);assert.equal(result.duplicate,true);assert.equal(b.inserts(),0);
+ const b=await fixture(t,{duplicate:true});b.git.inspectResources=async()=>{throw Error('must not inspect after prior admission');};const result=await importCleanup(b.pool,'p',b.m,b);assert.equal(result.duplicate,true);assert.equal(b.inserts(),0);
 });
 test('dry run validates without admission',async t=>{
  const f=await fixture(t);const result=await importCleanup(f.pool,'p',f.m,{...f,dryRun:true});assert.equal(result.state,'pending');assert.equal(f.inserts(),0);
@@ -66,4 +69,23 @@ test('retained import records pending only for verified exact DEV ancestry',asyn
  const flowGit={remote:async()=>target,ancestor:async()=>true};
  const result=await importCleanup(f.pool,'p',manifest,{...f,flowGit});assert.equal(result.state,'pending');assert.equal(f.inserts(),1);
  await assert.rejects(importCleanup(f.pool,'p',manifest,{...f,flowGit:{...flowGit,remote:async()=>source}}),/RETAINED_TARGET_CHANGED/);
+});
+
+
+test('allowlisted absent root is canonical without creating directories',async t=>{
+ const root=await mkdtemp(path.join(tmpdir(),'cleanup-root-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const missing=root+'/old/workspaces',project={workspace_root:root+'/current',legacy_workspace_roots:[missing]};
+ await assertCleanupRoot(project,missing);await assert.rejects(access(missing));
+ await assert.rejects(assertCleanupRoot(project,root+'/other'),{code:'OWNERSHIP_CONFLICT'});
+ await assert.rejects(assertCleanupRoot({...project,legacy_workspace_roots:[root+'/old/../other']},root+'/old/../other'),{code:'OWNERSHIP_CONFLICT'});
+ await mkdir(root+'/real');await symlink(root+'/real',root+'/old');
+ await assert.rejects(assertCleanupRoot(project,missing),{code:'OWNERSHIP_CONFLICT'});
+});
+
+
+test('attaches proof only before any cleanup step under execution guard',async t=>{
+ const item={id:'existing',state:'waiting_decision',step:'inspect',epoch:'4',outcome:'cancelled',evidence:{prior:'preserve'},expected:{}};
+ const f=await fixture(t,{existing:item});const result=await importCleanup(f.pool,'p',f.m,f);assert.equal(result.attached,true);assert.equal(result.id,'existing');assert.equal(f.updates(),1);assert.equal(f.inserts(),0);
+ const begun=await fixture(t,{existing:{...item,step:'remote',expected:{branch:{oid:'a'.repeat(40)}}}});await assert.rejects(importCleanup(begun.pool,'p',begun.m,begun),/CLEANUP_ALREADY_ADMITTED/);assert.equal(begun.updates(),0);
+ const busy=await fixture(t,{busy:true,existing:item});await assert.rejects(importCleanup(busy.pool,'p',busy.m,busy),/CLEANUP_BUSY/);assert.equal(busy.updates(),0);
 });

@@ -6,7 +6,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import path from 'node:path';
 import {Pool} from 'pg';
-import {createGit,command} from './git.mjs';
+import {createGit,command,assertCleanupRoot} from './git.mjs';
 import {createCodeIndex} from './code-index.mjs';
 import {createFlowGit} from './git-flow.mjs';
 
@@ -49,23 +49,32 @@ export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRu
     const row=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1 FOR SHARE',[projectId])).rows[0];
     const project=row?.config;if(!project||project.id!==projectId||project.common_dir!==manifest.common_dir||!Array.isArray(allowedRepositories)||!allowedRepositories.includes(project.repo_path))throw Error('PROJECT_MISMATCH');
     const root=path.dirname(manifest.worktree.path);
-    if(!(root===project.workspace_root||(project.legacy_workspace_roots??[]).includes(root))||await realpath(root)!==root)throw Error('LEGACY_ROOT_FORBIDDEN');
+    try{await assertCleanupRoot(project,root);}catch{throw Error('LEGACY_ROOT_FORBIDDEN');}
     await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",['codeworks:cleanup-import:'+projectId+':'+manifest.branch.ref]);
+    if(typeof manifest.workspace_id!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(manifest.workspace_id))throw Error('LEGACY_IDENTITY_UNVERIFIED');
+    const guard=await db.query('SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired',['execution:workspace:'+manifest.workspace_id]);
+    if(!guard.rows[0]?.acquired)throw Error('CLEANUP_BUSY');
     const matches=(await db.query('SELECT * FROM codeworks.workspaces WHERE project_id=$1 AND (id=$2 OR branch=$3 OR path=$4) FOR UPDATE',[projectId,manifest.workspace_id,manifest.branch.ref.slice(11),manifest.worktree.path])).rows;
     if(matches.length>1||matches.length===1&&(matches[0].id!==manifest.workspace_id||matches[0].branch!==manifest.branch.ref.slice(11)||matches[0].path!==manifest.worktree.path))throw Error('WORKSPACE_CONFLICT');
-    let workspace=matches[0];
-    if(!workspace){
+    let workspace=matches[0]??{id:manifest.workspace_id,project_id:projectId,branch:manifest.branch.ref.slice(11),path:manifest.worktree.path};
+    if(workspace.id&&manifest.protected_task_ids.includes(workspace.id))throw Error('ACTIVE_OR_PENDING_WORK');
+    if(workspace.id){
+      await db.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[workspace.id]);
+      const protectedRow=await db.query("SELECT 1 FROM codeworks.workflow_registry WHERE workspace_id=$1 AND lifecycle='active' UNION ALL SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain') UNION ALL SELECT 1 FROM codeworks.operations WHERE workspace_id=$1 AND status IN ('pending','running','awaiting_ci','awaiting_deployment','awaiting_reconciliation') UNION ALL SELECT 1 FROM codeworks.release_queue q JOIN codeworks.operations o ON o.id=q.operation_id WHERE o.workspace_id=$1 AND q.state IN ('held','queued') LIMIT 1",[workspace.id]);
+      if(protectedRow.rowCount)throw Error('ACTIVE_OR_PENDING_WORK');
+    }
+    const subject=matches[0]?'workspace:'+workspace.id:'legacy:'+manifest.manifest_sha256;
+    const existing=(await db.query("SELECT * FROM codeworks.cleanup_obligations WHERE project_id=$1 AND subject_key=$2 AND (state<>'done' OR evidence->'manifest'->>'manifest_sha256'=$3) ORDER BY (state<>'done') DESC,created_at DESC LIMIT 1 FOR UPDATE",[projectId,subject,manifest.manifest_sha256])).rows[0];
+    const previousDigest=existing?.evidence?.manifest?.manifest_sha256;
+    if(previousDigest===manifest.manifest_sha256){await db.query(dryRun?'ROLLBACK':'COMMIT');return {id:existing.id,subject,state:existing.state,blocker:existing.blocker,duplicate:true,attached:false,dry_run:dryRun};}
+    if(previousDigest)throw Error('CLEANUP_ALREADY_ADMITTED');
+    if(!matches[0]){
       if(!manifest.ownership?.oid||!manifest.provenance.some(p=>p.kind==='ownership-ref'&&p.ref===manifest.ownership.ref))throw Error('LEGACY_IDENTITY_UNVERIFIED');
       const blob=await command('git',['-C',project.repo_path,'cat-file','blob',manifest.ownership.ref]);let marker;
       try{marker=JSON.parse(blob.stdout);}catch{throw Error('LEGACY_IDENTITY_UNVERIFIED');}
       const evidence=manifest.provenance.find(p=>p.kind==='ownership-ref'&&p.ref===manifest.ownership.ref);
       if(hash(blob.stdout)!==evidence.sha256||marker.workspace_id!==manifest.workspace_id||marker.workspace_id!==manifest.ownership.ref.slice('refs/codeworks/ownership/'.length)||marker.branch!==manifest.branch.ref.slice(11)||marker.path!==manifest.worktree.path||!/^[0-9a-f-]{36}$/i.test(marker.token??'')||!/^[0-9a-f]{40}$/.test(marker.base_sha??''))throw Error('LEGACY_IDENTITY_UNVERIFIED');
       workspace={id:marker.workspace_id,project_id:projectId,branch:marker.branch,path:marker.path,base_sha:marker.base_sha,kind:manifest.disposition.kind,ownership_token:marker.token};
-    }
-    if(workspace.id&&manifest.protected_task_ids.includes(workspace.id))throw Error('ACTIVE_OR_PENDING_WORK');
-    if(workspace.id){
-      const protectedRow=await db.query("SELECT 1 FROM codeworks.workflow_registry WHERE workspace_id=$1 AND lifecycle='active' UNION ALL SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain') UNION ALL SELECT 1 FROM codeworks.operations WHERE workspace_id=$1 AND status IN ('pending','running','awaiting_ci','awaiting_deployment','awaiting_reconciliation') UNION ALL SELECT 1 FROM codeworks.release_queue q JOIN codeworks.operations o ON o.id=q.operation_id WHERE o.workspace_id=$1 AND q.state IN ('held','queued') LIMIT 1",[workspace.id]);
-      if(protectedRow.rowCount)throw Error('ACTIVE_OR_PENDING_WORK');
     }
     const snapshot=await git.inspectResources(project,workspace,{manifest});
     for(const key of ['branch','remote'])if(!equal(snapshot[key],key==='remote'?{...manifest[key],known:true}:manifest[key]))throw Error('GIT_SNAPSHOT_CHANGED');
@@ -103,12 +112,18 @@ export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRu
       if(evidenceValid)for(const leg of legs){const target=leg.target==='main'?'prod':'dev';const proof=await db.query('SELECT 1 FROM codeworks.deployment_evidence WHERE id=$1 AND project_id=$2 AND target=$3 AND commit_sha=$4',[leg.deployment_evidence_id,projectId,target,leg.merge_sha]);if(proof.rowCount!==1)evidenceValid=false;}
       if(evidenceValid&&[head,snapshot.branch.oid,snapshot.remote.oid].every(v=>v===null||v===release.requested_sha)){outcome='released';state='pending';blocker=null;}
     }
-    const subject=matches[0]?'workspace:'+workspace.id:'legacy:'+manifest.manifest_sha256;
-    const existing=(await db.query("SELECT id,evidence FROM codeworks.cleanup_obligations WHERE project_id=$1 AND subject_key=$2 AND state<>'done' FOR UPDATE",[projectId,subject])).rows[0];
-    if(existing&&existing.evidence?.manifest?.manifest_sha256!==manifest.manifest_sha256)throw Error('CLEANUP_ALREADY_ADMITTED');
     const id=existing?.id??randomUUID();
-    if(!dryRun&&!existing)await db.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,step,state,evidence,expected,blocker) VALUES($1,$2,$3,$4,$5,'remote',$6,$7::jsonb,$8::jsonb,$9)",[id,projectId,matches[0]?.id??null,subject,outcome,state,JSON.stringify({manifest,index_snapshot:index,...(verified_disposition?{verified_disposition}:{}),...(!matches[0]?{workspace}:{})}),JSON.stringify(snapshot),blocker]);
-    await db.query(dryRun?'ROLLBACK':'COMMIT');return {id,subject,state,blocker,duplicate:!!existing,dry_run:dryRun};
+    const evidence={...(existing?.evidence??{}),manifest,index_snapshot:index,...(verified_disposition?{verified_disposition}:{}),...(!matches[0]?{workspace}:{})};
+    let attached=false;
+    if(existing&&!previousDigest){
+      if(existing.step!=='inspect'||!['pending','waiting_decision'].includes(existing.state)||!existing.expected||Object.keys(existing.expected).length!==0||state!=='pending')throw Error('CLEANUP_ALREADY_ADMITTED');
+      if(!dryRun){
+        const updated=await db.query("UPDATE codeworks.cleanup_obligations SET evidence=$3::jsonb,expected=$4::jsonb,state='pending',blocker=NULL,next_attempt_at=NULL,epoch=epoch+1,updated_at=now() WHERE id=$1 AND epoch=$2 AND step='inspect' AND state IN ('pending','waiting_decision') AND expected='{}'::jsonb AND NOT (evidence ? 'manifest') RETURNING id",[id,existing.epoch,JSON.stringify(evidence),JSON.stringify(snapshot)]);
+        if(!updated.rowCount)throw Error('CLEANUP_FENCE_LOST');
+      }
+      attached=true;
+    }else if(!dryRun&&!existing)await db.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,step,state,evidence,expected,blocker) VALUES($1,$2,$3,$4,$5,'remote',$6,$7::jsonb,$8::jsonb,$9)",[id,projectId,matches[0]?.id??null,subject,outcome,state,JSON.stringify(evidence),JSON.stringify(snapshot),blocker]);
+    await db.query(dryRun?'ROLLBACK':'COMMIT');return {id,subject,state:previousDigest?existing.state:state,blocker:previousDigest?existing.blocker:blocker,duplicate:!!previousDigest,attached,dry_run:dryRun};
   }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}finally{db.release();}
 }
 /** Разбирает только фиксированную операторскую команду и абсолютный путь манифеста. */

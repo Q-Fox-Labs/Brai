@@ -8,6 +8,13 @@ import { Fault } from './errors.mjs';
 import {executionContext} from './execution-context.mjs';
 const relative=value=>value==='.'||(!path.isAbsolute(value)&&!value.split('/').some(p=>!p||p==='.'||p==='..')&&!value.includes('\\'));
 async function exists(file) { try { return await lstat(file); } catch(error) { if(error.code==='ENOENT') return null; throw error; } }
+/** Проверяет точный разрешённый корень, включая отсутствующие компоненты, без создания каталогов. */
+export async function assertCleanupRoot(project,root) {
+  if(typeof root!=='string'||!path.isAbsolute(root)||path.normalize(root)!==root||root==='/'||!(root===project.workspace_root||(project.legacy_workspace_roots??[]).includes(root)))throw new Fault('OWNERSHIP_CONFLICT');
+  let current=root,entry;
+  while(!(entry=await exists(current))){const parent=path.dirname(current);if(parent===current)throw new Fault('OWNERSHIP_CONFLICT');current=parent;}
+  if(entry.isSymbolicLink()||!entry.isDirectory()||await realpath(current)!==current)throw new Fault('OWNERSHIP_CONFLICT');
+}
 /** Запускает фиксированный executable без shell; наследует flock FD только в локальном Git helper или legacy worker. */
 export async function command(executable,args,{cwd,allowFailure=false,timeout=120000,input,env={}}={}) {
   return new Promise((resolve,reject)=>{
@@ -71,7 +78,7 @@ export function createGit({flowGit}={}) {
   }
   async function inspectResources(project,w,{manifest}={}) {
     await topology(project);
-    if(manifest){const root=path.dirname(w.path);if(!(root===project.workspace_root||(project.legacy_workspace_roots??[]).includes(root))||await realpath(root)!==root)throw new Fault('OWNERSHIP_CONFLICT');}
+    if(manifest)await assertCleanupRoot(project,path.dirname(w.path));
     const branchRef='refs/heads/'+w.branch, ownerRef=manifest?.ownership?.ref??ownershipRef(w);
     if(!/^refs\/codeworks\/ownership\/[A-Za-z0-9-]+$/.test(ownerRef))throw new Fault('OWNERSHIP_CONFLICT');
     const readRef=async ref=>{const r=await git(project,['rev-parse','--verify','--quiet',ref],{allowFailure:true});if(r.code===1)return null;if(r.code!==0)throw new Fault('GIT_FAILED');return r.stdout;};
