@@ -2,8 +2,9 @@
 // ABOUTME: Не управляет агентами; release агент вызывает после принятия пользователем в чате.
 import { randomUUID, createHash } from 'node:crypto';
 import path from 'node:path';
-import { canonical, methods, validate, outputNames, schema } from './contracts.mjs';
+import { canonical, methods, internalMethods, validate, outputNames, schema } from './contracts.mjs';
 import { Fault, safeFault } from './errors.mjs';
+import {createWriteAdmission} from './write-admission.mjs';
 const dto=value=>JSON.parse(JSON.stringify(value));
 const publicDTO=(name,row)=>dto(Object.fromEntries(Object.keys(schema.definitions[name].properties).filter(key=>key in row).map(key=>[key,row[key]])));
 const workspaceDTO=row=>publicDTO('workspace',row);
@@ -16,12 +17,25 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
     if(!allowedRepositories.includes(p.repo_path)||!p.executors.includes(executor))throw new Fault('FORBIDDEN');
     return p;
   }
-  async function call(method,args,executorId) {
-    if(!methods.includes(method))throw new Fault('INVALID_ARGUMENT');
+  async function call(method,args,executorId,writeCallId=null) {
+    if(!methods.includes(method)&&!internalMethods.includes(method))throw new Fault('INVALID_ARGUMENT');
     validate(method,args);
     if(!/^[a-z][a-z0-9_]{0,63}$/.test(executorId??''))throw new Fault('FORBIDDEN');
     let value;
-    if(method==='project.register') {
+    if(internalMethods.includes(method)) {
+      if(!store.pool)throw new Fault('INTERNAL');
+      await store.read(args.project_id,db=>project(db,args.project_id,executorId));
+      const admission=createWriteAdmission(store.pool,{
+        prepare:(input,executor,id)=>call('prepare',input,executor,id),
+        inspect:(p,w)=>git.inspect(p,w),
+        workspace:async(p,id)=>store.read(p,async db=>{
+          const config=await project(db,p,executorId),w=await db.workspace(p,id);
+          if(!w)throw new Fault('NOT_FOUND');
+          return {project:config,workspace:w};
+        }),
+      });
+      value=await admission[method.split('.')[1]](args,executorId);
+    } else if(method==='project.register') {
       if(executorId!==adminExecutor||!allowedRepositories.includes(args.project.repo_path))throw new Fault('FORBIDDEN');
       await git.validateProject(args.project);
       value=await store.transaction(args.project.id,async db=>{
@@ -43,9 +57,15 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         if(operation&&w&&operation.workspace_id!==w.id)throw new Fault('CONFLICT');
         if(method==='lifecycle.status'){
           const lifecycle=await db.lifecycle(w.id);
-          return {workspace_id:w.id,task_status:w.removed_at?'removed':lifecycle?.lifecycle??'historical',workflow:lifecycle?{id:lifecycle.workflow_id,status:lifecycle.state,generation:Number(lifecycle.generation),executor_state:lifecycle.state!=='completed'&&Date.now()-new Date(lifecycle.updated_at).getTime()>120000?'unavailable':lifecycle.executor_state,last_confirmed_stage:lifecycle.last_stage,blocked_reason:lifecycle.blocked_reason}:null,blockers:await db.blockers(w.id)};
+          const obligation=await db.cleanupObligation?.(w.id);
+          const closing=obligation&&obligation.state!=='done';
+          return {workspace_id:w.id,task_status:closing?'closing':w.removed_at?'removed':lifecycle?.lifecycle??'historical',outcome:lifecycle?.outcome??null,workflow:lifecycle?{id:lifecycle.workflow_id,status:lifecycle.state,generation:Number(lifecycle.generation),executor_state:lifecycle.state!=='completed'&&Date.now()-Math.max(new Date(lifecycle.updated_at).getTime(),new Date(obligation?.updated_at??0).getTime())>120000?'unavailable':lifecycle.executor_state,last_confirmed_stage:closing?'cleanup:'+obligation.step:lifecycle.last_stage,blocked_reason:closing?obligation.blocker:lifecycle.blocked_reason}:null,cleanup:obligation?{id:obligation.id,state:obligation.state,step:obligation.step,outcome:obligation.outcome,owner_workflow_id:obligation.owner_workflow_id,epoch:Number(obligation.epoch),next_attempt_at:obligation.next_attempt_at,blocker:obligation.blocker}:null,blockers:await db.blockers(w.id)};
         }
-        if(!w)return operation?{operation:operationDTO(operation)}:{workspaces:(await db.workspaces(p.id)).map(workspaceDTO)};
+        if(!w){
+          if(operation)return {operation:operationDTO(operation)};
+          const offset=args.offset??0,limit=args.limit??100,rows=await db.workspaces(p.id,limit+1,offset);
+          return {workspaces:rows.slice(0,limit).map(workspaceDTO),next_offset:rows.length>limit?offset+limit:null};
+        }
         const latest=operation??await db.latestOperation(w.id);
         const result={workspace:workspaceDTO(w),operation:latest?operationDTO(latest):null,git:null};
         if(w.preparation_state==='ready'&&!w.removed_at){
@@ -63,7 +83,14 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
       });
       let baseSHA,inspection;
       if(!snapshot.repeated){
-        if(method==='prepare'&&!snapshot.workspace)baseSHA=await git.readBase(snapshot.project,args.kind??'feature');
+        if(method==='prepare'){
+          if(!snapshot.workspace&&!writeCallId)throw new Fault('WORKSPACE_WRITE_REQUIRED');
+          if(snapshot.workspace?.removed_at){
+            const prior=await store.read(args.project_id,db=>db.lifecycle(snapshot.workspace.id));
+            if(!writeCallId||prior?.outcome!=='unused')throw new Fault('CONFLICT','Completed workspace requires a distinct task key.');
+          }
+          if(!snapshot.workspace||snapshot.workspace.removed_at)baseSHA=await git.readBase(snapshot.project,args.kind??'feature');
+        }
         if(['sync','release'].includes(method)&&snapshot.workspace&&!snapshot.workspace.removed_at&&snapshot.workspace.preparation_state==='ready')inspection=await git.inspect(snapshot.project,snapshot.workspace);
       }
       value=await store.transaction(args.project_id,async db=>{
@@ -81,17 +108,25 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         let w;
         if(method==='prepare') {
           w=await db.workspaceByKey(p.id,args.workspace_key);
+          if(w?.removed_at){
+            if(!writeCallId||(await db.lifecycle(w.id))?.outcome!=='unused')throw new Fault('CONFLICT');
+            w=null;
+          }
           const kind=args.kind??'feature';
           if(w){
             if(w.kind!==kind||w.removed_at||w.kind==='promotion')throw new Fault('CONFLICT','Use a new workspace key for a different or completed task.');
           }else{
+            if(!writeCallId)throw new Fault('WORKSPACE_WRITE_REQUIRED');
+            const native=(await db.query('SELECT id FROM codeworks.write_calls WHERE id=$1 AND project_id=$2 AND executor_id=$3 AND workspace_key=$4 AND request_key=$5 AND state=\'preparing\' FOR UPDATE',[writeCallId,p.id,executorId,args.workspace_key,args.request_key])).rows[0];
+            if(!native)throw new Fault('WORKSPACE_WRITE_REQUIRED');
             const key=args.workspace_key;
             if(key.length>64||!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(key)||/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i.test(key)||/^[0-9a-f]{12,}$/i.test(key))throw new Fault('INVALID_ARGUMENT','New workspace_key must be a short descriptive task name, e.g. codeworks-auto-cleanup; UUIDs and commit hashes are not task names.');
             const base_sha=baseSHA;
             if(!base_sha)throw new Fault('CONFLICT','Workspace changed during admission.');
             if(kind==='hotfix'&&(await db.currentEvidence(p.id,'prod'))?.commit_sha!==base_sha)throw new Fault('PRODUCTION_BASE_MISMATCH');
             const id=randomUUID();
-            w={id,project_id:p.id,workspace_key:args.workspace_key,kind,base_ref:p.git_flow[kind+'_base'],base_sha,branch:p.git_flow[kind+'_prefix']+args.workspace_key,path:path.join(p.workspace_root,id),ownership_token:randomUUID()};
+            w={id,project_id:p.id,workspace_key:args.workspace_key,kind,base_ref:p.git_flow[kind+'_base'],base_sha,branch:p.git_flow[kind+'_prefix']+args.workspace_key,path:path.join(p.workspace_root,id),ownership_token:randomUUID(),activation_state:'awaiting_first_write'};
+            if((await db.query("SELECT 1 FROM codeworks.cleanup_obligations WHERE project_id=$1 AND state<>'done' AND expected#>>'{branch,ref}'=$2 LIMIT 1",[p.id,'refs/heads/'+w.branch])).rowCount)throw new Fault('CLEANUP_ALREADY_STARTED','The branch is reserved by a saved cleanup obligation.');
             await db.insertWorkspace(w);
           }
         }else{
@@ -106,11 +141,21 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
             if(state.dirty||state.head!==args.commit_sha)throw new Fault('CONFLICT','Operation requires the current clean workspace commit.');
             if(await db.activeRelease(w.id))throw new Fault('CONFLICT','Workspace has an unfinished release; inspect its status first.');
           }
-          if(method==='cleanup'&&!await db.successfulRelease(w.id))throw new Fault('CONFLICT','Cleanup requires a completed release.');
+          if(method==='cleanup'&&!await db.successfulRelease(w.id)&&!(await db.query("SELECT 1 FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state<>'done'",[w.id])).rowCount)throw new Fault('CONFLICT','Cleanup requires a saved finalization obligation.');
           if(method==='release'&&!p.github)throw new Fault('CONFLICT','GitHub release is not configured.');
         }
+        // AIDEV-NOTE: Допуск команд и hook писателя используют один порядок блокировок.
+        await db.query?.('SELECT id FROM codeworks.workspaces WHERE id=$1 FOR UPDATE',[w.id]);
+        await db.query?.('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[w.id]);
         const lifecycle=await db.lifecycle?.(w.id);
-        if(lifecycle&&(lifecycle.state!=='open'||lifecycle.lifecycle!=='active'))throw new Fault('CONFLICT','Task no longer accepts commands.');
+        let superseded=null;
+        if(lifecycle?.lifecycle==='closing'&&['workspace.cancel','workspace.transfer'].includes(method)){
+          superseded=(await db.query("SELECT * FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state IN ('pending','retry','waiting_decision') AND step='inspect' AND expected='{}'::jsonb FOR UPDATE",[w.id])).rows[0];
+          if(!superseded)throw new Fault('CLEANUP_ALREADY_STARTED','Cleanup already began; reconcile the saved route.');
+          const guard=(await db.query('SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired',['execution:workspace:'+w.id])).rows[0];
+          if(!guard?.acquired)throw new Fault('BUSY','The previous route is being reconciled.');
+        }
+        if(lifecycle&&(lifecycle.state!=='open'||lifecycle.lifecycle!=='active')&&!superseded&&!(method==='cleanup'&&lifecycle.lifecycle==='closing'&&lifecycle.state==='draining'))throw new Fault('CLEANUP_ALREADY_STARTED','Task no longer accepts new changes.');
         if(method==='release.close'){
           const attempt=await db.releaseOperation(args.release_operation_id,w.id);
           if(!attempt)throw new Fault('NOT_FOUND');
@@ -120,7 +165,20 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         if(existing?.status==='failed')existing=null;
         const id=existing?.id??randomUUID();
         if(!existing){
+          // AIDEV-NOTE: Новый маршрут атомарно возвращает не начатую очистку в сверку; запись не открывается.
+          if(superseded)await db.query("UPDATE codeworks.cleanup_obligations SET state='waiting_decision',evidence=jsonb_set(evidence,'{route_pending}','true'::jsonb),updated_at=now() WHERE id=$1",[superseded.id]);
           await db.insertOperation({id,project_id:p.id,workspace_id:w.id,executor_id:executorId,kind:method,status:'pending',step:'intent',request:args,result:null});
+          if(['workspace.cancel','workspace.transfer'].includes(method)&&lifecycle){
+            const outcome=method==='workspace.cancel'?'cancelled':'transferred';
+            if(superseded){
+              const {route_history:priorHistory,...priorEvidence}=superseded.evidence??{};
+              const history=[...(priorHistory??[]),{operation_id:superseded.source_operation_id,outcome:superseded.outcome,evidence:priorEvidence}];
+              await db.query("UPDATE codeworks.cleanup_obligations SET source_operation_id=$2,outcome=$3,evidence=$4::jsonb,epoch=epoch+1,blocker='ROUTE_RECONCILIATION_REQUIRED',updated_at=now() WHERE id=$1",[superseded.id,id,outcome,JSON.stringify({route_pending:true,route_history:history})]);
+              await db.query("UPDATE codeworks.operations SET status='failed',step='ROUTE_SUPERSEDED',updated_at=now() WHERE id=$1 AND status<>'succeeded'",[superseded.source_operation_id]);
+              await db.query("UPDATE codeworks.commands SET state='done',updated_at=now() WHERE operation_id=$1",[superseded.source_operation_id]);
+            }else await db.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,source_operation_id,outcome,step,state,evidence,owner_workflow_id,epoch,blocker) VALUES($1,$2,$3,$4,$5,$6,'inspect','waiting_decision',$7::jsonb,$8,1,'ROUTE_RECONCILIATION_REQUIRED')",[randomUUID(),p.id,w.id,'workspace:'+w.id,id,outcome,JSON.stringify({route_pending:true}),lifecycle.workflow_id]);
+            await db.query("UPDATE codeworks.workflow_registry SET state='draining',lifecycle='closing',outcome=$2,updated_at=now() WHERE workspace_id=$1",[w.id,outcome]);
+          }
           if(method==='release'){
             let details={},retryOf=null;
             const previous=await db.latestRelease(w.id);
@@ -142,6 +200,8 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         return {operation_id:id,workspace_id:w.id,path:w.path,branch:w.branch};
       });
     }
+    // AIDEV-NOTE: PostgreSQL Date должен проверяться в том же ISO-виде, который получит транспорт.
+    value=dto(value);
     try{validate(outputNames[method],value);}catch{throw new Fault('INTERNAL');}
     return value;
   }

@@ -1,194 +1,105 @@
-// ABOUTME: Проверяет границу защитного hook на нативных формах входа PreToolUse.
-// ABOUTME: Подмена клиента проверяет решения политики, но не подтверждает установку hook в Codex.
+// ABOUTME: Проверяет маршрутизацию native записи через hook Codeworks.
+// ABOUTME: Подменяет backend и не запускает пользовательские сессии Codex.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, mkdir, symlink, rm} from 'node:fs/promises';
-import path from 'node:path';
-import {runHook, writePaths} from '../src/hook.mjs';
+import {runHook,writePaths} from '../src/hook.mjs';
+import {validate} from '../src/contracts.mjs';
+const config={projects:[{id:'demo',repo_path:'/test/main',documentation_paths:['docs'],excluded_paths:['tmp']}]};
+const env={CODEWORKS_WORKSPACE_KEY:'task'};
+const patch=text=>({hook_event_name:'PreToolUse',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'apply_patch',cwd:'/test/main',tool_input:{command:text}});
+const valid='*** Begin Patch\n*** Add File: src/a\n+hello\n*** End Patch';
+function fixture(ready=true){const calls=[];return {calls,options:{config,env,polls:1,wait:async()=>{},connect:async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='write.begin')return {workspace_id:'w',operation_id:'o',write_call_id:'c',path:'/test/tree'};if(method==='status')return {workspace:{preparation_state:ready?'ready':'intent'}};return {};},close:async()=>{}})}};}
+test('native patch is rewritten only after ready and admitted',async()=>{const f=fixture();const result=await runHook(patch(valid),f.options);assert.equal(result.hookSpecificOutput.permissionDecision,'allow');assert.equal(result.hookSpecificOutput.updatedInput.command,valid.replace('src/a','/test/tree/src/a'));assert.deepEqual(f.calls.map(x=>x.method),['write.begin','status','write.admit']);assert.deepEqual(f.calls[0].args.targets,['src/a']);});
+test('timeout denies without admitting',async()=>{const f=fixture(false);const r=await runHook(patch(valid),f.options);assert.equal(r.hookSpecificOutput.permissionDecision,'deny');assert.match(r.hookSpecificOutput.additionalContext,/PREPARE_PENDING/);assert.deepEqual(f.calls.map(x=>x.method),['write.begin','status','write.stop']);});
+test('mixed owners and shell do not create a workspace',async()=>{for(const event of [patch(valid.replace('*** End Patch','*** Add File: /outside/admin/a\n+x\n*** End Patch')),{...patch(valid),tool_name:'Bash',tool_input:{command:'touch src/a'}}]){const f=fixture();assert.equal((await runHook(event,f.options)).hookSpecificOutput.permissionDecision,'deny');assert.equal(f.calls.length,0);}});
+test('missing key uses actual write, missing identifiers deny',async()=>{const f=fixture();f.options.env={};assert.equal((await runHook(patch(valid),f.options)).hookSpecificOutput.permissionDecision,'allow');assert.equal(f.calls[0].method,'write.begin');assert.equal('workspace_key' in f.calls[0].args,false);f.calls.length=0;assert.equal((await runHook({...patch(valid),session_id:undefined},f.options)).hookSpecificOutput.permissionDecision,'deny');assert.equal(f.calls.length,0);});
+test('reads and Admin targets do not connect',async()=>{const f=fixture();assert.deepEqual(await runHook(patch(valid.replace('src/a','/outside/admin/a')),f.options),{});assert.equal(f.calls.length,0);});
+test('post and stop report only safe outcome',async()=>{const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_response:{error:'private'}},f.options);assert.deepEqual(f.calls[0],{method:'write.finish',args:{project_id:'demo',session_id:'s',turn_id:'t',tool_use_id:'u',outcome:'error'}});await runHook({...patch(valid),hook_event_name:'Stop'},f.options);assert.equal(f.calls[1].method,'write.stop');});
 
-const root = '/test/main';
-const config = {projects: [{id: 'demo', repo_path: root, documentation_paths: ['docs/allowed.md'], excluded_paths: ['tmp']}]};
-const env = {CODEWORKS_WORKSPACE_KEY: 'task-1'};
-const accepted = {operation_id: '00000000-0000-4000-8000-000000000002', workspace_id: '00000000-0000-4000-8000-000000000001', path: '/test/worktree', branch: 'codex/task-1'};
-const patch = command => ({hook_event_name: 'PreToolUse', tool_name: 'apply_patch', cwd: root, tool_input: {command}});
-const bash = command => ({hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd: root, tool_input: {command}});
-
-function fixture(extra = {}) {
-  const calls = [];
-  let closes = 0;
-  return {calls, get closes() { return closes; }, options: {config, env, connect: async () => ({call: async (method, args) => { calls.push({method, args}); return accepted; }, close: () => { closes++; }}), ...extra}};
-}
-
-for (const operation of ['Add File: src/new.mjs\n+new', 'Delete File: src/old.mjs', 'Update File: src/old.mjs\n*** Move to: src/moved.mjs\n@@\n-old\n+new']) {
-  test(`patch ${operation.split('\n')[0]} prepares and denies without rewriting`, async () => {
-    const f = fixture();
-    const result = await runHook(patch(`*** Begin Patch\n*** ${operation}\n*** End Patch`), f.options);
-    assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
-    assert.match(result.hookSpecificOutput.additionalContext, /\/test\/worktree/);
-    assert.match(result.hookSpecificOutput.additionalContext, /ready/);
-    assert.equal(f.calls[0].method, 'prepare');
-    assert.equal(f.calls[0].args.project_id, 'demo');
-    assert.equal(f.calls[0].args.workspace_key, 'task-1');
-    assert.equal(f.closes, 1);
-    assert.equal(result.hookSpecificOutput.updatedInput, undefined);
-  });
-}
-
-test('patch move protects destination even when source is outside main', async () => {
-  const f = fixture();
-  await runHook(patch('*** Update File: /outside/a\n*** Move to: /test/main/new\n@@\n-a\n+b'), f.options);
-  assert.equal(f.calls.length, 1);
+const bash = command => ({tool_name:'Bash',cwd:'/test/main',tool_input:{command}});
+test('simple shell targets and heredoc bodies retain parser coverage',()=>{
+  for (const command of ["echo 'hello' > src/a",'touch src/a','rm -f src/a','cp /outside/a src/a',"sed -i 's/a/b/' src/a",'printf test | tee src/a','rtk proxy rm src/a']) assert.deepEqual(writePaths(bash(command)),['/test/main/src/a']);
+  for (const marker of ['PY',"'PY'",'"PY"']) assert.deepEqual(writePaths(bash(`python3 - <<${marker}\ntouch src/body\nPY\n`)),[]);
+  assert.deepEqual(writePaths(bash("touch src/before; cat <<'FIRST' <<-SECOND > src/output\nrm src/body1\nFIRST\n\ttee src/body2\n\tSECOND\ntouch src/after")),['/test/main/src/before','/test/main/src/output','/test/main/src/after']);
+  assert.deepEqual(writePaths(bash("cat <<''\n> src/body\n\ntouch src/after")),['/test/main/src/after']);
+  assert.deepEqual(writePaths(bash("cat <<< '<h1>stdin</h1>' > src/output")),['/test/main/src/output']);
+  for (const command of ["cat <<'EOF'\n> src/body",'cat <<$MARKER\n> src/body\n$MARKER','cat <<\n> src/body']) assert.deepEqual(writePaths(bash(command)),[]);
+});
+test('existing native and shell write use the registered workspace',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,calls=[];
+ const cfg={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:'c'};return {};},close:async()=>{}});
+ for(const event of [{...patch(valid),cwd:root},{...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:'python3 script.py'}}]) {
+  const response=await runHook(event,{config:cfg,env,connect});assert.equal(response.hookSpecificOutput.permissionDecision,'allow');
+  assert.equal(calls.at(-2).method,'write.begin');assert.equal(calls.at(-2).args.workspace_id,id);assert.equal(calls.at(-1).method,'write.admit');
+ }
+ const before=calls.length;await runHook({...patch(valid),cwd:root,tool_name:'Bash',hook_event_name:'PostToolUse',tool_response:{}},{config:cfg,env,connect});assert.equal(calls.length,before);
+});
+test('lost begin reply stops by native call identity',async()=>{
+ const f=fixture();const calls=[];f.options.connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='write.begin')throw Error('lost');return {};},close:async()=>{}});
+ assert.equal((await runHook(patch(valid),f.options)).hookSpecificOutput.permissionDecision,'deny');assert.equal(calls[1].method,'write.stop');assert.equal(calls[1].args.tool_use_id,'u');
 });
 
-test('reads, diagnostics, allowed docs and worktree edits never connect', async () => {
-  const connect = () => assert.fail('read or exception must not connect');
-  for (const event of [bash('git status --short'), bash('cat src/main.mjs'), bash('git status # > /test/main/comment-only'), bash("echo 'x > /test/main/no-write'"), patch('*** Update File: docs/allowed.md\n@@\n-a\n+b'), patch('*** Add File: tmp/a\n+a'), {...patch('*** Add File: src/a\n+a'), cwd: '/test/worktree'}, {...patch(''), tool_name: 'Read', tool_input: {file_path: '/test/main/src/a'}}]) {
-    assert.deepEqual(await runHook(event, {config, env, connect}), {});
+test('strict read-only commands in a worktree do not admit a writer',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id;
+ const config={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=()=>assert.fail('read-only call connects');
+ for(const cmd of ['git status','git status --short','cat src/a','rg -n word src','rg --files']) assert.deepEqual(await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:cmd}},{config,env,connect}),{});
+});
+test('shell operators and unsafe flags are never classified as read-only',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,calls=[];
+ const config={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=async()=>({call:async(method,args)=>{calls.push(method);if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:'c'};return {};},close(){}});
+ for(const cmd of ['git status; touch x','cat a > x','rg --pre evil word','git status --exec=evil']) {await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:cmd}},{config,env,connect});assert.equal(calls.at(-1),'write.admit');}
+});
+
+test('new calls get distinct request keys and retries preserve the same key',async()=>{
+ const f=fixture();await runHook(patch(valid),f.options);const first=f.calls.find(c=>c.method==='write.begin').args.request_key;
+ f.calls.length=0;await runHook(patch(valid),f.options);assert.equal(f.calls.find(c=>c.method==='write.begin').args.request_key,first);
+ f.calls.length=0;await runHook({...patch(valid),tool_use_id:'next'},f.options);assert.notEqual(f.calls.find(c=>c.method==='write.begin').args.request_key,first);
+});
+test('only completed ordinary Git shell calls finish writer accounting',async()=>{
+ for(const command of ['git add -A','git commit -m "message"','git push origin feature/test']) {
+  for(const response of [{exit_code:0},'Process exited with code 1\nOutput:\nfailed']) {
+   const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:response},f.options);
+   assert.equal(f.calls[0].method,'write.finish');assert.equal(f.calls[0].args.outcome,'success');
   }
+ }
+ for(const [command,response] of [['git add -A; touch x',{exit_code:0}],['git -c core.hooksPath=/tmp commit -m x',{exit_code:0}],['git push origin feature/test',{session_id:12}],['git add -A','Process running, session ID 1']]) {
+  const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:response},f.options);assert.equal(f.calls.length,0);
+ }
 });
 
-test('mixed docs and code patch uses one prepare', async () => {
-  const f = fixture();
-  await runHook(patch('*** Update File: docs/allowed.md\n@@\n-a\n+b\n*** Add File: src/a\n+a'), f.options);
-  assert.equal(f.calls.length, 1);
+test('unreadable target fails closed before contacting Codeworks',async()=>{const f=fixture();f.options.resolveTarget=()=>{throw Object.assign(new Error('private path'),{code:'EACCES'});};const result=await runHook(patch(valid),f.options);assert.equal(result.hookSpecificOutput.permissionDecision,'deny');assert.equal(f.calls.length,0);assert.doesNotMatch(JSON.stringify(result),/private path/);});
+
+test('foreground checks and read-only pipelines finish but background and opaque commands stay protected',async()=>{
+ for(const command of ['node --test services/codeworks/tests/hook.test.mjs','node services/codeworks/components/cli.mjs build codeworks','node services/codeworks/components/cli.mjs check codeworks','node services/codeworks/components/cli.mjs package codeworks','node services/codeworks/components/cli.mjs run codeworks','rg -n pattern src | head -n 10','sed -n 1,20p src/file && git status --short']) {
+  const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:'Chunk ID: test\nWall time: 1\nProcess exited with code 0\nOutput:\n'},f.options);assert.equal(f.calls[0]?.method,'write.finish',command);
+ }
+ for(const command of ['node --test tests/a &','nohup node --test tests/a','node script.mjs','node -e evil','node services/codeworks/components/cli.mjs run codeworks &','rg word src | sh','sed -n 1w/tmp/out src/file']) {
+  const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:{exit_code:0}},f.options);assert.equal(f.calls.length,0,command);
+ }
+});
+test('output text cannot impersonate native completion',async()=>{const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'node --test tests/a'},tool_response:'Process running\nOutput:\nProcess exited with code 0'},f.options);assert.equal(f.calls.length,0);});
+
+test('safe backend failures keep their reason without exposing details',async()=>{
+ for(const code of ['FORBIDDEN','CLEANUP_ALREADY_STARTED','CONFLICT','WRITE_CALL_MISMATCH','INVALID_ARGUMENT','INTERNAL']) {
+  const f=fixture();f.options.connect=async()=>({call:async(method)=>{if(method==='write.begin')throw Object.assign(new Error('secret private stderr'),{code});return {};},close(){}});
+  const out=await runHook(patch(valid),f.options);assert.match(out.hookSpecificOutput.additionalContext,new RegExp(code));assert.doesNotMatch(JSON.stringify(out),/PREPARE_PENDING|secret private stderr/);
+ }
 });
 
-test('direct Edit, Write and MultiEdit guard the named file', async () => {
-  for (const tool_name of ['Edit', 'Write', 'MultiEdit']) {
-    const f = fixture();
-    const result = await runHook({tool_name, cwd: root, tool_input: {file_path: 'src/a'}}, f.options);
-    assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
-  }
+test('native Bash text Post finishes foreground call without parsing stdout',async()=>{
+ const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'node --test tests/a'},tool_response:'✔ tests/a (50ms)\nℹ pass 1'},f.options);assert.equal(f.calls[0].method,'write.finish');assert.equal(f.calls[0].args.outcome,'success');
+ for(const response of ['Process running with session ID 2',{session_id:2},{status:'running'}]) {const g=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'node --test tests/a'},tool_response:response},g.options);assert.equal(g.calls.length,0);}
+ const g=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'node --test tests/a',run_in_background:true},tool_response:'running'},g.options);assert.equal(g.calls.length,0);
 });
-
-for (const command of ["echo 'hello' > src/a", 'cat > /test/main/src/a', 'touch src/a', 'rm -f src/a', 'mv /outside/a src/a', 'mv src/a /outside/a', 'cp /outside/a src/a', 'cp -t /test/main /outside/a', 'cp --target-directory=/test/main /outside/a', "sed -i 's/a/b/' src/a", 'printf test | tee src/a', 'cd /test/main && touch src/a', 'rtk proxy rm src/a']) {
-  test(`recognizes simple shell write: ${command}`, async () => {
-    const f = fixture();
-    const result = await runHook(bash(command), f.options);
-    assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
-    assert.equal(f.calls.length, 1);
-  });
-}
-
-test('native exec_command uses its explicit workdir', () => {
-  assert.deepEqual(writePaths({tool_name: 'functions.exec_command', cwd: '/outside', tool_input: {cmd: 'touch src/a', workdir: root}}), ['/test/main/src/a']);
+test('existing shell call validates against real owner schema with whole-tree target',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,calls=[];
+ const cfg={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};validate(method,args);if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:id};return {};},close(){}});
+ const r=await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:'node --test tests/a'}},{config:cfg,env,connect});assert.equal(r.hookSpecificOutput.permissionDecision,'allow');assert.deepEqual(calls.find(x=>x.method==='write.begin').args.targets,['.']);
 });
-
-test('unrecognized shell stays outside the hook contract', async () => {
-  assert.deepEqual(await runHook(bash('python3 script.py'), fixture().options), {});
-});
-
-for (const marker of ['PY', "'PY'", '"PY"']) {
-  test(`heredoc ${marker} treats embedded HTML and shell words as stdin`, async () => {
-    const command = `python3 - <<${marker}\nfrom pathlib import Path\np = Path('/outside/admin/renderer.py')\ns = '<a href="'+url+'">'+label+'</a>'\ntouch src/not-a-shell-command\np.write_text(s)\nPY\n`;
-    const f = fixture({connect: () => assert.fail('stdin must not prepare a workspace')});
-    assert.deepEqual(writePaths(bash(command)), []);
-    assert.deepEqual(await runHook(bash(command), f.options), {});
-  });
-}
-
-test('multiple and tab-stripped heredocs preserve writes before and after stdin', () => {
-  const command = "touch src/before; cat <<'FIRST' <<-SECOND > src/output\nrm src/body1\nFIRST\n\ttee src/body2 > src/body3\n\tSECOND\ntouch src/after";
-  assert.deepEqual(writePaths(bash(command)), [root+'/src/before', root+'/src/output', root+'/src/after']);
-});
-
-test('heredoc with a real protected output still prepares and identifies its project', async () => {
-  const f = fixture();
-  const result = await runHook(bash("cat > src/output <<'EOF'\n<h1>not a command</h1>\nEOF"), f.options);
-  assert.equal(f.calls.length, 1);
-  assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
-  assert.match(result.hookSpecificOutput.permissionDecisionReason, /"id":"demo","repo_path":"\/test\/main"/);
-});
-
-test('empty heredoc delimiter and here-string are distinct shell inputs', () => {
-  assert.deepEqual(writePaths(bash("cat <<''\n> src/body\n\ntouch src/after")), [root+'/src/after']);
-  assert.deepEqual(writePaths(bash("cat <<< '<h1>stdin</h1>' > src/output")), [root+'/src/output']);
-});
-
-test('quoted and commented heredoc syntax is data, not a delimiter', () => {
-  assert.deepEqual(writePaths(bash("echo '<<EOF'; # <<BAD\ntouch src/after")), [root+'/src/after']);
-});
-
-test('unsupported or unfinished heredoc does not classify its body as shell writes', () => {
-  for (const command of ["cat <<'EOF'\n> src/body", 'cat <<$MARKER\n> src/body\n$MARKER', 'cat <<\n> src/body']) {
-    assert.deepEqual(writePaths(bash(command)), []);
-  }
-});
-
-test('an unregistered repository stays independent of the chat project and backend availability', async () => {
-  const connect = () => assert.fail('an unregistered path must not connect to Codeworks');
-  for (const event of [
-    {...patch('*** Update File: /outside/admin/rules.md\n@@\n-a\n+b')},
-    {...bash('touch /outside/admin/rules.md')},
-    {...bash('touch rules.md'), tool_input: {cmd: 'touch rules.md', workdir: '/outside/admin'}, tool_name: 'exec_command'},
-    {...bash('cd /outside/admin && touch rules.md')},
-  ]) assert.deepEqual(await runHook(event, {config, env, connect}), {});
-});
-
-test('unavailable Codeworks blocks only the identified write and preserves stable retry key', async () => {
-  const requests = [];
-  const options = {...fixture().options, connect: async () => ({call: async (method, args) => { requests.push(args); throw new Error('private backend detail'); }, close() {}})};
-  const event = bash('touch src/a');
-  for (let i = 0; i < 2; i++) {
-    const result = await runHook(event, options);
-    assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
-    assert.match(result.hookSpecificOutput.additionalContext, /request_key/);
-    assert.doesNotMatch(JSON.stringify(result), /private backend detail/);
-  }
-  assert.deepEqual(requests[0], requests[1]);
-  assert.deepEqual(await runHook(bash('git log -1'), options), {});
-  assert.equal(requests.length, 2);
-});
-
-test('workspace key hint selects one area, absent hint does not guess', async () => {
-  const f = fixture({env: {}});
-  const denied = await runHook(bash('touch src/a'), f.options);
-  assert.equal(denied.hookSpecificOutput.permissionDecision, 'deny');
-  assert.equal(f.calls.length, 0);
-  await runHook({...bash('touch src/a'), session_id: 'chat-2'}, f.options);
-  assert.equal(f.calls[0].args.workspace_key, 'chat-2');
-});
-
-test('two protected projects require explicit separate requests', async () => {
-  const f = fixture({config: {projects: [...config.projects, {id: 'other', repo_path: '/other/main'}]}});
-  const result = await runHook(patch('*** Add File: src/a\n+a\n*** Add File: /other/main/b\n+b'), f.options);
-  assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
-  assert.equal(f.calls.length, 0);
-});
-
-test('new file through symlink resolves to protected main', async () => {
-  const directory = await mkdtemp('/tmp/codeworks-hook-');
-  try {
-    await mkdir(path.join(directory, 'main'));
-    await symlink(path.join(directory, 'main'), path.join(directory, 'alias'));
-    const f = fixture({config: {projects: [{id: 'demo', repo_path: path.join(directory, 'main')}]}});
-    const result = await runHook({tool_name: 'Write', cwd: directory, tool_input: {file_path: 'alias/new-file'}}, f.options);
-    assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
-  } finally { await rm(directory, {recursive: true, force: true}); }
-});
-
-test('invalid new task key asks for a readable name without creating a second area',async()=>{
-  const f=fixture({connect:async()=>({call:async()=>{throw Object.assign(new Error('invalid key'),{code:'INVALID_ARGUMENT'});},close:async()=>{}})});
-  const result=await runHook(bash('touch src/a'),f.options);
-  assert.equal(result.hookSpecificOutput.permissionDecision,'deny');
-  assert.match(result.hookSpecificOutput.additionalContext,/осмысленным workspace_key/);
-  assert.match(result.hookSpecificOutput.additionalContext,/status/);
-});
-
-test('Brai documentation policy excludes docs and exact root AGENTS only',async()=>{
-  const policy={projects:[{id:'demo',repo_path:root,documentation_paths:['docs','AGENTS.md']}]};
-  for(const target of ['docs/README.md','docs/new/deep.md','AGENTS.md']) {
-    const f=fixture({config:policy});
-    assert.deepEqual(await runHook(patch('*** Update File: '+target+'\n@@\n-a\n+b'),f.options),{});
-    assert.equal(f.calls.length,0);
-  }
-  for(const target of ['services/hermes/README.md','deploy/README.md','dependencies/README.md','docs-other/a.md','AGENTS.md-other']) {
-    const f=fixture({config:policy});
-    const result=await runHook(patch('*** Update File: '+target+'\n@@\n-a\n+b'),f.options);
-    assert.equal(result.hookSpecificOutput.permissionDecision,'deny');
-    assert.equal(f.calls.length,1);
-  }
-  const f=fixture({config:policy});
-  await runHook(patch('*** Update File: docs/README.md\n@@\n-a\n+b\n*** Update File: services/hermes/tools.mjs\n@@\n-a\n+b'),f.options);
-  assert.equal(f.calls.length,1);
+test('native end-of-file marker survives rewrite byte for byte',async()=>{
+ const f=fixture(),command='*** Begin Patch\n*** Update File: src/a\n@@\n-old\n+new\n*** End of File\n*** End Patch';const r=await runHook(patch(command),f.options);assert.equal(r.hookSpecificOutput.permissionDecision,'allow');assert.equal(r.hookSpecificOutput.updatedInput.command,command.replace('src/a','/test/tree/src/a'));
 });

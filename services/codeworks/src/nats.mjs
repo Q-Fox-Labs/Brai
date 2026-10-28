@@ -1,13 +1,13 @@
 // ABOUTME: Предоставляет общий API Codeworks через NATS Services без JSON-RPC envelope.
 // ABOUTME: Executor выводится из ACL-защищённого subject и не управляет правами агента.
-import { methods } from './contracts.mjs';
+import { allMethods } from './contracts.mjs';
 import { safeFault, errorStatus } from './errors.mjs';
 /** Регистрирует реальные endpoints и PING/INFO/STATS; ACL должны ограничивать executor часть subject. */
 export async function runNats(nc,runtime,executors) {
   if(!executors.length||executors.some(e=>!(/^[a-z][a-z0-9_]{0,63}$/).test(e)))throw new Error('CODEWORKS_EXECUTORS_REQUIRED');
   const service=await nc.services.add({name:'service_codeworks',version:'2.0.0',queue:'service_codeworks',description:'Worktrees, branches and releases'});
   let active=0;
-  for(const executor of executors)for(const method of methods) {
+  for(const executor of executors)for(const method of allMethods) {
     service.addEndpoint(executor+'_'+method.replaceAll(/[.-]/g,'_'),{subject:'brai.codeworks.v2.'+executor+'.'+method,handler:async(error,msg)=>{
       if(error)return;
       try {

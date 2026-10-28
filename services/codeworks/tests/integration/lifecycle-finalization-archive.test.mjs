@@ -1,0 +1,67 @@
+// ABOUTME: Проверяет историческую отмену с настоящим standalone Git bundle и изолированным Qdrant.
+// ABOUTME: Активный root и неподтверждённый или повреждённый архив не разрешают удаление.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdir,writeFile,readFile,chmod,access} from 'node:fs/promises';
+import {createHash,randomUUID} from 'node:crypto';
+import {setup,configured} from './fixture.mjs';
+import {command} from '../../src/git.mjs';
+import {createActivityGit} from '../../src/git-steps.mjs';
+import {createCodeIndex} from '../../src/code-index.mjs';
+import {runCleanupObligation} from '../../src/worker.mjs';
+import {importCleanup,canonical} from '../../src/operator.mjs';
+import {reconcileProjectLedger} from '../../src/reconciler.mjs';
+
+test('archived cancelled workspace requires authorization, intact bundle and inactive root',{timeout:120000},async t=>{
+  assert.ok(configured&&process.env.CODEWORKS_INDEX_QDRANT,'explicit disposable PostgreSQL and Qdrant are required');
+  const f=await setup();t.after(()=>f.close());const project=await f.project();
+  const prepared=await f.prepare({project_id:project.id,workspace_key:'archived-cancel',request_key:'archived-cancel'});await f.worker(project,prepared.operation_id);
+  const w=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[prepared.workspace_id])).rows[0];
+  await writeFile(w.path+'/hello.txt','unique archived result\n');await command('git',['-C',w.path,'add','hello.txt']);await command('git',['-C',w.path,'commit','-m','archived result']);
+  const head=(await command('git',['-C',w.path,'rev-parse','HEAD'])).stdout,archiveRoot=project.workspace_root+'/archive';
+  await mkdir(archiveRoot,{mode:0o700});const bundle=archiveRoot+'/result.bundle';
+  await command('git',['-C',project.repo_path,'bundle','create',bundle,'refs/heads/'+w.branch]);await chmod(bundle,0o600);
+  const hash=value=>createHash('sha256').update(value).digest('hex');
+  const digest=hash(await readFile(bundle));
+  const bundleData={path:bundle,sha256:digest,heads:[{ref:'refs/heads/'+w.branch,oid:head}]};
+  project.cleanup_archive_roots=[archiveRoot];project.cleanup_archive_uid=process.getuid();
+  await f.owner.query('UPDATE codeworks.projects SET config=$2 WHERE id=$1',[project.id,project]);
+  const settings=project.workspace_root+'/index-runtime.json',configFile=project.workspace_root+'/index-config.json';
+  await writeFile(settings,JSON.stringify({env:{QDRANT_MODE:'external',QDRANT_URL:process.env.CODEWORKS_INDEX_QDRANT,SOCRATICODE_AUTO_RESUME:'off',SOCRATICODE_WATCHER:'manual'}}));
+  await writeFile(configFile,JSON.stringify({engine:'/opt/socraticode/node_modules/socraticode/dist/index.js',socraticodeConfig:settings,sources:{}}));
+  const codeIndex=createCodeIndex(f.app,{configFile}),adapters=createActivityGit();
+  const expected=await adapters.git.inspectResources(project,w),index=await codeIndex.inspect(project,w);
+  const record={id:w.id,project_id:w.project_id,branch:w.branch,path:w.path,base_sha:w.base_sha};
+  const manifest={manifestVersion:1,reviewed:true,project_id:project.id,common_dir:project.common_dir,workspace_id:w.id,branch:expected.branch,remote:expected.remote,tracking:expected.tracking,ownership:expected.ownership,worktree:expected.worktree,protected_task_ids:[],provenance:[{kind:'workspace-record',ref:w.id,sha256:hash(canonical(record))}],index:{identity:index.identity,ownerRecordHash:index.owner.recordHash,collections:index.resources.collections,metadataPoints:index.resources.metadataPoints},disposition:{type:'archived'}};
+  const receiptPath=archiveRoot+'/receipt.json',authorization_ref='01a18284-c791-7902-9879-60203820368b';
+  const receipt=JSON.stringify({authorization_ref,source_manifest_sha256:hash(canonical(manifest)),bundle:bundleData});
+  await writeFile(receiptPath,receipt,{mode:0o600});
+  const archive={...bundleData,authorization_ref,receipt:{path:receiptPath,sha256:hash(receipt)}};
+  manifest.disposition.archive=archive;manifest.manifest_sha256=hash(canonical(manifest));
+  const old='fixture/'+randomUUID(),owner='fixture-reconciler';
+  await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner) VALUES($1,$2,$3,'temporal')",[old,project.id,w.id]);
+  const accept=()=>importCleanup(f.app,project.id,manifest,{...adapters,codeIndex,allowedRepositories:[project.repo_path]});
+  await assert.rejects(accept(),/ACTIVE_OR_PENDING_WORK/);await access(w.path);
+  await f.owner.query("UPDATE codeworks.workflow_registry SET state='completed',lifecycle='cancelled',outcome='cancelled' WHERE workflow_id=$1",[old]);
+  await writeFile(receiptPath,'forged',{mode:0o600});await assert.rejects(accept(),/ARCHIVE_UNVERIFIED/);await access(w.path);
+  const wrongReceipt=JSON.stringify({authorization_ref,source_manifest_sha256:'0'.repeat(64),bundle:bundleData});
+  await writeFile(receiptPath,wrongReceipt,{mode:0o600});
+  const mismatch=structuredClone(manifest);mismatch.disposition.archive.receipt.sha256=hash(wrongReceipt);delete mismatch.manifest_sha256;mismatch.manifest_sha256=hash(canonical(mismatch));
+  await assert.rejects(importCleanup(f.app,project.id,mismatch,{...adapters,codeIndex,allowedRepositories:[project.repo_path]}),/ARCHIVE_UNVERIFIED/);
+  await writeFile(receiptPath,receipt,{mode:0o600});
+  const admitted=await accept(),id=admitted.id;
+  const saved=(await f.app.query('SELECT * FROM codeworks.cleanup_obligations WHERE id=$1',[id])).rows[0];
+  assert.equal(saved.outcome,'cancelled');assert.equal(saved.evidence.archive_authorized,true);
+  await reconcileProjectLedger(f.app,project.id,owner);
+  const run=()=>runCleanupObligation(f.app,id,owner,{...adapters,codeIndex,allowedRepositories:[project.repo_path]});
+  const original=await readFile(bundle);await writeFile(bundle,'corrupt');
+  let result=await run();assert.equal(result.blocker,'ARCHIVE_UNVERIFIED');await access(w.path);
+  await writeFile(bundle,original);await chmod(bundle,0o600);
+  await f.owner.query("UPDATE codeworks.cleanup_obligations SET state='pending' WHERE id=$1",[id]);
+  for(let i=0;i<8;i++){result=await run();assert.notEqual(result?.state,'waiting_decision',JSON.stringify(result));if(result?.state==='done')break;}
+  assert.equal(result.state,'done');assert.equal(result.result.disposition,'resources_removed_with_archive');await assert.rejects(access(w.path));
+  assert.equal(createHash('sha256').update(await readFile(bundle)).digest('hex'),digest);
+  assert.ok((await f.app.query('SELECT removed_at FROM codeworks.workspaces WHERE id=$1',[w.id])).rows[0].removed_at);
+  const zero=await codeIndex.inspect(project,w,{manifest,checkpointState:result.evidence.index_checkpoint});
+  assert.equal(zero.complete,true);assert.equal(zero.owner.present,false);assert.deepEqual(zero.resources,{collections:[],metadataPoints:[]});
+});

@@ -1,0 +1,123 @@
+// ABOUTME: Проверяет сроки и постраничное восстановление cleanup на реальной disposable PostgreSQL.
+// ABOUTME: Тестовые записи не указывают на существующие Git и index ресурсы.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import {setup,configured} from './fixture.mjs';
+import {reconcileProjectLedger} from '../../src/reconciler.mjs';
+
+test('unused cleanup honors five minute delay, immediate stop and scans more than 100 candidates',{timeout:120000},async t=>{
+  assert.ok(configured,'explicit disposable PostgreSQL is required');
+  const f=await setup();t.after(()=>f.close());const project=await f.project();
+  const create=async(key,{age=false,stopped=false,uncertain=false}={})=>{
+    const id=randomUUID(),workflow='fixture/'+id,call=randomUUID();
+    await f.owner.query("INSERT INTO codeworks.workspaces(id,project_id,workspace_key,kind,base_ref,base_sha,branch,path,ownership_token,preparation_state,activation_state) VALUES($1,$2,$3,'feature','refs/heads/dev',$4,$5,$6,$7,'ready','awaiting_first_write')",[id,project.id,key,'a'.repeat(40),'feature/'+key,project.workspace_root+'/'+id,randomUUID()]);
+    await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner) VALUES($1,$2,$3,'temporal')",[workflow,project.id,id]);
+    await f.owner.query("INSERT INTO codeworks.operations(id,project_id,workspace_id,executor_id,kind,status,step,request,updated_at) VALUES($1,$2,$3,'codex','prepare','succeeded','ready','{}',now()-$4::interval)",[randomUUID(),project.id,id,age?'6 minutes':'0 minutes']);
+    await f.owner.query("INSERT INTO codeworks.write_calls(id,project_id,workspace_id,executor_id,session_id,turn_id,tool_use_id,tool_name,workspace_key,kind,request_key,payload_sha256,targets,state,tool_result,updated_at) VALUES($1,$2,$3,'codex',$4,'turn','tool','apply_patch',$4,'feature',$4,$5,'[]',$6,$7::jsonb,now()-$8::interval)",[call,project.id,id,key,'a'.repeat(64),uncertain?'uncertain':'denied_pending',JSON.stringify(stopped?{stop_event:'Stop'}:{}),age?'6 minutes':'0 minutes']);
+    return id;
+  };
+  const recent=await create('recent');
+  const stopped=await create('stopped',{stopped:true});
+  const uncertain=await create('uncertain',{age:true,uncertain:true});
+  for(let i=0;i<105;i++)await create('old-'+i,{age:true});
+  const scan=()=>reconcileProjectLedger(f.app,project.id,'fixture-reconciler');
+  for(let i=0;i<5;i++)await scan();
+  let rows=(await f.owner.query('SELECT workspace_id,outcome FROM codeworks.cleanup_obligations WHERE project_id=$1',[project.id])).rows;
+  assert.equal(rows.length,106);assert.ok(rows.some(row=>row.workspace_id===stopped));
+  assert.ok(!rows.some(row=>row.workspace_id===recent||row.workspace_id===uncertain));
+  assert.ok(rows.every(row=>row.outcome==='unused'));
+  await f.owner.query("UPDATE codeworks.write_calls SET updated_at=now()-interval '6 minutes' WHERE workspace_id=$1",[recent]);
+  await f.owner.query("UPDATE codeworks.operations SET updated_at=now()-interval '6 minutes' WHERE workspace_id=$1 AND kind='prepare'",[recent]);
+  await scan();rows=(await f.owner.query('SELECT workspace_id FROM codeworks.cleanup_obligations WHERE project_id=$1',[project.id])).rows;
+  assert.equal(rows.length,107);assert.ok(rows.some(row=>row.workspace_id===recent));
+  assert.ok(!rows.some(row=>row.workspace_id===uncertain));
+});
+
+test('unused timeout starts at ready and true stop handles failed preparation safely',{timeout:120000},async t=>{
+  assert.ok(configured,'explicit disposable PostgreSQL is required');
+  const f=await setup();t.after(()=>f.close());const p=await f.project();
+  const create=async(key,state,status,result,extraWriter=false)=>{
+    const id=randomUUID(),workflow='fixture/'+id,operation=randomUUID();
+    await f.owner.query("INSERT INTO codeworks.workspaces(id,project_id,workspace_key,kind,base_ref,base_sha,branch,path,ownership_token,preparation_state,activation_state) VALUES($1,$2,$3,'feature','refs/heads/dev',$4,$5,$6,$7,$8,'awaiting_first_write')",[id,p.id,key,'a'.repeat(40),'feature/'+key,p.workspace_root+'/'+id,randomUUID(),state]);
+    await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner) VALUES($1,$2,$3,'temporal')",[workflow,p.id,id]);
+    await f.owner.query("INSERT INTO codeworks.operations(id,project_id,workspace_id,executor_id,kind,status,step,request,updated_at) VALUES($1,$2,$3,'codex','prepare',$4,'fixture','{}',now()-interval '10 minutes')",[operation,p.id,id,status]);
+    const add=async(state,tool)=>f.owner.query("INSERT INTO codeworks.write_calls(id,project_id,workspace_id,executor_id,session_id,turn_id,tool_use_id,tool_name,workspace_key,kind,request_key,payload_sha256,targets,state,tool_result,updated_at) VALUES($1,$2,$3,'codex',$4,'turn',$5,'apply_patch',$4,'feature',$5,$6,'[]',$7,$8,now()-interval '10 minutes')",[randomUUID(),p.id,id,key,tool,'a'.repeat(64),state,result]);
+    await add('denied_pending','denied');if(extraWriter)await add('uncertain','unknown');
+    return {id,operation};
+  };
+  const pending=await create('pending','intent','running',{stop_reason:'prepare_pending'});
+  const fake=await create('fake-stop','ready','succeeded',{stop_event:'Stop',stop_reason:'prepare_pending'});
+  const stopped=await create('real-stop','ready','succeeded',{stop_event:'Stop',stop_reason:'turn_stopped'});
+  const failed=await create('failed-stop','failed','failed',{stop_event:'Stop'});
+  const unknown=await create('unknown-writer','failed','failed',{stop_event:'Stop'},true);
+  const scan=()=>reconcileProjectLedger(f.app,p.id,'fixture-reconciler');
+  await f.owner.query('UPDATE codeworks.operations SET updated_at=now() WHERE id=$1',[fake.operation]);
+  await scan();let ids=(await f.app.query('SELECT workspace_id FROM codeworks.cleanup_obligations WHERE project_id=$1',[p.id])).rows.map(r=>r.workspace_id);
+  assert.ok(ids.includes(stopped.id)&&ids.includes(failed.id));assert.ok(!ids.includes(pending.id)&&!ids.includes(fake.id)&&!ids.includes(unknown.id));
+  await f.owner.query("UPDATE codeworks.workspaces SET preparation_state='ready' WHERE id=$1",[pending.id]);
+  await f.owner.query("UPDATE codeworks.operations SET status='succeeded',updated_at=now() WHERE id=$1",[pending.operation]);
+  await scan();ids=(await f.app.query('SELECT workspace_id FROM codeworks.cleanup_obligations WHERE project_id=$1',[p.id])).rows.map(r=>r.workspace_id);
+  assert.ok(!ids.includes(pending.id),'ten minutes before readiness do not count');
+  await f.owner.query("UPDATE codeworks.operations SET updated_at=now()-interval '6 minutes' WHERE id=ANY($1)",[[pending.operation,fake.operation]]);
+  await scan();ids=(await f.app.query('SELECT workspace_id FROM codeworks.cleanup_obligations WHERE project_id=$1',[p.id])).rows.map(r=>r.workspace_id);
+  assert.ok(ids.includes(pending.id)&&ids.includes(fake.id));assert.ok(!ids.includes(unknown.id));
+});
+
+test('reconciler adopts a completed root only after acquiring its execution guard',{timeout:120000},async t=>{
+  assert.ok(configured,'explicit disposable PostgreSQL is required');
+  const f=await setup();t.after(()=>f.close());const project=await f.project();
+  const prepared=await f.prepare({project_id:project.id,workspace_key:'adoption-test',request_key:'adoption-test'});await f.worker(project,prepared.operation_id);
+  const old='fixture/'+randomUUID(),owner='fixture-reconciler',id=randomUUID(),workspace=prepared.workspace_id;
+  await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner,state,lifecycle) VALUES($1,$2,$3,'temporal','completed','cancelled')",[old,project.id,workspace]);
+  await f.owner.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,owner_workflow_id,epoch,state,step) VALUES($1,$2,$3,$4,'cancelled',$5,7,'retry','worktree')",[id,project.id,workspace,'workspace:'+workspace,old]);
+  const held=await f.owner.connect();
+  try{
+    await held.query('BEGIN');await held.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',['execution:workspace:'+workspace]);
+    await reconcileProjectLedger(f.app,project.id,owner);
+    const unchanged=(await f.app.query('SELECT owner_workflow_id,epoch FROM codeworks.cleanup_obligations WHERE id=$1',[id])).rows[0];
+    assert.equal(unchanged.owner_workflow_id,old);assert.equal(Number(unchanged.epoch),7);
+    await held.query('ROLLBACK');
+  }finally{held.release();}
+  await reconcileProjectLedger(f.app,project.id,owner);
+  const adopted=(await f.app.query('SELECT owner_workflow_id,epoch,state,step FROM codeworks.cleanup_obligations WHERE id=$1',[id])).rows[0];
+  assert.equal(adopted.owner_workflow_id,owner);assert.equal(Number(adopted.epoch),8);assert.equal(adopted.state,'retry');assert.equal(adopted.step,'worktree');
+});
+
+test('adoption cursor reaches later obligations when the first 32 guards are held',{timeout:120000},async t=>{
+  assert.ok(configured,'explicit disposable PostgreSQL is required');
+  const f=await setup();t.after(()=>f.close());const project=await f.project(),items=[];
+  for(let i=0;i<33;i++){
+    const workspace=randomUUID(),id=randomUUID(),workflow='fixture/'+workspace,key='adopt-'+i;
+    await f.owner.query("INSERT INTO codeworks.workspaces(id,project_id,workspace_key,kind,base_ref,base_sha,branch,path,ownership_token,preparation_state) VALUES($1,$2,$3,'feature','refs/heads/dev',$4,$5,$6,$7,'ready')",[workspace,project.id,key,'a'.repeat(40),'feature/'+key,project.workspace_root+'/'+workspace,randomUUID()]);
+    await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner,state,lifecycle) VALUES($1,$2,$3,'temporal','completed','cancelled')",[workflow,project.id,workspace]);
+    await f.owner.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,owner_workflow_id,epoch,state) VALUES($1,$2,$3,$4,'cancelled',$5,7,'retry')",[id,project.id,workspace,'workspace:'+workspace,workflow]);
+    items.push({id,workspace,workflow});
+  }
+  items.sort((a,b)=>a.id.localeCompare(b.id));const held=await f.owner.connect();
+  try{
+    await held.query('BEGIN');
+    for(const item of items.slice(0,32))await held.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',['execution:workspace:'+item.workspace]);
+    const first=await reconcileProjectLedger(f.app,project.id,'fixture-reconciler',{cursor:null});
+    assert.equal(first.hasMore,true);assert.equal(first.nextCursor,items[31].id);
+    const next=await reconcileProjectLedger(f.app,project.id,'fixture-reconciler',{cursor:first.nextCursor});
+    assert.equal(next.id,items[32].id);assert.equal(next.hasMore,false);
+    const rows=(await f.app.query('SELECT id,owner_workflow_id,epoch FROM codeworks.cleanup_obligations WHERE project_id=$1 ORDER BY id',[project.id])).rows;
+    assert.ok(rows.slice(0,32).every((row,i)=>row.owner_workflow_id===items[i].workflow&&Number(row.epoch)===7));
+    assert.equal(rows[32].owner_workflow_id,'fixture-reconciler');assert.equal(Number(rows[32].epoch),8);
+    await held.query('ROLLBACK');
+  }finally{held.release();}
+});
+
+test('legacy removed timestamp remains closing while a cleanup obligation is unresolved',{timeout:120000},async t=>{
+  assert.ok(configured,'explicit disposable PostgreSQL is required');
+  const f=await setup();t.after(()=>f.close());const p=await f.project();
+  const area=await f.prepare({project_id:p.id,workspace_key:'legacy-pending',request_key:'legacy-pending'});await f.worker(p,area.operation_id);
+  const owner='fixture/'+randomUUID(),id=randomUUID(),due='2030-01-01T00:00:00.000Z';
+  await f.owner.query('UPDATE codeworks.workspaces SET removed_at=now() WHERE id=$1',[area.workspace_id]);
+  await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner,state,lifecycle,outcome) VALUES($1,$2,$3,'temporal','completed','removed','released')",[owner,p.id,area.workspace_id]);
+  await f.owner.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,owner_workflow_id,epoch,state,step,blocker,next_attempt_at) VALUES($1,$2,$3,$4,'released',$5,2,'waiting_decision','index','INDEX_UNAVAILABLE',$6)",[id,p.id,area.workspace_id,'workspace:'+area.workspace_id,owner,due]);
+  const state=await f.h.call('lifecycle.status',{project_id:p.id,workspace_id:area.workspace_id},'codex');
+  assert.equal(state.task_status,'closing');assert.equal(state.cleanup.id,id);assert.equal(state.cleanup.owner_workflow_id,owner);
+  assert.equal(state.cleanup.blocker,'INDEX_UNAVAILABLE');assert.equal(state.cleanup.next_attempt_at,due);assert.equal(state.workflow.blocked_reason,'INDEX_UNAVAILABLE');
+});

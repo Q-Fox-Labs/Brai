@@ -16,7 +16,8 @@
     "services/codeworks/src/verify-ci.mjs",
     "services/codeworks/src/cli.mjs",
     "services/codeworks/src/hook.mjs",
-    "services/codeworks/src/git-step.mjs"
+    "services/codeworks/src/git-step.mjs",
+    "services/codeworks/src/operator.mjs"
   ],
   "inputs": {
     "build": [
@@ -74,7 +75,17 @@
       "services/codeworks/git-step.openrpc.json",
       "services/codeworks/src/code-index.mjs",
       "services/codeworks/src/code-index-engine.mjs",
-      "services/codeworks/migrations/009.sql"
+      "services/codeworks/migrations/009.sql",
+      "services/codeworks/migrations/010.sql",
+      "services/codeworks/migrations/011.sql",
+      "services/codeworks/src/write-admission.mjs",
+      "services/codeworks/src/cleanup-coordinator.mjs",
+      "services/codeworks/src/cleanup-archive.mjs",
+      "services/codeworks/src/branch-cleanup.mjs",
+      "services/codeworks/src/branch-coordinator.mjs",
+      "services/codeworks/src/reconciler.mjs",
+      "services/codeworks/src/operator.mjs",
+      "services/codeworks/src/disposition.mjs"
     ],
     "checks": [
       "services/codeworks/components/cli.mjs",
@@ -115,7 +126,14 @@
       "services/codeworks/tests/integration/temporal*.mjs",
       "services/codeworks/tests/integration/deployment-retry.test.mjs",
       "services/codeworks/tests/code-index*.test.mjs",
-      "services/codeworks/tests/integration/code-index*.mjs"
+      "services/codeworks/tests/integration/code-index*.mjs",
+      "services/codeworks/tests/write-admission.test.mjs",
+      "services/codeworks/tests/operator.test.mjs",
+      "services/codeworks/tests/cleanup-archive.test.mjs",
+      "services/codeworks/tests/branch*.test.mjs",
+      "services/codeworks/tests/disposition.test.mjs",
+      "services/codeworks/tests/integration/*finalization*.mjs",
+      "services/codeworks/scripts/accept-finalization.mjs"
     ]
   },
   "dependencies": [],
@@ -165,7 +183,15 @@
       "services/codeworks/src/execution-context.mjs",
       "services/codeworks/git-step.openrpc.json",
       "services/codeworks/src/code-index.mjs",
-      "services/codeworks/src/code-index-engine.mjs"
+      "services/codeworks/src/code-index-engine.mjs",
+      "services/codeworks/src/write-admission.mjs",
+      "services/codeworks/src/cleanup-coordinator.mjs",
+      "services/codeworks/src/cleanup-archive.mjs",
+      "services/codeworks/src/branch-cleanup.mjs",
+      "services/codeworks/src/branch-coordinator.mjs",
+      "services/codeworks/src/reconciler.mjs",
+      "services/codeworks/src/operator.mjs",
+      "services/codeworks/src/disposition.mjs"
     ],
     "entrypoints": [
       "services/codeworks/src/main.mjs",
@@ -175,7 +201,8 @@
       "services/codeworks/src/verify-ci.mjs",
       "services/codeworks/src/cli.mjs",
       "services/codeworks/src/hook.mjs",
-      "services/codeworks/src/git-step.mjs"
+      "services/codeworks/src/git-step.mjs",
+      "services/codeworks/src/operator.mjs"
     ],
     "smokeImports": [
       "services/codeworks/src/contracts.mjs",
@@ -194,7 +221,7 @@
       "Git with merge-tree --write-tree; flock (util-linux)",
       "GitHub CLI (gh), operator authentication; origin HTTPS matches registered repository",
       "Existing GitHub OAuth operator identity with repo, workflow, read:packages/write:packages; Ed25519 identity in a protected file; durable Codeworks PG evidence backup; first owner catalog-v1 publication links the repository and inherits its Actions read access",
-      "Temporal server compatible with SDK 1.24.0; configured namespace and task queue; Codeworks migration 008"
+      "Temporal server compatible with SDK 1.24.0; configured namespace and task queue; Codeworks migration 011"
     ]
   },
   "deploy": {

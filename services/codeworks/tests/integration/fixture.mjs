@@ -3,7 +3,7 @@
 import { readFile,mkdir,writeFile,mkdtemp,copyFile,chmod,rm,realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID,createHash } from 'node:crypto';
 import { Pool } from 'pg';
 import { command as runCommand,createGit } from '../../src/git.mjs';
 import { createStore } from '../../src/storage.mjs';
@@ -11,6 +11,14 @@ import { createHandlers } from '../../src/domain.mjs';
 import { migrate } from '../../src/migrate.mjs';
 import { launchWorker } from '../../src/runtime.mjs';
 export const configured=!!process.env.CODEWORKS_TEST_CONFIG_FILE;
+/** Принимает native write.begin через указанный handler/runtime, сохраняя identity повтора. */
+export async function prepareWith(call,args,executor='codex') {
+  const key=createHash('sha256').update(JSON.stringify(args)).digest('hex');
+  const request={...args,session_id:'fixture-session',turn_id:key,tool_use_id:key,tool_name:'apply_patch',payload_sha256:key,targets:['hello.txt']};
+  const result=await call('write.begin',request,executor);
+  await call('write.stop',{project_id:args.project_id,session_id:request.session_id,turn_id:request.turn_id,event:'Stop'},executor);
+  return Object.fromEntries(['workspace_id','operation_id','path','branch'].filter(field=>field in result).map(field=>[field,result[field]]));
+}
 /** Принимает только две конкретные disposable DB; credentials не логируются. */
 export async function readConfig() {
   if(!configured)throw new Error('CODEWORKS_TEST_CONFIG_FILE_REQUIRED');
@@ -33,8 +41,12 @@ export async function setup({git=createGit(),command=runCommand}={}) {
   const h=createHandlers(createStore(app),git,{allowedRepositories});
   const temporary=[];
   return {config,owner,app,h,
+    /** Создаёт область через настоящий durable native write.begin, без допуска инструмента. */
+    async prepare(args,executor='codex') {
+      return prepareWith(h.call,args,executor);
+    },
     /** Реальный минимальный monorepo использует установленный подготовщик с package/workspace проверками. */
-    async project({documentationPaths=[],sharedFixture=false,github}={}) {
+    async project({documentationPaths=[],sharedFixture=false,github,codeIndexDisabled=false}={}) {
       const temporaryRoot=fileURLToPath(new URL('../../../../tmp/',import.meta.url));
       await mkdir(temporaryRoot,{recursive:true});
       const root=await realpath(await mkdtemp(path.join(temporaryRoot,'codeworks-test-')));temporary.push(root);
@@ -73,6 +85,7 @@ export async function setup({git=createGit(),command=runCommand}={}) {
       const preparer=path.join(common,'hooks/prepare-brai-worktree');
       await copyFile(process.env.CODEWORKS_TEST_PREPARER??path.join(sourceCommon,'hooks/prepare-brai-worktree'),preparer);await chmod(preparer,0o755);
       const project={id:'test_'+randomUUID(),repo_path:repo,common_dir:common,workspace_root:areas,allowed_paths:['.'],excluded_paths:['.git','node_modules','.env'],executors:['codex','hermes'],git_flow:{feature_base:'refs/remotes/origin/dev',hotfix_base:'refs/remotes/origin/main',feature_prefix:'feature/',hotfix_prefix:'hotfix/'},preparer_path:preparer,node_version:'24.22.1',platform:process.platform+'-'+process.arch};
+      if(codeIndexDisabled)project.code_index_policy={enabled:false};
       if(github){
         project.github=github;
         const remote=path.join(root,'origin.git');

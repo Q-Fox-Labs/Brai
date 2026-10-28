@@ -3,7 +3,19 @@
 import { Fault } from './errors.mjs';
 const waiting=(status,reason)=>({status,reason});
 function validatePR(p,w,leg,pr) {
-  if(!pr||!pr.body?.includes('Codeworks workspace '+w.id+';')||pr.head?.sha!==leg.head||pr.head?.ref!==leg.branch||pr.base?.ref!==leg.target||pr.head?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||pr.base?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||(leg.pr_number&&pr.number!==leg.pr_number))throw new Fault('CONFLICT','PR identity differs from pinned intent.');
+  if(!pr||!pr.body?.includes('Codeworks workspace '+w.id+';')||pr.head?.ref!==leg.branch||pr.base?.ref!==leg.target||pr.head?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||pr.base?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||(leg.pr_number&&pr.number!==leg.pr_number))throw new Fault('PR_IDENTITY_CONFLICT','PR identity differs from pinned intent.');
+}
+async function confirmPRHead(p,w,leg,pr,github,git) {
+  validatePR(p,w,leg,pr);
+  if(pr.head?.sha===leg.head)return {pr};
+  if(await git.remote(p,leg.branch)!==leg.head)return {wait:waiting('awaiting_reconciliation','PR_HEAD_PENDING')};
+  // AIDEV-NOTE: GitHub может отставать от подтверждённого push; идентичность проверяется при каждом чтении.
+  for(let attempt=0;attempt<2;attempt++) {
+    pr=await github.get(p,pr.number);
+    validatePR(p,w,leg,pr);
+    if(pr.head?.sha===leg.head)return {pr};
+  }
+  return {wait:waiting('awaiting_reconciliation','PR_HEAD_UNCONFIRMED')};
 }
 /** Один проход; save фиксирует намерения до мутаций, evidence читает доверенную установку.
  * deploy(target,sha,proof,retryOf) возвращает {operation_id,status}; retryOf разрешает одну явную попытку.
@@ -73,11 +85,15 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
       }
       let pr=leg.pr_number?await github.get(p,leg.pr_number):await github.find(p,leg);
       if(!pr){
-        if(leg.pr_attempted)return waiting('awaiting_reconciliation','PR_CREATE_UNCERTAIN');
+        if(leg.pr_attempted){
+          const historical=await github.find(p,leg,{state:'all',workspaceId:w.id,head:leg.head});
+          if(historical)validatePR(p,w,leg,historical);
+          return waiting('awaiting_reconciliation','PR_CREATE_UNCERTAIN');
+        }
         const marker='Запрос слияния отдельной области Codeworks. Проверки относятся к закреплённому head; выпуск ждёт CI итогового merge commit и независимое подтверждение установки.\n\nCodeworks workspace '+w.id+'; pinned '+leg.head+'; target '+leg.target+'; base '+leg.target_sha+'.';
         await mutation(leg,'pr_attempted',async()=>{pr=await github.create(p,leg,marker);});
       }
-      validatePR(p,w,leg,pr);
+      const confirmed=await confirmPRHead(p,w,leg,pr,github,git);if(confirmed.wait)return confirmed.wait;pr=confirmed.pr;
       leg.pr_number=pr.number;leg.pr_url=pr.html_url;await persist();
       if(leg.merge_sha&&await git.verifyMerge(p,leg)){
         if(!pr.merged||pr.merge_commit_sha!==leg.merge_sha)return waiting('awaiting_reconciliation','GITHUB_MERGE_NOT_CONFIRMED');
@@ -92,15 +108,15 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
         if(w.kind==='hotfix'&&name==='primary')await git.validateHotfixSource(p,w,leg.head);
         // AIDEV-NOTE: Повторное чтение закрывает обычные races; no-force push атомарно защищает последний промежуток.
         const fresh=await github.get(p,leg.pr_number);
-        validatePR(p,w,leg,fresh);
-        if(fresh.merged||fresh.state!=='open')throw new Fault('CONFLICT');
+        const freshConfirmed=await confirmPRHead(p,w,leg,fresh,github,git);if(freshConfirmed.wait)return freshConfirmed.wait;
+        if(freshConfirmed.pr.merged||freshConfirmed.pr.state!=='open')throw new Fault('CONFLICT');
         const freshGate=await checkGate(leg,leg.head,'head','HEAD_CHECKS_REQUIRED');if(freshGate)return freshGate;
         if(await git.remote(p,leg.target)!==leg.target_sha)throw new Fault('TARGET_CHANGED');
         await mutation(leg,'merge_push_attempted',()=>git.push(p,leg.target,leg.merge_sha));
         if(!await git.verifyMerge(p,leg))return waiting('awaiting_reconciliation','MERGE_PUSH_UNCERTAIN');
         const merged=await github.get(p,leg.pr_number);
-        validatePR(p,w,leg,merged);
-        if(!merged.merged||merged.merge_commit_sha!==leg.merge_sha)return waiting('awaiting_reconciliation','GITHUB_MERGE_NOT_CONFIRMED');
+        const mergedConfirmed=await confirmPRHead(p,w,leg,merged,github,git);if(mergedConfirmed.wait)return mergedConfirmed.wait;
+        if(!mergedConfirmed.pr.merged||mergedConfirmed.pr.merge_commit_sha!==leg.merge_sha)return waiting('awaiting_reconciliation','GITHUB_MERGE_NOT_CONFIRMED');
         leg.merged=true;await persist();
       }
     }
@@ -131,14 +147,19 @@ export async function advanceSync({project:p,workspace:w,operation:op,details}, 
   if(await git.remote(p,w.branch)!==head){
     leg.push_attempted=true;await save(details);await checkpoint('before-sync-push');
     await git.push(p,w.branch,head);await checkpoint('after-sync-push');
+    if(await git.remote(p,w.branch)!==head)return waiting('awaiting_reconciliation','BRANCH_PUSH_UNCERTAIN');
   }
   let pr=await github.find(p,leg);
   if(!pr){
-    if(leg.pr_attempted)return waiting('awaiting_reconciliation','PR_CREATE_UNCERTAIN');
+    if(leg.pr_attempted){
+      const historical=await github.find(p,leg,{state:'all',workspaceId:w.id,head:leg.head});
+      if(historical)validatePR(p,w,leg,historical);
+      return waiting('awaiting_reconciliation','PR_CREATE_UNCERTAIN');
+    }
     leg.pr_attempted=true;await save(details);
     pr=await github.create(p,leg,'Codeworks workspace '+w.id+'; working branch.');
   }
-  validatePR(p,w,leg,pr);
+  const confirmed=await confirmPRHead(p,w,leg,pr,github,git);if(confirmed.wait)return confirmed.wait;pr=confirmed.pr;
   if(pr.state!=='open'||pr.merged)throw new Fault('CONFLICT','Working PR is already closed.');
   leg.pr_number=pr.number;leg.pr_url=pr.html_url;await save(details);
   return waiting('succeeded','SYNCHRONIZED');

@@ -36,7 +36,7 @@ async function fixture(t,kind='feature') {
   const git=createFlowGit({localRemote:true,requireLock:()=>{}});
   const prs=[];let creations=0;
   const gh={
-    async find(_,leg){return prs.find(p=>p.head.ref===leg.branch&&p.base.ref===leg.target)??null;},
+    async find(_,leg,{state='open',workspaceId,head}={}){const matches=prs.filter(p=>p.head.ref===leg.branch&&p.base.ref===leg.target&&(state==='all'||p.state==='open')&&(!workspaceId||(p.body.includes('Codeworks workspace '+workspaceId+';')&&p.head.sha===head)));if(matches.length>1)throw Object.assign(Error('ambiguous'),{code:'PR_AMBIGUOUS'});return matches[0]??null;},
     async create(_,leg,body){creations++;const pr={number:prs.length+1,html_url:'https://github.com/fixture/repository/pull/'+(prs.length+1),state:'open',merged:false,body,head:{sha:leg.head,ref:leg.branch,repo:{full_name:project.github.repository}},base:{ref:leg.target,repo:{full_name:project.github.repository}}};prs.push(pr);return pr;},
     async get(_,number){const pr=prs.find(p=>p.number===number);const leg=Object.values(release.details).find(l=>l.pr_number===number);if(leg?.merge_sha&&await git.verifyMerge(project,leg)){pr.merged=true;pr.state='closed';pr.merge_commit_sha=leg.merge_sha;}return pr;},
     async checks(_,sha){return checks.get(sha)??[];},
@@ -160,28 +160,44 @@ test('hotfix reconciles a lost main push before considering a subsequent dev bac
   assert.equal(f.release.details.primary.merged,true);assert.equal(f.creations,1);
 });
 
-test('ownership and exact PR checks reject changed head/repository and closed PR',async t=>{
-  for(const alter of [p=>p.head.sha='f'.repeat(40),p=>p.head.repo.full_name='foreign/repository',p=>p.body='foreign',p=>p.state='closed']){
-    const f=await fixture(t);await f.advance();alter(f.prs[0]);f.good(f.head);await assert.rejects(f.advance(),{code:'CONFLICT'});
+test('identity changes reject the PR while stale head waits for GitHub',async t=>{
+  for(const alter of [p=>p.head.repo.full_name='foreign/repository',p=>p.body='foreign']){
+    const f=await fixture(t);await f.advance();alter(f.prs[0]);f.good(f.head);
+    await assert.rejects(f.advance(),{code:'PR_IDENTITY_CONFLICT'});
     assert.equal(await f.git.remote(f.project,'dev'),f.dev);
   }
+  const f=await fixture(t);await f.advance();f.prs[0].head.sha='f'.repeat(40);f.good(f.head);
+  assert.equal((await f.advance()).reason,'PR_HEAD_UNCONFIRMED');
+  assert.equal(await f.git.remote(f.project,'dev'),f.dev);
 });
-test('final fresh PR read revalidates every pinned identity before target mutation',async t=>{
-  const changes={
-    target:p=>p.base.ref='main',source:p=>p.head.ref='feature/codeworks-'+randomUUID(),
-    head:p=>p.head.sha='f'.repeat(40),headRepository:p=>p.head.repo.full_name='foreign/repository',
-    baseRepository:p=>p.base.repo.full_name='foreign/repository',ownership:p=>p.body='foreign',
-    number:p=>p.number++,closed:p=>p.state='closed',merged:p=>p.merged=true,
-  };
+test('fresh PR read revalidates identity before target mutation',async t=>{
+  const changes={target:p=>p.base.ref='main',source:p=>p.head.ref='foreign',headRepository:p=>p.head.repo.full_name='foreign/repository',baseRepository:p=>p.base.repo.full_name='foreign/repository',ownership:p=>p.body='foreign',number:p=>p.number++};
   for(const [name,alter] of Object.entries(changes))await t.test(name,async t=>{
-    const f=await fixture(t);f.good(f.head);let gets=0;
-    const github={...f.gh,get:async(...args)=>{
-      const pr=structuredClone(await f.gh.get(...args));if(++gets===1)alter(pr);return pr;
-    }};
-    await assert.rejects(f.advance({github}),{code:'CONFLICT'});
-    assert.equal(gets,1);assert.equal(await f.git.remote(f.project,'dev'),f.dev);
-    assert.equal(f.release.details.primary.merge_push_attempted,undefined);
+    const f=await fixture(t);f.good(f.head);const github={...f.gh,get:async(...args)=>{const pr=structuredClone(await f.gh.get(...args));alter(pr);return pr;}};
+    await assert.rejects(f.advance({github}),{code:'PR_IDENTITY_CONFLICT'});
+    assert.equal(await f.git.remote(f.project,'dev'),f.dev);
   });
+});
+test('stale PR head becomes fresh without bypassing release gates',async t=>{
+  const f=await fixture(t);f.good(f.head);let reads=0;
+  const github={...f.gh,find:async(...args)=>{const pr=await f.gh.find(...args);if(pr)return {...structuredClone(pr),head:{...pr.head,sha:'f'.repeat(40)}};return pr;},get:async(...args)=>{reads++;return f.gh.get(...args);}};
+  await f.advance({github});
+  assert.equal((await f.advance({github})).reason,'MERGE_CHECKS_REQUIRED');assert.ok(reads>0);
+});
+test('closed history is ignored and multiple open PRs are ambiguous',async t=>{
+  const f=await fixture(t),input={project:f.project,workspace:f.workspace,operation:{request:{commit_sha:f.head}},details:{}};
+  const ports={git:f.git,github:f.gh,inspect:async()=>({head:f.head,dirty:false}),save:async()=>{}};
+  const old=await f.gh.create(f.project,{branch:f.branch,target:'dev',head:f.base},'Codeworks workspace '+f.workspace.id+'; old');old.state='closed';old.merged=true;
+  assert.equal((await advanceSync(input,ports)).status,'succeeded');assert.equal(f.prs.length,2);
+  await f.gh.create(f.project,{branch:f.branch,target:'dev',head:f.head},'Codeworks workspace '+f.workspace.id+'; other');
+  await assert.rejects(advanceSync(input,ports),{code:'PR_AMBIGUOUS'});
+});
+test('GitHub search traverses historical pages and filters the recorded attempt',async()=>{
+  const p={github:{repository:'fixture/repository'}},leg={branch:'feature/task',target:'dev',head:'a'.repeat(40)};
+  const old=Array.from({length:100},(_,i)=>({number:i+1,body:'old',head:{sha:'b'.repeat(40)}}));
+  const wanted={number:101,body:'Codeworks workspace fixture;',head:{sha:leg.head}};let calls=0;
+  const gh=createGitHub({run:async()=>({stdout:JSON.stringify(++calls===1?old:[wanted])})});
+  assert.equal((await gh.find(p,leg,{state:'all',workspaceId:'fixture',head:leg.head})).number,101);assert.equal(calls,2);
 });
 
 test('GitHub adapter preserves exact query SHA, app identity and lost API error boundary',async()=>{

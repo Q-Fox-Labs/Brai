@@ -2,7 +2,7 @@
 // ABOUTME: Проверяет схемы владельца и не выполняет команды или операции с файлами проекта.
 import {connect, credsAuthenticator} from 'nats';
 import {readFile} from 'node:fs/promises';
-import {methods, validate, outputNames} from './contracts.mjs';
+import {allMethods, validate, outputNames} from './contracts.mjs';
 import {Fault} from './errors.mjs';
 
 /** Читает публичные настройки подключения; явные переменные окружения перекрывают файл. */
@@ -47,7 +47,7 @@ export async function connectClient({server, credsFile, executorId}, {connectNat
   return {
     /** Тайм-аут не отменяет операцию: повтор мутации использует прежний request_key. */
     async call(method, args) {
-      if (!methods.includes(method)) throw new Fault('INVALID_ARGUMENT');
+      if (!allMethods.includes(method)) throw new Fault('INVALID_ARGUMENT');
       validate(method, args);
       const bytes = Buffer.from(JSON.stringify(args));
       if (bytes.length > 65536) throw new Fault('INVALID_ARGUMENT');

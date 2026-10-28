@@ -11,28 +11,48 @@ import {indexIdentity} from './code-index.mjs';
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const uuid=value=>{const h=hash(value);return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`;};
 const absent=error=>error.status===404;
+const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(k=>[k,canonical(value[k])])):value;
 const parse=value=>typeof value==='string'?JSON.parse(value):value;
 const waiting=reason=>({state:'waiting',reason});
 const safeFile=(root,relative)=>{const file=path.resolve(root,relative);if(path.isAbsolute(relative)||!file.startsWith(root+'/'))throw Error('INDEX_PATH_INVALID');return file;};
 const move=(value,from,to)=>Array.isArray(value)?value.map(v=>move(v,from,to)):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[move(k,from,to),move(v,from,to)])):typeof value==='string'&&(value===from||value.startsWith(from+'/'))?to+value.slice(from.length):value;
 
+/** Проверяет доказательство очистки и допустимые остатки после сохранённого checkpoint. */
+export function validateCleanupSnapshot({action,project,workspace:w,manifest,checkpointState,snapshot}){
+  const id=snapshot.identity;
+  const hasResources=snapshot.resources.collections.length||snapshot.resources.metadataPoints.length;
+  const sameSet=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&new Set(a).size===a.length&&a.every(value=>b.includes(value));
+  const subset=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&new Set(a).size===a.length&&a.every(value=>b.includes(value));
+  if(manifest){
+    const expected=manifest.index;
+    if(manifest.reviewed!==true||manifest.manifestVersion!==1||manifest.project_id!==project.id||manifest.common_dir!==project.common_dir||manifest.workspace_id!==w.id||manifest.worktree?.path!==w.path||expected?.identity!==id||!/^[0-9a-f]{64}$/.test(manifest.manifest_sha256))throw Error('INDEX_OWNERSHIP_CONFLICT');
+    if(checkpointState){
+      if(checkpointState.manifest_sha256!==manifest.manifest_sha256||checkpointState.identity!==id||checkpointState.ownerRecordHash!==expected.ownerRecordHash||!sameSet(checkpointState.resources?.collections,expected.collections)||!sameSet(checkpointState.resources?.metadataPoints,expected.metadataPoints)||!subset(snapshot.resources.collections,expected.collections)||!subset(snapshot.resources.metadataPoints,expected.metadataPoints))throw Error('INDEX_OWNERSHIP_CONFLICT');
+      if(snapshot.owner.present?snapshot.owner.recordHash!==expected.ownerRecordHash:expected.ownerRecordHash!==null&&hasResources)throw Error('INDEX_OWNERSHIP_CONFLICT');
+    }else if(expected.ownerRecordHash!==snapshot.owner.recordHash||!sameSet(expected.collections,snapshot.resources.collections)||!sameSet(expected.metadataPoints,snapshot.resources.metadataPoints))throw Error('INDEX_OWNERSHIP_CONFLICT');
+  }else if(action==='remove'&&snapshot.owner.present){
+    if(!snapshot.owner.tokenMatches||!snapshot.owner.pathMatches)throw Error('INDEX_OWNERSHIP_CONFLICT');
+  }else if(action==='remove'&&hasResources)throw Error('INDEX_OWNERSHIP_CONFLICT');
+}
+
 /** Выполняет один fenced проход. Настройки и токен приходят от доверенного Activity, не из публичного API. */
-export async function runIndexEngine({action,config,project,workspace:w,index:owned}){
-  if(!['clone','update','remove'].includes(action)||owned.identity!==indexIdentity(w.path)||!path.isAbsolute(w.path)||path.dirname(w.path)!==project.workspace_root)throw Error('INDEX_OWNERSHIP_CONFLICT');
+export async function runIndexEngine({action,config,project,workspace:w,index:owned,manifest,checkpointState}){
+  const rootAllowed=path.dirname(w.path)===project.workspace_root||manifest&&['inspect','remove'].includes(action)&&(project.legacy_workspace_roots??[]).includes(path.dirname(w.path));
+  if(!['clone','update','remove','inspect'].includes(action)||owned.identity!==indexIdentity(w.path)||(!w.ownership_token&&!manifest)||!path.isAbsolute(w.path)||path.normalize(w.path)!==w.path||!rootAllowed)throw Error('INDEX_OWNERSHIP_CONFLICT');
   const runtimeFile=typeof config.socraticodeConfig==='string'?config.socraticodeConfig:config.socraticodeConfig?.[w.kind];
   const settings=JSON.parse(await readFile(runtimeFile,'utf8'));
   const engine=config.engine;
   if(!path.isAbsolute(engine))throw Error('INDEX_ENGINE_REQUIRED');
   const root=path.dirname(engine),require=createRequire(engine);
-  const manifest=JSON.parse(await readFile(path.join(root,'../package.json'),'utf8'));
-  if(manifest.name!=='socraticode'||manifest.version!=='1.16.0')throw Error('UNSUPPORTED_SOCRATICODE_VERSION');
+  const enginePackage=JSON.parse(await readFile(path.join(root,'../package.json'),'utf8'));
+  if(enginePackage.name!=='socraticode'||enginePackage.version!=='1.16.0')throw Error('UNSUPPORTED_SOCRATICODE_VERSION');
   Object.assign(process.env,settings.env,{SOCRATICODE_AUTO_RESUME:'off',SOCRATICODE_WATCHER:'manual'});
   if(process.env.SOCRATICODE_PROJECT_ID||process.env.SOCRATICODE_BRANCH_AWARE==='true')throw Error('PATH_IDENTITY_REQUIRED');
   // AIDEV-NOTE: Эти version-pinned exports — единственная граница с протоколом locks/storage внешнего движка.
   const native=relative=>import(pathToFileURL(path.join(root,relative)).href);
   const locks=await native('services/lock.js'),barriers=await native('services/reclamation-barrier.js');
   const {projectIdFromPath}=await native('config.js');
-  if(action!=='remove'&&(await realpath(w.path)!==w.path||projectIdFromPath(w.path)!==owned.identity))throw Error('PATH_IDENTITY_REQUIRED');
+  if(!['remove','inspect'].includes(action)&&(await realpath(w.path)!==w.path||projectIdFromPath(w.path)!==owned.identity))throw Error('PATH_IDENTITY_REQUIRED');
   const {QdrantClient}=require('@qdrant/js-client-rest');
   const q=new QdrantClient({url:settings.env.QDRANT_URL,apiKey:settings.env.QDRANT_API_KEY,checkCompatibility:false,timeout:30000});
   const prefix=settings.env.QDRANT_COLLECTION_PREFIX??'',id=owned.identity;
@@ -56,26 +76,32 @@ export async function runIndexEngine({action,config,project,workspace:w,index:ow
     do{const page=await q.scroll(collection,{limit:32,with_payload:true,with_vector:true,...(filter?{filter}:{}),...(offset!==undefined?{offset}:{})});await consume(page.points);offset=page.next_page_offset??undefined;}while(offset!==undefined);
   };
   const list=async()=>new Set((await q.getCollections()).collections.map(c=>c.name));
-  const existsResources=async()=>{const all=await list();return [...names(id),prefix+'context_'+id].some(n=>all.has(n))||!!await point(metadata,uuid(graph))||!!await point(metadata,uuid(prefix+'context_'+id));};
-  if(action==='remove'){
+  const resourceCollections=[...names(id),prefix+'context_'+id];
+  const resourcePoints=[base,graph,prefix+'context_'+id],ownerName=base+'::codeworks-owner';
+  const inspect=async()=>{
+    assertFence();
+    const all=await list(),record=await master(),collections=resourceCollections.filter(name=>all.has(name)),metadataPoints=[];
+    for(const name of resourcePoints){assertFence();if(await point(metadata,uuid(name)))metadataPoints.push(name);}
+    if(record)metadataPoints.push(ownerName);
+    assertFence();
+    return {identity:id,owner:{present:!!record,tokenMatches:!!record&&!!w.ownership_token&&record.payload?.codeworksOwner===w.ownership_token,pathMatches:record?.payload?.projectPath===w.path,recordHash:record?hash(JSON.stringify(canonical(record.payload))):null},resources:{collections,metadataPoints},complete:true};
+  };
+  const existsResources=async()=>{const result=await inspect();return !!(result.resources.collections.length||result.resources.metadataPoints.length);};
+  if(action==='remove'||action==='inspect'){
     const barrier=await barriers.acquireReclamationBarrier(id);
     if(!barrier)throw Error('INDEX_WRITER_BUSY');
     assertFence=()=>{if(barrier.isCompromised())throw Error('INDEX_LOCK_LOST');};
     try{
-      const record=await master();
-      if(!record){if(await existsResources())throw Error('INDEX_OWNERSHIP_CONFLICT');return {state:'removed'};}
-      if(!owner(record))throw Error('INDEX_OWNERSHIP_CONFLICT');
-      for(const collection of [...names(id),prefix+'context_'+id]){
-        if(barrier.isCompromised())throw Error('INDEX_LOCK_LOST');
-        if((await list()).has(collection))await q.deleteCollection(collection);
-      }
-      // Ownership marker удаляется последним: повтор после частичного удаления всё ещё имеет доказательство.
-      for(const name of [graph,prefix+'context_'+id,base]){
-        if(barrier.isCompromised())throw Error('INDEX_LOCK_LOST');
-        await q.delete(metadata,{points:[uuid(name)],wait:true});
-      }
-      await q.delete(metadata,{points:[ownershipKey],wait:true});
-      if(await existsResources()||await master())throw Error('INDEX_CLEANUP_INCOMPLETE');
+      const snapshot=await inspect();
+      validateCleanupSnapshot({action,project,workspace:w,manifest,checkpointState,snapshot});
+      const hasResources=snapshot.resources.collections.length||snapshot.resources.metadataPoints.length;
+      if(action==='inspect')return snapshot;
+      if(!hasResources)return {state:'removed'};
+      for(const collection of snapshot.resources.collections){assertFence();await q.deleteCollection(collection);}
+      for(const name of snapshot.resources.metadataPoints.filter(name=>name!==ownerName)){assertFence();await q.delete(metadata,{points:[uuid(name)],wait:true});}
+      if(snapshot.owner.present){assertFence();await q.delete(metadata,{points:[ownershipKey],wait:true});}
+      const after=await inspect();
+      if(after.owner.present||after.resources.collections.length||after.resources.metadataPoints.length)throw Error('INDEX_CLEANUP_INCOMPLETE');
       return {state:'removed'};
     }finally{await barrier.release();}
   }

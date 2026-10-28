@@ -51,12 +51,18 @@ export function createGitHub({run=command,registryFactory=createRegistry,evidenc
     return checks.filter(c=>!candidates.includes(c)||c===selected);
   }
   return {
-    /** Ищет и закрытые PR: потерянный ответ create не должен создавать дубль. */
-    async find(project,leg) {
+    /** Ищет единственный PR в выбранном состоянии по всем страницам. */
+    async find(project,leg,{state='open',workspaceId,head}={}) {
       const owner=project.github.repository.split('/')[0];
-      const prs=await api(project,'pulls?state=all&per_page=100&head='+encodeURIComponent(owner+':'+leg.branch)+'&base='+leg.target);
-      if(!Array.isArray(prs)||prs.length>1)throw new Fault('CONFLICT','Ambiguous pull request; resources retained.');
-      return prs[0]??null;
+      const matches=[];
+      for(let page=1;page<=100;page++) {
+        const prs=await api(project,'pulls?state='+state+'&per_page=100&head='+encodeURIComponent(owner+':'+leg.branch)+'&base='+encodeURIComponent(leg.target)+'&page='+page);
+        if(!Array.isArray(prs))throw new Fault('GITHUB_UNAVAILABLE');
+        matches.push(...prs.filter(pr=>!workspaceId||(pr.body?.includes('Codeworks workspace '+workspaceId+';')&&pr.head?.sha===head)));
+        if(matches.length>1)throw new Fault('PR_AMBIGUOUS','Multiple pull requests match the branch and target.');
+        if(prs.length<100)return matches[0]??null;
+      }
+      throw new Fault('PR_AMBIGUOUS','Pull request search exceeded its page limit.');
     },
     get:(project,number)=>api(project,'pulls/'+number),
     /** Создаёт только после durable pr_attempted; при неопределённом ответе следующий проход только читает. */

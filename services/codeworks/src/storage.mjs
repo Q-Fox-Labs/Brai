@@ -4,17 +4,19 @@ import { Fault } from './errors.mjs';
 function session(db) {
   const one=async(sql,args)=>(await db.query(sql,args)).rows[0];
   return {
+    query:(sql,args)=>db.query(sql,args),
     executionControl:id=>one('SELECT * FROM codeworks.execution_control WHERE project_id=$1',[id]),
     lifecycle:id=>one('SELECT * FROM codeworks.workflow_registry WHERE workspace_id=$1',[id]),
+    cleanupObligation:id=>one("SELECT * FROM codeworks.cleanup_obligations WHERE workspace_id=$1 ORDER BY (state<>'done') DESC,created_at DESC,id DESC LIMIT 1",[id]),
     releaseOperation:(id,w)=>one('SELECT * FROM codeworks.releases WHERE operation_id=$1 AND workspace_id=$2',[id,w]),
     blockers:id=>db.query("SELECT target,operation_id,state FROM codeworks.release_queue WHERE operation_id IN(SELECT id FROM codeworks.operations WHERE workspace_id=$1) AND state IN ('queued','held') ORDER BY ticket",[id]).then(r=>r.rows),
     project:id=>one('SELECT config FROM codeworks.projects WHERE id=$1',[id]).then(r=>r?.config),
     conflictingProject:p=>one("SELECT id FROM codeworks.projects WHERE id<>$1 AND (config->>'common_dir'=$2 OR config->>'workspace_root'=$3)",[p.id,p.common_dir,p.workspace_root]),
     insertProject:p=>db.query('INSERT INTO codeworks.projects(id,config) VALUES($1,$2)',[p.id,p]),
     workspace:(p,id)=>one('SELECT * FROM codeworks.workspaces WHERE project_id=$1 AND id=$2',[p,id]),
-    workspaceByKey:(p,key)=>one('SELECT * FROM codeworks.workspaces WHERE project_id=$1 AND workspace_key=$2',[p,key]),
-    workspaces:p=>db.query('SELECT * FROM codeworks.workspaces WHERE project_id=$1 ORDER BY created_at DESC LIMIT 100',[p]).then(r=>r.rows),
-    insertWorkspace:w=>db.query('INSERT INTO codeworks.workspaces(id,project_id,workspace_key,kind,base_ref,base_sha,branch,path,ownership_token) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',[w.id,w.project_id,w.workspace_key,w.kind,w.base_ref,w.base_sha,w.branch,w.path,w.ownership_token]),
+    workspaceByKey:(p,key)=>one('SELECT * FROM codeworks.workspaces WHERE project_id=$1 AND workspace_key=$2 ORDER BY (removed_at IS NULL) DESC,created_at DESC,id DESC LIMIT 1',[p,key]),
+    workspaces:(p,limit=100,offset=0)=>db.query('SELECT * FROM codeworks.workspaces WHERE project_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3',[p,limit,offset]).then(r=>r.rows),
+    insertWorkspace:w=>db.query('INSERT INTO codeworks.workspaces(id,project_id,workspace_key,kind,base_ref,base_sha,branch,path,ownership_token,activation_state) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',[w.id,w.project_id,w.workspace_key,w.kind,w.base_ref,w.base_sha,w.branch,w.path,w.ownership_token,w.activation_state??'awaiting_first_write']),
     operation:(p,id)=>one('SELECT * FROM codeworks.operations WHERE project_id=$1 AND id=$2',[p,id]),
     latestOperation:id=>one('SELECT * FROM codeworks.operations WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1',[id]),
     latestPreparation:id=>one("SELECT id,status FROM codeworks.operations WHERE workspace_id=$1 AND kind='prepare' AND NOT archived ORDER BY created_at DESC,id DESC LIMIT 1",[id]),
@@ -32,6 +34,7 @@ function session(db) {
 /** Подключает SQL без доступа к данным других сервисов. */
 export function createStore(pool) {
   return {
+    pool,
     async transaction(projectId,work) {
       const db=await pool.connect();
       try{
