@@ -1,3 +1,5 @@
+# ABOUTME: Доставляет сохранённые события памяти и повторяет неудачные попытки.
+# ABOUTME: Независимые разговоры могут обойти сбой, но изменения и удаления сохраняют порядок.
 """Durable retry queue only; memory is stored by MemOS, never in a second database."""
 
 import fcntl
@@ -78,17 +80,29 @@ class Outbox:
                 except (OSError, ValueError):
                     return 0  # Surface a damaged queue file before making later writes.
             paths = sorted(self.pending.glob("*.json"), key=order)
+            blocked = False
             for path in paths:
                 if self.stop.is_set():
                     break
                 job = None
+                independent = False
                 try:
                     if (self.receipts / path.name).exists():
                         path.unlink(missing_ok=True)
                         continue
                     job = json.loads(path.read_text(encoding="utf-8"))
+                    # AIDEV-NOTE: Только независимые события диалога можно переставлять.
+                    # Любая другая операция остаётся барьером для всех последующих событий.
+                    independent = (job.get("operation") == "route" and not job.get("delete_filter")
+                                   and not job.get("replacement_id") and not job.get("shared_infra")
+                                   and (job.get("body", {}).get("info") or {}).get("hermes_kind") in ("turn", "business_message"))
+                    if blocked and not independent:
+                        break
                     if job.get("next_attempt", 0) > time.time():
-                        break  # Keep mirror replacement/removal and turns in FIFO order.
+                        if not independent:
+                            break
+                        blocked = True
+                        continue
                     self._guard(job)
                     def checkpoint(value):
                         atomic_json_write(path, value, mode=0o600, fsync_dir=True)
@@ -114,7 +128,9 @@ class Outbox:
                         job["next_attempt"] = time.time() + min(60, 2 ** min(job["attempts"], 6))
                         job["last_error"] = error
                         atomic_json_write(path, job, mode=0o600, fsync_dir=True)
-                    break
+                    if job is None or not independent:
+                        break
+                    blocked = True
 
     def _run(self):
         while not self.stop.is_set():

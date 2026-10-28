@@ -32,7 +32,7 @@ Managed cubes: `main`, `life_work`, `life_society`, `life_systems`, `life_body`,
 `sync_turn` сохраняет scrubbed исходник в приватную outbox без сетевых/LLM-вызовов. Worker:
 
 1. Проверяет live config, epoch/generation и session fence.
-2. Архивирует полный оригинал в `main` через sync-fast API и проверяет read-back всех IDs/метаданных.
+2. Архивирует полный оригинал в `main` через sync-fast API и проверяет read-back всех IDs/метаданных. Длинный текст сохраняется последовательными UTF-8 частями до 768 байт: исходный диалог и общий logical ID остаются в метаданных каждой части. План и ID частей сохраняются до следующих запросов; после потери ответа восстановление проверяет event ID и номер части. Forget удаляет все части общего logical ID.
 3. Вызывает настоящий semantic LLM router; фиксирует валидированный план в durable job **до** тематической доставки.
 4. Создаёт атомарные факты в первичной сфере и управляемые копии во вторичных сферах/проекте. Копии имеют общий `hermes_logical_id`, memberships, author/subject, epoch/phase, source event/IDs/role/span.
 5. Проверяет каждый commit и создаёт квитанцию только после завершения всей операции. При коррекции сначала проверяет новые копии, затем удаляет старые по точной локальной области и проверяет удаление.
@@ -43,7 +43,7 @@ Grounding требует дословную source quote с соответств
 
 При сбое роутера исходник остаётся доступен, `memos_read/search` показывают `pending/unclassified`, job повторяется. Если валидных фактов нет, оригинал остаётся recallable в main со статусом `unclassified`. Classification исходника вычисляется из локальной квитанции; backend metadata не обновляется неподдерживаемым endpoint.
 
-Потерянный API-ответ восстанавливается по scoped event IDs, план и IDs переживают restart. Межпроцессный delivery lock и FIFO защищают согласованность replace/forget. Нет server-side idempotency transaction: абсолютное exactly-once при произвольных частичных commits backend не заявляется.
+Потерянный API-ответ восстанавливается по scoped event IDs, план и IDs переживают restart. Межпроцессный delivery lock и барьеры очереди защищают порядок replace/forget. Независимые ходы и сообщения Business могут проходить мимо неудачного события до первого барьера; неудачный ход остаётся в очереди и повторяется. Неизвестные и повреждённые операции не обходятся. Нет server-side idempotency transaction: абсолютное exactly-once при произвольных частичных commits backend не заявляется.
 
 ## Router / bridge
 

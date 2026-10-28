@@ -1,3 +1,5 @@
+# ABOUTME: Подключает сохранение и поиск памяти к жизненному циклу Hermes.
+# ABOUTME: Сохраняет границы автора, области и конфиденциальных сообщений.
 """Lifecycle adapter. No MemOS kernel, Node bridge, or additional memory database."""
 
 import hashlib
@@ -294,8 +296,19 @@ class MemOSProvider(MemoryProvider):
         if self.routing:
             return self.routing.search(scrub(query), sid, top_k)
         rows = self.client.search(scrub(query), sid, top_k=top_k, relativity=float(self.config["relativity"]))
-        # Snapshots ensure recoverability; ordinary turns/facts are better recall candidates.
-        return [row for row in rows if (row.get("metadata", {}).get("info") or {}).get("hermes_kind") != "checkpoint"]
+        # AIDEV-NOTE: Части одного события занимают в выдаче одно место, как исходный диалог.
+        selected, seen = [], set()
+        for row in rows:
+            info = (row.get("metadata", {}).get("info") or {})
+            if info.get("hermes_kind") == "checkpoint":
+                continue
+            event = info.get("hermes_event_id") if "hermes_chunk_index" in info else None
+            if event and event in seen:
+                continue
+            if event:
+                seen.add(event)
+            selected.append(row)
+        return selected
 
     def _recall_key(self, sid, query):
         from .admin import json_file
@@ -448,6 +461,15 @@ class MemOSProvider(MemoryProvider):
             if tool_name == "memos_forget":
                 if not self.primary:
                     raise ValueError("MemOS writes are disabled in non-primary agent contexts")
+                info = (row.get("metadata") or {}).get("info") or {}
+                if "hermes_chunk_index" in info and info.get("hermes_event_id"):
+                    event_id = digest(["legacy-forget", str(self.home.resolve()), info["hermes_event_id"]])
+                    self.outbox.submit(event_id, {"operation": "delete", "filter": {"hermes_event_id": info["hermes_event_id"]},
+                                                  "exclude_private": True})
+                    deleted = self.outbox.flush(float(self.config["tool_write_timeout"]), event_id)
+                    with self._lock:
+                        self._cache.clear()
+                    return {"status": "deleted" if deleted else "pending", "memory_id": memory_id}
                 self.client.delete([memory_id])
                 with self._lock:
                     self._cache.clear()
