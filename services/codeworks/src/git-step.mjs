@@ -4,7 +4,7 @@ import {createInterface} from 'node:readline';
 import {pathToFileURL} from 'node:url';
 import {createGit} from './git.mjs';
 import {safeFault} from './errors.mjs';
-const methods=new Set(['branch','registerCheckout','checkout','dependencies','cleanupLocal']);
+const methods=new Set(['branch','registerCheckout','checkout','dependencies','cleanupLocal','cleanupStep']);
 const failure=(id,code,message,data)=>({jsonrpc:'2.0',id,error:{code,message,...(data?{data}:{})}});
 /** Обрабатывает один JSON-документ RPC, включая batch и notifications; mutate — фиксированный локальный порт. */
 export async function handleGitStep(input,mutate){
@@ -34,7 +34,7 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
   const git=createGit();
   for await(const line of createInterface({input:process.stdin,crlfDelay:Infinity})){
     const response=await handleGitStep(line,async({method,project,workspace,args=[]})=>{
-      const result=method==='cleanupLocal'?await git.cleanup(project,workspace,...args,{localOnly:true}):await git[method](project,workspace,...(method==='checkout'?[{registered:true}]:[]));
+      const result=method==='cleanupLocal'?await git.cleanup(project,workspace,...args,{localOnly:true}):method==='cleanupStep'?await git.cleanupStep(project,workspace,...args):await git[method](project,workspace,...(method==='checkout'?[{registered:true}]:[]));
       if(process.env.CODEWORKS_TEST_MODE==='1'&&process.env.CODEWORKS_TEST_CRASH_AFTER==='after-'+method)process.kill(process.pid,'SIGKILL');
       return result;
     });

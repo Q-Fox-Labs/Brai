@@ -7,7 +7,7 @@ import {createFlowGit} from './git-flow.mjs';
 import {Fault} from './errors.mjs';
 /** Запускает один локальный шаг под унаследованным flock; crash родителя не освобождает замок живого Git. */
 export async function localGitStep(method,project,workspace,args=[],{env={}}={}) {
-  const common=['branch','registerCheckout','cleanupLocal'].includes(method);
+  const common=['branch','registerCheckout','cleanupLocal','cleanupStep'].includes(method);
   const lock=path.join(project.common_dir,common?'codeworks.lock':'codeworks-workspace-'+workspace.id+'.lock');
   const script='exec 3>"$1" || exit 74; flock -n -E 75 3 || exit $?; export CODEWORKS_LOCK_HELD=1; exec "$2" "$3"';
   const result=await command('/bin/sh',['-c',script,'codeworks-git',lock,process.execPath,fileURLToPath(new URL('./git-step.mjs',import.meta.url))],{
@@ -27,6 +27,9 @@ export function createActivityGit({flowGit=createFlowGit({requireLock:()=>{}}),s
     branch:(p,w)=>step('branch',p,w),
     async checkout(p,w){await step('registerCheckout',p,w);await step('checkout',p,w);},
     dependencies:(p,w)=>step('dependencies',p,w),
+    async cleanupStep(p,w,expected,phase,options={}){
+      return phase==='remote'?git.cleanupStep(p,w,expected,phase,options):step('cleanupStep',p,w,[expected,phase,options]);
+    },
     async cleanup(p,w,heads,head){
       if(!await git.cleanup(p,w,heads,head,{remoteOnly:true}))return false;
       return step('cleanupLocal',p,w,[heads,head]);

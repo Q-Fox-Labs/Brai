@@ -3,6 +3,7 @@
 import { spawn } from 'node:child_process';
 import { lstat, realpath, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import {createHash} from 'node:crypto';
 import { Fault } from './errors.mjs';
 import {executionContext} from './execution-context.mjs';
 const relative=value=>value==='.'||(!path.isAbsolute(value)&&!value.split('/').some(p=>!p||p==='.'||p==='..')&&!value.includes('\\'));
@@ -26,6 +27,10 @@ export async function command(executable,args,{cwd,allowFailure=false,timeout=12
     child.once('error',()=>{dispose();clearTimeout(timer);clearTimeout(killTimer);reject(new Fault('GIT_FAILED','External command could not start.'));});
     child.once('close',code=>{dispose();clearTimeout(timer);clearTimeout(killTimer); if(signal?.aborted)reject(signal.reason);else if(overflow||(!allowFailure&&code!==0))reject(new Fault('GIT_FAILED','Git operation failed; owned resources and intent were preserved.'));else resolve({code,stdout:stdout.trim(),stderr});});
   });
+}
+/** Подтверждает отсутствие всех проверенных Git ресурсов. */
+export function gitResourcesAbsent(o) {
+  return o?.remote?.known===true && !o.branch.oid && !o.ownership.oid && !o.remote.oid && !o.worktree.registered && !o.worktree.pathExists;
 }
 /** Адаптер Git/preparer; локальные мутации требуют унаследованный flock FD 3. */
 export function createGit({flowGit}={}) {
@@ -64,7 +69,63 @@ export function createGit({flowGit}={}) {
     if(common!==project.common_dir||top!==w.path)throw new Fault('OWNERSHIP_CONFLICT');
     return byPath;
   }
+  async function inspectResources(project,w,{manifest}={}) {
+    await topology(project);
+    const branchRef='refs/heads/'+w.branch, ownerRef=manifest?.ownership?.ref??ownershipRef(w);
+    if(!/^refs\/codeworks\/ownership\/[A-Za-z0-9-]+$/.test(ownerRef))throw new Fault('OWNERSHIP_CONFLICT');
+    const readRef=async ref=>{const r=await git(project,['rev-parse','--verify','--quiet',ref],{allowFailure:true});if(r.code===1)return null;if(r.code!==0)throw new Fault('GIT_FAILED');return r.stdout;};
+    const branch=await readRef(branchRef),owner=await readRef(ownerRef);
+    const marker=owner?(await git(project,['cat-file','blob',ownerRef])).stdout:null;
+    const matches=!!marker&&marker===ownership(w);
+    const raw=(await git(project,['worktree','list','--porcelain','-z'])).stdout;
+    const entries=raw.split('\0\0').map(block=>Object.fromEntries(block.split('\0').filter(Boolean).map(line=>{const i=line.indexOf(' ');return [line.slice(0,i),line.slice(i+1)];})));
+    if(entries.some(e=>e.branch===branchRef&&e.worktree!==w.path))throw new Fault('OWNERSHIP_CONFLICT');
+    const entry=entries.find(e=>e.worktree===w.path),st=await exists(w.path);
+    const pathExists=!!st,canonical=st?.isDirectory()&&!st.isSymbolicLink()&&await realpath(w.path)===w.path;
+    const owned=!!entry&&entry.branch===branchRef&&entry.locked==='codeworks:'+w.ownership_token;
+    let head=entry?.HEAD??null,dirty=null;
+    if(entry&&canonical){head=(await local(w,['rev-parse','HEAD'])).stdout;dirty=!!(await local(w,['status','--porcelain=v1','--untracked-files=all'])).stdout;}
+    const flow=project.github?(flowGit??(await import('./git-flow.mjs')).createFlowGit()):null;
+    const remote=flow?await flow.remote(project,w.branch,{legacy:!!manifest}):null;
+    return {branch:{ref:branchRef,oid:branch},ownership:{ref:ownerRef,oid:owner,matches},remote:{ref:branchRef,oid:remote,known:true},worktree:{path:w.path,registered:!!entry,pathExists,head,dirty,owned,lock:entry?.locked??null}};
+  }
+  function authorize(project,w,expected,manifest) {
+    if(!expected||expected.branch.ref!=='refs/heads/'+w.branch||expected.ownership.ref!==(manifest?.ownership?.ref??ownershipRef(w))||expected.remote.ref!==expected.branch.ref||expected.worktree.path!==w.path||!path.isAbsolute(w.path)||w.path===project.repo_path)throw new Fault('OWNERSHIP_CONFLICT');
+    if(['dev','main'].includes(w.branch))throw new Fault('OWNERSHIP_CONFLICT');
+    if(manifest){
+      if(!(project.legacy_workspace_roots??[]).some(root=>path.isAbsolute(root)&&path.dirname(w.path)===root)||manifest.manifestVersion!==1||manifest.reviewed!==true||manifest.project_id!==project.id||manifest.common_dir!==project.common_dir||manifest.workspace_id!==w.id||manifest.branch?.ref!==expected.branch.ref||manifest.branch?.oid!==expected.branch.oid||manifest.ownership?.ref!==expected.ownership.ref||manifest.ownership?.oid!==expected.ownership.oid||manifest.remote?.ref!==expected.remote.ref||manifest.remote?.oid!==expected.remote.oid||manifest.worktree?.path!==w.path||manifest.worktree?.registered!==expected.worktree.registered||manifest.worktree?.lock!==expected.worktree.lock||manifest.worktree?.head!==expected.worktree.head||!Array.isArray(manifest.provenance)||!manifest.provenance.length||!manifest.disposition||!/^[0-9a-f]{64}$/.test(manifest.manifest_sha256))throw new Fault('OWNERSHIP_CONFLICT');
+    }else if(!w.path.startsWith(project.workspace_root+'/')||!expected.ownership.matches&&(expected.branch.oid||expected.ownership.oid))throw new Fault('OWNERSHIP_CONFLICT');
+  }
+  async function cleanupStep(project,w,expected,step,{manifest}={}) {
+    if(!['remote','worktree','local_refs'].includes(step))throw new Fault('INVALID_ARGUMENT');
+    if(step!=='remote')requireLock();
+    authorize(project,w,expected,manifest);
+    const current=await inspectResources(project,w,{manifest});
+    for(const field of ['branch','ownership','remote'])if(current[field].oid!==null&&current[field].oid!==expected[field].oid)throw new Fault('TARGET_CHANGED');
+    if(current.worktree.registered&&(!expected.worktree.registered||current.worktree.lock!==expected.worktree.lock||current.worktree.head!==expected.worktree.head))throw new Fault('TARGET_CHANGED');
+    if(current.worktree.pathExists&&!expected.worktree.pathExists)throw new Fault('TARGET_CHANGED');
+    if(current.ownership.oid&&!manifest&&!current.ownership.matches)throw new Fault('OWNERSHIP_CONFLICT');
+    if(manifest?.ownership?.payload_hash&&current.ownership.oid){const payload=(await git(project,['cat-file','blob',current.ownership.ref])).stdout;if(createHash('sha256').update(payload).digest('hex')!==manifest.ownership.payload_hash)throw new Fault('OWNERSHIP_CONFLICT');}
+    let changed=false;
+    if(step==='remote'&&current.remote.oid){const flow=flowGit??(await import('./git-flow.mjs')).createFlowGit({requireLock:()=>{}});await flow.removeBranch(project,w.branch,current.remote.oid,{legacy:!!manifest});changed=true;}
+    if(step==='worktree'&&current.worktree.registered){
+      if(!manifest&&!current.worktree.owned)throw new Fault('OWNERSHIP_CONFLICT');
+      if(current.worktree.pathExists&&(current.worktree.dirty!==false||!current.worktree.owned))throw new Fault('OWNERSHIP_CONFLICT');
+      if(current.worktree.lock)await git(project,['worktree','unlock',w.path]);
+      await git(project,['worktree','remove',...(current.worktree.pathExists?[]:['--force']),w.path]);changed=true;
+    } else if(step==='worktree'&&current.worktree.pathExists)throw new Fault('OWNERSHIP_CONFLICT');
+    if(step==='local_refs'){
+      if(current.worktree.registered||current.worktree.pathExists||current.remote.oid)throw new Fault('OWNERSHIP_CONFLICT');
+      const tracking='refs/remotes/origin/'+w.branch;const trackingResult=await git(project,['rev-parse','--verify','--quiet',tracking],{allowFailure:true});
+      if(![0,1].includes(trackingResult.code))throw new Fault('GIT_FAILED');
+      if(trackingResult.code===0&&trackingResult.stdout!==expected.remote.oid)throw new Fault('TARGET_CHANGED');
+      const lines=[];if(trackingResult.code===0)lines.push('delete '+tracking+' '+trackingResult.stdout);if(current.branch.oid)lines.push('delete '+current.branch.ref+' '+current.branch.oid);if(current.ownership.oid)lines.push('delete '+current.ownership.ref+' '+current.ownership.oid);
+      if(lines.length){await git(project,['update-ref','--stdin'],{input:'start\n'+lines.join('\n')+'\nprepare\ncommit\n'});changed=true;}
+    }
+    return {step,outcome:changed?'removed':'already_absent',observation:await inspectResources(project,w,{manifest})};
+  }
   return {
+    inspectResources, cleanupStep,
     /** Проверяет канонические каталоги и политику без изменения Git. */
     async validateProject(project) {
       await topology(project);
