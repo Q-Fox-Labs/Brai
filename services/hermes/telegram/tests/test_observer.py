@@ -119,6 +119,97 @@ class JournalTest(unittest.TestCase):
         with self.journal.db() as db:
             self.assertEqual(db.execute("SELECT text FROM messages").fetchone()[0], "последняя страница")
 
+    def test_existing_history_gains_two_images_and_audio_without_replacing_live_text(self):
+        refs = [
+            {"artifactId": "00000000-0000-4000-8000-000000000001", "filename": "one.jpg", "mimeType": "image/jpeg", "status": "ready"},
+            {"artifactId": "00000000-0000-4000-8000-000000000002", "filename": "two.jpg", "mimeType": "image/jpeg", "status": "ready"},
+            {"artifactId": "00000000-0000-4000-8000-000000000003", "filename": "voice.ogg", "mimeType": "audio/ogg", "status": "ready"},
+        ]
+        aliases = sqlite3.connect(":memory:")
+        self.addCleanup(aliases.close)
+        aliases.executescript("CREATE TABLE aliases(path TEXT,artifact TEXT,ref TEXT); CREATE TABLE items(source TEXT,position INTEGER,artifact TEXT,ref TEXT);")
+        for ref in refs[:2]:
+            aliases.execute("INSERT INTO aliases VALUES (?,?,?)", (f"/results/{ref['artifactId']}/{ref['filename']}", ref['artifactId'], json.dumps(ref)))
+        text = "\n".join(f"[Image attached at: /results/{ref['artifactId']}/{ref['filename']}]" for ref in refs[:2])
+        voice = f"[voice.ogg](</results/{refs[2]['artifactId']}/voice.ogg>)"
+        class Source:
+            def list_sessions_rich(self, **kwargs):
+                return [{"id": "s", "chat_id": "123", "user_id": "123", "display_name": "Анна", "chat_type": "private"}]
+            def get_messages(self, session_id, **kwargs):
+                return [{"id": 1, "role": "user", "content": text, "platform_message_id": "44", "timestamp": 1},
+                        {"id": 2, "role": "user", "content": voice, "platform_message_id": "45", "timestamp": 2}]
+        self.journal.incoming(self.message("Текст из Telegram"), self.chat, self.user)
+        history.import_history(Source(), self.journal, lambda _: True, "/results", aliases, lambda aid, chat, mid: next((x for x in refs if x['artifactId'] == aid), None))
+        history.import_history(Source(), self.journal, lambda _: True, "/results", aliases, lambda aid, chat, mid: next((x for x in refs if x['artifactId'] == aid), None))
+        with self.journal.db() as db:
+            rows = db.execute("SELECT * FROM messages ORDER BY telegram_id").fetchall()
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]['text'], "Текст из Telegram")
+            self.assertEqual(len(json.loads(rows[0]['attachments'])), 2)
+            self.assertEqual(json.loads(rows[1]['attachments'])[0]['mimeType'], "audio/ogg")
+            self.assertEqual(rows[1]['author_name'], "Анна")
+
+    def test_group_author_requires_exact_original_message_or_sender(self):
+        origin = {"chat_id": "-100", "user_id": "123", "user_name": "Анна", "message_id": "50"}
+        session = {"origin_json": json.dumps(origin), "user_id": "123", "display_name": "Название группы"}
+        self.assertEqual(history._author(session, "-100", "", "50", None), ("123", "Анна"))
+        self.assertEqual(history._author(session, "-100", "", "51", None), ("", ""))
+        aliases = sqlite3.connect(":memory:")
+        self.addCleanup(aliases.close)
+        aliases.execute("CREATE TABLE items(source TEXT)")
+        source = {"platform": "telegram", "chat": "-100", "thread": "", "messageId": "51", "sender": "123"}
+        aliases.execute("INSERT INTO items VALUES (?)", (json.dumps(source),))
+        self.assertEqual(history._author(session, "-100", "", "51", aliases), ("123", "Анна"))
+        source["sender"] = "456"
+        aliases.execute("INSERT INTO items VALUES (?)", (json.dumps(source),))
+        self.assertEqual(history._author(session, "-100", "", "51", aliases), ("", ""))
+
+    def test_legacy_audio_key_is_bound_to_message_and_owner(self):
+        from hashlib import sha256
+        owner, chat, message = "owner", "123", "45"
+        raw = json.dumps([owner, f"tg:{chat}:{message}:0"], ensure_ascii=False, separators=(",", ":"))
+        ref = {"requestId": "brai:agent:publish:v1:" + sha256(raw.encode()).hexdigest()}
+        self.assertTrue(history.legacy_input_matches(ref, owner, chat, message))
+        self.assertFalse(history.legacy_input_matches(ref, owner, chat, "46"))
+        self.assertFalse(history.legacy_input_matches(ref, "other", chat, message))
+
+    def test_direct_bot_receipt_and_queued_receipt_do_not_duplicate(self):
+        self.journal.outgoing("123", "9", "Полный ответ", None, "pending", identity="job")
+        self.journal.outgoing("123", "9", "Техническое сообщение", "88", "sent")
+        self.journal.outgoing("123", "9", "Полный ответ", "88", "sent", identity="job")
+        self.journal.outgoing("123", "", "Изменённый ответ", "88", "sent")
+        with self.journal.db() as db:
+            rows = db.execute("SELECT * FROM messages").fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual((rows[0]['identity'], rows[0]['thread_id'], rows[0]['text']), ("pending:job", "9", "Изменённый ответ"))
+            self.assertEqual(db.execute("SELECT count(*) FROM changes WHERE identity != ?", ("pending:job",)).fetchone()[0], 0)
+
+
+class DirectSendTest(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_send_and_edit_observed_without_changing_bot_behavior(self):
+        outgoing = load("outgoing")
+        class Bot:
+            async def send_message(self, chat_id, text, message_thread_id=None):
+                return SimpleNamespace(chat=SimpleNamespace(id=chat_id), message_id=7, text=text, message_thread_id=message_thread_id)
+            async def edit_message_text(self, chat_id, message_id, text):
+                return SimpleNamespace(chat=SimpleNamespace(id=chat_id), message_id=message_id, text=text)
+        class Observer:
+            closed = False
+            def __init__(self): self.events = []
+            async def observe_send(self, chat, route, text, result): self.events.append((chat, route, text, result.message_id))
+        bot, other, observer = Bot(), Bot(), Observer()
+        stop = outgoing.install(bot, observer)
+        try:
+            await bot.send_message(123, "Служебное", message_thread_id=5)
+            await bot.edit_message_text(123, 7, "Обновлено")
+            await other.send_message(456, "Не наш бот")
+            self.assertEqual([x[2] for x in observer.events], ["Служебное", "Обновлено"])
+            self.assertEqual(observer.events[0][1]['message_thread_id'], 5)
+        finally:
+            stop()
+        await bot.send_message(123, "После отключения")
+        self.assertEqual(len(observer.events), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

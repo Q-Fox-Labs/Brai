@@ -201,6 +201,7 @@
       "services/hermes/telegram/observer/__init__.py",
       "services/hermes/telegram/observer/journal.py",
       "services/hermes/telegram/observer/history.py",
+      "services/hermes/telegram/observer/outgoing.py",
       "services/hermes/telegram/observer/server.mjs",
       "services/hermes/telegram/observer/CONTRACT.md",
       "services/hermes/telegram/observer/asyncapi.yaml"
@@ -483,6 +484,7 @@
       "services/hermes/telegram/observer/__init__.py",
       "services/hermes/telegram/observer/journal.py",
       "services/hermes/telegram/observer/history.py",
+      "services/hermes/telegram/observer/outgoing.py",
       "services/hermes/telegram/observer/server.mjs",
       "services/hermes/telegram/observer/CONTRACT.md",
       "services/hermes/telegram/observer/asyncapi.yaml"

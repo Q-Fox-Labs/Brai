@@ -3,11 +3,12 @@
 // ABOUTME: Не отправляет сообщения, решения или команды агенту.
 import { useCallback, useEffect, useRef, useState } from "react";
 import Markdown from "./markdown";
+import { telegramText, updateTelegramMessage } from "./telegram-display";
 import "./telegram-observer.css";
 
 type Chat = { chat_id: string; thread_id: string; chat_type: string; chat_name: string | null; last_text: string; last_at: string | null; last_row: number };
 type Attachment = { artifactId: string; filename: string; mimeType: string; sizeBytes?: number };
-type Message = { row_id: number; identity: string; chat_id: string; thread_id: string; author_name: string; direction: "in" | "out";
+type Message = { row_id: number; identity: string; chat_id: string; thread_id: string; telegram_id?: string | null; author_name: string; direction: "in" | "out";
   text: string; occurred_at: string | null; edited_at: string | null; delivery: string; attachment_state: string; attachments: Attachment[] };
 type Page = { messages: Message[]; before: number | null };
 const keyOf = (chat: Pick<Chat, "chat_id" | "thread_id">) => `${chat.chat_id}:${chat.thread_id}`;
@@ -21,7 +22,7 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   if (!response.ok) throw new Error("UNAVAILABLE");
   return response.json() as Promise<T>;
 }
-function chatName(chat: Chat) { return chat.chat_name || (chat.chat_id.startsWith("-") ? "Группа Telegram" : `Пользователь ${chat.chat_id}`); }
+function chatName(chat: Chat) { return chat.chat_name || (chat.chat_id.startsWith("-") ? "Группа Telegram" : "Неизвестный чат"); }
 function time(value: string | null) {
   if (!value || Number.isNaN(Date.parse(value))) return "";
   return new Intl.DateTimeFormat("ru", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
@@ -39,7 +40,7 @@ function TelegramAttachment({ message, item }: { message: Message; item: Attachm
       <a href={fileUrl(message, item)} target="_blank" rel="noopener noreferrer"><img src={fileUrl(message, item)} alt={item.filename} loading="lazy" onError={() => setUnavailable(true)} /></a>)}
     {item.mimeType.startsWith("audio/") && <audio controls preload="none" src={fileUrl(message, item)} />}
     {item.mimeType.startsWith("video/") && <video controls preload="metadata" src={fileUrl(message, item)} />}
-    <figcaption><a href={fileUrl(message, item, true)} download={item.filename}>{item.filename || "Скачать файл"}</a></figcaption>
+    {!item.mimeType.startsWith("image/") && !item.mimeType.startsWith("audio/") && <figcaption><a href={fileUrl(message, item, true)} download={item.filename}>{item.filename || "Скачать файл"}</a></figcaption>}
   </figure>;
 }
 
@@ -104,8 +105,8 @@ function TelegramObserver({ username, active }: { username: string | null; activ
             refreshChats();
             if (!selectedRef.current || keyOf(selectedRef.current) !== keyOf(value)) return;
             setMessages(previous => {
-              const index = previous.findIndex(item => item.identity === value.identity);
-              if (index >= 0) { const updated = previous.slice(); updated[index] = value; return updated; }
+              const updated = updateTelegramMessage(previous, value);
+              if (updated) return updated;
               if (previous.length && compareMessages(value, previous[0]) < 0) return previous;
               if (!nearBottom.current) setNewCount(count => count + 1);
               return [...previous, value].sort(compareMessages);
@@ -176,8 +177,8 @@ function TelegramObserver({ username, active }: { username: string | null; activ
           <div className="tg-timeline">{before !== null && <button className="tg-older" type="button" disabled={loading} onClick={() => { void older(); }}>Показать более ранние</button>}
             {loading && !messages.length && <p className="tg-muted" role="status">Загружаем сообщения…</p>}
             {messages.map(message => <article className="tg-message" data-direction={message.direction} key={message.identity}>
-              <div className="tg-message-meta"><strong>{message.author_name || (message.direction === "out" ? "Brai" : "Пользователь")}</strong><time>{time(message.occurred_at)}</time>{message.edited_at && <span>изменено</span>}</div>
-              {message.text && <Markdown text={message.text} />}
+              <div className="tg-message-meta"><strong>{message.author_name || (message.direction === "out" ? "Brai" : selected && !selected.chat_id.startsWith("-") ? chatName(selected) : "Отправитель не указан")}</strong><time>{time(message.occurred_at)}</time>{message.edited_at && <span>изменено</span>}</div>
+              {telegramText(message.text, message.attachments) && <Markdown text={telegramText(message.text, message.attachments)} />}
               {message.attachments.length > 0 && <div className="tg-attachments">{message.attachments.map(item => <TelegramAttachment key={item.artifactId} message={message} item={item} />)}</div>}
               {message.attachment_state === "pending" && <p className="tg-muted">Сохраняем вложения…</p>}
               {message.attachment_state === "failed" && <p className="tg-muted">Сохранение вложений не подтверждено.</p>}

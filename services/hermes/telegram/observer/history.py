@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -26,14 +27,14 @@ def _time(value):
         return None
 
 
-def _references(text, result_root, aliases):
-    if not result_root or aliases is None:
+def _references(text, result_root, aliases, lookup=None):
+    if not result_root:
         return []
-    pattern = re.escape(result_root.rstrip("/")) + r"/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/([^<>\n]+)"
+    pattern = re.escape(result_root.rstrip("/")) + r"/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/([^<>\n\]\)]+)"
     refs = []
     for match in re.finditer(pattern, text):
         path = match.group(0).rstrip(")")
-        row = aliases.execute("SELECT ref FROM aliases WHERE path=? AND artifact=?", (path, match.group(1))).fetchone()
+        row = aliases.execute("SELECT ref FROM aliases WHERE path=? AND artifact=?", (path, match.group(1))).fetchone() if aliases is not None else None
         if row:
             try:
                 ref = json.loads(row[0])
@@ -41,7 +42,26 @@ def _references(text, result_root, aliases):
                     refs.append(ref)
             except (ValueError, TypeError, AttributeError):
                 pass
+        elif lookup is not None:
+            # The descriptor came from an authorized Hermes session. Verify the fixed owner
+            # and exact filename before linking a legacy publication without a files alias.
+            ref = lookup(match.group(1))
+            if (isinstance(ref, dict) and ref.get("artifactId") == match.group(1)
+                    and ref.get("filename") == match.group(2).strip()
+                    and ref.get("status") == "ready" and ref not in refs):
+                refs.append({key: ref[key] for key in ("artifactId", "filename", "mimeType", "sizeBytes", "sha256") if key in ref})
     return refs
+
+
+def legacy_input_matches(ref, owner_id, chat_id, message_id):
+    """Проверить исходный ключ старой публикации для конкретного Telegram message."""
+    if not isinstance(ref, dict) or not owner_id or not chat_id or not message_id:
+        return False
+    for index in range(10):
+        raw = json.dumps([owner_id, f"tg:{chat_id}:{message_id}:{index}"], ensure_ascii=False, separators=(",", ":"))
+        if ref.get("requestId") == "brai:agent:publish:v1:" + sha256(raw.encode()).hexdigest():
+            return True
+    return False
 
 
 def _input_references(aliases, chat_id, thread_id, message_id):
@@ -62,7 +82,34 @@ def _input_references(aliases, chat_id, thread_id, message_id):
     return refs
 
 
-def import_history(source, journal, allows, result_root="", aliases=None):
+def _author(session, chat_id, thread_id, message_id, aliases):
+    """Вернуть имя только при подтверждённой связи отправителя с сообщением."""
+    try:
+        raw = session.get("origin_json") or {}
+        origin = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(origin, dict):
+            origin = {}
+    except (ValueError, TypeError):
+        origin = {}
+    user_id = str(origin.get("user_id") or session.get("user_id") or "")
+    name = origin.get("user_name") if isinstance(origin.get("user_name"), str) else ""
+    if not chat_id.startswith("-") and user_id == chat_id:
+        return user_id, name or str(session.get("display_name") or "")
+    if not user_id or not name or not message_id or str(origin.get("chat_id") or "") != chat_id:
+        return "", ""
+    if str(origin.get("message_id") or "") == message_id:
+        return user_id, name
+    if aliases is not None:
+        rows = aliases.execute("""SELECT DISTINCT json_extract(source, '$.sender') FROM items
+            WHERE json_extract(source, '$.platform')='telegram' AND json_extract(source, '$.chat')=?
+            AND json_extract(source, '$.thread') IN (?, ?) AND json_extract(source, '$.messageId')=?""",
+            (chat_id, thread_id, '1' if thread_id == '' else thread_id, message_id))
+        if {str(row[0]) for row in rows if row[0]} == {user_id}:
+            return user_id, name
+    return "", ""
+
+
+def import_history(source, journal, allows, result_root="", aliases=None, lookup=None):
     """Прочитать допустимые Telegram-сессии, включая сжатые продолжения, без изменения источника."""
     sessions, session_offset = [], 0
     while True:
@@ -95,17 +142,19 @@ def import_history(source, journal, allows, result_root="", aliases=None):
                 text = _text(message.get("content"))
                 platform_id = str(message.get("platform_message_id") or "")
                 identity = f"telegram:{chat_id}:{platform_id}" if role == "user" and platform_id.isdecimal() else f"history:{mid}"
-                refs = _references(text, result_root, aliases)
+                refs = _references(text, result_root, aliases, (lambda aid: lookup(aid, chat_id, platform_id)) if lookup and role == "user" and platform_id else None)
                 if role == "user":
                     refs.extend(ref for ref in _input_references(aliases, chat_id, thread_id, platform_id) if ref not in refs)
+                refs = list({ref.get("artifactId"): ref for ref in refs if ref.get("artifactId")}.values())
                 content = message.get("content")
                 had_media = isinstance(content, list) and any(isinstance(item, dict) and item.get("type") in {"image_url", "file", "file_url", "audio"} for item in content)
                 if not text and not refs and not had_media:
                     continue
                 seen.add(mid)
+                author_id, author_name = _author(session, chat_id, thread_id, platform_id, aliases) if role == "user" else ("brai", "Brai")
                 value = {"identity": identity, "chat_id": chat_id, "thread_id": thread_id,
                          "chat_type": str(session.get("chat_type") or ""), "chat_name": str(session.get("display_name") or ""),
-                         "author_id": "brai" if role == "assistant" else "", "author_name": "Brai" if role == "assistant" else "",
+                         "author_id": author_id, "author_name": author_name,
                          "direction": "out" if role == "assistant" else "in", "telegram_id": platform_id or None,
                          "session_id": session_id, "text": text, "occurred_at": _time(message.get("timestamp")),
                          "edited_at": None, "delivery": "unknown" if role == "assistant" else "received",
@@ -116,7 +165,7 @@ def import_history(source, journal, allows, result_root="", aliases=None):
             offset += len(page)
     # AIDEV-NOTE: Исторический импорт не перезаписывает уже полученное живое событие.
     for value in sorted(pending, key=lambda item: (item["occurred_at"] or "", item["identity"])):
-        journal.record(value, only_if_new=True)
+        journal.import_record(value)
     return {"sessions": len(sessions), "messages": len(pending)}
 
 

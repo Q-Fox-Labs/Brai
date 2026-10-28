@@ -43,6 +43,7 @@
       "apps/web/app/agent/settings.tsx",
       "apps/web/app/agent/sidebar.tsx",
       "apps/web/app/agent/telegram-entry.tsx",
+      "apps/web/app/agent/telegram-display.ts",
       "apps/web/app/agent/timeline.ts",
       "apps/web/app/agent/turn-error.tsx",
       "apps/web/app/alerts/bell.tsx",
@@ -289,6 +290,7 @@
       "apps/web/tests/timer-history.test.ts",
       "apps/web/tests/timer-http.test.ts",
       "apps/web/tests/workspace-link.test.ts",
+      "apps/web/tests/telegram-display.test.ts",
       "apps/web/tests/telegram-observer.test.ts"
     ]
   },
