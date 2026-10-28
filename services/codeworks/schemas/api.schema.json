@@ -1414,7 +1414,6 @@
       },
       "required": [
         "project_id",
-        "workspace_key",
         "session_id",
         "turn_id",
         "tool_use_id",
@@ -1588,6 +1587,18 @@
         "operation_id": {
           "type": "string",
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "workspace_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "kind": {
+          "enum": [
+            "feature",
+            "hotfix"
+          ]
         }
       },
       "required": [
@@ -1595,7 +1606,9 @@
         "state",
         "workspace_id",
         "path",
-        "branch"
+        "branch",
+        "workspace_key",
+        "kind"
       ],
       "additionalProperties": false
     },

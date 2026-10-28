@@ -244,10 +244,12 @@ test('internal write admission has strict schemas and is excluded from user meth
   const common={project_id:'p',session_id:'session',turn_id:'turn',tool_use_id:'call'};
   const begin={...common,workspace_key:'task',tool_name:'shell',payload_sha256:'b'.repeat(64),targets:['/repo/file'],request_key:'request'};
   validate('write.begin',begin);validate('write.begin',{...begin,workspace_id:id,kind:'hotfix'});
+  const {workspace_key,...automatic}=begin;validate('write.begin',automatic);validate('write.begin',{...automatic,workspace_id:id});
   validate('write.admit',{project_id:'p',write_call_id:id,rewritten_sha256:'b'.repeat(64)});
   validate('write.finish',{...common,outcome:'success'});
   validate('write.stop',{project_id:'p',session_id:'session',turn_id:'turn',event:'Stop',tool_use_id:'call',reason:'prepare_pending'});
-  validate('writeBeginResponse',{write_call_id:id,state:'preparing',workspace_id:id,path:'/area',branch:'feature/task'});
+  validate('writeBeginResponse',{write_call_id:id,state:'preparing',workspace_id:id,path:'/area',branch:'feature/task',workspace_key:'task',kind:'feature'});
+  assert.throws(()=>validate('writeBeginResponse',{write_call_id:id,state:'preparing',workspace_id:id,path:'/area',branch:'feature/task'}));
   validate('writeAdmitResponse',{write_call_id:id,state:'in_flight'});validate('writeFinishResponse',{write_call_id:id,state:'finished',changed:true});validate('writeStopResponse',{closed:1,uncertain:0});
   assert.throws(()=>validate('write.begin',{...begin,executor_id:'forged'}));
   assert.throws(()=>validate('write.finish',{...common,outcome:'success',output:'private'}));
