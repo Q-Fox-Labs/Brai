@@ -97,7 +97,10 @@ export async function cancelWorkspace(db,op,{outcome='cancelled',evidence={}}={}
     const obligation=(await db.query("SELECT * FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state<>'done' FOR UPDATE",[op.workspace_id])).rows[0];
     if(obligation&&obligation.outcome!==outcome)throw new Fault('CONFLICT');
     if(!obligation)await db.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,source_operation_id,outcome,step,state,owner_workflow_id,epoch,evidence) VALUES($1,$2,$3,$4,$5,$6,'inspect','pending',$7,1,$8::jsonb)",[randomUUID(),op.project_id,op.workspace_id,'workspace:'+op.workspace_id,op.id,outcome,registry.workflow_id,JSON.stringify(evidence)]);
-    else if(obligation.evidence?.route_pending)await db.query("UPDATE codeworks.cleanup_obligations SET state='pending',blocker=NULL,evidence=$2::jsonb,next_attempt_at=NULL,updated_at=now() WHERE id=$1",[obligation.id,JSON.stringify(evidence)]);
+    else if(obligation.evidence?.route_pending){
+      const confirmed={...obligation.evidence,...evidence};delete confirmed.route_pending;
+      await db.query("UPDATE codeworks.cleanup_obligations SET state='pending',blocker=NULL,evidence=$2::jsonb,next_attempt_at=NULL,updated_at=now() WHERE id=$1",[obligation.id,JSON.stringify(confirmed)]);
+    }
     await db.query("UPDATE codeworks.workflow_registry SET state='draining',lifecycle='closing',outcome=$2,updated_at=now() WHERE workspace_id=$1",[op.workspace_id,outcome]);
     await db.query('COMMIT');
   }catch(error){await db.query('ROLLBACK');throw error;}
