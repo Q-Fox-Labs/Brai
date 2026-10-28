@@ -297,3 +297,12 @@ test('project cleanup archive configuration requires absolute roots and a nonneg
   validate('project',{...project,cleanup_archive_roots:['/var/lib/codeworks/archive'],cleanup_archive_uid:0});
   for(const fields of [{cleanup_archive_roots:['relative']},{cleanup_archive_uid:-1},{cleanup_archive_uid:'0'},{cleanup_archive_roots:['/ok',42]}])assert.throws(()=>validate('project',{...project,...fields}));
 });
+
+
+test('lifecycle exposes only safe cleanup progress',()=>{
+  const cleanup={id,state:'waiting_decision',step:'inspect',outcome:'cancelled',owner_workflow_id:'workflow',epoch:2,next_attempt_at:null,blocker:'UNIQUE_CHANGES'};
+  const response={workspace_id:id,task_status:'closing',outcome:'cancelled',workflow:null,blockers:[],cleanup};
+  validate('lifecycleResponse',response);validate('lifecycleResponse',{...response,cleanup:null});
+  for(const field of ['expected','evidence','ownership_token'])assert.throws(()=>validate('lifecycleResponse',{...response,cleanup:{...cleanup,[field]:{}}}));
+  assert.throws(()=>validate('lifecycleResponse',{...response,cleanup:{...cleanup,epoch:-1}}));
+});

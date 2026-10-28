@@ -44,7 +44,7 @@ Executor задают broker ACL; он не идентифицирует writer 
 | sync | workspace_id, commit_sha, request_key | идентификаторы операции и области |
 | release | workspace_id, commit_sha, request_key | идентификаторы операции и области |
 | cleanup | workspace_id, request_key | идентификаторы операции и области |
-| lifecycle.status | workspace_id | задача, workflow, блокировки, стадия и состояние исполнителя |
+| lifecycle.status | workspace_id | задача, workflow, блокировки и безопасное состояние обязательства cleanup |
 | release.close | workspace_id, release_operation_id, request_key, reason | идентификаторы закрывающей операции и области |
 | workspace.cancel | workspace_id, request_key, reason | идентификаторы операции закрытия и области |
 | workspace.transfer | workspace_id, request_key, evidence | идентификаторы операции переноса и области |
@@ -147,6 +147,13 @@ removed_at означает подтверждённое отсутствие р
 с незавершённой записью или операцией. После подтверждённого архивирования outcome
 остаётся cancelled; refs и индекс проверяются до подтверждённого отсутствия.
 Публичный workspace.cancel доказательство архива не принимает.
+
+Историческое обязательство может относиться только к Git ref ветки, без рабочей
+области. Такой scope не создаёт фиктивный путь или UUID дерева и не удаляет индекс.
+Он проверяет принадлежащие ветке refs и архивное доказательство, а также защиту
+активных и ожидающих задач. `lifecycle.status` для известной области показывает
+состояние её обязательства и причину ожидания без внутренних доказательств и токенов;
+исторический workflow сохраняет свой ID.
 
 ## Хук Codex
 

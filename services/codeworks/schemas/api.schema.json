@@ -1330,6 +1330,83 @@
             "unused",
             null
           ]
+        },
+        "cleanup": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                },
+                "state": {
+                  "enum": [
+                    "pending",
+                    "running",
+                    "retry",
+                    "waiting_decision",
+                    "done"
+                  ]
+                },
+                "step": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 255,
+                  "pattern": "^[^\\u0000-\\u001f]+$"
+                },
+                "outcome": {
+                  "enum": [
+                    "released",
+                    "cancelled",
+                    "transferred",
+                    "unused"
+                  ]
+                },
+                "owner_workflow_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "epoch": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "next_attempt_at": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "string",
+                      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"
+                    }
+                  ]
+                },
+                "blocker": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "state",
+                "step",
+                "outcome",
+                "owner_workflow_id",
+                "epoch",
+                "next_attempt_at",
+                "blocker"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
