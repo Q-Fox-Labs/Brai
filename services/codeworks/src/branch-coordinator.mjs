@@ -2,6 +2,7 @@
 // ABOUTME: Не создаёт путь или индекс и не удаляет ссылки без проверенного решения.
 import {canonical} from './contracts.mjs';
 import {verifyCleanupArchive} from './cleanup-archive.mjs';
+import {branchResourcesAbsent} from './branch-cleanup.mjs';
 
 /** Выполняет один шаг закреплённой очистки под внешним guard субъекта. */
 export async function advanceBranchCleanup(db,obligation,project,{git,checkpoint=async()=>{},verifyArchive=verifyCleanupArchive}) {
@@ -27,7 +28,7 @@ export async function advanceBranchCleanup(db,obligation,project,{git,checkpoint
   await fence();
   const current=await git.inspectBranchResources(project,subject);
   if(current.remote?.known!==true||current.index?.scope!=='not_allocated_by_codeworks'||current.worktree?.registered!==false||current.worktree?.path!==null||current.ownership?.oid!==null)return wait('BRANCH_INSPECTION_INCOMPLETE');
-  if(!current.branch?.oid&&!current.remote?.oid&&!current.tracking?.oid){
+  if(branchResourcesAbsent(current)){
     return save("state='done',step='done',blocker=NULL,result=$4::jsonb",[JSON.stringify({scope:'git_refs',git:current,index:{scope:'not_allocated_by_codeworks'},...(obligation.step==='verify'?{disposition:'resources_removed_with_archive'}:{})})]);
   }
   if(obligation.step==='verify')return wait('RESOURCES_REMAIN');

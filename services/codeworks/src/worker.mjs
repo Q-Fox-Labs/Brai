@@ -34,7 +34,7 @@ export async function runCleanupObligation(pool,id,owner,{git,flowGit,codeIndex,
       try{return branch?await advanceBranchCleanup(db,item,project,{git,checkpoint:guardedCheckpoint}):await advanceCleanup(db,item,project,workspace,{git,flowGit,codeIndex,allowedRepositories,verifyTransfer,checkpoint:guardedCheckpoint});}
       catch(error){
         const blocker=error.code??error.message;
-        if(!signal.aborted&&['TARGET_CHANGED','OWNERSHIP_CONFLICT','TRANSFER_UNVERIFIED','BRANCH_LIVE_TASK'].includes(blocker)){
+        if(!signal.aborted&&['TARGET_CHANGED','OWNERSHIP_CONFLICT','TRANSFER_UNVERIFIED','BRANCH_LIVE_TASK','BRANCH_SUBJECT_INVALID','INVALID_ARGUMENT'].includes(blocker)){
           return (await db.query("UPDATE codeworks.cleanup_obligations SET state='waiting_decision',blocker=$4,updated_at=now() WHERE id=$1 AND owner_workflow_id=$2 AND epoch=$3 AND state IN ('pending','running','retry') RETURNING *",[id,owner,item.epoch,blocker])).rows[0];
         }
         throw error;
