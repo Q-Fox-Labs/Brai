@@ -137,8 +137,8 @@ function synchronousGit(command) {
   }
   return false;
 }
-// Обрабатываем только проверяемые foreground argv; произвольные скрипты и фоновые операции остаются неизвестными.
-function foregroundCommand(command) {
+/** Распознаёт ограниченный набор foreground argv; неизвестные и фоновые команды возвращают false. */
+export function foregroundCommand(command) {
   if (typeof command !== 'string') return false;
   const tokens=shellTokens(command);
   if (!tokens.length || tokens.some(t=>t.dynamic)) return false;

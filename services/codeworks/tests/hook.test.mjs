@@ -2,7 +2,7 @@
 // ABOUTME: Подменяет backend и не запускает пользовательские сессии Codex.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {runHook,writePaths} from '../src/hook.mjs';
+import {runHook,writePaths,foregroundCommand} from '../src/hook.mjs';
 import {validate} from '../src/contracts.mjs';
 const config={projects:[{id:'demo',repo_path:'/test/main',documentation_paths:['docs'],excluded_paths:['tmp']}]};
 const env={CODEWORKS_WORKSPACE_KEY:'task'};
@@ -124,4 +124,9 @@ test('actual component publication commands admit and complete with literal redi
   assert.equal((await runHook(event,{config:cfg,env,connect})).hookSpecificOutput.permissionDecision,'allow');
   await runHook({...event,hook_event_name:'PostToolUse',tool_response:'completed'},{config:cfg,env,connect});assert.equal(calls.at(-1).method,'write.finish');
  }
+});
+
+test('owner verifier uses the same conservative foreground classifier',()=>{
+ assert.equal(foregroundCommand('node services/codeworks/components/cli.mjs run codeworks > tmp/out.log 2>&1'),true);
+ for(const command of ['node --test tests/a &','node script.mjs > tmp/out','node --test tests/a > $(evil)','nohup node --test tests/a']) assert.equal(foregroundCommand(command),false,command);
 });
