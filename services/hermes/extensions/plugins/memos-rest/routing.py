@@ -272,7 +272,7 @@ class RoutedRuntime:
             row['_classification'] = ('classified' if receipt.get('fact_count') else 'unclassified') if receipt else 'pending/unclassified'
         return row
 
-    def search(self, query, sid, top_k=None, project=None, cubes=None, include_archive=False):
+    def search(self, query, sid, top_k=None, project=None, cubes=None, include_archive=False, all_cubes=False):
         """Вернуть релевантные факты без скрытого потолка; архив включается явно."""
         config = self.reload()
         if not config.get('enabled', True) or config.get('suspended', False):
@@ -287,7 +287,7 @@ class RoutedRuntime:
                 selected = self.router.select(query, project)
             except MemOSError:
                 selected = []
-        selected = selected or self.catalog.cubes
+        selected = self.catalog.cubes if all_cubes else selected or self.catalog.cubes
         candidates = {}
         def collect(cube):
             client = self.client(cube)
@@ -315,7 +315,9 @@ class RoutedRuntime:
                     candidates[key] = decorated
         for cube in selected:
             collect(cube)
-        if top_k is None or len(candidates) < top_k:
+        # top_k is a maximum, not a target that forces unrelated topic scans.
+        # A caller can broaden deliberately; an empty scoped recall widens itself.
+        if not candidates:
             for cube in self.catalog.cubes:
                 if cube not in selected:
                     collect(cube)

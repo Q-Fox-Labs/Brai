@@ -94,6 +94,25 @@ class QualityTests(RoutingTests):
         self.assertTrue(any(path=='/product/search' and body['readable_cube_ids']==['main']
                             for path,body in self.backend.calls))
 
+    def test_maximum_does_not_force_other_topics_and_expansion_is_available(self):
+        self.router_reply([self.fact()])
+        self.provider.sync_turn('I am studying sales.', '')
+        self.send()
+        other=copy.deepcopy(next(r for r in self.backend.rows.values() if r['metadata']['info']['hermes_kind']=='fact'))
+        other.update(id='another-topic',cube='life_body')
+        other['metadata']['info'].update(hermes_logical_id='body-fact',hermes_cube='life_body',hermes_memberships=['life_body'])
+        self.backend.rows[other['id']]=other
+        self.provider.routing.router.transport=lambda _: {'cubes':['life_intellect']}
+        self.backend.calls.clear()
+        result=json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales','top_k':1000}))
+        self.assertEqual(len(result['memories']),1)
+        self.assertFalse(any(p=='/product/search' and b['readable_cube_ids']==['life_body'] for p,b in self.backend.calls))
+        result=json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales','all_cubes':True}))
+        self.assertEqual(len(result['memories']),2)
+        self.provider.routing.router.transport=lambda _: {'cubes':['life_comfort']}
+        result=json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales'}))
+        self.assertEqual(len(result['memories']),2,'Empty initial recall must widen automatically')
+
     def test_context_never_includes_another_author_or_session(self):
         self.router_reply([])
         self.provider.sync_turn('My purpose is a massage business.', '')
