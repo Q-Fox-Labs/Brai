@@ -24,6 +24,7 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
     if (row.workspace_id) {
       if (args.workspace_id && args.workspace_id !== row.workspace_id) throw new Fault('WRITE_CALL_MISMATCH');
       const found = await workspace(args.project_id, row.workspace_id);
+      if (!found?.workspace || found.workspace.removed_at) throw new Fault('CONFLICT','Workspace was removed.');
       return {write_call_id:row.id, state:row.state, workspace_id:row.workspace_id, ...(row.operation_id ? {operation_id:row.operation_id} : {}), path:found.workspace.path, branch:found.workspace.branch};
     }
     if (row.state !== 'preparing') throw new Fault('CONFLICT','Write call was already stopped.');

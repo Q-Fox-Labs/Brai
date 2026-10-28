@@ -113,6 +113,36 @@ function readOnlyShell(command) {
   return false;
 }
 
+// Разрешаем только обычные Git argv; shell операторы и нестандартные опции исключены.
+function synchronousGit(command) {
+  if (typeof command !== 'string') return false;
+  const tokens=shellTokens(command);
+  if (!tokens.length || tokens.some(t=>t.operator || t.dynamic)) return false;
+  const words=tokens.map(t=>t.word);
+  if (words[0]==='rtk' && words[1]==='proxy') words.splice(0,2);
+  if (words.shift()!=='git') return false;
+  const action=words.shift();
+  if (action==='add') return words.length>0 && words.every(w=>!w.startsWith('-') || ['-A','--all','-u','--update','--'].includes(w));
+  if (action==='push') return words.length>0 && words.every(w=>!w.startsWith('-') || ['-u','--set-upstream','--'].includes(w));
+  if (action==='commit') {
+    let message=false;
+    for (let i=0;i<words.length;i++) {
+      const w=words[i];
+      if (w==='-m' || w==='--message') { if (++i>=words.length) return false; message=true; continue; }
+      if (w.startsWith('--message=')) {message=true; continue;}
+      if (!['-a','--all','--amend','--no-edit'].includes(w)) return false;
+    }
+    return message || words.includes('--no-edit');
+  }
+  return false;
+}
+function completedShell(response) {
+  if (response && typeof response==='object' && Number.isInteger(response.exit_code) && !response.session_id) return response.exit_code;
+  if (typeof response!=='string' || /(?:session[_ ]id|process running|still running)/i.test(response)) return null;
+  const match=response.match(/(?:Process exited with code|exit code)\s*:?\s*(\d+)\b/i);
+  return match ? Number(match[1]) : null;
+}
+
 function shellPaths(command, cwd) {
   const found = [];
   let segment = [];
@@ -188,8 +218,10 @@ export async function runHook(event, {env = process.env, config, connect = conne
   const eventName = event.hook_event_name ?? 'PreToolUse';
   if (['PostToolUse', 'Stop', 'SubagentStop', 'Interrupt', 'SessionEnd'].includes(eventName)) {
     if (!event.session_id || !event.turn_id || (eventName === 'PostToolUse' && !event.tool_use_id)) return {};
-    // AIDEV-NOTE: Завершение shell не доказывает остановку фоновых потомков.
-    if (eventName === 'PostToolUse' && ['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1))) return {};
+    const shellPost = eventName === 'PostToolUse' && ['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1));
+    const exitCode = shellPost ? completedShell(event.tool_response) : null;
+    // AIDEV-NOTE: Только обычный завершённый Git вызов снимает учёт; другие shell могут оставить потомков.
+    if (shellPost && (!synchronousGit(event.tool_input?.command ?? event.tool_input?.cmd) || exitCode === null)) return {};
     let client;
     try {
       client = await connect(await loadClientConfig(env));
@@ -197,7 +229,7 @@ export async function runHook(event, {env = process.env, config, connect = conne
         const args = {project_id: project.id, session_id: event.session_id, turn_id: event.turn_id};
         if (eventName === 'PostToolUse') {
           args.tool_use_id = event.tool_use_id;
-          args.outcome = event.tool_response?.isError || event.tool_response?.error ? 'error' : 'success';
+          args.outcome = shellPost ? (exitCode === 0 ? 'success' : 'error') : (event.tool_response?.isError || event.tool_response?.error ? 'error' : 'success');
         } else args.event = eventName;
         try { await client.call(eventName === 'PostToolUse' ? 'write.finish' : 'write.stop', args); } catch { /* Другому проекту вызов не принадлежит. */ }
       }
@@ -260,7 +292,7 @@ export async function runHook(event, {env = process.env, config, connect = conne
   const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
   const kind = env.CODEWORKS_WORKSPACE_KIND || 'feature';
   const payload = hash({tool_name:event.tool_name, tool_input:input, cwd, project_id:project.id, workspace_key:key, kind});
-  const args = {project_id:project.id, workspace_key:key, kind, session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, targets:files.map(f=>path.relative(root,f)), request_key:'hook-'+hash([project.id,key,kind]).slice(0,48)};
+  const args = {project_id:project.id, workspace_key:key, kind, session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, targets:files.map(f=>path.relative(root,f)), request_key:'hook-'+hash([project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
   let client, result;
   try {
     client = await connect(await loadClientConfig(env));
@@ -301,7 +333,7 @@ async function existingWrite(event, area, {env,connect,files,shell,cwd,input,nam
     const w = status.workspace;
     if (!w || resolved(w.path,'/') !== area.root || w.preparation_state !== 'ready') return deny('Рабочая область недоступна.');
     const key=w.workspace_key,kind=w.kind;
-    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),targets:files.map(f=>path.relative(area.root,f)),request_key:'hook-'+hash([area.project.id,key,kind]).slice(0,48)};
+    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),targets:files.map(f=>path.relative(area.root,f)),request_key:'hook-'+hash([area.project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
     result=await client.call('write.begin',args);
     if (result.workspace_id!==area.id || resolved(result.path,'/')!==area.root) throw Error('WORKSPACE_MISMATCH');
     await client.call('write.admit',{project_id:area.project.id,write_call_id:result.write_call_id,rewritten_sha256:hash(input)});

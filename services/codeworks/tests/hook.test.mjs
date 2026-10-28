@@ -51,3 +51,20 @@ test('shell operators and unsafe flags are never classified as read-only',async(
  const connect=async()=>({call:async(method,args)=>{calls.push(method);if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:'c'};return {};},close(){}});
  for(const cmd of ['git status; touch x','cat a > x','rg --pre evil word','git status --exec=evil']) {await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:cmd}},{config,env,connect});assert.equal(calls.at(-1),'write.admit');}
 });
+
+test('new calls get distinct request keys and retries preserve the same key',async()=>{
+ const f=fixture();await runHook(patch(valid),f.options);const first=f.calls.find(c=>c.method==='write.begin').args.request_key;
+ f.calls.length=0;await runHook(patch(valid),f.options);assert.equal(f.calls.find(c=>c.method==='write.begin').args.request_key,first);
+ f.calls.length=0;await runHook({...patch(valid),tool_use_id:'next'},f.options);assert.notEqual(f.calls.find(c=>c.method==='write.begin').args.request_key,first);
+});
+test('only completed ordinary Git shell calls finish writer accounting',async()=>{
+ for(const command of ['git add -A','git commit -m "message"','git push origin feature/test']) {
+  for(const response of [{exit_code:0},'Process exited with code 1\nOutput:\nfailed']) {
+   const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:response},f.options);
+   assert.equal(f.calls[0].method,'write.finish');assert.equal(f.calls[0].args.outcome,typeof response==='string'?'error':'success');
+  }
+ }
+ for(const [command,response] of [['git add -A; touch x',{exit_code:0}],['git -c core.hooksPath=/tmp commit -m x',{exit_code:0}],['git push origin feature/test',{session_id:12}],['git add -A','Process running, session ID 1']]) {
+  const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:response},f.options);assert.equal(f.calls.length,0);
+ }
+});

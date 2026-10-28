@@ -20,3 +20,10 @@ test('stopped call never starts a new preparation',async()=>{
  const api=createWriteAdmission({connect:async()=>({query,release(){}})},{prepare:async()=>{called=true;},workspace:async()=>{},inspect:async()=>{}});
  await assert.rejects(api.begin({project_id:'p',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'apply_patch',payload_sha256:'a',targets:['src/a'],workspace_key:'task',request_key:'r'},'e'),{code:'CONFLICT'});assert.equal(called,false);
 });
+
+test('replay for removed workspace never returns its former path',async()=>{
+ const existing={id:'c',workspace_id:'w',state:'finished',tool_name:'apply_patch',payload_sha256:'a',targets:['src/a'],workspace_key:'task',kind:'feature',request_key:'r'};
+ const query=async sql=>sql.startsWith('SELECT * FROM codeworks.write_calls')?{rows:[existing],rowCount:1}:{rows:[],rowCount:0};
+ const api=createWriteAdmission({connect:async()=>({query,release(){}})},{prepare:async()=>assert.fail('must not recreate'),workspace:async()=>({workspace:{removed_at:'now'}}),inspect:async()=>{}});
+ await assert.rejects(api.begin({project_id:'p',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'apply_patch',payload_sha256:'a',targets:['src/a'],workspace_key:'task',request_key:'r'},'e'),{code:'CONFLICT'});
+});
