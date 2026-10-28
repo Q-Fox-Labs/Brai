@@ -4,11 +4,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {writeFile,access} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
+import path from 'node:path';
 import {setup,configured} from './fixture.mjs';
 import {command} from '../../src/git.mjs';
 import {createActivityGit} from '../../src/git-steps.mjs';
 import {createCodeIndex} from '../../src/code-index.mjs';
 import {runCleanupObligation} from '../../src/worker.mjs';
+import {verifyDisposition} from '../../src/disposition.mjs';
 
 for(const outcome of ['unused','released','transferred'])test(outcome+' disposition removes only proven disposable resources',{timeout:120000},async t=>{
   assert.ok(configured&&process.env.CODEWORKS_INDEX_QDRANT,'explicit disposable PostgreSQL and Qdrant are required');
@@ -16,6 +18,18 @@ for(const outcome of ['unused','released','transferred'])test(outcome+' disposit
   const prepared=await f.prepare({project_id:project.id,workspace_key:'disposition-'+outcome,request_key:'disposition-'+outcome});
   await f.worker(project,prepared.operation_id);
   const workspace=(await f.owner.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[prepared.workspace_id])).rows[0];
+  let verifyTransfer;
+  if(outcome==='transferred'){
+    const bare=path.join(path.dirname(project.repo_path),'destination.git');
+    await command('git',['init','--bare',bare]);await command('git',['-C',project.repo_path,'remote','add','origin',bare]);
+    project.transfer_destinations=[{repo_path:project.repo_path,origin:bare}];
+    await f.owner.query('UPDATE codeworks.projects SET config=$2 WHERE id=$1',[project.id,project]);
+    const localGit=async(repo,args,options)=>{
+      if(![project.repo_path,workspace.path].includes(repo))throw Error('FOREIGN_FIXTURE_REPOSITORY');
+      return command('git',['-C',repo,...args],options);
+    };
+    verifyTransfer=(p,w,proof,options)=>verifyDisposition(p,w,proof,{...options,git:localGit});
+  }
   const workflow='fixture/'+randomUUID(),id=randomUUID();
   await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner,state,lifecycle,outcome) VALUES($1,$2,$3,'temporal','draining','closing',$4)",[workflow,project.id,workspace.id,outcome]);
   let evidence={};
@@ -25,6 +39,7 @@ for(const outcome of ['unused','released','transferred'])test(outcome+' disposit
     const head=(await command('git',['-C',workspace.path,'rev-parse','HEAD'])).stdout;
     await command('git',['-C',project.repo_path,'merge','--ff-only',workspace.branch]);
     if(outcome==='transferred'){
+      await command('git',['-C',project.repo_path,'push','origin','dev']);
       const blob=(await command('git',['-C',workspace.path,'rev-parse','HEAD:hello.txt'])).stdout;
       evidence={transfer:{destination:{repo_path:project.repo_path,commit_sha:head},source_head:head,source_base:workspace.base_sha,files:[{status:'M',source_path:'hello.txt',destination_path:'hello.txt',source_blob:blob,destination_blob:blob}]}};
     }else{
@@ -40,7 +55,7 @@ for(const outcome of ['unused','released','transferred'])test(outcome+' disposit
   await writeFile(configFile,JSON.stringify({engine:'/opt/socraticode/node_modules/socraticode/dist/index.js',socraticodeConfig:settings,sources:{}}));
   const codeIndex=createCodeIndex(f.app,{configFile}),adapters=createActivityGit();
   for(let i=0;i<8;i++){
-    const result=await runCleanupObligation(f.app,id,workflow,{...adapters,codeIndex,allowedRepositories:[project.repo_path]});
+    const result=await runCleanupObligation(f.app,id,workflow,{...adapters,codeIndex,allowedRepositories:[project.repo_path],...(verifyTransfer?{verifyTransfer}:{})});
     assert.notEqual(result?.state,'waiting_decision',JSON.stringify(result));
     if(result?.state==='done')break;
   }
