@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// ABOUTME: Останавливает распознанную запись в основную копию и показывает область Codeworks.
-// ABOUTME: Не переписывает инструменты, не исполняет shell и не заменяет файловые права sandbox.
+// ABOUTME: Направляет поддержанную запись в подготовленную область Codeworks.
+// ABOUTME: Не исполняет shell и не заменяет файловые права sandbox.
 import {readFile} from 'node:fs/promises';
 import {realpathSync} from 'node:fs';
 import path from 'node:path';
@@ -164,40 +164,97 @@ function denied(context, projects) {
   return {hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `Запись в основную копию требует рабочей области Codeworks. Защищённые проекты: ${scope}.`, additionalContext: context}};
 }
 
-/** Возвращает официальный PreToolUse DTO; подключается только для распознанной защищённой записи. */
-export async function runHook(event, {env = process.env, config, connect = connectClient} = {}) {
-  if (event.hook_event_name && event.hook_event_name !== 'PreToolUse') return {};
-  const files = writePaths(event);
-  if (!files.length) return {};
+/** Обрабатывает native write и завершения; не исполняет исходный инструмент. */
+export async function runHook(event, {env = process.env, config, connect = connectClient, wait = ms => new Promise(resolve => setTimeout(resolve, ms)), polls = 8} = {}) {
   if (!config) {
     if (!env.CODEWORKS_HOOK_CONFIG) return {};
     try { config = JSON.parse(await readFile(env.CODEWORKS_HOOK_CONFIG, 'utf8')); }
-    catch { return {systemMessage: 'Codeworks hook: публичная конфигурация недоступна; проверьте CODEWORKS_HOOK_CONFIG.'}; }
+    catch { return {systemMessage: 'Codeworks hook: конфигурация недоступна.'}; }
   }
-  const projects = (config.projects ?? []).filter(project => {
+  const projects = config.projects ?? [];
+  const eventName = event.hook_event_name ?? 'PreToolUse';
+  if (['PostToolUse', 'Stop', 'SubagentStop', 'Interrupt', 'SessionEnd'].includes(eventName)) {
+    if (!event.session_id || !event.turn_id || (eventName === 'PostToolUse' && !event.tool_use_id)) return {};
+    let client;
+    try {
+      client = await connect(await loadClientConfig(env));
+      for (const project of projects) {
+        const args = {project_id: project.id, session_id: event.session_id, turn_id: event.turn_id};
+        if (eventName === 'PostToolUse') {
+          args.tool_use_id = event.tool_use_id;
+          args.outcome = event.tool_response?.isError || event.tool_response?.error ? 'error' : 'success';
+        } else args.event = eventName;
+        try { await client.call(eventName === 'PostToolUse' ? 'write.finish' : 'write.stop', args); } catch { /* Другому проекту вызов не принадлежит. */ }
+      }
+    } catch { /* Отсутствие Post оставляет write неопределённым. */ }
+    finally { try { await client?.close(); } catch {} }
+    return {};
+  }
+  if (eventName !== 'PreToolUse') return {};
+  const files = writePaths(event);
+  if (!files.length) return {};
+  const matching = projects.filter(project => {
     if (typeof project.repo_path !== 'string' || !path.isAbsolute(project.repo_path) || typeof project.id !== 'string') return false;
     const root = resolved(project.repo_path, '/');
     return files.some(file => inside(root, file) && ![...(project.documentation_paths ?? []), ...(project.excluded_paths ?? [])].some(exception => inside(resolved(exception, root), file)));
   });
-  if (!projects.length) return {};
-  const deny = context => denied(context, projects);
-  const workspaceKey = env.CODEWORKS_WORKSPACE_KEY || env.CODEX_THREAD_ID || env.CODEX_SESSION_ID || event.thread_id || event.session_id;
-  if (projects.length !== 1 || !workspaceKey) return deny('Задайте CODEWORKS_WORKSPACE_KEY и выберите один проект. Найдите существующие области через status с project_id. Чтение и диагностика доступны.');
-  const project = projects[0];
+  if (!matching.length) return {};
+  const deny = message => denied(message, matching);
+  const project = matching[0], root = resolved(project.repo_path, '/');
+  const excluded = [...(project.documentation_paths ?? []), ...(project.excluded_paths ?? [])].map(p => resolved(p, root));
+  if (matching.length !== 1 || files.some(file => !inside(root, file) || excluded.some(p => inside(p, file)))) return deny('Разделите запись по владельцам и исключениям.');
+  const name = event.tool_name?.split('.').at(-1);
+  // AIDEV-NOTE: Shell может содержать непрозрачный код; он не создаёт область и не переписывается.
+  if (!['apply_patch', 'Write', 'Edit'].includes(name)) return deny('Используйте native файловую запись для подготовки области.');
+  const key = env.CODEWORKS_WORKSPACE_KEY;
+  if (!key || !event.session_id || !event.turn_id || !event.tool_use_id) return deny('Укажите осмысленный CODEWORKS_WORKSPACE_KEY и повторите запись в поддерживаемой сессии.');
+  const input = event.tool_input, cwd = input?.workdir || input?.cwd || event.cwd || process.cwd();
+  let rewrite;
+  if (name === 'apply_patch') {
+    const field = typeof input === 'string' ? null : typeof input?.command === 'string' ? 'command' : typeof input?.patch === 'string' ? 'patch' : null;
+    const value = field ? input[field] : input;
+    if (typeof value !== 'string' || !/^\*\*\* Begin Patch\r?\n/.test(value) || !/\*\*\* End Patch\r?\n?$/.test(value)) return deny('Не удалось однозначно разобрать patch.');
+    const headers = [...value.matchAll(/^\*\*\* (Add File|Update File|Delete File|Move to): (.+)\r?$/gm)];
+    if (!headers.length || headers.length !== files.length || /^\*\*\* (?!Begin Patch|End Patch|Add File: |Update File: |Delete File: |Move to: ).+$/m.test(value)) return deny('Не удалось однозначно разобрать patch.');
+    rewrite = target => {
+      let i = 0;
+      const result = value.replace(/^(\*\*\* (?:Add File|Update File|Delete File|Move to): )(.+?)(\r?)$/gm, (_, prefix, original, cr) => prefix + path.join(target, path.relative(root, files[i++])) + cr);
+      return field ? {...input, [field]: result} : result;
+    };
+  } else {
+    const field = typeof input?.file_path === 'string' ? 'file_path' : typeof input?.path === 'string' ? 'path' : null;
+    if (!field || files.length !== 1) return deny('Не удалось однозначно разобрать запись.');
+    rewrite = target => ({...input, [field]: path.join(target, path.relative(root, files[0]))});
+  }
+  const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
   const kind = env.CODEWORKS_WORKSPACE_KIND || 'feature';
-  const requestKey = 'hook-prepare-' + createHash('sha256').update(JSON.stringify([project.id, workspaceKey, kind])).digest('hex');
-  const args = {project_id: project.id, workspace_key: workspaceKey, kind, request_key: requestKey};
-  let client;
+  const payload = hash({tool_name:event.tool_name, tool_input:input, cwd, project_id:project.id, workspace_key:key, kind});
+  const args = {project_id:project.id, workspace_key:key, kind, session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, targets:files.map(f=>path.relative(root,f)), request_key:'hook-'+hash([project.id,key,kind]).slice(0,48)};
+  let client, result;
   try {
     client = await connect(await loadClientConfig(env));
-    const result = await client.call('prepare', args);
-    return deny(`Область Codeworks: ${JSON.stringify(result)}. Дождитесь ready через status с project_id=${project.id}, workspace_id=${result.workspace_id}, operation_id=${result.operation_id}. Затем повторите исходную запись штатным инструментом по path области, с её рабочим каталогом. Ветка: ${result.branch}. Hook не переносит правки автоматически. workspace_key=${workspaceKey}; request_key=${requestKey}.`);
-  } catch (error) {
-    if(error?.code==='INVALID_ARGUMENT')return deny('Для новой задачи вызовите prepare с коротким осмысленным workspace_key, например codeworks-auto-cleanup; ID чата не является названием задачи. Для продолжения найдите прежнюю область через status. Затем повторите запись в возвращённом дереве.');
-    return deny(`Codeworks недоступен или prepare завершился ошибкой. Исходная запись остановлена; чтение и диагностика доступны. Проверьте status с project_id=${project.id}, workspace_key=${workspaceKey}; повтор prepare использует тот же запрос ${JSON.stringify(args)}. Ошибка ожидания не отменяет операцию.`);
-  } finally {
-    try { await client?.close(); } catch { /* Не скрываем решение hook при ошибке закрытия соединения. */ }
+    result = await client.call('write.begin', args);
+    let ready = false;
+    for (let i=0; i<polls; i++) {
+      const status = await client.call('status', {project_id:project.id, workspace_id:result.workspace_id, operation_id:result.operation_id});
+      if (status.workspace?.preparation_state === 'ready') { ready=true; break; }
+      if (status.operation?.status === 'failed') break;
+      await wait(250);
+    }
+    if (!ready) {
+      await client.call('write.stop', {project_id:project.id,session_id:event.session_id,turn_id:event.turn_id,event:'Stop',write_call_id:result.write_call_id,reason:'prepare_pending'});
+      return deny(`PREPARE_PENDING: операция ${result.operation_id}; дождитесь status и повторите запись.`);
+    }
+    const targetRoot = resolved(result.path, '/');
+    if (files.some(file => !inside(targetRoot, resolved(path.join(targetRoot, path.relative(root, file)), '/')))) return deny('Цель записи выходит за пределы рабочей области.');
+    const updatedInput = rewrite(targetRoot);
+    await client.call('write.admit', {project_id:project.id, write_call_id:result.write_call_id, rewritten_sha256:hash(updatedInput)});
+    return {hookSpecificOutput:{hookEventName:'PreToolUse', permissionDecision:'allow', updatedInput}};
+  } catch {
+    if (client && result?.write_call_id) try { await client.call('write.stop', {project_id:project.id,session_id:event.session_id,turn_id:event.turn_id,event:'Stop',write_call_id:result.write_call_id,reason:'prepare_pending'}); } catch {}
+    return deny('PREPARE_PENDING: запись остановлена; проверьте status и повторите её после подготовки.');
   }
+  finally { try { await client?.close(); } catch {} }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
