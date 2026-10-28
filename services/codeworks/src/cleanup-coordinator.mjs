@@ -5,12 +5,14 @@ import {verifyDisposition} from './disposition.mjs';
 import {verifyCleanupArchive} from './cleanup-archive.mjs';
 import {canonical} from './contracts.mjs';
 import {recheckPublication} from './publication.mjs';
+import {verifyFilesystemPreservation} from './filesystem-preservation.mjs';
+import {Fault} from './errors.mjs';
 
 const steps=['remote','worktree','local_refs','index','verify'];
 const indexAbsent=value=>value?.complete===true && value.owner?.present===false && Array.isArray(value.resources?.collections) && !value.resources.collections.length && Array.isArray(value.resources?.metadataPoints) && !value.resources.metadataPoints.length;
 
 /** Выполняет один идемпотентный шаг под внешним execution guard и проверкой эпохи. */
-export async function advanceCleanup(db,obligation,project,workspace,{git,flowGit,codeIndex,allowedRepositories=[],verifyTransfer=verifyDisposition,verifyArchive=verifyCleanupArchive,checkpoint=async()=>{}}) {
+export async function advanceCleanup(db,obligation,project,workspace,{git,flowGit,codeIndex,allowedRepositories=[],verifyTransfer=verifyDisposition,verifyArchive=verifyCleanupArchive,verifyFilesystem=verifyFilesystemPreservation,checkpoint=async()=>{}}) {
   const id=obligation.id,epoch=Number(obligation.epoch),owner=obligation.owner_workflow_id;
   const fence=async()=>{
     await checkpoint('cleanup-fence');
@@ -43,6 +45,14 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
     }catch(error){await db.query('ROLLBACK');throw error;}
   };
   const manifest=obligation.evidence?.manifest;
+  const preservation=manifest&&Object.hasOwn(manifest,'filesystem_preservation');
+  const checkPreservation=async observed=>{
+    if(!preservation)return;
+    if(typeof observed?.worktree?.pathExists!=='boolean')throw new Fault('TARGET_CHANGED','Filesystem preservation needs a confirmed workspace state.');
+    await fence();
+    await verifyFilesystem(project,workspace,manifest.filesystem_preservation,{phase:observed.worktree.pathExists?'source':'archive'});
+    await fence();
+  };
   const releaseProof=async()=>{
     const release=(await db.query("SELECT * FROM codeworks.releases WHERE workspace_id=$1 AND state='succeeded' ORDER BY created_at DESC LIMIT 1",[workspace.id])).rows[0];
     const legs=workspace.kind==='hotfix'?[release?.details?.primary,release?.details?.backport]:[release?.details?.primary];
@@ -89,6 +99,7 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
   if(['inspect','remote'].includes(obligation.step)){
     if(!codeIndex)return wait('INDEX_ADAPTER_REQUIRED');
     await fence();const observed=await git.inspectResources(project,workspace,{manifest});
+    await checkPreservation(observed);
     await fence();const indexObserved=await codeIndex.inspect(project,workspace,{manifest,checkpointState:obligation.evidence?.index_checkpoint});
     if(indexObserved?.complete!==true)throw Error('INDEX_INSPECTION_INCOMPLETE');
     const finished=await finishIfAbsent(observed,indexObserved);
@@ -158,6 +169,10 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
   }else return wait('DISPOSITION_PROOF_REQUIRED');
   const step=steps.includes(obligation.step)?obligation.step:'remote';
   await fence();
+  if(preservation&&step!=='verify'){
+    const current=await git.inspectResources(project,workspace,{manifest});
+    await checkPreservation(current);
+  }
   if(['remote','worktree','local_refs'].includes(step)){
     await git.cleanupStep(project,workspace,expected,step,{manifest});
   }else if(step==='index'){
@@ -170,6 +185,7 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
   }else{
     if(!codeIndex)return wait('INDEX_ADAPTER_REQUIRED');
     const gitState=await git.inspectResources(project,workspace,{manifest});
+    await checkPreservation(gitState);
     await fence();
     const indexState=await codeIndex.inspect(project,workspace,{manifest,checkpointState:obligation.evidence?.index_checkpoint});
     return await finishIfAbsent(gitState,indexState)??await wait('RESOURCES_REMAIN');
