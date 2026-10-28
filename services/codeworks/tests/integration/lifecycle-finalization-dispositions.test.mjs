@@ -2,7 +2,7 @@
 // ABOUTME: Доказательства выпуска и переноса принадлежат только созданным тестовым репозиториям.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {writeFile,access} from 'node:fs/promises';
+import {writeFile,readFile,access} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import path from 'node:path';
 import {setup,configured} from './fixture.mjs';
@@ -11,6 +11,7 @@ import {createActivityGit} from '../../src/git-steps.mjs';
 import {createCodeIndex} from '../../src/code-index.mjs';
 import {runCleanupObligation} from '../../src/worker.mjs';
 import {verifyDisposition} from '../../src/disposition.mjs';
+import {reconcileProjectLedger} from '../../src/reconciler.mjs';
 
 for(const outcome of ['unused','released','transferred'])test(outcome+' disposition removes only proven disposable resources',{timeout:120000},async t=>{
   assert.ok(configured&&process.env.CODEWORKS_INDEX_QDRANT,'explicit disposable PostgreSQL and Qdrant are required');
@@ -64,4 +65,29 @@ for(const outcome of ['unused','released','transferred'])test(outcome+' disposit
   await assert.rejects(access(workspace.path));
   assert.notEqual((await command('git',['-C',project.repo_path,'show-ref','--verify','refs/heads/'+workspace.branch],{allowFailure:true})).code,0);
   if(outcome!=='unused')assert.equal((await command('git',['-C',project.repo_path,'show','dev:hello.txt'])).stdout,'retained fixture change');
+});
+
+test('actual stopped partial preparation is cleaned after terminal failure',{timeout:120000},async t=>{
+  assert.ok(configured&&process.env.CODEWORKS_INDEX_QDRANT,'explicit disposable PostgreSQL and Qdrant are required');
+  const f=await setup();t.after(()=>f.close());const project=await f.project();
+  const prepared=await f.prepare({project_id:project.id,workspace_key:'partial-failed',request_key:'partial-failed'});
+  await f.worker(project,prepared.operation_id,'after-checkout');
+  const lockFile=project.repo_path+'/package-lock.json',original=await readFile(lockFile);
+  try{await writeFile(lockFile,'{}\n');await f.worker(project,prepared.operation_id);}finally{await writeFile(lockFile,original);}
+  const operation=(await f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[prepared.operation_id])).rows[0];assert.equal(operation.status,'failed');
+  const workspace=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[prepared.workspace_id])).rows[0];assert.equal(workspace.preparation_state,'failed');
+  const workflow='fixture/'+randomUUID();await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner) VALUES($1,$2,$3,'temporal')",[workflow,project.id,workspace.id]);
+  await reconcileProjectLedger(f.app,project.id,'fixture-reconciler');
+  const obligation=(await f.app.query('SELECT * FROM codeworks.cleanup_obligations WHERE workspace_id=$1',[workspace.id])).rows[0];
+  assert.equal(obligation.outcome,'unused');assert.equal(obligation.owner_workflow_id,workflow);
+  const settings=project.workspace_root+'/index-runtime.json',configFile=project.workspace_root+'/index-config.json';
+  await writeFile(settings,JSON.stringify({env:{QDRANT_MODE:'external',QDRANT_URL:process.env.CODEWORKS_INDEX_QDRANT,SOCRATICODE_AUTO_RESUME:'off',SOCRATICODE_WATCHER:'manual'}}));
+  await writeFile(configFile,JSON.stringify({engine:'/opt/socraticode/node_modules/socraticode/dist/index.js',socraticodeConfig:settings,sources:{}}));
+  const codeIndex=createCodeIndex(f.app,{configFile}),adapters=createActivityGit();let result;
+  for(let i=0;i<8;i++){
+    result=await runCleanupObligation(f.app,obligation.id,workflow,{...adapters,codeIndex,allowedRepositories:[project.repo_path]});
+    assert.notEqual(result?.state,'waiting_decision',JSON.stringify(result));if(result?.state==='done')break;
+  }
+  assert.equal(result.state,'done');await assert.rejects(access(workspace.path));
+  assert.ok((await f.app.query('SELECT removed_at FROM codeworks.workspaces WHERE id=$1',[workspace.id])).rows[0].removed_at);
 });
