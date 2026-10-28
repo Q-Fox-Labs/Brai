@@ -48,6 +48,20 @@ test('недоступный индекс не подтверждает отсу
   await assert.rejects(advanceCleanup(db,item,{id:'project'},{id:'workspace'},{git:{inspectResources:async()=>empty},codeIndex:{inspect:async()=>({complete:false})}}),/INDEX_INSPECTION_INCOMPLETE/);
 });
 
+test('неподтверждённая доставка не закрывается через проверку пустых ресурсов',async()=>{
+  const item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',outcome:'released',step:'inspect',state:'pending',expected:{},evidence:{publication:{project_id:'project',workspace_id:'workspace'}}};
+  let inspected=false;
+  const db={query:async(sql)=>{
+    if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};
+    if(sql.includes('SELECT 1 FROM codeworks.write_calls')||sql.includes('SELECT 1 FROM codeworks.release_queue'))return {rowCount:0};
+    if(sql.includes('SELECT a.requested_sha'))return {rows:[]};
+    if(sql.includes('UPDATE codeworks.cleanup_obligations'))return {rowCount:1,rows:[{state:'waiting_decision'}]};
+    return {rowCount:0};
+  }};
+  const result=await advanceCleanup(db,item,{id:'project'},{id:'workspace',project_id:'project',kind:'feature'},{git:{inspectResources:async()=>{inspected=true;}},codeIndex:{}});
+  assert.equal(result.state,'waiting_decision');assert.equal(inspected,false);
+});
+
 test('историческую область удаляют только после повторной проверки разрешённого архива',async()=>{
   for(const [outcome,valid] of [['cancelled',false],['cancelled',true],['released',true],['unused',true],['transferred',true]]){
     const archive={path:'/backup/area.bundle',sha256:'a'.repeat(64),heads:[{ref:'refs/heads/task',oid:'b'.repeat(40)}],authorization_ref:'approved'};

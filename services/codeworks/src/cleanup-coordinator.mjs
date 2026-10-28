@@ -45,6 +45,8 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
   if(manifest&&(await db.query("SELECT 1 FROM codeworks.operations WHERE workspace_id=$1 AND NOT archived AND kind<>'cleanup' AND status IN ('pending','running','awaiting_execution','awaiting_ci','awaiting_deployment','awaiting_reconciliation') LIMIT 1",[workspace.id])).rowCount)return wait('LIVE_TASK_PROTECTED');
   if((await db.query("SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain') LIMIT 1",[workspace.id])).rowCount)return wait('WRITER_OUTCOME_UNKNOWN');
   if((await db.query("SELECT 1 FROM codeworks.release_queue q JOIN codeworks.operations o ON o.id=q.operation_id WHERE o.workspace_id=$1 AND q.state IN ('held','queued') LIMIT 1",[workspace.id])).rowCount)return wait('RELEASE_OUTCOME_UNKNOWN');
+  // AIDEV-NOTE: Нулевые ресурсы не подтверждают доставку при более позднем неопределённом rollout.
+  if(obligation.outcome==='released'&&obligation.evidence?.publication&&!await recheckPublication(db,project,workspace,obligation.evidence.publication,{ignoreOperationId:obligation.source_operation_id}))return wait('DELIVERY_PROOF_CHANGED');
   const finishIfAbsent=async(gitState,indexState)=>{
     if(!gitResourcesAbsent(gitState)||!indexAbsent(indexState))return null;
     await fence();
