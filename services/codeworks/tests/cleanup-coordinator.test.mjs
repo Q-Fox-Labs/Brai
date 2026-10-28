@@ -49,9 +49,9 @@ test('недоступный индекс не подтверждает отсу
 });
 
 test('историческую область удаляют только после повторной проверки разрешённого архива',async()=>{
-  for(const valid of [false,true]){
+  for(const [outcome,valid] of [['cancelled',false],['cancelled',true],['released',true],['unused',true],['transferred',true]]){
     const archive={path:'/backup/area.bundle',sha256:'a'.repeat(64),heads:[{ref:'refs/heads/task',oid:'b'.repeat(40)}],authorization_ref:'approved'};
-    const item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',outcome:'cancelled',step:'worktree',state:'pending',expected:{branch:{oid:'b'.repeat(40)},remote:{oid:null},tracking:{oid:null},worktree:{head:'b'.repeat(40),pathExists:true,dirty:false}},evidence:{archive,archive_authorized:true,manifest:{reviewed:true,protected_task_ids:[],disposition:{type:'archived',archive}}}};
+    const item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',outcome,step:'worktree',state:'pending',expected:{branch:{oid:'b'.repeat(40)},remote:{oid:null},tracking:{oid:null},worktree:{head:'b'.repeat(40),pathExists:true,dirty:false}},evidence:{archive,archive_authorized:true,manifest:{reviewed:true,protected_task_ids:[],disposition:{type:'archived',archive}}}};
     let deleted=false,verified=false;
     const db={query:async(sql)=>{
       if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};

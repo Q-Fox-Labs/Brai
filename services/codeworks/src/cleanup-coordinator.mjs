@@ -61,7 +61,7 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
         await db.query("UPDATE codeworks.commands SET state='done',updated_at=now() WHERE operation_id IN (SELECT id FROM codeworks.operations WHERE workspace_id=$1 AND kind='cleanup' AND NOT archived AND status NOT IN ('succeeded','failed'))",[workspace.id]);
         await db.query("UPDATE codeworks.operations SET status='succeeded',step='removed',updated_at=now() WHERE workspace_id=$1 AND kind='cleanup' AND NOT archived AND status NOT IN ('succeeded','failed')",[workspace.id]);
       }
-      const result=await db.query("UPDATE codeworks.cleanup_obligations SET state='done',step='done',blocker=NULL,result=$2::jsonb,updated_at=now() WHERE id=$1 RETURNING *",[id,JSON.stringify({git:gitState,index:indexState})]);
+      const result=await db.query("UPDATE codeworks.cleanup_obligations SET state='done',step='done',blocker=NULL,result=$2::jsonb,updated_at=now() WHERE id=$1 RETURNING *",[id,JSON.stringify({git:gitState,index:indexState,...(obligation.step==='verify'&&obligation.evidence?.archive?{disposition:'resources_removed_with_archive'}:{})})]);
       await db.query('COMMIT');return result.rows[0];
     }catch(error){await db.query('ROLLBACK');throw error;}
   };
@@ -98,10 +98,10 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
   if(expected.worktree?.pathExists&&expected.worktree?.dirty!==false)return wait('DIRTY_WORKTREE');
   const retained=obligation.evidence?.verified_disposition;
   const archive=obligation.evidence?.archive;
-  if(archive&&obligation.outcome==='cancelled'&&manifest){
+  if(archive&&manifest){
     if(manifest.reviewed!==true||manifest.disposition?.type!=='archived'||obligation.evidence?.archive_authorized!==true||canonical(archive)!==canonical(manifest.disposition.archive))return wait('ARCHIVE_UNVERIFIED');
-    if(['inspect','remote','worktree','local_refs','index'].includes(obligation.step)){
-      try{await fence();await verifyArchive(project,expected,archive);await fence();}
+    if(['inspect','remote','worktree','local_refs','index','verify'].includes(obligation.step)){
+      try{await fence();await verifyArchive(project,expected,archive,{manifest});await fence();}
       catch(error){if(error.message==='CLEANUP_FENCE_LOST')throw error;return wait('ARCHIVE_UNVERIFIED');}
     }
   }else if(retained?.type==='retained'&&manifest){
