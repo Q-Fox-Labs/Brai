@@ -11,7 +11,7 @@ import {createWriteAdmission} from './write-admission.mjs';
 const hash=x=>createHash('sha256').update(x).digest('hex');
 const MAX_SOURCE=64*1024*1024,MAX_RECEIPT=16384;
 const fail=()=>{throw Error('NATIVE_COMPLETION_UNVERIFIED');};
-const keys=['version','write_call_id','project_id','workspace_id','executor_id','session_id','turn_id','tool_use_id','tool_name','payload_sha256','rewritten_sha256','exit_code','native_event_sha256'];
+const keys=['version','write_call_id','project_id','workspace_id','executor_id','session_id','turn_id','tool_use_id','tool_name','payload_sha256','rewritten_sha256','exit_code','native_event_sha256','native_thread_id','parent_thread_id','lineage_sha256'];
 async function readExact(file,limit){
  if(typeof file!=='string'||!path.isAbsolute(file)||path.normalize(file)!==file||await realpath(file)!==file)fail();
  const h=await open(file,constants.O_RDONLY|constants.O_NOFOLLOW);try{
@@ -22,20 +22,23 @@ async function readExact(file,limit){
 /** Возвращает доказанные metadata; точный input восстанавливается только при совпадении обоих ledger digest. */
 export async function attestNativeCompletion({sourcePath,call,project,workspace}){
  if(!call||!workspace||!project||call.project_id!==project.id||call.workspace_id!==workspace.id||call.executor_id!=='codex'||call.tool_name!=='Bash'||!['in_flight','uncertain'].includes(call.state)||!call.admitted_at||!Number.isFinite(Date.parse(call.admitted_at))||!/^([a-f0-9]{64})$/.test(call.payload_sha256??'')||!/^([a-f0-9]{64})$/.test(call.rewritten_sha256??''))fail();
- const {bytes}=await readExact(sourcePath,MAX_SOURCE);let offset=0,session=null,found=[];
+ const {bytes}=await readExact(sourcePath,MAX_SOURCE);let offset=0,session=null,sessionLine=null,found=[];
  while(offset<bytes.length){const end=bytes.indexOf(10,offset);if(end<0)fail();const line=bytes.subarray(offset,end+1);offset=end+1;let event;try{event=JSON.parse(line.toString('utf8'));}catch{fail();}
-  if(event.type==='session_meta'){if(session)fail();session=event.payload;}
+  if(event.type==='session_meta'){if(session)fail();session=event.payload;sessionLine=line;}
   const p=event.payload,item=p?.item;if(event.type!=='event_msg'||p?.type!=='item_completed'||item?.id!==call.tool_use_id)continue;
-  if(p.thread_id!==call.session_id||p.turn_id!==call.turn_id||item.type!=='CommandExecution'||item.source!=='unified_exec_startup'||item.status!=='completed'||!Number.isSafeInteger(item.exit_code)||typeof item.process_id!=='string'||!/^\d+$/.test(item.process_id)||!Array.isArray(item.command)||item.command.length!==3||item.command[0]!=='/bin/bash'||item.command[1]!=='-lc'||typeof item.command[2]!=='string'||!foregroundCommand(item.command[2])||typeof item.cwd!=='string')fail();
+  if(!session||p.thread_id!==session.id||p.turn_id!==call.turn_id||item.type!=='CommandExecution'||item.source!=='unified_exec_startup'||item.status!=='completed'||!Number.isSafeInteger(item.exit_code)||typeof item.process_id!=='string'||!/^\d+$/.test(item.process_id)||!Array.isArray(item.command)||item.command.length!==3||item.command[0]!=='/bin/bash'||item.command[1]!=='-lc'||typeof item.command[2]!=='string'||!foregroundCommand(item.command[2])||typeof item.cwd!=='string')fail();
   let cwd;try{cwd=fileURLToPath(item.cwd);}catch{fail();}if(cwd!==workspace.path)fail();
   if(!event.timestamp||!Number.isFinite(Date.parse(event.timestamp))||Date.parse(event.timestamp)<Date.parse(call.admitted_at))fail();
   const input={command:item.command[2]};if(hash(JSON.stringify(input))!==call.rewritten_sha256)fail();
   found.push({line,command:item.command[2],exit_code:item.exit_code});
  }
- if(!session||session.id!==call.session_id||session.cwd!==project.repo_path||found.length!==1)fail();
+ if(!session||typeof session.id!=='string'||session.cwd!==project.repo_path||found.length!==1)fail();
+ const parent=session.parent_thread_id??null,spawn=session.source?.subagent?.thread_spawn;
+ if(session.id===call.session_id){if(parent!==null||spawn?.parent_thread_id)fail();}
+ else if(parent!==call.session_id||spawn?.parent_thread_id!==call.session_id||spawn?.depth!==1)fail();
  const item=found[0],payload={tool_name:call.tool_name,tool_input:{command:item.command},cwd:session.cwd,project_id:call.project_id,workspace_id:call.workspace_id};
  if(hash(JSON.stringify(payload))!==call.payload_sha256)fail();
- return {version:1,write_call_id:call.id,project_id:call.project_id,workspace_id:call.workspace_id,executor_id:call.executor_id,session_id:call.session_id,turn_id:call.turn_id,tool_use_id:call.tool_use_id,tool_name:call.tool_name,payload_sha256:call.payload_sha256,rewritten_sha256:call.rewritten_sha256,exit_code:item.exit_code,native_event_sha256:hash(item.line)};
+ return {version:1,write_call_id:call.id,project_id:call.project_id,workspace_id:call.workspace_id,executor_id:call.executor_id,session_id:call.session_id,turn_id:call.turn_id,tool_use_id:call.tool_use_id,tool_name:call.tool_name,payload_sha256:call.payload_sha256,rewritten_sha256:call.rewritten_sha256,exit_code:item.exit_code,native_event_sha256:hash(item.line),native_thread_id:session.id,parent_thread_id:parent,lineage_sha256:hash(sessionLine)};
 }
 /** Проверяет root-owned неизменяемые предки и не следует символическим ссылкам. */
 export async function assertRootDirectory(directory){
@@ -48,7 +51,7 @@ export async function assertRootDirectory(directory){
 export async function verifyCompletionReceipt(file){
  await assertRootDirectory(path.dirname(file));const {bytes,stat}=await readExact(file,MAX_RECEIPT);
  if(stat.uid!==0||![0o600,0o440].includes(stat.mode&0o777))fail();let receipt;try{receipt=JSON.parse(bytes);}catch{fail();}
- if(!receipt||Object.keys(receipt).sort().join(',')!==[...keys].sort().join(',')||receipt.version!==1||!Number.isSafeInteger(receipt.exit_code)||!keys.filter(k=>!['version','exit_code'].includes(k)).every(k=>typeof receipt[k]==='string'&&receipt[k].length>0&&receipt[k].length<=256)||!['payload_sha256','rewritten_sha256','native_event_sha256'].every(k=>/^[a-f0-9]{64}$/.test(receipt[k])))fail();
+ if(!receipt||Object.keys(receipt).sort().join(',')!==[...keys].sort().join(',')||receipt.version!==1||!Number.isSafeInteger(receipt.exit_code)||!keys.filter(k=>!['version','exit_code','parent_thread_id'].includes(k)).every(k=>typeof receipt[k]==='string'&&receipt[k].length>0&&receipt[k].length<=256)||!(receipt.parent_thread_id===null||typeof receipt.parent_thread_id==='string'&&receipt.parent_thread_id.length>0&&receipt.parent_thread_id.length<=256)||!['payload_sha256','rewritten_sha256','native_event_sha256','lineage_sha256'].every(k=>/^[a-f0-9]{64}$/.test(receipt[k])))fail();
  return {...receipt,receipt_sha256:hash(bytes)};
 }
 /** Под workspace guard использует штатное завершение write admission, без ручного обновления состояний. */

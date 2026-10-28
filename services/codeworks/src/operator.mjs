@@ -12,7 +12,7 @@ import {createCodeIndex} from './code-index.mjs';
 import {createFlowGit} from './git-flow.mjs';
 import {verifyCleanupArchive} from './cleanup-archive.mjs';
 import {createBranchCleanup} from './branch-cleanup.mjs';
-import {attestNativeCompletion,assertRootDirectory,importNativeCompletion} from './write-completion.mjs';
+import {attestNativeCompletion,assertRootDirectory,verifyCompletionReceipt,importNativeCompletion} from './write-completion.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 /** Канонический JSON сортирует ключи рекурсивно; массивы сохраняют порядок. */
@@ -184,7 +184,12 @@ export async function createCompletionReceipt(pool,args,{allowedRepositories}={}
  if(!project||!workspace||!allowedRepositories?.includes(project.repo_path))throw Error('NATIVE_COMPLETION_UNVERIFIED');
  const proof=await attestNativeCompletion({sourcePath:args['--source'],call,project,workspace}),target=args['--receipt'];
  if(!path.isAbsolute(target)||path.normalize(target)!==target)throw Error('INVALID_ARGUMENT');await assertRootDirectory(path.dirname(target));
- const handle=await open(target,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
+ let handle;try{handle=await open(target,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);}catch(error){
+  if(error.code!=='EEXIST')throw error;
+  const {receipt_sha256,...existing}=await verifyCompletionReceipt(target);
+  if(canonical(existing)!==canonical(proof))throw Error('NATIVE_COMPLETION_UNVERIFIED');
+  return {write_call_id:call.id,created:false};
+ }
  try{await handle.writeFile(JSON.stringify(proof)+'\n');await handle.sync();}finally{await handle.close();}
  return {write_call_id:call.id,created:true};
 }

@@ -30,19 +30,28 @@ test('root receipt attestation imports each completed call once and cleanup reac
   const prepared=await f.prepare({project_id:p.id,workspace_key:'receipt-recovery',request_key:'receipt-recovery'});await f.worker(p,prepared.operation_id);
   const w=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[prepared.workspace_id])).rows[0],owner='fixture/'+randomUUID();
   await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner) VALUES($1,$2,$3,'temporal')",[owner,p.id,w.id]);
-  const session='receipt-session',turn='receipt-turn',calls=[],events=[];
+  const session=randomUUID(),nativeThread=randomUUID(),turn='receipt-turn',calls=[],events=[];
   for(const [tool,cmd] of [['native-one','git status --short'],['native-two','cat hello.txt']]){
     const payload={tool_name:'Bash',tool_input:{command:cmd},cwd:p.repo_path,project_id:p.id,workspace_id:w.id};
     const request={project_id:p.id,workspace_id:w.id,workspace_key:w.workspace_key,session_id:session,turn_id:turn,tool_use_id:tool,tool_name:'Bash',payload_sha256:hash(JSON.stringify(payload)),targets:['.'],request_key:'receipt-'+tool};
     const admitted=await f.h.call('write.begin',request,'codex');await f.h.call('write.admit',{project_id:p.id,write_call_id:admitted.write_call_id,rewritten_sha256:hash(JSON.stringify({command:cmd}))},'codex');
     const pid=await execute(cmd,w.path);
-    events.push({timestamp:new Date(Date.now()+1000).toISOString(),type:'event_msg',payload:{type:'item_completed',thread_id:session,turn_id:turn,item:{id:tool,type:'CommandExecution',source:'unified_exec_startup',status:'completed',exit_code:0,process_id:pid,command:['/bin/bash','-lc',cmd],cwd:pathToFileURL(w.path).href}}});
+    events.push({timestamp:new Date(Date.now()+1000).toISOString(),type:'event_msg',payload:{type:'item_completed',thread_id:nativeThread,turn_id:turn,item:{id:tool,type:'CommandExecution',source:'unified_exec_startup',status:'completed',exit_code:0,process_id:pid,command:['/bin/bash','-lc',cmd],cwd:pathToFileURL(w.path).href}}});
     calls.push((await f.app.query('SELECT * FROM codeworks.write_calls WHERE id=$1',[admitted.write_call_id])).rows[0]);
   }
-  const source=receiptRoot+'/native.jsonl';await writeFile(source,[{type:'session_meta',payload:{id:session,cwd:p.repo_path}},...events].map(JSON.stringify).join('\n')+'\n',{mode:0o600});
+  const meta={type:'session_meta',payload:{id:nativeThread,parent_thread_id:session,cwd:p.repo_path,source:{subagent:{thread_spawn:{parent_thread_id:session,depth:1,agent_path:'/root/fixture'}}}}};
+  const source=receiptRoot+'/native.jsonl';await writeFile(source,[meta,...events].map(JSON.stringify).join('\n')+'\n',{mode:0o600});
+  const invalid=receiptRoot+'/invalid.jsonl',unrelated=structuredClone(meta),conflicting=structuredClone(meta);
+  unrelated.payload.parent_thread_id=randomUUID();unrelated.payload.source.subagent.thread_spawn.parent_thread_id=unrelated.payload.parent_thread_id;
+  await writeFile(invalid,[unrelated,...events].map(JSON.stringify).join('\n')+'\n',{mode:0o600});
+  await assert.rejects(attestNativeCompletion({sourcePath:invalid,call:calls[0],project:p,workspace:w}),/NATIVE_COMPLETION_UNVERIFIED/);
+  conflicting.payload.source.subagent.thread_spawn.parent_thread_id=randomUUID();
+  await writeFile(invalid,[conflicting,...events].map(JSON.stringify).join('\n')+'\n',{mode:0o600});
+  await assert.rejects(attestNativeCompletion({sourcePath:invalid,call:calls[0],project:p,workspace:w}),/NATIVE_COMPLETION_UNVERIFIED/);
   const receipts=[];
   for(const [i,call] of calls.entries()){
     const receipt=await attestNativeCompletion({sourcePath:source,call,project:p,workspace:w}),file=receiptRoot+'/receipt-'+i+'.json';
+    assert.equal(receipt.native_thread_id,nativeThread);assert.equal(receipt.parent_thread_id,session);assert.equal(receipt.lineage_sha256,hash(JSON.stringify(meta)+'\n'));
     await writeFile(file,JSON.stringify(receipt),{mode:0o600});assert.equal((await verifyCompletionReceipt(file)).write_call_id,call.id);receipts.push({receipt,file});
   }
   await f.owner.query("UPDATE codeworks.workflow_registry SET state='draining',lifecycle='closing' WHERE workspace_id=$1",[w.id]);
