@@ -42,8 +42,8 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
 +        fallback = ("⚠️ **Не удалось завершить запрос**\n\nПричину ошибки нужно проверить. "
 +                    "Некоторые действия могли уже выполниться; перед повтором проверьте их результат.")
 +        return f"{delivered}\n\n{fallback}" if delivered else fallback
- 
- 
+
+
  def _bg_prompt_preview(prompt: str, limit: int = 60) -> str:
 @@ -1780,6 +1813,7 @@
              # Conversation boundary: the funnel clears every conversation-scoped per-session dict.
@@ -55,7 +55,7 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
                  # forever. No-op on non-topic lanes.
 @@ -1927,6 +1961,15 @@
              response = ""
- 
+
          adapter = self._delivery_adapter_for(source)
 +        # AIDEV-NOTE: обработать ошибку до озвучивания и финальной доставки.
 +        from gateway.run import _gateway_platform_value
@@ -70,7 +70,7 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
          _streaming_tts_done = adapter is not None and bool(
              getattr(adapter, "_streaming_tts_turn_completed", lambda *_a, **_k: False)(session_key, run_generation)
 @@ -1938,7 +1981,7 @@
- 
+
          # Streamed responses still need MEDIA: files delivered (chunks carry the tags verbatim). Never
          # skip when the agent failed: the error text is new content streaming didn't show.
 -        if agent_result.get("already_sent") and not agent_result.get("failed"):
@@ -99,13 +99,51 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
              t("gateway.errors.generic_failed_with_hint", hint=status_hint), PARTIAL_FAILED_TURN_NOTICE,
          )
 +        return _telegram_failure_explanation(reply, source, exception=e, partial=True)
- 
+
      def _hmwa_discard_stale_result(self, source, _quick_key, run_generation):
          """A newer run generation superseded this turn: drop its deferred post-delivery callback."""
 diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
 --- a/agent/turn_recovery.py
 +++ b/agent/turn_recovery.py
-@@ -1148,6 +1148,7 @@
+@@ -1113,18 +1113,22 @@
+     else:
+         agent._persist_session(messages, conversation_history)
+     if classified.reason == FailoverReason.content_policy_blocked:
+-        return _content_policy_blocked_result(
++        result = _content_policy_blocked_result(
+             messages, api_call_count,
+             final_response="⚠️ " + content_policy_copy(label=_plabel, summary=_nonretryable_summary),
+             error_detail=_nonretryable_summary,
+         )
++        result["brai_original_error"] = result.get("final_response", "")
++        return result
+     # Billing walls get the same structured recovery descriptor as the max-retries path
+     # so every surface renders one consistent signal.
+     if classified.reason == FailoverReason.billing:
+-        return _billing_failure_result(
++        result = _billing_failure_result(
+             classified=classified, summary=_nonretryable_summary, messages=messages,
+             api_call_count=api_call_count, provider=provider, base_url=base_url, model=model,
+         )
++        result["brai_original_error"] = result.get("final_response", "")
++        return result
+     if _welcome_hint:
+         # A free-tier refusal is fully explained by its own sentence; the raw provider summary
+         # (status codes, JSON) is for the log, not for a first-time user's chat.
+@@ -1138,16 +1142,20 @@
+     # Same verdict fields as the max-retries path: without them the UI descriptor
+     # (agent/error_surface.py) reads a rejected OAuth token as a retryable
+     # "Provider error" and offers Retry instead of a re-login.
++    # Сохраняем именно текст ошибки, без уже выданного фрагмента ответа.
++    _error_response = _final_response
+     _final_response, _keep_partial = _with_delivered_partial(
+         _final_response, _nonretryable_summary, delivered,
+     )
+     result = _failed_turn_result(_final_response, messages, api_call_count, _nonretryable_summary)
++    result["brai_original_error"] = _error_response
+     result.update({
+         "failure_reason": classified.reason.value,
+         "failure_retryable": bool(classified.retryable),
      })
      if _keep_partial:
          result["partial"] = True
@@ -113,7 +151,16 @@ diff --git a/agent/turn_recovery.py b/agent/turn_recovery.py
      _stamp_limit_reset(result, agent, api_error)
      if _welcome_hint and (_kind := _welcome_surface_kind(classified)):
          # The card form: the desktop renders the sign-in as a button, so no "To sign in" tail.
-@@ -1295,6 +1296,7 @@
+@@ -1275,6 +1283,8 @@
+             "smaller sections (or via execute_code with Python's open())."
+         )
+     result = _failed_turn_result(_final_response, messages, api_call_count, _final_summary)
++    result["brai_original_error"] = _final_response
++    result["brai_attempts"] = attempts
+     result.update({
+         # Classified reason so callers (kanban worker in cli.py) can tell a quota wall
+         # (``rate_limit`` / ``billing``) from a task failure.
+@@ -1295,6 +1305,7 @@
      if _keep_partial:
          result["final_response"] = _final_response
          result["partial"] = True
@@ -176,22 +223,67 @@ diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
          finally:
              unregister_gateway_notify(session_key)
              # Cancel pending clarify entries so blocked agent threads don't hang past the end of the
-@@ -1979,6 +1984,10 @@
+@@ -1979,6 +1984,12 @@
              "tools": ctx.tools_holder[0] or [],
              "history_offset": history_offset, "compacted_in_place": compacted_in_place, "session_id": effective_session_id,
              **usage,
 +            **{key: result[key] for key in (
 +                "brai_connection_kind", "brai_delivered_partial", "brai_failure_kind",
 +                "failure_resets_at", "billing_unverified", "billing_block", "free_tier",
++                "brai_http_status", "brai_attempts", "brai_error_provider", "brai_error_model",
++                "brai_original_error", "brai_request_tokens", "brai_context_window", "compaction_disabled", "failure_retryable",
 +            ) if key in result},
          }
          if not final_response:
              final_response = _normalize_empty_agent_response(result, final_response or "", history_len=len(agent_history))
+diff --git a/agent/turn_overflow.py b/agent/turn_overflow.py
+--- a/agent/turn_overflow.py
++++ b/agent/turn_overflow.py
+@@ -391,7 +391,7 @@
+                 f"{agent.log_prefix}Output-cap error not routed into compression "
+                 f"(max_tokens over provider cap): {error_msg[:200]}",
+             ),
+-            compression_exhausted=False,
++            compression_exhausted=False, brai_failure_kind="output_cap_exceeded",
+         )
+
+     new_ctx = _adopt_provider_context_limit(st, error_msg, old_ctx)
+@@ -426,6 +426,8 @@
+                 "skipping compression: %s", agent.log_prefix, f"{request_tokens:,}", f"{window:,}", error_msg[:200],
+             ),
+             compression_exhausted=False, reason=FailoverReason.server_error.value, retryable=True,
++            brai_failure_kind="server_context_rejection", brai_request_tokens=request_tokens,
++            brai_context_window=window,
+         )
+
+     exhausted = st.count_attempt()
+diff --git a/agent/turn_api_error.py b/agent/turn_api_error.py
+--- a/agent/turn_api_error.py
++++ b/agent/turn_api_error.py
+@@ -63,6 +63,18 @@
+     _provider_overflow_recovery_pending = False
+
+     def _verdict(action: str, result: Optional[dict[str, Any]] = None) -> ApiErrorVerdict:
++        # AIDEV-NOTE: факты отказа нужны для связанных диагностических записей.
++        if action == "return" and isinstance(result, dict):
++            try:
++                status = getattr(api_error, "status_code", None)
++                if type(status) is int and 400 <= status <= 599:
++                    result["brai_http_status"] = status
++                if type(retry_count) is int and retry_count > 0:
++                    result.setdefault("brai_attempts", retry_count)
++                result["brai_error_provider"] = getattr(agent, "provider", "")
++                result["brai_error_model"] = getattr(agent, "model", "")
++            except Exception:
++                pass
+         return ApiErrorVerdict(
+             action=action, thinking_spinner=thinking_spinner, messages=messages,
+             active_system_prompt=active_system_prompt, conversation_history=conversation_history,
 diff --git a/gateway/russian_failure_notice.py b/gateway/russian_failure_notice.py
 new file mode 100644
 --- /dev/null
 +++ b/gateway/russian_failure_notice.py
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,269 @@
 +# ABOUTME: Готовит русские сообщения о сбоях для Telegram.
 +# ABOUTME: Использует классификацию движка и сохраняет безопасные данные для проверки.
 +"""Пояснения для Telegram не управляют повторами и сессиями."""
@@ -250,6 +342,9 @@ new file mode 100644
 +    'disk_full': 'Недостаточно места в хранилище для сохранения разговора. Обратитесь к администратору, чтобы освободить место.',
 +    'context_reset': 'Разговор стал слишком длинным для модели. Сократить контекст не удалось, поэтому начат новый разговор. Предыдущий разговор сохранён в истории. Отправьте запрос снова.',
 +    'compression_deferred': 'Сокращение контекста временно отложено или уже выполняется. Подождите немного и повторите запрос; можно также попробовать /compress.',
++    'compression_disabled': 'Разговор слишком длинный для модели, а автоматическое сокращение отключено. Сократите контекст вручную командой /compress, начните новый разговор командой /new или выберите модель с большим контекстом.',
++    'output_cap_exceeded': 'Сервис модели отклонил запрос: запрошенная длина ответа превышает допустимый предел, но его значение не сообщено. Сокращение разговора не решит эту проблему. Выберите другую модель командой /model или проверьте настройки модели.',
++    'server_context_rejection': 'Сервер отклонил запрос как слишком большой, хотя по доступной оценке он должен помещаться. Сокращение разговора в этом случае не поможет. Попробуйте позже и отправьте /retry; если ошибка повторится, проверьте настройки сервера модели.',
 +    'free_tier_rate_limited': 'Бесплатный доступ к модели временно ограничен по числу запросов. Дождитесь снятия ограничения или выберите другую модель командой /model.',
 +    'free_tier_at_capacity': 'Бесплатный доступ к модели временно перегружен. Попробуйте позже или выберите другую модель командой /model.',
 +    'free_tier_outage': 'Бесплатное подключение к модели временно не отвечает. Попробуйте позже или выберите другую модель командой /model.',
@@ -272,7 +367,8 @@ new file mode 100644
 +    '⚠️ **Причина отказа не подтверждена**': ('billing_unverified',),
 +    '🚧 **Запрос заблокирован**': ('upstream_blocked', 'provider_policy_blocked', 'content_policy_blocked', 'free_tier_route', 'free_tier_refused'),
 +    '🔒 **Не удалось проверить сертификат**': ('ssl_cert_verification',),
-+    '📜 **Разговор слишком длинный**': ('context_overflow', 'long_context_tier', 'oauth_long_context_beta_forbidden'),
++    '📜 **Разговор слишком длинный**': ('context_overflow', 'long_context_tier', 'oauth_long_context_beta_forbidden', 'compression_disabled'),
++    '⚠️ **Сервер отклонил размер запроса**': ('server_context_rejection', 'output_cap_exceeded'),
 +    '📎 **Запрос слишком большой**': ('payload_too_large',),
 +    '🖼 **Изображение слишком большое**': ('image_too_large',),
 +    '🖼 **Не удалось прочитать изображение**': ('image_corrupt',),
@@ -378,13 +474,16 @@ new file mode 100644
 +    code = surface.get('code', 'unknown')
 +    if not isinstance(code, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.:-]{0,79}', code):
 +        code = 'unknown'
++    raw_code = code
 +    layer = surface.get('layer', 'unknown')
 +    if layer not in {'provider', 'endpoint', 'streaming', 'auth', 'billing', 'gateway', 'disk'}:
 +        layer = 'unknown'
-+    if result.get('brai_failure_kind') in {'invalid_tool_call', 'truncated_tool_call'}:
++    if result.get('brai_failure_kind') in {'invalid_tool_call', 'truncated_tool_call', 'server_context_rejection', 'output_cap_exceeded'}:
 +        code = result['brai_failure_kind']
 +    elif result.get('brai_session_reset'):
 +        code = 'context_reset'
++    elif result.get('compaction_disabled'):
++        code = 'compression_disabled'
 +    elif result.get('compression_deferred'):
 +        code = 'compression_deferred'
 +    elif layer == 'disk':
@@ -401,6 +500,10 @@ new file mode 100644
 +            kind = connection_kind(result.get('provider'), result.get('base_url'))
 +        message = _message_for_connection(code, kind)
 +    lines = [_TITLES.get(code, _DEFAULT_TITLE), message]
++    if code == 'server_context_rejection':
++        size, window = result.get('brai_request_tokens'), result.get('brai_context_window')
++        if type(size) is int and type(window) is int and 0 < size < window <= 10**9:
++            lines.append(f'Оценка размера запроса с резервом на ответ — {size:,} токенов; ожидаемая вместимость — {window:,} токенов.')
 +    resets_at = surface.get('resets_at', result.get('failure_resets_at'))
 +    clock = time.time() if now is None else now
 +    if (code in {'rate_limit', 'upstream_rate_limit', 'free_tier_rate_limited'}
@@ -412,15 +515,37 @@ new file mode 100644
 +    if partial:
 +        lines.append('Некоторые действия могли уже выполниться. Перед повтором проверьте их результат.')
 +    details = [f'Код: `{code}`']
-+    http = status_code if type(status_code) is int and 400 <= status_code <= 599 else None
++    status = status_code if type(status_code) is int else result.get('brai_http_status')
++    http = status if type(status) is int and 400 <= status <= 599 else None
 +    if http is not None:
 +        details.append(f'Ответ сервера: `HTTP {http}`')
-+    if diagnostic and logger.isEnabledFor(logging.WARNING):
++    original_error = result.get('brai_original_error')
++    if (diagnostic or original_error) and logger.isEnabledFor(logging.WARNING):
 +        try:
 +            reference = secrets.token_hex(8)
-+            safe_diagnostic = redact(str(diagnostic))[:2048]
-+            logger.warning('TELEGRAM_FAILURE reference=%s layer=%s code=%s http=%s detail=%s',
-+                           reference, layer, code, http or '-', json.dumps(safe_diagnostic, ensure_ascii=False))
++            metadata = {}
++            for key in ('brai_error_provider', 'brai_error_model', 'session_id'):
++                value = result.get(key)
++                if isinstance(value, str) and value:
++                    metadata[key] = redact(value)[:256]
++            for key in ('brai_attempts', 'api_calls', 'brai_request_tokens', 'brai_context_window'):
++                value = result.get(key)
++                if type(value) is int and 0 <= value <= 10**9:
++                    metadata[key] = value
++            metadata['raw_code'] = raw_code
++            if type(result.get('billing_unverified')) is bool:
++                metadata['billing_unverified'] = result['billing_unverified']
++            if type(result.get('failure_retryable')) is bool:
++                metadata['failure_retryable'] = result['failure_retryable']
++            reset = result.get('failure_resets_at')
++            if type(reset) in (int, float) and math.isfinite(reset) and 0 < reset < 10**11:
++                metadata['failure_resets_at'] = reset
++            safe_diagnostic = redact(str(diagnostic or ''))
++            safe_original = redact(original_error) if isinstance(original_error, str) else ''
++            record = {'detail': safe_diagnostic[:8192], 'original_error': safe_original[:8192],
++                      'truncated': len(safe_diagnostic) > 8192 or len(safe_original) > 8192, **metadata}
++            logger.warning('TELEGRAM_FAILURE reference=%s layer=%s code=%s http=%s data=%s',
++                           reference, layer, code, http or '-', json.dumps(record, ensure_ascii=False))
 +            details.append(f'Номер в журнале: `{reference}`')
 +        except Exception:
 +            pass

@@ -143,6 +143,147 @@ class FailureNoticeTest(unittest.TestCase):
             diagnostic='secret', logger=self.log, redact=lambda value: 1/0)
         self.assertNotIn('secret', text)
 
+    def test_linked_diagnostic_preserves_redacted_facts_without_answer_text(self):
+        result = {'brai_original_error':'Provider details and repair: TOKEN-SECRET',
+                  'brai_error_provider':'openai-codex', 'brai_error_model':'private-model',
+                  'brai_http_status':503, 'brai_attempts':3, 'api_calls':4,
+                  'brai_connection_kind':'external', 'failure_resets_at':1121,
+                  'failure_retryable':True, 'session_id':'session-test'}
+        with self.assertLogs(self.log, 'WARNING') as records:
+            text = self.notice.explain_failure('original', surface={'code':'overloaded'},
+                diagnostic='failure TOKEN-SECRET', logger=self.log,
+                redact=lambda value: value.replace('TOKEN-SECRET', '[скрыто]'),
+                result=result, delivered_partial='Личная часть ответа')
+        record = records.output[0]
+        self.assertIn('Provider details and repair: [скрыто]', record)
+        self.assertIn('brai_error_provider', record)
+        self.assertIn('private-model', record)
+        self.assertIn('brai_attempts', record)
+        self.assertIn('failure_resets_at', record)
+        self.assertIn('failure_retryable', record)
+        self.assertIn('session-test', record)
+        self.assertIn('http=503', record)
+        self.assertNotIn('TOKEN-SECRET', record + text)
+        self.assertNotIn('Личная часть ответа', record)
+        self.assertNotIn('openai-codex', text)
+        self.assertNotIn('Provider details', text)
+        self.assertIn('Ответ сервера: `HTTP 503`', text)
+        self.assertIn('Номер в журнале:', text)
+
+    def test_context_rejection_does_not_recommend_compression(self):
+        result = {'brai_failure_kind':'server_context_rejection', 'brai_connection_kind':'local',
+                  'brai_request_tokens':24000, 'brai_context_window':80000}
+        text = self.render('server_error', result=result)
+        self.assertIn('Сокращение разговора в этом случае не поможет', text)
+        self.assertIn('24,000 токенов', text)
+        self.assertIn('80,000 токенов', text)
+        self.assertNotIn('/compress', text)
+        text = self.render('context_overflow', result={'compaction_disabled':True, 'failure_retryable':False})
+        self.assertIn('автоматическое сокращение отключено', text)
+        self.assertIn('/compress', text)
+
+    def test_terminal_error_keeps_status_and_attempts_for_diagnostics(self):
+        import os
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for API error integration')
+        tree = ast.parse((Path(candidate) / 'agent/turn_api_error.py').read_text())
+        outer = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'handle_api_error')
+        fn = next(node for node in outer.body if isinstance(node, ast.FunctionDef) and node.name == '_verdict')
+        fn.returns = None
+        for arg in fn.args.args + fn.args.kwonlyargs:
+            arg.annotation = None
+        scope = {'ApiErrorVerdict':lambda **kwargs:kwargs,
+                 'api_error':types.SimpleNamespace(status_code=503),
+                 'agent':types.SimpleNamespace(provider='openai-codex', model='example'),
+                 'retry_count':3, 'max_retries':3, 'thinking_spinner':None, 'messages':[],
+                 'active_system_prompt':'', 'conversation_history':[], 'approx_tokens':0,
+                 'compression_attempts':0, '_provider_overflow_recovery_pending':False}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<candidate>', 'exec'), scope)
+        result = scope['_verdict']('return', {'failure_reason':'overloaded'})['result']
+        self.assertEqual(result['brai_http_status'], 503)
+        self.assertEqual(result['brai_attempts'], 3)
+        self.assertEqual(result['brai_error_provider'], 'openai-codex')
+        self.assertEqual(result['brai_error_model'], 'example')
+        kept = scope['_verdict']('return', {'brai_attempts':1})['result']
+        self.assertEqual(kept['brai_attempts'], 1)
+
+    def test_engine_marks_distinct_rejections_before_gateway(self):
+        import os
+        import re
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for overflow integration')
+        tree = ast.parse((Path(candidate) / 'agent/turn_overflow.py').read_text())
+        fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == '_recover_context_length')
+        fn.returns = None
+        for arg in fn.args.args + fn.args.kwonlyargs:
+            arg.annotation = None
+        scope = {'parse_available_output_tokens_from_error':lambda value:None,
+                 'is_output_cap_error':lambda value:True, 're':re}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[fn], type_ignores=[])), '<candidate>', 'exec'), scope)
+        agent = types.SimpleNamespace(context_compressor=types.SimpleNamespace(context_length=80000), log_prefix='')
+        state = types.SimpleNamespace(agent=agent, fail_turn=lambda message, **kwargs:kwargs)
+        result = scope['_recover_context_length'](state, None, 'output cap')
+        self.assertEqual(result['brai_failure_kind'], 'output_cap_exceeded')
+        text = self.render('context_overflow', result=result)
+        self.assertIn('запрошенная длина ответа превышает допустимый предел', text)
+        self.assertIn('Сокращение разговора не решит', text)
+        self.assertNotIn('/compress', text)
+        scope['is_output_cap_error'] = lambda value:False
+        scope['_adopt_provider_context_limit'] = lambda *args:None
+        scope['is_local_endpoint'] = lambda value:True
+        scope['_UNEXPLAINED_REJECTION_FRACTION'] = .75
+        scope['site_copy'] = lambda *args, **kwargs:'size error'
+        scope['FailoverReason'] = types.SimpleNamespace(server_error=types.SimpleNamespace(value='server_error'))
+        agent.base_url = 'http://127.0.0.1:1234'
+        agent.model = 'test-model'
+        agent.max_tokens = 1000
+        state.request_tokens = lambda:23000
+        result = scope['_recover_context_length'](state, None, 'context too large')
+        self.assertEqual(result['brai_failure_kind'], 'server_context_rejection')
+        self.assertEqual(result['brai_request_tokens'], 24000)
+        self.assertEqual(result['brai_context_window'], 80000)
+
+    def test_original_error_is_separated_from_delivered_answer(self):
+        import os
+        import sys
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for recovery integration')
+        tree = ast.parse((Path(candidate) / 'agent/turn_recovery.py').read_text())
+        selected = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                    and node.name in {'_failed_turn_result', '_with_delivered_partial', 'nonretryable_client_error_result'}]
+        for node in selected:
+            node.returns = None
+            for arg in node.args.args + node.args.kwonlyargs:
+                arg.annotation = None
+        reasons = types.SimpleNamespace(content_policy_blocked='policy', billing='billing',
+            model_not_found='missing', upstream_blocked='blocked', ssl_cert_verification='tls')
+        scope = {'Optional':object, 'Any':object, 'FailoverReason':reasons, '_NONRETRYABLE_LABELS':{},
+                 'provider_label_for':lambda provider:'service', 'display_hermes_home':lambda:'/test',
+                 '_welcome_tier_guidance':lambda *a,**k:'',
+                 '_missing_vendor_prefix_suggestion':lambda *a:None, '_vlines':lambda *a:None,
+                 '_stamp_limit_reset':lambda *a:None, 'nonretryable_copy':lambda *a,**k:'original diagnostic',
+                 'logger':self.log}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=selected, type_ignores=[])), '<candidate>', 'exec'), scope)
+        agent = types.SimpleNamespace(_flush_status_buffer=lambda:None, _summarize_api_error=lambda error:'summary',
+            _emit_diagnostic_status=lambda *args:None, verbose_logging=False, log_prefix='',
+            _persist_session=lambda *args:None)
+        from enum import Enum
+        class Reason(Enum):
+            format = 'format'
+        classified = types.SimpleNamespace(reason=Reason.format, is_auth=False, retryable=False)
+        modules = {'agent.conversation_loop':types.SimpleNamespace(_billing_failure_result=None, _content_policy_blocked_result=None)}
+        with patch.dict('sys.modules', modules):
+            result = scope['nonretryable_client_error_result'](agent, Exception('error'), classified,
+                status_code=400, api_kwargs=None, api_messages=[], messages=[], conversation_history=[],
+                api_call_count=1, approx_tokens=0, provider='test', base_url='test', model='test',
+                delivered='Личная часть ответа')
+        self.assertEqual(result['brai_original_error'], 'original diagnostic')
+        self.assertEqual(result['brai_delivered_partial'], 'Личная часть ответа')
+        self.assertNotIn('Личная часть ответа', result['brai_original_error'])
+
     def test_tool_validation_distinguishes_incomplete_and_unknown_actions(self):
         import os
         candidate = os.environ.get('HERMES_TEST_CANDIDATE')
@@ -212,17 +353,22 @@ class FailureNoticeTest(unittest.TestCase):
         result = {'failed':True, 'failure_reason':'rate_limit', 'error':'error', 'brai_connection_kind':'external',
                   'brai_delivered_partial':'partial answer', 'brai_failure_kind':'truncated_tool_call',
                   'failure_resets_at':1121, 'billing_unverified':True, 'billing_block':{},
-                  'free_tier':{'kind':'rate_limited'}, 'api_key':'secret'}
+                  'free_tier':{'kind':'rate_limited'}, 'api_key':'secret', 'brai_original_error':'diagnostic',
+                  'brai_http_status':503, 'brai_attempts':3, 'brai_error_provider':'test',
+                  'brai_error_model':'test-model', 'brai_request_tokens':24000, 'brai_context_window':80000,
+                  'compaction_disabled':True, 'failure_retryable':False}
         scope = {'result':result, 'ctx':types.SimpleNamespace(tools_holder=[[]]),
                  'history_offset':0, 'compacted_in_place':False, 'effective_session_id':'s', 'usage':{}}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[common], type_ignores=[])), '<candidate>', 'exec'), scope)
         output = scope['common']
         for key in ('brai_connection_kind', 'brai_delivered_partial', 'brai_failure_kind',
-                    'failure_resets_at', 'billing_unverified', 'billing_block', 'free_tier'):
+                    'failure_resets_at', 'billing_unverified', 'billing_block', 'free_tier', 'brai_original_error',
+                    'brai_http_status', 'brai_attempts', 'brai_error_provider', 'brai_error_model',
+                    'brai_request_tokens', 'brai_context_window', 'compaction_disabled', 'failure_retryable'):
             self.assertEqual(output[key], result[key])
         self.assertNotIn('api_key', output)
         text = self.notice.explain_failure('english', surface={'code':'rate_limit'}, diagnostic='',
-            logger=self.log, redact=str, now=1000, result={key:value for key,value in output.items() if key != 'brai_failure_kind'},
+            logger=self.log, redact=str, now=1000, result={key:value for key,value in output.items() if key not in {'brai_failure_kind', 'compaction_disabled'}},
             delivered_partial=output['brai_delivered_partial'])
         self.assertIn('Сторонний сервис ИИ', text)
         self.assertIn('примерно 3 мин.', text)
