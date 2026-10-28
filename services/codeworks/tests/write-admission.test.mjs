@@ -31,6 +31,7 @@ test('replay for removed workspace never returns its former path',async()=>{
 test('one session reuses one key for multiple targets and gets a new key after removal',async()=>{
  const rows=[],workspaces=new Map();let sequence=0;
  const query=async(sql,args=[])=>{
+  if(sql.startsWith('SELECT workspace_key,kind,removed_at FROM codeworks.workspaces')) {const w=workspaces.get(args[1]);return {rows:w?[w]:[]};}
   if(sql.startsWith('INSERT INTO codeworks.write_calls')) {rows.push({id:args[0],project_id:args[1],executor_id:args[2],session_id:args[3],turn_id:args[4],tool_use_id:args[5],tool_name:args[6],payload_sha256:args[7],targets:JSON.parse(args[8]),workspace_key:args[9],kind:args[10],request_key:args[11],state:'preparing',workspace_id:null});return {rowCount:1,rows:[]};}
   if(sql.startsWith('SELECT * FROM codeworks.write_calls WHERE project_id='))return {rows:rows.filter(x=>x.project_id===args[0]&&x.executor_id===args[1]&&x.session_id===args[2]&&x.turn_id===args[3]&&x.tool_use_id===args[4]),rowCount:1};
   if(sql.includes('SELECT c.workspace_key,c.kind'))return {rows:rows.filter(x=>x.session_id===args[2]&&(!x.workspace_id||!workspaces.get(x.workspace_id)?.removed_at)).map(x=>({workspace_key:x.workspace_key,kind:x.kind,workspace_id:x.workspace_id,lifecycle:'active',workflow_state:'open'}))};
@@ -47,4 +48,5 @@ test('one session reuses one key for multiple targets and gets a new key after r
  workspaces.get(first.workspace_id).removed_at='now';
  const third=await api.begin(input('three',['services/auth/index.mjs']),'e');
  assert.notEqual(third.workspace_key,first.workspace_key);assert.notEqual(third.workspace_id,first.workspace_id);
+ const explicit=await api.begin({...input('four',['apps/web/form.ts']),workspace_id:third.workspace_id},'e');assert.equal(explicit.workspace_key,third.workspace_key);assert.equal(explicit.workspace_id,third.workspace_id);
 });

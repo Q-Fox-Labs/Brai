@@ -20,6 +20,11 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
       let found=(await db.query('SELECT * FROM codeworks.write_calls WHERE project_id=$1 AND executor_id=$2 AND session_id=$3 AND turn_id=$4 AND tool_use_id=$5 FOR UPDATE',identity)).rows[0];
       if (!found) {
         let key=args.workspace_key, kind=args.kind;
+        if (args.workspace_id) {
+          const selected=(await db.query('SELECT workspace_key,kind,removed_at FROM codeworks.workspaces WHERE project_id=$1 AND id=$2',[args.project_id,args.workspace_id])).rows[0];
+          if (!selected || selected.removed_at || (key && key!==selected.workspace_key) || (kind && kind!==selected.kind)) throw new Fault('CONFLICT');
+          key=selected.workspace_key;kind=selected.kind;
+        }
         if (!key && !args.workspace_id) {
           const entries=(await db.query(`SELECT c.workspace_key,c.kind,c.workspace_id,w.removed_at,r.lifecycle,r.state AS workflow_state
             FROM codeworks.write_calls c LEFT JOIN codeworks.workspaces w ON w.id=c.workspace_id
