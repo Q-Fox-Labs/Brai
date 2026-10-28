@@ -20,7 +20,7 @@ async function codeworksWorkspace(state={generation:1,position:0}) {
     if(batch.completed){await stopIndex();return;}
     if(patched('codeworks-checkpoint-references-v1'))state.checkpoint=batch.checkpoint;
     for(const command of batch.commands){
-      if(['cleanup','workspace.cancel'].includes(command.kind))await stopIndex();
+      if(['cleanup','workspace.cancel','workspace.transfer'].includes(command.kind))await stopIndex();
       try{
         if(patched('codeworks-scoped-activities-v1')&&command.kind){
           if(command.kind==='prepare'){
@@ -30,13 +30,18 @@ async function codeworksWorkspace(state={generation:1,position:0}) {
               if(result.status==='failed'||['branch','checkout','dependencies','ready'].indexOf(result.preparation_state)<['branch','checkout','dependencies','ready'].indexOf(stage))break;
             }
           }else{
-            const names={sync:'synchronizeBranch',release:'advanceRelease',rollout:'reconcileRollout',cleanup:'cleanupWorkspace','release.close':'closeRelease','workspace.cancel':'cancelWorkspace'};
+            const names={sync:'synchronizeBranch',release:'advanceRelease',rollout:'reconcileRollout',cleanup:'cleanupWorkspace','release.close':'closeRelease','workspace.cancel':'cancelWorkspace','workspace.transfer':'transferWorkspace'};
             await execution[names[command.kind]](command.operation_id,state.generation);
           }
         }else await execution.executeCommand(command.operation_id,state.generation);
       }
       catch{await resilient(()=>activities.requireReconciliation(command.operation_id,state.generation));}
       state.position=Math.max(state.position,Number(command.sequence));
+    }
+    if(patched('codeworks-cleanup-obligations-v1')&&batch.closing){
+      await stopIndex();
+      try{await execution.advanceCleanupObligation(state.generation);}
+      catch{await resilient(()=>activities.deferCleanupObligation(state.generation));}
     }
     if(await resilient(()=>activities.finishWorkflow(state.generation))){await stopIndex();return;}
     if((workflowInfo().continueAsNewSuggested||++cycles>=continueAfter)&&allHandlersFinished()&&!indexPass)await continueAsNew(state);
@@ -52,3 +57,13 @@ async function codeworksWorkspace(state={generation:1,position:0}) {
   }
 }
 exports.codeworksWorkspace=codeworksWorkspace;
+/** Singleton проекта регулярно сверяет сохранённые обязательства и продолжает историю. */
+async function codeworksProjectReconciler(state){
+  let cycles=0;
+  for(;;){
+    try{await execution.reconcileProject(state.projectId);}catch{}
+    if((workflowInfo().continueAsNewSuggested||++cycles>=500)&&allHandlersFinished())await continueAsNew(state);
+    await condition(()=>false,60000);
+  }
+}
+exports.codeworksProjectReconciler=codeworksProjectReconciler;
