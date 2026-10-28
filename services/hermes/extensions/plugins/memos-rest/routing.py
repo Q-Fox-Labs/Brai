@@ -171,7 +171,12 @@ class RoutedRuntime:
             checkpoint(job)
         if 'facts' not in job:
             from .provider import scrub
-            facts = scrub(self.router.extract(job['body']['messages'], job.get('project'), self.conversation_context(job)))
+            # A checkpoint contains several speakers. It is a recovery archive,
+            # never a source of facts attributed to a synthetic session owner.
+            info = job['body']['info']
+            unresolved = info.get('hermes_author_id') in (None, '', 'unknown', 'multiple_or_unknown')
+            facts = [] if info.get('hermes_kind') == 'checkpoint' or unresolved else scrub(
+                self.router.extract(job['body']['messages'], job.get('project'), self.conversation_context(job)))
             if job.get('replacement_id') and len(facts) != 1:
                 raise MemOSError('A logical correction must produce exactly one grounded fact')
             if job.get('shared_infra') and (not facts or any('infra' not in f['memberships'] for f in facts)):

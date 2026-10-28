@@ -12,6 +12,17 @@ from test_routing import RoutingTests
 class QualityTests(RoutingTests):
     """Проверить внешнее поведение pipeline и возобновляемого обслуживания."""
 
+    def test_unresolved_authors_and_mixed_checkpoints_never_create_personal_facts(self):
+        self.provider.routing.router.transport = lambda _: self.fail('Unattributed history must not be classified')
+        self.provider._archive([{'role':'user','content':'An old personal statement.'}],
+            'session-a','turn','unresolved',{'id':'unknown'})
+        self.provider._archive([{'role':'user','content':'Several speakers in a recovery archive.'}],
+            'session-a','checkpoint','mixed',{'id':'multiple_or_unknown'})
+        self.send()
+        self.assertEqual(self.provider.outbox.status()['pending'],0)
+        self.assertTrue(self.backend.rows)
+        self.assertFalse(any(r['metadata']['info']['hermes_kind']=='fact' for r in self.backend.rows.values()))
+
     def test_review_drops_noise_and_repairs_category_before_any_fact_write(self):
         quote = 'Проверил публикации об аппарате для моего массажного кабинета.'
         candidate = self.fact(text=quote, source={'message_index': 0, 'role': 'user',
