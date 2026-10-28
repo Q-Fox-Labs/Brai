@@ -10,7 +10,8 @@ import {createCodeIndex,indexIdentity} from '../../src/code-index.mjs';
 import {advanceCleanup} from '../../src/cleanup-coordinator.mjs';
 import {randomUUID} from 'node:crypto';
 
-test('durable write admission waits for actual write and retains an uncertain missing PostToolUse', {skip:!configured||!process.env.CODEWORKS_INDEX_QDRANT,timeout:120000},async t=>{
+test('durable write admission waits for actual write and retains an uncertain missing PostToolUse', {timeout:120000},async t=>{
+  assert.ok(configured&&process.env.CODEWORKS_INDEX_QDRANT,'explicit disposable PostgreSQL and Qdrant are required');
   const f=await setup();t.after(()=>f.close());
   const project=await f.project();
   const base={project_id:project.id,workspace_key:'admission-test',session_id:'fixture-session',turn_id:'turn-one',tool_use_id:'tool-one',tool_name:'apply_patch',payload_sha256:'a'.repeat(64),targets:['hello.txt'],request_key:'write-one'};

@@ -45,11 +45,11 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
     const base=(await command('git',['-C',p.repo_path,'rev-parse','HEAD'])).stdout;
     const args={project_id:p.id,request_key:'prepare',workspace_key:'route',kind};
     if(kind==='hotfix'){
-      await assert.rejects(f.h.call('prepare',args,'codex'),{code:'PRODUCTION_BASE_MISMATCH'});
+      await assert.rejects(f.prepare(args,'codex'),{code:'PRODUCTION_BASE_MISMATCH'});
       const first=await evidence(p,'prod',base);assert.deepEqual(await evidence(p,'prod',base),first);
       await writeFile(path.join(p.repo_path,'unreleased'),'future dev\n');await command('git',['-C',p.repo_path,'add','.']);await command('git',['-C',p.repo_path,'commit','-m','Future dev']);await command('git',['-C',p.repo_path,'push','origin','dev']);
     }
-    const prepared=await f.h.call('prepare',args,'codex');await f.worker(p,prepared.operation_id);
+    const prepared=await f.prepare(args,'codex');await f.worker(p,prepared.operation_id);
     assert.equal((await op(p,prepared.operation_id)).status,'succeeded');const w=await area(prepared.workspace_id);
     await writeFile(path.join(w.path,'fix'),'fix\n');await command('git',['-C',w.path,'add','fix']);await command('git',['-C',w.path,'commit','-m','Fix']);
     const head=(await git.inspect(p,w)).head;
@@ -155,7 +155,7 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
   });
   await subtest('sync recovers a lost push response and publishes one PR without merging or deploying',async()=>{
     const p=await f.project({github:{repository:'fixture/repository',required_checks,ci}});
-    const prepared=await f.h.call('prepare',{project_id:p.id,request_key:'prepare',workspace_key:'sync'},'codex');await f.worker(p,prepared.operation_id);
+    const prepared=await f.prepare({project_id:p.id,request_key:'prepare',workspace_key:'sync'},'codex');await f.worker(p,prepared.operation_id);
     const w=await area(prepared.workspace_id),target=await flowGit.remote(p,'dev');
     await writeFile(path.join(w.path,'sync'),'working change\n');await command('git',['-C',w.path,'add','sync']);await command('git',['-C',w.path,'commit','-m','Working change']);
     const head=(await git.inspect(p,w)).head,request={project_id:p.id,workspace_id:w.id,commit_sha:head,request_key:'sync'};
@@ -178,7 +178,7 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
   });
   for(const mutation of ['dirty','changed-head'])await subtest('release rejects '+mutation+' after durable admission',async()=>{
     const p=await f.project({github:{repository:'fixture/repository',required_checks,ci}});
-    const prepared=await f.h.call('prepare',{project_id:p.id,request_key:'prepare',workspace_key:'changed'},'codex');await f.worker(p,prepared.operation_id);
+    const prepared=await f.prepare({project_id:p.id,request_key:'prepare',workspace_key:'changed'},'codex');await f.worker(p,prepared.operation_id);
     const w=await area(prepared.workspace_id),head=(await git.inspect(p,w)).head,target=await flowGit.remote(p,'dev');
     const accepted=await f.h.call('release',{project_id:p.id,request_key:'release',workspace_id:w.id,commit_sha:head},'codex');
     await writeFile(path.join(w.path,'changed'),'preserve changed bytes\n');
@@ -190,7 +190,7 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
   });
   await subtest('a changed target fails the pinned release rather than merging a different base',async()=>{
     const p=await f.project({github:{repository:'fixture/repository',required_checks,ci}});
-    const prepared=await f.h.call('prepare',{project_id:p.id,request_key:'prepare',workspace_key:'target-race'},'codex');await f.worker(p,prepared.operation_id);
+    const prepared=await f.prepare({project_id:p.id,request_key:'prepare',workspace_key:'target-race'},'codex');await f.worker(p,prepared.operation_id);
     const w=await area(prepared.workspace_id);
     await writeFile(path.join(w.path,'feature'),'feature\n');await command('git',['-C',w.path,'add','feature']);await command('git',['-C',w.path,'commit','-m','Feature']);
     const head=(await git.inspect(p,w)).head,accepted=await f.h.call('release',{project_id:p.id,workspace_id:w.id,commit_sha:head,request_key:'release'},'codex');
@@ -204,7 +204,7 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
   });
   await subtest('no-op release fails safely without changing workspace readiness',async()=>{
     const p=await f.project({github:{repository:'fixture/repository',required_checks,ci}});
-    const prepared=await f.h.call('prepare',{project_id:p.id,request_key:'noop-prepare',workspace_key:'noop',kind:'feature'},'codex');await f.worker(p,prepared.operation_id);
+    const prepared=await f.prepare({project_id:p.id,request_key:'noop-prepare',workspace_key:'noop',kind:'feature'},'codex');await f.worker(p,prepared.operation_id);
     const w=await area(prepared.workspace_id);
     const accepted=await f.h.call('release',{project_id:p.id,request_key:'noop-release',workspace_id:w.id,commit_sha:w.base_sha},'codex');
     await own.run(()=>runOperation(f.app,accepted.operation_id,git,{allowedRepositories:[p.repo_path],flowGit,github:{}}));

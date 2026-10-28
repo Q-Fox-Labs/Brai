@@ -3,7 +3,7 @@
 import { readFile,mkdir,writeFile,mkdtemp,copyFile,chmod,rm,realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID,createHash } from 'node:crypto';
 import { Pool } from 'pg';
 import { command as runCommand,createGit } from '../../src/git.mjs';
 import { createStore } from '../../src/storage.mjs';
@@ -33,6 +33,14 @@ export async function setup({git=createGit(),command=runCommand}={}) {
   const h=createHandlers(createStore(app),git,{allowedRepositories});
   const temporary=[];
   return {config,owner,app,h,
+    /** Создаёт область через настоящий durable native write.begin, без допуска инструмента. */
+    async prepare(args,executor='codex') {
+      const key=createHash('sha256').update(JSON.stringify(args)).digest('hex');
+      const request={...args,session_id:'fixture-session',turn_id:key,tool_use_id:key,tool_name:'apply_patch',payload_sha256:key,targets:['hello.txt']};
+      const result=await h.call('write.begin',request,executor);
+      await h.call('write.stop',{project_id:args.project_id,session_id:request.session_id,turn_id:request.turn_id,event:'Stop'},executor);
+      return Object.fromEntries(['workspace_id','operation_id','path','branch'].filter(field=>field in result).map(field=>[field,result[field]]));
+    },
     /** Реальный минимальный monorepo использует установленный подготовщик с package/workspace проверками. */
     async project({documentationPaths=[],sharedFixture=false,github}={}) {
       const temporaryRoot=fileURLToPath(new URL('../../../../tmp/',import.meta.url));
