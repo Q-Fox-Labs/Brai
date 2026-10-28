@@ -188,7 +188,242 @@
                                metadata: Optional[dict]) -> Optional[asyncio.Task]:
 --- a/plugins/platforms/telegram/adapter.py
 +++ b/plugins/platforms/telegram/adapter.py
-@@ -6591,6 +6591,14 @@
+@@ -374,6 +374,21 @@
+ _MDV2_ESCAPE_RE = re.compile(r'([_*\[\]()~`>#\+\-=|{}.!\\])')
+ 
+ 
++def _brai_hide_bare_urls(content: str) -> str:
++    """Скрыть открытые адреса в ссылках, сохранив готовые ссылки и блоки кода."""
++    pattern = re.compile(r'```[\s\S]*?```|`[^`\n]*`|\[[^\]]+\]\([^()]*(?:\([^()]*\)[^()]*)*\)|https?://[^\s<>\x00]+')
++    def convert(match):
++        value = match.group(0)
++        if not value.startswith(('http://', 'https://')):
++            return value
++        suffix = ''
++        while value and (value[-1] in '.,;:!?' or value[-1] == ')' and value.count(')') > value.count('(')):
++            suffix = value[-1] + suffix
++            value = value[:-1]
++        return '[Ссылка](' + value + ')' + suffix
++    return pattern.sub(convert, content)
++
++
+ def _escape_mdv2(text: str) -> str:
+     """Escape Telegram MarkdownV2 special characters with a preceding backslash."""
+     return _MDV2_ESCAPE_RE.sub(r'\\\1', text)
+@@ -1394,7 +1409,7 @@
+     def _rich_message_payload(self, content: str, *, skip_entity_detection: bool = False) -> dict[str, Any]:
+         """``InputRichMessage`` from RAW markdown — never ``format_message(content)``, whose MarkdownV2
+         escaping destroys table pipes."""
+-        payload: dict[str, Any] = {"markdown": _rich_normalize_linebreaks(content)}
++        payload: dict[str, Any] = {"markdown": _rich_normalize_linebreaks(_brai_hide_bare_urls(content))}
+         if skip_entity_detection:
+             payload["skip_entity_detection"] = True
+         return payload
+@@ -3461,18 +3476,10 @@
+         return _NetErr, _BadReq, _TimedOut
+ 
+     async def _send_chunk_markdown_or_plain(self, chunk: str, send_kwargs: dict[str, Any]):
+-        """MarkdownV2 first; on a parse/markdown rejection resend as stripped plain text."""
+-        try:
+-            return await _await_with_thread_deadline(
+-                self._bot.send_message(text=chunk, parse_mode=ParseMode.MARKDOWN_V2, **send_kwargs),
+-                timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
+-        except Exception as md_error:
+-            if "parse" in str(md_error).lower() or "markdown" in str(md_error).lower():
+-                logger.warning("[%s] MarkdownV2 parse failed, falling back to plain text: %s", self.name, md_error)
+-                return await _await_with_thread_deadline(
+-                    self._bot.send_message(text=_strip_mdv2(chunk), parse_mode=None, **send_kwargs),
+-                    timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
+-            raise
++        """Отправить только форматированный фрагмент; отказ разметки не раскрывает сырой текст."""
++        return await _await_with_thread_deadline(
++            self._bot.send_message(text=chunk, parse_mode=ParseMode.MARKDOWN_V2, **send_kwargs),
++            timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
+ 
+     async def _send_chunk_with_retries(
+         self, chat_id: str, chunk: str, index: int, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
+@@ -3811,22 +3818,13 @@
+             self._bot.edit_message_text(**kwargs), timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
+ 
+     async def _edit_markdown_or_plain(self, chat_id: str, message_id: str, formatted: str, plain: str, warn_fmt: str) -> bool:
+-        """MarkdownV2 edit with plain-text fallback. Returns True on a "not modified" no-op (caller may
+-        skip further work); the fallback edit's exceptions propagate."""
++        """Редактировать форматированный текст; при отказе не повторять сырую разметку."""
+         try:
+             await self._edit_text(chat_id, message_id, formatted, ParseMode.MARKDOWN_V2)
+-        except Exception as fmt_err:
+-            if "not modified" in str(fmt_err).lower():
++        except Exception as error:
++            if "not modified" in str(error).lower():
+                 return True
+-            # A transport refusal is independent of formatting. Retrying it as plain
+-            # text spends the same flood budget and can leave the live preview frozen.
+-            if not any(marker in str(fmt_err).lower() for marker in (
+-                "can't parse entities", "cannot parse entities", "can't find end",
+-                "unsupported start tag", "entity bounds", "parse entities",
+-            )):
+-                raise
+-            logger.warning(warn_fmt, self.name, _redact_telegram_error_text(fmt_err))
+-            await self._edit_text(chat_id, message_id, plain)
++            raise
+         return False
+ 
+     async def edit_message(
+@@ -3928,7 +3926,7 @@
+                 truncated = self._truncate_stream_overflow_preview(content)
+                 if self._last_overflow_preview.get(_preview_key) == truncated:
+                     return SendResult(success=True, message_id=message_id)
+-                await self._edit_text(chat_id, message_id, truncated)
++                await self._edit_text(chat_id, message_id, self.format_message(truncated), ParseMode.MARKDOWN_V2)
+                 self._last_overflow_preview[_preview_key] = truncated
+                 return SendResult(success=True, message_id=message_id)
+             # Flood control: short waits retry inline; long waits fail immediately so streaming falls back
+@@ -3989,42 +3987,28 @@
+     async def _send_overflow_continuation(
+         self, chat_id: str, chunk: str, reply_to_id: Optional[int], thread_kwargs: dict[str, Any],
+         thread_id: Optional[str], metadata: Optional[dict[str, Any]], finalize: bool):
+-        """Send one continuation chunk (MarkdownV2 then plain on finalize; raw when streaming); drops the
+-        reply anchor once on 'reply message not found'. Returns the sent message or None."""
++        """Отправить продолжение с разметкой; сырая версия не используется при ошибке."""
+         base = {**self._link_preview_kwargs(), **self._notification_kwargs(metadata)}
+-        for use_markdown in (True, False) if finalize else (False,):
+-            try:
+-                if use_markdown:
+-                    text = _separate_chunk_indicator_from_fence(self.format_message(chunk))
+-                else:
+-                    # Degrade to stripped text on finalize (raw ** / ``` would render literally); previews stay raw.
+-                    text = _strip_mdv2(chunk) if finalize else chunk
+-                return await _await_with_thread_deadline(
+-                    self._bot.send_message(
+-                    chat_id=normalize_telegram_chat_id(chat_id), text=text, parse_mode=ParseMode.MARKDOWN_V2 if use_markdown else None,
+-                    reply_to_message_id=reply_to_id, **thread_kwargs, **base),
+-                    timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
+-            except Exception as send_err:
+-                if "reply message not found" in str(send_err).lower():
+-                    # Private DM topic fallback needs anchor + topic id together; forum topics keep thread id.
+-                    retry_thread_kwargs = (
+-                        {} if self._dm_topic_fallback(metadata)
+-                        else self._thread_kwargs_for_send(chat_id, thread_id, metadata, reply_to_message_id=None))
+-                    try:
+-                        return await _await_with_thread_deadline(
+-                            self._bot.send_message(
+-                            chat_id=normalize_telegram_chat_id(chat_id), text=_strip_mdv2(chunk) if finalize else chunk,
+-                            **retry_thread_kwargs, **base),
+-                            timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
+-                    except Exception as _retry_err:
+-                        logger.warning(
+-                            "[%s] Overflow continuation no-reply retry failed: %s", self.name, _redact_telegram_error_text(_retry_err))
+-                        return None
+-                if use_markdown:
+-                    continue  # try plain text on next loop iteration
+-                logger.warning("[%s] Overflow continuation send failed: %s", self.name, _redact_telegram_error_text(send_err))
+-                return None
+-        return None
++        text = _separate_chunk_indicator_from_fence(self.format_message(chunk))
++        try:
++            return await _await_with_thread_deadline(
++                self._bot.send_message(chat_id=normalize_telegram_chat_id(chat_id), text=text,
++                    parse_mode=ParseMode.MARKDOWN_V2, reply_to_message_id=reply_to_id, **thread_kwargs, **base),
++                timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
++        except Exception as send_err:
++            if "reply message not found" in str(send_err).lower():
++                retry_thread_kwargs = ({} if self._dm_topic_fallback(metadata)
++                    else self._thread_kwargs_for_send(chat_id, thread_id, metadata, reply_to_message_id=None))
++                try:
++                    return await _await_with_thread_deadline(
++                        self._bot.send_message(chat_id=normalize_telegram_chat_id(chat_id), text=text,
++                            parse_mode=ParseMode.MARKDOWN_V2, **retry_thread_kwargs, **base),
++                        timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False)
++                except Exception as retry_err:
++                    logger.warning("[%s] Overflow continuation no-reply retry failed: %s", self.name, _redact_telegram_error_text(retry_err))
++                    return None
++            logger.warning("[%s] Overflow continuation send failed: %s", self.name, _redact_telegram_error_text(send_err))
++            return None
+ 
+     async def _edit_overflow_split(
+         self, chat_id: str, message_id: str, content: str, *, finalize: bool, metadata: Optional[dict[str, Any]] = None) -> SendResult:
+@@ -4041,7 +4025,7 @@
+                     chat_id, message_id, _separate_chunk_indicator_from_fence(self.format_message(first_chunk)), _strip_mdv2(first_chunk),
+                     "[%s] Overflow split: MarkdownV2 first-chunk edit failed, falling back to plain text: %s")
+             else:
+-                await self._edit_text(chat_id, message_id, first_chunk)
++                await self._edit_text(chat_id, message_id, self.format_message(first_chunk), ParseMode.MARKDOWN_V2)
+         except Exception as e:
+             if "not modified" not in str(e).lower():  # identical first chunk still sends continuations
+                 logger.error("[%s] Overflow split: first-chunk edit failed: %s", self.name, _redact_telegram_error_text(e), exc_info=True)
+@@ -4114,35 +4098,18 @@
+         # Drafts share the regular-send UTF-16 length contract.
+         text = content if len(
+             content) <= self.MAX_MESSAGE_LENGTH else self.truncate_message(content, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)[0]
+-        # Same MarkdownV2 conversion as ``send`` (MarkdownV2 then plain) so the draft doesn't snap at the end. Exception: a Rich
+-        # final with rich drafts disabled previews raw — the legacy formatter would turn pipe tables into bullets.
+-        plain_rich_preview = bool(
+-            getattr(self, "_rich_messages_enabled", False) and not getattr(self, "_rich_drafts_enabled", False)
+-            and self._needs_rich_rendering(text))
+-        draft_thread_kwargs = self._thread_kwargs_for_draft(chat_id, metadata)
+-        for use_markdown in ((False,) if plain_rich_preview else (True, False)):
+-            kwargs: dict[str, Any] = {
+-                "chat_id": normalize_telegram_chat_id(chat_id), "draft_id": int(draft_id),
+-                "text": self.format_message(text) if use_markdown else text}
+-            if use_markdown:
+-                kwargs["parse_mode"] = ParseMode.MARKDOWN_V2
+-            kwargs.update(draft_thread_kwargs)
+-            try:
+-                if await _await_with_thread_deadline(
+-                    self._bot.send_message_draft(**kwargs), timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False):
+-                    return SendResult(success=True, message_id=None)
+-                return SendResult(success=False, error="draft_rejected")
+-            except Exception as e:
+-                # MarkdownV2 parse failure → retry once as plain text; anything else returns to the caller,
+-                # which falls back to edit-based streaming for this response.
+-                if use_markdown and self._is_bad_request_error(e):
+-                    logger.debug(
+-                        "[%s] sendMessageDraft MarkdownV2 rejected, retrying as plain text (chat=%s draft_id=%s): %s",
+-                        self.name, chat_id, draft_id, _redact_telegram_error_text(e))
+-                    continue
+-                logger.debug("[%s] sendMessageDraft failed (chat=%s draft_id=%s): %s", self.name, chat_id, draft_id, e)
+-                return SendResult(success=False, error=_redact_telegram_error_text(e))
+-        return SendResult(success=False, error="draft_rejected")
++        # Черновик использует тот же формат; сырую разметку не отправляем даже при ошибке.
++        kwargs = {"chat_id": normalize_telegram_chat_id(chat_id), "draft_id": int(draft_id),
++                  "text": self.format_message(text), "parse_mode": ParseMode.MARKDOWN_V2}
++        kwargs.update(self._thread_kwargs_for_draft(chat_id, metadata))
++        try:
++            if await _await_with_thread_deadline(
++                self._bot.send_message_draft(**kwargs), timeout=_TEXT_SEND_DEADLINE, label="telegram-send", dump_on_blocked_loop=False):
++                return SendResult(success=True, message_id=None)
++            return SendResult(success=False, error="draft_rejected")
++        except Exception as error:
++            logger.debug("[%s] Formatted draft failed: %s", self.name, _redact_telegram_error_text(error))
++            return SendResult(success=False, error=_redact_telegram_error_text(error))
+ 
+     async def _send_message_with_thread_fallback(self, **kwargs):
+         """Send a control-style message (approval prompts, pickers), retrying once without
+@@ -4370,13 +4337,12 @@
+             reply_to_mode=self._reply_to_mode)
+ 
+     async def _edit_result_text(self, query, result_text: str) -> None:
+-        """Replace a picker message with ``result_text`` (MarkdownV2, then plain, then give up), keyboard removed."""
++        """Replace a picker message with formatted text; never retry with raw markup."""
+         result_text = self.strip_media_directives_for_display(result_text)
+         try:
+             await query.edit_message_text(text=self.format_message(result_text), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=None)
+         except Exception:
+-            with contextlib.suppress(Exception):
+-                await query.edit_message_text(text=result_text, parse_mode=None, reply_markup=None)
++            logger.warning("[%s] Formatted picker result was not delivered", self.name)
+ 
+     async def _handle_choice_picker_callback(self, query, data: str, chat_id: str) -> None:
+         """Handle choice picker button taps (cp:<index>)."""
+@@ -5651,6 +5617,7 @@
+         modified), markdown constructs become MarkdownV2 syntax, everything else is escaped."""
+         if not content:
+             return content
++        content = _brai_hide_bare_urls(content)
+         placeholders: dict = {}
+         counter = [0]
+ 
+@@ -6591,6 +6558,14 @@
          event = None
          try:
              await asyncio.sleep(delay)
@@ -203,7 +438,7 @@
              # Superseded flush (a newer chunk re-armed the timer while our sleep was already done):
              # CancelledError only lands at the next await, so check synchronously before the pop.
              owner = tasks.get(key)
-@@ -6599,7 +6607,9 @@
+@@ -6599,7 +6574,9 @@
              event = pending.pop(key, None)
              if not event:
                  return
@@ -214,7 +449,7 @@
                  self._hold_inbound_event(event, where=f"{where}-flush")
                  event = None
                  return
-@@ -6657,6 +6667,8 @@
+@@ -6657,6 +6634,8 @@
          if existing is None:
              pending[key] = event
              return
@@ -223,7 +458,7 @@
          existing.media_urls.extend(event.media_urls)
          existing.media_types.extend(event.media_types)
          if event.text:
-@@ -6678,6 +6690,8 @@
+@@ -6678,6 +6657,8 @@
          """Album items debounce on media_group_id; singles go through the photo burst batcher."""
          if self._drop_unresolved(event):  # identity FIRST: the batch lane is derived from it
              return
@@ -232,7 +467,7 @@
          media_group_id = getattr(msg, "media_group_id", None)
          if media_group_id:
              await self._queue_media_group_event(str(media_group_id), event)
-@@ -6714,6 +6728,8 @@
+@@ -6714,6 +6695,8 @@
                  cached_path = await cache_audio_from_bytes_async(bytes(data), ext=ext)
              event.media_urls = [cached_path]
              event.media_types = [mime]
@@ -241,7 +476,7 @@
              logger.info("[Telegram] Cached user %s at %s", kind, cached_path)
          except Exception as e:
              logger.warning("[Telegram] Failed to cache %s: %s", kind, _redact_telegram_error_text(e), exc_info=True)
-@@ -6782,7 +6798,7 @@
+@@ -6782,7 +6765,7 @@
                  self._set_cached_media(
                      event, await cache_video_from_bytes_async(bytes(video_bytes), ext=ext), SUPPORTED_VIDEO_TYPES[ext], MessageType.VIDEO,
                      "[Telegram] Cached user video document at %s")
@@ -250,7 +485,7 @@
                  return True
              # Any file type is accepted (authorization is the gate, not the extension); unknown types get
              # application/octet-stream. Image documents already returned above.
-@@ -6794,6 +6810,8 @@
+@@ -6794,6 +6777,8 @@
                  return await self._dispatch_with_text(event, f"Document '{display}' could not be cached.")
              event.media_urls = [cached.path]
              event.media_types = [cached.media_type]
@@ -259,7 +494,7 @@
              event.media_text_inlined = [False]  # flipped below once the text is actually injected
              if cached.kind == "audio":
                  event.message_type = MessageType.AUDIO
-@@ -6880,6 +6898,9 @@
+@@ -6880,6 +6865,9 @@
          if self._should_drop_delayed_delivery():
              self._hold_inbound_event(event, where="media-group-enqueue")
              return
@@ -269,7 +504,7 @@
          self._merge_into_pending(self._media_group_events, media_group_id, event)
          self._accept_update()
          prior_task = self._media_group_tasks.get(media_group_id)
-@@ -6912,6 +6933,10 @@
+@@ -6912,6 +6900,10 @@
              file_obj = await sticker.get_file()
              image_bytes = await file_obj.download_as_bytearray()
              cached_path = await cache_image_from_bytes_async(bytes(image_bytes), ext=".webp")
@@ -346,6 +581,52 @@
      if platform == Platform.WEIXIN:
          return await _send_weixin(pconfig, chat_id, message, media_files=media_files)
      # Telegram chunks internally on the *formatted* text (escaping inflates length).
+--- a/tools/send_message_senders.py
++++ b/tools/send_message_senders.py
+@@ -166,9 +166,7 @@
+ 
+ 
+ async def _telegram_send_text_chunk(bot, chat_id, chunk, parse_mode, has_html, text_kwargs):
+-    """One text chunk with adapter-matching fallbacks: thread-not-found -> retry without
+-    ``message_thread_id`` (dropped from ``text_kwargs`` for later chunks too); parse failure
+-    -> plain text."""
++    """Send formatted text; retry only a rejected thread route, never raw markup."""
+     async def send(text, mode):
+         return await _send_telegram_message_with_retry(bot, chat_id=chat_id, text=text, parse_mode=mode, **text_kwargs)
+     try:
+@@ -180,11 +178,6 @@
+             logger.warning("Thread %s not found in _send_telegram, retrying without message_thread_id",
+                            text_kwargs.pop("message_thread_id"))
+             return await send(chunk, parse_mode)
+-        err_text = str(md_error).lower()
+-        if "parse" in err_text or "markdown" in err_text or "html" in err_text:
+-            logger.warning("Parse mode %s failed in _send_telegram, falling back to plain text: %s",
+-                           parse_mode, _sanitize_error_text(md_error))
+-            return await send(chunk if has_html else _strip_mdv2_safe(chunk), None)
+         raise
+ 
+ 
+@@ -249,15 +242,14 @@
+     from telegram.constants import ParseMode
+     if re.search(r'<[a-zA-Z/][^>]*>', message):
+         return message, ParseMode.HTML, True
+-    try:
+-        from plugins.platforms.telegram.adapter import TelegramAdapter
+-        return TelegramAdapter.__new__(TelegramAdapter).format_message(message), ParseMode.MARKDOWN_V2, False
+-    except Exception:
+-        return message, ParseMode.MARKDOWN_V2, False  # formatting unavailable: send as-is
++    from plugins.platforms.telegram.adapter import TelegramAdapter
++    return TelegramAdapter.__new__(TelegramAdapter).format_message(message), ParseMode.MARKDOWN_V2, False
+ 
+ 
+ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):
+-    """One-shot Telegram Bot API send; parse failures fall back to plain text."""
++    """One-shot formatted Telegram text; files use the Artifacts delivery boundary."""
++    if media_files:
++        return {"error": "Telegram files must be delivered through Artifacts"}
+     try:
+         formatted, send_parse_mode, _has_html = _telegram_format(message)
+         bot = _telegram_bot(token)
 --- a/tools/file_tools.py
 +++ b/tools/file_tools.py
 @@ -612,6 +612,8 @@

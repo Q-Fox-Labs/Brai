@@ -41,6 +41,8 @@ export interface GameCoreHandlers {
   planningApply?(value: unknown, context?: OperationContext): Promise<unknown>;
   elementReclassify?(value: unknown, context?: OperationContext): Promise<unknown>;
   planningExpandRepeat?(value: unknown, context?: OperationContext): Promise<unknown>;
+  /** Убирает устаревшую приёмку готового артефакта без создания решения человека. */
+  resultReviewSkip?(value: unknown, context?: OperationContext): Promise<unknown>;
   /** Только DEV: меняет один статус и пишет аудит, не создавая результатов исполнения. */
   devStatus?(value: unknown, context?: OperationContext): Promise<unknown>;
   structureCreate(value: unknown, context?: OperationContext): Promise<unknown>;

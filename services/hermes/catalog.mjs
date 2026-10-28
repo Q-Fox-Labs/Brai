@@ -78,7 +78,7 @@ for (const [operation, request, response] of [
   add(`local_ai_${words}`, localAi.subjects[operation], 'local-ai', 'messages', request, response, 'ownerId', !['modelsList', 'modelsGet', 'catalogSearch', 'operationsGet', 'status'].includes(operation));
 }
 
-export const gameCoreNames = new Set(['game_core_structure_create', 'game_core_element_create', 'game_core_element_revise', 'game_core_element_reclassify', 'game_core_move_create', 'game_core_move_link', 'game_core_element_activate', 'game_core_graph_get', 'game_core_timeline_get', 'game_core_moves_available', 'game_core_move_claim', 'game_core_move_complete', 'game_core_move_fail', 'game_core_planning_packet', 'game_core_planning_bind', 'game_core_planning_build', 'game_core_planning_apply', 'game_core_planning_expand_repeat']);
+export const gameCoreNames = new Set(['game_core_structure_create', 'game_core_element_create', 'game_core_element_revise', 'game_core_element_reclassify', 'game_core_move_create', 'game_core_move_link', 'game_core_element_activate', 'game_core_graph_get', 'game_core_timeline_get', 'game_core_moves_available', 'game_core_move_claim', 'game_core_move_complete', 'game_core_move_fail', 'game_core_planning_packet', 'game_core_planning_bind', 'game_core_planning_build', 'game_core_planning_apply', 'game_core_planning_expand_repeat', 'game_core_result_review_skip']);
 export const historyNames = new Set(['history_categories_list', 'history_types_list', 'history_type_get']);
 export const transcriptionNames = new Set(['transcription_request_submit', 'transcription_request_get', 'transcription_request_cancel', 'transcription_models_list', 'transcription_settings_get', 'transcription_settings_set', 'transcription_result_get']);
 

@@ -247,8 +247,8 @@ test('final confirmation shows only required actual resources, not all available
   const { ports, graph, calls } = fixture();
   graph.moves[0].fields = { planning: { decision: 'final', output_contracts: [{}] } };
   graph.resources = [
-    { id: ids[4], title: 'Чек-лист', content: '1. План.\n2. Почта.\n3. Работа.' },
-    { id: ids[6], title: 'Внутренний контекст', content: 'Не для приёмки' },
+    { id: ids[4], title: 'Чек-лист', content: '1. План.\n2. Почта.\n3. Работа.', artifactIds: [ids[5]] },
+    { id: ids[6], title: 'Внутренний контекст', content: 'Не для приёмки', artifactIds: [ids[7]] },
   ];
   ports.mcp = async (endpoint, name, args) => {
     calls.push({ name, args });
@@ -260,6 +260,7 @@ test('final confirmation shows only required actual resources, not all available
   assert.equal((await human.read({ moveId: ids[2] })).confirmationText, null);
   const prepared = await human.prepare({ moveId: ids[2], revisionId: ids[1], idempotencyKey: 'review' });
   assert.deepEqual(prepared.inputResourceIds, [ids[4]]);
+  assert.deepEqual(prepared.confirmationFiles, [ids[5]]);
   assert.match(prepared.confirmationText, /1\. План\.\n2\. Почта\.\n3\. Работа\./);
   assert.doesNotMatch(prepared.confirmationText, /Внутренний контекст|Не для приёмки/);
 });

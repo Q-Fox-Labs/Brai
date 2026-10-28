@@ -7,7 +7,7 @@ import {spawnSync} from 'node:child_process';
 import {Pool} from 'pg';
 import {createGameHandlers} from '../dist/game.js';
 
-const fields=(title,inputs=[],outputs=[])=>({title,summary:`TEST ${title}`,inputs,context:'TEST вход известен.',scope:'Только результат теста.',constraints:'Без внешних действий.',preferences:'',unknowns:'',hypothesis:`Если вход сохранён, то получен ${title}.`,expected_result:`TEST ${title} готов.`,result_types:['Артефакт'],outputs});
+const fields=(title,inputs=[],outputs=[])=>({title,summary:`TEST ${title}`,inputs,context:'TEST вход известен.',scope:'Только результат теста.',constraints:'Без внешних действий.',preferences:'',unknowns:'',hypothesis:`Если вход сохранён, то получен ${title}.`,expected_result:`TEST ${title} готов.`,result_types:['Выбор','Артефакт'],outputs});
 
 test('planning PostgreSQL: Goal and Quest trees complete through child and root decisions',{skip:!process.env.GAME_CORE_OWNER_DATABASE_URL||!process.env.GAME_CORE_DATABASE_URL},async()=>{
  const admin=new Pool({connectionString:process.env.GAME_CORE_OWNER_DATABASE_URL}),app=new Pool({connectionString:process.env.GAME_CORE_DATABASE_URL});
