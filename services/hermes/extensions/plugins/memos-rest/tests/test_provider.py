@@ -1,3 +1,5 @@
+# ABOUTME: Проверяет запись и чтение памяти Hermes через тестовый MemOS API.
+# ABOUTME: Очередь проверяется без обращения к пользовательским данным.
 """Behaviour tests against the real Hermes loader/manager and a fake MemOS API."""
 
 import copy
@@ -116,6 +118,38 @@ class ProviderTests(unittest.TestCase):
             job = json.loads(path.read_text())
             job["next_attempt"] = 0
             path.write_text(json.dumps(job))
+
+    def test_blocked_turn_does_not_starve_later_turns_or_cross_delete_barrier(self):
+        outbox = self.provider.outbox
+        calls = []
+        fail = {'first': True}
+
+        class FakeClient:
+            def execute(self, job, checkpoint):
+                calls.append(job['label'])
+                if job['label'] == 'first' and fail['first']:
+                    raise RuntimeError('failed')
+                return [job['label']]
+
+        outbox.client = FakeClient()
+        def submit(label, operation='route', kind='turn'):
+            outbox.submit(label, {'label': label, 'operation': operation,
+                                  'body': {'info': {'hermes_kind': kind}}})
+        submit('first')
+        submit('second')
+        submit('business', kind='business_message')
+        submit('delete', 'forget')
+        submit('after-delete')
+        self.send()
+        self.assertEqual(calls, ['first', 'second', 'business'])
+        self.assertEqual(outbox.status()['pending'], 3)
+        self.send()
+        self.assertEqual(calls, ['first', 'second', 'business'], 'backoff must not cross the delete barrier')
+        fail['first'] = False
+        self.retry_now()
+        self.send()
+        self.assertEqual(calls, ['first', 'second', 'business', 'first', 'delete', 'after-delete'])
+        self.assertEqual(outbox.status()['pending'], 0)
 
     def test_nonblocking_sync_identity_and_readback(self):
         messages = [{"role": "user", "content": "Запомни: проект называется Север."},
