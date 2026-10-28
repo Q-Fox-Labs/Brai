@@ -292,6 +292,57 @@ class RoutingTests(unittest.TestCase):
         original = next(r for r in self.backend.rows.values() if r['cube'] == 'main')
         self.assertIn('Unrelated private detail.', original['memory'])
 
+    def test_long_dialogue_is_chunked_recovered_and_forgotten_as_one_memory(self):
+        text = ('Массаж 🟢 и уход. ' * 300)
+        self.router_reply([])
+        self.provider.sync_turn(text, '')
+        original_request = self.provider.client.request
+        lost = [False]
+        def limited_api(path, body=None, **extra):
+            if path == '/product/add':
+                part = body['messages'][0]['content']
+                self.assertLessEqual(len(part.encode('utf-8')), 768)
+                if not lost[0]:
+                    lost[0] = True
+                    self.backend.lose_response = True
+            return original_request(path, body, **extra)
+        self.provider.client.request = limited_api
+        self.send()
+        self.assertEqual(self.provider.outbox.status()['pending'], 1)
+        self.retry_now()
+        self.send()
+        self.assertEqual(self.provider.outbox.status()['pending'], 0)
+        rows = sorted(self.backend.rows.values(), key=lambda row: row['metadata']['info']['hermes_chunk_index'])
+        self.assertGreater(len(rows), 1)
+        self.assertEqual(''.join(row['memory'] for row in rows), text)
+        self.assertTrue(all(row['metadata']['info']['hermes_messages'][0]['content'] == text for row in rows))
+        self.assertEqual(len(rows), self.backend.add_count, 'lost response must not duplicate a part')
+        result = json.loads(self.provider.handle_tool_call('memos_forget', {'memory_id': rows[0]['id']}))
+        self.assertEqual(result['status'], 'pending')
+        self.send()
+        self.assertEqual(self.backend.rows, {}, 'forget must delete every part')
+
+    def test_corrupted_part_never_receives_a_delivery_receipt(self):
+        self.router_reply([])
+        self.provider.sync_turn('Сохранить текст. ' * 100, '')
+        original_request = self.provider.client.request
+        def corrupt_part(path, body=None, **extra):
+            result = original_request(path, body, **extra)
+            if path == '/product/get_memory':
+                for group in result['data']['text_mem']:
+                    for row in group['memories']:
+                        row['memory'] = 'corrupted'
+            return result
+        self.provider.client.request = corrupt_part
+        self.send()
+        self.assertEqual(self.provider.outbox.status()['pending'], 1)
+        self.assertEqual(self.provider.outbox.status()['verified_events'], 0)
+        self.assertIn('chunk_content', self.provider.outbox.status()['last_error'])
+        self.provider.client.request = original_request
+        self.retry_now()
+        self.send()
+        self.assertEqual(self.provider.outbox.status()['pending'], 0)
+
     def test_worker_archives_original_and_routes_grounded_atomic_fact(self):
         self.assertIsNotNone(getattr(self.provider, 'routing', None), 'semantic runtime must be enabled')
         self.router_reply([self.fact()])

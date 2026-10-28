@@ -242,6 +242,19 @@ class ProviderTests(unittest.TestCase):
         self.send()
         self.assertEqual(len(self.backend.rows), 0)
 
+    def test_legacy_forget_deletes_all_parts_after_pending_delivery(self):
+        text = 'Массаж и уход. ' * 160
+        self.provider.sync_turn(text, '')
+        self.backend.lose_response = True
+        self.send()
+        rows = list(self.backend.rows.values())
+        self.assertEqual(len(rows), 1)
+        result = json.loads(self.provider.handle_tool_call('memos_forget', {'memory_id': rows[0]['id']}))
+        self.assertEqual(result['status'], 'pending')
+        self.retry_now()
+        self.send()
+        self.assertEqual(self.backend.rows, {})
+
     def test_recall_budget_no_stale_indicator_on_failure(self):
         self.provider.sync_turn("Russian question Север", "reply " * 4000)
         self.send()
