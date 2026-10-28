@@ -17,7 +17,8 @@ function resolved(value, cwd) {
   // AIDEV-NOTE: Проверяем существующего предка, чтобы новые файлы через symlink тоже имели правильный repo.
   while (true) {
     try { return path.join(realpathSync(parent), path.relative(parent, absolute)); }
-    catch {
+    catch (error) {
+      if (!['ENOENT','ENOTDIR'].includes(error?.code)) throw error;
       const next = path.dirname(parent);
       if (next === parent) return absolute;
       parent = next;
@@ -183,17 +184,17 @@ function shellPaths(command, cwd) {
 }
 
 /** Извлекает только явные цели поддержанных edits и простых shell writes; неизвестное оставляет инструменту. */
-export function writePaths(event) {
+export function writePaths(event, resolveTarget = resolved) {
   const input = event.tool_input;
   const name = event.tool_name?.split('.').at(-1);
   const cwd = input?.workdir || input?.cwd || event.cwd || process.cwd();
   if (name === 'apply_patch') {
     const patch = typeof input === 'string' ? input : input?.command ?? input?.patch;
-    return typeof patch === 'string' ? [...patch.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)\r?$/gm)].map(match => resolved(match[1].replace(/\r$/, ''), cwd)) : [];
+    return typeof patch === 'string' ? [...patch.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)\r?$/gm)].map(match => resolveTarget(match[1].replace(/\r$/, ''), cwd)) : [];
   }
   if (name === 'Edit' || name === 'Write' || name === 'MultiEdit') {
     const file = input?.file_path ?? input?.path;
-    return typeof file === 'string' ? [resolved(file, cwd)] : [];
+    return typeof file === 'string' ? [resolveTarget(file, cwd)] : [];
   }
   if (name === 'Bash' || name === 'exec_command') {
     const command = input?.command ?? input?.cmd;
@@ -208,7 +209,11 @@ function denied(context, projects) {
 }
 
 /** Обрабатывает native write и завершения; не исполняет исходный инструмент. */
-export async function runHook(event, {env = process.env, config, connect = connectClient, wait = ms => new Promise(resolve => setTimeout(resolve, ms)), polls = 8} = {}) {
+export async function runHook(event, options = {}) {
+  try { return await runHookInner(event, options); }
+  catch { return denied('Невозможно безопасно определить цель записи; проверьте доступ к пути.', []); }
+}
+async function runHookInner(event, {env = process.env, config, connect = connectClient, wait = ms => new Promise(resolve => setTimeout(resolve, ms)), polls = 8, resolveTarget = resolved} = {}) {
   if (!config) {
     if (!env.CODEWORKS_HOOK_CONFIG) return {};
     try { config = JSON.parse(await readFile(env.CODEWORKS_HOOK_CONFIG, 'utf8')); }
@@ -238,7 +243,7 @@ export async function runHook(event, {env = process.env, config, connect = conne
     return {};
   }
   if (eventName !== 'PreToolUse') return {};
-  const files = writePaths(event);
+  const files = writePaths(event, resolveTarget);
   const input = event.tool_input, cwd = input?.workdir || input?.cwd || event.cwd || process.cwd();
   const name = event.tool_name?.split('.').at(-1);
   const shell = ['Bash','exec_command'].includes(name);
@@ -271,7 +276,7 @@ export async function runHook(event, {env = process.env, config, connect = conne
   // AIDEV-NOTE: Shell может содержать непрозрачный код; он не создаёт область и не переписывается.
   if (!['apply_patch', 'Write', 'Edit'].includes(name)) return deny('Используйте native файловую запись для подготовки области.');
   const key = env.CODEWORKS_WORKSPACE_KEY;
-  if (!key || !event.session_id || !event.turn_id || !event.tool_use_id) return deny('Укажите осмысленный CODEWORKS_WORKSPACE_KEY и повторите запись в поддерживаемой сессии.');
+  if (!event.session_id || !event.turn_id || !event.tool_use_id) return deny('Для записи нужны идентификаторы сессии и вызова.');
   let rewrite;
   if (name === 'apply_patch') {
     const field = typeof input === 'string' ? null : typeof input?.command === 'string' ? 'command' : typeof input?.patch === 'string' ? 'patch' : null;
@@ -290,9 +295,9 @@ export async function runHook(event, {env = process.env, config, connect = conne
     rewrite = target => ({...input, [field]: path.join(target, path.relative(root, files[0]))});
   }
   const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-  const kind = env.CODEWORKS_WORKSPACE_KIND || 'feature';
+  const kind = env.CODEWORKS_WORKSPACE_KIND;
   const payload = hash({tool_name:event.tool_name, tool_input:input, cwd, project_id:project.id, workspace_key:key, kind});
-  const args = {project_id:project.id, workspace_key:key, kind, session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, targets:files.map(f=>path.relative(root,f)), request_key:'hook-'+hash([project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
+  const args = {project_id:project.id, ...(key ? {workspace_key:key} : {}), ...(kind ? {kind} : {}), session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, targets:files.map(f=>path.relative(root,f)), request_key:'hook-'+hash([project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
   let client, result;
   try {
     client = await connect(await loadClientConfig(env));
@@ -312,7 +317,7 @@ export async function runHook(event, {env = process.env, config, connect = conne
     if (files.some(file => !inside(targetRoot, resolved(path.join(targetRoot, path.relative(root, file)), '/')))) return deny('Цель записи выходит за пределы рабочей области.');
     const updatedInput = rewrite(targetRoot);
     await client.call('write.admit', {project_id:project.id, write_call_id:result.write_call_id, rewritten_sha256:hash(updatedInput)});
-    return {hookSpecificOutput:{hookEventName:'PreToolUse', permissionDecision:'allow', updatedInput}};
+    return {hookSpecificOutput:{hookEventName:'PreToolUse', permissionDecision:'allow', updatedInput, additionalContext:`Запись перенаправлена в область Codeworks ${result.workspace_key}: ${result.path}; ветка ${result.branch}; workspace_id=${result.workspace_id}. Продолжайте работу в этом дереве.`}};
   } catch {
     if (client) try { await client.call('write.stop', {project_id:project.id,session_id:event.session_id,turn_id:event.turn_id,event:'Stop',...(result?.write_call_id ? {write_call_id:result.write_call_id} : {tool_use_id:event.tool_use_id}),reason:'prepare_pending'}); } catch {}
     return deny('PREPARE_PENDING: запись остановлена; проверьте status и повторите её после подготовки.');

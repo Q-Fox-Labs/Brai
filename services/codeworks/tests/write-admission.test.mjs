@@ -12,7 +12,7 @@ test('stop leaves in-flight write uncertain',async()=>{const f=fixture(false);as
 test('stop stores only safe event and reason for never-admitted calls',async()=>{
  const f=fixture(false);await f.api.stop({project_id:'p',session_id:'s',turn_id:'t',event:'Stop',reason:'prepare_pending'},'e');
  const query=f.queries.find(q=>q.sql.includes('UPDATE codeworks.write_calls SET state=CASE'));
- assert.match(query.sql,/state IN \('preparing','denied_pending'\).*stop_event/);assert.deepEqual(query.args.slice(-2),['Stop','prepare_pending']);
+ assert.match(query.sql,/state IN \('preparing','denied_pending'\).*stop_event/);assert.match(query.sql,/prepare_pending.*THEN NULL/);assert.deepEqual(query.args.slice(-2),['Stop','prepare_pending']);
 });
 test('stopped call never starts a new preparation',async()=>{
  let called=false;const existing={id:'c',workspace_id:null,state:'denied_pending',tool_name:'apply_patch',payload_sha256:'a',targets:['src/a'],workspace_key:'task',kind:'feature',request_key:'r'};
@@ -26,4 +26,25 @@ test('replay for removed workspace never returns its former path',async()=>{
  const query=async sql=>sql.startsWith('SELECT * FROM codeworks.write_calls')?{rows:[existing],rowCount:1}:{rows:[],rowCount:0};
  const api=createWriteAdmission({connect:async()=>({query,release(){}})},{prepare:async()=>assert.fail('must not recreate'),workspace:async()=>({workspace:{removed_at:'now'}}),inspect:async()=>{}});
  await assert.rejects(api.begin({project_id:'p',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'apply_patch',payload_sha256:'a',targets:['src/a'],workspace_key:'task',request_key:'r'},'e'),{code:'CONFLICT'});
+});
+
+test('one session reuses one key for multiple targets and gets a new key after removal',async()=>{
+ const rows=[],workspaces=new Map();let sequence=0;
+ const query=async(sql,args=[])=>{
+  if(sql.startsWith('INSERT INTO codeworks.write_calls')) {rows.push({id:args[0],project_id:args[1],executor_id:args[2],session_id:args[3],turn_id:args[4],tool_use_id:args[5],tool_name:args[6],payload_sha256:args[7],targets:JSON.parse(args[8]),workspace_key:args[9],kind:args[10],request_key:args[11],state:'preparing',workspace_id:null});return {rowCount:1,rows:[]};}
+  if(sql.startsWith('SELECT * FROM codeworks.write_calls WHERE project_id='))return {rows:rows.filter(x=>x.project_id===args[0]&&x.executor_id===args[1]&&x.session_id===args[2]&&x.turn_id===args[3]&&x.tool_use_id===args[4]),rowCount:1};
+  if(sql.includes('SELECT c.workspace_key,c.kind'))return {rows:rows.filter(x=>x.session_id===args[2]&&(!x.workspace_id||!workspaces.get(x.workspace_id)?.removed_at)).map(x=>({workspace_key:x.workspace_key,kind:x.kind,workspace_id:x.workspace_id,lifecycle:'active',workflow_state:'open'}))};
+  if(sql.startsWith('UPDATE codeworks.write_calls SET workspace_id=')) {const row=rows.find(x=>x.id===args[0]);row.workspace_id=args[1];row.operation_id=args[2];return {rows:[row],rowCount:1};}
+  return {rows:[],rowCount:0};
+ };
+ const pool={query,connect:async()=>({query,release(){}})};
+ const api=createWriteAdmission(pool,{prepare:async args=>{let w=[...workspaces.values()].find(x=>x.workspace_key===args.workspace_key&&!x.removed_at);if(!w){const id='w'+(++sequence);w={id,workspace_key:args.workspace_key,kind:args.kind,path:'/tree/'+id,branch:'feature/'+args.workspace_key};workspaces.set(id,w);}return {workspace_id:w.id,operation_id:'o'+w.id,path:w.path,branch:w.branch};},workspace:async(_,id)=>({workspace:workspaces.get(id)}),inspect:async()=>({})});
+ const input=(tool,targets)=>({project_id:'p',session_id:'s',turn_id:'t',tool_use_id:tool,tool_name:'apply_patch',payload_sha256:tool,targets,request_key:tool});
+ const first=await api.begin(input('one',['services/auth/index.mjs']),'e');
+ const second=await api.begin(input('two',['apps/web/form.ts']),'e');
+ assert.equal(first.workspace_key,second.workspace_key);assert.equal(first.workspace_id,second.workspace_id);
+ assert.equal((await api.begin(input('one',['services/auth/index.mjs']),'e')).workspace_key,first.workspace_key);
+ workspaces.get(first.workspace_id).removed_at='now';
+ const third=await api.begin(input('three',['services/auth/index.mjs']),'e');
+ assert.notEqual(third.workspace_key,first.workspace_key);assert.notEqual(third.workspace_id,first.workspace_id);
 });
