@@ -17,6 +17,19 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
       // AIDEV-NOTE: Одна сессия выбирает область атомарно до обращения к внешнему prepare.
       await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',['write-session:'+JSON.stringify([args.project_id,executorId,args.session_id])]);
       const identity=[args.project_id,executorId,args.session_id,args.turn_id,args.tool_use_id];
+      // AIDEV-NOTE: Сначала блокируем незакреплённые вызовы: private prepare проверяет ту же строку.
+      await db.query('SELECT id FROM codeworks.write_calls WHERE project_id=$1 AND executor_id=$2 AND session_id=$3 AND workspace_id IS NULL FOR UPDATE',identity.slice(0,3));
+      await db.query(`UPDATE codeworks.write_calls c SET workspace_id=o.workspace_id,operation_id=o.id,updated_at=now()
+        FROM codeworks.requests r JOIN codeworks.operations o ON o.id=r.operation_id
+        WHERE c.project_id=$1 AND c.executor_id=$2 AND c.session_id=$3 AND c.workspace_id IS NULL
+          AND r.project_id=c.project_id AND r.executor_id=c.executor_id AND r.idempotency_key=c.request_key
+          AND o.project_id=c.project_id AND o.kind='prepare' AND o.workspace_id IS NOT NULL
+          AND o.request->>'workspace_key'=c.workspace_key AND COALESCE(o.request->>'kind','feature')=c.kind`,identity.slice(0,3));
+      // AIDEV-NOTE: Истечение относится только к вызову без принятого prepare; оно не доказывает остановку писателя.
+      await db.query(`UPDATE codeworks.write_calls c SET state='denied_pending',updated_at=now()
+        WHERE c.project_id=$1 AND c.executor_id=$2 AND c.session_id=$3 AND c.workspace_id IS NULL
+          AND c.state='preparing' AND c.created_at<now()-interval '2 minutes'
+          AND NOT EXISTS (SELECT 1 FROM codeworks.requests r WHERE r.project_id=c.project_id AND r.executor_id=c.executor_id AND r.idempotency_key=c.request_key)`,identity.slice(0,3));
       let found=(await db.query('SELECT * FROM codeworks.write_calls WHERE project_id=$1 AND executor_id=$2 AND session_id=$3 AND turn_id=$4 AND tool_use_id=$5 FOR UPDATE',identity)).rows[0];
       if (!found) {
         let key=args.workspace_key, kind=args.kind;
@@ -30,7 +43,7 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
             FROM codeworks.write_calls c LEFT JOIN codeworks.workspaces w ON w.id=c.workspace_id
             LEFT JOIN codeworks.workflow_registry r ON r.workspace_id=w.id
             WHERE c.project_id=$1 AND c.executor_id=$2 AND c.session_id=$3 AND
-              ((c.workspace_id IS NULL AND c.state IN ('preparing','denied_pending')) OR (c.workspace_id IS NOT NULL AND w.removed_at IS NULL))`,identity.slice(0,3))).rows;
+              ((c.workspace_id IS NULL AND c.state='preparing') OR (c.workspace_id IS NOT NULL AND w.removed_at IS NULL))`,identity.slice(0,3))).rows;
           if (entries.some(e=>e.workspace_id && (e.lifecycle && e.lifecycle!=='active' || e.workflow_state && e.workflow_state!=='open'))) throw new Fault('CONFLICT','Previous workspace is closing.');
           const choices=new Map(entries.map(e=>[e.workspace_key+'\0'+e.kind,e]));
           const workspaceIds=new Set(entries.map(e=>e.workspace_id).filter(Boolean));

@@ -70,3 +70,20 @@ test('only completed ordinary Git shell calls finish writer accounting',async()=
 });
 
 test('unreadable target fails closed before contacting Codeworks',async()=>{const f=fixture();f.options.resolveTarget=()=>{throw Object.assign(new Error('private path'),{code:'EACCES'});};const result=await runHook(patch(valid),f.options);assert.equal(result.hookSpecificOutput.permissionDecision,'deny');assert.equal(f.calls.length,0);assert.doesNotMatch(JSON.stringify(result),/private path/);});
+
+test('foreground checks and read-only pipelines finish but background and opaque commands stay protected',async()=>{
+ for(const command of ['node --test services/codeworks/tests/hook.test.mjs','node services/codeworks/components/cli.mjs build codeworks','node services/codeworks/components/cli.mjs check codeworks','node services/codeworks/components/cli.mjs package codeworks','node services/codeworks/components/cli.mjs run codeworks','rg -n pattern src | head -n 10','sed -n 1,20p src/file && git status --short']) {
+  const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:'Chunk ID: test\nWall time: 1\nProcess exited with code 0\nOutput:\n'},f.options);assert.equal(f.calls[0]?.method,'write.finish',command);
+ }
+ for(const command of ['node --test tests/a &','nohup node --test tests/a','node script.mjs','node -e evil','node services/codeworks/components/cli.mjs run codeworks &','rg word src | sh','sed -n 1w/tmp/out src/file']) {
+  const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:{exit_code:0}},f.options);assert.equal(f.calls.length,0,command);
+ }
+});
+test('output text cannot impersonate native completion',async()=>{const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'node --test tests/a'},tool_response:'Process running\nOutput:\nProcess exited with code 0'},f.options);assert.equal(f.calls.length,0);});
+
+test('safe backend failures keep their reason without exposing details',async()=>{
+ for(const code of ['FORBIDDEN','CLEANUP_ALREADY_STARTED','CONFLICT','WRITE_CALL_MISMATCH','INVALID_ARGUMENT','INTERNAL']) {
+  const f=fixture();f.options.connect=async()=>({call:async(method)=>{if(method==='write.begin')throw Object.assign(new Error('secret private stderr'),{code});return {};},close(){}});
+  const out=await runHook(patch(valid),f.options);assert.match(out.hookSpecificOutput.additionalContext,new RegExp(code));assert.doesNotMatch(JSON.stringify(out),/PREPARE_PENDING|secret private stderr/);
+ }
+});

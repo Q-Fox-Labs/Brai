@@ -137,10 +137,36 @@ function synchronousGit(command) {
   }
   return false;
 }
+// Обрабатываем только проверяемые foreground argv; произвольные скрипты и фоновые операции остаются неизвестными.
+function foregroundCommand(command) {
+  if (typeof command !== 'string') return false;
+  const tokens=shellTokens(command);
+  if (!tokens.length || tokens.some(t=>t.dynamic)) return false;
+  let segment=[];
+  const allowed = () => {
+    if (!segment.length) return false;
+    const words=segment.map(t=>t.word);
+    const literal=words.map(w=>"'"+w.replaceAll("'", "'\\''")+"'").join(' ');
+    if (readOnlyShell(literal) || synchronousGit(literal)) return true;
+    if (words[0]==='head' || words[0]==='tail') return words.slice(1).every(w=>!w.startsWith('-') || /^-(?:n)?[0-9]+$/.test(w) || w==='-n');
+    if (words[0]==='sed') return words[1]==='-n' && /^\d+(?:,\d+)?p$/.test(words[2]??'') && words.slice(3).every(w=>!w.startsWith('-'));
+    if (words[0]!=='node') return false;
+    if (words[1]==='--test') return words.slice(2).every(w=>!w.startsWith('-') || /^--test-(?:reporter|name-pattern|concurrency)=.+$/.test(w));
+    if (!/^(?:\.\/)?services\/codeworks\/components\/cli\.mjs$/.test(words[1]??'') || !['build','check','package','run','plan','validate'].includes(words[2])) return false;
+    return words.slice(3).every(w=>!w.startsWith('-') || ['--base','--root','--no-deps'].includes(w));
+  };
+  for (const token of tokens) {
+    if (!token.operator) {segment.push(token);continue;}
+    if (!['&&',';','|','\n'].includes(token.operator) || !allowed()) return false;
+    segment=[];
+  }
+  return allowed();
+}
 function completedShell(response) {
   if (response && typeof response==='object' && Number.isInteger(response.exit_code) && !response.session_id) return response.exit_code;
   if (typeof response!=='string' || /(?:session[_ ]id|process running|still running)/i.test(response)) return null;
-  const match=response.match(/(?:Process exited with code|exit code)\s*:?\s*(\d+)\b/i);
+  const header=response.split(/\nOutput:\s*\n/)[0];
+  const match=header.match(/^Process exited with code\s*:?\s*(\d+)\s*$/im);
   return match ? Number(match[1]) : null;
 }
 
@@ -208,6 +234,12 @@ function denied(context, projects) {
   return {hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `Запись в основную копию требует рабочей области Codeworks. Защищённые проекты: ${scope}.`, additionalContext: context}};
 }
 
+const safeHookCodes=new Set(['FORBIDDEN','CONFLICT','WRITE_CALL_MISMATCH','CLEANUP_ALREADY_STARTED','INVALID_ARGUMENT','INTERNAL','NOT_FOUND','WORKSPACE_WRITE_REQUIRED','WRITER_OUTCOME_UNKNOWN','PREPARE_PENDING','BUSY']);
+function hookFailure(error) {
+  const code=safeHookCodes.has(error?.code) ? error.code : 'BACKEND_UNAVAILABLE';
+  return `${code}: запись остановлена; проверьте состояние Codeworks.`;
+}
+
 /** Обрабатывает native write и завершения; не исполняет исходный инструмент. */
 export async function runHook(event, options = {}) {
   try { return await runHookInner(event, options); }
@@ -225,8 +257,8 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     if (!event.session_id || !event.turn_id || (eventName === 'PostToolUse' && !event.tool_use_id)) return {};
     const shellPost = eventName === 'PostToolUse' && ['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1));
     const exitCode = shellPost ? completedShell(event.tool_response) : null;
-    // AIDEV-NOTE: Только обычный завершённый Git вызов снимает учёт; другие shell могут оставить потомков.
-    if (shellPost && (!synchronousGit(event.tool_input?.command ?? event.tool_input?.cmd) || exitCode === null)) return {};
+    // AIDEV-NOTE: Только распознанный завершённый foreground вызов снимает учёт; произвольный shell может оставить потомков.
+    if (shellPost && (!foregroundCommand(event.tool_input?.command ?? event.tool_input?.cmd) || exitCode === null)) return {};
     let client;
     try {
       client = await connect(await loadClientConfig(env));
@@ -318,9 +350,9 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     const updatedInput = rewrite(targetRoot);
     await client.call('write.admit', {project_id:project.id, write_call_id:result.write_call_id, rewritten_sha256:hash(updatedInput)});
     return {hookSpecificOutput:{hookEventName:'PreToolUse', permissionDecision:'allow', updatedInput, additionalContext:`Запись перенаправлена в область Codeworks ${result.workspace_key}: ${result.path}; ветка ${result.branch}; workspace_id=${result.workspace_id}. Продолжайте работу в этом дереве.`}};
-  } catch {
+  } catch (error) {
     if (client) try { await client.call('write.stop', {project_id:project.id,session_id:event.session_id,turn_id:event.turn_id,event:'Stop',...(result?.write_call_id ? {write_call_id:result.write_call_id} : {tool_use_id:event.tool_use_id}),reason:'prepare_pending'}); } catch {}
-    return deny('PREPARE_PENDING: запись остановлена; проверьте status и повторите её после подготовки.');
+    return deny(hookFailure(error));
   }
   finally { try { await client?.close(); } catch {} }
 }
@@ -343,9 +375,9 @@ async function existingWrite(event, area, {env,connect,files,shell,cwd,input,nam
     if (result.workspace_id!==area.id || resolved(result.path,'/')!==area.root) throw Error('WORKSPACE_MISMATCH');
     await client.call('write.admit',{project_id:area.project.id,write_call_id:result.write_call_id,rewritten_sha256:hash(input)});
     return {hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'allow'}};
-  } catch {
+  } catch (error) {
     if (client) try { await client.call('write.stop',{project_id:area.project.id,session_id:event.session_id,turn_id:event.turn_id,event:'Stop',...(result?.write_call_id ? {write_call_id:result.write_call_id} : {tool_use_id:event.tool_use_id}),reason:'prepare_pending'}); } catch {}
-    return deny('Не удалось подтвердить допуск записи; проверьте состояние области.');
+    return deny(hookFailure(error));
   } finally { try { await client?.close(); } catch {} }
 }
 
