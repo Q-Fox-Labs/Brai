@@ -288,3 +288,10 @@ test('project index policy and transfer destinations are explicit and strict',()
   for(const policy of [{enabled:false,extra:true},{enabled:'false'},{}])assert.throws(()=>validate('project',{...project,code_index_policy:policy}));
   for(const destination of [{repo_path:'relative',origin:'https://github.com/example/repository.git'},{repo_path:'/srv/../repo',origin:'https://github.com/example/repository.git'},{repo_path:'/srv/repo',origin:'http://github.com/example/repository.git'},{repo_path:'/srv/repo',origin:'https://github.com/example/repository.git',extra:true}])assert.throws(()=>validate('project',{...project,transfer_destinations:[destination]}));
 });
+
+
+test('project cleanup archive configuration requires absolute roots and a nonnegative uid',()=>{
+  const {project}=fixture();
+  validate('project',{...project,cleanup_archive_roots:['/var/lib/codeworks/archive'],cleanup_archive_uid:0});
+  for(const fields of [{cleanup_archive_roots:['relative']},{cleanup_archive_uid:-1},{cleanup_archive_uid:'0'},{cleanup_archive_roots:['/ok',42]}])assert.throws(()=>validate('project',{...project,...fields}));
+});
