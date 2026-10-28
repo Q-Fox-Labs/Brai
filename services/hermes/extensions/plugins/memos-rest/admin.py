@@ -11,8 +11,8 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 
 from utils import atomic_json_write
-from .client import Client, MemOSError
-from .router import Catalog, stable_id
+from .client import Client, MemOSError, business_private
+from .router import Catalog, SemanticRouter, stable_id, QUALITY_VERSION
 
 
 @contextmanager
@@ -110,6 +110,213 @@ class Admin:
         with file_lock(self.root / 'delivery.lock', timeout):
             pass
         return self.status()
+
+    def quality_plan(self, scope):
+        """Проверить факты без изменения MemOS, сохранив обратимый план в профиле.
+
+        Источники и копии проверяются по owner/home/epoch. Пользовательские данные
+        плана остаются в закрытом runtime-каталоге и не попадают в вывод CLI.
+        """
+        cubes = self.scope(scope)
+        config = self.config()
+        catalog = Catalog(self.home)
+        router = SemanticRouter(config.get('router', {}), catalog)
+        api = self.api or Client(config)
+        clients = {cube: Client({**config, 'cube_id': cube}) for cube in cubes}
+        for client in clients.values():
+            client.request = api.request
+        rows = [row for client in clients.values() for row in client.get({})
+                if self._quality_allowed(row, config)]
+        sources = {}
+        groups = {}
+        for row in rows:
+            meta, info = row['metadata'], row['metadata']['info']
+            key = (info['hermes_author_id'], meta.get('session_id'))
+            if info.get('hermes_kind') in ('turn', 'native', 'explicit'):
+                sources.setdefault(key, {})[info['hermes_event_id']] = info.get('hermes_messages', [])
+            elif info.get('hermes_kind') == 'fact':
+                groups.setdefault(key, {}).setdefault(info['hermes_logical_id'], []).append(row)
+        directory = self.root / 'quality'
+        directory.mkdir(mode=0o700, exist_ok=True)
+        plan_id = uuid.uuid4().hex
+        plan = {'version': QUALITY_VERSION, 'id': plan_id, 'scope': scope,
+                'epoch': config['memory_epoch'], 'home_scope': stable_id(str(self.home.resolve())),
+                'items': []}
+        path = directory / (plan_id + '.json')
+        for key, logical in groups.items():
+            events = sources.get(key, {})
+            context = [m['content'] for event in events.values() for m in event if m.get('role') == 'user']
+            context = context if sum(map(len, context)) <= 48000 else context[:2] + context[-12:]
+            context = [t if len(t) <= 4000 else t[:2000] + '\n[context excerpt]\n' + t[-2000:] for t in context]
+            candidates, items = [], []
+            for logical_id, copies in logical.items():
+                info = copies[0]['metadata']['info']
+                quote = info.get('hermes_source', {}).get('quote', '')
+                role = info.get('hermes_source', {}).get('role')
+                grounded = bool(quote) and any(quote in m.get('content', '') and m.get('role') == role
+                    for m in events.get(info.get('hermes_source_event'), []))
+                item = {'logical_id': logical_id, 'before': copies, 'accepted': False,
+                        'grounded': grounded, 'memberships': []}
+                items.append(item)
+                if grounded:
+                    candidates.append({'_logical_id': logical_id, 'text': info['hermes_messages'][0]['content'],
+                        'source': info['hermes_source'], 'status': info.get('hermes_status', 'unknown'),
+                        'spheres': info.get('hermes_spheres', []), 'projects': info.get('hermes_projects', []),
+                        'memberships': info.get('hermes_memberships', [])})
+            accepted = {}
+            for start in range(0, len(candidates), 20):
+                for fact in router.review(candidates[start:start + 20], context):
+                    accepted[fact['_logical_id']] = fact
+            rejected = [fact for fact in candidates if fact['_logical_id'] not in accepted]
+            for start in range(0, len(rejected), 20):
+                for fact in router.review(rejected[start:start + 20], context, conservative=True):
+                    accepted[fact['_logical_id']] = fact
+            for item in items:
+                if item['logical_id'] in accepted:
+                    fact = accepted[item['logical_id']]
+                    item.update(accepted=True, memberships=fact['memberships'], spheres=fact['spheres'])
+                plan['items'].append(item)
+            atomic_json_write(path, plan, mode=0o600, fsync_dir=True)
+        plan['complete'] = True
+        atomic_json_write(path, plan, mode=0o600, fsync_dir=True)
+        return self.quality_summary(plan) | {'plan_id': plan_id, 'plan_sha': stable_id(plan)}
+
+    def _quality_allowed(self, row, config):
+        """Отобрать только обычную память текущего профиля, без Business-приватных строк."""
+        meta = row.get('metadata') or {}
+        info = meta.get('info') or {}
+        return (meta.get('user_id') == config['user_id'] and not business_private(row)
+                and info.get('hermes_home_scope') == stable_id(str(self.home.resolve()))
+                and info.get('hermes_memory_epoch') == config['memory_epoch']
+                and row.get('_cube_id') in Catalog(self.home).cubes
+                and info.get('hermes_cube') == row.get('_cube_id'))
+
+    @staticmethod
+    def quality_summary(plan):
+        """Вернуть только счётчики плана, без содержимого воспоминаний."""
+        items = plan['items']
+        return {'facts_reviewed': len(items), 'rejected': sum(not i['accepted'] for i in items),
+                'retained': sum(i['accepted'] for i in items),
+                'rerouted': sum(i['accepted'] and set(i['memberships']) !=
+                    {r['_cube_id'] for r in i['before']} for i in items),
+                'ungrounded': sum(not i['grounded'] for i in items)}
+
+    def quality_apply(self, scope, plan_id, plan_sha, timeout=120):
+        """Применить согласованный точный план под locks, сохраняя исходники и logical ID.
+
+        Требует frozen профиль. Новые копии подтверждаются до удаления старых.
+        План содержит исходные записи; журнал позволяет продолжить тот же переход.
+        Никакие purge/handoff, epoch, SQL-права или bulk_clear_locked не меняются.
+        """
+        self.scope(scope)
+        if not isinstance(plan_id, str) or uuid.UUID(plan_id).hex != plan_id:
+            raise ValueError('Invalid quality plan ID')
+        path = self.root / 'quality' / (plan_id + '.json')
+        plan = json_file(path)
+        if (stable_id(plan) != plan_sha or plan.get('version') != QUALITY_VERSION or plan.get('complete') is not True
+                or plan.get('scope') != scope or plan.get('id') != plan_id
+                or plan.get('home_scope') != stable_id(str(self.home.resolve()))):
+            raise ValueError('Quality plan identity/digest mismatch')
+        state_path = path.with_suffix('.progress.json')
+        with file_lock(self.root / 'admin.lock', timeout), file_lock(self.root / 'delivery.lock', timeout), file_lock(self.root / 'submit.lock', timeout):
+            self.scope(scope)
+            config = self.config()
+            if config.get('frozen') is not True or config['memory_epoch'] != plan['epoch']:
+                raise ValueError('Quality apply requires frozen matching epoch')
+            if config.get('bulk_clear_locked') is True:
+                raise ValueError('Memory protection is locked; reviewed plan needs separate owner authorization for one-time application')
+            if any((self.root / 'pending').glob('*.json')):
+                raise ValueError('Drain pending deliveries before quality apply')
+            state = json_file(state_path, {'plan_sha': plan_sha, 'items': {}})
+            if state.get('plan_sha') != plan_sha:
+                raise ValueError('Quality progress belongs to another plan')
+            api = self.api or Client(config)
+            def client(cube):
+                if cube not in scope['managed_cubes']:
+                    raise ValueError('Quality target cube is unmanaged')
+                value = Client({**config, 'cube_id': cube}); value.request = api.request
+                return value
+            def save():
+                atomic_json_write(state_path, state, mode=0o600, fsync_dir=True)
+            # AIDEV-NOTE: Проверить весь исходный набор до первого изменения.
+            current = {(cube, row['id']): row for cube in scope['managed_cubes'] for row in client(cube).get({})}
+            seen = set()
+            for item in plan['items']:
+                logical = item['logical_id']
+                if logical in seen or not item['before']:
+                    raise ValueError('Invalid duplicate/empty quality item')
+                seen.add(logical)
+                for row in item['before']:
+                    info = row.get('metadata', {}).get('info', {})
+                    if (not self._quality_allowed(row, config) or info.get('hermes_kind') != 'fact'
+                            or info.get('hermes_logical_id') != logical):
+                        raise ValueError('Quality snapshot crosses memory scope')
+                    actual = current.get((row['_cube_id'], row['id']))
+                    started = logical in state['items']
+                    if actual is not None and stable_id(actual) != stable_id(row):
+                        raise ValueError('Quality snapshot changed; prepare a fresh plan')
+                    if actual is None and not started:
+                        raise ValueError('Quality snapshot missing before apply')
+                if any(c not in scope['managed_cubes'] for c in item['memberships']):
+                    raise ValueError('Quality membership is unmanaged')
+            for item in plan['items']:
+                logical = item['logical_id']
+                progress = state['items'].setdefault(logical, {'units': {}, 'done': False})
+                if progress['done']:
+                    continue
+                save()
+                original = item['before'][0]
+                info = original['metadata']['info']
+                if (item['accepted'] and set(item['memberships']) == {r['_cube_id'] for r in item['before']}
+                        and set(item['spheres']) == set(info.get('hermes_spheres', []))):
+                    progress['done'] = True
+                    save()
+                    continue
+                kept = []
+                if item['accepted']:
+                    for cube in item['memberships']:
+                        if cube not in progress['units']:
+                            updated = {**info, 'hermes_event_id': stable_id([QUALITY_VERSION, logical, cube]),
+                                'hermes_quality_version': QUALITY_VERSION, 'hermes_spheres': item['spheres'],
+                                'hermes_cube': cube, 'hermes_primary_cube': item['memberships'][0],
+                                'hermes_memberships': item['memberships']}
+                            updated['hermes_payload_hash'] = stable_id({k:v for k,v in updated.items() if k != 'hermes_payload_hash'})
+                            progress['units'][cube] = {'body': {'session_id': original['metadata']['session_id'],
+                                'messages': info['hermes_messages'], 'info': updated}}
+                            save()
+                        kept.extend(client(cube).execute(progress['units'][cube], lambda _: save()))
+                for row in item['before']:
+                    if row['id'] not in kept:
+                        client(row['_cube_id']).delete([row['id']])
+                progress['done'] = True
+                save()
+            # AIDEV-NOTE: Квитанции явного remember/повтора не должны ссылаться
+            # на удалённые копии; исходный event ID при переклассификации сохраняется.
+            by_event, facts_by_event = {}, {}
+            for cube in scope['managed_cubes']:
+                for row in client(cube).get({}):
+                    if not self._quality_allowed(row, config):
+                        continue
+                    info = row['metadata']['info']
+                    event = info.get('hermes_source_event') if info.get('hermes_kind') == 'fact' else info.get('hermes_event_id')
+                    by_event.setdefault(event, set()).add(row['id'])
+                    if info.get('hermes_kind') == 'fact':
+                        facts_by_event.setdefault(event, set()).add(info['hermes_logical_id'])
+            events = {item['before'][0]['metadata']['info'].get('hermes_source_event') for item in plan['items']}
+            for event in events:
+                if not isinstance(event, str) or len(event) != 64 or any(c not in '0123456789abcdef' for c in event):
+                    raise ValueError('Invalid source event in quality plan')
+                receipt_path = self.root / 'receipts' / (event + '.json')
+                receipt = json_file(receipt_path)
+                if receipt:
+                    if receipt.get('event_id') != event:
+                        raise ValueError('Source receipt identity changed')
+                    receipt.update(memory_ids=sorted(by_event.get(event, set())), fact_count=len(facts_by_event.get(event, set())),
+                                   quality_version=QUALITY_VERSION, quality_plan_id=plan_id)
+                    atomic_json_write(receipt_path, receipt, mode=0o600, fsync_dir=True)
+            state['complete'] = True
+            save()
+        return self.quality_summary(plan) | {'complete': True, 'plan_id': plan_id}
 
     def resume(self, scope):
         self.scope(scope)
