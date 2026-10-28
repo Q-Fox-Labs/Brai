@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import html
 import importlib
 import importlib.util
 import logging
@@ -459,20 +458,6 @@ def _uuid(value):
     return isinstance(value, str) and re.fullmatch(UUID, value) is not None
 
 
-def _confirmation_html_chunk(chunk, first_line, bold_lines):
-    """Escape one original-text chunk and add only trusted Telegram bold tags."""
-    rendered = []
-    for offset, line in enumerate(chunk.splitlines(keepends=True)):
-        body = line[:-1] if line.endswith("\n") else line
-        newline = "\n" if line.endswith("\n") else ""
-        number = first_line + offset
-        bold = number in bold_lines
-        escaped = html.escape(body, quote=False)
-        rendered.append(f"<b>{escaped}</b>" if bold else escaped)
-        rendered.append(newline)
-    return "".join(rendered)
-
-
 class TelegramPlugin:
     """Собирает native hooks, private RPC и локальное состояние подтверждений."""
 
@@ -483,7 +468,7 @@ class TelegramPlugin:
         self.tokens = Tokens(config.state_dir)
         self.inject_message = inject_message
         self.session_store = None
-        self.loop = self.bot = None
+        self.loop = self.bot = self.adapter = None
         self._stop_outgoing_observer = None
         self.tasks = set()
         self.cleanup_tasks = {}
@@ -516,7 +501,7 @@ class TelegramPlugin:
         from telegram.ext import CallbackQueryHandler, TypeHandler
         for task in self.tasks:
             task.cancel()
-        self.loop, self.bot = asyncio.get_running_loop(), app.bot
+        self.loop, self.bot, self.adapter = asyncio.get_running_loop(), app.bot, adapter
         guard = TypeHandler(Update, self.guard)
         app.add_handler(guard, group=-100)
         self.handlers.append((app, guard, -100))
@@ -1355,7 +1340,7 @@ class TelegramPlugin:
                 preview = action["confirmationText"]
                 if not isinstance(preview, str) or not preview.strip():
                     raise BridgeError("HUMAN_OUTPUT_REQUIRED")
-                text = f"{stage_label}\n\n{preview}"
+                text = f"**{stage_label}**\n\n{preview}"
             else:
                 text = f"{stage_label}: {action['title'][:800]}\n{title}\n{context}\n"
             if stage == "work":
@@ -1371,31 +1356,65 @@ class TelegramPlugin:
                 text += ("\n\n" if action.get("confirmationText") is not None else "") + footer
             thread_id = self.tokens.unresolved(token)["thread_id"]
             route = {"message_thread_id": int(thread_id)} if thread_id and str(thread_id) != "1" else {}
-            # Не обрезаем план/результат. 1800 code points помещаются в 4096 UTF-16 units.
-            bold_lines = {0}
-            if action.get("confirmationText") is not None:
-                bold_lines.add(2)
-            bold_lines.update(index for index, line in enumerate(text.splitlines()) if re.match(r"^\d+(?:\.\d+)*\.\s", line))
-            chunks = [(text[index:index + 1800], text[:index].count("\n")) for index in range(0, len(text), 1800)]
-            for index, (source_chunk, first_line) in enumerate(chunks):
-                chunk = _confirmation_html_chunk(source_chunk, first_line, bold_lines)
+            # Файлы проходят через общий owner-bound Artifacts и тот же журнал доставки, что обычные ответы.
+            files = sys.modules.get("brai_files")
+            artifact_ids = action.get("confirmationFiles", [])
+            if not isinstance(artifact_ids, list) or any(not _uuid(value) for value in artifact_ids):
+                raise BridgeError("INVALID_ARTIFACTS")
+            if files is not None:
+                route_id = self.tokens.unresolved(token)["chat_id"]
+                stable = json.dumps([self.config.owner, route_id, thread_id, action["moveId"],
+                                     action["revisionId"], text, artifact_ids], ensure_ascii=False)
+                identity = "confirmation:" + sha256(stable.encode()).hexdigest()
+                prepared = await asyncio.to_thread(files.final_text, text, identity)
+                paths = []
+                def take_file(match):
+                    paths.append(next(value for value in match.groups() if value is not None))
+                    return ""
+                text = files.active_sub(files._MEDIA, take_file, prepared).strip()
+                if self.config.result_root in text:
+                    raise BridgeError("FILE_REFERENCE_UNRECOGNIZED")
+                items, mode = await asyncio.to_thread(files.output_items, paths) if paths else ([], "files")
+                seen = {item["file"]["artifactId"] for item in items}
+                for artifact_id in artifact_ids:
+                    if artifact_id not in seen:
+                        value = await asyncio.to_thread(files.resolve_artifact, artifact_id, identity)
+                        items.append({"file": files.store().checked(value), "caption": "",
+                                      "presentation": files.presentation(value)})
+                        seen.add(artifact_id)
+                if items:
+                    delivery = await files.send_set(self.adapter, route_id, items, mode,
+                                                    {"thread_id": thread_id} if thread_id else {}, identity)
+                    if not delivery.success:
+                        raise BridgeError("FILE_DELIVERY_UNCONFIRMED")
+            elif artifact_ids or self.output_files.search(text):
+                raise BridgeError("FILE_DELIVERY_UNAVAILABLE")
+            if self.config.result_root in text:
+                raise BridgeError("FILE_REFERENCE_UNRECOGNIZED")
+            # Форматирование и разбиение выполняет закреплённый Telegram adapter; обычный текст не является fallback.
+            formatted = self.adapter.format_message(text)
+            chunks = self.adapter.truncate_message(formatted, 4096, len_fn=lambda value: len(value.encode("utf-16-le")) // 2)
+            if len(chunks) > 1:
+                chunks = [re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", chunk) for chunk in chunks]
+                chunks = [re.sub(r"(?m)^``` (\\\(\d+/\d+\\\))$", r"```\n\1", chunk) for chunk in chunks]
+            for index, chunk in enumerate(chunks):
                 keyboard = {"reply_markup": InlineKeyboardMarkup(buttons)} if buttons and index == len(chunks) - 1 else {}
                 if existing and len(chunks) == 1:
                     from telegram.error import BadRequest
                     try:
                         await self.bot.edit_message_text(chat_id=int(self.tokens.unresolved(token)["chat_id"]),
-                            message_id=int(existing["message_id"]), text=chunk, parse_mode="HTML", **keyboard,
+                            message_id=int(existing["message_id"]), text=chunk, parse_mode="MarkdownV2", **keyboard,
                             connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
                     except BadRequest as error:
                         if "message is not modified" not in str(error).lower():
                             raise
                 else:
                     message = await self.bot.send_message(chat_id=int(self.tokens.unresolved(token)["chat_id"]), text=chunk, **route,
-                        parse_mode="HTML", **keyboard, connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
+                        parse_mode="MarkdownV2", **keyboard, connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
                     self.tokens.bind(token, message.message_id)
                 from types import SimpleNamespace
                 sent_id = existing["message_id"] if existing and len(chunks) == 1 else message.message_id
-                await self.observe_send(self.tokens.unresolved(token)["chat_id"], route, source_chunk,
+                await self.observe_send(self.tokens.unresolved(token)["chat_id"], route, chunk,
                                         SimpleNamespace(success=True, message_id=sent_id))
             return json.dumps({"ok": True, "status": "awaiting_owner", "moveId": action["moveId"],
                                "attemptId": action["attemptId"], "revisionId": action["revisionId"]})

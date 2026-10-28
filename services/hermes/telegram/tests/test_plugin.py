@@ -154,6 +154,13 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.markdown = MARKDOWN.replace(ROOT, self.config.result_root)
         self.bridge.file["markdown"] = self.markdown
         self.plugin = mod.TelegramPlugin(self.config, self.bridge, self.inject)
+        self.format_inputs = []
+        def format_message(value):
+            self.format_inputs.append(value)
+            return value
+        def truncate_message(value, maximum, len_fn):
+            return [value[i:i + 1800] for i in range(0, len(value), 1800)]
+        self.adapter = NS(format_message=format_message, truncate_message=truncate_message)
         self.bot = FakeBot()
         self.app = NS(bot=self.bot, handlers=[])
         def add_handler(handler, group=0):
@@ -164,7 +171,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.stubs = patch.dict(sys.modules, {**ptb_stubs(), "gateway.session_context":
             NS(get_session_env=lambda key: self.native_context.get(key, ""))})
         self.stubs.start()
-        self.plugin.factory(self.app, object())
+        self.plugin.factory(self.app, self.adapter)
         self.plugin.session_store = self.store
 
     def inject(self, content, role="user", *, session_key=None, origin=None):
@@ -234,7 +241,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.native_context.update(HERMES_SESSION_CHAT_ID=chat, HERMES_SESSION_CHAT_TYPE="supergroup")
         self.entry.origin.chat_id, self.entry.origin.chat_type = chat, "supergroup"
         self.plugin = mod.TelegramPlugin(self.config, self.bridge, self.inject)
-        self.plugin.factory(self.app, object())
+        self.plugin.factory(self.app, self.adapter)
         self.plugin.session_store = self.store
 
     def update(self, chat=GROUP, owner=123, chat_type="supergroup", **message):
@@ -283,7 +290,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("message_thread_id", self.bot.sent[-1])
         row = self.plugin.tokens.pending()[0]
         self.assertEqual((row["owner"], row["chat_id"]), ("123", "456"))
-        self.plugin.factory(self.app, object())
+        self.plugin.factory(self.app, self.adapter)
         await asyncio.sleep(0)
         for user, chat, kind in ((123, 123, "private"), (789, 789, "private"), (456, int(GROUP), "supergroup"),
                                   (123, 456, "private")):
@@ -675,36 +682,115 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(MOVE, plain)
         for message in self.bot.sent:
             self.assertLessEqual(len(message['text'].encode('utf-16-le')) // 2, 4096)
-            self.assertEqual(message['parse_mode'], 'HTML')
+            self.assertEqual(message['parse_mode'], 'MarkdownV2')
         self.assertTrue(all('reply_markup' not in item for item in self.bot.sent[:-1]))
         keyboard = self.bot.sent[-1]['reply_markup'].inline_keyboard
         self.assertEqual([row[0].text for row in keyboard], ['Принять'])
         self.assertEqual(self.plugin.tokens.pending()[0]['message_id'], str(len(self.bot.sent)))
 
-    async def test_confirmation_html_escapes_owner_text_and_keeps_format_after_edit(self):
-        preview = 'Проверить <камера> & объектив\n\nПлан\n\n1. Сверить A&B < C\n2. Осмотреть < корпус >\n\n2.1. Проверить вложенную задачу'
+    async def test_confirmation_uses_native_formatter_for_new_and_edited_message(self):
+        preview = 'Заголовок\n\n## Вывод\n\n**Важно**: [источник](https://example.org)'
         self.bridge.action.update(confirmationStage='planning', confirmationText=preview)
         await self.request()
-        original = self.bot.sent[0]
-        self.assertEqual(original['parse_mode'], 'HTML')
-        self.assertIn('<b>План работы</b>', original['text'])
-        self.assertIn('<b>Проверить &lt;камера&gt; &amp; объектив</b>', original['text'])
-        self.assertIn('<b>1. Сверить A&amp;B &lt; C</b>', original['text'])
-        self.assertIn('<b>2. Осмотреть &lt; корпус &gt;</b>', original['text'])
-        self.assertIn('<b>2.1. Проверить вложенную задачу</b>', original['text'])
-        self.assertNotIn('<камера>', original['text'])
-        self.assertNotIn('Замечания или отмену задачи напиши сообщением.', original['text'])
-        self.assertEqual([button.text for row in original['reply_markup'].inline_keyboard for button in row], ['Принять'])
-
+        self.assertIn(preview, self.format_inputs[-1])
+        self.assertEqual(self.bot.sent[0]['parse_mode'], 'MarkdownV2')
         result = json.loads(await self.plugin.request_confirmation({'moveId': MOVE, 'revisionId': REVISION}))
         self.assertTrue(result['ok'])
         self.assertEqual(len(self.bot.sent), 1)
-        self.assertEqual(len(self.bot.edited), 1)
-        edited = self.bot.edited[0]
-        self.assertEqual(edited['parse_mode'], 'HTML')
-        self.assertIn('<b>План работы</b>', edited['text'])
-        self.assertIn('<b>1. Сверить A&amp;B &lt; C</b>', edited['text'])
-        self.assertEqual([button.text for row in edited['reply_markup'].inline_keyboard for button in row], ['Принять'])
+        self.assertEqual(self.bot.edited[0]['parse_mode'], 'MarkdownV2')
+        self.assertIn(preview, self.format_inputs[-1])
+        self.assertEqual([button.text for row in self.bot.edited[0]['reply_markup'].inline_keyboard for button in row], ['Принять'])
+
+    async def test_real_file_adapter_sends_saved_pdf_as_document(self):
+        from types import ModuleType
+        sys.path.insert(0, str(REPO / 'services/hermes'))
+        from files import native
+        from files.tests.test_files import Backend
+        root = Path(self.tmp.name)
+        incoming = root / 'incoming'
+        incoming.mkdir()
+        source = incoming / 'report.pdf'
+        source.write_bytes(b'%PDF-1.4 synthetic report')
+        backend = Backend(Path(self.config.result_root))
+        store = native.configure({'ownerId': 'owner', 'account': 'test', 'stateRoot': str(root / 'state'),
+            'resultRoot': self.config.result_root, 'readRoots': [str(incoming)]}, backend)
+        artifact = store.publish(source, ['synthetic-report'])
+        descriptor = '[Отчёт](<' + artifact['localPath'] + '>)'
+        self.bridge.action.update(confirmationStage='final', confirmationFiles=[artifact['artifactId']],
+                                  confirmationText='Готовый отчёт: ' + descriptor)
+        uploads = []
+        async def send_document(**kwargs):
+            uploads.append(kwargs['document'].read())
+            return NS(message_id=77)
+        self.bot.send_document = send_document
+        self.adapter._bot, self.adapter.platform = self.bot, 'telegram'
+        class Media:
+            def __init__(self, media, caption=None, parse_mode=None):
+                self.media, self.caption, self.parse_mode = media, caption, parse_mode
+        telegram = NS(**vars(sys.modules['telegram']))
+        for kind in ('Photo', 'Video', 'Audio', 'Document'):
+            setattr(telegram, 'InputMedia' + kind, Media)
+        base = ModuleType('gateway.platforms.base')
+        base.SendResult = lambda **kwargs: NS(**kwargs)
+        before = sum(method == 'files.publish' for method, _ in backend.calls)
+        with patch.dict(sys.modules, {'brai_files': native, 'telegram': telegram, 'gateway.platforms.base': base}):
+            response = json.loads(await self.plugin.request_confirmation(
+                {'moveId': MOVE, 'revisionId': REVISION, 'stage': 'final'}))
+        self.assertTrue(response['ok'], response)
+        self.assertEqual(uploads, [source.read_bytes()])
+        self.assertEqual(sum(method == 'files.publish' for method, _ in backend.calls), before)
+        self.assertTrue(any(method == 'files.fetch' for method, _ in backend.calls))
+        self.assertNotIn(self.config.result_root, self.bot.sent[0]['text'])
+
+    async def test_saved_file_is_delivered_via_artifacts_without_exposing_path(self):
+        second = '00000000-0000-4000-8000-000000000006'
+        self.bridge.action.update(confirmationStage='final', confirmationFiles=[ARTIFACT, second],
+                                  confirmationText='Итог: ' + self.markdown)
+        calls = []
+        files = NS(_MEDIA=re.compile(r'MEDIA:"([^"\n]+)"'),
+                   final_text=lambda text, identity: text.replace(self.markdown, 'MEDIA:"/tmp/ready.pdf"'),
+                   active_sub=lambda pattern, replace, text: pattern.sub(replace, text),
+                   output_items=lambda paths: ([{'file': {'artifactId': ARTIFACT}}], 'files'),
+                   resolve_artifact=lambda aid, identity: {'artifactId': aid, 'filename': 'other.pdf'},
+                   store=lambda: NS(checked=lambda value: value), presentation=lambda value: 'document')
+        async def send_set(adapter, chat, items, mode, metadata, identity):
+            calls.append((chat, [item['file']['artifactId'] for item in items], identity))
+            return NS(success=True)
+        files.send_set = send_set
+        with patch.dict(sys.modules, {'brai_files': files}):
+            self.assertTrue(json.loads(await self.plugin.request_confirmation(
+                {'moveId': MOVE, 'revisionId': REVISION, 'stage': 'final'}))['ok'])
+            self.assertTrue(json.loads(await self.plugin.request_confirmation(
+                {'moveId': MOVE, 'revisionId': REVISION, 'stage': 'final'}))['ok'])
+        self.assertEqual(calls[0][1], [ARTIFACT, second])
+        self.assertEqual(calls[0][2], calls[1][2])
+        self.assertNotIn('/tmp/ready.pdf', self.bot.sent[0]['text'])
+        self.assertNotIn(self.config.result_root, self.bot.sent[0]['text'])
+
+    async def test_failed_artifact_delivery_never_exposes_descriptor(self):
+        self.bridge.action.update(confirmationStage='final', confirmationFiles=[ARTIFACT],
+                                  confirmationText='Итог: ' + self.markdown)
+        files = NS(_MEDIA=re.compile(r'MEDIA:"([^"\n]+)"'),
+                   final_text=lambda text, identity: text.replace(self.markdown, 'MEDIA:"/tmp/ready.pdf"'),
+                   active_sub=lambda pattern, replace, text: pattern.sub(replace, text),
+                   output_items=lambda paths: ([{'file': {'artifactId': ARTIFACT}}], 'files'))
+        async def failed(*args):
+            return NS(success=False)
+        files.send_set = failed
+        with patch.dict(sys.modules, {'brai_files': files}):
+            result = json.loads(await self.plugin.request_confirmation(
+                {'moveId': MOVE, 'revisionId': REVISION, 'stage': 'final'}))
+        self.assertFalse(result['ok'])
+        self.assertEqual(self.bot.sent, [])
+        self.assertTrue(any(method == 'actions.cancel' for method, _ in self.bridge.calls))
+
+    async def test_unrecognized_result_path_is_never_sent_as_text(self):
+        self.bridge.action.update(confirmationStage='final',
+                                  confirmationText='Файл находится здесь: ' + self.config.result_root + '/broken')
+        result = json.loads(await self.plugin.request_confirmation(
+            {'moveId': MOVE, 'revisionId': REVISION, 'stage': 'final'}))
+        self.assertFalse(result['ok'])
+        self.assertEqual(self.bot.sent, [])
 
     async def test_missing_reviewable_result_does_not_send_blind_approval_buttons(self):
         self.bridge.action.update(confirmationStage='final', confirmationText=None)
@@ -828,7 +914,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_crash_reservation_recovers_same_key_then_cancels_never_approves(self):
         token = self.plugin.tokens.create("123", {"moveId": MOVE, "revisionId": REVISION, "attemptId": ""}, "planning")
-        self.plugin.factory(self.app, object())
+        self.plugin.factory(self.app, self.adapter)
         for _ in range(100):
             if not self.plugin.tokens.pending():
                 break
@@ -947,7 +1033,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_reconciles_consumed_unresolved_immediately(self):
         data = await self.request()
         self.plugin.tokens.consume(data.split(":")[1])
-        self.plugin.factory(self.app, object())
+        self.plugin.factory(self.app, self.adapter)
         for _ in range(100):
             if not self.plugin.tokens.pending():
                 break
@@ -1162,7 +1248,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},
             result={"attempt": {"id": ATTEMPT, "status": "running", "executor_kind": "agent"}},
             session_id="native-session-1", status="ok")
-        self.plugin.factory(self.app, object())
+        self.plugin.factory(self.app, self.adapter)
         await asyncio.sleep(0)
         self.assertEqual(self.plugin.tokens.agent_attempts("123", "native-session-1"), [
             {"owner": "123", "session_id": "native-session-1", "move_id": MOVE, "attempt_id": ATTEMPT}])
@@ -1186,7 +1272,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
                                     "/usr/local/bin/node", str(Path(self.tmp.name) / "results"))
         plugin = mod.TelegramPlugin(startup_config, self.bridge, self.inject)
         plugin.tokens.track_agent_attempt("123", "terminal-session", MOVE, ATTEMPT)
-        plugin.factory(self.app, object())
+        plugin.factory(self.app, self.adapter)
         tasks = tuple(plugin.tasks)
         if tasks:
             await asyncio.gather(*tasks)
@@ -1264,12 +1350,12 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.callback(NS(callback_query=FakeQuery(data)), None)
         self.assertEqual(len(self.injections), 1)
         calls = list(self.bridge.calls)
-        self.plugin.factory(self.app, object())
+        self.plugin.factory(self.app, self.adapter)
         await asyncio.sleep(0.01)
         self.assertEqual(len(self.injections), 1)
         self.assertEqual(self.bridge.calls, calls)
         self.assertIn("исход автоматического продолжения не подтверждён", self.bot.sent[-1]["text"])
-        self.plugin.factory(self.app, object())
+        self.plugin.factory(self.app, self.adapter)
         await asyncio.sleep(0.01)
         self.assertEqual(sum("был перезапущен" in sent["text"] for sent in self.bot.sent), 1)
 
@@ -1281,7 +1367,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.plugin.tokens.confirm(token)
         self.assertIsNotNone(await asyncio.to_thread(self.plugin.tokens.reserve_resume, token))
         self.assertIsNone(await asyncio.to_thread(self.plugin.tokens.reserve_resume, token))
-        self.plugin.factory(self.app, object())
+        self.plugin.factory(self.app, self.adapter)
         await asyncio.sleep(0.01)
         self.assertEqual(self.injections, [])
         self.assertIn("перезапущен", self.bot.sent[-1]["text"])
@@ -1299,7 +1385,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.callback(NS(callback_query=FakeQuery(data)), None)
         self.assertEqual(self.injections, [])
         self.assertEqual(sum(method == "actions.complete" for method, _ in self.bridge.calls), 1)
-        self.plugin.factory(self.app, object())
+        self.plugin.factory(self.app, self.adapter)
         await asyncio.sleep(0.03)
         self.assertEqual(self.injections, [])
         self.assertEqual(sum(method == "actions.complete" for method, _ in self.bridge.calls), 1)

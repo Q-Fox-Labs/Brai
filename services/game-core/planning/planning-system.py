@@ -1,3 +1,5 @@
+# ABOUTME: Собирает предметный план и служебные Ходы из проверенного пакета.
+# ABOUTME: Не исполняет работу и не создаёт человеческих решений.
 """Файловая сборка предварительных планов. Не runtime и не клиент БД."""
 import copy
 import hashlib
@@ -90,7 +92,9 @@ def result_chain(plan):
 
 def compile_plan(packet, plan):
     """Только предметный план; служебные записи создаёт эта функция."""
-    require(set(plan) == {'fields', 'resources', 'children', 'work', 'completion', 'questions', 'deferred', 'chain'}, 'Неверный состав предметного плана')
+    required = {'fields', 'resources', 'children', 'work', 'completion', 'questions', 'deferred', 'chain'}
+    require(set(plan) in (required, required | {'approval_required'}), 'Неверный состав предметного плана')
+    require(type(plan.get('approval_required', True)) is bool, 'Неверный состав предметного плана')
     fields(plan['fields'])
     clear = bool(plan['fields']['outputs'])
     eid, kind = packet['element']['id'], packet['element']['kind']
@@ -243,21 +247,31 @@ def compile_plan(packet, plan):
     require(completion and set(completion) <= available, 'Нет основания конечного ресурса')
     for child in child_packets:
         require(set(child['draft']['outputs']) & set(completion), 'Итог ребёнка не участвует в общем результате')
-    if kind != 'Задача' or moves[-1]['actor'] != 'player' or moves[-1]['purpose'] != 'work':
-        add(uid(eid, 'review-result'), 'Рассмотреть итог', 'player', eid, 'review', completion,
-            outputs=[decision_resource],
-            instruction='Оценить результат и принять итоговое решение по этому Элементу.', criteria=['Сохранено итоговое решение с основаниями'], decision='final')
+    # Старые планы без признака сохраняют прежнее требование реального решения.
+    automatic = plan.get('approval_required', True) is False
+    if automatic:
+        del catalog[decision_resource]
     else:
-        moves[-1]['decision'] = 'final'
-        moves[-1]['outputs'].append(decision_resource)
-    catalog[decision_resource]['producer'] = moves[-1]['id']
+        if kind != 'Задача' or moves[-1]['actor'] != 'player' or moves[-1]['purpose'] != 'work':
+            add(uid(eid, 'review-result'), 'Рассмотреть итог', 'player', eid, 'review', completion,
+                outputs=[decision_resource],
+                instruction='Оценить результат и принять итоговое решение по этому Элементу.', criteria=['Сохранено итоговое решение с основаниями'], decision='final')
+        else:
+            moves[-1]['decision'] = 'final'
+            moves[-1]['outputs'].append(decision_resource)
+        catalog[decision_resource]['producer'] = moves[-1]['id']
     require(not set(current['outputs']) & available, 'Итог приёмки создан до приёмки')
     own_end = copy.deepcopy(finish)
-    own_end.update({'title': 'Принять итог: ' + current['title'], 'actor': 'agent', 'purpose': 'accept',
-                    'previous': previous, 'inputs': completion + [decision_resource], 'outputs': current['outputs'],
-                    'wait_decision': eid, 'decision': None, 'requires_confirmation': False, 'status': 'planned',
-                    'instruction': 'Зафиксировать решение Игрока, основания и принятый итог. Закрыть этот Элемент.',
-                    'criteria': ['Есть итоговое решение именно по этому Элементу; результат сохранён']})
+    own_end.update({'title': ('Завершить: ' if automatic else 'Принять итог: ') + current['title'], 'actor': 'agent', 'purpose': 'accept',
+                    'previous': previous, 'inputs': completion if automatic else completion + [decision_resource], 'outputs': current['outputs'],
+                    'decision': None, 'requires_confirmation': automatic, 'status': 'planned',
+                    'instruction': ('Сохранить готовый результат и закрыть Элемент. Передать результат пользователю штатным каналом.' if automatic else 'Зафиксировать решение Игрока, основания и принятый итог. Закрыть этот Элемент.'),
+                    'criteria': (['Готовый результат сохранён'] if automatic else ['Есть итоговое решение именно по этому Элементу; результат сохранён'])})
+    if automatic:
+        own_end.pop('wait_decision', None)
+        own_end['auto_finish'] = True
+    else:
+        own_end['wait_decision'] = eid
     produce(current['outputs'], own_end['id'])
     require(set(definitions.values()) <= set(producers), 'Объявлен ресурс без производителя')
     view.append(own_end['id'])

@@ -54,7 +54,10 @@ export function createHumanActions(runtime) {
           idempotency_key: `telegram:${args.idempotencyKey}`, executor_kind: 'human', input_resource_ids: inputs }, signal);
         if (!uuid(result.attempt?.id) || result.attempt.executor_kind !== 'human') throw fault('INVALID_UPSTREAM_RESPONSE');
         if (result.attempt.status !== 'running' || action.status === 'claimed' && result.attempt.id !== action.attemptId) throw fault('STALE_ACTION');
-        return { ...action, ...(move.fields?.planning ? { confirmationText: confirmationText(graph, move, target, inputs) } : {}), revisionId: args.revisionId, currentRevisionId: action.revisionId, attemptId: result.attempt.id, status: result.attempt.status, inputResourceIds: inputs };
+        const confirmationFiles = action.confirmationStage === 'final'
+          ? [...new Set((graph.resources ?? []).filter(resource => inputs.includes(resource.id) && !resource.metadata?.stage)
+            .flatMap(resource => resource.artifactIds ?? []))] : [];
+        return { ...action, ...(move.fields?.planning ? { confirmationText: confirmationText(graph, move, target, inputs), confirmationFiles } : {}), revisionId: args.revisionId, currentRevisionId: action.revisionId, attemptId: result.attempt.id, status: result.attempt.status, inputResourceIds: inputs };
       } catch (error) {
         if (uncertain(error)) throw fault('OUTCOME_UNKNOWN');
         throw error;

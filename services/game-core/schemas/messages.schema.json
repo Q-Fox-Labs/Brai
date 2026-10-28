@@ -794,6 +794,7 @@
         "user_id": { "type": "string", "minLength": 1, "maxLength": 255 }
       },
       "required": ["user_id", "move_id", "revision_id", "resource_id", "items", "idempotency_key"]
-    }
+    },
+    "game_core_result_review_skip": {"type": "object", "additionalProperties": false, "properties": {"move_id": {"type": "string", "format": "uuid"}, "revision_id": {"type": "string", "format": "uuid"}, "user_id": {"type": "string", "minLength": 1, "maxLength": 255}}, "required": ["user_id", "move_id", "revision_id"]}
   }
 }

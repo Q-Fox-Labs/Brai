@@ -585,6 +585,26 @@ def release_set(identity):
         store().cleanup(json.loads(row[0])['scope'])
 
 
+def telegram_format(adapter, text):
+    """Форматировать подпись тем же Telegram adapter, который обслуживает обычный ответ."""
+    formatter = getattr(adapter, 'format_message', None)
+    splitter = getattr(adapter, 'truncate_message', None)
+    if formatter is None or splitter is None:
+        from plugins.platforms.telegram.adapter import TelegramAdapter
+        formatter = lambda value: TelegramAdapter.format_message(adapter, value)
+        splitter = TelegramAdapter.truncate_message
+    return formatter(text), splitter
+
+
+def telegram_chunks(formatted, splitter):
+    """Сохранить ограничения Telegram и экранировать добавленные нумератором скобки."""
+    chunks = splitter(formatted, 4096, len_fn=text_units)
+    if len(chunks) > 1:
+        chunks = [re.sub(r' \((\d+)/(\d+)\)$', r' \\(\1/\2\\)', chunk) for chunk in chunks]
+        chunks = [re.sub(r'(?m)^``` (\\\(\d+/\d+\\\))$', r'```\n\1', chunk) for chunk in chunks]
+    return chunks
+
+
 async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback):
     """Один Bot API вызов на группу; без retry/downgrade после неизвестного ответа."""
     from telegram import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
@@ -597,29 +617,33 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback):
         notice = await bot.send_message(**target, text='Этот набор нельзя отправить одним альбомом. Файлы идут отдельно в исходном порядке.')
         if not getattr(notice, 'message_id', None):
             raise FileError('DELIVERY_UNKNOWN')
+    captions = []
     for item in items:
         caption = item.get('caption', '')
-        if text_units(caption) > 1024:
-            for chunk in text_chunks(caption, 4096):
-                notice = await bot.send_message(**target, text=chunk, parse_mode=None)
+        formatted, splitter = telegram_format(adapter, caption) if caption else ('', None)
+        if text_units(formatted) > 1024:
+            for chunk in telegram_chunks(formatted, splitter):
+                notice = await bot.send_message(**target, text=chunk, parse_mode='MarkdownV2')
                 if not getattr(notice, 'message_id', None):
                     raise FileError('DELIVERY_UNKNOWN')
+            captions.append(None)
+        else:
+            captions.append(formatted or None)
     classes = {'photo': InputMediaPhoto, 'video': InputMediaVideo, 'audio': InputMediaAudio, 'document': InputMediaDocument}
     with ExitStack() as stack:
         media = []
-        for item in items:
+        for item, caption in zip(items, captions):
             file = stack.enter_context(open(item['localPath'], 'rb'))
-            caption = item.get('caption', '')
             if item['presentation'] in classes:
-                media.append(classes[item['presentation']](media=file, caption=caption if text_units(caption) <= 1024 else None, parse_mode=None))
+                media.append(classes[item['presentation']](media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
             else:
                 from types import SimpleNamespace
-                media.append(SimpleNamespace(media=file, caption=caption if text_units(caption) <= 1024 else None, parse_mode=None))
+                media.append(SimpleNamespace(media=file, caption=caption, parse_mode='MarkdownV2' if caption else None))
         if kind == 'album':
             result = await bot.send_media_group(**target, media=media)
         else:
             field = items[0]['presentation']
-            result = [await getattr(bot, 'send_' + field)(**target, **{field: media[0].media}, caption=media[0].caption, parse_mode=None)]
+            result = [await getattr(bot, 'send_' + field)(**target, **{field: media[0].media}, caption=media[0].caption, parse_mode='MarkdownV2' if media[0].caption else None)]
     return [getattr(message, 'message_id', None) for message in result]
 
 

@@ -19,4 +19,4 @@ An unavailable reader, denied permission, or a requirement without a real source
 
 An ordinary content-producing Operation completes with `result.resources`. Each resource contains the actual complete content and the current output contract key in `metadata.output_key`. Never use placeholder IDs in live calls. The logical output key may differ from the new resource ID. After completion read available Moves and verify the saved output and next gate.
 
-For rework use actual conditions and resolved required resources; older fields can refer to superseded versions. Keep accepted content unchanged. A final result is completed only after the real owner decision and the available finish Operation have been saved and read back.
+For rework use actual conditions and resolved required resources; older fields can refer to superseded versions. Keep accepted content unchanged. With `approval_required=false`, complete the result through the available finish Operation without inventing an owner decision. Save any real choice before finishing. Read back the completed result. Include actual artifact IDs in the saved resource, and deliver files through Artifacts.

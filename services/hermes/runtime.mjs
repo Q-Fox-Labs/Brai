@@ -228,7 +228,7 @@ export async function createBraiTools(config, ports) {
             if (!move) throw fault('NOT_FOUND');
             if (move.kind !== 'operation' || move.executor === 'human') throw fault('FORBIDDEN');
           }
-          mutation = name === 'publish_file' || /(?:_create|_revise|_reclassify|_expand_repeat|_link|_activate|_claim|_complete|_fail|_submit|_cancel|_set|_bind|_build|_apply)$/.test(name);
+          mutation = name === 'publish_file' || /(?:_create|_revise|_reclassify|_expand_repeat|_link|_activate|_claim|_complete|_fail|_submit|_cancel|_set|_bind|_build|_apply|_skip)$/.test(name);
           return await ports.mcp(upstream.endpoint, name, args, signal);
         }
         const definition = natsTools.find(tool => tool.name === name);

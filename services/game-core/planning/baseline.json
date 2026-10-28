@@ -3,11 +3,11 @@
   "files": {
     "game-planning-rules.md": {
       "version": "9.2",
-      "sha256": "809a75562bff8a948f58e742a85e32485c1690849c44bd301f38c3ef85aa83eb"
+      "sha256": "dad932a385a08bed78fa76620e6a6dae14a2d7afab46819b43baadced6f26802"
     },
     "game-planning-format.md": {
       "version": "9.2",
-      "sha256": "6aef8fb1a7efec5e14596450d721fe2e869c3520f765288a46dcc0f5886966df"
+      "sha256": "a1f1487b3985b4ed24f2b3897bd6e404ad05cac3cd00ac0e30c4598e4fb06322"
     },
     "element-classification-rules.md": {
       "version": "0.8",
@@ -15,19 +15,19 @@
     },
     "goal-planning-rules.md": {
       "version": "1.0",
-      "sha256": "517e8580409e65ea15627014c98ddb2ab409b9311fe22d2cb9875baf57fd7e05"
+      "sha256": "5416a1a2a46836e3372b1b682ce13eadab6e340ca4d8458fd7ba6ad644be4ec4"
     },
     "quest-planning-rules.md": {
       "version": "1.0",
-      "sha256": "7594ba57b44f7cdd5286f32454503f0d241e594544452e8c59dd307b08a0929c"
+      "sha256": "0e011c01b79e33902de64d44a5eebfa656edf63397ebe863164dfe27512e0f44"
     },
     "planning-review-rules.md": {
       "version": "1.3",
-      "sha256": "f4a4fbd91aaf59099a4d7f8fd7ed383b581607a975a9b933ac350da42e8e462e"
+      "sha256": "1fb14d19a0888339e89221a5359ab1849d089a4445bd8584bad9146cd517efe7"
     },
     "planning-system.py": {
       "version": "9.2",
-      "sha256": "e187fedfb21b06bb12b75a1e3134d386964e41c51b681ac57f729db1a780595a"
+      "sha256": "68bb3be295a9467e101d74668ac57129fba7d1dbb0bf01b0cb0b7b0cf8817f2c"
     }
   }
 }
