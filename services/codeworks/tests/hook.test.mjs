@@ -38,3 +38,16 @@ test('lost begin reply stops by native call identity',async()=>{
  const f=fixture();const calls=[];f.options.connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='write.begin')throw Error('lost');return {};},close:async()=>{}});
  assert.equal((await runHook(patch(valid),f.options)).hookSpecificOutput.permissionDecision,'deny');assert.equal(calls[1].method,'write.stop');assert.equal(calls[1].args.tool_use_id,'u');
 });
+
+test('strict read-only commands in a worktree do not admit a writer',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id;
+ const config={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=()=>assert.fail('read-only call connects');
+ for(const cmd of ['git status','git status --short','cat src/a','rg -n word src','rg --files']) assert.deepEqual(await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:cmd}},{config,env,connect}),{});
+});
+test('shell operators and unsafe flags are never classified as read-only',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,calls=[];
+ const config={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=async()=>({call:async(method,args)=>{calls.push(method);if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:'c'};return {};},close(){}});
+ for(const cmd of ['git status; touch x','cat a > x','rg --pre evil word','git status --exec=evil']) {await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:cmd}},{config,env,connect});assert.equal(calls.at(-1),'write.admit');}
+});

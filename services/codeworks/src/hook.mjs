@@ -100,6 +100,19 @@ function shellTokens(command) {
   return tokens;
 }
 
+// Допускаем только один простой вызов с явно безопасными аргументами.
+function readOnlyShell(command) {
+  if (typeof command !== 'string') return false;
+  const tokens = shellTokens(command);
+  if (!tokens.length || tokens.some(t => t.operator || t.dynamic)) return false;
+  const words = tokens.map(t=>t.word);
+  if (words[0] === 'rtk' && words[1] === 'proxy') words.splice(0,2);
+  if (words[0] === 'git') return words[1] === 'status' && words.slice(2).every(w=>['--short','-s','--porcelain','--porcelain=v1','--branch','-b','--untracked-files=no'].includes(w));
+  if (words[0] === 'cat') return words.length > 1 && words.slice(1).every(w=>w !== '-' && !w.startsWith('-'));
+  if (words[0] === 'rg') return words.length > 1 && words.slice(1).every(w=>!w.startsWith('-') || ['-n','-i','-l','--files','--hidden','--no-heading'].includes(w));
+  return false;
+}
+
 function shellPaths(command, cwd) {
   const found = [];
   let segment = [];
@@ -210,6 +223,7 @@ export async function runHook(event, {env = process.env, config, connect = conne
     }
   }
   if (areas.size > 1) return denied('Разделите запись между рабочими областями.',[...areas.values()].map(a=>a.project));
+  if (areas.size === 1 && shell && readOnlyShell(input?.command ?? input?.cmd)) return {};
   if (areas.size === 1) return existingWrite(event,[...areas.values()][0],{env,connect,files,shell,cwd,input,name});
   if (!files.length) return {};
   const matching = projects.filter(project => {

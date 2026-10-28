@@ -26,6 +26,7 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
       const found = await workspace(args.project_id, row.workspace_id);
       return {write_call_id:row.id, state:row.state, workspace_id:row.workspace_id, ...(row.operation_id ? {operation_id:row.operation_id} : {}), path:found.workspace.path, branch:found.workspace.branch};
     }
+    if (row.state !== 'preparing') throw new Fault('CONFLICT','Write call was already stopped.');
     let accepted;
     if (args.workspace_id) {
       const found = await workspace(args.project_id,args.workspace_id);
@@ -73,8 +74,8 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
   }
   async function stop(args, executorId) {
     return transaction(pool, async db => {
-      const result = await db.query(`UPDATE codeworks.write_calls SET state=CASE WHEN state='in_flight' THEN 'uncertain' ELSE 'denied_pending' END,updated_at=now()
-        WHERE project_id=$1 AND executor_id=$2 AND session_id=$3 AND turn_id=$4 AND state IN ('preparing','in_flight','denied_pending') AND ($5::uuid IS NULL OR (id=$5 AND state IN ('preparing','denied_pending'))) AND ($6::text IS NULL OR (tool_use_id=$6 AND state IN ('preparing','denied_pending'))) RETURNING state`,[args.project_id,executorId,args.session_id,args.turn_id,args.write_call_id ?? null,args.tool_use_id ?? null]);
+      const result = await db.query(`UPDATE codeworks.write_calls SET state=CASE WHEN state='in_flight' THEN 'uncertain' ELSE 'denied_pending' END,tool_result=CASE WHEN state IN ('preparing','denied_pending') THEN jsonb_build_object('stop_event',$7::text,'stop_reason',$8::text) ELSE tool_result END,updated_at=now()
+        WHERE project_id=$1 AND executor_id=$2 AND session_id=$3 AND turn_id=$4 AND state IN ('preparing','in_flight','denied_pending') AND ($5::uuid IS NULL OR (id=$5 AND state IN ('preparing','denied_pending'))) AND ($6::text IS NULL OR (tool_use_id=$6 AND state IN ('preparing','denied_pending'))) RETURNING state`,[args.project_id,executorId,args.session_id,args.turn_id,args.write_call_id ?? null,args.tool_use_id ?? null,args.event,args.reason ?? 'turn_stopped']);
       return {closed:result.rows.filter(r=>r.state==='denied_pending').length,uncertain:result.rows.filter(r=>r.state==='uncertain').length};
     });
   }
