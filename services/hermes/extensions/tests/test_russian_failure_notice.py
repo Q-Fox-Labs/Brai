@@ -70,6 +70,38 @@ class FailureNoticeTest(unittest.TestCase):
                 self.assertNotIn('Исходное сообщение', text)
                 self.assertNotIn(self.notice._UNKNOWN, text)
 
+    def test_connection_origin_requires_evidence(self):
+        kind = self.notice.connection_kind
+        self.assertEqual(kind('openai-codex', 'https://chatgpt.com/backend-api/codex'), 'external')
+        self.assertEqual(kind('openrouter', 'https://openrouter.ai/api/v1'), 'external')
+        self.assertEqual(kind('openai-codex', 'https://chatgpt.com.other.invalid/v1'), 'unknown')
+        self.assertEqual(kind('openai-codex', 'https://localhost/v1'), 'local')
+        self.assertEqual(kind('ollama', 'https://example.invalid/v1'), 'unknown')
+        self.assertEqual(kind('custom:cloud', 'https://example.invalid/v1'), 'unknown')
+        self.assertEqual(kind('openai-codex', 'https://user:pass@chatgpt.com/v1'), 'unknown')
+        self.assertEqual(kind(None, None), 'unknown')
+        registry = types.SimpleNamespace(PROVIDER_REGISTRY={'anthropic':types.SimpleNamespace(inference_base_url='https://api.anthropic.com/v1')})
+        with patch.dict('sys.modules', {'hermes_cli.auth':registry}):
+            self.assertEqual(kind('anthropic', 'https://api.anthropic.com/v1'), 'external')
+            self.assertEqual(kind('anthropic', 'https://private.example/v1'), 'unknown')
+
+    def test_external_local_and_unknown_errors_are_distinct(self):
+        for code in self.notice._MODEL_CODES:
+            with self.subTest(code=code):
+                external = self.render(code, result={'brai_connection_kind':'external'})
+                local = self.render(code, result={'brai_connection_kind':'local'})
+                unknown = self.render(code, result={'brai_connection_kind':'unknown'})
+                self.assertIn('сторонн', external.lower())
+                self.assertIn('локальное подключение', local)
+                self.assertIn('неизвестно, на чьей стороне', unknown)
+                self.assertNotIn('chatgpt', external.lower())
+                self.assertNotIn('codex', external.lower())
+                self.assertNotIn('hermes', external.lower())
+        for code in ('overloaded', 'server_error', 'rate_limit', 'auth', 'billing', 'invalid_response'):
+            self.assertNotIn('администратор', self.render(code, result={'brai_connection_kind':'external'}))
+        self.assertIn('стороннего сервиса ИИ', self.render('timeout', result={'brai_connection_kind':'external'}))
+        self.assertIn('или в соединении', self.render('timeout', result={'brai_connection_kind':'external'}))
+
     def test_error_meaning_and_unverified_billing(self):
         self.assertIn('Сервер, который обрабатывает запросы к модели', self.render('overloaded'))
         self.assertIn('отклонил данные для подключения', self.render('auth'))
@@ -119,6 +151,72 @@ class FailureNoticeTest(unittest.TestCase):
             self.assertEqual(result['brai_failure_kind'], kind)
             self.assertEqual(result['failure_reason'], 'truncated')
 
+    def test_origin_tracks_actual_connection_after_fallback(self):
+        import contextlib
+        import os
+        import sys
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for runner integration')
+        tree = ast.parse((Path(candidate) / 'gateway/run_turn_runner.py').read_text())
+        cls = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                   and any(isinstance(m, ast.FunctionDef) and m.name == '_run_conversation_with_approval' for m in node.body))
+        method = next(m for m in cls.body if isinstance(m, ast.FunctionDef) and m.name == '_run_conversation_with_approval')
+        scope = {'_accepts_keyword': lambda *args: False, 'suppress':contextlib.suppress}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), '<candidate>', 'exec'), scope)
+        source = types.SimpleNamespace(user_id='1', user_name='test', is_bot=False)
+        ctx = types.SimpleNamespace(session_key='s', message='hello', source=source, session_id='s',
+            title_user_message=None, persist_user_display_kind=None, persist_user_display_metadata=None,
+            moa_config=None, inbound_message_id=None, mute_notification_reply=False)
+        runner = types.SimpleNamespace(_ctx=ctx, _approval_notify_sync=lambda *args: None,
+                                       _native_image_run_message=lambda: 'hello')
+        agent = types.SimpleNamespace(provider='ollama', base_url='http://localhost:1234')
+        def run(*args, **kwargs):
+            agent.provider, agent.base_url = 'openai-codex', 'https://chatgpt.com/backend-api/codex'
+            return {'failed':True, 'failure_reason':'server_error'}
+        agent.run_conversation = run
+        modules = {
+            'gateway.run': types.SimpleNamespace(_wrap_current_message_with_observed_context=lambda text, context: text),
+            'tools.approval': types.SimpleNamespace(register_gateway_notify=lambda *args: None, unregister_gateway_notify=lambda *args: None),
+            'tools.approval_context': types.SimpleNamespace(set_current_session_key=lambda value: None, reset_current_session_key=lambda value: None),
+            'agent.notification_presentation': types.SimpleNamespace(notification_turn=lambda *args, **kwargs: contextlib.nullcontext()),
+            'brai_files': types.SimpleNamespace(inbound_handoff=lambda *args, **kwargs: contextlib.nullcontext()),
+            'gateway.russian_failure_notice': self.notice,
+        }
+        with patch.dict(sys.modules, modules):
+            result = scope['_run_conversation_with_approval'](runner, agent, [], None, None, None)
+        self.assertEqual(result['brai_connection_kind'], 'external')
+        self.assertIn('Сторонний сервис ИИ', self.render('server_error', result=result))
+
+    def test_runner_preserves_error_facts_for_gateway(self):
+        import os
+        candidate = os.environ.get('HERMES_TEST_CANDIDATE')
+        if not candidate:
+            self.skipTest('HERMES_TEST_CANDIDATE is required for runner integration')
+        tree = ast.parse((Path(candidate) / 'gateway/run_turn_runner.py').read_text())
+        common = next(node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == 'common' for target in node.targets)
+                      and isinstance(node.value, ast.Dict)
+                      and any(isinstance(key, ast.Constant) and key.value == 'failure_reason' for key in node.value.keys if key))
+        result = {'failed':True, 'failure_reason':'rate_limit', 'error':'error', 'brai_connection_kind':'external',
+                  'brai_delivered_partial':'partial answer', 'brai_failure_kind':'truncated_tool_call',
+                  'failure_resets_at':1121, 'billing_unverified':True, 'billing_block':{},
+                  'free_tier':{'kind':'rate_limited'}, 'api_key':'secret'}
+        scope = {'result':result, 'ctx':types.SimpleNamespace(tools_holder=[[]]),
+                 'history_offset':0, 'compacted_in_place':False, 'effective_session_id':'s', 'usage':{}}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[common], type_ignores=[])), '<candidate>', 'exec'), scope)
+        output = scope['common']
+        for key in ('brai_connection_kind', 'brai_delivered_partial', 'brai_failure_kind',
+                    'failure_resets_at', 'billing_unverified', 'billing_block', 'free_tier'):
+            self.assertEqual(output[key], result[key])
+        self.assertNotIn('api_key', output)
+        text = self.notice.explain_failure('english', surface={'code':'rate_limit'}, diagnostic='',
+            logger=self.log, redact=str, now=1000, result={key:value for key,value in output.items() if key != 'brai_failure_kind'},
+            delivered_partial=output['brai_delivered_partial'])
+        self.assertIn('Сторонний сервис ИИ', text)
+        self.assertIn('примерно 3 мин.', text)
+        self.assertTrue(text.startswith('partial answer'))
+
     def test_classifier_taxonomy_is_covered(self):
         import os
         engine = os.environ.get('HERMES_TEST_ENGINE')
@@ -145,12 +243,12 @@ class FailureNoticeTest(unittest.TestCase):
         func = gateway_function()
         with patch.dict('sys.modules', fake_modules):
             result = {'failed': True, 'failure_reason': 'overloaded', 'error': 'provider said overloaded',
-                      'brai_delivered_partial': 'Уже полученная часть ответа.'}
+                      'brai_delivered_partial': 'Уже полученная часть ответа.', 'brai_connection_kind': 'external'}
             with self.assertLogs(self.log, 'WARNING'):
                 text = func('ChatGPT hermes fallback add', types.SimpleNamespace(platform='telegram'),
                             result=result, failure_notice=lambda value: 'partial')
             self.assertTrue(text.startswith('Уже полученная часть ответа.'))
-            self.assertIn('Сервер, который обрабатывает запросы к модели', text)
+            self.assertIn('Сторонний сервис ИИ', text)
             self.assertIn('Некоторые действия могли уже выполниться', text)
             self.assertNotIn('ChatGPT', text)
             self.assertEqual(func('original', types.SimpleNamespace(platform='other'), result=result), 'original')

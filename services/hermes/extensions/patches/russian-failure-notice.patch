@@ -159,11 +159,39 @@ diff --git a/agent/turn_tool_validation.py b/agent/turn_tool_validation.py
              ))
 
          agent._invalid_json_retries += 1
+diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -1721,7 +1721,12 @@
+             from agent.notification_presentation import notification_turn
+             import brai_files
+             with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""), brai_files.inbound_handoff(ctx.source, ctx.inbound_message_id, inline_images=getattr(self, "_brai_inline_images", ())):
+-                return agent.run_conversation(api_message, **kwargs)
++                result = agent.run_conversation(api_message, **kwargs)
++                if isinstance(result, dict) and (result.get("failed") or (result.get("partial") and result.get("error"))):
++                    with suppress(Exception):
++                        from gateway.russian_failure_notice import connection_kind
++                        result["brai_connection_kind"] = connection_kind(getattr(agent, "provider", None), getattr(agent, "base_url", None))
++                return result
+         finally:
+             unregister_gateway_notify(session_key)
+             # Cancel pending clarify entries so blocked agent threads don't hang past the end of the
+@@ -1979,6 +1984,10 @@
+             "tools": ctx.tools_holder[0] or [],
+             "history_offset": history_offset, "compacted_in_place": compacted_in_place, "session_id": effective_session_id,
+             **usage,
++            **{key: result[key] for key in (
++                "brai_connection_kind", "brai_delivered_partial", "brai_failure_kind",
++                "failure_resets_at", "billing_unverified", "billing_block", "free_tier",
++            ) if key in result},
+         }
+         if not final_response:
+             final_response = _normalize_empty_agent_response(result, final_response or "", history_len=len(agent_history))
 diff --git a/gateway/russian_failure_notice.py b/gateway/russian_failure_notice.py
 new file mode 100644
 --- /dev/null
 +++ b/gateway/russian_failure_notice.py
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,201 @@
 +# ABOUTME: Готовит русские сообщения о сбоях для Telegram.
 +# ABOUTME: Использует классификацию движка и сохраняет безопасные данные для проверки.
 +"""Пояснения для Telegram не управляют повторами и сессиями."""
@@ -176,6 +204,8 @@ new file mode 100644
 +import re
 +import secrets
 +import time
++from ipaddress import ip_address
++from urllib.parse import urlsplit
 +
 +
 +_COPY = {
@@ -230,6 +260,79 @@ new file mode 100644
 +}
 +_UNKNOWN = 'Не удалось завершить запрос. Причину ошибки не удалось определить. Попробуйте позже; если ошибка повторится, обратитесь к администратору.'
 +
++# AIDEV-NOTE: код ошибки сам по себе не показывает, где работает модель.
++_MODEL_CODES = frozenset(_COPY) - {
++    'loop_error', 'interpreter_shutdown', 'session_busy', 'disk_full',
++    'compression_deferred', 'context_reset',
++}
++_EXTERNAL_COPY = {
++    'overloaded': 'Сторонний сервис ИИ, к которому подключён агент, сообщил, что сейчас перегружен или временно недоступен. Подождите немного и отправьте /retry или выберите другую модель командой /model.',
++    'server_error': 'Сторонний сервис ИИ, к которому подключён агент, вернул ошибку. Попробуйте позже: отправьте /retry или выберите другую модель командой /model.',
++    'timeout': 'Агент не получил вовремя ответ от стороннего сервиса ИИ. Причина может быть на стороне этого сервиса или в соединении с ним. Попробуйте позже и отправьте /retry.',
++    'stream_drop': 'Соединение со сторонним сервисом ИИ прервалось во время ответа. Причина может быть на стороне этого сервиса или в соединении с ним. Попробуйте /retry; если ошибка повторяется, попросите выполнить работу небольшими частями.',
++    'rate_limit': 'Сторонний сервис ИИ временно ограничил число запросов или объём использования. Дождитесь снятия ограничения и отправьте /retry или выберите другую модель командой /model.',
++    'upstream_rate_limit': 'Сторонний сервис ИИ сообщил, что доступ к модели ограничен на стороне другого сервиса, который её предоставляет. Дождитесь снятия ограничения и отправьте /retry или выберите другую модель командой /model.',
++    'auth': 'Сторонний сервис ИИ отклонил данные для входа, которые использует агент. Проверьте подключение к этому сервису или выберите другую модель командой /model.',
++    'auth_permanent': 'Сторонний сервис ИИ отклонил данные для входа, которые использует агент. Автоматически восстановить подключение не удалось. Проверьте подключение к этому сервису или выберите другую модель командой /model.',
++    'billing': 'Сторонний сервис ИИ сообщил об ограничении оплаты, баланса или тарифа. Проверьте условия и лимиты аккаунта этого сервиса или выберите другую модель командой /model.',
++    'billing_unverified': 'Сторонний сервис ИИ отклонил запрос. Это может быть связано с оплатой или ограничением содержимого, но точная причина не подтверждена. Проверьте аккаунт этого сервиса; не пополняйте баланс только на основании этого сообщения.',
++    'upstream_blocked': 'Защита на пути к стороннему сервису ИИ заблокировала запрос до обработки. Пока неизвестно, на чьей стороне возникла блокировка. Попробуйте другую модель командой /model.',
++    'ssl_cert_verification': 'Не удалось проверить сертификат при подключении к стороннему сервису ИИ, поэтому соединение не установлено. Причина может быть в сертификате, настройках соединения или промежуточном сервере. Выберите другую модель командой /model или попросите администратора проверить подключение.',
++    'format_error': 'Сторонний сервис ИИ отклонил формат запроса. Причина может быть в запросе агента или требованиях этого сервиса. Попробуйте другую модель командой /model.',
++    'multimodal_tool_content_unsupported': 'Сторонний сервис ИИ не принял формат данных, полученных после действия. Попробуйте выбрать другую модель командой /model.',
++    'reasoning_mandatory': 'Сторонний сервис ИИ отклонил настройки запроса. Попробуйте выбрать другую модель командой /model.',
++    'llama_cpp_grammar_pattern': 'Сторонний сервис ИИ не поддерживает формат описания действия. Попробуйте выбрать другую модель командой /model.',
++    'invalid_response': 'Сторонний сервис ИИ вернул непонятный или повреждённый ответ. Попробуйте позже и отправьте /retry; если ошибка повторится, выберите другую модель командой /model.',
++}
++
++
++def connection_kind(provider, base_url):
++    """Определить тип соединения только по подтверждённому адресу движка."""
++    if not isinstance(provider, str) or not isinstance(base_url, str):
++        return 'unknown'
++    try:
++        parsed = urlsplit(base_url)
++        host = (parsed.hostname or '').lower().rstrip('.')
++        if not host or parsed.username or parsed.password:
++            return 'unknown'
++        try:
++            if ip_address(host).is_loopback:
++                return 'local'
++        except ValueError:
++            if host == 'localhost' or host.endswith('.localhost'):
++                return 'local'
++        if parsed.scheme != 'https':
++            return 'unknown'
++        slug = provider.strip().lower()
++        known = {'openai-codex': 'chatgpt.com', 'openrouter': 'openrouter.ai'}
++        try:
++            from hermes_cli.auth import PROVIDER_REGISTRY
++            descriptor = PROVIDER_REGISTRY.get(slug)
++            default_url = getattr(descriptor, 'inference_base_url', '') if descriptor else ''
++            default_host = (urlsplit(default_url).hostname or '').lower().rstrip('.')
++            if default_host:
++                known[slug] = default_host
++        except Exception:
++            pass
++        if slug in {'lmstudio', 'ollama', 'local', 'llama.cpp', 'llamacpp', 'vllm'}:
++            return 'unknown'
++        return 'external' if known.get(slug) == host else 'unknown'
++    except (ValueError, TypeError):
++        return 'unknown'
++
++
++def _message_for_connection(code, kind):
++    message = _COPY.get(code, _UNKNOWN)
++    if code not in _MODEL_CODES:
++        return message
++    if kind == 'external':
++        if code in _EXTERNAL_COPY:
++            return _EXTERNAL_COPY[code]
++        return 'Запрос направлен в сторонний сервис ИИ, к которому подключён агент. ' + message
++    if kind == 'local':
++        return 'Запрос направлен через локальное подключение. Где именно возникла проблема, пока неизвестно. ' + message
++    return 'Запрос направлен к подключённой модели. Пока неизвестно, на чьей стороне находится её сервис. ' + message
++
 +
 +def explain_failure(original, *, surface, diagnostic, logger, redact, partial=False,
 +                    status_code=None, billing_unverified=False, now=None, result=None,
@@ -258,7 +361,10 @@ new file mode 100644
 +    if code == 'session_persistence_failed':
 +        message = 'Не удалось сохранить состояние разговора, поэтому работа остановлена. Обратитесь к администратору для проверки хранилища.'
 +    else:
-+        message = _COPY.get(code, _UNKNOWN)
++        kind = result.get('brai_connection_kind')
++        if kind not in {'local', 'external', 'unknown'}:
++            kind = connection_kind(result.get('provider'), result.get('base_url'))
++        message = _message_for_connection(code, kind)
 +    lines = [message]
 +    resets_at = surface.get('resets_at', result.get('failure_resets_at'))
 +    clock = time.time() if now is None else now
