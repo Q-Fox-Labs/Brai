@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import threading
 
 
 def _timestamp(value):
@@ -25,6 +26,7 @@ class TelegramJournal:
 
     def __init__(self, directory):
         """Открыть каталог профиля; данные переживают обновление кода Hermes."""
+        self._outgoing_lock = threading.RLock()
         self.directory = Path(directory)
         if not self.directory.is_absolute() or self.directory.is_symlink():
             raise ValueError("INVALID_JOURNAL_DIRECTORY")
@@ -54,12 +56,12 @@ class TelegramJournal:
     def history_complete(self):
         """Вернуть признак завершённого импорта штатной истории."""
         with self.db() as db:
-            return db.execute("SELECT 1 FROM settings WHERE key='history_complete' AND value='1'").fetchone() is not None
+            return db.execute("SELECT 1 FROM settings WHERE key='history_complete' AND value='2'").fetchone() is not None
 
     def mark_history_complete(self):
         """Сохранить завершение импорта после успешного чтения всех страниц."""
         with self.db() as db:
-            db.execute("INSERT OR REPLACE INTO settings VALUES ('history_complete','1')")
+            db.execute("INSERT OR REPLACE INTO settings VALUES ('history_complete','2')")
 
     @contextmanager
     def db(self):
@@ -120,6 +122,37 @@ class TelegramJournal:
             db.execute("UPDATE messages SET changed_seq=? WHERE identity=?", (seq, value["identity"]))
             return seq
 
+    def import_record(self, value):
+        """Добавить подтверждённые сведения к импорту, не заменяя живое сообщение."""
+        with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM messages WHERE identity=?", (value["identity"],)).fetchone()
+            if row is None:
+                fields = ("identity", "chat_id", "thread_id", "chat_type", "chat_name", "author_id", "author_name",
+                          "direction", "telegram_id", "session_id", "text", "occurred_at", "edited_at", "delivery",
+                          "attachment_state", "attachments", "group_id")
+                data = {name: value.get(name, "") for name in fields}
+                data["attachments"] = json.dumps(data["attachments"] or [], ensure_ascii=False, separators=(",", ":"))
+                db.execute(f"INSERT INTO messages ({', '.join(fields)}) VALUES ({', '.join('?' for _ in fields)})", [data[name] for name in fields])
+                seq = db.execute("INSERT INTO changes(identity) VALUES (?)", (value["identity"],)).lastrowid
+                db.execute("UPDATE messages SET changed_seq=? WHERE identity=?", (seq, value["identity"]))
+                return
+            refs = json.loads(row["attachments"])
+            known = {ref.get("artifactId") for ref in refs}
+            for ref in value["attachments"]:
+                if ref.get("artifactId") not in known:
+                    refs.append(ref)
+                    known.add(ref.get("artifactId"))
+            state = "ready" if refs and row["attachment_state"] in {"none", "unavailable"} else row["attachment_state"]
+            author_id = row["author_id"] or value["author_id"]
+            author_name = row["author_name"] or value["author_name"]
+            encoded = json.dumps(refs, ensure_ascii=False, separators=(",", ":"))
+            if (encoded, state, author_id, author_name) == (row["attachments"], row["attachment_state"], row["author_id"], row["author_name"]):
+                return
+            seq = db.execute("INSERT INTO changes(identity) VALUES (?)", (value["identity"],)).lastrowid
+            db.execute("UPDATE messages SET attachments=?, attachment_state=?, author_id=?, author_name=?, changed_seq=? WHERE identity=?",
+                       (encoded, state, author_id, author_name, seq, value["identity"]))
+
     def incoming(self, message, chat, user):
         """Зафиксировать исходный Telegram message после проверки маршрута и пользователя."""
         mid = getattr(message, "message_id", None)
@@ -172,14 +205,27 @@ class TelegramJournal:
         if not chat_id or not (message_id or identity):
             return
         pending_id = f"pending:{identity}" if identity else None
-        with self.db() as db:
-            pending = pending_id and db.execute("SELECT 1 FROM messages WHERE identity=?", (pending_id,)).fetchone()
-        item_id = pending_id if pending or not message_id else f"telegram:{chat_id}:{message_id}"
-        thread = str(thread_id or "")
-        self.record({"identity": item_id, "chat_id": str(chat_id), "thread_id": "" if thread == "1" else thread,
-                     "chat_type": "group" if str(chat_id).startswith("-") else "private", "chat_name": "",
-                     "author_id": "brai", "author_name": "Brai", "direction": "out",
-                     "telegram_id": str(message_id) if message_id else None, "session_id": "", "text": _text(text),
-                     "occurred_at": datetime.now(timezone.utc).isoformat(), "edited_at": None,
-                     "delivery": delivery, "attachment_state": "ready" if attachments else "none",
-                     "attachments": list(attachments), "group_id": ""})
+        canonical = f"telegram:{chat_id}:{message_id}" if message_id else None
+        with self._outgoing_lock:
+            with self.db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                pending = pending_id and db.execute("SELECT 1 FROM messages WHERE identity=?", (pending_id,)).fetchone()
+                existing = message_id and db.execute("SELECT identity, thread_id FROM messages WHERE chat_id=? AND telegram_id=? AND direction='out' ORDER BY rowid LIMIT 1", (str(chat_id), str(message_id))).fetchone()
+                item_id = pending_id if pending else existing["identity"] if existing else canonical or pending_id
+                # A direct Bot observation can arrive before a queued receipt. Keep the
+                # pending identity and move its already recorded Telegram changes to it.
+                duplicate = canonical and item_id != canonical and db.execute("SELECT * FROM messages WHERE identity=? AND direction='out'", (canonical,)).fetchone()
+                if duplicate:
+                    attachments = list(attachments) + [ref for ref in json.loads(duplicate["attachments"]) if ref not in attachments]
+                    if not text:
+                        text = duplicate["text"]
+                    db.execute("UPDATE changes SET identity=? WHERE identity=?", (item_id, canonical))
+                    db.execute("DELETE FROM messages WHERE identity=?", (canonical,))
+            thread = str(thread_id or (existing["thread_id"] if existing else "") or "")
+            self.record({"identity": item_id, "chat_id": str(chat_id), "thread_id": "" if thread == "1" else thread,
+                         "chat_type": "group" if str(chat_id).startswith("-") else "private", "chat_name": "",
+                         "author_id": "brai", "author_name": "Brai", "direction": "out",
+                         "telegram_id": str(message_id) if message_id else None, "session_id": "", "text": _text(text),
+                         "occurred_at": datetime.now(timezone.utc).isoformat(), "edited_at": None,
+                         "delivery": delivery, "attachment_state": "ready" if attachments else "none",
+                         "attachments": list(attachments), "group_id": ""})

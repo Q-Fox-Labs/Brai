@@ -484,6 +484,7 @@ class TelegramPlugin:
         self.inject_message = inject_message
         self.session_store = None
         self.loop = self.bot = None
+        self._stop_outgoing_observer = None
         self.tasks = set()
         self.cleanup_tasks = {}
         self.handlers = []
@@ -525,6 +526,17 @@ class TelegramPlugin:
         if self.journal is not None and "brai_files" in sys.modules:
             sys.modules["brai_files"].register_telegram_observer(self)
         if self.journal is not None:
+            try:
+                path = _observer_source(self.config, "outgoing.py")
+                spec = importlib.util.spec_from_file_location("_brai_telegram_observer_outgoing", path)
+                if spec and spec.loader:
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    if self._stop_outgoing_observer:
+                        self._stop_outgoing_observer()
+                    self._stop_outgoing_observer = module.install(app.bot, self)
+            except Exception:
+                logging.getLogger(__name__).warning("BRAI_TELEGRAM_OBSERVER_START_FAILED")
             task = self.loop.create_task(self._recover_history())
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
@@ -552,6 +564,9 @@ class TelegramPlugin:
         self.closed = True
 
         def cleanup():
+            if self._stop_outgoing_observer:
+                self._stop_outgoing_observer()
+                self._stop_outgoing_observer = None
             for task in tuple(self.tasks):
                 task.cancel()
             for app, handler, group in self.handlers:
@@ -593,7 +608,17 @@ class TelegramPlugin:
         try:
             def allows(session):
                 return self._route_matches(session.get("chat_id"), session.get("chat_type"), session.get("user_id"))
-            module.import_history(source, self.journal, allows, self.config.result_root, aliases)
+            file_config = self.bridge.call("files.configuration", {})
+            owner_id = file_config.get("ownerId")
+            def lookup(artifact_id, chat_id, message_id):
+                try:
+                    ref = self.bridge.call("files.get", {"artifactId": artifact_id})
+                    return ref if module.legacy_input_matches(ref, owner_id, chat_id, message_id) else None
+                except BridgeError as error:
+                    if str(error) == "NOT_FOUND":
+                        return None
+                    raise
+            module.import_history(source, self.journal, allows, self.config.result_root, aliases, lookup)
             self.journal.mark_history_complete()
         finally:
             source.close()

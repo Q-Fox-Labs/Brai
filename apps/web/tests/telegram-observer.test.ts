@@ -11,7 +11,7 @@ test("наблюдение доступно всем сессиям DEV, фай�
   const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   Object.assign(process.env, { BRAI_ENVIRONMENT: "dev", BRAI_WEB_AGENT_MODE: "hermes_telegram", BRAI_WEB_TELEGRAM_OBSERVER_ENABLED: "1" });
   const id = "11111111-1111-4111-8111-111111111111";
-  let allowed = true, authenticated = true, owner = "owner", observedAfter = -1;
+  let allowed = true, authenticated = true, owner = "owner", mime = "image/png", observedAfter = -1;
   class Failure extends Error {
     status: number; code: string;
     constructor(status: number, code: string) { super(code); this.status = status; this.code = code; }
@@ -21,7 +21,7 @@ test("наблюдение доступно всем сессиям DEV, фай�
     const input = JSON.parse(Buffer.from(data).toString());
     if (input.action === "changes") observedAfter = input.after;
     const value = input.action === "changes" ? { cursor: input.after + 3, changes: [1, 2, 3].map(offset => ({ change_seq: input.after + offset, identity: `message-${offset}` })) }
-      : subject.endsWith(".query") ? { allowed, ownerId: "owner", cursor: 0, chats: [] } : { ownerId: owner, status: "ready", filename: "image.png", mimeType: "image/png" };
+      : subject.endsWith(".query") ? { allowed, ownerId: "owner", cursor: 0, chats: [] } : { ownerId: owner, status: "ready", filename: "media", mimeType: mime };
     return { data: Buffer.from(JSON.stringify(value)), headers: { has: () => false } };
   } };
   const filename = new URL("../server/telegram-observer.ts", import.meta.url);
@@ -41,6 +41,13 @@ test("наблюдение доступно всем сессиям DEV, фай�
   try {
     assert.equal((await module.exports.observerGet(new Request("https://dev.test/api/telegram-observer/chats"))).status, 200);
     assert.equal((await module.exports.observerFileAuth(auth())).status, 200);
+    mime = "audio/ogg";
+    const audio = await module.exports.observerFileAuth(auth());
+    assert.equal(audio.headers.get("Content-Type"), "audio/ogg");
+    assert.equal(audio.headers.get("Content-Disposition"), "inline");
+    mime = "audio/mp4";
+    assert.equal((await module.exports.observerFileAuth(auth())).headers.get("Content-Type"), "audio/mp4");
+    mime = "image/png";
     for (const uri of [`//other.test/api/telegram-observer/files/${id}?message=x`, `/\\other.test/api/telegram-observer/files/${id}?message=x`, `/api/telegram-observer/files/${id}?message=x#fragment`, `/api/telegram-observer/files/${id}?message=x&message=y`]) {
       const bad = new Request("https://dev.test/api/telegram-observer/file-auth", { headers: { "x-forwarded-method": "GET", "x-forwarded-uri": uri } });
       assert.equal((await module.exports.observerFileAuth(bad)).status, 400);
