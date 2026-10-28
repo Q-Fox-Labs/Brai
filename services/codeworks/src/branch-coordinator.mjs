@@ -6,7 +6,7 @@ import {verifyCleanupArchive} from './cleanup-archive.mjs';
 /** Выполняет один шаг закреплённой очистки под внешним guard субъекта. */
 export async function advanceBranchCleanup(db,obligation,project,{git,checkpoint=async()=>{},verifyArchive=verifyCleanupArchive}) {
   const manifest=obligation.evidence?.manifest,ref=obligation.subject_key?.slice(7);
-  if(obligation.workspace_id||manifest?.subject_type!=='branch'||obligation.subject_key!=='branch:'+ref||!/^refs\/heads\/.+/.test(ref)||['refs/heads/dev','refs/heads/main'].includes(ref)||manifest.branch?.ref!==ref)throw Error('BRANCH_SUBJECT_INVALID');
+  if(obligation.workspace_id||manifest?.subject_type!=='branch'||manifest.project_id!==project.id||obligation.project_id!==project.id||obligation.subject_key!=='branch:'+ref||!/^refs\/heads\/.+/.test(ref)||['refs/heads/dev','refs/heads/main'].includes(ref)||manifest.branch?.ref!==ref)throw Error('BRANCH_SUBJECT_INVALID');
   const id=obligation.id,owner=obligation.owner_workflow_id,epoch=Number(obligation.epoch),subject={ref};
   const fence=async()=>{
     await checkpoint('branch-cleanup-fence');
