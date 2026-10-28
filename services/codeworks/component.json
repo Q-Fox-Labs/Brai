@@ -79,6 +79,7 @@
       "services/codeworks/migrations/010.sql",
       "services/codeworks/src/write-admission.mjs",
       "services/codeworks/src/cleanup-coordinator.mjs",
+      "services/codeworks/src/reconciler.mjs",
       "services/codeworks/src/operator.mjs",
       "services/codeworks/src/disposition.mjs"
     ],
@@ -179,6 +180,7 @@
       "services/codeworks/src/code-index-engine.mjs",
       "services/codeworks/src/write-admission.mjs",
       "services/codeworks/src/cleanup-coordinator.mjs",
+      "services/codeworks/src/reconciler.mjs",
       "services/codeworks/src/operator.mjs",
       "services/codeworks/src/disposition.mjs"
     ],
