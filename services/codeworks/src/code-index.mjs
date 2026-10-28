@@ -61,37 +61,43 @@ export function createCodeIndex(pool,{configFile=process.env.CODEWORKS_CODE_INDE
       }
     },
     /** Проверяет все ресурсы под барьером; недоступное хранилище не считается пустым. */
-    async inspect(project,w,{manifest}={}){
+    async inspect(project,w,{manifest,checkpointState}={}){
       const settings=await config();
       if(!settings)throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
-      const index=cleanupIdentity(project,w);
-      return exclusive(()=>invoke('inspect',settings,project,w,index,manifest));
+      const index=cleanupIdentity(project,w,manifest);
+      return exclusive(()=>invoke('inspect',settings,project,w,index,manifest,checkpointState));
     },
     /** Повторно проверяет ресурсы даже после частичной или завершённой очистки. */
-    async remove(project,w,{manifest}={}){
+    async remove(project,w,{manifest,checkpoint,checkpointState}={}){
       const settings=await config();
       if(!settings)throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
-      const index=cleanupIdentity(project,w);
+      const index=cleanupIdentity(project,w,manifest);
       return exclusive(async()=>{
-        await invoke('inspect',settings,project,w,index,manifest);
-        await invoke('remove',settings,project,w,index,manifest);
+        const snapshot=await invoke('inspect',settings,project,w,index,manifest,checkpointState);
+        if(manifest&&!checkpointState){
+          if(typeof checkpoint!=='function')throw Error('INDEX_CHECKPOINT_REQUIRED');
+          checkpointState={manifest_sha256:manifest.manifest_sha256,identity:snapshot.identity,ownerRecordHash:snapshot.owner.recordHash,resources:snapshot.resources};
+          await checkpoint(checkpointState);
+        }
+        await invoke('remove',settings,project,w,index,manifest,checkpointState);
         if(w.code_index)await save(w.id,{...w.code_index,state:'removed',error:null});
       });
     },
   };
 }
 
-function cleanupIdentity(project,w){
-  if(!w.ownership_token||!path.isAbsolute(w.path)||path.normalize(w.path)!==w.path||path.dirname(w.path)!==project.workspace_root)throw Error('INDEX_OWNERSHIP_CONFLICT');
+function cleanupIdentity(project,w,manifest){
+  const rootAllowed=path.dirname(w.path)===project.workspace_root||manifest&&(project.legacy_workspace_roots??[]).includes(path.dirname(w.path));
+  if((!w.ownership_token&&!manifest)||!path.isAbsolute(w.path)||path.normalize(w.path)!==w.path||!rootAllowed)throw Error('INDEX_OWNERSHIP_CONFLICT');
   const identity=indexIdentity(w.path);
   if(w.code_index&&w.code_index.identity!==identity)throw Error('INDEX_OWNERSHIP_CONFLICT');
   return {...w.code_index,identity};
 }
 
 /** Отдельный процесс имеет собственные env/cache; общий MCP и службы не перенастраиваются. */
-async function invokeEngine(action,config,project,workspace,index,manifest){
+async function invokeEngine(action,config,project,workspace,index,manifest,checkpointState){
   const result=await command(process.execPath,[fileURLToPath(new URL('./code-index-engine.mjs',import.meta.url))],{
-    input:JSON.stringify({action,config,project,workspace,index,manifest}),timeout:1800000,allowFailure:true,
+    input:JSON.stringify({action,config,project,workspace,index,manifest,checkpointState}),timeout:1800000,allowFailure:true,
   });
   const value=JSON.parse(result.stdout);
   if(result.code!==0){

@@ -6,6 +6,7 @@ import {mkdir,mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {createCodeIndex,indexIdentity} from '../src/code-index.mjs';
 import {validate} from '../src/contracts.mjs';
+import {validateCleanupSnapshot} from '../src/code-index-engine.mjs';
 
 async function fixture(t,kind='feature'){
   const root=fileURLToPath(new URL('../../../tmp/',import.meta.url));await mkdir(root,{recursive:true});
@@ -23,7 +24,7 @@ async function fixture(t,kind='feature'){
   };
   const db={query,on(){},removeListener(){},release(){}};
   const pool={query,connect:async()=>db};let result={state:'ready'};
-  const adapter=createCodeIndex(pool,{configFile,invoke:async(action,config,p,w,index)=>{calls.push({action,index});if(result instanceof Error)throw result;return result;}});
+  const adapter=createCodeIndex(pool,{configFile,invoke:async(action,config,p,w,index,manifest,checkpointState)=>{calls.push({action,index,manifest,checkpointState});if(result instanceof Error)throw result;return result;}});
   return {w,source,adapter,calls,project:{id:'brai',workspace_root:'/fixture/workspaces'},setResult:v=>{result=v;},cancel:()=>{active=false;},busy:()=>{locked=true;}};
 }
 
@@ -70,4 +71,32 @@ test('cleanup inspects even without index state and propagates backend errors',a
   f.setResult(Error('backend unavailable'));
   await assert.rejects(f.adapter.inspect(f.project,f.w),/backend unavailable/);
   await assert.rejects(f.adapter.remove(f.project,f.w),/backend unavailable/);
+});
+
+test('legacy checkpoint permits only previously verified remaining resources',()=>{
+  const project={id:'fixture',common_dir:'/fixture/repo'},workspace={id:'id',path:'/fixture/area'};
+  const resources={collections:['one','two'],metadataPoints:['base']};
+  const manifest={manifestVersion:1,reviewed:true,project_id:project.id,common_dir:project.common_dir,workspace_id:workspace.id,worktree:{path:workspace.path},manifest_sha256:'a'.repeat(64),index:{identity:'index',ownerRecordHash:null,...resources}};
+  const checkpointState={manifest_sha256:manifest.manifest_sha256,identity:'index',ownerRecordHash:null,resources};
+  const snapshot={identity:'index',owner:{present:false,recordHash:null},resources,complete:true};
+  const check=(state,checkpoint=checkpointState)=>validateCleanupSnapshot({action:'remove',project,workspace,manifest,checkpointState:checkpoint,snapshot:state});
+  assert.doesNotThrow(()=>check(snapshot,undefined));
+  for(const remaining of [{collections:['two'],metadataPoints:['base']},{collections:[],metadataPoints:['base']},{collections:[],metadataPoints:[]}])assert.doesNotThrow(()=>check({...snapshot,resources:remaining}));
+  assert.throws(()=>check({...snapshot,resources:{collections:['foreign'],metadataPoints:[]}}),/INDEX_OWNERSHIP_CONFLICT/);
+  assert.throws(()=>check({...snapshot,owner:{present:true,recordHash:'foreign'}}),/INDEX_OWNERSHIP_CONFLICT/);
+  assert.throws(()=>check({...snapshot,resources:{collections:['two'],metadataPoints:[]}},null),/INDEX_OWNERSHIP_CONFLICT/);
+  const owned={...manifest,index:{...manifest.index,ownerRecordHash:'hash'}};
+  assert.throws(()=>validateCleanupSnapshot({action:'remove',project,workspace,manifest:owned,checkpointState:{...checkpointState,ownerRecordHash:'hash'},snapshot}),/INDEX_OWNERSHIP_CONFLICT/);
+  assert.doesNotThrow(()=>validateCleanupSnapshot({action:'remove',project,workspace,manifest:owned,checkpointState:{...checkpointState,ownerRecordHash:'hash'},snapshot:{...snapshot,resources:{collections:[],metadataPoints:[]}}}));
+});
+
+test('checkpoint is persisted before deletion and failed persistence prevents deletion',async t=>{
+  const f=await fixture(t),snapshot={identity:indexIdentity(f.w.path),owner:{recordHash:null},resources:{collections:['fixture'],metadataPoints:[]},complete:true},manifest={manifest_sha256:'a'.repeat(64)};
+  f.setResult(snapshot);let saved;
+  await f.adapter.remove(f.project,f.w,{manifest,checkpoint:async state=>{assert.deepEqual(f.calls.map(c=>c.action),['inspect']);saved=state;}});
+  assert.deepEqual(f.calls.map(c=>c.action),['inspect','remove']);assert.deepEqual(f.calls[1].checkpointState,saved);
+  f.calls.length=0;await assert.rejects(f.adapter.remove(f.project,f.w,{manifest,checkpoint:async()=>{throw Error('save failed');}}),/save failed/);
+  assert.deepEqual(f.calls.map(c=>c.action),['inspect']);
+  f.calls.length=0;await f.adapter.remove(f.project,f.w,{manifest,checkpointState:saved});
+  assert.deepEqual(f.calls[1].checkpointState,saved);
 });

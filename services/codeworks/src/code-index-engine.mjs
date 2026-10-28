@@ -17,16 +17,35 @@ const waiting=reason=>({state:'waiting',reason});
 const safeFile=(root,relative)=>{const file=path.resolve(root,relative);if(path.isAbsolute(relative)||!file.startsWith(root+'/'))throw Error('INDEX_PATH_INVALID');return file;};
 const move=(value,from,to)=>Array.isArray(value)?value.map(v=>move(v,from,to)):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[move(k,from,to),move(v,from,to)])):typeof value==='string'&&(value===from||value.startsWith(from+'/'))?to+value.slice(from.length):value;
 
+/** Проверяет доказательство очистки и допустимые остатки после сохранённого checkpoint. */
+export function validateCleanupSnapshot({action,project,workspace:w,manifest,checkpointState,snapshot}){
+  const id=snapshot.identity;
+  const hasResources=snapshot.resources.collections.length||snapshot.resources.metadataPoints.length;
+  const sameSet=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&new Set(a).size===a.length&&a.every(value=>b.includes(value));
+  const subset=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&new Set(a).size===a.length&&a.every(value=>b.includes(value));
+  if(manifest){
+    const expected=manifest.index;
+    if(manifest.reviewed!==true||manifest.manifestVersion!==1||manifest.project_id!==project.id||manifest.common_dir!==project.common_dir||manifest.workspace_id!==w.id||manifest.worktree?.path!==w.path||expected?.identity!==id||!/^[0-9a-f]{64}$/.test(manifest.manifest_sha256))throw Error('INDEX_OWNERSHIP_CONFLICT');
+    if(checkpointState){
+      if(checkpointState.manifest_sha256!==manifest.manifest_sha256||checkpointState.identity!==id||checkpointState.ownerRecordHash!==expected.ownerRecordHash||!sameSet(checkpointState.resources?.collections,expected.collections)||!sameSet(checkpointState.resources?.metadataPoints,expected.metadataPoints)||!subset(snapshot.resources.collections,expected.collections)||!subset(snapshot.resources.metadataPoints,expected.metadataPoints))throw Error('INDEX_OWNERSHIP_CONFLICT');
+      if(snapshot.owner.present?snapshot.owner.recordHash!==expected.ownerRecordHash:expected.ownerRecordHash!==null&&hasResources)throw Error('INDEX_OWNERSHIP_CONFLICT');
+    }else if(expected.ownerRecordHash!==snapshot.owner.recordHash||!sameSet(expected.collections,snapshot.resources.collections)||!sameSet(expected.metadataPoints,snapshot.resources.metadataPoints))throw Error('INDEX_OWNERSHIP_CONFLICT');
+  }else if(action==='remove'&&snapshot.owner.present){
+    if(!snapshot.owner.tokenMatches||!snapshot.owner.pathMatches)throw Error('INDEX_OWNERSHIP_CONFLICT');
+  }else if(action==='remove'&&hasResources)throw Error('INDEX_OWNERSHIP_CONFLICT');
+}
+
 /** Выполняет один fenced проход. Настройки и токен приходят от доверенного Activity, не из публичного API. */
-export async function runIndexEngine({action,config,project,workspace:w,index:owned,manifest}){
-  if(!['clone','update','remove','inspect'].includes(action)||owned.identity!==indexIdentity(w.path)||!w.ownership_token||!path.isAbsolute(w.path)||path.normalize(w.path)!==w.path||path.dirname(w.path)!==project.workspace_root)throw Error('INDEX_OWNERSHIP_CONFLICT');
+export async function runIndexEngine({action,config,project,workspace:w,index:owned,manifest,checkpointState}){
+  const rootAllowed=path.dirname(w.path)===project.workspace_root||manifest&&['inspect','remove'].includes(action)&&(project.legacy_workspace_roots??[]).includes(path.dirname(w.path));
+  if(!['clone','update','remove','inspect'].includes(action)||owned.identity!==indexIdentity(w.path)||(!w.ownership_token&&!manifest)||!path.isAbsolute(w.path)||path.normalize(w.path)!==w.path||!rootAllowed)throw Error('INDEX_OWNERSHIP_CONFLICT');
   const runtimeFile=typeof config.socraticodeConfig==='string'?config.socraticodeConfig:config.socraticodeConfig?.[w.kind];
   const settings=JSON.parse(await readFile(runtimeFile,'utf8'));
   const engine=config.engine;
   if(!path.isAbsolute(engine))throw Error('INDEX_ENGINE_REQUIRED');
   const root=path.dirname(engine),require=createRequire(engine);
-  const manifest=JSON.parse(await readFile(path.join(root,'../package.json'),'utf8'));
-  if(manifest.name!=='socraticode'||manifest.version!=='1.16.0')throw Error('UNSUPPORTED_SOCRATICODE_VERSION');
+  const enginePackage=JSON.parse(await readFile(path.join(root,'../package.json'),'utf8'));
+  if(enginePackage.name!=='socraticode'||enginePackage.version!=='1.16.0')throw Error('UNSUPPORTED_SOCRATICODE_VERSION');
   Object.assign(process.env,settings.env,{SOCRATICODE_AUTO_RESUME:'off',SOCRATICODE_WATCHER:'manual'});
   if(process.env.SOCRATICODE_PROJECT_ID||process.env.SOCRATICODE_BRANCH_AWARE==='true')throw Error('PATH_IDENTITY_REQUIRED');
   // AIDEV-NOTE: Эти version-pinned exports — единственная граница с протоколом locks/storage внешнего движка.
@@ -65,7 +84,7 @@ export async function runIndexEngine({action,config,project,workspace:w,index:ow
     for(const name of resourcePoints){assertFence();if(await point(metadata,uuid(name)))metadataPoints.push(name);}
     if(record)metadataPoints.push(ownerName);
     assertFence();
-    return {identity:id,owner:{present:!!record,tokenMatches:record?.payload?.codeworksOwner===w.ownership_token,pathMatches:record?.payload?.projectPath===w.path,recordHash:record?hash(JSON.stringify(canonical(record.payload))):null},resources:{collections,metadataPoints},complete:true};
+    return {identity:id,owner:{present:!!record,tokenMatches:!!record&&!!w.ownership_token&&record.payload?.codeworksOwner===w.ownership_token,pathMatches:record?.payload?.projectPath===w.path,recordHash:record?hash(JSON.stringify(canonical(record.payload))):null},resources:{collections,metadataPoints},complete:true};
   };
   const existsResources=async()=>{const result=await inspect();return !!(result.resources.collections.length||result.resources.metadataPoints.length);};
   if(action==='remove'||action==='inspect'){
@@ -74,14 +93,9 @@ export async function runIndexEngine({action,config,project,workspace:w,index:ow
     assertFence=()=>{if(barrier.isCompromised())throw Error('INDEX_LOCK_LOST');};
     try{
       const snapshot=await inspect();
-      if(action==='inspect')return snapshot;
+      validateCleanupSnapshot({action,project,workspace:w,manifest,checkpointState,snapshot});
       const hasResources=snapshot.resources.collections.length||snapshot.resources.metadataPoints.length;
-      const sameSet=(a,b)=>Array.isArray(a)&&Array.isArray(b)&&a.length===b.length&&new Set(a).size===a.length&&a.every(value=>b.includes(value));
-      if(manifest){
-        if(manifest.reviewed!==true||manifest.manifestVersion!==1||manifest.project_id!==project.id||manifest.common_dir!==project.common_dir||manifest.workspace_id!==w.id||manifest.worktree?.path!==w.path||manifest.index?.identity!==id||manifest.index.ownerRecordHash!==snapshot.owner.recordHash||!sameSet(manifest.index.collections,snapshot.resources.collections)||!sameSet(manifest.index.metadataPoints,snapshot.resources.metadataPoints))throw Error('INDEX_OWNERSHIP_CONFLICT');
-      }else if(snapshot.owner.present){
-        if(!snapshot.owner.tokenMatches||!snapshot.owner.pathMatches)throw Error('INDEX_OWNERSHIP_CONFLICT');
-      }else if(hasResources)throw Error('INDEX_OWNERSHIP_CONFLICT');
+      if(action==='inspect')return snapshot;
       if(!hasResources)return {state:'removed'};
       for(const collection of snapshot.resources.collections){assertFence();await q.deleteCollection(collection);}
       for(const name of snapshot.resources.metadataPoints.filter(name=>name!==ownerName)){assertFence();await q.delete(metadata,{points:[uuid(name)],wait:true});}
