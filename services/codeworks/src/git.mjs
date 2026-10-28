@@ -30,7 +30,7 @@ export async function command(executable,args,{cwd,allowFailure=false,timeout=12
 }
 /** Подтверждает отсутствие всех проверенных Git ресурсов. */
 export function gitResourcesAbsent(o) {
-  return o?.remote?.known===true && !o.branch.oid && !o.ownership.oid && !o.remote.oid && !o.worktree.registered && !o.worktree.pathExists;
+  return o?.remote?.known===true && !o.branch.oid && !o.ownership.oid && !o.remote.oid && !o.tracking?.oid && !o.worktree.registered && !o.worktree.pathExists;
 }
 /** Адаптер Git/preparer; локальные мутации требуют унаследованный flock FD 3. */
 export function createGit({flowGit}={}) {
@@ -74,7 +74,7 @@ export function createGit({flowGit}={}) {
     const branchRef='refs/heads/'+w.branch, ownerRef=manifest?.ownership?.ref??ownershipRef(w);
     if(!/^refs\/codeworks\/ownership\/[A-Za-z0-9-]+$/.test(ownerRef))throw new Fault('OWNERSHIP_CONFLICT');
     const readRef=async ref=>{const r=await git(project,['rev-parse','--verify','--quiet',ref],{allowFailure:true});if(r.code===1)return null;if(r.code!==0)throw new Fault('GIT_FAILED');return r.stdout;};
-    const branch=await readRef(branchRef),owner=await readRef(ownerRef);
+    const branch=await readRef(branchRef),owner=await readRef(ownerRef),trackingRef='refs/remotes/origin/'+w.branch,tracking=await readRef(trackingRef);
     const marker=owner?(await git(project,['cat-file','blob',ownerRef])).stdout:null;
     const matches=!!marker&&marker===ownership(w);
     const raw=(await git(project,['worktree','list','--porcelain','-z'])).stdout;
@@ -87,13 +87,13 @@ export function createGit({flowGit}={}) {
     if(entry&&canonical){head=(await local(w,['rev-parse','HEAD'])).stdout;dirty=!!(await local(w,['status','--porcelain=v1','--untracked-files=all'])).stdout;}
     const flow=project.github?(flowGit??(await import('./git-flow.mjs')).createFlowGit()):null;
     const remote=flow?await flow.remote(project,w.branch,{legacy:!!manifest}):null;
-    return {branch:{ref:branchRef,oid:branch},ownership:{ref:ownerRef,oid:owner,matches},remote:{ref:branchRef,oid:remote,known:true},worktree:{path:w.path,registered:!!entry,pathExists,head,dirty,owned,lock:entry?.locked??null}};
+    return {tracking:{ref:trackingRef,oid:tracking},branch:{ref:branchRef,oid:branch},ownership:{ref:ownerRef,oid:owner,matches},remote:{ref:branchRef,oid:remote,known:true},worktree:{path:w.path,registered:!!entry,pathExists,head,dirty,owned,lock:entry?.locked??null}};
   }
   function authorize(project,w,expected,manifest) {
-    if(!expected||expected.branch.ref!=='refs/heads/'+w.branch||expected.ownership.ref!==(manifest?.ownership?.ref??ownershipRef(w))||expected.remote.ref!==expected.branch.ref||expected.worktree.path!==w.path||!path.isAbsolute(w.path)||w.path===project.repo_path)throw new Fault('OWNERSHIP_CONFLICT');
+    if(!expected||expected.branch.ref!=='refs/heads/'+w.branch||expected.ownership.ref!==(manifest?.ownership?.ref??ownershipRef(w))||expected.remote.ref!==expected.branch.ref||expected.tracking?.ref!=='refs/remotes/origin/'+w.branch||expected.worktree.path!==w.path||!path.isAbsolute(w.path)||w.path===project.repo_path)throw new Fault('OWNERSHIP_CONFLICT');
     if(['dev','main'].includes(w.branch))throw new Fault('OWNERSHIP_CONFLICT');
     if(manifest){
-      if(!(project.legacy_workspace_roots??[]).some(root=>path.isAbsolute(root)&&path.dirname(w.path)===root)||manifest.manifestVersion!==1||manifest.reviewed!==true||manifest.project_id!==project.id||manifest.common_dir!==project.common_dir||manifest.workspace_id!==w.id||manifest.branch?.ref!==expected.branch.ref||manifest.branch?.oid!==expected.branch.oid||manifest.ownership?.ref!==expected.ownership.ref||manifest.ownership?.oid!==expected.ownership.oid||manifest.remote?.ref!==expected.remote.ref||manifest.remote?.oid!==expected.remote.oid||manifest.worktree?.path!==w.path||manifest.worktree?.registered!==expected.worktree.registered||manifest.worktree?.lock!==expected.worktree.lock||manifest.worktree?.head!==expected.worktree.head||!Array.isArray(manifest.provenance)||!manifest.provenance.length||!manifest.disposition||!/^[0-9a-f]{64}$/.test(manifest.manifest_sha256))throw new Fault('OWNERSHIP_CONFLICT');
+      if(!(project.legacy_workspace_roots??[]).some(root=>path.isAbsolute(root)&&path.dirname(w.path)===root)||manifest.manifestVersion!==1||manifest.reviewed!==true||manifest.project_id!==project.id||manifest.common_dir!==project.common_dir||manifest.workspace_id!==w.id||manifest.branch?.ref!==expected.branch.ref||manifest.branch?.oid!==expected.branch.oid||manifest.ownership?.ref!==expected.ownership.ref||manifest.ownership?.oid!==expected.ownership.oid||manifest.remote?.ref!==expected.remote.ref||manifest.remote?.oid!==expected.remote.oid||(expected.tracking.oid!==null&&(manifest.tracking?.ref!==expected.tracking.ref||manifest.tracking?.oid!==expected.tracking.oid))||manifest.worktree?.path!==w.path||manifest.worktree?.registered!==expected.worktree.registered||manifest.worktree?.lock!==expected.worktree.lock||manifest.worktree?.head!==expected.worktree.head||!Array.isArray(manifest.provenance)||!manifest.provenance.length||!manifest.disposition||!/^[0-9a-f]{64}$/.test(manifest.manifest_sha256))throw new Fault('OWNERSHIP_CONFLICT');
     }else if(!w.path.startsWith(project.workspace_root+'/')||!expected.ownership.matches&&(expected.branch.oid||expected.ownership.oid))throw new Fault('OWNERSHIP_CONFLICT');
   }
   async function cleanupStep(project,w,expected,step,{manifest}={}) {
@@ -101,7 +101,7 @@ export function createGit({flowGit}={}) {
     if(step!=='remote')requireLock();
     authorize(project,w,expected,manifest);
     const current=await inspectResources(project,w,{manifest});
-    for(const field of ['branch','ownership','remote'])if(current[field].oid!==null&&current[field].oid!==expected[field].oid)throw new Fault('TARGET_CHANGED');
+    for(const field of ['branch','ownership','remote','tracking'])if(current[field].oid!==null&&current[field].oid!==expected[field].oid)throw new Fault('TARGET_CHANGED');
     if(current.worktree.registered&&(!expected.worktree.registered||current.worktree.lock!==expected.worktree.lock||current.worktree.head!==expected.worktree.head))throw new Fault('TARGET_CHANGED');
     if(current.worktree.pathExists&&!expected.worktree.pathExists)throw new Fault('TARGET_CHANGED');
     if(current.ownership.oid&&!manifest&&!current.ownership.matches)throw new Fault('OWNERSHIP_CONFLICT');
@@ -118,7 +118,7 @@ export function createGit({flowGit}={}) {
       if(current.worktree.registered||current.worktree.pathExists||current.remote.oid)throw new Fault('OWNERSHIP_CONFLICT');
       const tracking='refs/remotes/origin/'+w.branch;const trackingResult=await git(project,['rev-parse','--verify','--quiet',tracking],{allowFailure:true});
       if(![0,1].includes(trackingResult.code))throw new Fault('GIT_FAILED');
-      if(trackingResult.code===0&&trackingResult.stdout!==expected.remote.oid)throw new Fault('TARGET_CHANGED');
+      if(trackingResult.code===0&&trackingResult.stdout!==expected.tracking.oid)throw new Fault('TARGET_CHANGED');
       const lines=[];if(trackingResult.code===0)lines.push('delete '+tracking+' '+trackingResult.stdout);if(current.branch.oid)lines.push('delete '+current.branch.ref+' '+current.branch.oid);if(current.ownership.oid)lines.push('delete '+current.ownership.ref+' '+current.ownership.oid);
       if(lines.length){await git(project,['update-ref','--stdin'],{input:'start\n'+lines.join('\n')+'\nprepare\ncommit\n'});changed=true;}
     }
