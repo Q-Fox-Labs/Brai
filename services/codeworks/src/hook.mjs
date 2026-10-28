@@ -175,6 +175,8 @@ export async function runHook(event, {env = process.env, config, connect = conne
   const eventName = event.hook_event_name ?? 'PreToolUse';
   if (['PostToolUse', 'Stop', 'SubagentStop', 'Interrupt', 'SessionEnd'].includes(eventName)) {
     if (!event.session_id || !event.turn_id || (eventName === 'PostToolUse' && !event.tool_use_id)) return {};
+    // AIDEV-NOTE: Завершение shell не доказывает остановку фоновых потомков.
+    if (eventName === 'PostToolUse' && ['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1))) return {};
     let client;
     try {
       client = await connect(await loadClientConfig(env));
@@ -192,6 +194,23 @@ export async function runHook(event, {env = process.env, config, connect = conne
   }
   if (eventName !== 'PreToolUse') return {};
   const files = writePaths(event);
+  const input = event.tool_input, cwd = input?.workdir || input?.cwd || event.cwd || process.cwd();
+  const name = event.tool_name?.split('.').at(-1);
+  const shell = ['Bash','exec_command'].includes(name);
+  const candidates = [...files, ...(shell ? [resolved(cwd, '/')] : [])];
+  const areas = new Map();
+  for (const project of projects) {
+    if (!path.isAbsolute(project.workspace_root ?? '')) continue;
+    const base = resolved(project.workspace_root, '/');
+    for (const file of candidates) {
+      if (!inside(base,file) || file === base) continue;
+      const id = path.relative(base,file).split(path.sep)[0];
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) continue;
+      areas.set(project.id+':'+id,{project,id,root:path.join(base,id)});
+    }
+  }
+  if (areas.size > 1) return denied('Разделите запись между рабочими областями.',[...areas.values()].map(a=>a.project));
+  if (areas.size === 1) return existingWrite(event,[...areas.values()][0],{env,connect,files,shell,cwd,input,name});
   if (!files.length) return {};
   const matching = projects.filter(project => {
     if (typeof project.repo_path !== 'string' || !path.isAbsolute(project.repo_path) || typeof project.id !== 'string') return false;
@@ -203,12 +222,10 @@ export async function runHook(event, {env = process.env, config, connect = conne
   const project = matching[0], root = resolved(project.repo_path, '/');
   const excluded = [...(project.documentation_paths ?? []), ...(project.excluded_paths ?? [])].map(p => resolved(p, root));
   if (matching.length !== 1 || files.some(file => !inside(root, file) || excluded.some(p => inside(p, file)))) return deny('Разделите запись по владельцам и исключениям.');
-  const name = event.tool_name?.split('.').at(-1);
   // AIDEV-NOTE: Shell может содержать непрозрачный код; он не создаёт область и не переписывается.
   if (!['apply_patch', 'Write', 'Edit'].includes(name)) return deny('Используйте native файловую запись для подготовки области.');
   const key = env.CODEWORKS_WORKSPACE_KEY;
   if (!key || !event.session_id || !event.turn_id || !event.tool_use_id) return deny('Укажите осмысленный CODEWORKS_WORKSPACE_KEY и повторите запись в поддерживаемой сессии.');
-  const input = event.tool_input, cwd = input?.workdir || input?.cwd || event.cwd || process.cwd();
   let rewrite;
   if (name === 'apply_patch') {
     const field = typeof input === 'string' ? null : typeof input?.command === 'string' ? 'command' : typeof input?.patch === 'string' ? 'patch' : null;
@@ -251,10 +268,34 @@ export async function runHook(event, {env = process.env, config, connect = conne
     await client.call('write.admit', {project_id:project.id, write_call_id:result.write_call_id, rewritten_sha256:hash(updatedInput)});
     return {hookSpecificOutput:{hookEventName:'PreToolUse', permissionDecision:'allow', updatedInput}};
   } catch {
-    if (client && result?.write_call_id) try { await client.call('write.stop', {project_id:project.id,session_id:event.session_id,turn_id:event.turn_id,event:'Stop',write_call_id:result.write_call_id,reason:'prepare_pending'}); } catch {}
+    if (client) try { await client.call('write.stop', {project_id:project.id,session_id:event.session_id,turn_id:event.turn_id,event:'Stop',...(result?.write_call_id ? {write_call_id:result.write_call_id} : {tool_use_id:event.tool_use_id}),reason:'prepare_pending'}); } catch {}
     return deny('PREPARE_PENDING: запись остановлена; проверьте status и повторите её после подготовки.');
   }
   finally { try { await client?.close(); } catch {} }
+}
+
+// AIDEV-NOTE: Для shell сохраняется незавершённая запись до независимой проверки процессов.
+async function existingWrite(event, area, {env,connect,files,shell,cwd,input,name}) {
+  const deny = message => denied(message,[area.project]);
+  if (!event.session_id || !event.turn_id || !event.tool_use_id) return deny('Нет идентификаторов вызова записи.');
+  if ((!shell && !['apply_patch','Write','Edit'].includes(name)) || files.some(f=>!inside(area.root,f))) return deny('Разделите запись по владельцам.');
+  const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  let client,result;
+  try {
+    client = await connect(await loadClientConfig(env));
+    const status = await client.call('status',{project_id:area.project.id,workspace_id:area.id});
+    const w = status.workspace;
+    if (!w || resolved(w.path,'/') !== area.root || w.preparation_state !== 'ready') return deny('Рабочая область недоступна.');
+    const key=w.workspace_key,kind=w.kind;
+    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),targets:files.map(f=>path.relative(area.root,f)),request_key:'hook-'+hash([area.project.id,key,kind]).slice(0,48)};
+    result=await client.call('write.begin',args);
+    if (result.workspace_id!==area.id || resolved(result.path,'/')!==area.root) throw Error('WORKSPACE_MISMATCH');
+    await client.call('write.admit',{project_id:area.project.id,write_call_id:result.write_call_id,rewritten_sha256:hash(input)});
+    return {hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'allow'}};
+  } catch {
+    if (client) try { await client.call('write.stop',{project_id:area.project.id,session_id:event.session_id,turn_id:event.turn_id,event:'Stop',...(result?.write_call_id ? {write_call_id:result.write_call_id} : {tool_use_id:event.tool_use_id}),reason:'prepare_pending'}); } catch {}
+    return deny('Не удалось подтвердить допуск записи; проверьте состояние области.');
+  } finally { try { await client?.close(); } catch {} }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
