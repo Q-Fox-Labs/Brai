@@ -20,7 +20,7 @@ function fixture({active=false,proof=true,empty=false}={}){
   const run=()=>advanceBranchCleanup(db,item,{id:'project'},{git,verifyArchive:async()=>{verified++;}});
   return {run,counts:()=>({deleted,verified})};
 }
-test('active task blocks the branch before any external operation',async()=>{
+test('any workspace record, including a terminal one, blocks branch-only cleanup before external work',async()=>{
   const f=fixture({active:true});await assert.rejects(f.run(),/BRANCH_LIVE_TASK/);assert.deepEqual(f.counts(),{deleted:0,verified:0});
 });
 test('archive proof is required and rechecked before a Git deletion',async()=>{

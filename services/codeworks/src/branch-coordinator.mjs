@@ -12,9 +12,7 @@ export async function advanceBranchCleanup(db,obligation,project,{git,checkpoint
   const fence=async()=>{
     await checkpoint('branch-cleanup-fence');
     if(!(await db.query("SELECT 1 FROM codeworks.cleanup_obligations WHERE id=$1 AND epoch=$2 AND owner_workflow_id=$3 AND state IN ('pending','running','retry')",[id,epoch,owner])).rowCount)throw Error('CLEANUP_FENCE_LOST');
-    const active=await db.query(`SELECT 1 FROM codeworks.workspaces w LEFT JOIN codeworks.workflow_registry r ON r.workspace_id=w.id
-      WHERE w.project_id=$1 AND w.branch=$2 AND (w.removed_at IS NULL OR r.lifecycle='active' OR EXISTS(
-        SELECT 1 FROM codeworks.operations o WHERE o.workspace_id=w.id AND NOT o.archived AND o.status IN ('pending','running','awaiting_execution','awaiting_ci','awaiting_deployment','awaiting_reconciliation'))) LIMIT 1`,[project.id,ref.slice(11)]);
+    const active=await db.query('SELECT 1 FROM codeworks.workspaces WHERE project_id=$1 AND branch=$2 LIMIT 1',[project.id,ref.slice(11)]);
     if(active.rowCount)throw Error('BRANCH_LIVE_TASK');
   };
   const save=async(fields,values)=>{
