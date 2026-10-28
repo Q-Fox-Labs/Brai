@@ -2,12 +2,25 @@
 // ABOUTME: Не удаляет ресурсы и не считает неизвестный исход записи завершённым.
 import {randomUUID} from 'node:crypto';
 
+// AIDEV-NOTE: Старый prepare_pending мог ошибочно иметь stop_event; он не доказывает конец хода.
+const unusedEligibility=`w.activation_state='awaiting_first_write' AND EXISTS(
+  SELECT 1 FROM codeworks.write_calls c WHERE c.workspace_id=w.id AND (
+    (c.state='denied_pending' AND c.tool_result->>'stop_event' IS NOT NULL
+      AND COALESCE(c.tool_result->>'stop_reason','')<>'prepare_pending'
+      AND (w.preparation_state='ready' OR (w.preparation_state='failed' AND EXISTS(
+        SELECT 1 FROM codeworks.operations f WHERE f.workspace_id=w.id AND f.kind='prepare' AND NOT f.archived AND f.status='failed'))))
+    OR (w.preparation_state='ready' AND (c.state='denied_pending' OR (c.state='finished' AND c.tool_result->>'changed'='false'))
+      AND EXISTS(SELECT 1 FROM codeworks.operations p WHERE p.workspace_id=w.id AND p.kind='prepare' AND NOT p.archived AND p.status='succeeded')
+      AND GREATEST(c.updated_at,(SELECT max(p.updated_at) FROM codeworks.operations p WHERE p.workspace_id=w.id AND p.kind='prepare' AND NOT p.archived AND p.status='succeeded'))<now()-interval '5 minutes')
+  ))`;
+
 /** Создаёт обязательство только для заведомо отклонённой записи или terminal legacy root. */
 export async function reconcileProjectLedger(pool,projectId,owner,{cursor=null}={}) {
   const candidates=(await pool.query(`SELECT w.id FROM codeworks.workspaces w JOIN codeworks.workflow_registry r ON r.workspace_id=w.id
     WHERE w.project_id=$1 AND ((r.state='completed' AND r.lifecycle IN ('cancelled','removed')) OR
-      (r.state='open' AND r.lifecycle='active' AND w.activation_state='awaiting_first_write' AND w.preparation_state='ready'
-       AND EXISTS(SELECT 1 FROM codeworks.write_calls c WHERE c.workspace_id=w.id AND ((c.state='denied_pending' AND (c.tool_result->>'stop_event' IS NOT NULL OR c.updated_at<now()-interval '5 minutes')) OR (c.state='finished' AND c.tool_result->>'changed'='false' AND c.updated_at<now()-interval '5 minutes'))))
+      (r.state='open' AND r.lifecycle='active' AND ${unusedEligibility}
+       AND NOT EXISTS(SELECT 1 FROM codeworks.write_calls x WHERE x.workspace_id=w.id AND x.state IN ('preparing','in_flight','uncertain'))
+       AND NOT EXISTS(SELECT 1 FROM codeworks.commands q WHERE q.workflow_id=r.workflow_id AND q.state<>'done'))
       ) AND NOT EXISTS(SELECT 1 FROM codeworks.cleanup_obligations o WHERE o.workspace_id=w.id)
     ORDER BY w.created_at LIMIT 32`,[projectId])).rows;
   for(const candidate of candidates){
@@ -20,7 +33,8 @@ export async function reconcileProjectLedger(pool,projectId,owner,{cursor=null}=
       const existing=(await db.query('SELECT 1 FROM codeworks.cleanup_obligations WHERE workspace_id=$1',[w.id])).rowCount;
       const writers=(await db.query("SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain')",[w.id])).rowCount;
       const pending=(await db.query("SELECT 1 FROM codeworks.commands WHERE workflow_id=$1 AND state<>'done'",[r.workflow_id])).rowCount;
-      const unused=r.state==='open'&&r.lifecycle==='active'&&w.activation_state==='awaiting_first_write'&&w.preparation_state==='ready'&&!writers&&!pending;
+      const eligible=r.state==='open'&&r.lifecycle==='active'&&(await db.query(`SELECT 1 FROM codeworks.workspaces w WHERE w.id=$1 AND ${unusedEligibility}`,[w.id])).rowCount;
+      const unused=!!eligible&&!writers&&!pending;
       const orphan=r.state==='completed'&&['cancelled','removed'].includes(r.lifecycle);
       if(!existing&&(unused||orphan)){
         const outcome=unused?'unused':r.lifecycle==='cancelled'?'cancelled':'released';
