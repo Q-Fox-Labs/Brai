@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {runHook,writePaths} from '../src/hook.mjs';
+import {validate} from '../src/contracts.mjs';
 const config={projects:[{id:'demo',repo_path:'/test/main',documentation_paths:['docs'],excluded_paths:['tmp']}]};
 const env={CODEWORKS_WORKSPACE_KEY:'task'};
 const patch=text=>({hook_event_name:'PreToolUse',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'apply_patch',cwd:'/test/main',tool_input:{command:text}});
@@ -61,7 +62,7 @@ test('only completed ordinary Git shell calls finish writer accounting',async()=
  for(const command of ['git add -A','git commit -m "message"','git push origin feature/test']) {
   for(const response of [{exit_code:0},'Process exited with code 1\nOutput:\nfailed']) {
    const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:response},f.options);
-   assert.equal(f.calls[0].method,'write.finish');assert.equal(f.calls[0].args.outcome,typeof response==='string'?'error':'success');
+   assert.equal(f.calls[0].method,'write.finish');assert.equal(f.calls[0].args.outcome,'success');
   }
  }
  for(const [command,response] of [['git add -A; touch x',{exit_code:0}],['git -c core.hooksPath=/tmp commit -m x',{exit_code:0}],['git push origin feature/test',{session_id:12}],['git add -A','Process running, session ID 1']]) {
@@ -86,4 +87,19 @@ test('safe backend failures keep their reason without exposing details',async()=
   const f=fixture();f.options.connect=async()=>({call:async(method)=>{if(method==='write.begin')throw Object.assign(new Error('secret private stderr'),{code});return {};},close(){}});
   const out=await runHook(patch(valid),f.options);assert.match(out.hookSpecificOutput.additionalContext,new RegExp(code));assert.doesNotMatch(JSON.stringify(out),/PREPARE_PENDING|secret private stderr/);
  }
+});
+
+test('native Bash text Post finishes foreground call without parsing stdout',async()=>{
+ const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'node --test tests/a'},tool_response:'✔ tests/a (50ms)\nℹ pass 1'},f.options);assert.equal(f.calls[0].method,'write.finish');assert.equal(f.calls[0].args.outcome,'success');
+ for(const response of ['Process running with session ID 2',{session_id:2},{status:'running'}]) {const g=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'node --test tests/a'},tool_response:response},g.options);assert.equal(g.calls.length,0);}
+ const g=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'node --test tests/a',run_in_background:true},tool_response:'running'},g.options);assert.equal(g.calls.length,0);
+});
+test('existing shell call validates against real owner schema with whole-tree target',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,calls=[];
+ const cfg={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};validate(method,args);if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:id};return {};},close(){}});
+ const r=await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:'node --test tests/a'}},{config:cfg,env,connect});assert.equal(r.hookSpecificOutput.permissionDecision,'allow');assert.deepEqual(calls.find(x=>x.method==='write.begin').args.targets,['.']);
+});
+test('native end-of-file marker survives rewrite byte for byte',async()=>{
+ const f=fixture(),command='*** Begin Patch\n*** Update File: src/a\n@@\n-old\n+new\n*** End of File\n*** End Patch';const r=await runHook(patch(command),f.options);assert.equal(r.hookSpecificOutput.permissionDecision,'allow');assert.equal(r.hookSpecificOutput.updatedInput.command,command.replace('src/a','/test/tree/src/a'));
 });

@@ -162,12 +162,13 @@ function foregroundCommand(command) {
   }
   return allowed();
 }
-function completedShell(response) {
-  if (response && typeof response==='object' && Number.isInteger(response.exit_code) && !response.session_id) return response.exit_code;
-  if (typeof response!=='string' || /(?:session[_ ]id|process running|still running)/i.test(response)) return null;
-  const header=response.split(/\nOutput:\s*\n/)[0];
-  const match=header.match(/^Process exited with code\s*:?\s*(\d+)\s*$/im);
-  return match ? Number(match[1]) : null;
+function completedShell(event) {
+  const name=event.tool_name?.split('.').at(-1), input=event.tool_input, response=event.tool_response;
+  if (input?.run_in_background || input?.background || input?.async) return false;
+  if (response && typeof response==='object') return !response.session_id && !response.sessionId && !['running','pending'].includes(response.status) && (name==='Bash' || Number.isInteger(response.exit_code));
+  if (typeof response!=='string' || /(?:session[_ ]id|process running|still running)/i.test(response)) return false;
+  // AIDEV-NOTE: Native Bash PostToolUse подтверждает ответ инструмента; его stdout не является exit code.
+  return name==='Bash' || /^Process exited with code\s*:?\s*\d+\s*$/im.test(response.split(/\nOutput:\s*\n/)[0]);
 }
 
 function shellPaths(command, cwd) {
@@ -256,9 +257,9 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   if (['PostToolUse', 'Stop', 'SubagentStop', 'Interrupt', 'SessionEnd'].includes(eventName)) {
     if (!event.session_id || !event.turn_id || (eventName === 'PostToolUse' && !event.tool_use_id)) return {};
     const shellPost = eventName === 'PostToolUse' && ['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1));
-    const exitCode = shellPost ? completedShell(event.tool_response) : null;
+    const finished = shellPost && completedShell(event);
     // AIDEV-NOTE: Только распознанный завершённый foreground вызов снимает учёт; произвольный shell может оставить потомков.
-    if (shellPost && (!foregroundCommand(event.tool_input?.command ?? event.tool_input?.cmd) || exitCode === null)) return {};
+    if (shellPost && (!foregroundCommand(event.tool_input?.command ?? event.tool_input?.cmd) || !finished)) return {};
     let client;
     try {
       client = await connect(await loadClientConfig(env));
@@ -266,7 +267,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
         const args = {project_id: project.id, session_id: event.session_id, turn_id: event.turn_id};
         if (eventName === 'PostToolUse') {
           args.tool_use_id = event.tool_use_id;
-          args.outcome = shellPost ? (exitCode === 0 ? 'success' : 'error') : (event.tool_response?.isError || event.tool_response?.error ? 'error' : 'success');
+          args.outcome = event.tool_response?.isError || event.tool_response?.error || (Number.isInteger(event.tool_response?.exit_code) && event.tool_response.exit_code !== 0) ? 'error' : 'success';
         } else args.event = eventName;
         try { await client.call(eventName === 'PostToolUse' ? 'write.finish' : 'write.stop', args); } catch { /* Другому проекту вызов не принадлежит. */ }
       }
@@ -315,7 +316,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     const value = field ? input[field] : input;
     if (typeof value !== 'string' || !/^\*\*\* Begin Patch\r?\n/.test(value) || !/\*\*\* End Patch\r?\n?$/.test(value)) return deny('Не удалось однозначно разобрать patch.');
     const headers = [...value.matchAll(/^\*\*\* (Add File|Update File|Delete File|Move to): (.+)\r?$/gm)];
-    if (!headers.length || headers.length !== files.length || /^\*\*\* (?!Begin Patch|End Patch|Add File: |Update File: |Delete File: |Move to: ).+$/m.test(value)) return deny('Не удалось однозначно разобрать patch.');
+    if (!headers.length || headers.length !== files.length || /^\*\*\* (?!Begin Patch|End Patch|End of File|Add File: |Update File: |Delete File: |Move to: ).+$/m.test(value)) return deny('Не удалось однозначно разобрать patch.');
     rewrite = target => {
       let i = 0;
       const result = value.replace(/^(\*\*\* (?:Add File|Update File|Delete File|Move to): )(.+?)(\r?)$/gm, (_, prefix, original, cr) => prefix + path.join(target, path.relative(root, files[i++])) + cr);
@@ -329,7 +330,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
   const kind = env.CODEWORKS_WORKSPACE_KIND;
   const payload = hash({tool_name:event.tool_name, tool_input:input, cwd, project_id:project.id, workspace_key:key, kind});
-  const args = {project_id:project.id, ...(key ? {workspace_key:key} : {}), ...(kind ? {kind} : {}), session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, targets:files.map(f=>path.relative(root,f)), request_key:'hook-'+hash([project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
+  const args = {project_id:project.id, ...(key ? {workspace_key:key} : {}), ...(kind ? {kind} : {}), session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, targets:[...new Set(files.map(f=>path.relative(root,f)))], request_key:'hook-'+hash([project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
   let client, result;
   try {
     client = await connect(await loadClientConfig(env));
@@ -370,7 +371,7 @@ async function existingWrite(event, area, {env,connect,files,shell,cwd,input,nam
     const w = status.workspace;
     if (!w || resolved(w.path,'/') !== area.root || w.preparation_state !== 'ready') return deny('Рабочая область недоступна.');
     const key=w.workspace_key,kind=w.kind;
-    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),targets:files.map(f=>path.relative(area.root,f)),request_key:'hook-'+hash([area.project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
+    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),targets:files.length ? [...new Set(files.map(f=>path.relative(area.root,f)))] : ['.'],request_key:'hook-'+hash([area.project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
     result=await client.call('write.begin',args);
     if (result.workspace_id!==area.id || resolved(result.path,'/')!==area.root) throw Error('WORKSPACE_MISMATCH');
     await client.call('write.admit',{project_id:area.project.id,write_call_id:result.write_call_id,rewritten_sha256:hash(input)});
