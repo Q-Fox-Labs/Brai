@@ -5,9 +5,10 @@ import {fileURLToPath} from 'node:url';
 import {command,createGit} from './git.mjs';
 import {createFlowGit} from './git-flow.mjs';
 import {Fault} from './errors.mjs';
+import {createBranchCleanup} from './branch-cleanup.mjs';
 /** Запускает один локальный шаг под унаследованным flock; crash родителя не освобождает замок живого Git. */
 export async function localGitStep(method,project,workspace,args=[],{env={}}={}) {
-  const common=['branch','registerCheckout','cleanupLocal','cleanupStep'].includes(method);
+  const common=['branch','registerCheckout','cleanupLocal','cleanupStep','cleanupBranchLocal'].includes(method);
   const lock=path.join(project.common_dir,common?'codeworks.lock':'codeworks-workspace-'+workspace.id+'.lock');
   const script='exec 3>"$1" || exit 74; flock -n -E 75 3 || exit $?; export CODEWORKS_LOCK_HELD=1; exec "$2" "$3"';
   const result=await command('/bin/sh',['-c',script,'codeworks-git',lock,process.execPath,fileURLToPath(new URL('./git-step.mjs',import.meta.url))],{
@@ -22,9 +23,16 @@ export async function localGitStep(method,project,workspace,args=[],{env={}}={})
 }
 /** Подключает прежние Git проверки; только конфликтующие локальные изменения отправляет под flock. */
 export function createActivityGit({flowGit=createFlowGit({requireLock:()=>{}}),step=localGitStep}={}) {
-  const git=createGit({flowGit});
+  const git=createGit({flowGit}),branchOnly=createBranchCleanup({flowGit});
   return {git:{...git,
     branch:(p,w)=>step('branch',p,w),
+    inspectBranchResources:(p,subject)=>branchOnly.inspect(p,subject),
+    async cleanupBranchStep(p,subject,expected,phase){
+      if(phase==='remote')return branchOnly.cleanupStep(p,subject,expected,phase);
+      if(phase!=='local_refs')throw new Fault('INVALID_ARGUMENT');
+      if((await branchOnly.inspect(p,subject)).remote.oid!==null)throw new Fault('TARGET_CHANGED');
+      return step('cleanupBranchLocal',p,{id:subject.ref,ref:subject.ref},[expected,phase]);
+    },
     async checkout(p,w){await step('registerCheckout',p,w);await step('checkout',p,w);},
     dependencies:(p,w)=>step('dependencies',p,w),
     async cleanupStep(p,w,expected,phase,options={}){

@@ -10,6 +10,7 @@ import {createGit,command,assertCleanupRoot} from './git.mjs';
 import {createCodeIndex} from './code-index.mjs';
 import {createFlowGit} from './git-flow.mjs';
 import {verifyCleanupArchive} from './cleanup-archive.mjs';
+import {createBranchCleanup} from './branch-cleanup.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 /** Канонический JSON сортирует ключи рекурсивно; массивы сохраняют порядок. */
@@ -24,7 +25,10 @@ export function validateManifest(manifest,projectId){
   if(!manifest||Array.isArray(manifest)||manifest.manifestVersion!==1||manifest.reviewed!==true||manifest.project_id!==projectId||!/^[0-9a-f]{64}$/.test(manifest.manifest_sha256??'')||!Array.isArray(manifest.protected_task_ids)||manifest.protected_task_ids.some(id=>typeof id!=='string')||!Array.isArray(manifest.provenance)||!manifest.provenance.length||!manifest.disposition||!manifest.index||!manifest.branch||!manifest.ownership||!manifest.remote||!manifest.worktree)throw Error('INVALID_MANIFEST');
   const {manifest_sha256,...payload}=manifest;
   if(hash(canonical(payload))!==manifest_sha256)throw Error('MANIFEST_DIGEST_MISMATCH');
-  if(!/^refs\/heads\/(?:feature|hotfix|codex)\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(manifest.branch.ref??'')||manifest.remote.ref!==manifest.branch.ref||!path.isAbsolute(manifest.worktree.path??'')||path.normalize(manifest.worktree.path)!==manifest.worktree.path)throw Error('INVALID_MANIFEST');
+  if(!/^refs\/heads\/(?:feature|hotfix|codex)\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(manifest.branch.ref??'')||manifest.remote.ref!==manifest.branch.ref)throw Error('INVALID_MANIFEST');
+  if(manifest.subject_type==='branch'){
+    if(manifest.workspace_id!==null||manifest.ownership.ref!==null||manifest.ownership.oid!==null||manifest.worktree.path!==null||manifest.worktree.registered!==false||manifest.index.scope!=='not_allocated_by_codeworks'||manifest.disposition.type!=='archived'||!manifest.provenance.some(p=>p?.kind==='reflog'))throw Error('INVALID_MANIFEST');
+  }else if(!path.isAbsolute(manifest.worktree.path??'')||path.normalize(manifest.worktree.path)!==manifest.worktree.path)throw Error('INVALID_MANIFEST');
   for(const item of manifest.provenance)if(!item||!['ownership-ref','reflog','workspace-record','bundle'].includes(item.kind)||typeof item.ref!=='string'||!/^[0-9a-f]{64}$/.test(item.sha256??''))throw Error('INVALID_PROVENANCE');
   return manifest;
 }
@@ -41,9 +45,33 @@ export async function verifyRetained(project,snapshot,disposition,{flowGit=creat
   if(await flowGit.remote(project,'dev')!==disposition.target_sha)throw Error('RETAINED_TARGET_CHANGED');
   return {type:'retained',target:'dev',target_sha:disposition.target_sha,source_head:disposition.source_head,refs:{branch:snapshot.branch.oid,remote:snapshot.remote.oid,worktree:snapshot.worktree.head}};
 }
+/** Принимает orphan branch без подмены workspace identity; происхождение и архив обязательны. */
+export async function importBranchCleanup(pool,projectId,manifest,{git,preflight=false,dryRun=false,allowedRepositories,verifyArchive=verifyCleanupArchive}={}){
+ validateManifest(manifest,projectId);if(manifest.subject_type!=='branch')throw Error('INVALID_MANIFEST');if(preflight)dryRun=true;
+ const db=await pool.connect();try{
+  await db.query('BEGIN');await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[projectId]);
+  const project=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1 FOR SHARE',[projectId])).rows[0]?.config;
+  if(!project||project.id!==projectId||project.common_dir!==manifest.common_dir||!Array.isArray(allowedRepositories)||!allowedRepositories.includes(project.repo_path))throw Error('PROJECT_MISMATCH');
+  const guard=await db.query('SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired',['execution:branch:'+projectId+':'+manifest.branch.ref]);if(!guard.rows[0]?.acquired)throw Error('CLEANUP_BUSY');
+  if((await db.query('SELECT id FROM codeworks.workspaces WHERE project_id=$1 AND branch=$2 FOR UPDATE',[projectId,manifest.branch.ref.slice('refs/heads/'.length)])).rowCount)throw Error('ACTIVE_OR_PENDING_WORK');
+  const subject='branch:'+manifest.branch.ref,existing=(await db.query("SELECT * FROM codeworks.cleanup_obligations WHERE project_id=$1 AND subject_key=$2 AND (state<>'done' OR evidence->'manifest'->>'manifest_sha256'=$3) ORDER BY (state<>'done') DESC,created_at DESC LIMIT 1 FOR UPDATE",[projectId,subject,manifest.manifest_sha256])).rows[0];
+  const prior=existing?.evidence?.manifest?.manifest_sha256;if(prior===manifest.manifest_sha256&&!preflight){await db.query(dryRun?'ROLLBACK':'COMMIT');return {id:existing.id,subject,state:existing.state,blocker:existing.blocker,duplicate:true,dry_run:dryRun};}if(prior)throw Error('CLEANUP_ALREADY_ADMITTED');
+  const snapshot=await git.inspectBranchResources(project,{ref:manifest.branch.ref});
+  for(const field of ['branch','remote','tracking','ownership','worktree','index'])if(!equal(snapshot[field],manifest[field]))throw Error('GIT_SNAPSHOT_CHANGED');
+  let proven=false;for(const entry of manifest.provenance){if(entry.kind!=='reflog'||entry.ref!==snapshot.branch.ref||!snapshot.branch.oid)continue;const result=await command('git',['-C',project.repo_path,'reflog','show','--format=%H',entry.ref],{allowFailure:true});if(result.code===0&&result.stdout.split('\n').includes(snapshot.branch.oid)&&hash(result.stdout)===entry.sha256)proven=true;}if(!proven)throw Error('PROVENANCE_UNVERIFIED');
+  const archive=manifest.disposition.archive;if(preflight&&archive)throw Error('INVALID_ARCHIVE_PREFLIGHT');if(!preflight&&!archive)throw Error('ARCHIVE_UNVERIFIED');
+  let state='waiting_decision',blocker='DISPOSITION_PROOF_REQUIRED',authorized=false;if(archive){await verifyArchive(project,snapshot,archive,{manifest});state='pending';blocker=null;authorized=true;}
+  const id=existing?.id??randomUUID(),evidence={...(existing?.evidence??{}),manifest,branch_subject:{ref:manifest.branch.ref},...(authorized?{archive,archive_authorized:true}:{})};let attached=false;
+  if(existing){if(existing.step!=='inspect'||!['pending','waiting_decision'].includes(existing.state)||!existing.expected||Object.keys(existing.expected).length||(!preflight&&!authorized))throw Error('CLEANUP_ALREADY_ADMITTED');
+   if(!dryRun){const updated=await db.query("UPDATE codeworks.cleanup_obligations SET evidence=$3::jsonb,expected=$4::jsonb,state='pending',blocker=NULL,next_attempt_at=NULL,epoch=epoch+1,updated_at=now() WHERE id=$1 AND epoch=$2 AND step='inspect' AND state IN ('pending','waiting_decision') AND expected='{}'::jsonb AND NOT (evidence ? 'manifest') RETURNING id",[id,existing.epoch,JSON.stringify(evidence),JSON.stringify(snapshot)]);if(!updated.rowCount)throw Error('CLEANUP_FENCE_LOST');}attached=true;
+  }else if(!dryRun)await db.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,step,state,evidence,expected,blocker) VALUES($1,$2,NULL,$3,'cancelled','remote',$4,$5::jsonb,$6::jsonb,$7)",[id,projectId,subject,state,JSON.stringify(evidence),JSON.stringify(snapshot),blocker]);
+  await db.query(dryRun?'ROLLBACK':'COMMIT');return {id,subject,state,blocker,duplicate:false,attached,dry_run:dryRun};
+ }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}finally{db.release();}
+}
 /** Проверяет точную область и сохраняет durable intent в одной транзакции; dry-run не пишет. */
 export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRun=false,preflight=false,allowedRepositories,flowGit,verifyArchive=verifyCleanupArchive}={}){
   validateManifest(manifest,projectId);
+  if(manifest.subject_type==='branch')return importBranchCleanup(pool,projectId,manifest,{git,preflight,dryRun,allowedRepositories,verifyArchive});
   if(preflight)dryRun=true;
   const db=await pool.connect();
   try{
@@ -144,6 +172,6 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
     const args=parseArgs(process.argv.slice(2));const manifest=JSON.parse(await readFile(args['--manifest'],'utf8'));
     const databaseURL=process.env.CODEWORKS_DATABASE_URL??JSON.parse(readFileSync(process.env.CODEWORKS_DATABASE_CONFIG_FILE,'utf8')).app_url;
     pool=new Pool({connectionString:databaseURL,max:3,connectionTimeoutMillis:3000,statement_timeout:10000});
-    const result=await importCleanup(pool,args['--project'],manifest,{git:createGit(),codeIndex:createCodeIndex(pool),dryRun:args.dryRun||args.preflight,preflight:args.preflight,allowedRepositories:JSON.parse(process.env.CODEWORKS_ALLOWED_REPOSITORIES??'[]')});console.log(JSON.stringify(result));
+    const result=await importCleanup(pool,args['--project'],manifest,{git:{...createGit(),inspectBranchResources:createBranchCleanup().inspect},codeIndex:createCodeIndex(pool),dryRun:args.dryRun||args.preflight,preflight:args.preflight,allowedRepositories:JSON.parse(process.env.CODEWORKS_ALLOWED_REPOSITORIES??'[]')});console.log(JSON.stringify(result));
   }catch(error){console.error('Cleanup import failed: '+(/^[A-Z_]+$/.test(error.message)?error.message:'UNAVAILABLE'));process.exitCode=1;}finally{await pool?.end();}
 }
