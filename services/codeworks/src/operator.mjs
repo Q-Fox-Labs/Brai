@@ -9,6 +9,7 @@ import {Pool} from 'pg';
 import {createGit,command,assertCleanupRoot} from './git.mjs';
 import {createCodeIndex} from './code-index.mjs';
 import {createFlowGit} from './git-flow.mjs';
+import {verifyCleanupArchive} from './cleanup-archive.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 /** Канонический JSON сортирует ключи рекурсивно; массивы сохраняют порядок. */
@@ -41,8 +42,9 @@ export async function verifyRetained(project,snapshot,disposition,{flowGit=creat
   return {type:'retained',target:'dev',target_sha:disposition.target_sha,source_head:disposition.source_head,refs:{branch:snapshot.branch.oid,remote:snapshot.remote.oid,worktree:snapshot.worktree.head}};
 }
 /** Проверяет точную область и сохраняет durable intent в одной транзакции; dry-run не пишет. */
-export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRun=false,allowedRepositories,flowGit}={}){
+export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRun=false,preflight=false,allowedRepositories,flowGit,verifyArchive=verifyCleanupArchive}={}){
   validateManifest(manifest,projectId);
+  if(preflight)dryRun=true;
   const db=await pool.connect();
   try{
     await db.query('BEGIN');
@@ -66,6 +68,7 @@ export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRu
     const subject=matches[0]?'workspace:'+workspace.id:'legacy:'+manifest.manifest_sha256;
     const existing=(await db.query("SELECT * FROM codeworks.cleanup_obligations WHERE project_id=$1 AND subject_key=$2 AND (state<>'done' OR evidence->'manifest'->>'manifest_sha256'=$3) ORDER BY (state<>'done') DESC,created_at DESC LIMIT 1 FOR UPDATE",[projectId,subject,manifest.manifest_sha256])).rows[0];
     const previousDigest=existing?.evidence?.manifest?.manifest_sha256;
+    if(previousDigest===manifest.manifest_sha256&&preflight)throw Error('CLEANUP_ALREADY_ADMITTED');
     if(previousDigest===manifest.manifest_sha256){await db.query(dryRun?'ROLLBACK':'COMMIT');return {id:existing.id,subject,state:existing.state,blocker:existing.blocker,duplicate:true,attached:false,dry_run:dryRun};}
     if(previousDigest)throw Error('CLEANUP_ALREADY_ADMITTED');
     if(!matches[0]){
@@ -100,8 +103,12 @@ export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRu
     }
     if(!proven)throw Error('PROVENANCE_UNVERIFIED');
     const disposition=manifest.disposition,head=snapshot.worktree.head??snapshot.branch.oid;
-    let outcome='unused',state='waiting_decision',blocker='DISPOSITION_PROOF_REQUIRED',verified_disposition;
-    if(disposition.type==='retained'){
+    if(preflight&&(disposition.type!=='archived'||disposition.archive))throw Error('INVALID_ARCHIVE_PREFLIGHT');
+    let outcome='unused',state='waiting_decision',blocker='DISPOSITION_PROOF_REQUIRED',verified_disposition,archive_authorized=false;
+    if(disposition.type==='archived'){
+      if(!disposition.archive){if(!preflight)throw Error('ARCHIVE_UNVERIFIED');}
+      else{await verifyArchive(project,snapshot,disposition.archive,{manifest});archive_authorized=true;outcome='cancelled';state='pending';blocker=null;}
+    }else if(disposition.type==='retained'){
       verified_disposition=await verifyRetained(project,snapshot,disposition,{flowGit});outcome='released';state='pending';blocker=null;
     }else if(disposition.type==='unused'&&matches[0]&&/^[0-9a-f]{40}$/.test(workspace.base_sha)&&[head,snapshot.branch.oid,snapshot.remote.oid].every(v=>v===null||v===workspace.base_sha)&&(!snapshot.worktree.pathExists||snapshot.worktree.dirty===false)){
       outcome='unused';state='pending';blocker=null;
@@ -113,10 +120,10 @@ export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRu
       if(evidenceValid&&[head,snapshot.branch.oid,snapshot.remote.oid].every(v=>v===null||v===release.requested_sha)){outcome='released';state='pending';blocker=null;}
     }
     const id=existing?.id??randomUUID();
-    const evidence={...(existing?.evidence??{}),manifest,index_snapshot:index,...(verified_disposition?{verified_disposition}:{}),...(!matches[0]?{workspace}:{})};
+    const evidence={...(existing?.evidence??{}),manifest,index_snapshot:index,...(verified_disposition?{verified_disposition}:{}),...(archive_authorized?{archive:disposition.archive,archive_authorized:true}:{}),...(!matches[0]?{workspace}:{})};
     let attached=false;
     if(existing&&!previousDigest){
-      if(existing.step!=='inspect'||!['pending','waiting_decision'].includes(existing.state)||!existing.expected||Object.keys(existing.expected).length!==0||state!=='pending')throw Error('CLEANUP_ALREADY_ADMITTED');
+      if(existing.step!=='inspect'||!['pending','waiting_decision'].includes(existing.state)||!existing.expected||Object.keys(existing.expected).length!==0||(!preflight&&state!=='pending'))throw Error('CLEANUP_ALREADY_ADMITTED');
       if(!dryRun){
         const updated=await db.query("UPDATE codeworks.cleanup_obligations SET evidence=$3::jsonb,expected=$4::jsonb,state='pending',blocker=NULL,next_attempt_at=NULL,epoch=epoch+1,updated_at=now() WHERE id=$1 AND epoch=$2 AND step='inspect' AND state IN ('pending','waiting_decision') AND expected='{}'::jsonb AND NOT (evidence ? 'manifest') RETURNING id",[id,existing.epoch,JSON.stringify(evidence),JSON.stringify(snapshot)]);
         if(!updated.rowCount)throw Error('CLEANUP_FENCE_LOST');
@@ -128,8 +135,8 @@ export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRu
 }
 /** Разбирает только фиксированную операторскую команду и абсолютный путь манифеста. */
 export function parseArgs(args){
-  if(args[0]!=='cleanup-import')throw Error('INVALID_ARGUMENT');
-  const out={};for(let i=1;i<args.length;i++){const name=args[i];if(name==='--dry-run'){if(out.dryRun)throw Error('INVALID_ARGUMENT');out.dryRun=true;continue;}if(!['--project','--manifest'].includes(name)||out[name]!==undefined||!args[i+1]||args[i+1].startsWith('--'))throw Error('INVALID_ARGUMENT');out[name]=args[++i];}
+  if(!['cleanup-import','cleanup-preflight'].includes(args[0]))throw Error('INVALID_ARGUMENT');
+  const out={preflight:args[0]==='cleanup-preflight'};for(let i=1;i<args.length;i++){const name=args[i];if(name==='--dry-run'){if(out.dryRun||out.preflight)throw Error('INVALID_ARGUMENT');out.dryRun=true;continue;}if(!['--project','--manifest'].includes(name)||out[name]!==undefined||!args[i+1]||args[i+1].startsWith('--'))throw Error('INVALID_ARGUMENT');out[name]=args[++i];}
   if(!out['--project']||!path.isAbsolute(out['--manifest']??''))throw Error('INVALID_ARGUMENT');return out;
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
@@ -137,6 +144,6 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
     const args=parseArgs(process.argv.slice(2));const manifest=JSON.parse(await readFile(args['--manifest'],'utf8'));
     const databaseURL=process.env.CODEWORKS_DATABASE_URL??JSON.parse(readFileSync(process.env.CODEWORKS_DATABASE_CONFIG_FILE,'utf8')).app_url;
     pool=new Pool({connectionString:databaseURL,max:3,connectionTimeoutMillis:3000,statement_timeout:10000});
-    const result=await importCleanup(pool,args['--project'],manifest,{git:createGit(),codeIndex:createCodeIndex(pool),dryRun:args.dryRun,allowedRepositories:JSON.parse(process.env.CODEWORKS_ALLOWED_REPOSITORIES??'[]')});console.log(JSON.stringify(result));
+    const result=await importCleanup(pool,args['--project'],manifest,{git:createGit(),codeIndex:createCodeIndex(pool),dryRun:args.dryRun||args.preflight,preflight:args.preflight,allowedRepositories:JSON.parse(process.env.CODEWORKS_ALLOWED_REPOSITORIES??'[]')});console.log(JSON.stringify(result));
   }catch(error){console.error('Cleanup import failed: '+(/^[A-Z_]+$/.test(error.message)?error.message:'UNAVAILABLE'));process.exitCode=1;}finally{await pool?.end();}
 }

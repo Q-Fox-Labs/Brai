@@ -16,18 +16,18 @@ async function fixture(t,{active=false,duplicate=false,existing=null,busy=false}
  const record={id:w.id,project_id:w.project_id,branch:w.branch,path:w.path,base_sha:w.base_sha};
  const snapshot={branch:{ref:'refs/heads/'+w.branch,oid:sha},ownership:{ref:'refs/codeworks/ownership/'+w.id,oid:null,matches:false},remote:{ref:'refs/heads/'+w.branch,oid:null,known:true},tracking:{ref:'refs/remotes/origin/'+w.branch,oid:null},worktree:{path:w.path,registered:false,pathExists:false,head:null,dirty:null,owned:false,lock:null}};
  const m=sign({manifestVersion:1,reviewed:true,project_id:'p',common_dir:root+'/git',workspace_id:w.id,protected_task_ids:[],branch:snapshot.branch,ownership:snapshot.ownership,remote:snapshot.remote,tracking:snapshot.tracking,worktree:snapshot.worktree,index:{identity:'fixture',collections:[],metadataPoints:[],ownerRecordHash:null},provenance:[{kind:'workspace-record',ref:w.id,sha256:digest(canonical(record))}],disposition:{type:'unused'}});
- const project={id:'p',common_dir:root+'/git',repo_path:root,workspace_root:root,legacy_workspace_roots:[root]};let inserts=0,updates=0;
- const db={query:async(sql)=>{
+ const project={id:'p',common_dir:root+'/git',repo_path:root,workspace_root:root,legacy_workspace_roots:[root]};let inserts=0,updates=0,lastInsert;
+ const db={query:async(sql,params)=>{
   if(sql.startsWith('SELECT pg_try_advisory_xact_lock'))return {rows:[{acquired:!busy}],rowCount:1};
   if(sql.startsWith('SELECT config'))return {rows:[{config:project}],rowCount:1};
   if(sql.startsWith('SELECT * FROM codeworks.workspaces'))return {rows:[w],rowCount:1};
   if(sql.startsWith('SELECT 1 FROM codeworks.workflow_registry'))return {rows:[],rowCount:active?1:0};
   if(sql.startsWith('SELECT * FROM codeworks.cleanup_obligations'))return {rows:duplicate?[{id:'existing',state:'pending',blocker:null,evidence:{manifest:m}}]:existing?[existing]:[],rowCount:duplicate||existing?1:0};
   if(sql.startsWith('UPDATE codeworks.cleanup_obligations')){updates++;return {rows:[{id:'existing'}],rowCount:1};}
-  if(sql.startsWith('INSERT INTO codeworks.cleanup_obligations'))inserts++;
+  if(sql.startsWith('INSERT INTO codeworks.cleanup_obligations')){inserts++;lastInsert=params;}
   return {rows:[],rowCount:0};
  },release(){}};
- return {m,allowedRepositories:[root],pool:{connect:async()=>db},git:{inspectResources:async()=>snapshot},codeIndex:{inspect:async()=>({complete:true})},inserts:()=>inserts,updates:()=>updates};
+ return {m,allowedRepositories:[root],pool:{connect:async()=>db},git:{inspectResources:async()=>snapshot},codeIndex:{inspect:async()=>({complete:true})},inserts:()=>inserts,updates:()=>updates,insertParams:()=>lastInsert};
 }
 test('digest, provenance and command arguments are strict',()=>{
  assert.throws(()=>validateManifest({manifestVersion:1},'p'),/INVALID_MANIFEST/);
@@ -88,4 +88,17 @@ test('attaches proof only before any cleanup step under execution guard',async t
  const f=await fixture(t,{existing:item});const result=await importCleanup(f.pool,'p',f.m,f);assert.equal(result.attached,true);assert.equal(result.id,'existing');assert.equal(f.updates(),1);assert.equal(f.inserts(),0);
  const begun=await fixture(t,{existing:{...item,step:'remote',expected:{branch:{oid:'a'.repeat(40)}}}});await assert.rejects(importCleanup(begun.pool,'p',begun.m,begun),/CLEANUP_ALREADY_ADMITTED/);assert.equal(begun.updates(),0);
  const busy=await fixture(t,{busy:true,existing:item});await assert.rejects(importCleanup(busy.pool,'p',busy.m,busy),/CLEANUP_BUSY/);assert.equal(busy.updates(),0);
+});
+
+
+test('archive preflight reads only and admission requires verified receipt',async t=>{
+ const f=await fixture(t),{manifest_sha256,...source}=f.m;source.disposition={type:'archived'};const pre=sign(source);
+ const result=await importCleanup(f.pool,'p',pre,{...f,preflight:true});assert.equal(result.state,'waiting_decision');assert.equal(result.dry_run,true);assert.equal(f.inserts(),0);
+ await assert.rejects(importCleanup(f.pool,'p',pre,f),/ARCHIVE_UNVERIFIED/);
+ const proof={path:'/unused/example.bundle',sha256:'a'.repeat(64),heads:[{ref:'refs/heads/example',oid:source.branch.oid}],authorization_ref:'thread-id',receipt:{path:'/unused/example.json',sha256:'b'.repeat(64)}};
+ const full=sign({...source,disposition:{type:'archived',archive:proof}});
+ await assert.rejects(importCleanup(f.pool,'p',full,{...f,verifyArchive:async()=>{throw Error('ARCHIVE_UNVERIFIED');}}),/ARCHIVE_UNVERIFIED/);assert.equal(f.inserts(),0);
+ await importCleanup(f.pool,'p',full,{...f,verifyArchive:async()=>({})});const params=f.insertParams(),evidence=JSON.parse(params[6]);assert.equal(params[4],'cancelled');assert.equal(evidence.archive_authorized,true);assert.deepEqual(evidence.archive,proof);
+ const args=parseArgs(['cleanup-preflight','--project','p','--manifest','/tmp/m.json']);assert.equal(args.preflight,true);
+ assert.throws(()=>parseArgs(['cleanup-preflight','--project','p','--manifest','/tmp/m.json','--dry-run']),/INVALID_ARGUMENT/);
 });
