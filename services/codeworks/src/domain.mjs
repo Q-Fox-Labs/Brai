@@ -57,7 +57,9 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         if(operation&&w&&operation.workspace_id!==w.id)throw new Fault('CONFLICT');
         if(method==='lifecycle.status'){
           const lifecycle=await db.lifecycle(w.id);
-          return {workspace_id:w.id,task_status:w.removed_at?'removed':lifecycle?.lifecycle??'historical',outcome:lifecycle?.outcome??null,workflow:lifecycle?{id:lifecycle.workflow_id,status:lifecycle.state,generation:Number(lifecycle.generation),executor_state:lifecycle.state!=='completed'&&Date.now()-new Date(lifecycle.updated_at).getTime()>120000?'unavailable':lifecycle.executor_state,last_confirmed_stage:lifecycle.last_stage,blocked_reason:lifecycle.blocked_reason}:null,blockers:await db.blockers(w.id)};
+          const obligation=await db.cleanupObligation?.(w.id);
+          const closing=obligation&&obligation.state!=='done';
+          return {workspace_id:w.id,task_status:closing?'closing':w.removed_at?'removed':lifecycle?.lifecycle??'historical',outcome:lifecycle?.outcome??null,workflow:lifecycle?{id:lifecycle.workflow_id,status:lifecycle.state,generation:Number(lifecycle.generation),executor_state:lifecycle.state!=='completed'&&Date.now()-Math.max(new Date(lifecycle.updated_at).getTime(),new Date(obligation?.updated_at??0).getTime())>120000?'unavailable':lifecycle.executor_state,last_confirmed_stage:closing?'cleanup:'+obligation.step:lifecycle.last_stage,blocked_reason:closing?obligation.blocker:lifecycle.blocked_reason}:null,cleanup:obligation?{id:obligation.id,state:obligation.state,step:obligation.step,outcome:obligation.outcome,owner_workflow_id:obligation.owner_workflow_id,epoch:Number(obligation.epoch),next_attempt_at:obligation.next_attempt_at,blocker:obligation.blocker}:null,blockers:await db.blockers(w.id)};
         }
         if(!w){
           if(operation)return {operation:operationDTO(operation)};
@@ -124,6 +126,7 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
             if(kind==='hotfix'&&(await db.currentEvidence(p.id,'prod'))?.commit_sha!==base_sha)throw new Fault('PRODUCTION_BASE_MISMATCH');
             const id=randomUUID();
             w={id,project_id:p.id,workspace_key:args.workspace_key,kind,base_ref:p.git_flow[kind+'_base'],base_sha,branch:p.git_flow[kind+'_prefix']+args.workspace_key,path:path.join(p.workspace_root,id),ownership_token:randomUUID(),activation_state:'awaiting_first_write'};
+            if((await db.query("SELECT 1 FROM codeworks.cleanup_obligations WHERE project_id=$1 AND state<>'done' AND expected#>>'{branch,ref}'=$2 LIMIT 1",[p.id,'refs/heads/'+w.branch])).rowCount)throw new Fault('CLEANUP_ALREADY_STARTED','The branch is reserved by a saved cleanup obligation.');
             await db.insertWorkspace(w);
           }
         }else{
@@ -197,6 +200,8 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         return {operation_id:id,workspace_id:w.id,path:w.path,branch:w.branch};
       });
     }
+    // AIDEV-NOTE: PostgreSQL Date должен проверяться в том же ISO-виде, который получит транспорт.
+    value=dto(value);
     try{validate(outputNames[method],value);}catch{throw new Fault('INTERNAL');}
     return value;
   }

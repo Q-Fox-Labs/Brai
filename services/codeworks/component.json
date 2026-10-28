@@ -81,6 +81,8 @@
       "services/codeworks/src/write-admission.mjs",
       "services/codeworks/src/cleanup-coordinator.mjs",
       "services/codeworks/src/cleanup-archive.mjs",
+      "services/codeworks/src/branch-cleanup.mjs",
+      "services/codeworks/src/branch-coordinator.mjs",
       "services/codeworks/src/reconciler.mjs",
       "services/codeworks/src/operator.mjs",
       "services/codeworks/src/disposition.mjs"
@@ -128,6 +130,7 @@
       "services/codeworks/tests/write-admission.test.mjs",
       "services/codeworks/tests/operator.test.mjs",
       "services/codeworks/tests/cleanup-archive.test.mjs",
+      "services/codeworks/tests/branch*.test.mjs",
       "services/codeworks/tests/disposition.test.mjs",
       "services/codeworks/tests/integration/*finalization*.mjs",
       "services/codeworks/scripts/accept-finalization.mjs"
@@ -184,6 +187,8 @@
       "services/codeworks/src/write-admission.mjs",
       "services/codeworks/src/cleanup-coordinator.mjs",
       "services/codeworks/src/cleanup-archive.mjs",
+      "services/codeworks/src/branch-cleanup.mjs",
+      "services/codeworks/src/branch-coordinator.mjs",
       "services/codeworks/src/reconciler.mjs",
       "services/codeworks/src/operator.mjs",
       "services/codeworks/src/disposition.mjs"
