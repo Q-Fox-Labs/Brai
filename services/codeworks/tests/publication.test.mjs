@@ -4,9 +4,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {verifyPublication} from '../src/publication.mjs';
 
-function fixture({remote='source',receiptValid=true,pending=false,writer=false,delivered=true,dirty=false,head='source'}={}){
+function fixture({remote='source',receiptValid=true,pending=false,writer=false,delivered=true,dirty=false,head='source',deliveryStatus='succeeded',legTarget='dev',legMerged=true,legSha='installed',legEvidence='evidence'}={}){
   const project={id:'p'},workspace={id:'w',project_id:'p',kind:'feature'},composition={components:[]};
-  const row={requested_sha:'source',closed_at:'2026-01-01',state:'failed',original_status:'failed',installed_operation_id:'rollout',commit_sha:'installed',target:'dev',project_id:'p',composition_digest:'digest',composition,receipt:{operation_id:'rollout',project_id:'p',target:'dev',commit_sha:'installed',composition_digest:'digest',composition,verified:receiptValid},rollout_status:'succeeded',evidence_id:'evidence',evidence_at:'2026-01-02',delivery_release_id:'release-b',delivery_release_state:'succeeded'};
+  const row={requested_sha:'source',closed_at:'2026-01-01',state:'failed',original_status:'failed',installed_operation_id:'rollout',commit_sha:'installed',target:'dev',project_id:'p',composition_digest:'digest',composition,receipt:{operation_id:'rollout',project_id:'p',target:'dev',commit_sha:'installed',composition_digest:'digest',composition,verified:receiptValid},rollout_status:'succeeded',evidence_id:'evidence',evidence_at:'2026-01-02',delivery_release_id:'release-b',delivery_release_state:'succeeded',delivery_operation_status:deliveryStatus,delivery_release_details:{primary:{target:legTarget,merged:legMerged,merge_sha:legSha,deployment_evidence_id:legEvidence}}};
   const db={query:async sql=>{
     if(sql.includes('SELECT r.operation_id,r.requested_sha'))return {rows:[{operation_id:'attempt-a',requested_sha:'source'}]};
     if(sql.includes('SELECT d.operation_id,d.release_operation_id'))return {rows:[{operation_id:'rollout',release_operation_id:'release-b',commit_sha:'installed',evidence_id:'evidence'}]};
@@ -23,5 +23,5 @@ test('later installed release proves delivery without changing failed attempt',a
   const proof=await fixture()();assert.equal(proof.original_attempt_id,'attempt-a');assert.equal(proof.delivery_release_operation_id,'release-b');assert.equal(proof.installed_commit,'installed');
 });
 test('new refs, unknown receipt or pending work do not authorize cleanup',async()=>{
-  for(const options of [{remote:'new'},{head:'new'},{dirty:true},{receiptValid:false},{pending:true},{writer:true},{delivered:false}])assert.equal(await fixture(options)(),null);
+  for(const options of [{remote:'new'},{head:'new'},{dirty:true},{receiptValid:false},{pending:true},{writer:true},{delivered:false},{deliveryStatus:'failed'},{legTarget:'main'},{legMerged:false},{legSha:'other'},{legEvidence:'other'}])assert.equal(await fixture(options)(),null);
 });
