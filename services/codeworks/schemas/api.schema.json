@@ -193,6 +193,45 @@
           },
           "uniqueItems": true,
           "maxItems": 128
+        },
+        "code_index_policy": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "enabled"
+          ],
+          "additionalProperties": false
+        },
+        "transfer_destinations": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "properties": {
+              "repo_path": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 2048,
+                "pattern": "^/(?!.*(?:^|/)\\.\\.?(/|$))(?!.*//)[^\\u0000-\\u001f]*[^/\\u0000-\\u001f]$"
+              },
+              "origin": {
+                "type": "string",
+                "minLength": 9,
+                "maxLength": 2048,
+                "pattern": "^https://[^\\s/@]+/[^\\s]+$"
+              }
+            },
+            "required": [
+              "repo_path",
+              "origin"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [

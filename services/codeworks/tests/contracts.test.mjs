@@ -280,3 +280,11 @@ test('public prepare requires a native write for a new workspace but can resume 
   const resumed=await f.owner.call('prepare',{...prepare,request_key:'resume'},'codex');
   assert.equal(resumed.workspace_id,created.workspace_id);
 });
+
+
+test('project index policy and transfer destinations are explicit and strict',()=>{
+  const {project}=fixture();
+  validate('project',{...project,code_index_policy:{enabled:false},transfer_destinations:[{repo_path:'/srv/destination',origin:'https://github.com/example/repository.git'}]});
+  for(const policy of [{enabled:false,extra:true},{enabled:'false'},{}])assert.throws(()=>validate('project',{...project,code_index_policy:policy}));
+  for(const destination of [{repo_path:'relative',origin:'https://github.com/example/repository.git'},{repo_path:'/srv/../repo',origin:'https://github.com/example/repository.git'},{repo_path:'/srv/repo',origin:'http://github.com/example/repository.git'},{repo_path:'/srv/repo',origin:'https://github.com/example/repository.git',extra:true}])assert.throws(()=>validate('project',{...project,transfer_destinations:[destination]}));
+});
