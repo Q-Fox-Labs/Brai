@@ -148,3 +148,18 @@ test('после удаления дерева проверяется сохра
   const result=await advanceCleanup(db,item,{id:'project'},{id:'workspace',base_sha:'base'},{git:{inspectResources:async()=>empty},codeIndex:{inspect:async()=>({complete:true,owner:{present:false},resources:{collections:[],metadataPoints:[]}})},verifyFilesystem:async(_p,_w,_proof,{phase})=>{phases.push(phase);}});
   assert.deepEqual(phases,['archive']);assert.equal(finished,true);assert.equal(result.state,'done');
 });
+
+test('недоступный архив не позволяет завершить даже уже пустую область',async()=>{
+  const proof={receipt_path:'/protected/receipt.json',receipt_sha256:'a'.repeat(64)};
+  const empty={branch:{oid:null},ownership:{oid:null},remote:{known:true,oid:null},tracking:{oid:null},worktree:{registered:false,pathExists:false}};
+  const item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',outcome:'cancelled',step:'inspect',state:'pending',expected:{},evidence:{manifest:{filesystem_preservation:proof}}};
+  let changed=false;
+  const db={query:async(sql)=>{
+    if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};
+    if(sql.startsWith('UPDATE codeworks'))changed=true;
+    return {rowCount:0,rows:[]};
+  }};
+  const error=Object.assign(Error('archive missing'),{code:'TARGET_CHANGED'});
+  await assert.rejects(advanceCleanup(db,item,{id:'project'},{id:'workspace',base_sha:'base'},{git:{inspectResources:async()=>empty},codeIndex:{},verifyFilesystem:async(_p,_w,_proof,{phase})=>{assert.equal(phase,'archive');throw error;}}),{code:'TARGET_CHANGED'});
+  assert.equal(changed,false);
+});
