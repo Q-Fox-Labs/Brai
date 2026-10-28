@@ -42,7 +42,15 @@ test('cancelled workspace cleanup survives SIGKILL after index removal and repla
     const cancel=await f.h.call('workspace.cancel',{project_id:project.id,workspace_id:prepared.workspace_id,request_key:'cancel-finalization-request',reason:'fixture cancellation'},'codex');
     await deliverCommands(f.app,client,{taskQueue});
     await until(async()=>await status(cancel.operation_id)==='succeeded');
-    await until(async()=>access(crashMarker).then(()=>true,()=>false));
+    await until(async()=>{
+      const obligation=(await f.app.query('SELECT state,step,blocker,attempts FROM codeworks.cleanup_obligations WHERE workspace_id=$1',[prepared.workspace_id])).rows[0];
+      if(obligation?.state==='waiting_decision')throw Error('CLEANUP_BLOCKED '+JSON.stringify(obligation));
+      return access(crashMarker).then(()=>true,()=>false);
+    },45000).catch(async error=>{
+      const obligation=(await f.app.query('SELECT state,step,blocker,attempts FROM codeworks.cleanup_obligations WHERE workspace_id=$1',[prepared.workspace_id])).rows[0];
+      const registry=(await f.app.query('SELECT state,lifecycle,executor_state,blocked_reason FROM codeworks.workflow_registry WHERE workflow_id=$1',[workflow])).rows[0];
+      throw Error(error.message+' '+JSON.stringify({obligation,registry}));
+    });
     await until(()=>child.signalCode==='SIGKILL');child=null;start();
     await until(async()=>(await f.app.query('SELECT removed_at FROM codeworks.workspaces WHERE id=$1',[prepared.workspace_id])).rows[0]?.removed_at);
     const obligation=(await f.app.query('SELECT * FROM codeworks.cleanup_obligations WHERE workspace_id=$1',[prepared.workspace_id])).rows[0];
