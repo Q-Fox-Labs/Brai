@@ -4,6 +4,7 @@ import {gitResourcesAbsent,command} from './git.mjs';
 import {verifyDisposition} from './disposition.mjs';
 import {verifyCleanupArchive} from './cleanup-archive.mjs';
 import {canonical} from './contracts.mjs';
+import {recheckPublication} from './publication.mjs';
 
 const steps=['remote','worktree','local_refs','index','verify'];
 const indexAbsent=value=>value?.complete===true && value.owner?.present===false && Array.isArray(value.resources?.collections) && !value.resources.collections.length && Array.isArray(value.resources?.metadataPoints) && !value.resources.metadataPoints.length;
@@ -44,6 +45,8 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
   if(manifest&&(await db.query("SELECT 1 FROM codeworks.operations WHERE workspace_id=$1 AND NOT archived AND kind<>'cleanup' AND status IN ('pending','running','awaiting_execution','awaiting_ci','awaiting_deployment','awaiting_reconciliation') LIMIT 1",[workspace.id])).rowCount)return wait('LIVE_TASK_PROTECTED');
   if((await db.query("SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain') LIMIT 1",[workspace.id])).rowCount)return wait('WRITER_OUTCOME_UNKNOWN');
   if((await db.query("SELECT 1 FROM codeworks.release_queue q JOIN codeworks.operations o ON o.id=q.operation_id WHERE o.workspace_id=$1 AND q.state IN ('held','queued') LIMIT 1",[workspace.id])).rowCount)return wait('RELEASE_OUTCOME_UNKNOWN');
+  // AIDEV-NOTE: Нулевые ресурсы не подтверждают доставку при более позднем неопределённом rollout.
+  if(obligation.outcome==='released'&&obligation.evidence?.publication&&!await recheckPublication(db,project,workspace,obligation.evidence.publication,{ignoreOperationId:obligation.source_operation_id}))return wait('DELIVERY_PROOF_CHANGED');
   const finishIfAbsent=async(gitState,indexState)=>{
     if(!gitResourcesAbsent(gitState)||!indexAbsent(indexState))return null;
     await fence();
@@ -55,6 +58,10 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
       }
       const locked=(await db.query('SELECT * FROM codeworks.cleanup_obligations WHERE id=$1 FOR UPDATE',[id])).rows[0];
       if(!locked||Number(locked.epoch)!==epoch||locked.owner_workflow_id!==owner||!['pending','running','retry'].includes(locked.state))throw Error('CLEANUP_FENCE_LOST');
+      if(locked.outcome==='released'&&locked.evidence?.publication&&!await recheckPublication(db,project,workspace,locked.evidence.publication,{ignoreOperationId:locked.source_operation_id,lock:true})){
+        await db.query('ROLLBACK');
+        return await wait('DELIVERY_PROOF_CHANGED');
+      }
       if(obligation.workspace_id){
         await db.query('UPDATE codeworks.workspaces SET removed_at=COALESCE(removed_at,now()) WHERE id=$1',[workspace.id]);
         await db.query("UPDATE codeworks.workflow_registry SET lifecycle='removed',updated_at=now() WHERE workspace_id=$1",[workspace.id]);
@@ -86,6 +93,9 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
     if(observed.worktree.dirty!==false && observed.worktree.pathExists)return wait('DIRTY_WORKTREE');
     if(['unused','cancelled'].includes(obligation.outcome)){
       if((head && head!==workspace.base_sha)||(observed.branch.oid && observed.branch.oid!==workspace.base_sha)||(observed.remote.oid && observed.remote.oid!==workspace.base_sha))return wait('UNIQUE_CHANGES');
+    }else if(obligation.outcome==='released'&&obligation.evidence?.publication){
+      const delivery=obligation.evidence.publication;
+      if(canonical(observed)!==canonical(delivery.resources)||!await recheckPublication(db,project,workspace,delivery,{ignoreOperationId:obligation.source_operation_id}))return wait('DELIVERY_PROOF_CHANGED');
     }else if(obligation.outcome==='released'&&!obligation.evidence?.verified_disposition){
       const release=await releaseProof();
       if(!release || (head&&head!==release.requested_sha) || (observed.branch.oid&&observed.branch.oid!==release.requested_sha) || (observed.remote.oid&&observed.remote.oid!==release.requested_sha))return wait('RELEASE_PROOF_MISMATCH');
@@ -116,6 +126,11 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
     }
   }else if(['unused','cancelled'].includes(obligation.outcome)){
     if((fixedHead&&fixedHead!==workspace.base_sha)||(expected.branch?.oid&&expected.branch.oid!==workspace.base_sha)||(expected.remote?.oid&&expected.remote.oid!==workspace.base_sha)||(expected.tracking?.oid&&expected.tracking.oid!==workspace.base_sha))return wait('UNIQUE_CHANGES');
+  }else if(obligation.outcome==='released'&&obligation.evidence?.publication){
+    const delivery=obligation.evidence.publication;
+    if(canonical(expected)!==canonical(delivery.resources)||!await recheckPublication(db,project,workspace,delivery,{ignoreOperationId:obligation.source_operation_id}))return wait('DELIVERY_PROOF_CHANGED');
+    if(!flowGit)return wait('DELIVERY_PROOF_CHANGED');
+    for(const sha of [expected.worktree?.head,expected.branch?.oid,expected.remote?.oid,expected.tracking?.oid].filter(Boolean))if(!await flowGit.ancestor(project,sha,delivery.installed_commit))return wait('DELIVERY_PROOF_CHANGED');
   }else if(obligation.outcome==='released'){
     const release=await releaseProof();
     if(!release||(fixedHead&&fixedHead!==release.requested_sha)||(expected.branch?.oid&&expected.branch.oid!==release.requested_sha)||(expected.remote?.oid&&expected.remote.oid!==release.requested_sha)||(expected.tracking?.oid&&expected.tracking.oid!==release.requested_sha))return wait('RELEASE_PROOF_MISMATCH');

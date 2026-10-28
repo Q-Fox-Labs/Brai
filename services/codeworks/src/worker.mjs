@@ -26,7 +26,15 @@ export async function runCleanupObligation(pool,id,owner,{git,flowGit,codeIndex,
     if(!item.workspace_id&&!synthetic?.id&&!branch)return;
     const key=branch?'execution:branch:'+item.project_id+':'+branch:'execution:workspace:'+(item.workspace_id??synthetic.id);
     if(!(await db.query('SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS acquired',[key])).rows[0].acquired)return;
+    let targetGuard=false;
     try{
+      if(item.evidence?.publication){
+        // AIDEV-NOTE: Тот же ключ берёт acquireTarget; уже занятый DEV нужно дождаться до очистки.
+        const targetKey='lane:'+item.project_id+':dev';
+        targetGuard=(await db.query('SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS acquired',[targetKey])).rows[0].acquired;
+        const held=targetGuard&&(await db.query("SELECT 1 FROM codeworks.release_queue WHERE project_id=$1 AND target='dev' AND state='held' LIMIT 1",[item.project_id])).rowCount;
+        if(!targetGuard||held)return (await db.query("UPDATE codeworks.cleanup_obligations SET state='retry',next_attempt_at=now()+interval '30 seconds',blocker='DEV_TARGET_BUSY',updated_at=now() WHERE id=$1 AND owner_workflow_id=$2 AND epoch=$3 AND state IN ('pending','running','retry') RETURNING *",[id,owner,item.epoch])).rows[0];
+      }
       const workspace=item.workspace_id?(await db.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[item.workspace_id])).rows[0]:synthetic;
       const project=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1',[item.project_id])).rows[0]?.config;
       if((!workspace&&!branch)||!project||!allowedRepositories.includes(project.repo_path))throw Error('CLEANUP_PROJECT_FORBIDDEN');
@@ -39,7 +47,10 @@ export async function runCleanupObligation(pool,id,owner,{git,flowGit,codeIndex,
         }
         throw error;
       }
-    }finally{await db.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',[key]).catch(()=>{});}
+    }finally{
+      if(targetGuard)await db.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',['lane:'+item.project_id+':dev']).catch(()=>{});
+      await db.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',[key]).catch(()=>{});
+    }
   });
 }
 /** Потеря сессии отменяет её внешние процессы: потерянный guard больше не разрешает продолжение. */
