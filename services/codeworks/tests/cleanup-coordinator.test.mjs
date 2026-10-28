@@ -47,3 +47,20 @@ test('недоступный индекс не подтверждает отсу
   const db={query:async(sql)=>sql.includes('SELECT 1 FROM codeworks.cleanup_obligations')?{rowCount:1}:{rowCount:0}};
   await assert.rejects(advanceCleanup(db,item,{id:'project'},{id:'workspace'},{git:{inspectResources:async()=>empty},codeIndex:{inspect:async()=>({complete:false})}}),/INDEX_INSPECTION_INCOMPLETE/);
 });
+
+test('историческую область удаляют только после повторной проверки разрешённого архива',async()=>{
+  for(const valid of [false,true]){
+    const archive={path:'/backup/area.bundle',sha256:'a'.repeat(64),heads:[{ref:'refs/heads/task',oid:'b'.repeat(40)}],authorization_ref:'approved'};
+    const item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',outcome:'cancelled',step:'worktree',state:'pending',expected:{branch:{oid:'b'.repeat(40)},remote:{oid:null},tracking:{oid:null},worktree:{head:'b'.repeat(40),pathExists:true,dirty:false}},evidence:{archive,archive_authorized:true,manifest:{reviewed:true,protected_task_ids:[],disposition:{type:'archived',archive}}}};
+    let deleted=false,verified=false;
+    const db={query:async(sql)=>{
+      if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};
+      if(sql.includes('SELECT 1 FROM codeworks'))return {rowCount:0};
+      if(sql.includes('UPDATE codeworks.cleanup_obligations'))return {rowCount:1,rows:[{state:valid?'pending':'waiting_decision'}]};
+      return {rowCount:0};
+    }};
+    const git={cleanupStep:async()=>{deleted=true;}};
+    const result=await advanceCleanup(db,item,{id:'project'},{id:'workspace'},{git,verifyArchive:async()=>{verified=true;if(!valid)throw Error('ARCHIVE_UNVERIFIED');}});
+    assert.equal(verified,true);assert.equal(deleted,valid);assert.equal(result.state,valid?'pending':'waiting_decision');
+  }
+});

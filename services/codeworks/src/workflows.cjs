@@ -64,7 +64,13 @@ async function codeworksProjectReconciler(state){
   let cycles=0;
   for(;;){
     let progressed=false;
-    try{const result=await (patched('codeworks-reconciler-progress-v2')?finalization:execution).reconcileProject(state.projectId);progressed=result?.state==='pending';}catch{}
+    try{
+      const cursorEnabled=patched('codeworks-reconciler-cursor-v1');
+      const activity=(patched('codeworks-reconciler-progress-v2')?finalization:execution);
+      const result=cursorEnabled?await activity.reconcileProject(state.projectId,state.adoptionCursor??null):await activity.reconcileProject(state.projectId);
+      if(cursorEnabled)state.adoptionCursor=result?.nextCursor??null;
+      progressed=result?.state==='pending'||(cursorEnabled&&result?.hasMore===true);
+    }catch{}
     if((workflowInfo().continueAsNewSuggested||++cycles>=500)&&allHandlersFinished())await continueAsNew(state);
     await condition(()=>false,progressed?1000:60000);
   }

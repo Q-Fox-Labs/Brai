@@ -3,7 +3,7 @@
 import {randomUUID} from 'node:crypto';
 
 /** Создаёт обязательство только для заведомо отклонённой записи или terminal legacy root. */
-export async function reconcileProjectLedger(pool,projectId,owner) {
+export async function reconcileProjectLedger(pool,projectId,owner,{cursor=null}={}) {
   const candidates=(await pool.query(`SELECT w.id FROM codeworks.workspaces w JOIN codeworks.workflow_registry r ON r.workspace_id=w.id
     WHERE w.project_id=$1 AND ((r.state='completed' AND r.lifecycle IN ('cancelled','removed')) OR
       (r.state='open' AND r.lifecycle='active' AND w.activation_state='awaiting_first_write' AND w.preparation_state='ready'
@@ -33,7 +33,8 @@ export async function reconcileProjectLedger(pool,projectId,owner) {
   const adopt=(await pool.query(`SELECT o.id,o.workspace_id,o.evidence,o.owner_workflow_id,o.epoch FROM codeworks.cleanup_obligations o
     LEFT JOIN codeworks.workflow_registry r ON r.workflow_id=o.owner_workflow_id
     WHERE o.project_id=$1 AND o.state IN ('pending','retry') AND (o.owner_workflow_id IS NULL OR r.state='completed')
-      AND NOT EXISTS(SELECT 1 FROM codeworks.workflow_registry live WHERE live.workspace_id=o.workspace_id AND live.lifecycle='active') ORDER BY o.created_at LIMIT 32`,[projectId])).rows;
+      AND ($2::uuid IS NULL OR o.id>$2::uuid)
+      AND NOT EXISTS(SELECT 1 FROM codeworks.workflow_registry live WHERE live.workspace_id=o.workspace_id AND live.lifecycle='active') ORDER BY o.id LIMIT 32`,[projectId,cursor])).rows;
   for(const candidate of adopt){
     const db=await pool.connect();
     try{
@@ -50,5 +51,6 @@ export async function reconcileProjectLedger(pool,projectId,owner) {
       await db.query('COMMIT');
     }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}finally{db.release();}
   }
-  return (await pool.query("SELECT id FROM codeworks.cleanup_obligations WHERE project_id=$1 AND owner_workflow_id=$2 AND state IN ('pending','running','retry') AND (next_attempt_at IS NULL OR next_attempt_at<=now()) ORDER BY created_at LIMIT 1",[projectId,owner])).rows[0];
+  const item=(await pool.query("SELECT id FROM codeworks.cleanup_obligations WHERE project_id=$1 AND owner_workflow_id=$2 AND state IN ('pending','running','retry') AND (next_attempt_at IS NULL OR next_attempt_at<=now()) ORDER BY created_at LIMIT 1",[projectId,owner])).rows[0];
+  return {...item,nextCursor:adopt.length===32?adopt.at(-1).id:null,hasMore:adopt.length===32};
 }

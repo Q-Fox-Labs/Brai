@@ -2,12 +2,14 @@
 // ABOUTME: Не принимает внешних поручений и не удаляет ресурсы без проверки владельца.
 import {gitResourcesAbsent,command} from './git.mjs';
 import {verifyDisposition} from './disposition.mjs';
+import {verifyCleanupArchive} from './cleanup-archive.mjs';
+import {canonical} from './contracts.mjs';
 
 const steps=['remote','worktree','local_refs','index','verify'];
 const indexAbsent=value=>value?.complete===true && value.owner?.present===false && Array.isArray(value.resources?.collections) && !value.resources.collections.length && Array.isArray(value.resources?.metadataPoints) && !value.resources.metadataPoints.length;
 
 /** Выполняет один идемпотентный шаг под внешним execution guard и проверкой эпохи. */
-export async function advanceCleanup(db,obligation,project,workspace,{git,flowGit,codeIndex,allowedRepositories=[],verifyTransfer=verifyDisposition,checkpoint=async()=>{}}) {
+export async function advanceCleanup(db,obligation,project,workspace,{git,flowGit,codeIndex,allowedRepositories=[],verifyTransfer=verifyDisposition,verifyArchive=verifyCleanupArchive,checkpoint=async()=>{}}) {
   const id=obligation.id,epoch=Number(obligation.epoch),owner=obligation.owner_workflow_id;
   const fence=async()=>{
     await checkpoint('cleanup-fence');
@@ -39,6 +41,7 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
   if(!workspace)return wait('WORKSPACE_REQUIRED');
   if(manifest?.protected_task_ids?.includes(workspace.id))return wait('LIVE_TASK_PROTECTED');
   if(manifest&&(await db.query("SELECT 1 FROM codeworks.workspaces w JOIN codeworks.workflow_registry r ON r.workspace_id=w.id WHERE w.project_id=$1 AND (w.id=$2 OR w.path=$3 OR w.branch=$4) AND r.lifecycle='active' LIMIT 1",[project.id,workspace.id,workspace.path,workspace.branch])).rowCount)return wait('LIVE_TASK_PROTECTED');
+  if(manifest&&(await db.query("SELECT 1 FROM codeworks.operations WHERE workspace_id=$1 AND NOT archived AND kind<>'cleanup' AND status IN ('pending','running','awaiting_execution','awaiting_ci','awaiting_deployment','awaiting_reconciliation') LIMIT 1",[workspace.id])).rowCount)return wait('LIVE_TASK_PROTECTED');
   if((await db.query("SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain') LIMIT 1",[workspace.id])).rowCount)return wait('WRITER_OUTCOME_UNKNOWN');
   if((await db.query("SELECT 1 FROM codeworks.release_queue q JOIN codeworks.operations o ON o.id=q.operation_id WHERE o.workspace_id=$1 AND q.state IN ('held','queued') LIMIT 1",[workspace.id])).rowCount)return wait('RELEASE_OUTCOME_UNKNOWN');
   const finishIfAbsent=async(gitState,indexState)=>{
@@ -72,6 +75,7 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
   }
   let expected=obligation.expected;
   if(!expected || !expected.branch){
+    if(obligation.evidence?.archive)return wait('ARCHIVE_SNAPSHOT_REQUIRED');
     await fence();
     const observed=await git.inspectResources(project,workspace,{manifest});
     if(!codeIndex)return wait('INDEX_ADAPTER_REQUIRED');
@@ -93,7 +97,14 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
   const fixedHead=expected.worktree?.head??expected.branch?.oid;
   if(expected.worktree?.pathExists&&expected.worktree?.dirty!==false)return wait('DIRTY_WORKTREE');
   const retained=obligation.evidence?.verified_disposition;
-  if(retained?.type==='retained'&&manifest){
+  const archive=obligation.evidence?.archive;
+  if(archive&&obligation.outcome==='cancelled'&&manifest){
+    if(manifest.reviewed!==true||manifest.disposition?.type!=='archived'||obligation.evidence?.archive_authorized!==true||canonical(archive)!==canonical(manifest.disposition.archive))return wait('ARCHIVE_UNVERIFIED');
+    if(['inspect','remote','worktree','local_refs','index'].includes(obligation.step)){
+      try{await fence();await verifyArchive(project,expected,archive);await fence();}
+      catch(error){if(error.message==='CLEANUP_FENCE_LOST')throw error;return wait('ARCHIVE_UNVERIFIED');}
+    }
+  }else if(retained?.type==='retained'&&manifest){
     if(retained.target!=='dev'||!flowGit||!retained.target_sha||!retained.refs)return wait('DISPOSITION_PROOF_REQUIRED');
     const actual=[expected.branch?.oid,expected.remote?.oid,expected.worktree?.head];
     if(JSON.stringify(actual)!==JSON.stringify([retained.refs.branch,retained.refs.remote,retained.refs.worktree]))return wait('DISPOSITION_PROOF_REQUIRED');
