@@ -36,6 +36,7 @@
       "services/codeworks/src/contracts.mjs",
       "services/codeworks/src/deployment-evidence.mjs",
       "services/codeworks/src/domain.mjs",
+      "services/codeworks/src/publication.mjs",
       "services/codeworks/src/errors.mjs",
       "services/codeworks/src/git-flow.mjs",
       "services/codeworks/src/git.mjs",
@@ -132,6 +133,7 @@
       "services/codeworks/tests/cleanup-archive.test.mjs",
       "services/codeworks/tests/branch*.test.mjs",
       "services/codeworks/tests/disposition.test.mjs",
+      "services/codeworks/tests/publication.test.mjs",
       "services/codeworks/tests/integration/*finalization*.mjs",
       "services/codeworks/scripts/accept-finalization.mjs"
     ]
@@ -156,6 +158,7 @@
       "services/codeworks/src/contracts.mjs",
       "services/codeworks/src/deployment-evidence.mjs",
       "services/codeworks/src/domain.mjs",
+      "services/codeworks/src/publication.mjs",
       "services/codeworks/src/errors.mjs",
       "services/codeworks/src/git-flow.mjs",
       "services/codeworks/src/git.mjs",
