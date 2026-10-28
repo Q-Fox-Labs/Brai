@@ -31,3 +31,23 @@ test('unused cleanup honors five minute delay, immediate stop and scans more tha
   assert.equal(rows.length,107);assert.ok(rows.some(row=>row.workspace_id===recent));
   assert.ok(!rows.some(row=>row.workspace_id===uncertain));
 });
+
+test('reconciler adopts a completed root only after acquiring its execution guard',{timeout:120000},async t=>{
+  assert.ok(configured,'explicit disposable PostgreSQL is required');
+  const f=await setup();t.after(()=>f.close());const project=await f.project();
+  const prepared=await f.prepare({project_id:project.id,workspace_key:'adoption-test',request_key:'adoption-test'});await f.worker(project,prepared.operation_id);
+  const old='fixture/'+randomUUID(),owner='fixture-reconciler',id=randomUUID(),workspace=prepared.workspace_id;
+  await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner,state,lifecycle) VALUES($1,$2,$3,'temporal','completed','cancelled')",[old,project.id,workspace]);
+  await f.owner.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,owner_workflow_id,epoch,state,step) VALUES($1,$2,$3,$4,'cancelled',$5,7,'retry','worktree')",[id,project.id,workspace,'workspace:'+workspace,old]);
+  const held=await f.owner.connect();
+  try{
+    await held.query('BEGIN');await held.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',['execution:workspace:'+workspace]);
+    await reconcileProjectLedger(f.app,project.id,owner);
+    const unchanged=(await f.app.query('SELECT owner_workflow_id,epoch FROM codeworks.cleanup_obligations WHERE id=$1',[id])).rows[0];
+    assert.equal(unchanged.owner_workflow_id,old);assert.equal(Number(unchanged.epoch),7);
+    await held.query('ROLLBACK');
+  }finally{held.release();}
+  await reconcileProjectLedger(f.app,project.id,owner);
+  const adopted=(await f.app.query('SELECT owner_workflow_id,epoch,state,step FROM codeworks.cleanup_obligations WHERE id=$1',[id])).rows[0];
+  assert.equal(adopted.owner_workflow_id,owner);assert.equal(Number(adopted.epoch),8);assert.equal(adopted.state,'retry');assert.equal(adopted.step,'worktree');
+});
