@@ -150,7 +150,10 @@ class Client:
         result = self.request("/product/search", {
             "user_id": self.user_id, "readable_cube_ids": [self.cube_id],
             "session_id": session_id or None, "query": query, "top_k": top_k,
-            "mode": "fast", "relativity": relativity, "rerank": True, "dedup": "mmr",
+            # Routed recall deduplicates source/logical IDs after scope checks.
+            # MMR over the complete archive is quadratic and removes independent
+            # facts before that boundary; no semantic dedup is needed here.
+            "mode": "fast", "relativity": relativity, "rerank": True, "dedup": "no",
             "include_preference": False, "search_tool_memory": False, "include_skill_memory": False,
             "internet_search": False, "chat_history": [],
         }, timeout=self.timeout)

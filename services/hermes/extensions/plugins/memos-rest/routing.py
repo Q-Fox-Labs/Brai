@@ -292,8 +292,14 @@ class RoutedRuntime:
         def collect(cube):
             client = self.client(cube)
             # AIDEV-NOTE: Лимит до фильтра автора/дедупликации теряет воспоминания.
-            count = len(client.get({}))
-            if not count:
+            pool = client.get({})
+            count = len(pool)
+            # An archive-only or foreign cube cannot contribute results. Avoid
+            # ranking it; the full candidate count is retained for eligible cubes.
+            if not any(self.allowed(row, config)
+                       and row['metadata']['info'].get('hermes_kind') != 'checkpoint'
+                       and (include_archive or row['metadata']['info'].get('hermes_kind') == 'fact')
+                       for row in pool):
                 return
             for row in client.search(query, sid, top_k=count, relativity=float(config.get('relativity', .45))):
                 if not self.allowed(row, config):

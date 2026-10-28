@@ -74,6 +74,26 @@ class QualityTests(RoutingTests):
         self.assertEqual(len(json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales'}))['memories']),1025)
         self.assertEqual(json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales','top_k':0}))['status'],'error')
 
+    def test_search_skips_archive_only_cubes_and_preserves_independent_similar_facts(self):
+        self.router_reply([self.fact()])
+        self.provider.sync_turn('I am studying sales.', '')
+        self.send()
+        base=next(r for r in self.backend.rows.values() if r['metadata']['info']['hermes_kind']=='fact')
+        other=copy.deepcopy(base);other['id']='same-text-independent-fact'
+        other['metadata']['info']['hermes_logical_id']='independent-logical'
+        self.backend.rows[other['id']]=other
+        self.backend.calls.clear()
+        self.provider.routing.router.transport=lambda _: {'cubes':['main','life_intellect']}
+        result=json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales','top_k':1000}))
+        self.assertEqual(len(result['memories']),2,'An upper bound must not invent or fill more results')
+        searches=[body for path,body in self.backend.calls if path=='/product/search']
+        self.assertEqual([b['readable_cube_ids'] for b in searches],[['life_intellect']])
+        self.assertTrue(all(b['dedup']=='no' for b in searches))
+        self.backend.calls.clear()
+        self.provider.handle_tool_call('memos_search',{'query':'sales','include_archive':True})
+        self.assertTrue(any(path=='/product/search' and body['readable_cube_ids']==['main']
+                            for path,body in self.backend.calls))
+
     def test_context_never_includes_another_author_or_session(self):
         self.router_reply([])
         self.provider.sync_turn('My purpose is a massage business.', '')
