@@ -44,7 +44,7 @@ export async function reconcileProjectLedger(pool,projectId,owner,{cursor=null}=
       await db.query('COMMIT');
     }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}finally{db.release();}
   }
-  const adopt=(await pool.query(`SELECT o.id,o.workspace_id,o.evidence,o.owner_workflow_id,o.epoch FROM codeworks.cleanup_obligations o
+  const adopt=(await pool.query(`SELECT o.id,o.workspace_id,o.subject_key,o.evidence,o.owner_workflow_id,o.epoch FROM codeworks.cleanup_obligations o
     LEFT JOIN codeworks.workflow_registry r ON r.workflow_id=o.owner_workflow_id
     WHERE o.project_id=$1 AND o.state IN ('pending','retry') AND (o.owner_workflow_id IS NULL OR r.state='completed')
       AND ($2::uuid IS NULL OR o.id>$2::uuid)
@@ -54,10 +54,14 @@ export async function reconcileProjectLedger(pool,projectId,owner,{cursor=null}=
     try{
       await db.query('BEGIN');
       const workspaceId=candidate.workspace_id??candidate.evidence?.workspace?.id;
-      if(!workspaceId){await db.query('COMMIT');continue;}
-      await db.query('SELECT id FROM codeworks.workspaces WHERE id=$1 FOR UPDATE',[workspaceId]);
-      await db.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[workspaceId]);
-      const guard=(await db.query("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired",['execution:workspace:'+workspaceId])).rows[0].acquired;
+      const branch=candidate.evidence?.manifest?.subject_type==='branch'&&candidate.subject_key?.startsWith('branch:')?candidate.subject_key.slice(7):null;
+      if(!workspaceId&&!branch){await db.query('COMMIT');continue;}
+      if(workspaceId){
+        await db.query('SELECT id FROM codeworks.workspaces WHERE id=$1 FOR UPDATE',[workspaceId]);
+        await db.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[workspaceId]);
+      }
+      const guardKey=workspaceId?'execution:workspace:'+workspaceId:'execution:branch:'+projectId+':'+branch;
+      const guard=(await db.query("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired",[guardKey])).rows[0].acquired;
       if(guard)await db.query(`UPDATE codeworks.cleanup_obligations o SET owner_workflow_id=$2,epoch=epoch+1,updated_at=now()
         WHERE o.id=$1 AND o.epoch=$3 AND o.owner_workflow_id IS NOT DISTINCT FROM $4 AND o.state IN ('pending','retry')
           AND (o.owner_workflow_id IS NULL OR EXISTS(SELECT 1 FROM codeworks.workflow_registry old WHERE old.workflow_id=o.owner_workflow_id AND old.state='completed'))

@@ -14,6 +14,7 @@ import {executionContext,withExecutionContext} from './execution-context.mjs';
 import {authorizeCommand,acquireTarget,releaseTarget,closeRelease,cancelWorkspace} from './lifecycle.mjs';
 import {advanceCleanup} from './cleanup-coordinator.mjs';
 import {verifyDisposition} from './disposition.mjs';
+import {advanceBranchCleanup} from './branch-coordinator.mjs';
 
 /** Продвигает сохранённую обязанность под общим guard области и проверкой owner/epoch. */
 export async function runCleanupObligation(pool,id,owner,{git,flowGit,codeIndex,allowedRepositories,verifyTransfer=verifyDisposition,checkpoint=async()=>{}}) {
@@ -21,17 +22,20 @@ export async function runCleanupObligation(pool,id,owner,{git,flowGit,codeIndex,
     const item=(await db.query('SELECT * FROM codeworks.cleanup_obligations WHERE id=$1 AND owner_workflow_id=$2',[id,owner])).rows[0];
     if(!item||!['pending','retry','running'].includes(item.state))return;
     const synthetic=item.evidence?.workspace;
-    if(!item.workspace_id&&!synthetic?.id)return;
-    const key='execution:workspace:'+(item.workspace_id??synthetic.id);
+    const branch=item.evidence?.manifest?.subject_type==='branch'&&item.subject_key?.startsWith('branch:')?item.subject_key.slice(7):null;
+    if(!item.workspace_id&&!synthetic?.id&&!branch)return;
+    const key=branch?'execution:branch:'+item.project_id+':'+branch:'execution:workspace:'+(item.workspace_id??synthetic.id);
     if(!(await db.query('SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS acquired',[key])).rows[0].acquired)return;
     try{
       const workspace=item.workspace_id?(await db.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[item.workspace_id])).rows[0]:synthetic;
       const project=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1',[item.project_id])).rows[0]?.config;
-      if(!workspace||!project||!allowedRepositories.includes(project.repo_path))throw Error('CLEANUP_PROJECT_FORBIDDEN');
-      try{return await advanceCleanup(db,item,project,workspace,{git,flowGit,codeIndex,allowedRepositories,verifyTransfer,checkpoint:async step=>{signal.throwIfAborted();await checkpoint(step);}});}
+      if((!workspace&&!branch)||!project||!allowedRepositories.includes(project.repo_path))throw Error('CLEANUP_PROJECT_FORBIDDEN');
+      const guardedCheckpoint=async step=>{signal.throwIfAborted();await checkpoint(step);};
+      try{return branch?await advanceBranchCleanup(db,item,project,{git,checkpoint:guardedCheckpoint}):await advanceCleanup(db,item,project,workspace,{git,flowGit,codeIndex,allowedRepositories,verifyTransfer,checkpoint:guardedCheckpoint});}
       catch(error){
-        if(!signal.aborted&&['TARGET_CHANGED','OWNERSHIP_CONFLICT','TRANSFER_UNVERIFIED'].includes(error.code)){
-          return (await db.query("UPDATE codeworks.cleanup_obligations SET state='waiting_decision',blocker=$4,updated_at=now() WHERE id=$1 AND owner_workflow_id=$2 AND epoch=$3 AND state IN ('pending','running','retry') RETURNING *",[id,owner,item.epoch,error.code])).rows[0];
+        const blocker=error.code??error.message;
+        if(!signal.aborted&&['TARGET_CHANGED','OWNERSHIP_CONFLICT','TRANSFER_UNVERIFIED','BRANCH_LIVE_TASK'].includes(blocker)){
+          return (await db.query("UPDATE codeworks.cleanup_obligations SET state='waiting_decision',blocker=$4,updated_at=now() WHERE id=$1 AND owner_workflow_id=$2 AND epoch=$3 AND state IN ('pending','running','retry') RETURNING *",[id,owner,item.epoch,blocker])).rows[0];
         }
         throw error;
       }
