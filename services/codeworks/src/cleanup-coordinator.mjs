@@ -7,7 +7,7 @@ const steps=['remote','worktree','local_refs','index','verify'];
 const indexAbsent=value=>value?.complete===true && value.owner?.present===false && Array.isArray(value.resources?.collections) && !value.resources.collections.length && Array.isArray(value.resources?.metadataPoints) && !value.resources.metadataPoints.length;
 
 /** Выполняет один идемпотентный шаг под внешним execution guard и проверкой эпохи. */
-export async function advanceCleanup(db,obligation,project,workspace,{git,flowGit,codeIndex,allowedRepositories=[],checkpoint=async()=>{}}) {
+export async function advanceCleanup(db,obligation,project,workspace,{git,flowGit,codeIndex,allowedRepositories=[],verifyTransfer=verifyDisposition,checkpoint=async()=>{}}) {
   const id=obligation.id,epoch=Number(obligation.epoch),owner=obligation.owner_workflow_id;
   const fence=async()=>{
     await checkpoint('cleanup-fence');
@@ -41,6 +41,35 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
   if(manifest&&(await db.query("SELECT 1 FROM codeworks.workspaces w JOIN codeworks.workflow_registry r ON r.workspace_id=w.id WHERE w.project_id=$1 AND (w.id=$2 OR w.path=$3 OR w.branch=$4) AND r.lifecycle='active' LIMIT 1",[project.id,workspace.id,workspace.path,workspace.branch])).rowCount)return wait('LIVE_TASK_PROTECTED');
   if((await db.query("SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain') LIMIT 1",[workspace.id])).rowCount)return wait('WRITER_OUTCOME_UNKNOWN');
   if((await db.query("SELECT 1 FROM codeworks.release_queue q JOIN codeworks.operations o ON o.id=q.operation_id WHERE o.workspace_id=$1 AND q.state IN ('held','queued') LIMIT 1",[workspace.id])).rowCount)return wait('RELEASE_OUTCOME_UNKNOWN');
+  const finishIfAbsent=async(gitState,indexState)=>{
+    if(!gitResourcesAbsent(gitState)||!indexAbsent(indexState))return null;
+    await fence();
+    await db.query('BEGIN');
+    try{
+      if(obligation.workspace_id){
+        await db.query('SELECT id FROM codeworks.workspaces WHERE id=$1 FOR UPDATE',[workspace.id]);
+        await db.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[workspace.id]);
+      }
+      const locked=(await db.query('SELECT * FROM codeworks.cleanup_obligations WHERE id=$1 FOR UPDATE',[id])).rows[0];
+      if(!locked||Number(locked.epoch)!==epoch||locked.owner_workflow_id!==owner||!['pending','running','retry'].includes(locked.state))throw Error('CLEANUP_FENCE_LOST');
+      if(obligation.workspace_id){
+        await db.query('UPDATE codeworks.workspaces SET removed_at=COALESCE(removed_at,now()) WHERE id=$1',[workspace.id]);
+        await db.query("UPDATE codeworks.workflow_registry SET lifecycle='removed',updated_at=now() WHERE workspace_id=$1",[workspace.id]);
+        await db.query("UPDATE codeworks.commands SET state='done',updated_at=now() WHERE operation_id IN (SELECT id FROM codeworks.operations WHERE workspace_id=$1 AND kind='cleanup' AND NOT archived AND status NOT IN ('succeeded','failed'))",[workspace.id]);
+        await db.query("UPDATE codeworks.operations SET status='succeeded',step='removed',updated_at=now() WHERE workspace_id=$1 AND kind='cleanup' AND NOT archived AND status NOT IN ('succeeded','failed')",[workspace.id]);
+      }
+      const result=await db.query("UPDATE codeworks.cleanup_obligations SET state='done',step='done',blocker=NULL,result=$2::jsonb,updated_at=now() WHERE id=$1 RETURNING *",[id,JSON.stringify({git:gitState,index:indexState})]);
+      await db.query('COMMIT');return result.rows[0];
+    }catch(error){await db.query('ROLLBACK');throw error;}
+  };
+  if(['inspect','remote'].includes(obligation.step)){
+    if(!codeIndex)return wait('INDEX_ADAPTER_REQUIRED');
+    await fence();const observed=await git.inspectResources(project,workspace,{manifest});
+    await fence();const indexObserved=await codeIndex.inspect(project,workspace,{manifest,checkpointState:obligation.evidence?.index_checkpoint});
+    if(indexObserved?.complete!==true)throw Error('INDEX_INSPECTION_INCOMPLETE');
+    const finished=await finishIfAbsent(observed,indexObserved);
+    if(finished)return finished;
+  }
   let expected=obligation.expected;
   if(!expected || !expected.branch){
     await fence();
@@ -83,7 +112,7 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
     const transfer=obligation.evidence?.transfer;
     if(!transfer||fixedHead!==transfer.source_head||(expected.branch?.oid&&expected.branch.oid!==transfer.source_head)||(expected.remote?.oid&&expected.remote.oid!==transfer.source_head)||(expected.tracking?.oid&&expected.tracking.oid!==transfer.source_head))return wait('DISPOSITION_PROOF_REQUIRED');
     if(['inspect','remote','worktree'].includes(obligation.step)){
-      try{await fence();await verifyDisposition(project,workspace,transfer,{allowedRepositories});}
+      try{await fence();await verifyTransfer(project,workspace,transfer,{allowedRepositories});}
       catch(error){if(error.code==='TRANSFER_UNVERIFIED')return wait('TRANSFER_UNVERIFIED');throw error;}
     }
   }else return wait('DISPOSITION_PROOF_REQUIRED');
@@ -103,25 +132,7 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
     const gitState=await git.inspectResources(project,workspace,{manifest});
     await fence();
     const indexState=await codeIndex.inspect(project,workspace,{manifest,checkpointState:obligation.evidence?.index_checkpoint});
-    if(!gitResourcesAbsent(gitState)||!indexAbsent(indexState))return wait('RESOURCES_REMAIN');
-    await fence();
-    await db.query('BEGIN');
-    try{
-      if(obligation.workspace_id){
-        await db.query('SELECT id FROM codeworks.workspaces WHERE id=$1 FOR UPDATE',[workspace.id]);
-        await db.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[workspace.id]);
-      }
-      const locked=(await db.query('SELECT * FROM codeworks.cleanup_obligations WHERE id=$1 FOR UPDATE',[id])).rows[0];
-      if(!locked||Number(locked.epoch)!==epoch||locked.owner_workflow_id!==owner||!['pending','running','retry'].includes(locked.state))throw Error('CLEANUP_FENCE_LOST');
-      if(obligation.workspace_id){
-        await db.query('UPDATE codeworks.workspaces SET removed_at=COALESCE(removed_at,now()) WHERE id=$1',[workspace.id]);
-        await db.query("UPDATE codeworks.workflow_registry SET lifecycle='removed',updated_at=now() WHERE workspace_id=$1",[workspace.id]);
-        await db.query("UPDATE codeworks.commands SET state='done',updated_at=now() WHERE operation_id IN (SELECT id FROM codeworks.operations WHERE workspace_id=$1 AND kind='cleanup' AND NOT archived AND status NOT IN ('succeeded','failed'))",[workspace.id]);
-        await db.query("UPDATE codeworks.operations SET status='succeeded',step='removed',updated_at=now() WHERE workspace_id=$1 AND kind='cleanup' AND NOT archived AND status NOT IN ('succeeded','failed')",[workspace.id]);
-      }
-      const result=await db.query("UPDATE codeworks.cleanup_obligations SET state='done',step='done',blocker=NULL,result=$2::jsonb,updated_at=now() WHERE id=$1 RETURNING *",[id,JSON.stringify({git:gitState,index:indexState})]);
-      await db.query('COMMIT');return result.rows[0];
-    }catch(error){await db.query('ROLLBACK');throw error;}
+    return await finishIfAbsent(gitState,indexState)??await wait('RESOURCES_REMAIN');
   }
   return save("step=$4,state='pending',blocker=NULL,next_attempt_at=NULL",[steps[steps.indexOf(step)+1]]);
 }

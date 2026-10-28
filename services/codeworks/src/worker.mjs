@@ -16,7 +16,7 @@ import {advanceCleanup} from './cleanup-coordinator.mjs';
 import {verifyDisposition} from './disposition.mjs';
 
 /** Продвигает сохранённую обязанность под общим guard области и проверкой owner/epoch. */
-export async function runCleanupObligation(pool,id,owner,{git,flowGit,codeIndex,allowedRepositories,checkpoint=async()=>{}}) {
+export async function runCleanupObligation(pool,id,owner,{git,flowGit,codeIndex,allowedRepositories,verifyTransfer=verifyDisposition,checkpoint=async()=>{}}) {
   return executionSession(pool,async(db,signal)=>{
     const item=(await db.query('SELECT * FROM codeworks.cleanup_obligations WHERE id=$1 AND owner_workflow_id=$2',[id,owner])).rows[0];
     if(!item||!['pending','retry','running'].includes(item.state))return;
@@ -28,7 +28,7 @@ export async function runCleanupObligation(pool,id,owner,{git,flowGit,codeIndex,
       const workspace=item.workspace_id?(await db.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[item.workspace_id])).rows[0]:synthetic;
       const project=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1',[item.project_id])).rows[0]?.config;
       if(!workspace||!project||!allowedRepositories.includes(project.repo_path))throw Error('CLEANUP_PROJECT_FORBIDDEN');
-      try{return await advanceCleanup(db,item,project,workspace,{git,flowGit,codeIndex,allowedRepositories,checkpoint:async step=>{signal.throwIfAborted();await checkpoint(step);}});}
+      try{return await advanceCleanup(db,item,project,workspace,{git,flowGit,codeIndex,allowedRepositories,verifyTransfer,checkpoint:async step=>{signal.throwIfAborted();await checkpoint(step);}});}
       catch(error){
         if(!signal.aborted&&['TARGET_CHANGED','OWNERSHIP_CONFLICT','TRANSFER_UNVERIFIED'].includes(error.code)){
           return (await db.query("UPDATE codeworks.cleanup_obligations SET state='waiting_decision',blocker=$4,updated_at=now() WHERE id=$1 AND owner_workflow_id=$2 AND epoch=$3 AND state IN ('pending','running','retry') RETURNING *",[id,owner,item.epoch,error.code])).rows[0];
@@ -48,7 +48,7 @@ async function executionSession(pool,work){
   finally{db.removeListener('error',disconnect);db.release(lost.signal.aborted?new Error('EXECUTION_CONNECTION_LOST'):undefined);}
 }
 /** Продолжает одну операцию; прерванные шаги сверяет по фактическому Git/GitHub. */
-export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[],flowGit=createFlowGit(),github,deploymentAdapter=createDeploymentAdapter(),workflowId=process.env.CODEWORKS_WORKFLOW_ID,generation=process.env.CODEWORKS_WORKFLOW_GENERATION,scoped=false,expectedKind,prepareStep,codeIndex}={}) {
+export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[],flowGit=createFlowGit(),github,deploymentAdapter=createDeploymentAdapter(),workflowId=process.env.CODEWORKS_WORKFLOW_ID,generation=process.env.CODEWORKS_WORKFLOW_GENERATION,scoped=false,expectedKind,prepareStep,codeIndex,verifyTransfer=verifyDisposition}={}) {
   return executionSession(pool,async(db,signal)=>{
   const originalSignalCheckpoint=checkpoint;
   checkpoint=async step=>{signal.throwIfAborted();await originalSignalCheckpoint(step);};
@@ -127,7 +127,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
       }
       if(op.kind==='workspace.transfer'){
         await checkpoint('before-transfer-proof');
-        await verifyDisposition(project,w,op.request.evidence,{allowedRepositories});
+        await verifyTransfer(project,w,op.request.evidence,{allowedRepositories});
         const outcome=await cancelWorkspace(db,op,{outcome:'transferred',evidence:{transfer:op.request.evidence}});
         await finish(outcome.status,'TRANSFER_CLEANUP_PENDING',outcome);return;
       }
