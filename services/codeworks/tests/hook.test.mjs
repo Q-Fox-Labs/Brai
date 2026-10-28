@@ -2,7 +2,7 @@
 // ABOUTME: Подменяет backend и не запускает пользовательские сессии Codex.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {runHook,writePaths} from '../src/hook.mjs';
+import {runHook,writePaths,foregroundCommand} from '../src/hook.mjs';
 import {validate} from '../src/contracts.mjs';
 const config={projects:[{id:'demo',repo_path:'/test/main',documentation_paths:['docs'],excluded_paths:['tmp']}]};
 const env={CODEWORKS_WORKSPACE_KEY:'task'};
@@ -102,4 +102,40 @@ test('existing shell call validates against real owner schema with whole-tree ta
 });
 test('native end-of-file marker survives rewrite byte for byte',async()=>{
  const f=fixture(),command='*** Begin Patch\n*** Update File: src/a\n@@\n-old\n+new\n*** End of File\n*** End Patch';const r=await runHook(patch(command),f.options);assert.equal(r.hookSpecificOutput.permissionDecision,'allow');assert.equal(r.hookSpecificOutput.updatedInput.command,command.replace('src/a','/test/tree/src/a'));
+});
+
+test('literal foreground redirects accept terminal Post without accepting background or opaque shell',async()=>{
+ for(const command of ['node --test tests/a > /tmp/tests.log 2>&1','node --test tests/a 2> /tmp/error.log','node services/codeworks/components/cli.mjs package codeworks >> /tmp/package.log 2>&1','node --test tests/a > /tmp/test.log && node services/codeworks/components/cli.mjs check codeworks 2>> /tmp/check.log']) {
+  const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:'completed'},f.options);assert.equal(f.calls[0]?.method,'write.finish',command);
+ }
+ for(const command of ['node --test tests/a > /tmp/a &','node --test tests/a > $(evil)','node --test tests/a > /tmp/a 2>&1 &','node script.mjs > /tmp/a','node --test tests/a &> /tmp/a','node --test tests/a 2>&3','node --test tests/a > /tmp/a; nohup node other.mjs','node --test tests/a > /tmp/a 2>&1; disown']) {
+  const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:'completed'},f.options);assert.equal(f.calls.length,0,command);
+ }
+ for(const response of [{session_id:123},'Process running with session ID 12']) {const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'node --test tests/a > /tmp/a 2>&1'},tool_response:response},f.options);assert.equal(f.calls.length,0);}
+});
+
+test('actual component publication commands admit and complete with literal redirected log',async()=>{
+ const id='e67896b4-42f9-4ff8-b673-303dabab9253',root='/var/lib/brai-dev/codeworks/workspaces/'+id;
+ const cfg={projects:[{id:'demo',repo_path:'/srv/projects/brai-dev',workspace_root:'/var/lib/brai-dev/codeworks/workspaces'}]};
+ for(const suffix of ['','-eb77']) {
+  const calls=[];const connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};validate(method,args);if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:id};return {};},close(){}});
+  const command='node services/codeworks/components/cli.mjs run codeworks > '+root+'/tmp/codeworks-temporal/final-publication-check'+suffix+'.log 2>&1';
+  const event={...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command}};
+  assert.equal((await runHook(event,{config:cfg,env,connect})).hookSpecificOutput.permissionDecision,'allow');
+  await runHook({...event,hook_event_name:'PostToolUse',tool_response:'completed'},{config:cfg,env,connect});assert.equal(calls.at(-1).method,'write.finish');
+ }
+});
+
+test('owner verifier uses the same conservative foreground classifier',()=>{
+ assert.equal(foregroundCommand('node services/codeworks/components/cli.mjs run codeworks > tmp/out.log 2>&1'),true);
+ for(const command of ['node --test tests/a &','node script.mjs > tmp/out','node --test tests/a > $(evil)','nohup node --test tests/a']) assert.equal(foregroundCommand(command),false,command);
+});
+
+test('literal two-file cp completes while dynamic, multi-source and background variants remain protected',async()=>{
+ for(const command of ['cp services/codeworks/src/example.mjs services/codeworks/tests/example.mjs','cp -- services/codeworks/src/example.mjs services/codeworks/tests/example.mjs']) {
+  assert.equal(foregroundCommand(command),true);
+  const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command},tool_response:{exit_code:0}},f.options);assert.equal(f.calls[0]?.method,'write.finish');
+ }
+ for(const command of ['cp a b c','cp -r a b','cp a b &','cp $(evil) b','cp a "$DEST"','cp a b; python3 x','cp -- -r b']) assert.equal(foregroundCommand(command),false,command);
+ const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'cp a b'},tool_response:{session_id:23}},f.options);assert.equal(f.calls.length,0);
 });

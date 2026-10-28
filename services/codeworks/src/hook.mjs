@@ -137,8 +137,8 @@ function synchronousGit(command) {
   }
   return false;
 }
-// Обрабатываем только проверяемые foreground argv; произвольные скрипты и фоновые операции остаются неизвестными.
-function foregroundCommand(command) {
+/** Распознаёт ограниченный набор foreground argv; неизвестные и фоновые команды возвращают false. */
+export function foregroundCommand(command) {
   if (typeof command !== 'string') return false;
   const tokens=shellTokens(command);
   if (!tokens.length || tokens.some(t=>t.dynamic)) return false;
@@ -148,6 +148,11 @@ function foregroundCommand(command) {
     const words=segment.map(t=>t.word);
     const literal=words.map(w=>"'"+w.replaceAll("'", "'\\''")+"'").join(' ');
     if (readOnlyShell(literal) || synchronousGit(literal)) return true;
+    if (words[0]==='cp') {
+      const operands=words.slice(1);
+      if (operands[0]==='--') operands.shift();
+      return operands.length===2 && operands.every(w=>w.length>0 && !w.startsWith('-'));
+    }
     if (words[0]==='head' || words[0]==='tail') return words.slice(1).every(w=>!w.startsWith('-') || /^-(?:n)?[0-9]+$/.test(w) || w==='-n');
     if (words[0]==='sed') return words[1]==='-n' && /^\d+(?:,\d+)?p$/.test(words[2]??'') && words.slice(3).every(w=>!w.startsWith('-'));
     if (words[0]!=='node') return false;
@@ -155,8 +160,19 @@ function foregroundCommand(command) {
     if (!/^(?:\.\/)?services\/codeworks\/components\/cli\.mjs$/.test(words[1]??'') || !['build','check','package','run','plan','validate'].includes(words[2])) return false;
     return words.slice(3).every(w=>!w.startsWith('-') || ['--base','--root','--no-deps'].includes(w));
   };
-  for (const token of tokens) {
+  for (let i=0; i<tokens.length; i++) {
+    const token=tokens[i];
     if (!token.operator) {segment.push(token);continue;}
+    if (['>','>>'].includes(token.operator)) {
+      // AIDEV-NOTE: Только literal redirect и stderr-to-stdout; отдельный & не является завершённым foreground вызовом.
+      const fd=['1','2'].includes(segment.at(-1)?.word) ? segment.pop().word : null;
+      const next=tokens[++i];
+      if (next?.operator==='&') {
+        const target=tokens[++i];
+        if (token.operator!=='>' || fd!=='2' || target?.operator || target?.word!=='1') return false;
+      } else if (!next || next.operator || next.dynamic || !next.word) return false;
+      continue;
+    }
     if (!['&&',';','|','\n'].includes(token.operator) || !allowed()) return false;
     segment=[];
   }

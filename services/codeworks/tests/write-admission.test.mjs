@@ -14,6 +14,53 @@ test('stop stores only safe event and reason for never-admitted calls',async()=>
  const query=f.queries.find(q=>q.sql.includes('UPDATE codeworks.write_calls SET state=CASE'));
  assert.match(query.sql,/state IN \('preparing','denied_pending'\).*stop_event/);assert.match(query.sql,/prepare_pending.*THEN NULL/);assert.deepEqual(query.args.slice(-2),['Stop','prepare_pending']);
 });
+
+test('finish удерживает порядок блокировок и пробуждает только после последнего писателя',async()=>{
+ const rows=[{id:'one',workspace_id:'w',state:'in_flight',tool_result:null},{id:'two',workspace_id:'w',state:'uncertain',tool_result:null}];
+ const orders=[];let obligation={state:'waiting_decision',blocker:'WRITER_OUTCOME_UNKNOWN',owner:'old',epoch:7};
+ const query=async(sql,args=[])=>{
+  if(sql.startsWith('SELECT * FROM codeworks.write_calls WHERE project_id='))return {rows:[rows.find(r=>r.id===args[4])]};
+  if(sql.startsWith('SELECT * FROM codeworks.workspaces')){orders.push('workspace');return {rows:[w]};}
+  if(sql.startsWith('SELECT workflow_id FROM codeworks.workflow_registry')){orders.push('registry');return {rows:[]};}
+  if(sql.startsWith('SELECT id FROM codeworks.cleanup_obligations')){orders.push('obligation');return {rows:[obligation]};}
+  if(sql.startsWith('SELECT * FROM codeworks.write_calls WHERE id=')){orders.push('call');return {rows:[rows.find(r=>r.id===args[0])]};}
+  if(sql.startsWith("UPDATE codeworks.write_calls SET state='finished'")){const row=rows.find(r=>r.id===args[0]);row.state='finished';row.tool_result=JSON.parse(args[1]);return {rowCount:1};}
+  if(sql.startsWith('UPDATE codeworks.cleanup_obligations o SET')){if(!rows.some(r=>['preparing','in_flight','uncertain'].includes(r.state))&&obligation.state==='waiting_decision'&&obligation.blocker==='WRITER_OUTCOME_UNKNOWN')obligation={...obligation,state:'pending',blocker:null};return {rowCount:1};}
+  return {rows:[],rowCount:0};
+ };
+ const api=createWriteAdmission({query,connect:async()=>({query,release(){}})},{workspace:async()=>({project:{},workspace:w}),inspect:async()=>({dirty:false,head:'base'})});
+ const args=tool_use_id=>({project_id:'p',session_id:'s',turn_id:'t',tool_use_id,outcome:'success'});
+ await api.finish(args('one'),'e');assert.equal(obligation.state,'waiting_decision');
+ await api.finish(args('two'),'e');assert.deepEqual(obligation,{state:'pending',blocker:null,owner:'old',epoch:7});
+ assert.deepEqual(orders,['workspace','registry','obligation','call','workspace','registry','obligation','call']);
+});
+
+test('finish не снимает другие причины ожидания очистки',async()=>{
+ const f=fixture(false);await f.api.finish({project_id:'p',session_id:'s',turn_id:'t',tool_use_id:'u',outcome:'success'},'e');
+ const wake=f.queries.find(q=>q.sql.startsWith('UPDATE codeworks.cleanup_obligations o SET'));
+ assert.match(wake.sql,/state='waiting_decision' AND o.blocker='WRITER_OUTCOME_UNKNOWN'/);
+ assert.match(wake.sql,/NOT EXISTS\(SELECT 1 FROM codeworks.write_calls/);
+});
+
+test('owner receipt подтверждает только тот же native вызов и повторяется по тем же hashes',async()=>{
+ const hash='a'.repeat(64),event='b'.repeat(64),input='c'.repeat(64),rewritten='d'.repeat(64);
+ let row={id:'c',workspace_id:'w',project_id:'p',executor_id:'e',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'Bash',payload_sha256:input,rewritten_sha256:rewritten,admitted_at:'2026-01-01',state:'uncertain'};
+ let updates=0;
+ const query=async(sql,args=[])=>{
+  if(sql.startsWith('SELECT * FROM codeworks.write_calls'))return {rows:[row]};
+  if(sql.startsWith('SELECT * FROM codeworks.workspaces'))return {rows:[w]};
+  if(sql.startsWith("UPDATE codeworks.write_calls SET state='finished'")){updates++;row={...row,state:'finished',tool_result:JSON.parse(args[1])};return {rowCount:1};}
+  return {rows:[],rowCount:0};
+ };
+ const api=createWriteAdmission({query,connect:async()=>({query,release(){}})},{workspace:async()=>({project:{},workspace:w}),inspect:async()=>({dirty:false,head:'base'})});
+ const args={project_id:'p',session_id:'s',turn_id:'t',tool_use_id:'u',outcome:'success'};
+ const proof={write_call_id:'c',project_id:'p',executor_id:'e',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'Bash',payload_sha256:input,rewritten_sha256:rewritten,exit_code:0,receipt_sha256:hash,native_event_sha256:event};
+ await assert.rejects(api.finish(args,'e',{completionProof:{...proof,rewritten_sha256:hash}}),{code:'WRITE_CALL_MISMATCH'});assert.equal(updates,0);
+ assert.equal((await api.finish(args,'e',{completionProof:proof})).state,'finished');assert.equal(updates,1);
+ assert.deepEqual(row.tool_result.native_completion,{receipt_sha256:hash,native_event_sha256:event,exit_code:0});
+ assert.equal((await api.finish(args,'e',{completionProof:proof})).state,'finished');
+ await assert.rejects(api.finish(args,'e',{completionProof:{...proof,native_event_sha256:hash}}),{code:'WRITE_CALL_MISMATCH'});assert.equal(updates,1);
+});
 test('stopped call never starts a new preparation',async()=>{
  let called=false;const existing={id:'c',workspace_id:null,state:'denied_pending',tool_name:'apply_patch',payload_sha256:'a',targets:['src/a'],workspace_key:'task',kind:'feature',request_key:'r'};
  const query=async sql=>sql.startsWith('SELECT * FROM codeworks.write_calls')?{rows:[existing],rowCount:1}:{rows:[],rowCount:0};
