@@ -93,3 +93,15 @@ test('lone owned marker and stale registration are inspected and removed separat
  await run('update-ref','-d',observed.branch.ref,base);const lone=await git.inspectResources(project,w);assert.equal(lone.branch.oid,null);assert.ok(lone.ownership.oid);
  assert.equal((await git.cleanupStep(project,w,lone,'local_refs')).outcome,'removed');assert.ok(gitResourcesAbsent(await git.inspectResources(project,w)));
 });
+
+
+test('legacy refs clean with absent approved root without creating directories',async t=>{
+ const tmp=fileURLToPath(new URL('../../../tmp/',import.meta.url));await mkdir(tmp,{recursive:true});const root=await mkdtemp(path.join(tmp,'codeworks-missing-root-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const repo=root+'/repo',current=root+'/current',missing=root+'/old/workspaces';await mkdir(current);await command('git',['init','-b','dev',repo]);const run=(...args)=>command('git',['-C',repo,...args]);
+ await run('config','user.name','Fixture');await run('config','user.email','fixture@example.invalid');await writeFile(repo+'/base','base');await run('add','.');await run('commit','-m','base');const base=(await run('rev-parse','HEAD')).stdout;
+ const w={id:randomUUID(),ownership_token:randomUUID(),base_sha:base,branch:'codex/missing-root',path:missing+'/task'},project={id:'fixture',repo_path:repo,common_dir:repo+'/.git',workspace_root:current,legacy_workspace_roots:[missing]};await run('branch',w.branch);
+ const old=process.env.CODEWORKS_LOCK_HELD;process.env.CODEWORKS_LOCK_HELD='1';t.after(()=>{if(old===undefined)delete process.env.CODEWORKS_LOCK_HELD;else process.env.CODEWORKS_LOCK_HELD=old;});
+ const git=createGit(),snapshot=await git.inspectResources(project,w,{manifest:{ownership:{ref:'refs/codeworks/ownership/'+w.id}}});
+ const manifest={manifestVersion:1,reviewed:true,project_id:project.id,common_dir:project.common_dir,workspace_id:w.id,branch:snapshot.branch,ownership:snapshot.ownership,remote:snapshot.remote,tracking:snapshot.tracking,worktree:snapshot.worktree,provenance:[{kind:'fixture'}],disposition:{type:'retained'},manifest_sha256:'a'.repeat(64)};
+ assert.equal((await git.cleanupStep(project,w,snapshot,'local_refs',{manifest})).outcome,'removed');await assert.rejects(access(missing));assert.ok(gitResourcesAbsent(await git.inspectResources(project,w,{manifest})));
+});
