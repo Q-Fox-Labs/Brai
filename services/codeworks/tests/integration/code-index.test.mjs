@@ -126,8 +126,12 @@ test('native index and both graphs copy, refresh, caches and cleanup',{skip:!ena
   assert.equal((await invoke('update')).state,'ready');assert.match(await freshReader.call('codebase_graph_query',{filePath:'main.js'}),/renamed.js/);
   assert.ok(!(await scroll(collection(id))).some(p=>['third.js','other.js'].includes(p.payload.relativePath)));
   assert.deepEqual(await q.retrieve('socraticode_metadata',{ids:sourceBefore.map(p=>p.id),with_payload:true}),sourceBefore,'source remains byte-equivalent');
+  const inspected=await invoke('inspect');assert.equal(inspected.complete,true);assert.equal(inspected.identity,id);
+  assert.equal(inspected.owner.present,true);assert.equal(inspected.owner.tokenMatches,true);assert.equal(inspected.owner.pathMatches,true);
+  assert.equal(inspected.resources.collections.length,4);assert.ok(inspected.resources.metadataPoints.includes(collection(id)+'::codeworks-owner'));
   const token=w.ownership_token;w.ownership_token='foreign';await invoke('remove',{failure:true});w.ownership_token=token;
   await rm(w.path,{recursive:true});assert.equal((await invoke('remove')).state,'removed');assert.equal((await invoke('remove')).state,'removed');
+  const empty=await invoke('inspect');assert.equal(empty.owner.present,false);assert.deepEqual(empty.resources,{collections:[],metadataPoints:[]});
   await freshReader.call('codebase_graph_query',{filePath:'main.js'});await freshReader.call('codebase_symbols',{filePath:'other.js'});
   assert.ok(!(await q.getCollections()).collections.some(c=>c.name.includes(id)));
   assert.ok((await q.getCollections()).collections.some(c=>c.name===collection(sourceId)));

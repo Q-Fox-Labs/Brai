@@ -3,6 +3,7 @@
 import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
+import path from 'node:path';
 import {command} from './git.mjs';
 import {Fault} from './errors.mjs';
 import {executionContext,withExecutionContext} from './execution-context.mjs';
@@ -32,7 +33,7 @@ export function createCodeIndex(pool,{configFile=process.env.CODEWORKS_CODE_INDE
     /** Один проход: отсутствующий источник ждёт следующего таймера; чужой индекс не принимается. */
     async maintain(project,w){
       let state=w.code_index;
-      if(w.removed_at||w.preparation_state!=='ready'||['skipped','removed'].includes(state?.state))return;
+      if(w.removed_at||w.preparation_state!=='ready'||w.activation_state==='awaiting_first_write'||['skipped','removed'].includes(state?.state))return;
       try{
         const settings=await config(),source=settings?.sources?.[project.id]?.[w.kind];
         if(!source)return;
@@ -43,8 +44,8 @@ export function createCodeIndex(pool,{configFile=process.env.CODEWORKS_CODE_INDE
         if(state.identity!==indexIdentity(w.path)||state.source_path!==source||state.source_sha!==w.base_sha)throw Error('INDEX_OWNERSHIP_CONFLICT');
         await exclusive(async()=>{
           // AIDEV-NOTE: UUID поколения workflow проверяет Activity; строка дополнительно запрещает запись после cleanup/cancel.
-          const live=(await pool.query("SELECT w.removed_at,r.lifecycle FROM codeworks.workspaces w JOIN codeworks.workflow_registry r ON r.workspace_id=w.id WHERE w.id=$1",[w.id])).rows[0];
-          if(!live||live.removed_at||live.lifecycle!=='active')return;
+          const live=(await pool.query("SELECT w.removed_at,w.activation_state,r.lifecycle FROM codeworks.workspaces w JOIN codeworks.workflow_registry r ON r.workspace_id=w.id WHERE w.id=$1",[w.id])).rows[0];
+          if(!live||live.removed_at||live.activation_state==='awaiting_first_write'||live.lifecycle!=='active')return;
           const updating=!!state.last_success_at;
           await save(w.id,{...state,state:updating?'updating':'copying',error:null});
           const result=await invoke(updating?'update':'clone',settings,project,w,state);
@@ -59,24 +60,38 @@ export function createCodeIndex(pool,{configFile=process.env.CODEWORKS_CODE_INDE
         await save(w.id,{...state,state:'error',error:error.indexCode??'INDEX_MAINTENANCE_FAILED'});
       }
     },
-    /** Вызывается после Git-cleanup; отсутствие каталога не мешает удалить сохранённую identity. */
-    async remove(project,w){
-      if(!w.code_index||w.code_index.state==='removed')return;
+    /** Проверяет все ресурсы под барьером; недоступное хранилище не считается пустым. */
+    async inspect(project,w,{manifest}={}){
       const settings=await config();
       if(!settings)throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
-      if(w.code_index.identity!==indexIdentity(w.path))throw Error('INDEX_OWNERSHIP_CONFLICT');
-      await exclusive(async()=>{
-        await invoke('remove',settings,project,w,w.code_index);
-        await save(w.id,{...w.code_index,state:'removed',error:null});
+      const index=cleanupIdentity(project,w);
+      return exclusive(()=>invoke('inspect',settings,project,w,index,manifest));
+    },
+    /** Повторно проверяет ресурсы даже после частичной или завершённой очистки. */
+    async remove(project,w,{manifest}={}){
+      const settings=await config();
+      if(!settings)throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
+      const index=cleanupIdentity(project,w);
+      return exclusive(async()=>{
+        await invoke('inspect',settings,project,w,index,manifest);
+        await invoke('remove',settings,project,w,index,manifest);
+        if(w.code_index)await save(w.id,{...w.code_index,state:'removed',error:null});
       });
     },
   };
 }
 
+function cleanupIdentity(project,w){
+  if(!w.ownership_token||!path.isAbsolute(w.path)||path.normalize(w.path)!==w.path||path.dirname(w.path)!==project.workspace_root)throw Error('INDEX_OWNERSHIP_CONFLICT');
+  const identity=indexIdentity(w.path);
+  if(w.code_index&&w.code_index.identity!==identity)throw Error('INDEX_OWNERSHIP_CONFLICT');
+  return {...w.code_index,identity};
+}
+
 /** Отдельный процесс имеет собственные env/cache; общий MCP и службы не перенастраиваются. */
-async function invokeEngine(action,config,project,workspace,index){
+async function invokeEngine(action,config,project,workspace,index,manifest){
   const result=await command(process.execPath,[fileURLToPath(new URL('./code-index-engine.mjs',import.meta.url))],{
-    input:JSON.stringify({action,config,project,workspace,index}),timeout:1800000,allowFailure:true,
+    input:JSON.stringify({action,config,project,workspace,index,manifest}),timeout:1800000,allowFailure:true,
   });
   const value=JSON.parse(result.stdout);
   if(result.code!==0){

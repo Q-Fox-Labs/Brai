@@ -12,7 +12,7 @@ async function fixture(t,kind='feature'){
   const dir=await mkdtemp(root+'code-index-');t.after(()=>rm(dir,{recursive:true,force:true}));
   const configFile=dir+'/config.json',source=kind==='feature'?'/fixture/dev':'/fixture/prod';
   await writeFile(configFile,JSON.stringify({sources:{brai:{feature:'/fixture/dev',hotfix:'/fixture/prod'}}}));
-  const w={id:'fixture',path:'/fixture/workspaces/task',base_sha:'abc',kind,preparation_state:'ready',code_index:null};
+  const w={id:'fixture',path:'/fixture/workspaces/task',base_sha:'abc',kind,ownership_token:'fixture-token',preparation_state:'ready',code_index:null};
   let active=true,locked=false,calls=[];
   const query=async(sql,args)=>{
     if(sql.includes('SET code_index')){w.code_index=args[1];return {rows:[]};}
@@ -24,7 +24,7 @@ async function fixture(t,kind='feature'){
   const db={query,on(){},removeListener(){},release(){}};
   const pool={query,connect:async()=>db};let result={state:'ready'};
   const adapter=createCodeIndex(pool,{configFile,invoke:async(action,config,p,w,index)=>{calls.push({action,index});if(result instanceof Error)throw result;return result;}});
-  return {w,source,adapter,calls,project:{id:'brai'},setResult:v=>{result=v;},cancel:()=>{active=false;},busy:()=>{locked=true;}};
+  return {w,source,adapter,calls,project:{id:'brai',workspace_root:'/fixture/workspaces'},setResult:v=>{result=v;},cancel:()=>{active=false;},busy:()=>{locked=true;}};
 }
 
 for(const kind of ['feature','hotfix'])test(kind+' clones its contour once, then updates only its identity',async t=>{
@@ -54,7 +54,20 @@ test('cancellation and contention perform no external writes',async t=>{
 test('cleanup is repeatable after path disappearance and rejects foreign identity',async t=>{
   const f=await fixture(t);await f.adapter.maintain(f.project,f.w);
   await f.adapter.remove(f.project,f.w);await f.adapter.remove(f.project,f.w);
-  assert.deepEqual(f.calls.map(c=>c.action),['clone','remove']);assert.equal(f.w.code_index.state,'removed');
+  assert.deepEqual(f.calls.map(c=>c.action),['clone','inspect','remove','inspect','remove']);assert.equal(f.w.code_index.state,'removed');
   f.w.code_index={...f.w.code_index,state:'ready',identity:'foreign'};
   await assert.rejects(f.adapter.remove(f.project,f.w),/INDEX_OWNERSHIP_CONFLICT/);
+});
+
+test('awaiting first write does not index, but active and legacy do',async t=>{
+  const f=await fixture(t);f.w.activation_state='awaiting_first_write';
+  await f.adapter.maintain(f.project,f.w);assert.equal(f.calls.length,0);
+  f.w.activation_state='active';await f.adapter.maintain(f.project,f.w);assert.equal(f.calls[0].action,'clone');
+});
+test('cleanup inspects even without index state and propagates backend errors',async t=>{
+  const f=await fixture(t);await f.adapter.remove(f.project,f.w);
+  assert.deepEqual(f.calls.map(c=>c.action),['inspect','remove']);
+  f.setResult(Error('backend unavailable'));
+  await assert.rejects(f.adapter.inspect(f.project,f.w),/backend unavailable/);
+  await assert.rejects(f.adapter.remove(f.project,f.w),/backend unavailable/);
 });
