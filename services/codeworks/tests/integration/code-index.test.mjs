@@ -148,10 +148,10 @@ test('real Temporal background index does not block commands or cancellation',{s
   const native=await (await import('@temporalio/worker')).NativeConnection.connect({address:process.env.CODEWORKS_TEMPORAL_ADDRESS});t.after(()=>native.close());
   const worker=await Worker.create({connection:native,namespace:process.env.CODEWORKS_TEMPORAL_NAMESPACE,taskQueue,workflowBundle:bundle,activities,maxConcurrentActivityTaskExecutions:4});
   await worker.runUntil(async()=>{
-    const first=await f.h.call('prepare',{project_id:p.id,workspace_key:'index-one',request_key:'index-one'},'codex');
+    const first=await f.prepare({project_id:p.id,workspace_key:'index-one',request_key:'index-one'},'codex');
     const register=async operation=>{const r=(await f.app.query('SELECT workflow_id FROM codeworks.commands WHERE operation_id=$1',[operation.operation_id])).rows[0];ids.push(r.workflow_id);};await register(first);
     await deliverCommands(f.app,client,{taskQueue});await until(async()=>(await f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[first.operation_id])).rows[0].status==='succeeded');await until(()=>entered);
-    const second=await f.h.call('prepare',{project_id:p.id,workspace_key:'index-two',request_key:'index-two'},'codex');await register(second);
+    const second=await f.prepare({project_id:p.id,workspace_key:'index-two',request_key:'index-two'},'codex');await register(second);
     await deliverCommands(f.app,client,{taskQueue});await until(async()=>(await f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[second.operation_id])).rows[0].status==='succeeded');
     await Worker.runReplayHistory({workflowBundle:bundle},await client.workflow.getHandle(ids[0]).fetchHistory(),ids[0]);
     const cancelFirst=await f.h.call('workspace.cancel',{project_id:p.id,workspace_id:first.workspace_id,request_key:'cancel-first',reason:'cancel running index'},'codex');

@@ -98,7 +98,7 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
     if(!codeIndex)return wait('INDEX_ADAPTER_REQUIRED');
     const gitState=await git.inspectResources(project,workspace,{manifest});
     await fence();
-    const indexState=await codeIndex.inspect(project,workspace,{manifest});
+    const indexState=await codeIndex.inspect(project,workspace,{manifest,checkpointState:obligation.evidence?.index_checkpoint});
     if(!gitResourcesAbsent(gitState)||!indexAbsent(indexState))return wait('RESOURCES_REMAIN');
     await fence();
     await db.query('BEGIN');

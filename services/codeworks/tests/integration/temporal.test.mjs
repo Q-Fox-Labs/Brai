@@ -38,7 +38,7 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
   async function stop(signal='SIGTERM'){if(!child)return;const c=child;child=null;if(c.exitCode!==null||c.signalCode!==null)return;const done=new Promise(r=>c.once('close',r));c.kill(signal);await done;}
   t.after(async()=>{await stop();for(const id of workflowIds)await client.workflow.getHandle(id).terminate('isolated fixture cleanup').catch(()=>{});await connection.close();await f.close();});
   await f.owner.query("INSERT INTO codeworks.execution_control(project_id,instance_id,owner) VALUES($1,'fixture','temporal')",[project.id]);
-  const prepare=(key)=>f.h.call('prepare',{project_id:project.id,workspace_key:key,request_key:'prepare-'+key},'codex');
+  const prepare=(key)=>f.prepare({project_id:project.id,workspace_key:key,request_key:'prepare-'+key},'codex');
   const status=id=>f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[id]).then(r=>r.rows[0].status);
   const first=await prepare('first');
   const row=(await f.app.query('SELECT * FROM codeworks.commands WHERE operation_id=$1',[first.operation_id])).rows[0];workflowIds.add(row.workflow_id);
@@ -305,7 +305,7 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
         const base=(await command('git',['-C',p.repo_path,'rev-parse','dev'])).stdout;
         await f.owner.query("INSERT INTO codeworks.deployment_evidence(id,project_id,target,commit_sha,evidence_url) VALUES($1,$2,'prod',$3,'https://fixture.invalid/production-base')",[randomUUID(),p.id,base]);
       }
-      const prepared=await f.h.call('prepare',{project_id:p.id,workspace_key:'migration-'+state,request_key:'migration-'+state,...(state==='hotfix'?{kind:'hotfix'}:{})},'codex');
+      const prepared=await f.prepare({project_id:p.id,workspace_key:'migration-'+state,request_key:'migration-'+state,...(state==='hotfix'?{kind:'hotfix'}:{})},'codex');
       await f.worker(p,prepared.operation_id,state==='preparation'?'after-checkout':undefined);
       const w=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[prepared.workspace_id])).rows[0];
       let rollout;
