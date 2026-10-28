@@ -8,7 +8,7 @@ export async function reconcileProjectLedger(pool,projectId,owner) {
     WHERE w.project_id=$1 AND ((r.state='completed' AND r.lifecycle IN ('cancelled','removed')) OR
       (r.state='open' AND r.lifecycle='active' AND w.activation_state='awaiting_first_write' AND w.preparation_state='ready'
        AND EXISTS(SELECT 1 FROM codeworks.write_calls c WHERE c.workspace_id=w.id AND ((c.state='denied_pending' AND (c.tool_result->>'stop_event' IS NOT NULL OR c.updated_at<now()-interval '5 minutes')) OR (c.state='finished' AND c.tool_result->>'changed'='false' AND c.updated_at<now()-interval '5 minutes'))))
-      AND NOT EXISTS(SELECT 1 FROM codeworks.cleanup_obligations o WHERE o.workspace_id=w.id)
+      ) AND NOT EXISTS(SELECT 1 FROM codeworks.cleanup_obligations o WHERE o.workspace_id=w.id)
     ORDER BY w.created_at LIMIT 32`,[projectId])).rows;
   for(const candidate of candidates){
     const db=await pool.connect();

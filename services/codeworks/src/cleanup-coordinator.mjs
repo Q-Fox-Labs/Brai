@@ -20,7 +20,11 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
     if(!row.rowCount)throw Error('CLEANUP_FENCE_LOST');
     return row.rows[0];
   };
-  const wait=async reason=>save("state='waiting_decision',blocker=$4",[reason]);
+  const wait=async reason=>{
+    const result=await save("state='waiting_decision',blocker=$4",[reason]);
+    if(obligation.workspace_id)await db.query("UPDATE codeworks.operations SET status='awaiting_reconciliation',step=$2,updated_at=now() WHERE workspace_id=$1 AND kind='cleanup' AND NOT archived AND status NOT IN ('succeeded','failed')",[obligation.workspace_id,reason]);
+    return result;
+  };
   const manifest=obligation.evidence?.manifest;
   const releaseProof=async()=>{
     const release=(await db.query("SELECT * FROM codeworks.releases WHERE workspace_id=$1 AND state='succeeded' ORDER BY created_at DESC LIMIT 1",[workspace.id])).rows[0];
@@ -66,18 +70,18 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
     if(JSON.stringify(actual)!==JSON.stringify([retained.refs.branch,retained.refs.remote,retained.refs.worktree]))return wait('DISPOSITION_PROOF_REQUIRED');
     await fence();
     if(await flowGit.remote(project,'dev')!==retained.target_sha)return wait('TARGET_CHANGED');
-    for(const sha of actual.filter(Boolean)){
+    for(const sha of [...actual,expected.tracking?.oid].filter(Boolean)){
       const result=await command('git',['-C',project.repo_path,'merge-base','--is-ancestor',sha,retained.target_sha],{allowFailure:true});
       if(result.code!==0)return wait('DISPOSITION_PROOF_REQUIRED');
     }
   }else if(['unused','cancelled'].includes(obligation.outcome)){
-    if((fixedHead&&fixedHead!==workspace.base_sha)||(expected.branch?.oid&&expected.branch.oid!==workspace.base_sha)||(expected.remote?.oid&&expected.remote.oid!==workspace.base_sha))return wait('UNIQUE_CHANGES');
+    if((fixedHead&&fixedHead!==workspace.base_sha)||(expected.branch?.oid&&expected.branch.oid!==workspace.base_sha)||(expected.remote?.oid&&expected.remote.oid!==workspace.base_sha)||(expected.tracking?.oid&&expected.tracking.oid!==workspace.base_sha))return wait('UNIQUE_CHANGES');
   }else if(obligation.outcome==='released'){
     const release=await releaseProof();
-    if(!release||(fixedHead&&fixedHead!==release.requested_sha)||(expected.branch?.oid&&expected.branch.oid!==release.requested_sha)||(expected.remote?.oid&&expected.remote.oid!==release.requested_sha))return wait('RELEASE_PROOF_MISMATCH');
+    if(!release||(fixedHead&&fixedHead!==release.requested_sha)||(expected.branch?.oid&&expected.branch.oid!==release.requested_sha)||(expected.remote?.oid&&expected.remote.oid!==release.requested_sha)||(expected.tracking?.oid&&expected.tracking.oid!==release.requested_sha))return wait('RELEASE_PROOF_MISMATCH');
   }else if(obligation.outcome==='transferred'){
     const transfer=obligation.evidence?.transfer;
-    if(!transfer||fixedHead!==transfer.source_head||(expected.remote?.oid&&expected.remote.oid!==transfer.source_head))return wait('DISPOSITION_PROOF_REQUIRED');
+    if(!transfer||fixedHead!==transfer.source_head||(expected.branch?.oid&&expected.branch.oid!==transfer.source_head)||(expected.remote?.oid&&expected.remote.oid!==transfer.source_head)||(expected.tracking?.oid&&expected.tracking.oid!==transfer.source_head))return wait('DISPOSITION_PROOF_REQUIRED');
     if(['inspect','remote','worktree'].includes(obligation.step)){
       try{await fence();await verifyDisposition(project,workspace,transfer,{allowedRepositories});}
       catch(error){if(error.code==='TRANSFER_UNVERIFIED')return wait('TRANSFER_UNVERIFIED');throw error;}
@@ -112,6 +116,8 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
       if(obligation.workspace_id){
         await db.query('UPDATE codeworks.workspaces SET removed_at=COALESCE(removed_at,now()) WHERE id=$1',[workspace.id]);
         await db.query("UPDATE codeworks.workflow_registry SET lifecycle='removed',updated_at=now() WHERE workspace_id=$1",[workspace.id]);
+        await db.query("UPDATE codeworks.commands SET state='done',updated_at=now() WHERE operation_id IN (SELECT id FROM codeworks.operations WHERE workspace_id=$1 AND kind='cleanup' AND NOT archived AND status NOT IN ('succeeded','failed'))",[workspace.id]);
+        await db.query("UPDATE codeworks.operations SET status='succeeded',step='removed',updated_at=now() WHERE workspace_id=$1 AND kind='cleanup' AND NOT archived AND status NOT IN ('succeeded','failed')",[workspace.id]);
       }
       const result=await db.query("UPDATE codeworks.cleanup_obligations SET state='done',step='done',blocker=NULL,result=$2::jsonb,updated_at=now() WHERE id=$1 RETURNING *",[id,JSON.stringify({git:gitState,index:indexState})]);
       await db.query('COMMIT');return result.rows[0];

@@ -83,17 +83,21 @@ export async function closeRelease(db,op,project,workspace,{flowGit,github,recon
 }
 /** Отмена сохраняет обязанность очистки; неопределённые действия сначала сверяют. */
 export async function cancelWorkspace(db,op,{outcome='cancelled',evidence={}}={}) {
-  const unresolved=(await db.query(`SELECT 1 FROM codeworks.operations o WHERE workspace_id=$1 AND id<>$2 AND NOT archived AND
-    (status NOT IN ('failed','succeeded') OR (kind='release' AND EXISTS(SELECT 1 FROM codeworks.release_queue q WHERE q.operation_id=o.id AND q.state IN ('queued','held')))) LIMIT 1`,[op.workspace_id,op.id])).rowCount;
-  if(unresolved)throw new Fault('CONFLICT','Resolve or close unfinished releases and uncertain actions before cancellation.');
   await db.query('BEGIN');
   try{
     await db.query('SELECT id FROM codeworks.workspaces WHERE id=$1 FOR UPDATE',[op.workspace_id]);
     const registry=(await db.query('SELECT * FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[op.workspace_id])).rows[0];
     if(!registry||!['active','closing'].includes(registry.lifecycle))throw new Fault('CONFLICT');
+    // AIDEV-NOTE: Только ещё не начатые операции можно снять без внешней сверки.
+    await db.query("UPDATE codeworks.commands SET state='done',updated_at=now() WHERE operation_id IN (SELECT id FROM codeworks.operations WHERE workspace_id=$1 AND id<>$2 AND NOT archived AND kind IN ('prepare','sync','release') AND status='pending' AND step='intent')",[op.workspace_id,op.id]);
+    await db.query("UPDATE codeworks.operations SET status='failed',step='ROUTE_CLOSED',updated_at=now() WHERE workspace_id=$1 AND id<>$2 AND NOT archived AND kind IN ('prepare','sync','release') AND status='pending' AND step='intent'",[op.workspace_id,op.id]);
+    const unresolved=(await db.query(`SELECT 1 FROM codeworks.operations o WHERE workspace_id=$1 AND id<>$2 AND NOT archived AND
+      (status NOT IN ('failed','succeeded') OR (kind='release' AND EXISTS(SELECT 1 FROM codeworks.release_queue q WHERE q.operation_id=o.id AND q.state IN ('queued','held')))) LIMIT 1`,[op.workspace_id,op.id])).rowCount;
+    if(unresolved){await db.query('COMMIT');return {status:'awaiting_reconciliation',reason:'OUTSTANDING_ACTIONS'};}
     const obligation=(await db.query("SELECT * FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state<>'done' FOR UPDATE",[op.workspace_id])).rows[0];
     if(obligation&&obligation.outcome!==outcome)throw new Fault('CONFLICT');
     if(!obligation)await db.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,source_operation_id,outcome,step,state,owner_workflow_id,epoch,evidence) VALUES($1,$2,$3,$4,$5,$6,'inspect','pending',$7,1,$8::jsonb)",[randomUUID(),op.project_id,op.workspace_id,'workspace:'+op.workspace_id,op.id,outcome,registry.workflow_id,JSON.stringify(evidence)]);
+    else if(obligation.evidence?.route_pending)await db.query("UPDATE codeworks.cleanup_obligations SET state='pending',blocker=NULL,evidence=$2::jsonb,next_attempt_at=NULL,updated_at=now() WHERE id=$1",[obligation.id,JSON.stringify(evidence)]);
     await db.query("UPDATE codeworks.workflow_registry SET state='draining',lifecycle='closing',outcome=$2,updated_at=now() WHERE workspace_id=$1",[op.workspace_id,outcome]);
     await db.query('COMMIT');
   }catch(error){await db.query('ROLLBACK');throw error;}

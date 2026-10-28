@@ -155,7 +155,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
         if(admission){
           const obligation=(await db.query("SELECT id FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state<>'done'",[w.id])).rows[0];
           if(!obligation)throw new Fault('CONFLICT','Cleanup requires a durable obligation.');
-          await finish('succeeded','cleanup_scheduled',{obligation_id:obligation.id});return;
+          await finish('awaiting_reconciliation','cleanup_scheduled',{obligation_id:obligation.id});return;
         }
         const release=(await db.query("SELECT r.* FROM codeworks.releases r JOIN codeworks.operations o ON o.id=r.operation_id WHERE r.workspace_id=$1 AND r.state='succeeded' AND NOT o.archived ORDER BY r.created_at DESC LIMIT 1",[w.id])).rows[0];
         if(!release)throw new Fault('CONFLICT','Cleanup requires a completed release.');

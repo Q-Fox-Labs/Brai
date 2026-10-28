@@ -178,13 +178,20 @@ export function startTemporal(pool,options){
         connection=await Connection.connect({address,connectTimeout:'5 seconds'});
         if(stopping)break;
         const client=new Client({connection,namespace});
-        const projects=(await pool.query("SELECT project_id,instance_id FROM codeworks.execution_control WHERE owner='temporal'")).rows;
-        for(const project of projects){
-          try{await client.workflow.start('codeworksProjectReconciler',{workflowId:`codeworks/${project.instance_id}/${project.project_id}/reconciler`,taskQueue,args:[{projectId:project.project_id}],workflowIdReusePolicy:'REJECT_DUPLICATE'});}
-          catch(error){if(!(error instanceof WorkflowExecutionAlreadyStartedError))throw error;}
-        }
-        let delivering=false;
-        const deliver=async()=>{if(stopping||delivering)return;delivering=true;try{delivery=connection.withAbortSignal(abort.signal,()=>connection.withDeadline(Date.now()+3000,()=>deliverCommands(pool,client,{taskQueue,shouldStop:()=>stopping})));await delivery;}catch{console.error('codeworks command delivery unavailable');}finally{delivering=false;}};
+        let delivering=false,nextProjects=0;
+        const deliver=async()=>{if(stopping||delivering)return;delivering=true;try{
+          delivery=connection.withAbortSignal(abort.signal,()=>connection.withDeadline(Date.now()+3000,async()=>{
+            if(Date.now()>=nextProjects){
+              const projects=(await pool.query("SELECT project_id,instance_id FROM codeworks.execution_control WHERE owner='temporal'")).rows;
+              for(const project of projects){
+                try{await client.workflow.start('codeworksProjectReconciler',{workflowId:`codeworks/${project.instance_id}/${project.project_id}/reconciler`,taskQueue,args:[{projectId:project.project_id}],workflowIdReusePolicy:'REJECT_DUPLICATE'});}
+                catch(error){if(!(error instanceof WorkflowExecutionAlreadyStartedError))throw error;}
+              }
+              nextProjects=Date.now()+60000;
+            }
+            await deliverCommands(pool,client,{taskQueue,shouldStop:()=>stopping});
+          }));await delivery;
+        }catch{console.error('codeworks command delivery unavailable');}finally{delivering=false;}};
         relay=setInterval(()=>void deliver(),1000);relay.unref();await deliver();
         native=await NativeConnection.connect({address});
         worker=await Worker.create({connection:native,namespace,taskQueue,workflowBundle:{codePath:fileURLToPath(new URL('../dist/workflows.js',import.meta.url))},activities,maxConcurrentActivityTaskExecutions:4,maxConcurrentWorkflowTaskExecutions:8,shutdownGraceTime:'5 seconds',shutdownForceTime:'15 seconds'});
