@@ -129,3 +129,17 @@ test('legacy successful release admits cleanup without a publication lookup',{ti
   const registry=(await f.app.query('SELECT state,lifecycle,outcome FROM codeworks.workflow_registry WHERE workspace_id=$1',[w.id])).rows[0];
   assert.deepEqual(registry,{state:'draining',lifecycle:'closing',outcome:'released'});
 });
+
+test('existing cleanup obligation admits retry without a new publication or network lookup',{timeout:120000},async t=>{
+  assert.ok(configured,'explicit disposable PostgreSQL is required');
+  const f=await setup();t.after(()=>f.close());const p=await f.project();
+  const area=await f.prepare({project_id:p.id,workspace_key:'existing-obligation',request_key:'existing-obligation'});await f.worker(p,area.operation_id);
+  const owner='codeworks/fixture/'+p.id+'/workspace/'+area.workspace_id,id=randomUUID();
+  await f.owner.query("INSERT INTO codeworks.execution_control(project_id,instance_id,owner) VALUES($1,'fixture','temporal')",[p.id]);
+  await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner,state,lifecycle) VALUES($1,$2,$3,'temporal','draining','closing')",[owner,p.id,area.workspace_id]);
+  await f.owner.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,state,owner_workflow_id,epoch) VALUES($1,$2,$3,$4,'cancelled','waiting_decision',$5,1)",[id,p.id,area.workspace_id,'workspace:'+area.workspace_id,owner]);
+  const git={...createGit(),inspectResources:()=>assert.fail('existing obligation must not inspect publication')};
+  const handlers=createHandlers(createStore(f.app),git,{allowedRepositories:[p.repo_path],flowGit:{ancestor:()=>assert.fail('existing obligation must not access network')}});
+  const cleanup=await handlers.call('cleanup',{project_id:p.id,workspace_id:area.workspace_id,request_key:'existing-cleanup'},'codex');
+  assert.ok(cleanup.operation_id);assert.equal((await f.app.query('SELECT count(*)::int AS n FROM codeworks.cleanup_obligations WHERE workspace_id=$1',[area.workspace_id])).rows[0].n,1);
+});
