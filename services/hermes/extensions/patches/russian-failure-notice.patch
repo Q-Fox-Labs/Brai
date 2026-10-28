@@ -7,7 +7,7 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
  """Agent-turn execution for GatewayRunner: _handle_message_with_agent, _run_agent*, proxy path,
  background tasks, MCP reload. Bound onto ``GatewayRunner`` via the MRO; ``gateway.run`` internals
  are imported lazily inside method bodies (import cycle) so ``patch("gateway.run.X")`` still works.
-@@ -87,6 +89,29 @@
+@@ -87,6 +89,31 @@
  def _unexpected_silence_reply() -> str:
      """Reply when the model returned only a silence marker for a message that needed an answer."""
      return t("gateway.errors.unexpected_silence")
@@ -18,12 +18,14 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
 +    try:
 +        from gateway.run import _gateway_platform_value, _redact_gateway_user_facing_secrets
 +        from agent.i18n import get_language
-+        if _gateway_platform_value(source.platform) != "telegram" or get_language() != "ru":
++        if _gateway_platform_value(source.platform) != "telegram":
 +            return response
 +        from agent.error_surface import build_error_surface_from_result, build_error_surface_from_exception
 +        from gateway.russian_failure_notice import explain_failure
 +        surface = (build_error_surface_from_result(result) if result is not None
 +                   else build_error_surface_from_exception(exception))
++        if get_language() != "ru" and not (surface and surface.get("code") == "overloaded"):
++            return response
 +        diagnostic = (f"{type(exception).__name__}: {exception}" if exception is not None
 +                      else result.get("error", "") if result is not None else "")
 +        if failure_notice is not None:
@@ -37,7 +39,7 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
  
  
  def _bg_prompt_preview(prompt: str, limit: int = 60) -> str:
-@@ -1955,6 +1980,11 @@
+@@ -1955,6 +1982,11 @@
                  event._streamed_final_response = str(response or "")
              return None
  
@@ -49,7 +51,7 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
          return response
  
      # Chat-side next steps keyed by HTTP status; Hermes commands only (/login is the gateway's own
-@@ -1977,7 +2007,10 @@
+@@ -1977,7 +2009,10 @@
              # Context overflow / payload too large: a deterministic rejection (#107567), and the same
              # no-grow rule as the persist path (#1630) — nothing is written into an oversized session.
              from gateway.run import _context_overflow_reply
@@ -61,7 +63,7 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
          # Replay can coalesce inputs; only this input's durable marker establishes ownership.
          try:
              if prepared.message_text is not None and session_entry is not None:
-@@ -2017,9 +2050,10 @@
+@@ -2017,9 +2052,10 @@
                  status_hint = t("gateway.errors.hint_usage_limit")
          elif status_code == 400:
              status_hint = t("gateway.errors.hint_rejected")
@@ -77,9 +79,9 @@ diff --git a/gateway/russian_failure_notice.py b/gateway/russian_failure_notice.
 new file mode 100644
 --- /dev/null
 +++ b/gateway/russian_failure_notice.py
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,92 @@
 +# ABOUTME: Добавляет русское объяснение к штатному сообщению о сбое Hermes.
-+# ABOUTME: Сохраняет исходное сообщение и использует готовую классификацию движка.
++# ABOUTME: Использует классификацию движка; при перегрузке скрывает исходный текст.
 +"""Пояснения для Telegram; не управляют повторами, сессиями или доставкой."""
 +
 +from __future__ import annotations
@@ -123,7 +125,7 @@ new file mode 100644
 +
 +def explain_failure(original, *, surface, diagnostic, logger, redact, partial=False,
 +                    status_code=None, billing_unverified=False, now=None):
-+    """Добавить пояснение, сохранив исходный текст целиком и без изменений.
++    """Добавить пояснение; при перегрузке заменить исходный текст.
 +
 +    ``original`` уже должен пройти штатную очистку для чата. ``surface`` — результат
 +    agent.error_surface, а не классификация по словам. В журнал с номером попадает
@@ -153,8 +155,9 @@ new file mode 100644
 +            lines.append(f'До сброса лимита — примерно {minutes} мин.')
 +        if partial:
 +            lines.append('Некоторые действия могли уже выполниться. Перед повтором проверьте их результат.')
-+        # AIDEV-NOTE: исходный текст сохраняет все конкретные команды, сроки и частичный результат.
-+        lines.append('**Исходное сообщение и подробности:**\n' + original)
++        # AIDEV-NOTE: при перегрузке исходный текст раскрывает сервис и внутренние команды.
++        if code != 'overloaded':
++            lines.append('**Исходное сообщение и подробности:**\n' + original)
 +        details = [f'Код: `{code}`']
 +        http = status_code if type(status_code) is int and 400 <= status_code <= 599 else None
 +        if http is not None:
