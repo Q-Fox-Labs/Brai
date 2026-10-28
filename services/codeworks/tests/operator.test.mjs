@@ -6,7 +6,7 @@ import {createHash} from 'node:crypto';
 import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
-import {canonical,validateManifest,parseArgs,importCleanup} from '../src/operator.mjs';
+import {canonical,validateManifest,parseArgs,importCleanup,verifyRetained} from '../src/operator.mjs';
 const digest=x=>createHash('sha256').update(x).digest('hex');
 const sign=m=>({...m,manifest_sha256:digest(canonical(m))});
 async function fixture(t,{active=false,duplicate=false}={}){
@@ -42,4 +42,28 @@ test('active work is protected and duplicate import is idempotent',async t=>{
 });
 test('dry run validates without admission',async t=>{
  const f=await fixture(t);const result=await importCleanup(f.pool,'p',f.m,{...f,dryRun:true});assert.equal(result.state,'pending');assert.equal(f.inserts(),0);
+});
+
+
+test('retained proof checks clean work, pinned source and exact remote DEV',async()=>{
+ const source='a'.repeat(40),target='b'.repeat(40),d={type:'retained',target:'dev',target_sha:target,source_head:source};
+ const snap={branch:{oid:source},remote:{oid:source},worktree:{head:source,pathExists:true,dirty:false}};
+ const flowGit={remote:async()=>target,ancestor:async(_p,a,b)=>a===source&&b===target};
+ assert.equal((await verifyRetained({},snap,d,{flowGit})).target_sha,target);
+ await assert.rejects(verifyRetained({}, {...snap,worktree:{...snap.worktree,dirty:true}},d,{flowGit}),/DIRTY_WORKTREE/);
+ await assert.rejects(verifyRetained({}, {...snap,branch:{oid:'c'.repeat(40)}},d,{flowGit}),/RETAINED_SOURCE_CHANGED/);
+ await assert.rejects(verifyRetained({},snap,d,{flowGit:{...flowGit,remote:async()=>source}}),/RETAINED_TARGET_CHANGED/);
+ await assert.rejects(verifyRetained({},snap,d,{flowGit:{...flowGit,ancestor:async()=>false}}),/RETAINED_ANCESTRY_UNPROVEN/);
+ // После частичной очистки отсутствующие refs допустимы, закреплённые оставшиеся головы неизменны.
+ const partial={...snap,remote:{oid:null},worktree:{...snap.worktree,head:null,pathExists:false,dirty:null}};
+ assert.equal((await verifyRetained({},partial,d,{flowGit})).source_head,source);
+});
+
+
+test('retained import records pending only for verified exact DEV ancestry',async t=>{
+ const f=await fixture(t),{manifest_sha256,...m}=f.m,source=m.branch.oid,target='b'.repeat(40);
+ m.disposition={type:'retained',target:'dev',target_sha:target,source_head:source};const manifest=sign(m);
+ const flowGit={remote:async()=>target,ancestor:async()=>true};
+ const result=await importCleanup(f.pool,'p',manifest,{...f,flowGit});assert.equal(result.state,'pending');assert.equal(f.inserts(),1);
+ await assert.rejects(importCleanup(f.pool,'p',manifest,{...f,flowGit:{...flowGit,remote:async()=>source}}),/RETAINED_TARGET_CHANGED/);
 });

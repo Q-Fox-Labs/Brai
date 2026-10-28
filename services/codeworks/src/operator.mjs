@@ -8,6 +8,7 @@ import path from 'node:path';
 import {Pool} from 'pg';
 import {createGit,command} from './git.mjs';
 import {createCodeIndex} from './code-index.mjs';
+import {createFlowGit} from './git-flow.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 /** Канонический JSON сортирует ключи рекурсивно; массивы сохраняют порядок. */
@@ -23,12 +24,24 @@ export function validateManifest(manifest,projectId){
   const {manifest_sha256,...payload}=manifest;
   if(hash(canonical(payload))!==manifest_sha256)throw Error('MANIFEST_DIGEST_MISMATCH');
   if(!/^refs\/heads\/(?:feature|hotfix|codex)\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(manifest.branch.ref??'')||manifest.remote.ref!==manifest.branch.ref||!path.isAbsolute(manifest.worktree.path??'')||path.normalize(manifest.worktree.path)!==manifest.worktree.path)throw Error('INVALID_MANIFEST');
-  for(const item of manifest.provenance)if(!item||!['ownership-ref','reflog','workspace-record'].includes(item.kind)||typeof item.ref!=='string'||!/^[0-9a-f]{64}$/.test(item.sha256??''))throw Error('INVALID_PROVENANCE');
+  for(const item of manifest.provenance)if(!item||!['ownership-ref','reflog','workspace-record','bundle'].includes(item.kind)||typeof item.ref!=='string'||!/^[0-9a-f]{64}$/.test(item.sha256??''))throw Error('INVALID_PROVENANCE');
   return manifest;
 }
 const equal=(a,b)=>canonical(a)===canonical(b);
+/** Проверяет закреплённый DEV и все существующие головы; не меняет refs и не выполняет fetch. */
+export async function verifyRetained(project,snapshot,disposition,{flowGit=createFlowGit()}={}){
+  const sha=x=>typeof x==='string'&&/^[0-9a-f]{40}$/.test(x);
+  if(disposition?.type!=='retained'||disposition.target!=='dev'||!sha(disposition.target_sha)||!sha(disposition.source_head))throw Error('RETAINED_EVIDENCE_INVALID');
+  if(snapshot.worktree.pathExists&&snapshot.worktree.dirty!==false)throw Error('DIRTY_WORKTREE');
+  const refs=[snapshot.branch.oid,snapshot.remote.oid,snapshot.worktree.head].filter(x=>x!==null);
+  if(!refs.length||refs.some(x=>x!==disposition.source_head))throw Error('RETAINED_SOURCE_CHANGED');
+  if(await flowGit.remote(project,'dev')!==disposition.target_sha)throw Error('RETAINED_TARGET_CHANGED');
+  for(const head of new Set(refs))if(!await flowGit.ancestor(project,head,disposition.target_sha))throw Error('RETAINED_ANCESTRY_UNPROVEN');
+  if(await flowGit.remote(project,'dev')!==disposition.target_sha)throw Error('RETAINED_TARGET_CHANGED');
+  return {type:'retained',target:'dev',target_sha:disposition.target_sha,source_head:disposition.source_head,refs:{branch:snapshot.branch.oid,remote:snapshot.remote.oid,worktree:snapshot.worktree.head}};
+}
 /** Проверяет точную область и сохраняет durable intent в одной транзакции; dry-run не пишет. */
-export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRun=false,allowedRepositories}={}){
+export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRun=false,allowedRepositories,flowGit}={}){
   validateManifest(manifest,projectId);
   const db=await pool.connect();
   try{
@@ -36,11 +49,19 @@ export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRu
     const row=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1 FOR SHARE',[projectId])).rows[0];
     const project=row?.config;if(!project||project.id!==projectId||project.common_dir!==manifest.common_dir||!Array.isArray(allowedRepositories)||!allowedRepositories.includes(project.repo_path))throw Error('PROJECT_MISMATCH');
     const root=path.dirname(manifest.worktree.path);
-    if(!(project.legacy_workspace_roots??[]).includes(root)||await realpath(root)!==root)throw Error('LEGACY_ROOT_FORBIDDEN');
+    if(!(root===project.workspace_root||(project.legacy_workspace_roots??[]).includes(root))||await realpath(root)!==root)throw Error('LEGACY_ROOT_FORBIDDEN');
     await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",['codeworks:cleanup-import:'+projectId+':'+manifest.branch.ref]);
     const matches=(await db.query('SELECT * FROM codeworks.workspaces WHERE project_id=$1 AND (id=$2 OR branch=$3 OR path=$4) FOR UPDATE',[projectId,manifest.workspace_id,manifest.branch.ref.slice(11),manifest.worktree.path])).rows;
     if(matches.length>1||matches.length===1&&(matches[0].id!==manifest.workspace_id||matches[0].branch!==manifest.branch.ref.slice(11)||matches[0].path!==manifest.worktree.path))throw Error('WORKSPACE_CONFLICT');
-    const workspace=matches[0]??{id:manifest.workspace_id,project_id:projectId,branch:manifest.branch.ref.slice(11),path:manifest.worktree.path,base_sha:manifest.disposition.base_sha,kind:manifest.disposition.kind,ownership_token:null};
+    let workspace=matches[0];
+    if(!workspace){
+      if(!manifest.ownership?.oid||!manifest.provenance.some(p=>p.kind==='ownership-ref'&&p.ref===manifest.ownership.ref))throw Error('LEGACY_IDENTITY_UNVERIFIED');
+      const blob=await command('git',['-C',project.repo_path,'cat-file','blob',manifest.ownership.ref]);let marker;
+      try{marker=JSON.parse(blob.stdout);}catch{throw Error('LEGACY_IDENTITY_UNVERIFIED');}
+      const evidence=manifest.provenance.find(p=>p.kind==='ownership-ref'&&p.ref===manifest.ownership.ref);
+      if(hash(blob.stdout)!==evidence.sha256||marker.workspace_id!==manifest.workspace_id||marker.workspace_id!==manifest.ownership.ref.slice('refs/codeworks/ownership/'.length)||marker.branch!==manifest.branch.ref.slice(11)||marker.path!==manifest.worktree.path||!/^[0-9a-f-]{36}$/i.test(marker.token??'')||!/^[0-9a-f]{40}$/.test(marker.base_sha??''))throw Error('LEGACY_IDENTITY_UNVERIFIED');
+      workspace={id:marker.workspace_id,project_id:projectId,branch:marker.branch,path:marker.path,base_sha:marker.base_sha,kind:manifest.disposition.kind,ownership_token:marker.token};
+    }
     if(workspace.id&&manifest.protected_task_ids.includes(workspace.id))throw Error('ACTIVE_OR_PENDING_WORK');
     if(workspace.id){
       const protectedRow=await db.query("SELECT 1 FROM codeworks.workflow_registry WHERE workspace_id=$1 AND lifecycle='active' UNION ALL SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain') UNION ALL SELECT 1 FROM codeworks.operations WHERE workspace_id=$1 AND status IN ('pending','running','awaiting_ci','awaiting_deployment','awaiting_reconciliation') UNION ALL SELECT 1 FROM codeworks.release_queue q JOIN codeworks.operations o ON o.id=q.operation_id WHERE o.workspace_id=$1 AND q.state IN ('held','queued') LIMIT 1",[workspace.id]);
@@ -60,6 +81,9 @@ export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRu
         const result=await command('git',['-C',project.repo_path,'cat-file','blob',p.ref]);
         let marker;try{marker=JSON.parse(result.stdout);}catch{throw Error('PROVENANCE_UNVERIFIED');}
         if(hash(result.stdout)===p.sha256&&marker.workspace_id===p.ref.slice('refs/codeworks/ownership/'.length)&&marker.branch===workspace.branch&&marker.path===workspace.path)proven=true;
+      }else if(p.kind==='bundle'&&path.isAbsolute(p.ref)&&await realpath(p.ref)===p.ref&&snapshot.branch.oid){
+        const bytes=await readFile(p.ref);const result=await command('git',['bundle','list-heads',p.ref],{allowFailure:true});
+        if(hash(bytes)===p.sha256&&result.code===0&&result.stdout.split('\n').some(line=>line.split(/\s+/)[0]===snapshot.branch.oid))proven=true;
       }else if(p.kind==='reflog'&&p.ref===snapshot.branch.ref&&snapshot.branch.oid){
         const result=await command('git',['-C',project.repo_path,'reflog','show','--format=%H',p.ref],{allowFailure:true});
         if(result.code===0&&result.stdout.split('\n').includes(snapshot.branch.oid)&&hash(result.stdout)===p.sha256)proven=true;
@@ -67,8 +91,10 @@ export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRu
     }
     if(!proven)throw Error('PROVENANCE_UNVERIFIED');
     const disposition=manifest.disposition,head=snapshot.worktree.head??snapshot.branch.oid;
-    let outcome='unused',state='waiting_decision',blocker='DISPOSITION_PROOF_REQUIRED';
-    if(disposition.type==='unused'&&matches[0]&&/^[0-9a-f]{40}$/.test(workspace.base_sha)&&[head,snapshot.branch.oid,snapshot.remote.oid].every(v=>v===null||v===workspace.base_sha)&&(!snapshot.worktree.pathExists||snapshot.worktree.dirty===false)){
+    let outcome='unused',state='waiting_decision',blocker='DISPOSITION_PROOF_REQUIRED',verified_disposition;
+    if(disposition.type==='retained'){
+      verified_disposition=await verifyRetained(project,snapshot,disposition,{flowGit});outcome='released';state='pending';blocker=null;
+    }else if(disposition.type==='unused'&&matches[0]&&/^[0-9a-f]{40}$/.test(workspace.base_sha)&&[head,snapshot.branch.oid,snapshot.remote.oid].every(v=>v===null||v===workspace.base_sha)&&(!snapshot.worktree.pathExists||snapshot.worktree.dirty===false)){
       outcome='unused';state='pending';blocker=null;
     }else if(disposition.type==='released'&&matches[0]&&typeof disposition.release_id==='string'){
       const release=(await db.query("SELECT * FROM codeworks.releases WHERE id=$1 AND workspace_id=$2 AND state='succeeded'",[disposition.release_id,workspace.id])).rows[0];
@@ -81,7 +107,7 @@ export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRu
     const existing=(await db.query("SELECT id,evidence FROM codeworks.cleanup_obligations WHERE project_id=$1 AND subject_key=$2 AND state<>'done' FOR UPDATE",[projectId,subject])).rows[0];
     if(existing&&existing.evidence?.manifest?.manifest_sha256!==manifest.manifest_sha256)throw Error('CLEANUP_ALREADY_ADMITTED');
     const id=existing?.id??randomUUID();
-    if(!dryRun&&!existing)await db.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,step,state,evidence,expected,blocker) VALUES($1,$2,$3,$4,$5,'remote',$6,$7::jsonb,$8::jsonb,$9)",[id,projectId,matches[0]?.id??null,subject,outcome,state,JSON.stringify({manifest,index_snapshot:index}),JSON.stringify(snapshot),blocker]);
+    if(!dryRun&&!existing)await db.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,step,state,evidence,expected,blocker) VALUES($1,$2,$3,$4,$5,'remote',$6,$7::jsonb,$8::jsonb,$9)",[id,projectId,matches[0]?.id??null,subject,outcome,state,JSON.stringify({manifest,index_snapshot:index,...(verified_disposition?{verified_disposition}:{}),...(!matches[0]?{workspace}:{})}),JSON.stringify(snapshot),blocker]);
     await db.query(dryRun?'ROLLBACK':'COMMIT');return {id,subject,state,blocker,duplicate:!!existing,dry_run:dryRun};
   }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}finally{db.release();}
 }
