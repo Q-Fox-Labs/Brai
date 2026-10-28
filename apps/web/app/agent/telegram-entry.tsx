@@ -7,7 +7,7 @@ import { telegramText, updateTelegramMessage } from "./telegram-display";
 import "./telegram-observer.css";
 
 type Chat = { chat_id: string; thread_id: string; chat_type: string; chat_name: string | null; last_text: string; last_at: string | null; last_row: number };
-type Attachment = { artifactId: string; filename: string; mimeType: string; sizeBytes?: number };
+type Attachment = { artifactId: string; filename: string; mimeType: string; sizeBytes?: number; width?: number; height?: number };
 type Message = { row_id: number; identity: string; chat_id: string; thread_id: string; telegram_id?: string | null; author_name: string; direction: "in" | "out";
   text: string; occurred_at: string | null; edited_at: string | null; delivery: string; attachment_state: string; attachments: Attachment[] };
 type Page = { messages: Message[]; before: number | null };
@@ -34,10 +34,14 @@ function fileUrl(message: Message, item: Attachment, download = false) {
 }
 
 function TelegramAttachment({ message, item }: { message: Message; item: Attachment }) {
-  const [unavailable, setUnavailable] = useState(false);
+  const [imageState, setImageState] = useState<"loading" | "loaded" | "failed">("loading");
+  const ratio = item.width && item.height && item.width > 0 && item.height > 0 ? `${item.width} / ${item.height}` : undefined;
   return <figure>
-    {item.mimeType.startsWith("image/") && (unavailable ? <p className="tg-muted" role="status">Предпросмотр изображения недоступен.</p> :
-      <a href={fileUrl(message, item)} target="_blank" rel="noopener noreferrer"><img src={fileUrl(message, item)} alt={item.filename} loading="lazy" onError={() => setUnavailable(true)} /></a>)}
+    {item.mimeType.startsWith("image/") && <a className="tg-image-preview" data-state={imageState} style={ratio ? { aspectRatio: ratio } : undefined}
+      href={fileUrl(message, item)} target="_blank" rel="noopener noreferrer" aria-label={imageState === "failed" ? "Изображение недоступно" : "Открыть изображение"}>
+      {imageState !== "loaded" && <span className="tg-image-placeholder" role="status">{imageState === "failed" ? "Изображение недоступно" : "Загрузка изображения…"}</span>}
+      {imageState !== "failed" && <img src={fileUrl(message, item)} alt={item.filename || "Изображение"} loading="lazy" onLoad={() => setImageState("loaded")} onError={() => setImageState("failed")} />}
+    </a>}
     {item.mimeType.startsWith("audio/") && <audio controls preload="none" src={fileUrl(message, item)} />}
     {item.mimeType.startsWith("video/") && <video controls preload="metadata" src={fileUrl(message, item)} />}
     {!item.mimeType.startsWith("image/") && !item.mimeType.startsWith("audio/") && <figcaption><a href={fileUrl(message, item, true)} download={item.filename}>{item.filename || "Скачать файл"}</a></figcaption>}
@@ -170,7 +174,7 @@ function TelegramObserver({ username, active }: { username: string | null; activ
     <section className="tg-main" data-list-visible={showList} aria-label="Переписка">
       <header className="tg-header"><button type="button" className="tg-back" onClick={() => setShowList(true)} aria-label="Показать список чатов">←</button>
         <div><strong>{selected ? chatName(selected) : "Переписка"}</strong><span>{selected?.thread_id ? `Тема ${selected.thread_id} · ` : ""}Только просмотр</span></div>
-        <span className="tg-header-status">{connection === "live" ? "Обновляется" : "Подключаемся…"}</span></header>
+      </header>
       {error && <p className="tg-error" role="status">{error}</p>}
       <div ref={scroll} className="tg-conversation" onScroll={event => { const el = event.currentTarget; nearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; if (nearBottom.current) setNewCount(0); }}>
         {!selected ? <div className="tg-empty"><span className="tg-empty-mark">✦</span><h2>Выберите чат</h2><p>Здесь появятся сообщения и файлы из Telegram.</p></div> :
@@ -183,12 +187,11 @@ function TelegramObserver({ username, active }: { username: string | null; activ
               {message.attachment_state === "pending" && <p className="tg-muted">Сохраняем вложения…</p>}
               {message.attachment_state === "failed" && <p className="tg-muted">Сохранение вложений не подтверждено.</p>}
               {message.attachment_state === "unavailable" && <p className="tg-muted">Вложение из старой истории недоступно.</p>}
-              {message.direction === "out" && message.delivery !== "sent" && <p className="tg-muted">{message.delivery === "failed" ? "Не удалось доставить сообщение." : message.delivery === "pending" ? "Ожидает доставки." : "Доставка не подтверждена."}</p>}
+              {message.direction === "out" && (message.delivery === "failed" || message.delivery === "pending") && <p className="tg-muted">{message.delivery === "failed" ? "Не удалось доставить сообщение." : "Ожидает доставки."}</p>}
             </article>)}
           </div>}
       </div>
       {newCount > 0 && <button type="button" className="tg-new" onClick={() => { nearBottom.current = true; setNewCount(0); if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }}>Новые сообщения: {newCount} ↓</button>}
-      <footer className="tg-readonly">Сообщения отправляются в Telegram</footer>
     </section>
   </main>;
 }
