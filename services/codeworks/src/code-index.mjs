@@ -33,7 +33,7 @@ export function createCodeIndex(pool,{configFile=process.env.CODEWORKS_CODE_INDE
     /** Один проход: отсутствующий источник ждёт следующего таймера; чужой индекс не принимается. */
     async maintain(project,w){
       let state=w.code_index;
-      if(w.removed_at||w.preparation_state!=='ready'||w.activation_state==='awaiting_first_write'||['skipped','removed'].includes(state?.state))return;
+      if(project.code_index_policy?.enabled===false||w.removed_at||w.preparation_state!=='ready'||w.activation_state==='awaiting_first_write'||['skipped','removed'].includes(state?.state))return;
       try{
         const settings=await config(),source=settings?.sources?.[project.id]?.[w.kind];
         if(!source)return;
@@ -62,16 +62,18 @@ export function createCodeIndex(pool,{configFile=process.env.CODEWORKS_CODE_INDE
     },
     /** Проверяет все ресурсы под барьером; недоступное хранилище не считается пустым. */
     async inspect(project,w,{manifest,checkpointState}={}){
+      const index=cleanupIdentity(project,w,manifest);
+      if(disabledWithoutHistory(project,w,manifest))return emptySnapshot(index.identity);
       const settings=await config();
       if(!settings)throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
-      const index=cleanupIdentity(project,w,manifest);
       return exclusive(()=>invoke('inspect',settings,project,w,index,manifest,checkpointState));
     },
     /** Повторно проверяет ресурсы даже после частичной или завершённой очистки. */
     async remove(project,w,{manifest,checkpoint,checkpointState}={}){
+      const index=cleanupIdentity(project,w,manifest);
+      if(disabledWithoutHistory(project,w,manifest))return;
       const settings=await config();
       if(!settings)throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
-      const index=cleanupIdentity(project,w,manifest);
       return exclusive(async()=>{
         const snapshot=await invoke('inspect',settings,project,w,index,manifest,checkpointState);
         if(manifest&&!checkpointState){
@@ -85,6 +87,10 @@ export function createCodeIndex(pool,{configFile=process.env.CODEWORKS_CODE_INDE
     },
   };
 }
+
+// AIDEV-NOTE: Только явно отключённая политика нового поколения доказывает, что индекс никогда не создавался.
+const disabledWithoutHistory=(project,w,manifest)=>project.code_index_policy?.enabled===false&&!manifest&&!w.code_index&&['active','awaiting_first_write'].includes(w.activation_state);
+const emptySnapshot=identity=>({identity,owner:{present:false,tokenMatches:false,pathMatches:false,recordHash:null},resources:{collections:[],metadataPoints:[]},complete:true});
 
 function cleanupIdentity(project,w,manifest){
   const rootAllowed=path.dirname(w.path)===project.workspace_root||manifest&&(project.legacy_workspace_roots??[]).includes(path.dirname(w.path));

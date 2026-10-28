@@ -100,3 +100,21 @@ test('checkpoint is persisted before deletion and failed persistence prevents de
   f.calls.length=0;await f.adapter.remove(f.project,f.w,{manifest,checkpointState:saved});
   assert.deepEqual(f.calls[1].checkpointState,saved);
 });
+
+test('explicit disabled policy proves absence only for new workspaces without index history',async t=>{
+  const f=await fixture(t),adapter=createCodeIndex({},{configFile:null}),project={...f.project,code_index_policy:{enabled:false}};
+  f.w.activation_state='awaiting_first_write';
+  const result=await adapter.inspect(project,f.w);
+  assert.deepEqual(result,{identity:indexIdentity(f.w.path),owner:{present:false,tokenMatches:false,pathMatches:false,recordHash:null},resources:{collections:[],metadataPoints:[]},complete:true});
+  await adapter.remove(project,f.w);await adapter.maintain(project,f.w);
+  f.w.activation_state='active';await adapter.inspect(project,f.w);
+  f.w.code_index={identity:indexIdentity(f.w.path),state:'removed'};
+  await assert.rejects(adapter.inspect(project,f.w),/INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP/);
+  await assert.rejects(adapter.remove(project,f.w),/INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP/);
+  f.w.code_index=null;f.w.activation_state='legacy';
+  await assert.rejects(adapter.inspect(project,f.w),/INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP/);
+  delete f.w.activation_state;
+  await assert.rejects(adapter.inspect(project,f.w),/INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP/);
+  f.w.activation_state='active';delete project.code_index_policy;
+  await assert.rejects(adapter.inspect(project,f.w),/INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP/);
+});
