@@ -70,6 +70,17 @@ class FailureNoticeTest(unittest.TestCase):
                 self.assertNotIn('Исходное сообщение', text)
                 self.assertNotIn(self.notice._UNKNOWN, text)
 
+    def test_error_messages_keep_visible_formatting(self):
+        for code in self.notice._COPY:
+            with self.subTest(code=code):
+                text = self.render(code, result={'brai_connection_kind':'external'})
+                self.assertTrue(text.startswith(self.notice._TITLES[code] + '\n\n'))
+                self.assertIn('⚠️ **Работа не завершена.**', text)
+                self.assertIn('**Данные для проверки:**\nКод: `' + code + '`', text)
+        self.assertTrue(self.render('unknown').startswith('⚠️ **Не удалось завершить запрос**'))
+        text = self.render('overloaded', result={'brai_connection_kind':'external'}, partial=True)
+        self.assertIn('Некоторые действия могли уже выполниться. Перед повтором проверьте их результат.', text)
+
     def test_connection_origin_requires_evidence(self):
         kind = self.notice.connection_kind
         self.assertEqual(kind('openai-codex', 'https://chatgpt.com/backend-api/codex'), 'external')

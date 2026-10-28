@@ -39,7 +39,7 @@ diff --git a/gateway/run_turn.py b/gateway/run_turn.py
 +                               result=result, delivered_partial=delivered)
 +    except Exception:
 +        logger.exception("Не удалось подготовить сообщение об ошибке для Telegram")
-+        fallback = ("Не удалось завершить запрос. Причину ошибки нужно проверить. "
++        fallback = ("⚠️ **Не удалось завершить запрос**\n\nПричину ошибки нужно проверить. "
 +                    "Некоторые действия могли уже выполниться; перед повтором проверьте их результат.")
 +        return f"{delivered}\n\n{fallback}" if delivered else fallback
  
@@ -191,7 +191,7 @@ diff --git a/gateway/russian_failure_notice.py b/gateway/russian_failure_notice.
 new file mode 100644
 --- /dev/null
 +++ b/gateway/russian_failure_notice.py
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,236 @@
 +# ABOUTME: Готовит русские сообщения о сбоях для Telegram.
 +# ABOUTME: Использует классификацию движка и сохраняет безопасные данные для проверки.
 +"""Пояснения для Telegram не управляют повторами и сессиями."""
@@ -259,6 +259,41 @@ new file mode 100644
 +    'free_tier_refused': 'Бесплатное подключение к модели отклонило запрос. Проверьте условия доступа или выберите другую модель командой /model.',
 +}
 +_UNKNOWN = 'Не удалось завершить запрос. Причину ошибки не удалось определить. Попробуйте позже; если ошибка повторится, обратитесь к администратору.'
++
++# AIDEV-NOTE: заголовки описывают событие, не утверждая, где возникла причина.
++_TITLE_GROUPS = {
++    '⏳ **Модель временно недоступна**': ('overloaded', 'free_tier_at_capacity', 'free_tier_outage'),
++    '⚠️ **Ошибка при обращении к модели**': ('server_error',),
++    '⏳ **Ответ не получен вовремя**': ('timeout',),
++    '🔌 **Соединение прервалось**': ('stream_drop',),
++    '⏳ **Достигнут лимит запросов**': ('rate_limit', 'upstream_rate_limit', 'free_tier_rate_limited'),
++    '🔑 **Подключение отклонено**': ('auth', 'auth_permanent'),
++    '💳 **Ограничение оплаты или тарифа**': ('billing',),
++    '⚠️ **Причина отказа не подтверждена**': ('billing_unverified',),
++    '🚧 **Запрос заблокирован**': ('upstream_blocked', 'provider_policy_blocked', 'content_policy_blocked', 'free_tier_route', 'free_tier_refused'),
++    '🔒 **Не удалось проверить сертификат**': ('ssl_cert_verification',),
++    '📜 **Разговор слишком длинный**': ('context_overflow', 'long_context_tier', 'oauth_long_context_beta_forbidden'),
++    '📎 **Запрос слишком большой**': ('payload_too_large',),
++    '🖼 **Изображение слишком большое**': ('image_too_large',),
++    '🖼 **Не удалось прочитать изображение**': ('image_corrupt',),
++    '⚠️ **Модель недоступна**': ('model_not_found', 'free_tier_disabled'),
++    '🔑 **Нет доступа к модели**': ('model_entitlement', 'free_tier_model_not_free'),
++    '⚠️ **Запрос отклонён**': ('format_error', 'role_alternation', 'invalid_encrypted_content', 'thinking_signature', 'reasoning_mandatory'),
++    '⚠️ **Не поддерживается формат действия**': ('multimodal_tool_content_unsupported', 'llama_cpp_grammar_pattern'),
++    '⚠️ **Ответ не завершён**': ('incomplete_response', 'truncated', 'truncated_tool_call'),
++    '⚠️ **Неизвестное действие**': ('invalid_tool_call',),
++    '⚠️ **Не удалось прочитать ответ**': ('invalid_response',),
++    '⚠️ **Модель не ответила**': ('empty_response',),
++    '⚠️ **Ошибка обработки запроса**': ('loop_error',),
++    '⏳ **Предыдущий запрос ещё выполняется**': ('session_busy',),
++    '⏸ **Работа прервана**': ('interpreter_shutdown',),
++    '💾 **Недостаточно места**': ('disk_full',),
++    '💾 **Не удалось сохранить разговор**': ('session_persistence_failed',),
++    '📜 **Начат новый разговор**': ('context_reset',),
++    '⏳ **Сокращение контекста отложено**': ('compression_deferred',),
++}
++_TITLES = {code: title for title, codes in _TITLE_GROUPS.items() for code in codes}
++_DEFAULT_TITLE = '⚠️ **Не удалось завершить запрос**'
 +
 +# AIDEV-NOTE: код ошибки сам по себе не показывает, где работает модель.
 +_MODEL_CODES = frozenset(_COPY) - {
@@ -365,7 +400,7 @@ new file mode 100644
 +        if kind not in {'local', 'external', 'unknown'}:
 +            kind = connection_kind(result.get('provider'), result.get('base_url'))
 +        message = _message_for_connection(code, kind)
-+    lines = [message]
++    lines = [_TITLES.get(code, _DEFAULT_TITLE), message]
 +    resets_at = surface.get('resets_at', result.get('failure_resets_at'))
 +    clock = time.time() if now is None else now
 +    if (code in {'rate_limit', 'upstream_rate_limit', 'free_tier_rate_limited'}
@@ -373,7 +408,7 @@ new file mode 100644
 +            and 0 < resets_at - clock < 315360000):
 +        minutes = max(1, math.ceil((resets_at - clock) / 60))
 +        lines.append(f'До снятия ограничения — примерно {minutes} мин.')
-+    lines.append('Работа не завершена.')
++    lines.append('⚠️ **Работа не завершена.**')
 +    if partial:
 +        lines.append('Некоторые действия могли уже выполниться. Перед повтором проверьте их результат.')
 +    details = [f'Код: `{code}`']
@@ -389,7 +424,7 @@ new file mode 100644
 +            details.append(f'Номер в журнале: `{reference}`')
 +        except Exception:
 +            pass
-+    lines.append('Данные для проверки: ' + '; '.join(details))
++    lines.append('**Данные для проверки:**\n' + '\n'.join(details))
 +    if delivered_partial:
 +        lines.insert(0, delivered_partial)
 +    return '\n\n'.join(lines)
