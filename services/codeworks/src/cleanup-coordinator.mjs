@@ -28,6 +28,20 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
     if(obligation.workspace_id)await db.query("UPDATE codeworks.operations SET status='awaiting_reconciliation',step=$2,updated_at=now() WHERE workspace_id=$1 AND kind='cleanup' AND NOT archived AND status NOT IN ('succeeded','failed')",[obligation.workspace_id,reason]);
     return result;
   };
+  const waitForWriter=async()=>{
+    await fence();
+    await db.query('BEGIN');
+    try{
+      // AIDEV-NOTE: Этот порядок совпадает с write.finish; повторное чтение не теряет поздний Post.
+      await db.query('SELECT id FROM codeworks.workspaces WHERE id=$1 FOR UPDATE',[workspace.id]);
+      await db.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[workspace.id]);
+      const locked=(await db.query('SELECT * FROM codeworks.cleanup_obligations WHERE id=$1 FOR UPDATE',[id])).rows[0];
+      if(!locked||Number(locked.epoch)!==epoch||locked.owner_workflow_id!==owner||!['pending','running','retry'].includes(locked.state))throw Error('CLEANUP_FENCE_LOST');
+      const writers=(await db.query("SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain') LIMIT 1",[workspace.id])).rowCount;
+      const result=await db.query("UPDATE codeworks.cleanup_obligations SET state=$2,blocker=$3,next_attempt_at=NULL,updated_at=now() WHERE id=$1 RETURNING *",[id,writers?'waiting_decision':'pending',writers?'WRITER_OUTCOME_UNKNOWN':null]);
+      await db.query('COMMIT');return result.rows[0];
+    }catch(error){await db.query('ROLLBACK');throw error;}
+  };
   const manifest=obligation.evidence?.manifest;
   const releaseProof=async()=>{
     const release=(await db.query("SELECT * FROM codeworks.releases WHERE workspace_id=$1 AND state='succeeded' ORDER BY created_at DESC LIMIT 1",[workspace.id])).rows[0];
@@ -43,7 +57,7 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
   if(manifest?.protected_task_ids?.includes(workspace.id))return wait('LIVE_TASK_PROTECTED');
   if(manifest&&(await db.query("SELECT 1 FROM codeworks.workspaces w JOIN codeworks.workflow_registry r ON r.workspace_id=w.id WHERE w.project_id=$1 AND (w.id=$2 OR w.path=$3 OR w.branch=$4) AND r.lifecycle='active' LIMIT 1",[project.id,workspace.id,workspace.path,workspace.branch])).rowCount)return wait('LIVE_TASK_PROTECTED');
   if(manifest&&(await db.query("SELECT 1 FROM codeworks.operations WHERE workspace_id=$1 AND NOT archived AND kind<>'cleanup' AND status IN ('pending','running','awaiting_execution','awaiting_ci','awaiting_deployment','awaiting_reconciliation') LIMIT 1",[workspace.id])).rowCount)return wait('LIVE_TASK_PROTECTED');
-  if((await db.query("SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain') LIMIT 1",[workspace.id])).rowCount)return wait('WRITER_OUTCOME_UNKNOWN');
+  if((await db.query("SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain') LIMIT 1",[workspace.id])).rowCount){await checkpoint('writer-observed');return waitForWriter();}
   if((await db.query("SELECT 1 FROM codeworks.release_queue q JOIN codeworks.operations o ON o.id=q.operation_id WHERE o.workspace_id=$1 AND q.state IN ('held','queued') LIMIT 1",[workspace.id])).rowCount)return wait('RELEASE_OUTCOME_UNKNOWN');
   // AIDEV-NOTE: Нулевые ресурсы не подтверждают доставку при более позднем неопределённом rollout.
   if(obligation.outcome==='released'&&obligation.evidence?.publication&&!await recheckPublication(db,project,workspace,obligation.evidence.publication,{ignoreOperationId:obligation.source_operation_id}))return wait('DELIVERY_PROOF_CHANGED');

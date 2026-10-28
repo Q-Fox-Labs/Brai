@@ -55,11 +55,11 @@ test('owner receipt подтверждает только тот же native в�
  const api=createWriteAdmission({query,connect:async()=>({query,release(){}})},{workspace:async()=>({project:{},workspace:w}),inspect:async()=>({dirty:false,head:'base'})});
  const args={project_id:'p',session_id:'s',turn_id:'t',tool_use_id:'u',outcome:'success'};
  const proof={write_call_id:'c',project_id:'p',executor_id:'e',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'Bash',payload_sha256:input,rewritten_sha256:rewritten,exit_code:0,receipt_sha256:hash,native_event_sha256:event};
- await assert.rejects(api.finish(args,'e',{nativeCompletion:{...proof,rewritten_sha256:hash}}),{code:'WRITE_CALL_MISMATCH'});assert.equal(updates,0);
- assert.equal((await api.finish(args,'e',{nativeCompletion:proof})).state,'finished');assert.equal(updates,1);
+ await assert.rejects(api.finish(args,'e',{completionProof:{...proof,rewritten_sha256:hash}}),{code:'WRITE_CALL_MISMATCH'});assert.equal(updates,0);
+ assert.equal((await api.finish(args,'e',{completionProof:proof})).state,'finished');assert.equal(updates,1);
  assert.deepEqual(row.tool_result.native_completion,{receipt_sha256:hash,native_event_sha256:event,exit_code:0});
- assert.equal((await api.finish(args,'e',{nativeCompletion:proof})).state,'finished');
- await assert.rejects(api.finish(args,'e',{nativeCompletion:{...proof,native_event_sha256:hash}}),{code:'WRITE_CALL_MISMATCH'});assert.equal(updates,1);
+ assert.equal((await api.finish(args,'e',{completionProof:proof})).state,'finished');
+ await assert.rejects(api.finish(args,'e',{completionProof:{...proof,native_event_sha256:hash}}),{code:'WRITE_CALL_MISMATCH'});assert.equal(updates,1);
 });
 test('stopped call never starts a new preparation',async()=>{
  let called=false;const existing={id:'c',workspace_id:null,state:'denied_pending',tool_name:'apply_patch',payload_sha256:'a',targets:['src/a'],workspace_key:'task',kind:'feature',request_key:'r'};

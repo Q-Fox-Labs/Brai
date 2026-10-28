@@ -110,10 +110,10 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
     });
   }
   /** Подтверждает Post либо уже проверенный owner receipt; не принимает доказательства из API payload. */
-  async function finish(args, executorId, {nativeCompletion}={}) {
+  async function finish(args, executorId, {completionProof}={}) {
     const call = (await pool.query('SELECT * FROM codeworks.write_calls WHERE project_id=$1 AND executor_id=$2 AND session_id=$3 AND turn_id=$4 AND tool_use_id=$5',[args.project_id,executorId,args.session_id,args.turn_id,args.tool_use_id])).rows[0];
     if (!call) throw new Fault('NOT_FOUND');
-    validateNativeCompletion(call,args,executorId,nativeCompletion);
+    validateNativeCompletion(call,args,executorId,completionProof);
     if (call.state === 'finished') return {write_call_id:call.id,state:'finished',changed:!!call.tool_result?.changed};
     if (!['in_flight','uncertain'].includes(call.state) || !call.workspace_id) throw new Fault('CONFLICT');
     const found = await workspace(args.project_id,call.workspace_id);
@@ -126,11 +126,11 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
       await db.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[w.id]);
       await db.query("SELECT id FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state='waiting_decision' AND blocker='WRITER_OUTCOME_UNKNOWN' FOR UPDATE",[w.id]);
       const locked = (await db.query('SELECT * FROM codeworks.write_calls WHERE id=$1 FOR UPDATE',[call.id])).rows[0];
-      validateNativeCompletion(locked,args,executorId,nativeCompletion);
+      validateNativeCompletion(locked,args,executorId,completionProof);
       if (locked.state === 'finished') return {write_call_id:call.id,state:'finished',changed:!!locked.tool_result?.changed};
       if (!['in_flight','uncertain'].includes(locked.state)) throw new Fault('CONFLICT');
       if (changed) await db.query("UPDATE codeworks.workspaces SET activation_state='active',first_write_at=COALESCE(first_write_at,now()) WHERE id=$1",[w.id]);
-      const toolResult={outcome:args.outcome,changed,...(nativeCompletion?{native_completion:{receipt_sha256:nativeCompletion.receipt_sha256,native_event_sha256:nativeCompletion.native_event_sha256,exit_code:nativeCompletion.exit_code}}:{})};
+      const toolResult={outcome:args.outcome,changed,...(completionProof?{native_completion:{receipt_sha256:completionProof.receipt_sha256,native_event_sha256:completionProof.native_event_sha256,exit_code:completionProof.exit_code}}:{})};
       await db.query("UPDATE codeworks.write_calls SET state='finished',tool_result=$2::jsonb,finished_at=now(),updated_at=now() WHERE id=$1",[call.id,JSON.stringify(toolResult)]);
       await db.query(`UPDATE codeworks.cleanup_obligations o SET state='pending',blocker=NULL,next_attempt_at=NULL,updated_at=now()
         WHERE o.workspace_id=$1 AND o.state='waiting_decision' AND o.blocker='WRITER_OUTCOME_UNKNOWN'

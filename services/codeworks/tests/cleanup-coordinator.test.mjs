@@ -48,6 +48,20 @@ test('недоступный индекс не подтверждает отсу
   await assert.rejects(advanceCleanup(db,item,{id:'project'},{id:'workspace'},{git:{inspectResources:async()=>empty},codeIndex:{inspect:async()=>({complete:false})}}),/INDEX_INSPECTION_INCOMPLETE/);
 });
 
+test('поздний Post между обнаружением писателя и постановкой ожидания не теряется',async()=>{
+  const item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',outcome:'released',step:'inspect',state:'pending',expected:{},evidence:{}};
+  let writer=true,readCount=0,stored;
+  const db={query:async(sql,args=[])=>{
+    if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};
+    if(sql.includes('SELECT 1 FROM codeworks.write_calls')){readCount++;return {rowCount:writer?1:0};}
+    if(sql.includes('SELECT * FROM codeworks.cleanup_obligations'))return {rows:[item]};
+    if(sql.startsWith("UPDATE codeworks.cleanup_obligations SET state=$2")){stored={state:args[1],blocker:args[2]};return {rows:[stored]};}
+    return {rowCount:0,rows:[]};
+  }};
+  const result=await advanceCleanup(db,item,{id:'project'},{id:'workspace'},{git:{},checkpoint:async step=>{if(step==='writer-observed')writer=false;}});
+  assert.equal(readCount,2);assert.deepEqual(result,{state:'pending',blocker:null});
+});
+
 test('неподтверждённая доставка не закрывается через проверку пустых ресурсов',async()=>{
   const item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',outcome:'released',step:'inspect',state:'pending',expected:{},evidence:{publication:{project_id:'project',workspace_id:'workspace'}}};
   let inspected=false;
