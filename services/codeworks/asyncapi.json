@@ -42,6 +42,21 @@
         },
         "workspace_cancelResponse": {
           "$ref": "#/components/messages/workspace_cancelResponse"
+        },
+        "workspace_transferResponse": {
+          "$ref": "#/components/messages/workspace_transferResponse"
+        },
+        "write_beginResponse": {
+          "$ref": "#/components/messages/write_beginResponse"
+        },
+        "write_admitResponse": {
+          "$ref": "#/components/messages/write_admitResponse"
+        },
+        "write_finishResponse": {
+          "$ref": "#/components/messages/write_finishResponse"
+        },
+        "write_stopResponse": {
+          "$ref": "#/components/messages/write_stopResponse"
         }
       }
     },
@@ -172,6 +187,71 @@
       "messages": {
         "workspace_cancelRequest": {
           "$ref": "#/components/messages/workspace_cancelRequest"
+        }
+      }
+    },
+    "workspace_transfer": {
+      "address": "brai.codeworks.v2.{executor}.workspace.transfer",
+      "parameters": {
+        "executor": {
+          "description": "ACL-protected transport identity, never taken from request payload."
+        }
+      },
+      "messages": {
+        "workspace_transferRequest": {
+          "$ref": "#/components/messages/workspace_transferRequest"
+        }
+      }
+    },
+    "write_begin": {
+      "address": "brai.codeworks.v2.{executor}.write.begin",
+      "parameters": {
+        "executor": {
+          "description": "ACL-protected transport identity, never taken from request payload."
+        }
+      },
+      "messages": {
+        "write_beginRequest": {
+          "$ref": "#/components/messages/write_beginRequest"
+        }
+      }
+    },
+    "write_admit": {
+      "address": "brai.codeworks.v2.{executor}.write.admit",
+      "parameters": {
+        "executor": {
+          "description": "ACL-protected transport identity, never taken from request payload."
+        }
+      },
+      "messages": {
+        "write_admitRequest": {
+          "$ref": "#/components/messages/write_admitRequest"
+        }
+      }
+    },
+    "write_finish": {
+      "address": "brai.codeworks.v2.{executor}.write.finish",
+      "parameters": {
+        "executor": {
+          "description": "ACL-protected transport identity, never taken from request payload."
+        }
+      },
+      "messages": {
+        "write_finishRequest": {
+          "$ref": "#/components/messages/write_finishRequest"
+        }
+      }
+    },
+    "write_stop": {
+      "address": "brai.codeworks.v2.{executor}.write.stop",
+      "parameters": {
+        "executor": {
+          "description": "ACL-protected transport identity, never taken from request payload."
+        }
+      },
+      "messages": {
+        "write_stopRequest": {
+          "$ref": "#/components/messages/write_stopRequest"
         }
       }
     }
@@ -506,6 +586,171 @@
           "bindingVersion": "0.1.0"
         }
       }
+    },
+    "workspace_transfer": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/workspace_transfer"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/workspace_transfer/messages/workspace_transferRequest"
+        }
+      ],
+      "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/serviceReply"
+        },
+        "description": "Native NATS reply subject.",
+        "x-nats-reply-subject": "message.reply",
+        "messages": [
+          {
+            "$ref": "#/channels/serviceReply/messages/workspace_transferResponse"
+          },
+          {
+            "$ref": "#/channels/serviceReply/messages/ServiceError"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "service_codeworks",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "write_begin": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/write_begin"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/write_begin/messages/write_beginRequest"
+        }
+      ],
+      "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/serviceReply"
+        },
+        "description": "Native NATS reply subject.",
+        "x-nats-reply-subject": "message.reply",
+        "messages": [
+          {
+            "$ref": "#/channels/serviceReply/messages/write_beginResponse"
+          },
+          {
+            "$ref": "#/channels/serviceReply/messages/ServiceError"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "service_codeworks",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "write_admit": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/write_admit"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/write_admit/messages/write_admitRequest"
+        }
+      ],
+      "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/serviceReply"
+        },
+        "description": "Native NATS reply subject.",
+        "x-nats-reply-subject": "message.reply",
+        "messages": [
+          {
+            "$ref": "#/channels/serviceReply/messages/write_admitResponse"
+          },
+          {
+            "$ref": "#/channels/serviceReply/messages/ServiceError"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "service_codeworks",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "write_finish": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/write_finish"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/write_finish/messages/write_finishRequest"
+        }
+      ],
+      "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/serviceReply"
+        },
+        "description": "Native NATS reply subject.",
+        "x-nats-reply-subject": "message.reply",
+        "messages": [
+          {
+            "$ref": "#/channels/serviceReply/messages/write_finishResponse"
+          },
+          {
+            "$ref": "#/channels/serviceReply/messages/ServiceError"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "service_codeworks",
+          "bindingVersion": "0.1.0"
+        }
+      }
+    },
+    "write_stop": {
+      "action": "receive",
+      "channel": {
+        "$ref": "#/channels/write_stop"
+      },
+      "messages": [
+        {
+          "$ref": "#/channels/write_stop/messages/write_stopRequest"
+        }
+      ],
+      "description": "Deadline 10s. Timeout does not cancel durable intent. Repeat a mutation only with the same idempotency key and unchanged payload.",
+      "reply": {
+        "channel": {
+          "$ref": "#/channels/serviceReply"
+        },
+        "description": "Native NATS reply subject.",
+        "x-nats-reply-subject": "message.reply",
+        "messages": [
+          {
+            "$ref": "#/channels/serviceReply/messages/write_stopResponse"
+          },
+          {
+            "$ref": "#/channels/serviceReply/messages/ServiceError"
+          }
+        ]
+      },
+      "bindings": {
+        "nats": {
+          "queue": "service_codeworks",
+          "bindingVersion": "0.1.0"
+        }
+      }
     }
   },
   "components": {
@@ -650,6 +895,66 @@
         "name": "workspace_cancelResponse",
         "payload": {
           "$ref": "./schemas/api.schema.json#/definitions/accepted"
+        }
+      },
+      "workspace_transferRequest": {
+        "name": "workspace_transferRequest",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/workspace.transfer"
+        }
+      },
+      "workspace_transferResponse": {
+        "name": "workspace_transferResponse",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/accepted"
+        }
+      },
+      "write_beginRequest": {
+        "name": "write_beginRequest",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/write.begin"
+        }
+      },
+      "write_beginResponse": {
+        "name": "write_beginResponse",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/writeBeginResponse"
+        }
+      },
+      "write_admitRequest": {
+        "name": "write_admitRequest",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/write.admit"
+        }
+      },
+      "write_admitResponse": {
+        "name": "write_admitResponse",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/writeAdmitResponse"
+        }
+      },
+      "write_finishRequest": {
+        "name": "write_finishRequest",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/write.finish"
+        }
+      },
+      "write_finishResponse": {
+        "name": "write_finishResponse",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/writeFinishResponse"
+        }
+      },
+      "write_stopRequest": {
+        "name": "write_stopRequest",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/write.stop"
+        }
+      },
+      "write_stopResponse": {
+        "name": "write_stopResponse",
+        "payload": {
+          "$ref": "./schemas/api.schema.json#/definitions/writeStopResponse"
         }
       }
     }
