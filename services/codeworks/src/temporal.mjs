@@ -29,7 +29,7 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
       return await session(async db=>{
         await authorizeCommand(db,operationId,id,generation);
         const o=(await db.query('SELECT o.status,o.step,o.error,w.preparation_state FROM codeworks.operations o LEFT JOIN codeworks.workspaces w ON w.id=o.workspace_id WHERE o.id=$1',[operationId])).rows[0];
-        await db.query("UPDATE codeworks.commands SET state=CASE WHEN $2 IN ('succeeded','failed') THEN 'done' ELSE state END,updated_at=now() WHERE operation_id=$1",[operationId,o.status]);
+        await db.query("UPDATE codeworks.commands SET state=CASE WHEN $2 IN ('succeeded','failed') THEN 'done' ELSE state END,technical_attempts=0,retry_at=NULL,updated_at=now() WHERE operation_id=$1",[operationId,o.status]);
         await db.query("UPDATE codeworks.workflow_registry SET last_stage=$2,blocked_reason=$3,executor_state='waiting',updated_at=now() WHERE workflow_id=$1",[id,o.step,o.status==='succeeded'?null:o.error?.code??o.step]);
         return {status:o.status,preparation_state:o.preparation_state};
       });
@@ -45,7 +45,7 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
       if(!item)return;
       let context;try{context=Context.current();}catch{}
       const beat=setInterval(()=>context?.heartbeat({obligation_id:item.id}),2000);beat.unref();
-      try{await withExecutionContext({signal:context?.cancellationSignal},()=>runCleanupObligation(pool,item.id,id,{git:adapters.git,flowGit:adapters.flowGit,codeIndex,allowedRepositories,checkpoint:async()=>context?.cancellationSignal.throwIfAborted()}));}
+      try{return await withExecutionContext({signal:context?.cancellationSignal},()=>runCleanupObligation(pool,item.id,id,{git:adapters.git,flowGit:adapters.flowGit,codeIndex,allowedRepositories,checkpoint:async()=>context?.cancellationSignal.throwIfAborted()}));}
       catch(error){
         await pool.query("UPDATE codeworks.cleanup_obligations SET state='retry',attempts=attempts+1,next_attempt_at=now()+interval '60 seconds',blocker='TECHNICAL_RETRY',updated_at=now() WHERE id=$1 AND owner_workflow_id=$2 AND state IN ('pending','running','retry')",[item.id,id]);
         throw error;
@@ -95,7 +95,7 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
       await db.query("UPDATE codeworks.workflow_registry SET executor_state='running',updated_at=now() WHERE workflow_id=$1",[id]);
       const release=r.workspace_id?(await db.query('SELECT operation_id,requested_sha,details FROM codeworks.releases WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1',[r.workspace_id])).rows[0]:null;
       const checkpoint={workflow_id:id,workspace_id:r.workspace_id,rollout_operation_id:r.operation_id,position:Number(r.position),...(release?{release_operation_id:release.operation_id,sha:release.requested_sha,evidence_ids:[release.details.primary,release.details.backport].filter(Boolean).flatMap(leg=>leg.deployment_evidence_id?[leg.deployment_evidence_id]:[])}:{})};
-      return {completed:false,checkpoint,closing:r.lifecycle==='closing',commands:(await db.query("SELECT operation_id,sequence,kind FROM codeworks.commands WHERE workflow_id=$1 AND generation=$2 AND state='pending' AND NOT(kind='release' AND EXISTS(SELECT 1 FROM codeworks.commands control WHERE control.workflow_id=codeworks.commands.workflow_id AND control.state<>'done' AND ((control.kind='release.close' AND control.admitted_request->>'release_operation_id'=codeworks.commands.operation_id::text) OR control.kind IN ('workspace.cancel','workspace.transfer')))) ORDER BY sequence LIMIT 32",[id,generation])).rows};
+      return {completed:false,checkpoint,closing:r.lifecycle==='closing',commands:(await db.query("SELECT operation_id,sequence,kind FROM codeworks.commands WHERE workflow_id=$1 AND generation=$2 AND state='pending' AND (retry_at IS NULL OR retry_at<=now()) AND NOT(kind='release' AND EXISTS(SELECT 1 FROM codeworks.commands control WHERE control.workflow_id=codeworks.commands.workflow_id AND control.state<>'done' AND ((control.kind='release.close' AND control.admitted_request->>'release_operation_id'=codeworks.commands.operation_id::text) OR control.kind IN ('workspace.cancel','workspace.transfer')))) ORDER BY sequence LIMIT 32",[id,generation])).rows};
     }),
     // AIDEV-NOTE: Имя executeCommand остаётся для Activity, уже записанных в старых историях.
     executeCommand:executeCommand(),
@@ -110,11 +110,12 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
     closeRelease:executeCommand('release.close'),
     cancelWorkspace:executeCommand('workspace.cancel'),
     transferWorkspace:executeCommand('workspace.transfer'),
-    /** Исчерпание технических повторов замораживает команду, сохраняя доказательства и занятый контур. */
+    /** Исчерпание коротких попыток откладывает прежнюю команду без изменения её данных. */
     requireReconciliation:(operationId,generation)=>session(async(db,id)=>{
       await authorizeCommand(db,operationId,id,generation);
-      await db.query("UPDATE codeworks.commands SET state=CASE WHEN kind IN ('workspace.cancel','workspace.transfer') THEN 'pending' ELSE 'reconciliation' END,updated_at=now() WHERE operation_id=$1 AND state<>'done'",[operationId]);
-      await db.query("UPDATE codeworks.operations SET status='awaiting_reconciliation',step='TECHNICAL_RETRIES_EXHAUSTED',updated_at=now() WHERE id=$1 AND status NOT IN ('succeeded','failed')",[operationId]);
+      await db.query("UPDATE codeworks.commands SET state='pending',technical_attempts=technical_attempts+1,retry_at=now()+(LEAST(300,30*power(2,LEAST(technical_attempts,4))) * interval '1 second'),updated_at=now() WHERE operation_id=$1 AND state<>'done' AND EXISTS(SELECT 1 FROM codeworks.operations o WHERE o.id=operation_id AND o.status NOT IN ('succeeded','failed'))",[operationId]);
+      await db.query("UPDATE codeworks.commands SET state='done',retry_at=NULL,updated_at=now() WHERE operation_id=$1 AND state<>'done' AND EXISTS(SELECT 1 FROM codeworks.operations o WHERE o.id=operation_id AND o.status IN ('succeeded','failed'))",[operationId]);
+      await db.query("UPDATE codeworks.operations SET status='awaiting_reconciliation',updated_at=now() WHERE id=$1 AND status NOT IN ('succeeded','failed')",[operationId]);
       await db.query("UPDATE codeworks.workflow_registry SET blocked_reason='TECHNICAL_RETRIES_EXHAUSTED',executor_state='waiting',updated_at=now() WHERE workflow_id=$1",[id]);
     }),
     /** Закрывает приём атомарно с проверкой уже принятых команд; tombstone не зависит от Temporal retention. */

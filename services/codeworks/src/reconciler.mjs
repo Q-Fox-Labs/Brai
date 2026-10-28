@@ -30,8 +30,25 @@ export async function reconcileProjectLedger(pool,projectId,owner) {
       await db.query('COMMIT');
     }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}finally{db.release();}
   }
-  await pool.query(`UPDATE codeworks.cleanup_obligations o SET owner_workflow_id=$2,epoch=epoch+1,updated_at=now()
-    WHERE o.project_id=$1 AND o.owner_workflow_id IS NULL AND o.state IN ('pending','retry')
-      AND NOT EXISTS(SELECT 1 FROM codeworks.workflow_registry r WHERE r.workspace_id=o.workspace_id AND r.lifecycle='active')`,[projectId,owner]);
+  const adopt=(await pool.query(`SELECT o.id,o.workspace_id,o.evidence,o.owner_workflow_id,o.epoch FROM codeworks.cleanup_obligations o
+    LEFT JOIN codeworks.workflow_registry r ON r.workflow_id=o.owner_workflow_id
+    WHERE o.project_id=$1 AND o.state IN ('pending','retry') AND (o.owner_workflow_id IS NULL OR r.state='completed')
+      AND NOT EXISTS(SELECT 1 FROM codeworks.workflow_registry live WHERE live.workspace_id=o.workspace_id AND live.lifecycle='active') ORDER BY o.created_at LIMIT 32`,[projectId])).rows;
+  for(const candidate of adopt){
+    const db=await pool.connect();
+    try{
+      await db.query('BEGIN');
+      const workspaceId=candidate.workspace_id??candidate.evidence?.workspace?.id;
+      if(!workspaceId){await db.query('COMMIT');continue;}
+      await db.query('SELECT id FROM codeworks.workspaces WHERE id=$1 FOR UPDATE',[workspaceId]);
+      await db.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[workspaceId]);
+      const guard=(await db.query("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired",['execution:workspace:'+workspaceId])).rows[0].acquired;
+      if(guard)await db.query(`UPDATE codeworks.cleanup_obligations o SET owner_workflow_id=$2,epoch=epoch+1,updated_at=now()
+        WHERE o.id=$1 AND o.epoch=$3 AND o.owner_workflow_id IS NOT DISTINCT FROM $4 AND o.state IN ('pending','retry')
+          AND (o.owner_workflow_id IS NULL OR EXISTS(SELECT 1 FROM codeworks.workflow_registry old WHERE old.workflow_id=o.owner_workflow_id AND old.state='completed'))
+          AND NOT EXISTS(SELECT 1 FROM codeworks.workflow_registry live WHERE live.workspace_id=o.workspace_id AND live.lifecycle='active')`,[candidate.id,owner,candidate.epoch,candidate.owner_workflow_id]);
+      await db.query('COMMIT');
+    }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}finally{db.release();}
+  }
   return (await pool.query("SELECT id FROM codeworks.cleanup_obligations WHERE project_id=$1 AND owner_workflow_id=$2 AND state IN ('pending','running','retry') AND (next_attempt_at IS NULL OR next_attempt_at<=now()) ORDER BY created_at LIMIT 1",[projectId,owner])).rows[0];
 }
