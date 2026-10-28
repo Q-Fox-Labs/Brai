@@ -13,14 +13,19 @@ const reject=()=>{throw new Fault('TRANSFER_UNVERIFIED');};
 /** Проверяет все изменения и возвращает снимок доказательства; при сомнении бросает TRANSFER_UNVERIFIED. */
 export async function verifyDisposition(project,w,evidence,{allowedRepositories=[],git}={}){
   try{
-    if(!keys(evidence,['destination','source_head','source_base','files'])||!keys(evidence.destination,['repo_path','commit_sha'])||!sha(evidence.source_head)||!sha(evidence.source_base)||!sha(evidence.destination.commit_sha)||!Array.isArray(evidence.files)||evidence.files.length>256||!allowedRepositories.includes(evidence.destination.repo_path)||!allowedRepositories.includes(project.repo_path)||w.base_sha&&w.base_sha!==evidence.source_base)reject();
+    if(!keys(evidence,['destination','source_head','source_base','files'])||!keys(evidence.destination,['repo_path','commit_sha'])||!sha(evidence.source_head)||!sha(evidence.source_base)||!sha(evidence.destination.commit_sha)||!Array.isArray(evidence.files)||evidence.files.length>256||!allowedRepositories.includes(project.repo_path)||w.base_sha&&w.base_sha!==evidence.source_base)reject();
     const destination=evidence.destination.repo_path;
+    const declared=(project.transfer_destinations??[]).filter(item=>item.repo_path===destination);
+    if(declared.length>1)reject();
+    const expectedOrigin=declared[0]?.origin??(destination===project.repo_path&&project.github?.repository?'https://github.com/'+project.github.repository+'.git':null);
+    if(typeof expectedOrigin!=='string'||!expectedOrigin||!git&&!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/.test(expectedOrigin))reject();
     if(!path.isAbsolute(destination)||await realpath(destination)!==destination||!path.isAbsolute(w.path)||await realpath(w.path)!==w.path)reject();
     const run=git??((repo,args,options)=>command('git',['-C',repo,...args],options));
     const call=async(repo,args,options)=>run(repo,args,options);
     const source=async(...args)=>(await call(w.path,args)).stdout;
     const dest=async(...args)=>(await call(destination,args)).stdout;
     if(await source('rev-parse','--show-toplevel')!==w.path||await dest('rev-parse','--show-toplevel')!==destination||await source('rev-parse','--path-format=absolute','--git-common-dir')!==project.common_dir)reject();
+    if(await dest('remote','get-url','--all','origin')!==expectedOrigin)reject();
     const head=await source('rev-parse','HEAD');
     if(head!==evidence.source_head||await source('status','--porcelain=v1','--untracked-files=all'))reject();
     if((await call(w.path,['merge-base','--is-ancestor',evidence.source_base,head],{allowFailure:true})).code!==0)reject();
@@ -33,8 +38,10 @@ export async function verifyDisposition(project,w,evidence,{allowedRepositories=
     if(diff.size!==evidence.files.length)reject();
     let permanent=null;
     for(const ref of ['refs/heads/dev','refs/heads/main']){
-      const current=await call(destination,['rev-parse','--verify',ref+'^{commit}'],{allowFailure:true});
-      if(current.code===0&&sha(current.stdout)&&(await call(destination,['merge-base','--is-ancestor',evidence.destination.commit_sha,current.stdout],{allowFailure:true})).code===0){permanent={ref,oid:current.stdout};break;}
+      const remote=await dest('ls-remote','--refs','origin',ref),match=/^([0-9a-f]{40}|[0-9a-f]{64})\t([^\s]+)$/.exec(remote);
+      if(!match||match[2]!==ref)continue;
+      const current=await call(destination,['rev-parse','--verify',match[1]+'^{commit}'],{allowFailure:true});
+      if(current.code===0&&current.stdout===match[1]&&(await call(destination,['merge-base','--is-ancestor',evidence.destination.commit_sha,current.stdout],{allowFailure:true})).code===0){permanent={ref,oid:current.stdout};break;}
     }
     if(!permanent)reject();
     const entry=async(repo,commit,file)=>{
@@ -54,7 +61,7 @@ export async function verifyDisposition(project,w,evidence,{allowedRepositories=
       }else if(!a||!b||!current||!sha(file.source_blob)||file.source_blob!==a.blob||file.destination_blob!==b.blob||a.blob!==b.blob||a.mode!==b.mode||b.blob!==current.blob||b.mode!==current.mode)reject();
       files.push({...file,source_mode:a?.mode??null,destination_mode:b?.mode??null});
     }
-    if(await source('rev-parse','HEAD')!==head||await source('status','--porcelain=v1','--untracked-files=all')||await dest('rev-parse',permanent.ref+'^{commit}')!==permanent.oid)reject();
+    if(await source('rev-parse','HEAD')!==head||await source('status','--porcelain=v1','--untracked-files=all')||await dest('remote','get-url','--all','origin')!==expectedOrigin||await dest('ls-remote','--refs','origin',permanent.ref)!==permanent.oid+'\t'+permanent.ref)reject();
     return {destination:{...evidence.destination,ref:permanent.ref,ref_oid:permanent.oid},source_head:head,source_base:evidence.source_base,files};
   }catch(error){if(error instanceof Fault&&error.code==='TRANSFER_UNVERIFIED')throw error;throw new Fault('TRANSFER_UNVERIFIED');}
 }
