@@ -45,6 +45,13 @@ def fact_fields(content):
             'hermes_fact_sha256': hashlib.sha256(content.encode('utf-8')).hexdigest()}
 
 
+def document_references(text):
+    """Найти реальные файловые ссылки без угадывания темы документа."""
+    return list(dict.fromkeys(re.findall(
+        r'''[^\s<>"']+\.(?:pdf|docx?|odt|md|txt|html|xlsx?|csv)(?:\?[^\s<>"']*)?''',
+        text, re.IGNORECASE)))
+
+
 def memory_text(row):
     """Прочитать факт без подмены источником и проверить новое каноническое поле."""
     info = (row.get('metadata') or {}).get('info') or {}
@@ -72,6 +79,7 @@ def public_memory(row):
     info = meta.get("info") or {}
     return {
         "id": row.get("id"), "content": memory_text(row),
+        "document_refs": document_references(memory_text(row)),
         "session_id": meta.get("session_id"), "created_at": meta.get("created_at"),
         "source_date": row.get('_source_date'),
         "relevance": (1.0 if row.get('_relevance') == 'direct' else .5

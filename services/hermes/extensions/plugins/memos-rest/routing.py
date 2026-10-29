@@ -2,6 +2,7 @@
 # ABOUTME: Переписка хранится отдельно от фактов; автор и область проверяются локально.
 """Profile-local multi-cube worker. Durable jobs pin extraction before delivery."""
 import json
+from concurrent.futures import ThreadPoolExecutor
 import math
 import re
 from collections import Counter
@@ -14,11 +15,12 @@ from .router import Catalog, SemanticRouter, stable_id, QUALITY_VERSION, evidenc
 class RecallRows(list):
     """Передать выдачу и полноту поиска вместе, без общего изменяемого статуса."""
 
-    def __init__(self, rows=(), *, scanned=0, needs_sources=False, source_query=''):
+    def __init__(self, rows=(), *, scanned=0, needs_sources=False, source_query='', archive_searched=False):
         super().__init__(rows)
         self.scanned = scanned
         self.needs_sources = needs_sources
         self.source_query = source_query
+        self.archive_searched = archive_searched
 
 
 def lexical_order(query, rows):
@@ -288,12 +290,12 @@ class RoutedRuntime:
 
     def read(self, identifier):
         self.reload()
-        for cube in self.catalog.cubes:
-            rows = self.scoped_rows(cube, {'id': identifier})
-            if not rows:
-                rows = self.scoped_rows(cube, {'hermes_logical_id': identifier})
-            if rows:
-                return self.decorate(rows[0])
+        for filter_ in ({'id': identifier}, {'hermes_logical_id': identifier}):
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                pools = executor.map(lambda cube: self.scoped_rows(cube, filter_), self.catalog.cubes)
+                for rows in pools:
+                    if rows:
+                        return self.decorate(rows[0])
         return None
 
     def decorate(self, row):
@@ -303,7 +305,8 @@ class RoutedRuntime:
             row['_classification'] = ('classified' if receipt.get('fact_count') else 'unclassified') if receipt else 'pending/unclassified'
         return row
 
-    def search(self, query, sid, top_k=None, project=None, cubes=None, include_archive=False, all_cubes=False):
+    def search(self, query, sid, top_k=None, project=None, cubes=None, include_archive=False, all_cubes=False,
+               *, expand_sources=False):
         """Проверить всю разрешённую область и отобрать свидетельства по вопросу.
 
         Кубы задают явную область, но автоматическая классификация не закрывает
@@ -319,8 +322,12 @@ class RoutedRuntime:
                 raise ValueError('Recall cubes are not catalogued')
         selected = self.catalog.cubes if all_cubes or cubes is None else cubes
         candidates, source_dates = {}, {}
-        for cube in selected:
-            for row in self.client(cube).get({}):
+        def collect(cube):
+            return self.client(cube).get({})
+        with ThreadPoolExecutor(max_workers=min(4, max(1, len(selected)))) as executor:
+            pools = list(executor.map(collect, selected))
+        for pool in pools:
+            for row in pool:
                 if not self.allowed(row, config):
                     continue
                 info = row['metadata']['info']
@@ -328,7 +335,7 @@ class RoutedRuntime:
                     source_dates[info.get('hermes_event_id')] = row['metadata'].get('created_at')
                 if info.get('hermes_kind') == 'checkpoint':
                     continue
-                if info.get('hermes_kind') != 'fact' and not include_archive:
+                if info.get('hermes_kind') != 'fact' and not (include_archive or expand_sources):
                     continue
                 if project and project not in info.get('hermes_projects', []):
                     continue
@@ -349,15 +356,30 @@ class RoutedRuntime:
             row['metadata']['info'].get('hermes_source_event'))
             if row['metadata']['info'].get('hermes_kind') == 'fact' else row['metadata'].get('created_at'))}
             for row in candidates.values()])
-        result = self.router.rank(query, [{'text': memory_text(row),
-            'kind': row['metadata']['info'].get('hermes_kind'),
-            'status': row['metadata']['info'].get('hermes_status'),
-            'date': row.get('_source_date')} for row in ordered])
-        matches = sorted(result['matches'], key=lambda m: m['relevance'] != 'direct')
-        rows = [{**ordered[match['index']], '_relevance': match['relevance'],
-                 '_relevance_reason': match['reason']} for match in matches]
-        return RecallRows(rows[:top_k], scanned=len(ordered), needs_sources=result['needs_sources'],
-                          source_query=result['source_query'])
+        def select(pool):
+            result = self.router.rank(query, [{'text': memory_text(row),
+                'kind': row['metadata']['info'].get('hermes_kind'),
+                'status': row['metadata']['info'].get('hermes_status'),
+                'date': row.get('_source_date')} for row in pool])
+            rows = [{**pool[m['index']], '_relevance': m['relevance'],
+                     '_relevance_reason': m['reason']} for m in result['matches']]
+            return rows, result
+        initial = ([row for row in ordered if row['metadata']['info'].get('hermes_kind') == 'fact']
+                   if expand_sources and not include_archive else ordered)
+        rows, result = select(initial)
+        scanned, archive_searched = len(initial), include_archive
+        if expand_sources and not include_archive and (not rows or result['needs_sources']):
+            archive = [row for row in ordered if row['metadata']['info'].get('hermes_kind') != 'fact']
+            # AIDEV-NOTE: Исходники уже прочитаны с той же проверкой доступа.
+            # Не перечитываем 15 кубов и не проверяем те же факты второй раз.
+            source_rows, source_result = select(archive)
+            rows.extend(source_rows)
+            scanned += len(archive)
+            archive_searched = True
+            result = {**source_result, 'needs_sources': result['needs_sources'] or source_result['needs_sources']}
+        rows.sort(key=lambda row: row['_relevance'] != 'direct')
+        return RecallRows(rows[:top_k], scanned=scanned, needs_sources=result['needs_sources'],
+                          source_query=result['source_query'], archive_searched=archive_searched)
 
     def forget(self, identifier):
         config = self.writable()

@@ -4,6 +4,7 @@ import importlib
 import json
 import sys
 import types
+import threading
 import unittest
 from pathlib import Path
 
@@ -68,12 +69,68 @@ class QualityContractTests(unittest.TestCase):
         self.assertEqual(fact['source']['role'],'assistant')
         self.assertEqual(fact['source']['quote'],'Research finding.')
 
-    def test_search_accepts_large_requests_and_archive_is_opt_in(self):
+    def test_model_search_does_not_offer_a_result_quota_and_archive_is_opt_in(self):
         search=next(s for s in schemas.ROUTED_TOOLS if s['name']=='memos_search')
         fields=search['parameters']['properties']
-        self.assertNotIn('maximum',fields['top_k'])
+        self.assertNotIn('top_k',fields)
         self.assertNotIn('top_k',search['parameters']['required'])
         self.assertIn('include_archive',fields)
+
+    def test_recall_uses_validated_source_indices_without_generating_quotations(self):
+        source='The preferred studio name is Quiet Harbour.'
+        schema=self.router._response_schema([{'content':json.dumps({'recall_candidates':[{'text':source}]})}])
+        self.assertNotIn('evidence',schema['properties']['matches']['items']['properties'])
+        self.router.transport=lambda _: {'matches':[{'index':0,'relevance':'direct','reason':'The chosen name.'}],
+                                         'needs_sources':False,'source_query':''}
+        result=self.router.rank('Which studio name?', [{'text':source}])
+        self.assertEqual(result['matches'][0]['evidence'],source)
+
+    def test_independent_batches_run_concurrently_without_losing_candidates(self):
+        barrier=threading.Barrier(3,timeout=3)
+        def model(payload):
+            data=json.loads(payload[-1]['content'])
+            barrier.wait()
+            return {'matches':[{'index':i,'relevance':'direct','reason':'A requested source.'}
+                               for i in range(len(data['recall_candidates']))],
+                    'needs_sources':False,'source_query':''}
+        self.router.transport=model
+        rows=[{'text':str(i)+' '+('x'*41000)} for i in range(3)]
+        result=self.router.rank('Find these sources',rows)
+        self.assertEqual([m['index'] for m in result['matches']],[0,1,2])
+
+    def test_parallel_batch_failure_is_visible_instead_of_partial_success(self):
+        def model(payload):
+            source=json.loads(payload[-1]['content'])['recall_candidates'][0]['text']
+            if source.startswith('bad'):raise router_module.MemOSError('backend unavailable')
+            return {'matches':[{'index':0,'relevance':'direct','reason':'Requested.'}],
+                    'needs_sources':False,'source_query':''}
+        self.router.transport=model
+        with self.assertRaisesRegex(router_module.MemOSError,'unavailable'):
+            self.router.rank('Find sources',[{'text':'good'+'x'*80000},{'text':'bad'+'x'*80000}])
+
+    def test_document_lookup_keeps_actual_pointers_and_their_original_indices(self):
+        seen=[]
+        def model(payload):
+            data=json.loads(payload[-1]['content']);seen.append(data)
+            if 'recall_goal_query' in data:return {'goal':'locate_document'}
+            self.assertEqual(len(data['recall_candidates']),1)
+            self.assertIn('report-brand.pdf',data['recall_candidates'][0]['document_refs'])
+            return {'matches':[{'index':0,'relevance':'direct','reason':'The actual report file.'}],
+                    'needs_sources':True,'source_query':'report file'}
+        self.router.transport=model
+        result=self.router.rank('Find the actual report file',[
+            {'text':'Please research this topic.','kind':'turn'},
+            {'text':'The report is ready.','kind':'turn'},
+            {'text':'Final report: report-brand.pdf','kind':'turn'}])
+        self.assertEqual([m['index'] for m in result['matches']],[2])
+        self.assertEqual(len(seen),2)
+
+    def test_missing_document_pointer_is_explicit_and_does_not_return_progress(self):
+        self.router.transport=lambda _: {'goal':'locate_document'}
+        result=self.router.rank('Find the actual PDF',[
+            {'text':'The report was finished.','kind':'turn'}])
+        self.assertEqual(result['matches'],[])
+        self.assertTrue(result['needs_sources'])
 
     def test_outer_whitespace_is_trimmed_but_evidence_stays_exact(self):
         text='I chose this business name.'

@@ -84,9 +84,11 @@ class QualityTests(RoutingTests):
 
     def test_automatic_recall_keeps_text_budget_and_reports_partial_selection(self):
         self.seed_recall_facts(20, 'Sales experience. ' * 30)
-        self.provider.config['context_chars'] = 1000
+        self.provider.context_window = 20000
+        self.provider.context_available_tokens = 300
         text = self.provider.prefetch('sales')
-        self.assertLessEqual(len(text), 1000)
+        from agent.model_metadata import estimate_messages_tokens_rough
+        self.assertLessEqual(estimate_messages_tokens_rough([{'role':'user','content':text}]),300)
         self.assertGreater(self.provider.recall_status().count, 0)
         self.assertLess(self.provider.recall_status().count, 20)
         self.assertIn('found 20 relevant evidence records', text)
@@ -152,7 +154,9 @@ class QualityTests(RoutingTests):
             if i < 25: row['metadata']['info']['hermes_author_id'] = 'other-author'
             self.backend.rows[str(i)] = row
         self.provider.routing.router.transport = lambda p: {'cubes':['life_intellect']}
-        self.assertEqual(len(json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales','top_k':1000}))['memories']),1000)
+        # Старый параметр инструмента модели больше не режет полный результат.
+        self.assertEqual(len(json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales','top_k':1000}))['memories']),1025)
+        self.assertEqual(len(self.provider.routing.search('sales','session-a',top_k=1000)),1000)
         self.assertEqual(len(json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales'}))['memories']),1025)
         self.assertEqual(json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales','top_k':0}))['status'],'error')
 
