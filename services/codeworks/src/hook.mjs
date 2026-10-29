@@ -187,7 +187,13 @@ function readOnlyShell(command) {
   const tokens = shellTokens(command);
   if (!tokens.length || tokens.some(t => t.operator || t.dynamic)) return false;
   const words = tokens.map(t=>t.word);
+  if(words[0]==='RTK_DISABLED=1') words.shift();
   if (words[0] === 'rtk' && words[1] === 'proxy') words.splice(0,2);
+  else if(words[0]==='rtk' && ['git','ls','rg','grep'].includes(words[1])) {words.shift();if(words[0]==='grep') words[0]='rg';}
+  else if(words[0]==='rtk' && words[1]==='read') return words.length>2 && words.slice(2).every(w=>!w.startsWith('-')&&w!=='-');
+  else if(words[0]==='rtk' && words[1]==='find') {
+    let hasPath=false;for(let i=2;i<words.length;i++){const w=words[i];if(w==='-name'||w==='-iname'){if(!words[++i]||words[i].startsWith('-'))return false;}else if(w==='-type'){if(!['f','d','l'].includes(words[++i]))return false;}else if(w==='-maxdepth'||w==='-mindepth'){if(!/^[0-9]+$/.test(words[++i]??''))return false;}else if(w==='-print'){}else if(w.startsWith('-')||w==='!')return false;else hasPath=true;}return hasPath;
+  }
   if (words[0] === 'git') {
     const action=words[1], args=words.slice(2);
     if (action==='status') return args.every(w=>['--short','-s','--porcelain','--porcelain=v1','--branch','-b','--untracked-files=no'].includes(w));
@@ -210,7 +216,9 @@ function synchronousGit(command) {
   const tokens=shellTokens(command);
   if (!tokens.length || tokens.some(t=>t.operator || t.dynamic)) return false;
   const words=tokens.map(t=>t.word);
+  if(words[0]==='RTK_DISABLED=1') words.shift();
   if (words[0]==='rtk' && words[1]==='proxy') words.splice(0,2);
+  else if(words[0]==='rtk' && words[1]==='git')words.shift();
   if (words.shift()!=='git') return false;
   const action=words.shift();
   if (action==='add') return words.length>0 && words.every(w=>!w.startsWith('-') || ['-A','--all','-u','--update','--'].includes(w));
@@ -238,6 +246,7 @@ export function foregroundCommand(command) {
     const words=segment.map(t=>t.word);
     const literal=words.map(w=>"'"+w.replaceAll("'", "'\\''")+"'").join(' ');
     if (readOnlyShell(literal) || synchronousGit(literal)) return true;
+    if(words[0]==='RTK_DISABLED=1') words.shift();
     if (words[0]==='rm') {
       let options=true, operands=0;
       for (const word of words.slice(1)) {
@@ -259,7 +268,7 @@ export function foregroundCommand(command) {
     if (words[0]==='head' || words[0]==='tail') return words.slice(1).every(w=>!w.startsWith('-') || /^-(?:n)?[0-9]+$/.test(w) || w==='-n');
     if (words[0]==='sed') return words[1]==='-n' && /^\d+(?:,\d+)?p$/.test(words[2]??'') && words.slice(3).every(w=>!w.startsWith('-'));
     if (words[0]!=='node') return false;
-    if (words[1]==='--test') return words.slice(2).every(w=>!w.startsWith('-') || /^--test-(?:reporter|name-pattern|concurrency)=.+$/.test(w));
+    if (words[1]==='--test') return words.slice(2).every(w=>!w.startsWith('-') || (/^--test-(?:reporter|name-pattern|concurrency)=.+$/.test(w) || /^--test-isolation=(?:none|process)$/.test(w)));
     if (!/^(?:\.\/)?services\/codeworks\/components\/cli\.mjs$/.test(words[1]??'') || !['build','check','package','run','plan','validate'].includes(words[2])) return false;
     return words.slice(3).every(w=>!w.startsWith('-') || ['--base','--root','--no-deps'].includes(w));
   };
@@ -372,16 +381,29 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   }
   const projects = config.projects ?? [];
   const eventName = event.hook_event_name ?? 'PreToolUse';
-  if (['PostToolUse', 'Stop', 'SubagentStop', 'Interrupt', 'SessionEnd'].includes(eventName)) {
-    if (!event.session_id || !event.turn_id || (eventName === 'PostToolUse' && !event.tool_use_id)) return eventName==='PostToolUse'?{systemMessage:'POST_DELIVERY_UNAVAILABLE: отсутствует идентификатор вызова.'}:{};
-    const shellPost = eventName === 'PostToolUse' && ['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1));
+  const shellName=['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1));
+  const marker=event.tool_execution_end, markerPresent=marker!==undefined, markerValid=marker && marker.version===1 && typeof marker.ready==='boolean';
+  const isEnd=eventName==='ToolExecutionEnd';
+  if(shellName && (event.tool_input?.cwd_unavailable===true || (event.tool_input?.cwd_unavailable===false && (typeof event.tool_input?.cwd!=='string' || !path.isAbsolute(event.tool_input.cwd))))) {
+    if(eventName==='PreToolUse') return denied('Рабочий каталог shell недоступен; запись отклонена.',projects);
+    if(eventName==='PostToolUse'||isEnd) return {systemMessage:'POST_DELIVERY_UNAVAILABLE: рабочий каталог shell недоступен.'};
+  }
+  if(isEnd && (!markerValid || !marker.ready || event.tool_name?.split('.').at(-1)!=='Bash' || event.tool_response?.execution_status!=='completed' || !Number.isInteger(event.tool_response?.exit_code) || event.tool_response.exit_code < -2147483648 || event.tool_response.exit_code > 2147483647 || typeof event.tool_response.isError!=='boolean' || event.tool_response.isError!==(event.tool_response.exit_code!==0)))return {systemMessage:'POST_DELIVERY_UNAVAILABLE: недостоверное завершение.'};
+  if (['PostToolUse', 'ToolExecutionEnd', 'Stop', 'SubagentStop', 'Interrupt', 'SessionEnd'].includes(eventName)) {
+    if (!event.session_id || !event.turn_id || (['PostToolUse','ToolExecutionEnd'].includes(eventName) && !event.tool_use_id)) return ['PostToolUse','ToolExecutionEnd'].includes(eventName)?{systemMessage:'POST_DELIVERY_UNAVAILABLE: отсутствует идентификатор вызова.'}:{};
+    const shellPost = ['PostToolUse','ToolExecutionEnd'].includes(eventName) && ['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1));
     if (shellPost && (event.tool_input===undefined || event.tool_input===null)) return {systemMessage:'POST_DELIVERY_UNAVAILABLE: отсутствует вход вызова.'};
+    const response=event.tool_response;
+    if(eventName==='PostToolUse' && response?.execution_status!==undefined && (!['completed','not_started'].includes(response.execution_status) || (response.execution_status==='not_started' && (response.isError!==true || response.terminal!==true)))) return {systemMessage:'POST_DELIVERY_UNAVAILABLE: неподтверждённое состояние запуска.'};
+    const notStarted=response?.execution_status==='not_started' && response?.isError===true && response?.terminal===true;
+    if(eventName==='PostToolUse' && shellPost && markerPresent && !notStarted) {
+      if(!markerValid || !marker.ready)return {systemMessage:'POST_DELIVERY_UNAVAILABLE: подтверждение завершения недоступно.'};
+      return {};
+    }
     const finished = shellPost && completedShell(event);
-    // AIDEV-NOTE: Только распознанный завершённый foreground вызов снимает учёт; произвольный shell может оставить потомков.
-    if (shellPost && (!foregroundCommand(event.tool_input?.command ?? event.tool_input?.cmd) || !finished)) return {};
-    if (eventName === 'PostToolUse') {
-      const response=event.tool_response;
-      if(response?.execution_status!==undefined && (!['completed','not_started'].includes(response.execution_status) || (response.execution_status==='not_started' && (response.isError!==true || response.terminal!==true)))) return {systemMessage:'POST_DELIVERY_UNAVAILABLE: неподтверждённое состояние запуска.'};
+    // AIDEV-NOTE: Доказанный not_started не запускал shell; остальные требуют foreground и terminal Post.
+    if (shellPost && !notStarted && (!foregroundCommand(event.tool_input?.command ?? event.tool_input?.cmd) || !finished)) return {};
+    if (eventName === 'PostToolUse' || isEnd) {
       const name=event.tool_name?.split('.').at(-1);
       if (!shellPost && !['apply_patch','Write','Edit','MultiEdit'].includes(name)) return {};
       const input=event.tool_input;
@@ -390,7 +412,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
         const scoped=projects.some(p=>[p.repo_path,p.workspace_root].some(root=>typeof root==='string' && path.isAbsolute(root) && inside(resolved(root,'/'),resolved(cwd,'/'))));
         return scoped?{systemMessage:'POST_DELIVERY_UNAVAILABLE: отсутствует вход вызова; область удерживается для сверки.'}:{};
       }
-      if (shellPost && readOnlyShell(input?.command ?? input?.cmd)) return {};
+      if (shellPost && readOnlyShell(input?.command ?? input?.cmd)) return isEnd?{acknowledged:true}:{};
       const files=writePaths(event);
       const paths=[...files,...(shellPost?[resolved(cwd,'/')]:[])];
       const ids=[...new Set(projects.filter(project=>{
@@ -401,18 +423,18 @@ async function runHookInner(event, {env = process.env, config, connect = connect
         const exceptions=[...(project.documentation_paths??[]),...(project.excluded_paths??[])].map(p=>resolved(p,root));
         return paths.some(file=>inside(root,file)&&!exceptions.some(exception=>inside(exception,file)));
       }).map(p=>p.id))];
-      if (!ids.length) return {};
+      if (!ids.length) return isEnd?{acknowledged:true}:{};
       let client,notices=[];
       try {
         validateSpool(config.completion_spool);
         const clientConfig=await loadClientConfig(env);
-        const notStarted=event.tool_response?.execution_status==='not_started' && event.tool_response?.isError===true && event.tool_response?.terminal===true;
         const outcome=event.tool_response?.isError || event.tool_response?.error || (Number.isInteger(event.tool_response?.exit_code)&&event.tool_response.exit_code!==0) ? 'error' : 'success';
         for(const project_id of ids){
           const request={project_id,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,input_sha256:rawHash(input),canonical_input_sha256:canonicalHash(input),outcome,execution_status:notStarted?'not_started':'completed'};
           const notice={version:2,executor_id:clientConfig.executorId,request};
           notices.push({notice,...saveNotice(config.completion_spool,notice)});
         }
+        if(isEnd)return {acknowledged:true};
         client=await connect(clientConfig);
         let deliveryIssue=null;
         for(const item of notices){
@@ -468,6 +490,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     return denied('WRITER_COMPLETION_UNSUPPORTED: используйте native файловые инструменты или поддерживаемую команду проверки компонента.', [...areas.values()].map(a=>a.project));
   }
   if (areas.size === 1) {
+    if(shell && markerPresent && (!markerValid || !marker.ready))return denied('TOOL_EXECUTION_END_UNAVAILABLE: подтверждение завершения недоступно.',[...areas.values()].map(a=>a.project));
     if(!inputFits(event,input)) return denied('HOOK_INPUT_TOO_LARGE: размер записи превышает допустимый предел.', [...areas.values()].map(a=>a.project));
     try { validateSpool(config.completion_spool); } catch { return denied('POST_DELIVERY_UNAVAILABLE: журнал завершений недоступен.', [...areas.values()].map(a=>a.project)); }
     return existingWrite(event,[...areas.values()][0],{env,connect,files,shell,cwd,input,name});
@@ -485,6 +508,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   if (matching.length !== 1 || files.some(file => !inside(root, file) || excluded.some(p => inside(p, file)))) return deny('Разделите запись по владельцам и исключениям.');
   // AIDEV-NOTE: Shell может содержать непрозрачный код; он не создаёт область и не переписывается.
   if (!['apply_patch', 'Write', 'Edit'].includes(name)) return deny('Используйте native файловую запись для подготовки области.');
+  if(shell && markerPresent && (!markerValid || !marker.ready))return deny('TOOL_EXECUTION_END_UNAVAILABLE: подтверждение завершения недоступно.');
   if(!inputFits(event,input)) return deny('HOOK_INPUT_TOO_LARGE: размер записи превышает допустимый предел.');
   try { validateSpool(config.completion_spool); } catch { return deny('POST_DELIVERY_UNAVAILABLE: журнал завершений недоступен.'); }
   const key = env.CODEWORKS_WORKSPACE_KEY;

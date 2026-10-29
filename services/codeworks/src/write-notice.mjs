@@ -1,7 +1,7 @@
 // ABOUTME: Сохраняет метаданные завершённых native вызовов для повторной доставки.
 // ABOUTME: Не хранит содержимое входа или вывода и не удостоверяет источник события.
 import {createHash,randomUUID} from 'node:crypto';
-import {constants as C,openSync,closeSync,writeFileSync,readFileSync,fsyncSync,fstatSync,lstatSync,realpathSync,readdirSync,linkSync,unlinkSync} from 'node:fs';
+import {constants as C,openSync,closeSync,writeFileSync,readFileSync,fsyncSync,fstatSync,lstatSync,realpathSync,opendirSync,linkSync,unlinkSync} from 'node:fs';
 import path from 'node:path';
 const MAX_BYTES=16*1024,MAX_FILES=4096;
 const sort=value=>Array.isArray(value)?value.map(sort):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,sort(value[key])])):value;
@@ -42,7 +42,8 @@ function readEntry(dir,id){
 /** Сначала синхронизирует файл и каталог; не заменяет существующую запись. */
 export function saveNotice(dir,notice,{checkpoint=()=>{}}={}){
   validateSpool(dir);const bytes=ensureNotice(notice),id=noticeId(notice),target=path.join(dir,id+'.json');
-  if(readdirSync(dir).length>=MAX_FILES){try{const old=readEntry(dir,id);if(old.bytes.equals(bytes))return {id};throw Error('WRITE_CALL_MISMATCH');}catch(error){if(error.code==='ENOENT')throw Error('NOTICE_SPOOL_FULL');throw error;}}
+  let count=0;const directory=opendirSync(dir);try{while(directory.readSync())if(++count>=MAX_FILES)break;}finally{directory.closeSync();}
+  if(count>=MAX_FILES){try{const old=readEntry(dir,id);if(old.bytes.equals(bytes))return {id};throw Error('WRITE_CALL_MISMATCH');}catch(error){if(error.code==='ENOENT')throw Error('NOTICE_SPOOL_FULL');throw error;}}
   const temp=path.join(dir,'.'+randomUUID()+'.tmp');let created=false;
   try{
     const fd=openSync(temp,C.O_WRONLY|C.O_CREAT|C.O_EXCL|C.O_NOFOLLOW,0o600);created=true;
@@ -69,24 +70,28 @@ function recoverTemp(dir,name) {
     syncDir(dir);return {id,notice};
   } finally {closeSync(fd);}
 }
-/** Сканирует ограниченный журнал; испорченная запись не блокирует соседние. */
-export function scanNotices(dir){
-  validateSpool(dir);const names=readdirSync(dir);if(names.length>MAX_FILES)throw Error('NOTICE_SPOOL_FULL');const out=[];
-  for(const name of names.sort()){
-    const match=name.match(/^([a-f0-9]{64})\.json$/);
-    if(!match){
-      if(/^\.[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.tmp$/.test(name)){try{out.push(recoverTemp(dir,name));}catch{out.push({id:null,error:'NOTICE_INVALID'});}continue;}
-      out.push({id:null,error:'NOTICE_INVALID'});continue;
-    }
-    try{out.push({id:match[1],notice:readEntry(dir,match[1]).notice});}
-    catch{out.push({id:match[1],error:'NOTICE_INVALID'});}
-  }
-  return out;
+/** Выбирает ограниченную порцию из потока каталога, включая циклический обход по id. */
+export function scanNotices(dir,{projectId,cursor=null,limit=MAX_FILES}={}){
+  validateSpool(dir);
+  if((projectId!==undefined&&(typeof projectId!=='string'||!projectId))||!(cursor===null||/^[a-f0-9]{64}$/.test(cursor))||!Number.isInteger(limit)||limit<1||limit>MAX_FILES)throw Error('NOTICE_INVALID');
+  const chosen=[],errors=[];const rank=id=>cursor!==null&&id<=cursor?1:0;
+  const compare=(a,b)=>rank(a.id)-rank(b.id)||a.id.localeCompare(b.id);
+  const select=entry=>{if(projectId!==undefined&&entry.notice.request.project_id!==projectId)return;if(chosen.some(existing=>existing.id===entry.id))return;chosen.push(entry);chosen.sort(compare);if(chosen.length>limit)chosen.pop();};
+  const directory=opendirSync(dir);
+  try{let item;while((item=directory.readSync())){
+    const name=item.name,match=name.match(/^([a-f0-9]{64})\.json$/);
+    try{
+      if(match)select({id:match[1],notice:readEntry(dir,match[1]).notice});
+      else if(/^\.[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.tmp$/.test(name))select(recoverTemp(dir,name));
+      else if(errors.length<limit)errors.push({id:null,error:'NOTICE_INVALID'});
+    }catch{if(errors.length<limit)errors.push({id:match?.[1]??null,error:'NOTICE_INVALID'});}
+  }}finally{directory.closeSync();}
+  return chosen.concat(errors.slice(0,limit-chosen.length));
 }
 /** Возвращает ограниченную порцию записей конкретного проекта до лимита. */
-export function listNotices(dir,{projectId,limit=32}={}){
-  if(typeof projectId!=='string'||!projectId||!Number.isInteger(limit)||limit<1||limit>MAX_FILES)throw Error('NOTICE_INVALID');
-  return scanNotices(dir).filter(entry=>entry.notice?.request.project_id===projectId).slice(0,limit);
+export function listNotices(dir,{projectId,limit=32,cursor=null}={}){
+  if(typeof projectId!=='string'||!projectId)throw Error('NOTICE_INVALID');
+  return scanNotices(dir,{projectId,limit,cursor}).filter(entry=>entry.notice);
 }
 /** Удаляет только прежнюю запись после durable подтверждения получателя. */
 export function ackNotice(dir,id,notice){

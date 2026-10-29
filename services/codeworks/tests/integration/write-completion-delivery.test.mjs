@@ -63,7 +63,8 @@ test('durable Post survives inspect outage and lost ack, then Temporal retries w
  await f.owner.query("UPDATE codeworks.write_completions SET next_attempt_at=now()-interval '1 second' WHERE write_call_id=$1",[a.id]);
  const id=`codeworks/completion-fixture/${p.id}/reconciler`,queue='completion-delivery-'+randomUUID();
  connection=await Connection.connect({address:process.env.CODEWORKS_TEMPORAL_ADDRESS,connectTimeout:'5 seconds'});client=new Client({connection,namespace:process.env.CODEWORKS_TEMPORAL_NAMESPACE});native=await NativeConnection.connect({address:process.env.CODEWORKS_TEMPORAL_ADDRESS});
- const bundle=await bundleWorkflowCode({workflowsPath:fileURLToPath(new URL('../../src/workflows.cjs',import.meta.url))}),adapters=createActivityGit(),index=createCodeIndex(f.app);
+ const bundle=await bundleWorkflowCode({workflowsPath:fileURLToPath(new URL('../../src/workflows.cjs',import.meta.url))}),baseAdapters=createActivityGit(),index=createCodeIndex(f.app);let slowPasses=0;
+ const adapters={...baseAdapters,git:{...baseAdapters.git,inspect:async(...args)=>{if(!slowPasses++){await sleep(11000);}return baseAdapters.git.inspect(...args);}}};
  const makeWorker=()=>Worker.create({connection:native,namespace:process.env.CODEWORKS_TEMPORAL_NAMESPACE,taskQueue:queue,workflowBundle:bundle,activities:createActivities(f.app,{allowedRepositories:[p.repo_path],adapters,codeIndex:index,completionSpoolDirectory:spool})});
  await (await makeWorker()).runUntil(async()=>{
   handle=await client.workflow.start('codeworksProjectReconciler',{workflowId:id,taskQueue:queue,args:[{projectId:p.id}]});
@@ -76,7 +77,7 @@ test('durable Post survives inspect outage and lost ack, then Temporal retries w
  await (await makeWorker()).runUntil(async()=>{
   await until(async()=>(await f.app.query('SELECT state FROM codeworks.write_completions WHERE write_call_id=$1',[active.id])).rows[0]?.state==='done');
   await until(async()=>(await f.app.query('SELECT state FROM codeworks.cleanup_obligations WHERE id=$1',[obligation])).rows[0]?.state==='done');
-  const history=await handle.fetchHistory();assert.ok(history.events.some(e=>e.activityTaskScheduledEventAttributes?.activityType?.name==='reconcileProject'));
+  const history=await handle.fetchHistory();assert.ok(history.events.some(e=>e.activityTaskScheduledEventAttributes?.activityType?.name==='reconcileProject'));assert.ok(slowPasses>0,'real inspect exceeded heartbeat timeout');assert.ok(!history.events.some(e=>e.activityTaskTimedOutEventAttributes),'slow completion reconciliation remains heartbeating');
  });
 });
 

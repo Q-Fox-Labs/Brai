@@ -49,3 +49,12 @@ test('legacy v1 notices remain readable and v2 records explicit execution status
  assert.throws(()=>saveNotice(d,{...v2,request:{...v2.request,outcome:'success'}}),/NOTICE_INVALID/);
  assert.throws(()=>saveNotice(d,{...v2,request:{...v2.request,execution_status:'other'}}),/NOTICE_INVALID/);
 });
+
+
+test('overfull journal drains valid notices with cursor despite invalid files',t=>{
+ const d=dir(t),a=notice('brai','a'),b=notice('brai','b'),first=saveNotice(d,a),second=saveNotice(d,b);
+ for(let i=0;i<4097;i++)writeFileSync(path.join(d,'invalid-'+String(i).padStart(5,'0')),'',{mode:0o600});
+ assert.throws(()=>saveNotice(d,notice('brai','new')),/NOTICE_SPOOL_FULL/);assert.equal(saveNotice(d,a).id,first.id);
+ const ids=[first.id,second.id].sort();const one=scanNotices(d,{projectId:'brai',limit:1});assert.equal(one[0].id,ids[0]);const two=scanNotices(d,{projectId:'brai',limit:1,cursor:one[0].id});assert.equal(two[0].id,ids[1]);assert.equal(scanNotices(d,{projectId:'brai',limit:1,cursor:two[0].id})[0].id,ids[0]);
+ ackNotice(d,first.id,a);ackNotice(d,second.id,b);assert.equal(readdirSync(d).length,4097);
+});

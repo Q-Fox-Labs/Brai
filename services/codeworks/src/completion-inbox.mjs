@@ -97,12 +97,11 @@ export async function processProjectCompletions(pool,projectId,{allowedRepositor
   if(spoolDirectory) {
     const project=(await pool.query('SELECT config FROM codeworks.projects WHERE id=$1',[projectId])).rows[0]?.config;
     if(!project||!allowedRepositories?.includes(project.repo_path))throw new Fault('FORBIDDEN');
-    let scanned;
-    try {scanned=await list(spoolDirectory);}
-    catch {deliveryErrors++;scanned=[];}
     const cursor=(await pool.query('SELECT completion_spool_cursor FROM codeworks.execution_control WHERE project_id=$1',[projectId])).rows[0]?.completion_spool_cursor??null;
-    const entries=scanned.filter(entry=>entry.notice?.request.project_id===projectId).sort((a,b)=>a.id.localeCompare(b.id));
-    const batch=[...entries.filter(e=>!cursor||e.id>cursor),...entries.filter(e=>cursor&&e.id<=cursor)].slice(0,32);
+    let scanned;
+    try {scanned=await list(spoolDirectory,{projectId,cursor,limit:32});}
+    catch {deliveryErrors++;scanned=[];}
+    const batch=scanned.filter(entry=>entry.notice?.request.project_id===projectId);
     deliveryErrors+=scanned.filter(entry=>entry.error).length;
     for(const entry of batch) {
       try {

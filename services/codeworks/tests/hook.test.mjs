@@ -287,3 +287,64 @@ test('durable not_started fence acknowledges only a valid exact receipt',async()
   }finally{rmSync(isolated,{recursive:true,force:true});}
  }
 });
+
+
+test('typed shell not_started creates durable fence for unsupported and background calls',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id;
+ for(const input of [{command:'python3 script.py',cwd:root,cwd_unavailable:false},{command:'node --test tests/a',cwd:root,cwd_unavailable:false,run_in_background:true}]) {
+  const isolated=mkdtempSync('/tmp/cw-shell-fence-');try{const calls=[];const cfg={completion_spool:isolated,projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};const connect=async()=>({call:async(method,args)=>{calls.push({method,args});return {state:'not_started',write_call_id:null,receipt_sha256:'a'.repeat(64)};},close(){}});
+   const event={...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',cwd:root,tool_input:input,tool_response:{execution_status:'not_started',isError:true,terminal:true}};assert.deepEqual(await runHook(await readHookJSON([JSON.stringify(event)]),{config:cfg,env,connect}),{});assert.equal(calls.length,1);assert.equal(calls[0].method,'write.finish');assert.equal(calls[0].args.execution_status,'not_started');assert.equal(calls[0].args.canonical_input_sha256,canonicalHash(input));assert.equal(listNotices(isolated,{projectId:'demo'}).length,0);
+   for(const response of [{execution_status:'not_started',isError:true},{execution_status:'not_started',terminal:true}]) {calls.length=0;const result=await runHook({...event,tool_response:response},{config:cfg,env,connect});assert.match(result.systemMessage,/POST_DELIVERY_UNAVAILABLE/);assert.equal(calls.length,0);}
+   calls.length=0;await runHook({...event,tool_response:{execution_status:'completed'}},{config:cfg,env,connect});assert.equal(calls.length,0);
+  }finally{rmSync(isolated,{recursive:true,force:true});}
+ }
+});
+test('unavailable or invalid trusted shell cwd denies pre and never finishes post',async()=>{
+ const f=fixture();f.options.connect=()=>assert.fail('must not connect');for(const input of [{command:'node --test tests/a',cwd:null,cwd_unavailable:true},{command:'node --test tests/a',cwd:'relative',cwd_unavailable:false}]){
+  const pre={...patch(valid),tool_name:'Bash',tool_input:input};assert.equal((await runHook(pre,f.options)).hookSpecificOutput.permissionDecision,'deny');assert.match((await runHook({...pre,hook_event_name:'PostToolUse',tool_response:{execution_status:'not_started',isError:true,terminal:true}},f.options)).systemMessage,/POST_DELIVERY_UNAVAILABLE/);
+ }
+});
+
+
+test('RTK wrapper preserves trusted cwd read-only and exact admitted mutation',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,calls=[];
+ const cfg={completion_spool:spool,projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};validate(method,args);if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:id};return {};},close(){}});
+ for(const command of ['rtk git status --short','rtk git diff --stat','rtk ls -la src','rtk rg -n pattern src','rtk grep -n pattern src','rtk read src/a','rtk find src -type f -name \'*.mjs\'']) {const event={...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command,cwd:root,cwd_unavailable:false}};assert.deepEqual(await runHook(event,{config:cfg,env,connect}),{},command);assert.equal(calls.length,0);}
+ for(const command of ['rtk git -c core.hooksPath=/tmp status','rtk git diff --ext-diff','rtk rg --pre evil pattern src','rtk grep --pre evil pattern src','rtk find src -delete','rtk find src -exec sh -c evil','rtk find src -fprint output']) {const event={...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command,cwd:root,cwd_unavailable:false}};assert.equal((await runHook(event,{config:cfg,env,connect})).hookSpecificOutput.permissionDecision,'deny',command);assert.equal(calls.length,0);}
+ const input={command:'rtk git add -A',cwd:root,cwd_unavailable:false},event={...patch(valid),cwd:root,tool_name:'Bash',tool_input:input};assert.equal((await runHook(event,{config:cfg,env,connect})).hookSpecificOutput.permissionDecision,'allow');assert.equal(calls.at(-1).args.completion_input_sha256,canonicalHash(input));
+});
+test('node test isolation allows only known synchronous modes',()=>{for(const command of ['node --test --test-isolation=none tests/a','node --test --test-isolation=process tests/a'])assert.equal(foregroundCommand(command),true);for(const command of ['node --test --test-isolation=other tests/a','node --test --test-isolation=none tests/a &'])assert.equal(foregroundCommand(command),false);});
+
+
+test('only RTK_DISABLED=1 prefix preserves safe admission and terminal identity',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,calls=[];const cfg={completion_spool:spool,projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};validate(method,args);if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:id};if(method==='write.finish')return {state:'finished'};return {};},close(){}});
+ const event=command=>({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command,cwd:root,cwd_unavailable:false}});
+ assert.deepEqual(await runHook(event('RTK_DISABLED=1 git diff --check'),{config:cfg,env,connect}),{});assert.equal(calls.length,0);
+ for(const command of ['RTK_DISABLED=1 node --test --test-isolation=none tests/a','RTK_DISABLED=1 node services/codeworks/components/cli.mjs run codeworks','RTK_DISABLED=1 git add -A']){calls.length=0;const e=event(command);assert.equal((await runHook(e,{config:cfg,env,connect})).hookSpecificOutput.permissionDecision,'allow');assert.equal(calls.find(c=>c.method==='write.begin').args.original_input_sha256,canonicalHash(e.tool_input));assert.equal(calls.find(c=>c.method==='write.admit').args.completion_input_sha256,canonicalHash(e.tool_input));await runHook({...e,hook_event_name:'PostToolUse',tool_response:'completed'},{config:cfg,env,connect});assert.equal(calls.at(-1).args.canonical_input_sha256,canonicalHash(e.tool_input));}
+ for(const command of ['PATH=/tmp git status','LD_PRELOAD=/tmp/evil git status','GIT_CONFIG=/tmp/c git status','NODE_OPTIONS=--inspect node --test tests/a','RTK_DISABLED=0 git diff --check','RTK_DISABLED=1 NODE_OPTIONS=--inspect node --test tests/a']){calls.length=0;assert.equal((await runHook(event(command),{config:cfg,env,connect})).hookSpecificOutput.permissionDecision,'deny',command);assert.equal(calls.length,0);}
+});
+
+
+test('native ToolExecutionEnd durably acknowledges without RPC and suppresses ordinary Post',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,isolated=mkdtempSync('/tmp/cw-end-');try{
+  const cfg={completion_spool:isolated,projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};let calls=0;const connect=()=>{calls++;throw Error('offline');};
+  const input={command:'node --test tests/a',cwd:root,cwd_unavailable:false},base={...patch(valid),cwd:root,tool_name:'Bash',tool_input:input,tool_execution_end:{version:1,ready:true}};
+  assert.deepEqual(await runHook({...base,hook_event_name:'PostToolUse',tool_response:'finished'},{config:cfg,env,connect}),{});assert.equal(listNotices(isolated,{projectId:'demo'}).length,0);
+  const end={...base,hook_event_name:'ToolExecutionEnd',tool_response:{execution_status:'completed',exit_code:1,isError:true}};
+  assert.deepEqual(await runHook(await readHookJSON([JSON.stringify(end)]),{config:cfg,env,connect}),{acknowledged:true});assert.equal(calls,0);let entries=listNotices(isolated,{projectId:'demo'});assert.equal(entries.length,1);assert.equal(entries[0].notice.request.canonical_input_sha256,canonicalHash(input));assert.equal(entries[0].notice.request.outcome,'error');
+  assert.deepEqual(await runHook(end,{config:cfg,env,connect}),{acknowledged:true});assert.equal(listNotices(isolated,{projectId:'demo'}).length,1);assert.deepEqual(await runHook({...base,hook_event_name:'PostToolUse',tool_response:'finished'},{config:cfg,env,connect}),{});
+  for(const event of [{...end,tool_execution_end:undefined},{...end,tool_execution_end:{version:1,ready:false}},{...end,tool_response:{execution_status:'completed',exit_code:null,isError:false}},{...end,tool_response:{execution_status:'completed',exit_code:0,isError:'no'}},{...end,tool_response:{execution_status:'completed',exit_code:0,isError:true}},{...end,tool_response:{execution_status:'completed',exit_code:1,isError:false}}]) assert.match((await runHook(event,{config:cfg,env,connect})).systemMessage,/POST_DELIVERY_UNAVAILABLE/);
+ }finally{rmSync(isolated,{recursive:true,force:true});}
+});
+test('native end pairing denies protected writes when unavailable but allows reads and legacy',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,cfg={completion_spool:spool,projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};let calls=0;const connect=async()=>({call:async(method)=>{calls++;if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:id};return {};},close(){}});
+ for(const marker of [{version:1,ready:false},{version:2,ready:true}]){const e={...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:'node --test tests/a',cwd:root,cwd_unavailable:false},tool_execution_end:marker};assert.match((await runHook(e,{config:cfg,env,connect})).hookSpecificOutput.additionalContext,/TOOL_EXECUTION_END_UNAVAILABLE/);assert.equal(calls,0);assert.deepEqual(await runHook({...e,tool_input:{...e.tool_input,command:'git status'}},{config:cfg,env,connect}),{});}
+ const legacy={...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:'node --test tests/a',cwd:root,cwd_unavailable:false}};assert.equal((await runHook(legacy,{config:cfg,env,connect})).hookSpecificOutput.permissionDecision,'allow');
+});
+
+
+test('shell-only end marker does not block native file writes',async()=>{
+ const f=fixture();const r=await runHook({...patch(valid),tool_execution_end:{version:1,ready:false}},f.options);assert.equal(r.hookSpecificOutput.permissionDecision,'allow');assert.deepEqual(f.calls.map(c=>c.method),['write.begin','status','write.admit']);
+});
