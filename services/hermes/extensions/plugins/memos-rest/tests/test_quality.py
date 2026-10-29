@@ -4,6 +4,7 @@
 import copy
 import importlib
 import json
+import time
 from unittest.mock import patch
 
 from agent.memory_manager import MemoryManager
@@ -40,6 +41,33 @@ class QualityTests(RoutingTests):
         self.assertIn('recalled 12 memories', manager.describe_recall())
         self.assertIn('recall-11', text)
         self.assertIn('found 12 matching memories', text)
+
+    def test_search_slower_than_eight_seconds_is_delivered_by_native_manager(self):
+        self.seed_recall_facts(12)
+        manager = MemoryManager()
+        manager.add_provider(self.provider)
+        search = self.provider._search
+        def delayed(*args):
+            time.sleep(9.2)
+            return search(*args)
+        with patch.object(self.provider, '_search', side_effect=delayed):
+            text = manager.prefetch_all('sales')
+            for thread in manager._external_prefetch_threads.values():
+                thread.join(timeout=3)
+        self.assertIn('recall-11', text)
+        self.assertIn('recalled 12 memories', manager.describe_recall())
+
+    def test_real_provider_failure_replaces_previous_success_with_visible_warning(self):
+        self.seed_recall_facts(12)
+        manager = MemoryManager()
+        manager.add_provider(self.provider)
+        self.assertIn('recall-11', manager.prefetch_all('sales'))
+        self.backend.offline = True
+        text = manager.prefetch_all('another sales question')
+        self.assertIn('Память не прочитана', manager.describe_recall())
+        self.assertIn('retrieval failed for this turn', text)
+        self.assertNotIn('recalled 12', manager.describe_recall())
+        self.assertIsNone(self.provider.recall_status())
 
     def test_background_prefetch_cache_does_not_restore_six_record_limit(self):
         self.seed_recall_facts(12)
