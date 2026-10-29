@@ -6,11 +6,61 @@ import importlib
 import json
 from unittest.mock import patch
 
+from agent.memory_manager import MemoryManager
+
 from test_routing import RoutingTests
 
 
 class QualityTests(RoutingTests):
     """Проверить внешнее поведение pipeline и возобновляемого обслуживания."""
+
+    def seed_recall_facts(self, count, content='I am studying sales.'):
+        """Подготовить независимые факты автора без обращения к реальным данным."""
+        self.router_reply([self.fact()])
+        self.provider.sync_turn('I am studying sales.', '')
+        self.send()
+        base = next(r for r in self.backend.rows.values() if r['metadata']['info']['hermes_kind'] == 'fact')
+        self.backend.rows.clear()
+        for i in range(count):
+            row = copy.deepcopy(base)
+            row.update(id=f'recall-{i}', memory=content)
+            row['metadata']['info']['hermes_logical_id'] = f'fact-{i}'
+            self.backend.rows[row['id']] = row
+        self.provider.routing.router.transport = lambda _: {'cubes': ['life_intellect']}
+        # AIDEV-NOTE: Старый параметр в существующем профиле не должен вернуть потолок шесть.
+        self.cfg['top_k'] = 6
+        self.save_config()
+        self.provider.config['top_k'] = 6
+
+    def test_automatic_recall_and_native_indicator_are_not_limited_to_six(self):
+        self.seed_recall_facts(12)
+        manager = MemoryManager()
+        manager.add_provider(self.provider)
+        text = manager.prefetch_all('sales')
+        self.assertIn('recalled 12 memories', manager.describe_recall())
+        self.assertIn('recall-11', text)
+        self.assertIn('found 12 matching memories', text)
+
+    def test_background_prefetch_cache_does_not_restore_six_record_limit(self):
+        self.seed_recall_facts(12)
+        self.provider.queue_prefetch('sales')
+        self.provider._prefetch_thread.join(timeout=3)
+        self.assertFalse(self.provider._prefetch_thread.is_alive())
+        self.backend.calls.clear()
+        text = self.provider.prefetch('sales')
+        self.assertEqual(self.provider.recall_status().count, 12)
+        self.assertIn('recall-11', text)
+        self.assertFalse(any(path == '/product/search' for path, _ in self.backend.calls))
+
+    def test_automatic_recall_keeps_text_budget_and_reports_partial_selection(self):
+        self.seed_recall_facts(20, 'Sales experience. ' * 30)
+        self.provider.config['context_chars'] = 1000
+        text = self.provider.prefetch('sales')
+        self.assertLessEqual(len(text), 1000)
+        self.assertGreater(self.provider.recall_status().count, 0)
+        self.assertLess(self.provider.recall_status().count, 20)
+        self.assertIn('found 20 matching memories', text)
+        self.assertIn('memos_search and memos_read', text)
 
     def test_unresolved_authors_and_mixed_checkpoints_never_create_personal_facts(self):
         self.provider.routing.router.transport = lambda _: self.fail('Unattributed history must not be classified')
