@@ -15,12 +15,14 @@ from .router import Catalog, SemanticRouter, stable_id, QUALITY_VERSION, evidenc
 class RecallRows(list):
     """Передать выдачу и полноту поиска вместе, без общего изменяемого статуса."""
 
-    def __init__(self, rows=(), *, scanned=0, needs_sources=False, source_query='', archive_searched=False):
+    def __init__(self, rows=(), *, scanned=0, needs_sources=False, source_query='', archive_searched=False,
+                 needs_topic=False):
         super().__init__(rows)
         self.scanned = scanned
         self.needs_sources = needs_sources
         self.source_query = source_query
         self.archive_searched = archive_searched
+        self.needs_topic = needs_topic
 
 
 def lexical_order(query, rows):
@@ -306,7 +308,7 @@ class RoutedRuntime:
         return row
 
     def search(self, query, sid, top_k=None, project=None, cubes=None, include_archive=False, all_cubes=False,
-               *, expand_sources=False):
+               *, expand_sources=False, context=None):
         """Проверить всю разрешённую область и отобрать свидетельства по вопросу.
 
         Кубы задают явную область, но автоматическая классификация не закрывает
@@ -321,6 +323,11 @@ class RoutedRuntime:
             if not isinstance(cubes, list) or any(c not in self.catalog.cubes for c in cubes):
                 raise ValueError('Recall cubes are not catalogued')
         selected = self.catalog.cubes if all_cubes or cubes is None else cubes
+        plan = self.router.plan(query, context) if expand_sources else None
+        if plan:
+            query = plan['query']
+            if plan['goal'] == 'needs_topic':
+                return RecallRows(needs_topic=True, source_query=query)
         candidates, source_dates = {}, {}
         def collect(cube):
             return self.client(cube).get({})
@@ -357,18 +364,20 @@ class RoutedRuntime:
             if row['metadata']['info'].get('hermes_kind') == 'fact' else row['metadata'].get('created_at'))}
             for row in candidates.values()])
         def select(pool):
-            result = self.router.rank(query, [{'text': memory_text(row),
+            candidates = [{'text': memory_text(row),
                 'kind': row['metadata']['info'].get('hermes_kind'),
                 'status': row['metadata']['info'].get('hermes_status'),
-                'date': row.get('_source_date')} for row in pool])
+                'date': row.get('_source_date')} for row in pool]
+            result = self.router.rank(query, candidates, **({'goal': plan['goal']} if plan else {}))
             rows = [{**pool[m['index']], '_relevance': m['relevance'],
                      '_relevance_reason': m['reason']} for m in result['matches']]
             return rows, result
+        document_lookup = bool(plan and plan['goal'] == 'locate_document')
         initial = ([row for row in ordered if row['metadata']['info'].get('hermes_kind') == 'fact']
-                   if expand_sources and not include_archive else ordered)
+                   if expand_sources and not include_archive and not document_lookup else ordered)
         rows, result = select(initial)
-        scanned, archive_searched = len(initial), include_archive
-        if expand_sources and not include_archive and (not rows or result['needs_sources']):
+        scanned, archive_searched = len(initial), include_archive or document_lookup
+        if expand_sources and not archive_searched and (not rows or result['needs_sources']):
             archive = [row for row in ordered if row['metadata']['info'].get('hermes_kind') != 'fact']
             # AIDEV-NOTE: Исходники уже прочитаны с той же проверкой доступа.
             # Не перечитываем 15 кубов и не проверяем те же факты второй раз.

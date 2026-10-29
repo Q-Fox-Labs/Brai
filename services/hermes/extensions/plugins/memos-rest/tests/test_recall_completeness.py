@@ -53,7 +53,7 @@ class RecallCompletenessTests(unittest.TestCase):
         self.backend.rows['source']={'id':'source','cube':'main','memory':'The requested report: report.pdf',
             'metadata':{'user_id':'root','session_id':'neutral','info':info}}
         batches=[]
-        def rank(query,rows):
+        def rank(query,rows,**kwargs):
             batches.append(rows)
             return {'matches':[{'index':i,'relevance':'direct','reason':'Requested evidence.'} for i in range(len(rows))],
                     'needs_sources':True,'source_query':query}
@@ -63,6 +63,39 @@ class RecallCompletenessTests(unittest.TestCase):
         self.assertEqual(len(rows),31)
         self.assertTrue(rows.archive_searched)
         self.assertEqual(sum(path=='/product/get_memory' for path,_ in self.backend.calls),len(runtime.catalog.cubes))
+
+    def test_ambiguous_continuation_does_not_scan_the_entire_archive(self):
+        runtime=self.provider.routing
+        runtime.router.plan=lambda query,context: {'goal':'needs_topic','query':query}
+        text=self.provider.prefetch('Hi, let us continue.')
+        self.assertIn('Memory was not searched',text)
+        self.assertIn('Нужна тема',self.provider.recall_status().summary)
+        self.assertEqual(self.backend.calls,[])
+
+    def test_recent_turn_resolves_continuation_without_reusing_an_old_context_cache(self):
+        self.seed_facts()
+        provider=self.provider
+        plans=[]
+        def plan(query,context):
+            plans.append(context)
+            return {'goal':'evidence','query':context[0]['content']}
+        provider.routing.router.plan=plan
+        for topic in ['The studio name','The appointment price']:
+            question='Hi, I have an hour; let us continue our discussion.'
+            history=[{'role':'user','content':topic},{'role':'assistant','content':'Let us discuss it.'},
+                     {'role':'user','content':'Gateway message origin: trusted transport metadata\n'+question}]
+            provider.on_turn_start(1,question,memory_dialogue=history,context_length=500000)
+            provider.prefetch(question)
+        self.assertEqual([p[0]['content'] for p in plans],['The studio name','The appointment price'])
+
+    def test_user_notification_has_the_requested_text_and_counts_stay_separate(self):
+        self.seed_facts()
+        self.provider.context_available_tokens=400
+        self.provider.prefetch('Find the neutral facts')
+        status=self.provider.recall_status()
+        self.assertEqual(status.summary,'🧠 Найдено воспоминаний 30')
+        self.assertEqual(status.found_count,30)
+        self.assertLess(status.count,status.found_count)
 
 
 if __name__ == '__main__':

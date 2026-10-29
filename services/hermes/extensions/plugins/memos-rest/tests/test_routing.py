@@ -48,7 +48,8 @@ class RoutingTests(unittest.TestCase):
         """Изолировать модель релевантности в тестах транспорта и прав доступа."""
         provider = legacy.ProviderTests.new_provider(self, *args, **kwargs)
         if provider.routing:
-            provider.routing.router.rank = lambda query, rows: {
+            provider.routing.router.plan = lambda query, context=None: {'goal':'evidence','query':query}
+            provider.routing.router.rank = lambda query, rows, **kwargs: {
                 'matches': [{'index': i, 'relevance': 'direct', 'reason': 'Synthetic relevant evidence'}
                             for i in range(len(rows))],
                 'needs_sources': False, 'source_query': query}

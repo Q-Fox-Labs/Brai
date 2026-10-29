@@ -40,7 +40,7 @@ class QualityTests(RoutingTests):
         manager = MemoryManager()
         manager.add_provider(self.provider)
         text = manager.prefetch_all('sales')
-        self.assertIn('найдено 12; передано 12', manager.describe_recall())
+        self.assertIn('🧠 Найдено воспоминаний 12', manager.describe_recall())
         self.assertIn('recall-11', text)
         self.assertIn('found 12 relevant evidence records', text)
 
@@ -57,7 +57,7 @@ class QualityTests(RoutingTests):
             for thread in manager._external_prefetch_threads.values():
                 thread.join(timeout=3)
         self.assertIn('recall-11', text)
-        self.assertIn('найдено 12; передано 12', manager.describe_recall())
+        self.assertIn('🧠 Найдено воспоминаний 12', manager.describe_recall())
 
     def test_real_provider_failure_replaces_previous_success_with_visible_warning(self):
         self.seed_recall_facts(12)

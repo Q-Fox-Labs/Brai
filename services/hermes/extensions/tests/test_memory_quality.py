@@ -132,6 +132,17 @@ class QualityContractTests(unittest.TestCase):
         self.assertEqual(result['matches'],[])
         self.assertTrue(result['needs_sources'])
 
+    def test_query_plan_uses_recent_dialogue_instead_of_candidate_profile_topics(self):
+        calls=[]
+        def model(payload):
+            calls.append(json.loads(payload[-1]['content']))
+            return {'goal':'evidence','query':'Which cancellation terms did we agree?'}
+        self.router.transport=model
+        context=[{'role':'user','content':'Discussing cancellation of appointments.'}]
+        result=self.router.plan('Continue',context)
+        self.assertEqual(calls,[{'recent_conversation':context,'recall_goal_query':'Continue'}])
+        self.assertIn('cancellation',result['query'])
+
     def test_outer_whitespace_is_trimmed_but_evidence_stays_exact(self):
         text='I chose this business name.'
         candidate={'text':text,'source':{'message_index':0,'role':'user','start':0,'end':999,'quote':text+' '},
