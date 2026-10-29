@@ -3,7 +3,7 @@
   "info": {
     "title": "Codeworks NATS Services",
     "version": "2.0.0",
-    "description": "service_codeworks supports PING, INFO and STATS. ACL bind executor subject segment to broker identity. Registry operations require configured admin executor. Error headers and payload are ServiceError."
+    "description": "service_codeworks supports PING, INFO and STATS. ACL bind executor subject segment to broker identity. Registry operations require configured admin executor. Error headers and payload are ServiceError. Optional project.web_preview enables two pre-merge web slots; status.preview reports the desired and independently confirmed deployed SHA without extending the lease. sync success does not imply preview readiness."
   },
   "defaultContentType": "application/json",
   "channels": {

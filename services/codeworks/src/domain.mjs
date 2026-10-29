@@ -7,6 +7,7 @@ import { Fault, safeFault } from './errors.mjs';
 import {createWriteAdmission} from './write-admission.mjs';
 import {createFlowGit} from './git-flow.mjs';
 import {verifyPublication,recheckPublication} from './publication.mjs';
+import {publicWebPreview} from './web-preview-status.mjs';
 const dto=value=>JSON.parse(JSON.stringify(value));
 const publicDTO=(name,row)=>dto(Object.fromEntries(Object.keys(schema.definitions[name].properties).filter(key=>key in row).map(key=>[key,row[key]])));
 const workspaceDTO=row=>publicDTO('workspace',row);
@@ -70,6 +71,7 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
         }
         const latest=operation??await db.latestOperation(w.id);
         const result={workspace:workspaceDTO(w),operation:latest?operationDTO(latest):null,git:null};
+        if(p.web_preview?.enabled)result.preview=publicWebPreview(await db.webPreview(p.id,w.id),p.web_preview);
         if(w.preparation_state==='ready'&&!w.removed_at){
           try{result.git=await git.inspect(p,w);}catch(error){result.inspection_error=safeFault(error).dto();}
         }

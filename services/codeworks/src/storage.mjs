@@ -14,6 +14,7 @@ function session(db) {
     conflictingProject:p=>one("SELECT id FROM codeworks.projects WHERE id<>$1 AND (config->>'common_dir'=$2 OR config->>'workspace_root'=$3)",[p.id,p.common_dir,p.workspace_root]),
     insertProject:p=>db.query('INSERT INTO codeworks.projects(id,config) VALUES($1,$2)',[p.id,p]),
     workspace:(p,id)=>one('SELECT * FROM codeworks.workspaces WHERE project_id=$1 AND id=$2',[p,id]),
+    webPreview:(p,id)=>one("SELECT v.*,CASE WHEN v.state='queued' THEN (SELECT count(*)+1 FROM codeworks.web_previews q WHERE q.project_id=v.project_id AND q.state='queued' AND q.queue_ticket<v.queue_ticket) END AS queue_position FROM codeworks.web_previews v WHERE v.project_id=$1 AND v.workspace_id=$2",[p,id]),
     workspaceByKey:(p,key)=>one('SELECT * FROM codeworks.workspaces WHERE project_id=$1 AND workspace_key=$2 ORDER BY (removed_at IS NULL) DESC,created_at DESC,id DESC LIMIT 1',[p,key]),
     workspaces:(p,limit=100,offset=0)=>db.query('SELECT * FROM codeworks.workspaces WHERE project_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3',[p,limit,offset]).then(r=>r.rows),
     insertWorkspace:w=>db.query('INSERT INTO codeworks.workspaces(id,project_id,workspace_key,kind,base_ref,base_sha,branch,path,ownership_token,activation_state) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',[w.id,w.project_id,w.workspace_key,w.kind,w.base_ref,w.base_sha,w.branch,w.path,w.ownership_token,w.activation_state??'awaiting_first_write']),

@@ -1,0 +1,146 @@
+{
+  "openrpc": "1.3.2",
+  "info": {
+    "title": "Codeworks web preview adapter",
+    "version": "1.0.0"
+  },
+  "methods": [
+    {
+      "name": "publish",
+      "params": [
+        {
+          "name": "preview_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "generation",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "state",
+        "schema": {
+          "$ref": "#/components/schemas/state"
+        }
+      }
+    },
+    {
+      "name": "inspect",
+      "params": [
+        {
+          "name": "preview_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "generation",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "state",
+        "schema": {
+          "$ref": "#/components/schemas/state"
+        }
+      }
+    },
+    {
+      "name": "remove",
+      "params": [
+        {
+          "name": "preview_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "name": "generation",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "state",
+        "schema": {
+          "$ref": "#/components/schemas/state"
+        }
+      }
+    }
+  ],
+  "components": {
+    "schemas": {
+      "state": {
+        "type": "object",
+        "required": [
+          "status",
+          "preview_id",
+          "generation",
+          "deployed_sha",
+          "image_reference"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "enum": [
+              "ready",
+              "absent",
+              "failed",
+              "pending",
+              "unknown"
+            ]
+          },
+          "preview_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "generation": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "deployed_sha": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{40}$"
+          },
+          "image_reference": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "@sha256:[0-9a-f]{64}$"
+          },
+          "error_code": {
+            "type": "string",
+            "enum": [
+              "PREVIEW_PROTOCOL_UNSUPPORTED",
+              "PREVIEW_START_FAILED",
+              "PREVIEW_SUPERSEDED"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
