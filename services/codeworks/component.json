@@ -235,7 +235,7 @@
       "Git with merge-tree --write-tree; flock (util-linux)",
       "GitHub CLI (gh), operator authentication; origin HTTPS matches registered repository",
       "Existing GitHub OAuth operator identity with repo, workflow, read:packages/write:packages; Ed25519 identity in a protected file; durable Codeworks PG evidence backup; first owner catalog-v1 publication links the repository and inherits its Actions read access",
-      "Temporal server compatible with SDK 1.24.0; configured namespace and task queue; Codeworks migration 011"
+      "Temporal server compatible with SDK 1.24.0; configured namespace and task queue; Codeworks migration 012"
     ]
   },
   "deploy": {
