@@ -107,10 +107,12 @@ async function restoreOutputs(item,c,root,commands) {
 }
 function runtimeContext(root,c,payload) {
   const context=mkdtempSync(join(root,'tmp/ci-context-'));mkdirSync(join(context,'payload'));cpSync(payload.path,join(context,'payload'),{recursive:true,verbatimSymlinks:true});
-  const base=c.delivery.kind==='oci-context'?json(join(root,'services/codeworks/ci/toolchain.json')).nodeBase:'scratch';
+  const toolchain=json(join(root,'services/codeworks/ci/toolchain.json'));
+  const base=c.delivery.kind==='oci-context'?toolchain.nodeBase:'scratch';
   const command=c.delivery.command??(c.delivery.entrypoints.length?['node',posix.relative(c.directory,c.delivery.entrypoints[0])]:[]);
   const workdir=c.delivery.kind==='oci-context'?`/payload/${c.directory}`:'/payload';
-  writeFileSync(join(context,'Dockerfile'),`FROM ${base}\nCOPY payload/ /payload/\nWORKDIR ${workdir}\n${c.delivery.kind==='oci-context'?`CMD ${JSON.stringify(command)}\n`:''}`);
+  const python=c.id==='game-core';
+  writeFileSync(join(context,'Dockerfile'),`${python?`FROM ${toolchain.pythonBase} AS planning_python\n`:''}FROM ${base}\n${python?'COPY --from=planning_python /usr/local/ /opt/brai-python/\nRUN ln -s /opt/brai-python/bin/python3 /usr/bin/python3\n':''}COPY payload/ /payload/\nWORKDIR ${workdir}\n${c.delivery.kind==='oci-context'?`CMD ${JSON.stringify(command)}\n`:''}`);
   return context;
 }
 /** Выполняет зафиксированный plan; commands/registry — явные порты для изолированной проверки ошибок. */
@@ -163,6 +165,11 @@ export async function executePlan(cfg,registry,plan,{repositoryRoot=root,command
           const t=Date.now(),built=await commands('docker',[...args,entry.context]);entry.packageMs+=Date.now()-t;entry.layerCacheHits=(built.stdout+'\n'+built.stderr).match(/\bCACHED\b/g)?.length??0;
           const script="import{execFileSync}from'node:child_process';\n"+c.delivery.entrypoints.filter(p=>/\.(?:mjs|cjs|js)$/.test(p)).map(p=>`execFileSync(process.execPath,['--check',${JSON.stringify('/payload/'+p)}]);`).join('\n')+'\n'+c.delivery.smokeImports.map(p=>`await import(${JSON.stringify('file:///payload/'+p)}${p.endsWith('.json')?",{with:{type:'json'}}":''});`).join('\n');
           const checked=Date.now();await commands('docker',['run','--rm','--pull','never','--network','none','--read-only','--entrypoint','node',entry.externalImage,'--input-type=module','--eval',script]);entry.checkMs+=Date.now()-checked;
+          if(c.id==='game-core') {
+            const checked=Date.now();
+            await commands('docker',['run','--rm','--pull','never','--network','none','--read-only','--tmpfs','/tmp:size=33554432,uid=1000,gid=1000,mode=1777','--user','1000:1000','--entrypoint','node',entry.externalImage,'/payload/services/game-core/planning/smoke.mjs']);
+            entry.checkMs+=Date.now()-checked;
+          }
         }
       }
       prepared.set(item.id,entry);finished.add(item.id);

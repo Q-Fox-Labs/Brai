@@ -1,3 +1,5 @@
+# ABOUTME: Описывает настройки поиска и контекста MemOS в панели Hermes.
+# ABOUTME: Схема не ограничивает количество воспоминаний или результатов поиска.
 """Pure data schema for the Hermes Desktop/dashboard memory configuration panel."""
 
 from plugins.memory.config_schema import ProviderConfigSchema, ProviderField, KIND_NUMBER
@@ -9,7 +11,7 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         ProviderField("base_url", "Local MemOS API", default="http://127.0.0.1:8001", inline=True),
         ProviderField("user_id", "Existing owner ID", default="root", inline=True),
         ProviderField("cube_id", "Existing MemCube", default="main", inline=True),
-        ProviderField("top_k", "Recall results", kind=KIND_NUMBER, default="6"),
+        ProviderField("prefetch_timeout_seconds", "Recall wait, seconds", kind=KIND_NUMBER, default="60"),
         ProviderField("context_chars", "Maximum recalled characters", kind=KIND_NUMBER, default="6000"),
         ProviderField("relativity", "Relevance threshold", kind=KIND_NUMBER, default="0.45"),
     ),
