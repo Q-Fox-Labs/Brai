@@ -15,6 +15,7 @@ from .client import MemOSError, document_references
 
 STATUSES = {'idea', 'plan', 'decision', 'reported_done', 'verified_done', 'observation', 'preference', 'unknown'}
 QUALITY_VERSION = 'grounded-facts-v4'
+RECALL_QUALITY_VERSION = 2
 
 
 def stable_id(value):
@@ -161,7 +162,8 @@ class SemanticRouter:
                 term in resolved['query'].casefold() for term in ('отмен', 'перенос', 'предоплат'))):
             raise MemOSError('Semantic qualification failed: recall_continuation_context')
         checked.append('recall_continuation_context')
-        return {'verified': True, 'cases': checked, 'memos_writes': 0, 'version': QUALITY_VERSION}
+        return {'verified': True, 'cases': checked, 'memos_writes': 0, 'version': QUALITY_VERSION,
+                'recall_version': RECALL_QUALITY_VERSION}
 
     def _http(self, payload):
         base = str(self.config.get('base_url', 'http://172.19.0.1:8012')).rstrip('/').removesuffix('/v1')
