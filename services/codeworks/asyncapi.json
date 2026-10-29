@@ -945,7 +945,7 @@
         "payload": {
           "$ref": "./schemas/api.schema.json#/definitions/writeFinishResponse"
         },
-        "description": "Pending подтверждает запись уведомления в БД; finished содержит результат проверки; not_started подтверждает fence без созданного вызова. Подтверждение native End после fsync спула не ждёт NATS."
+        "description": "Pending подтверждает запись уведомления в БД; finished содержит результат проверки; not_started подтверждает fence без созданного вызова."
       },
       "write_stopRequest": {
         "name": "write_stopRequest",

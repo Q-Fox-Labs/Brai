@@ -382,28 +382,21 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   const projects = config.projects ?? [];
   const eventName = event.hook_event_name ?? 'PreToolUse';
   const shellName=['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1));
-  const marker=event.tool_execution_end, markerPresent=marker!==undefined, markerValid=marker && marker.version===1 && typeof marker.ready==='boolean';
-  const isEnd=eventName==='ToolExecutionEnd';
   if(shellName && (event.tool_input?.cwd_unavailable===true || (event.tool_input?.cwd_unavailable===false && (typeof event.tool_input?.cwd!=='string' || !path.isAbsolute(event.tool_input.cwd))))) {
     if(eventName==='PreToolUse') return denied('Рабочий каталог shell недоступен; запись отклонена.',projects);
-    if(eventName==='PostToolUse'||isEnd) return {systemMessage:'POST_DELIVERY_UNAVAILABLE: рабочий каталог shell недоступен.'};
+    if(eventName==='PostToolUse') return {systemMessage:'POST_DELIVERY_UNAVAILABLE: рабочий каталог shell недоступен.'};
   }
-  if(isEnd && (!markerValid || !marker.ready || event.tool_name?.split('.').at(-1)!=='Bash' || event.tool_response?.execution_status!=='completed' || !Number.isInteger(event.tool_response?.exit_code) || event.tool_response.exit_code < -2147483648 || event.tool_response.exit_code > 2147483647 || typeof event.tool_response.isError!=='boolean' || event.tool_response.isError!==(event.tool_response.exit_code!==0)))return {systemMessage:'POST_DELIVERY_UNAVAILABLE: недостоверное завершение.'};
-  if (['PostToolUse', 'ToolExecutionEnd', 'Stop', 'SubagentStop', 'Interrupt', 'SessionEnd'].includes(eventName)) {
-    if (!event.session_id || !event.turn_id || (['PostToolUse','ToolExecutionEnd'].includes(eventName) && !event.tool_use_id)) return ['PostToolUse','ToolExecutionEnd'].includes(eventName)?{systemMessage:'POST_DELIVERY_UNAVAILABLE: отсутствует идентификатор вызова.'}:{};
-    const shellPost = ['PostToolUse','ToolExecutionEnd'].includes(eventName) && ['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1));
+  if (['PostToolUse', 'Stop', 'SubagentStop', 'Interrupt', 'SessionEnd'].includes(eventName)) {
+    if (!event.session_id || !event.turn_id || (eventName==='PostToolUse' && !event.tool_use_id)) return eventName==='PostToolUse'?{systemMessage:'POST_DELIVERY_UNAVAILABLE: отсутствует идентификатор вызова.'}:{};
+    const shellPost = eventName==='PostToolUse' && ['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1));
     if (shellPost && (event.tool_input===undefined || event.tool_input===null)) return {systemMessage:'POST_DELIVERY_UNAVAILABLE: отсутствует вход вызова.'};
     const response=event.tool_response;
     if(eventName==='PostToolUse' && response?.execution_status!==undefined && (!['completed','not_started'].includes(response.execution_status) || (response.execution_status==='not_started' && (response.isError!==true || response.terminal!==true)))) return {systemMessage:'POST_DELIVERY_UNAVAILABLE: неподтверждённое состояние запуска.'};
     const notStarted=response?.execution_status==='not_started' && response?.isError===true && response?.terminal===true;
-    if(eventName==='PostToolUse' && shellPost && markerPresent && !notStarted) {
-      if(!markerValid || !marker.ready)return {systemMessage:'POST_DELIVERY_UNAVAILABLE: подтверждение завершения недоступно.'};
-      return {};
-    }
     const finished = shellPost && completedShell(event);
     // AIDEV-NOTE: Доказанный not_started не запускал shell; остальные требуют foreground и terminal Post.
     if (shellPost && !notStarted && (!foregroundCommand(event.tool_input?.command ?? event.tool_input?.cmd) || !finished)) return {};
-    if (eventName === 'PostToolUse' || isEnd) {
+    if (eventName === 'PostToolUse') {
       const name=event.tool_name?.split('.').at(-1);
       if (!shellPost && !['apply_patch','Write','Edit','MultiEdit'].includes(name)) return {};
       const input=event.tool_input;
@@ -412,7 +405,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
         const scoped=projects.some(p=>[p.repo_path,p.workspace_root].some(root=>typeof root==='string' && path.isAbsolute(root) && inside(resolved(root,'/'),resolved(cwd,'/'))));
         return scoped?{systemMessage:'POST_DELIVERY_UNAVAILABLE: отсутствует вход вызова; область удерживается для сверки.'}:{};
       }
-      if (shellPost && readOnlyShell(input?.command ?? input?.cmd)) return isEnd?{acknowledged:true}:{};
+      if (shellPost && readOnlyShell(input?.command ?? input?.cmd)) return {};
       const files=writePaths(event);
       const paths=[...files,...(shellPost?[resolved(cwd,'/')]:[])];
       const ids=[...new Set(projects.filter(project=>{
@@ -423,7 +416,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
         const exceptions=[...(project.documentation_paths??[]),...(project.excluded_paths??[])].map(p=>resolved(p,root));
         return paths.some(file=>inside(root,file)&&!exceptions.some(exception=>inside(exception,file)));
       }).map(p=>p.id))];
-      if (!ids.length) return isEnd?{acknowledged:true}:{};
+      if (!ids.length) return {};
       let client,notices=[];
       try {
         validateSpool(config.completion_spool);
@@ -434,7 +427,6 @@ async function runHookInner(event, {env = process.env, config, connect = connect
           const notice={version:2,executor_id:clientConfig.executorId,request};
           notices.push({notice,...saveNotice(config.completion_spool,notice)});
         }
-        if(isEnd)return {acknowledged:true};
         client=await connect(clientConfig);
         let deliveryIssue=null;
         for(const item of notices){
@@ -490,7 +482,6 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     return denied('WRITER_COMPLETION_UNSUPPORTED: используйте native файловые инструменты или поддерживаемую команду проверки компонента.', [...areas.values()].map(a=>a.project));
   }
   if (areas.size === 1) {
-    if(shell && markerPresent && (!markerValid || !marker.ready))return denied('TOOL_EXECUTION_END_UNAVAILABLE: подтверждение завершения недоступно.',[...areas.values()].map(a=>a.project));
     if(!inputFits(event,input)) return denied('HOOK_INPUT_TOO_LARGE: размер записи превышает допустимый предел.', [...areas.values()].map(a=>a.project));
     try { validateSpool(config.completion_spool); } catch { return denied('POST_DELIVERY_UNAVAILABLE: журнал завершений недоступен.', [...areas.values()].map(a=>a.project)); }
     return existingWrite(event,[...areas.values()][0],{env,connect,files,shell,cwd,input,name});
@@ -508,7 +499,6 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   if (matching.length !== 1 || files.some(file => !inside(root, file) || excluded.some(p => inside(p, file)))) return deny('Разделите запись по владельцам и исключениям.');
   // AIDEV-NOTE: Shell может содержать непрозрачный код; он не создаёт область и не переписывается.
   if (!['apply_patch', 'Write', 'Edit'].includes(name)) return deny('Используйте native файловую запись для подготовки области.');
-  if(shell && markerPresent && (!markerValid || !marker.ready))return deny('TOOL_EXECUTION_END_UNAVAILABLE: подтверждение завершения недоступно.');
   if(!inputFits(event,input)) return deny('HOOK_INPUT_TOO_LARGE: размер записи превышает допустимый предел.');
   try { validateSpool(config.completion_spool); } catch { return deny('POST_DELIVERY_UNAVAILABLE: журнал завершений недоступен.'); }
   const key = env.CODEWORKS_WORKSPACE_KEY;
