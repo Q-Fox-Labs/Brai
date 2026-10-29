@@ -3,6 +3,7 @@
 import importlib
 import unittest
 import json
+import copy
 
 from test_routing import RoutingTests
 
@@ -96,6 +97,32 @@ class RecallCompletenessTests(unittest.TestCase):
         self.assertEqual(status.summary,'🧠 Найдено воспоминаний 30')
         self.assertEqual(status.found_count,30)
         self.assertLess(status.count,status.found_count)
+
+    def test_native_manager_keeps_more_than_six_thousand_characters_within_model_budget(self):
+        self.seed_facts()
+        self.provider.context_window=500000
+        from agent.memory_manager import MemoryManager
+        manager=MemoryManager();manager.add_provider(self.provider)
+        context=manager.prefetch_all('Find all neutral facts')
+        self.assertGreater(len(context),6000)
+        self.assertIn('[29;',context)
+        self.assertEqual(self.provider.recall_status().count,30)
+
+    def test_complete_empty_archive_is_identified_without_a_false_service_error(self):
+        text=self.provider.prefetch('Find the absent synthetic topic')
+        self.assertIn('original archive included',text)
+        self.assertIn('Complete empty search',text)
+        self.assertEqual(self.provider.recall_status().summary,'🧠 Найдено воспоминаний 0')
+
+    def test_document_pointer_is_explicit_in_the_delivered_context(self):
+        self.seed_facts()
+        row=copy.deepcopy(self.backend.rows['0'])
+        row.update(id='report',memory='The final report is report-brand.pdf')
+        row['metadata']['info']['hermes_logical_id']='report'
+        self.backend.rows['report']=row
+        text=self.provider.prefetch('Find the final report')
+        self.assertIn('DOCUMENT_REFS: ["report-brand.pdf"]',text)
+        self.assertIn('files ALREADY LOCATED',text)
 
 
 if __name__ == '__main__':

@@ -452,8 +452,10 @@ class SemanticRouter:
             'Use needs_topic when neither question nor recent conversation identifies any searchable '
             'subject (for example a bare greeting or "let us continue" without history). '
             'Use locate_document when explicitly asked to find or read the actual earlier document, '
-            'including its numbered sections. Use evidence for facts, conversation content or a mixture '
-            'of independent personal questions and finding sources. A query about an unfamiliar subject '
+            'including its numbered sections, and ALL requested information belongs to that document. '
+            'Use evidence if ANY part asks about personal facts such as a preferred name, prices or '
+            'equipment, even when the same request ALSO asks to find a report. Use evidence for '
+            'conversation content. A query about an unfamiliar subject '
             'is evidence, not needs_topic: do not replace its subject with a familiar one.'},
             {'role': 'user', 'content': json.dumps({'recent_conversation': context or [],
                                                    'recall_goal_query': query}, ensure_ascii=False)}])
