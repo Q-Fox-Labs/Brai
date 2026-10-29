@@ -545,6 +545,9 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             async def send_message(self, **kwargs):
                 calls.append(('text', kwargs))
                 return SimpleNamespace(message_id=len(calls))
+            async def do_api_request(self, method, **kwargs):
+                calls.append((method, kwargs['api_kwargs']))
+                return {'message_id': len(calls)}
             async def send_media_group(self, **kwargs):
                 calls.append(('album', kwargs))
                 self.paths = [m.media.name for m in kwargs['media']]
@@ -555,16 +558,48 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         for name in ['Photo', 'Video', 'Audio', 'Document']:
             setattr(module, 'InputMedia' + name, Media)
         adapter = SimpleNamespace(_bot=Bot(), format_message=lambda value: value,
+                                  _rich_message_payload=lambda value, **kwargs: {'markdown': value, **kwargs},
                                   truncate_message=lambda value, maximum, len_fn: list(native.text_chunks(value, maximum)))
         with self.store.materialize([i['file'] for i in items], 'tg') as values:
             prepared = [{**i, 'localPath': v['localPath']} for i, v in zip(items, values)]
             with patch.dict(sys.modules, {'telegram': module}):
                 result = await native.telegram_sender(adapter, '123', {'thread_id': '77'}, 'album', prepared, False)
         self.assertEqual(result, [100, 101])
-        self.assertEqual(''.join(c[1]['text'] for c in calls if c[0] == 'text'), 'Я' * 5300)
+        self.assertEqual([c[0] for c in calls], ['sendRichMessage', 'album'])
+        self.assertEqual(calls[0][1]['rich_message']['markdown'], 'Я' * 5300)
         self.assertTrue(all(c[1]['chat_id'] == 123 and c[1]['message_thread_id'] == 77 for c in calls))
         self.assertEqual(adapter._bot.captions, [None, '1'])
         self.assertEqual(adapter._bot.bytes, [b'fixture-0', b'fixture-1'])
+
+    async def test_oversized_caption_is_sent_as_one_pdf_before_the_attachment(self):
+        item = self.items(1)[0]
+        item['caption'] = 'Полное описание. ' * 2500
+        calls = []
+        class Media:
+            def __init__(self, media, caption=None, parse_mode=None):
+                self.media, self.caption = media, caption
+        class Bot:
+            async def send_photo(self, **kwargs):
+                calls.append(('photo', kwargs))
+                return SimpleNamespace(message_id=2)
+        async def send_document(chat, content, markup, metadata, identity):
+            calls.append(('document', {'chat': chat, 'content': content, 'metadata': metadata, 'markup': markup}))
+            return {'message_id': 1}
+        telegram = ModuleType('telegram')
+        for kind in ['Photo', 'Video', 'Audio', 'Document']:
+            setattr(telegram, 'InputMedia' + kind, Media)
+        adapter = SimpleNamespace(_bot=Bot(), format_message=lambda value: value,
+                                  _rich_message_payload=lambda value, **kwargs: {'markdown': value},
+                                  send_brai_long_document=send_document)
+        with self.store.materialize([item['file']], 'tg-large-caption') as values:
+            with patch.dict(sys.modules, {'telegram': telegram}):
+                result = await native.telegram_sender(adapter, '123', {'thread_id': '77'}, 'single',
+                    [{**item, 'localPath': values[0]['localPath']}], False)
+        self.assertEqual(result, [2])
+        self.assertEqual([name for name, _ in calls], ['document', 'photo'])
+        self.assertEqual(calls[0][1]['content'], item['caption'])
+        self.assertEqual(calls[0][1]['metadata']['thread_id'], '77')
+        self.assertIsNone(calls[0][1]['markup'])
 
     async def test_caption_uses_telegram_formatter_and_does_not_fallback_to_raw_text(self):
         item = self.items(1)[0]

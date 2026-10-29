@@ -3,8 +3,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {assemble,baseline,PlanningFault} from '../dist/planning.js';
+import {createGameHandlers} from '../dist/game.js';
 
 import {fixture} from './planning-fixture.mjs';
+
+test('личный graph показывает только явный признак приёмки, без текста кандидата',async()=>{
+ const attempts=[true,false,undefined].map((approval_required,index)=>({id:String(index),move_id:'plan',status:'succeeded',
+  result:{planning:{candidate:{...(approval_required===undefined?{}:{approval_required}),private_text:'не раскрывать'}}}}));
+ const tables={elements:[],element_revisions:[],moves:[],move_attempts:attempts,resources:[],attempt_resources:[],element_resources:[]};
+ const client={query:async sql=>{const name=/^SELECT \* FROM game_core\.(\w+)/.exec(sql)?.[1];return {rows:name?tables[name]:[]};},release:()=>{}};
+ const result=await createGameHandlers({connect:async()=>client},{}).graphGet({user_id:'test-owner'});
+ assert.equal(result.attempts[0].result.planning.approval_required,true);
+ assert.equal(result.attempts[1].result.planning.approval_required,false);
+ assert.equal(Object.hasOwn(result.attempts[2].result.planning,'approval_required'),false);
+ assert.ok(!JSON.stringify(result).includes('не раскрывать'));
+});
 
 test('нормативная сборка сохраняет границы, выпуск связывает критерии и кандидат',async()=>{
  assert.equal(baseline.id,'planning-9.2-review-1.3');

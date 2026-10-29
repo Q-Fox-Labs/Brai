@@ -107,7 +107,7 @@ function publicFields(fields:Value):Value{
  return {...visible,planning:{...planning,...(criteria?{criteria:criteria.map((r:Value)=>{const {quote,...criterion}=r;return criterion;})}:{})}};
 }
 function publicMoveFields(fields:Value):Value{const {id,owner,target,previous,status,purpose,instruction,title,...visible}=fields;return visible;}
-function publicResult(result:Value|null,resourceIds:string[]):Value|null{if(!result)return result;const {resources,...visible}=result;const p=result.planning;return {...visible,...(resources?{resource_ids:resourceIds}:{}),...(p?{planning:{source_revision:p.source_revision,candidate_sha256:p.candidate_sha256,applied:p.applied}}:{})};}
+function publicResult(result:Value|null,resourceIds:string[]):Value|null{if(!result)return result;const {resources,...visible}=result;const p=result.planning;return {...visible,...(resources?{resource_ids:resourceIds}:{}),...(p?{planning:{source_revision:p.source_revision,candidate_sha256:p.candidate_sha256,applied:p.applied,...(typeof p.candidate?.approval_required==='boolean'?{approval_required:p.candidate.approval_required}:{})}}:{})};}
 async function graph(c: PoolClient, owner: string): Promise<Value> {
  const rows=async(table:string)=>(await c.query(`SELECT * FROM game_core.${table} WHERE owner_id=$1`,[owner])).rows;
  const [els,revs,mvs,ats,res,ars,ers]=await Promise.all(['elements','element_revisions','moves','move_attempts','resources','attempt_resources','element_resources'].map(rows));

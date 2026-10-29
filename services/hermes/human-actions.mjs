@@ -1,7 +1,7 @@
 // ABOUTME: Связывает доверенный Telegram callback с человеческой попыткой game-core.
 // ABOUTME: Этот порт не регистрируется в обычном MCP и не удостоверяет Telegram пользователя.
 import { fault } from './runtime.mjs';
-import { confirmationText } from './confirmation.mjs';
+import { confirmationText, needsLegacyArtifactReviewCheck } from './confirmation.mjs';
 
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).every(key => keys.includes(key));
@@ -40,6 +40,7 @@ export function createHumanActions(runtime) {
       // AIDEV-NOTE: Claimed допускает только восстановление прежнего ключа после crash до записи attemptId в Telegram.
       if (action.revisionId !== args.revisionId && action.status !== 'claimed') throw fault('STALE_ACTION');
       if (!['planned', 'claimed'].includes(action.status)) throw fault('STALE_ACTION');
+      if (needsLegacyArtifactReviewCheck(graph, move, target)) throw fault('LEGACY_RESULT_REVIEW_CHECK');
       // Claimed same-key recovery остаётся доступен для отмены даже неподдерживаемой прежней кнопки.
       if (action.status === 'planned' && action.confirmationStage === null && (!action.outputContracts?.length || action.decision === 'confirm')) throw fault('HUMAN_OUTPUT_REQUIRED');
       let inputs = args.inputResourceIds;
