@@ -99,6 +99,7 @@
       "services/codeworks/components/package-runtime.test.mjs",
       "services/codeworks/tests/contracts.test.mjs",
       "services/codeworks/tests/git-flow.test.mjs",
+      "services/codeworks/tests/historical-git.test.mjs",
       "services/codeworks/tests/integration/fixture.mjs",
       "services/codeworks/tests/integration/git-flow.test.mjs",
       "services/codeworks/tests/integration/postgres.test.mjs",

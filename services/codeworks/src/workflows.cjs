@@ -63,15 +63,18 @@ exports.codeworksWorkspace=codeworksWorkspace;
 async function codeworksProjectReconciler(state){
   let cycles=0;
   for(;;){
-    let progressed=false;
+    let progressed=false,historicalEnabled=false;
     try{
       const cursorEnabled=patched('codeworks-reconciler-cursor-v1');
       const activity=(patched('codeworks-reconciler-progress-v2')?finalization:execution);
-      const result=cursorEnabled?await activity.reconcileProject(state.projectId,state.adoptionCursor??null):await activity.reconcileProject(state.projectId);
+      historicalEnabled=patched('codeworks-historical-zero-cursor-v1');
+      const result=historicalEnabled?await activity.reconcileProject(state.projectId,state.adoptionCursor??null,state.historicalCursor??null):cursorEnabled?await activity.reconcileProject(state.projectId,state.adoptionCursor??null):await activity.reconcileProject(state.projectId);
       if(cursorEnabled)state.adoptionCursor=result?.nextCursor??null;
-      progressed=result?.state==='pending'||(cursorEnabled&&result?.hasMore===true);
+      if(historicalEnabled)state.historicalCursor=result?.nextHistoricalCursor??null;
+      progressed=result?.state==='pending'||(cursorEnabled&&result?.hasMore===true)||(historicalEnabled&&(result?.historicalHasMore===true||result?.ready===true));
     }catch{}
-    if((workflowInfo().continueAsNewSuggested||++cycles>=500)&&allHandlersFinished())await continueAsNew(state);
+    const continueAfter=historicalEnabled&&Number.isSafeInteger(state.continueAfter)&&state.continueAfter>=2&&state.continueAfter<=500?state.continueAfter:500;
+    if((workflowInfo().continueAsNewSuggested||++cycles>=continueAfter)&&allHandlersFinished())await continueAsNew(state);
     await condition(()=>false,progressed?1000:60000);
   }
 }

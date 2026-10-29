@@ -38,15 +38,18 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
   };
   return {
     /** Проектный singleton сверяет ledger, а затем исполняет только собственную обязанность. */
-    reconcileProject:async (projectId,cursor=null)=>{
+    reconcileProject:async (projectId,cursor=null,historicalCursor=null)=>{
       const id=identity();
       const control=(await pool.query("SELECT instance_id FROM codeworks.execution_control WHERE project_id=$1 AND owner='temporal'",[projectId])).rows[0];
       if(!control||id!==`codeworks/${control.instance_id}/${projectId}/reconciler`)throw Error('RECONCILER_OWNER_REQUIRED');
-      const item=await reconcileProjectLedger(pool,projectId,id,{cursor});
-      if(!item.id)return {nextCursor:item.nextCursor,hasMore:item.hasMore};
+      const item=await reconcileProjectLedger(pool,projectId,id,{cursor,historicalCursor});
+      const cursors={nextCursor:item.nextCursor,hasMore:item.hasMore,nextHistoricalCursor:item.nextHistoricalCursor,historicalHasMore:item.historicalHasMore};
+      if(!item.id)return cursors;
       let context;try{context=Context.current();}catch{}
       const beat=setInterval(()=>context?.heartbeat({obligation_id:item.id}),2000);beat.unref();
-      try{const result=await withExecutionContext({signal:context?.cancellationSignal},()=>runCleanupObligation(pool,item.id,id,{git:adapters.git,flowGit:adapters.flowGit,codeIndex,allowedRepositories,verifyTransfer,checkpoint:async()=>context?.cancellationSignal.throwIfAborted()}));return {...result,nextCursor:item.nextCursor,hasMore:item.hasMore};}
+      try{const result=await withExecutionContext({signal:context?.cancellationSignal},()=>runCleanupObligation(pool,item.id,id,{git:adapters.git,flowGit:adapters.flowGit,codeIndex,allowedRepositories,verifyTransfer,checkpoint:async()=>context?.cancellationSignal.throwIfAborted()}));
+        const ready=!!result&&(await pool.query("SELECT 1 FROM codeworks.cleanup_obligations WHERE project_id=$1 AND owner_workflow_id=$2 AND state IN ('pending','running','retry') AND (next_attempt_at IS NULL OR next_attempt_at<=now()) LIMIT 1",[projectId,id])).rowCount>0;
+        return {...result,...cursors,ready};}
       catch(error){
         await pool.query("UPDATE codeworks.cleanup_obligations SET state='retry',attempts=attempts+1,next_attempt_at=now()+interval '60 seconds',blocker='TECHNICAL_RETRY',updated_at=now() WHERE id=$1 AND owner_workflow_id=$2 AND state IN ('pending','running','retry')",[item.id,id]);
         throw error;

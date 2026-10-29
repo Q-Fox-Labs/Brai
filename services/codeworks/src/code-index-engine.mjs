@@ -36,11 +36,14 @@ export function validateCleanupSnapshot({action,project,workspace:w,manifest,che
 }
 
 /** Выполняет один fenced проход. Настройки и токен приходят от доверенного Activity, не из публичного API. */
-export async function runIndexEngine({action,config,project,workspace:w,index:owned,manifest,checkpointState}){
+export async function runIndexEngine({action,config,project,workspace:w,index:owned,manifest,checkpointState,runtimeProfile}){
   const rootAllowed=path.dirname(w.path)===project.workspace_root||manifest&&['inspect','remove'].includes(action)&&(project.legacy_workspace_roots??[]).includes(path.dirname(w.path));
   if(!['clone','update','remove','inspect'].includes(action)||owned.identity!==indexIdentity(w.path)||(!w.ownership_token&&!manifest)||!path.isAbsolute(w.path)||path.normalize(w.path)!==w.path||!rootAllowed)throw Error('INDEX_OWNERSHIP_CONFLICT');
-  const runtimeFile=typeof config.socraticodeConfig==='string'?config.socraticodeConfig:config.socraticodeConfig?.[w.kind];
+  if(runtimeProfile!==undefined&&(action!=='inspect'||typeof runtimeProfile!=='string'||!Object.hasOwn(config.socraticodeConfig??{},runtimeProfile)))throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
+  const runtimeFile=typeof config.socraticodeConfig==='string'?config.socraticodeConfig:config.socraticodeConfig?.[runtimeProfile??w.kind];
+  if(typeof runtimeFile!=='string'||!path.isAbsolute(runtimeFile))throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
   const settings=JSON.parse(await readFile(runtimeFile,'utf8'));
+  if(!settings.env?.QDRANT_URL||typeof settings.env.QDRANT_URL!=='string')throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
   const engine=config.engine;
   if(!path.isAbsolute(engine))throw Error('INDEX_ENGINE_REQUIRED');
   const root=path.dirname(engine),require=createRequire(engine);
@@ -95,7 +98,7 @@ export async function runIndexEngine({action,config,project,workspace:w,index:ow
       const snapshot=await inspect();
       validateCleanupSnapshot({action,project,workspace:w,manifest,checkpointState,snapshot});
       const hasResources=snapshot.resources.collections.length||snapshot.resources.metadataPoints.length;
-      if(action==='inspect')return snapshot;
+      if(action==='inspect')return runtimeProfile===undefined?snapshot:{...snapshot,backendScope:hash(JSON.stringify([settings.env.QDRANT_URL,prefix]))};
       if(!hasResources)return {state:'removed'};
       for(const collection of snapshot.resources.collections){assertFence();await q.deleteCollection(collection);}
       for(const name of snapshot.resources.metadataPoints.filter(name=>name!==ownerName)){assertFence();await q.delete(metadata,{points:[uuid(name)],wait:true});}

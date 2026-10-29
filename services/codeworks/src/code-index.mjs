@@ -68,6 +68,23 @@ export function createCodeIndex(pool,{configFile=process.env.CODEWORKS_CODE_INDE
       if(!settings)throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
       return exclusive(()=>invoke('inspect',settings,project,w,index,manifest,checkpointState));
     },
+    /** Проверяет все настроенные исторические backend; неполный ответ или ошибка блокируют сверку. */
+    async inspectHistorical(project,w){
+      const index=cleanupIdentity(project,w);
+      const settings=await config(),profiles=settings?.socraticodeConfig;
+      if(!profiles||typeof profiles!=='object'||Array.isArray(profiles)||!['feature','hotfix'].every(name=>typeof profiles[name]==='string'&&path.isAbsolute(profiles[name])))throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
+      const names=Object.keys(profiles).sort();
+      if(names.some(name=>typeof profiles[name]!=='string'||!path.isAbsolute(profiles[name])))throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
+      return exclusive(async()=>{
+        const observations=[];
+        for(const profile of names){
+          const snapshot=await invoke('inspect',settings,project,w,index,undefined,undefined,profile);
+          if(snapshot?.complete!==true||snapshot.identity!==index.identity||typeof snapshot.owner?.present!=='boolean'||!Array.isArray(snapshot.resources?.collections)||!Array.isArray(snapshot.resources?.metadataPoints)||!/^[0-9a-f]{64}$/.test(snapshot.backendScope??''))throw Error('INDEX_INSPECTION_INCOMPLETE');
+          observations.push({profile,snapshot});
+        }
+        return {complete:true,profiles:observations};
+      });
+    },
     /** Повторно проверяет ресурсы даже после частичной или завершённой очистки. */
     async remove(project,w,{manifest,checkpoint,checkpointState}={}){
       const index=cleanupIdentity(project,w,manifest);
@@ -101,9 +118,9 @@ function cleanupIdentity(project,w,manifest){
 }
 
 /** Отдельный процесс имеет собственные env/cache; общий MCP и службы не перенастраиваются. */
-async function invokeEngine(action,config,project,workspace,index,manifest,checkpointState){
+async function invokeEngine(action,config,project,workspace,index,manifest,checkpointState,runtimeProfile){
   const result=await command(process.execPath,[fileURLToPath(new URL('./code-index-engine.mjs',import.meta.url))],{
-    input:JSON.stringify({action,config,project,workspace,index,manifest,checkpointState}),timeout:1800000,allowFailure:true,
+    input:JSON.stringify({action,config,project,workspace,index,manifest,checkpointState,runtimeProfile}),timeout:1800000,allowFailure:true,
   });
   const value=JSON.parse(result.stdout);
   if(result.code!==0){

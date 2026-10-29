@@ -12,7 +12,7 @@ async function fixture(t,kind='feature'){
   const root=fileURLToPath(new URL('../../../tmp/',import.meta.url));await mkdir(root,{recursive:true});
   const dir=await mkdtemp(root+'code-index-');t.after(()=>rm(dir,{recursive:true,force:true}));
   const configFile=dir+'/config.json',source=kind==='feature'?'/fixture/dev':'/fixture/prod';
-  await writeFile(configFile,JSON.stringify({sources:{brai:{feature:'/fixture/dev',hotfix:'/fixture/prod'}}}));
+  await writeFile(configFile,JSON.stringify({socraticodeConfig:{feature:'/fixture/dev.json',hotfix:'/fixture/prod.json'},sources:{brai:{feature:'/fixture/dev',hotfix:'/fixture/prod'}}}));
   const w={id:'fixture',path:'/fixture/workspaces/task',base_sha:'abc',kind,ownership_token:'fixture-token',preparation_state:'ready',code_index:null};
   let active=true,locked=false,calls=[];
   const query=async(sql,args)=>{
@@ -24,8 +24,8 @@ async function fixture(t,kind='feature'){
   };
   const db={query,on(){},removeListener(){},release(){}};
   const pool={query,connect:async()=>db};let result={state:'ready'};
-  const adapter=createCodeIndex(pool,{configFile,invoke:async(action,config,p,w,index,manifest,checkpointState)=>{calls.push({action,index,manifest,checkpointState});if(result instanceof Error)throw result;return result;}});
-  return {w,source,adapter,calls,project:{id:'brai',workspace_root:'/fixture/workspaces'},setResult:v=>{result=v;},cancel:()=>{active=false;},busy:()=>{locked=true;}};
+  const adapter=createCodeIndex(pool,{configFile,invoke:async(action,config,p,w,index,manifest,checkpointState,runtimeProfile)=>{calls.push({action,index,manifest,checkpointState,runtimeProfile});if(result instanceof Error)throw result;return typeof result==='function'?result(runtimeProfile):result;}});
+  return {w,source,adapter,calls,configFile,project:{id:'brai',workspace_root:'/fixture/workspaces'},setResult:v=>{result=v;},cancel:()=>{active=false;},busy:()=>{locked=true;}};
 }
 
 for(const kind of ['feature','hotfix'])test(kind+' clones its contour once, then updates only its identity',async t=>{
@@ -117,4 +117,19 @@ test('explicit disabled policy proves absence only for new workspaces without in
   await assert.rejects(adapter.inspect(project,f.w),/INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP/);
   f.w.activation_state='active';delete project.code_index_policy;
   await assert.rejects(adapter.inspect(project,f.w),/INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP/);
+});
+
+test('historical promotion inspects every configured profile without invoking mutation',async t=>{
+  const f=await fixture(t);f.w.kind='promotion';f.w.removed_at='2026-01-01';
+  const snapshot={identity:indexIdentity(f.w.path),complete:true,owner:{present:false},resources:{collections:[],metadataPoints:[]},backendScope:'a'.repeat(64)};
+  f.setResult(snapshot);const result=await f.adapter.inspectHistorical(f.project,f.w);
+  assert.deepEqual(result,{complete:true,profiles:[{profile:'feature',snapshot},{profile:'hotfix',snapshot}]});
+  assert.deepEqual(f.calls.map(c=>[c.action,c.runtimeProfile]),[['inspect','feature'],['inspect','hotfix']]);
+  f.calls.length=0;f.setResult(profile=>{if(profile==='hotfix')throw Error('backend unavailable');return snapshot;});
+  await assert.rejects(f.adapter.inspectHistorical(f.project,f.w),/backend unavailable/);
+  assert.equal(f.calls.length,2);
+  f.calls.length=0;f.setResult({...snapshot,complete:false});
+  await assert.rejects(f.adapter.inspectHistorical(f.project,f.w),/INDEX_INSPECTION_INCOMPLETE/);
+  await writeFile(f.configFile,JSON.stringify({socraticodeConfig:{feature:'/fixture/dev.json'}}));
+  await assert.rejects(f.adapter.inspectHistorical(f.project,f.w),/INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP/);
 });

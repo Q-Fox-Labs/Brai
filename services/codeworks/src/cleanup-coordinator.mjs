@@ -64,6 +64,45 @@ export async function advanceCleanup(db,obligation,project,workspace,{git,flowGi
     return release;
   };
   if(!workspace)return wait('WORKSPACE_REQUIRED');
+  if(obligation.evidence?.historical_zero){
+    const h=obligation.evidence.historical_zero;
+    if(h.version!==1||h.mode!=='inspect_only'||h.workspace_id!==workspace.id||obligation.workspace_id!==workspace.id||obligation.project_id!==workspace.project_id||obligation.outcome!=='released'||obligation.step!=='inspect')return wait('HISTORICAL_ZERO_INVALID');
+    if(!git?.inspectHistoricalResources||!codeIndex?.inspectHistorical)return wait('HISTORICAL_INSPECTION_REQUIRED');
+    const safe=async()=>{
+      const row=await db.query(`SELECT 1 FROM codeworks.workspaces w
+        JOIN codeworks.releases r ON r.workspace_id=w.id AND r.operation_id=$3 AND r.state='succeeded'
+        JOIN codeworks.operations o ON o.id=r.operation_id AND o.workspace_id=w.id AND o.project_id=w.project_id AND o.status='succeeded'
+        WHERE w.id=$1 AND w.project_id=$2 AND w.removed_at IS NOT NULL AND w.path=$4 AND w.branch=$5 AND w.kind=$6 AND w.ownership_token IS NOT DISTINCT FROM $7
+          AND NOT EXISTS(SELECT 1 FROM codeworks.workflow_registry reg WHERE reg.workspace_id=w.id)
+          AND NOT EXISTS(SELECT 1 FROM codeworks.write_calls c WHERE c.workspace_id=w.id AND c.state IN ('preparing','in_flight','uncertain'))
+          AND NOT EXISTS(SELECT 1 FROM codeworks.operations p WHERE p.workspace_id=w.id AND NOT p.archived AND p.status IN ('pending','running','awaiting_execution','awaiting_ci','awaiting_deployment','awaiting_reconciliation'))
+          AND NOT EXISTS(SELECT 1 FROM codeworks.commands c JOIN codeworks.operations p ON p.id=c.operation_id WHERE p.workspace_id=w.id AND c.state<>'done')
+          AND NOT EXISTS(SELECT 1 FROM codeworks.release_queue q JOIN codeworks.operations p ON p.id=q.operation_id WHERE p.workspace_id=w.id AND q.state IN ('held','queued'))
+          AND NOT EXISTS(SELECT 1 FROM codeworks.workspaces other LEFT JOIN codeworks.workflow_registry reg ON reg.workspace_id=other.id WHERE other.project_id=w.project_id AND other.id<>w.id AND (other.path=w.path OR other.branch=w.branch) AND (other.removed_at IS NULL OR reg.lifecycle='active'))`,[workspace.id,project.id,h.release_operation_id,workspace.path,workspace.branch,workspace.kind,workspace.ownership_token]);
+      return !!row.rowCount;
+    };
+    if(!await safe())return wait('HISTORICAL_SCOPE_CHANGED');
+    const observations=[];
+    for(let n=0;n<2;n++){
+      await fence();
+      const gitState=await git.inspectHistoricalResources(project,workspace);
+      await fence();
+      const indexState=await codeIndex.inspectHistorical(project,workspace);
+      const profiles=indexState?.profiles;
+      if(!gitResourcesAbsent(gitState)||indexState?.complete!==true||!Array.isArray(profiles)||profiles.length<2||new Set(profiles.map(p=>p.profile)).size!==profiles.length||!profiles.some(p=>p.profile==='feature')||!profiles.some(p=>p.profile==='hotfix')||profiles.some(p=>!indexAbsent(p.snapshot)))return wait('HISTORICAL_RESOURCES_REMAIN_OR_UNKNOWN');
+      observations.push({git:gitState,index:indexState,observed_at:new Date().toISOString()});
+    }
+    await fence();await db.query('BEGIN');
+    try{
+      await db.query('SELECT id FROM codeworks.workspaces WHERE id=$1 FOR UPDATE',[workspace.id]);
+      await db.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[workspace.id]);
+      const locked=(await db.query('SELECT * FROM codeworks.cleanup_obligations WHERE id=$1 FOR UPDATE',[id])).rows[0];
+      if(!locked||Number(locked.epoch)!==epoch||locked.owner_workflow_id!==owner||!['pending','running','retry'].includes(locked.state)||canonical(locked.evidence?.historical_zero)!==canonical(h))throw Error('CLEANUP_FENCE_LOST');
+      if(!await safe()){await db.query('ROLLBACK');return await wait('HISTORICAL_SCOPE_CHANGED');}
+      const result=await db.query("UPDATE codeworks.cleanup_obligations SET state='done',step='done',blocker=NULL,result=$2::jsonb,updated_at=now() WHERE id=$1 RETURNING *",[id,JSON.stringify({scope:'historical_workspace_resources',observations})]);
+      await db.query('COMMIT');return result.rows[0];
+    }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}
+  }
   if(manifest?.protected_task_ids?.includes(workspace.id))return wait('LIVE_TASK_PROTECTED');
   if(manifest&&(await db.query("SELECT 1 FROM codeworks.workspaces w JOIN codeworks.workflow_registry r ON r.workspace_id=w.id WHERE w.project_id=$1 AND (w.id=$2 OR w.path=$3 OR w.branch=$4) AND r.lifecycle='active' LIMIT 1",[project.id,workspace.id,workspace.path,workspace.branch])).rowCount)return wait('LIVE_TASK_PROTECTED');
   if(manifest&&(await db.query("SELECT 1 FROM codeworks.operations WHERE workspace_id=$1 AND NOT archived AND kind<>'cleanup' AND status IN ('pending','running','awaiting_execution','awaiting_ci','awaiting_deployment','awaiting_reconciliation') LIMIT 1",[workspace.id])).rowCount)return wait('LIVE_TASK_PROTECTED');

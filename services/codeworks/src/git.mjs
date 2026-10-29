@@ -77,7 +77,7 @@ export function createGit({flowGit}={}) {
     if(common!==project.common_dir||top!==w.path)throw new Fault('OWNERSHIP_CONFLICT');
     return byPath;
   }
-  async function inspectResources(project,w,{manifest}={}) {
+  async function inspectResourcesCore(project,w,{manifest,historical=false}={}) {
     await topology(project);
     if(manifest)await assertCleanupRoot(project,path.dirname(w.path));
     const branchRef='refs/heads/'+w.branch, ownerRef=manifest?.ownership?.ref??ownershipRef(w);
@@ -95,8 +95,19 @@ export function createGit({flowGit}={}) {
     let head=entry?.HEAD??null,dirty=null;
     if(entry&&canonical){head=(await local(w,['rev-parse','HEAD'])).stdout;dirty=!!(await local(w,['status','--porcelain=v1','--untracked-files=all'])).stdout;}
     const flow=project.github?(flowGit??(await import('./git-flow.mjs')).createFlowGit()):null;
-    const remote=flow?await flow.remote(project,w.branch,{legacy:!!manifest}):null;
+    if(historical&&!flow)throw new Fault('GIT_FAILED','Remote cannot be established.');
+    const remote=flow?(historical?await flow.remoteHistorical(project,w.branch):await flow.remote(project,w.branch,{legacy:!!manifest})):null;
     return {tracking:{ref:trackingRef,oid:tracking},branch:{ref:branchRef,oid:branch},ownership:{ref:ownerRef,oid:owner,matches},remote:{ref:branchRef,oid:remote,known:true},worktree:{path:w.path,registered:!!entry,pathExists,head,dirty,owned,lock:entry?.locked??null}};
+  }
+  const inspectResources=(project,w,{manifest}={})=>inspectResourcesCore(project,w,{manifest});
+  /** Только чтение для старых записей без workflow, включая точный promotion ref. */
+  async function inspectHistoricalResources(project,w) {
+    if(!w||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(w.id??'')||!path.isAbsolute(w.path??'')||path.normalize(w.path)!==w.path||path.basename(w.path)!==w.id||w.path===project.repo_path)throw new Fault('INVALID_ARGUMENT');
+    const valid=w.kind==='promotion'?w.branch==='release/codeworks-'+w.id:(w.kind==='feature'||w.kind==='hotfix')&&typeof w.branch==='string'&&w.branch.startsWith(w.kind+'/');
+    if(!valid)throw new Fault('INVALID_ARGUMENT');
+    const check=await git(project,['check-ref-format','refs/heads/'+w.branch],{allowFailure:true});if(check.code!==0)throw new Fault('INVALID_ARGUMENT');
+    await assertCleanupRoot(project,path.dirname(w.path));
+    return inspectResourcesCore(project,w,{historical:true});
   }
   function authorize(project,w,expected,manifest) {
     if(!expected||expected.branch.ref!=='refs/heads/'+w.branch||expected.ownership.ref!==(manifest?.ownership?.ref??ownershipRef(w))||expected.remote.ref!==expected.branch.ref||expected.tracking?.ref!=='refs/remotes/origin/'+w.branch||expected.worktree.path!==w.path||!path.isAbsolute(w.path)||w.path===project.repo_path)throw new Fault('OWNERSHIP_CONFLICT');
@@ -136,7 +147,7 @@ export function createGit({flowGit}={}) {
     return {step,outcome:changed?'removed':'already_absent',observation:await inspectResources(project,w,{manifest})};
   }
   return {
-    inspectResources, cleanupStep,
+    inspectResources, inspectHistoricalResources, cleanupStep,
     /** Проверяет канонические каталоги и политику без изменения Git. */
     async validateProject(project) {
       await topology(project);
