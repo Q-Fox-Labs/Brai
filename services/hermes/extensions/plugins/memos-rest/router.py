@@ -112,6 +112,17 @@ class SemanticRouter:
             if (bool(facts) if required is None else required not in spheres) or spheres & forbidden:
                 raise MemOSError('Semantic qualification failed: ' + name)
             checked.append(name)
+        quote = 'Меня зовут Виктор. В своём кабинете я провожу платные массажные сеансы.'
+        fact = {'text': 'Пользователь проводит платные массажные сеансы в своём кабинете.',
+                'source': {'role': 'user', 'quote': quote}, 'status': 'observation',
+                'spheres': ['life_work'], 'projects': []}
+        reviewed = self.review([fact], [quote])
+        if len(reviewed) != 1 or reviewed[0]['memberships'] != ['life_work']:
+            raise MemOSError('Semantic qualification failed: speaker_paraphrase')
+        wrong_actor = {**fact, 'text': 'Олег проводит платные массажные сеансы в своём кабинете.'}
+        if self.review([wrong_actor], [quote]):
+            raise MemOSError('Semantic qualification failed: speaker_paraphrase')
+        checked.append('speaker_paraphrase')
         corpus = [
             {'text': 'Для своего массажного кабинета предпочитаю название «Тихая гавань».', 'kind': 'fact'},
             {'text': 'Продаю участок за городом.', 'kind': 'fact'},
@@ -320,6 +331,12 @@ class SemanticRouter:
             'supported means that the ACTUAL CANDIDATE TEXT, not merely its quote, follows from '
             'the validated source.quote, using conversation_context only to resolve its meaning. '
             'An empty additional context does not invalidate the source.quote. '
+            'Support is SEMANTIC entailment, not identical wording or grammatical person. '
+            'A direct first-person user statement may be paraphrased as "the user" or an implicit '
+            'third-person subject referring to THE SAME source speaker. This does not change the actor '
+            'and MUST NOT be rejected as unsupported merely for changing grammatical person. '
+            'The caller separately verifies author identity. Do not change a named third party into '
+            'the author, or an assistant suggestion into a user decision. '
             'standalone means the text identifies who/what '
             'it is about and states concrete useful information without missing referents. '
             'keep=true requires BOTH supported=true and standalone=true. '
