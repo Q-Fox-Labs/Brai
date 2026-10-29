@@ -218,6 +218,7 @@
     "locales/ru.yaml",
     "patches/codex-cli-single-owner.patch",
     "patches/hermes-core.patch",
+    "patches/memory-recall.patch",
     "patches/runtime-isolation.patch",
     "patches/russian-failure-notice.patch",
     "patches/telegram-media-display.patch",

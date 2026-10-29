@@ -27,6 +27,7 @@ DEFAULTS = {
     "base_url": "http://127.0.0.1:8001", "user_id": "root", "cube_id": "main",
     "relativity": 0.45, "context_chars": 6000, "excerpt_chars": 1400,
     "request_timeout": 30, "tool_write_timeout": 10, "flush_timeout": 10,
+    "prefetch_timeout_seconds": 60,
 }
 
 
@@ -223,6 +224,11 @@ class MemOSProvider(MemoryProvider):
     def name(self):
         return "memos-rest"
 
+    @property
+    def prefetch_timeout_seconds(self):
+        """Дать Hermes настроенный бюджет ожидания поиска MemOS, в секундах."""
+        return float(self.config["prefetch_timeout_seconds"])
+
     @staticmethod
     def _config(home):
         return {**DEFAULTS, **read_json_or_empty(Path(home) / "memos-rest.json")}
@@ -245,6 +251,7 @@ class MemOSProvider(MemoryProvider):
         Client(config)
         for key, low, high in (("relativity", 0, 1), ("context_chars", 1000, 20000),
                                ("excerpt_chars", 200, 6000), ("request_timeout", 1, 120),
+                               ("prefetch_timeout_seconds", 1, 300),
                                ("tool_write_timeout", 1, 60), ("flush_timeout", 1, 60)):
             if not low <= float(config[key]) <= high:
                 raise ValueError(f"Invalid MemOS setting: {key}")
@@ -466,10 +473,7 @@ class MemOSProvider(MemoryProvider):
         if is_trivial_prompt(query) or len(query.strip()) < 3:
             return ""
         sid = session_id or self.session_id
-        try:
-            key = self._recall_key(sid, query)
-        except MemOSError:
-            return ""
+        key = self._recall_key(sid, query)
         if key is None:
             return ""
         with self._lock:
@@ -480,7 +484,7 @@ class MemOSProvider(MemoryProvider):
                 return ""
         except MemOSError as exc:
             logger.warning("MemOS recall unavailable: %s", exc)
-            return ""
+            raise
         blocks = []
         guidance = (f"Automatic recall found {len(rows)} matching memories in the searched scope. "
                     "The excerpts below are a selection within the context budget. "
@@ -643,7 +647,7 @@ class MemOSProvider(MemoryProvider):
 
     def get_status_config(self, provider_config=None):
         config = self._config(get_hermes_home())
-        return {key: config[key] for key in ("base_url", "user_id", "cube_id", "context_chars")}
+        return {key: config[key] for key in ("base_url", "user_id", "cube_id", "context_chars", "prefetch_timeout_seconds")}
 
     def post_setup(self, hermes_home, config):
         """Native headless setup for this existing local deployment, with a real API check."""
