@@ -6,6 +6,13 @@ const canonical=value=>JSON.stringify(sorted(value));
 /** Проверяет неизменные записи доставки и отсутствие новой незавершённой работы. */
 export async function recheckPublication(db,project,workspace,proof,{ignoreOperationId=null,lock=false}={}) {
   if(!proof||workspace.kind!=='feature'||proof.project_id!==workspace.project_id||proof.workspace_id!==workspace.id)return false;
+  if(lock){
+    // AIDEV-NOTE: Verifier пишет deployment до installed; сохраняем тот же порядок блокировок.
+    const deployment=await db.query('SELECT operation_id FROM codeworks.deployments WHERE operation_id=$1 FOR SHARE',[proof.deployment_operation_id]);
+    if(!deployment.rowCount)return false;
+    const evidence=await db.query('SELECT codeworks.lock_publication_evidence($1,$2,$3) AS locked',[workspace.project_id,proof.deployment_operation_id,proof.deployment_evidence_id]);
+    if(evidence.rows[0]?.locked!==true)return false;
+  }
   const result=await db.query(`SELECT a.requested_sha,a.closed_at,a.state,ao.status AS original_status,
       i.operation_id AS installed_operation_id,d.commit_sha,d.target,d.project_id,d.composition_digest,d.composition,d.receipt,
       ro.status AS rollout_status,de.id AS evidence_id,de.created_at AS evidence_at,
@@ -25,7 +32,7 @@ export async function recheckPublication(db,project,workspace,proof,{ignoreOpera
       AND NOT EXISTS(SELECT 1 FROM codeworks.deployments newer JOIN codeworks.operations n ON n.id=newer.operation_id
         WHERE newer.project_id=d.project_id AND newer.target='dev' AND NOT n.archived
           AND newer.created_at>d.created_at AND (newer.receipt->>'verified') IS DISTINCT FROM 'true')
-      ${lock?'FOR SHARE OF a,ao,i,d,ro,de,b,bo':''}`,
+      ${lock?'FOR SHARE OF a,ao,d,ro,b,bo':''}`,
     [workspace.project_id,proof.original_attempt_id,proof.deployment_evidence_id,workspace.id]);
   const row=result.rows[0],receipt=row?.receipt;
   const legs=[row?.delivery_release_details?.primary,row?.delivery_release_details?.backport];

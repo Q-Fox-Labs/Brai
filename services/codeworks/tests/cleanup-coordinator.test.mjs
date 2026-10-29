@@ -85,6 +85,8 @@ test('потеря подтверждения после внешней пров
   let reads=0,removed=false,rolledBack=false;
   const db={query:async(sql)=>{
     if(sql.includes('SELECT a.requested_sha'))return {rows:++reads===1?[row]:[]};
+    if(sql.startsWith('SELECT operation_id FROM codeworks.deployments'))return {rowCount:1,rows:[{operation_id:'rollout'}]};
+    if(sql.startsWith('SELECT codeworks.lock_publication_evidence'))return {rows:[{locked:true}]};
     if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};
     if(sql.includes('SELECT 1 FROM codeworks.write_calls')||sql.includes('SELECT 1 FROM codeworks.release_queue')||sql.includes('SELECT 1 FROM codeworks.operations'))return {rowCount:0};
     if(sql.includes('SELECT * FROM codeworks.cleanup_obligations'))return {rows:[item]};
@@ -112,4 +114,54 @@ test('историческую область удаляют только пос
     const result=await advanceCleanup(db,item,{id:'project'},{id:'workspace'},{git,verifyArchive:async()=>{verified=true;if(!valid)throw Error('ARCHIVE_UNVERIFIED');}});
     assert.equal(verified,true);assert.equal(deleted,valid);assert.equal(result.state,valid?'pending':'waiting_decision');
   }
+});
+
+test('защищённые файлы проверяются перед удалением и изменённый source блокирует Git',async()=>{
+  const proof={receipt_path:'/protected/receipt.json',receipt_sha256:'a'.repeat(64)};
+  const snapshot={branch:{oid:'base'},remote:{oid:null,known:true},tracking:{oid:null},ownership:{oid:'owner'},worktree:{head:'base',pathExists:true,registered:true,dirty:false}};
+  for(const step of ['remote','worktree']){
+    const item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',outcome:'cancelled',step,state:'pending',expected:snapshot,evidence:{manifest:{filesystem_preservation:proof}}};
+    let deleted=false;const phases=[];
+    const db={query:async(sql)=>{
+      if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};
+      if(sql.includes('SELECT 1 FROM codeworks'))return {rowCount:0};
+      return {rows:[],rowCount:0};
+    }};
+    const git={inspectResources:async()=>snapshot,cleanupStep:async()=>{deleted=true;}};
+    const codeIndex={inspect:async()=>({complete:true,owner:{present:false},resources:{collections:[],metadataPoints:[]}})};
+    const error=Object.assign(Error('changed'),{code:'TARGET_CHANGED'});
+    await assert.rejects(advanceCleanup(db,item,{id:'project'},{id:'workspace',base_sha:'base'},{git,codeIndex,verifyFilesystem:async(_p,_w,actual,options)=>{assert.equal(actual,proof);phases.push(options.phase);throw error;}}),{code:'TARGET_CHANGED'});
+    assert.deepEqual(phases,['source']);assert.equal(deleted,false);
+  }
+});
+
+test('после удаления дерева проверяется сохранённый архив до финального нуля',async()=>{
+  const proof={receipt_path:'/protected/receipt.json',receipt_sha256:'a'.repeat(64)};
+  const empty={branch:{oid:null},ownership:{oid:null},remote:{known:true,oid:null},tracking:{oid:null},worktree:{registered:false,pathExists:false}};
+  const item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',outcome:'cancelled',step:'verify',state:'pending',expected:{branch:{oid:'base'},remote:{oid:null},tracking:{oid:null},worktree:{head:'base',pathExists:true,dirty:false}},evidence:{manifest:{filesystem_preservation:proof}}};
+  const phases=[];let finished=false;
+  const db={query:async(sql)=>{
+    if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};
+    if(sql.includes('SELECT 1 FROM codeworks'))return {rowCount:0};
+    if(sql.includes('SELECT * FROM codeworks.cleanup_obligations'))return {rows:[item]};
+    if(sql.includes('UPDATE codeworks.cleanup_obligations')){finished=true;return {rowCount:1,rows:[{state:'done'}]};}
+    return {rows:[],rowCount:0};
+  }};
+  const result=await advanceCleanup(db,item,{id:'project'},{id:'workspace',base_sha:'base'},{git:{inspectResources:async()=>empty},codeIndex:{inspect:async()=>({complete:true,owner:{present:false},resources:{collections:[],metadataPoints:[]}})},verifyFilesystem:async(_p,_w,_proof,{phase})=>{phases.push(phase);}});
+  assert.deepEqual(phases,['archive']);assert.equal(finished,true);assert.equal(result.state,'done');
+});
+
+test('недоступный архив не позволяет завершить даже уже пустую область',async()=>{
+  const proof={receipt_path:'/protected/receipt.json',receipt_sha256:'a'.repeat(64)};
+  const empty={branch:{oid:null},ownership:{oid:null},remote:{known:true,oid:null},tracking:{oid:null},worktree:{registered:false,pathExists:false}};
+  const item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',outcome:'cancelled',step:'inspect',state:'pending',expected:{},evidence:{manifest:{filesystem_preservation:proof}}};
+  let changed=false;
+  const db={query:async(sql)=>{
+    if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};
+    if(sql.startsWith('UPDATE codeworks'))changed=true;
+    return {rowCount:0,rows:[]};
+  }};
+  const error=Object.assign(Error('archive missing'),{code:'TARGET_CHANGED'});
+  await assert.rejects(advanceCleanup(db,item,{id:'project'},{id:'workspace',base_sha:'base'},{git:{inspectResources:async()=>empty},codeIndex:{},verifyFilesystem:async(_p,_w,_proof,{phase})=>{assert.equal(phase,'archive');throw error;}}),{code:'TARGET_CHANGED'});
+  assert.equal(changed,false);
 });

@@ -46,6 +46,15 @@ test('active work is protected and duplicate import is idempotent',async t=>{
 test('dry run validates without admission',async t=>{
  const f=await fixture(t);const result=await importCleanup(f.pool,'p',f.m,{...f,dryRun:true});assert.equal(result.state,'pending');assert.equal(f.inserts(),0);
 });
+test('invalid filesystem preservation blocks preflight and admission',async t=>{
+ const f=await fixture(t);const {manifest_sha256,...base}=f.m;
+ for(const proof of [null,false,{}]){
+  const manifest=sign({...base,filesystem_preservation:proof,disposition:{type:'archived'}});
+  await assert.rejects(importCleanup(f.pool,'p',manifest,{...f,preflight:true}),{code:'TARGET_CHANGED'});
+  await assert.rejects(importCleanup(f.pool,'p',manifest,f),{code:'TARGET_CHANGED'});
+ }
+ assert.equal(f.inserts(),0);assert.equal(f.updates(),0);
+});
 
 
 test('retained proof checks clean work, pinned source and exact remote DEV',async()=>{

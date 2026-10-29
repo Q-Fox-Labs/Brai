@@ -6,6 +6,7 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import { Fault } from './errors.mjs';
 import {executionContext} from './execution-context.mjs';
+import {verifyFilesystemPreservation} from './filesystem-preservation.mjs';
 const relative=value=>value==='.'||(!path.isAbsolute(value)&&!value.split('/').some(p=>!p||p==='.'||p==='..')&&!value.includes('\\'));
 async function exists(file) { try { return await lstat(file); } catch(error) { if(error.code==='ENOENT') return null; throw error; } }
 /** Проверяет точный разрешённый корень, включая отсутствующие компоненты, без создания каталогов. */
@@ -119,8 +120,10 @@ export function createGit({flowGit}={}) {
     if(step==='worktree'&&current.worktree.registered){
       if(!manifest&&!current.worktree.owned)throw new Fault('OWNERSHIP_CONFLICT');
       if(current.worktree.pathExists&&(current.worktree.dirty!==false||!current.worktree.owned))throw new Fault('OWNERSHIP_CONFLICT');
+      // AIDEV-NOTE: Игнорируемые файлы не входят в Git status; проверка выполняется внутри общего flock перед удалением.
+      if(manifest&&Object.hasOwn(manifest,'filesystem_preservation'))await verifyFilesystemPreservation(project,w,manifest.filesystem_preservation,{phase:current.worktree.pathExists?'source':'archive'});
       if(current.worktree.lock)await git(project,['worktree','unlock',w.path]);
-      await git(project,['worktree','remove',...(current.worktree.pathExists?[]:['--force']),w.path]);changed=true;
+      try{await git(project,['worktree','remove',...(current.worktree.pathExists?[]:['--force']),w.path]);}catch(error){if(current.worktree.lock)await git(project,['worktree','lock','--reason',current.worktree.lock,w.path],{allowFailure:true});throw error;}changed=true;
     } else if(step==='worktree'&&current.worktree.pathExists)throw new Fault('OWNERSHIP_CONFLICT');
     if(step==='local_refs'){
       if(current.worktree.registered||current.worktree.pathExists||current.remote.oid)throw new Fault('OWNERSHIP_CONFLICT');

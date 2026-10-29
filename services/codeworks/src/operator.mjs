@@ -11,6 +11,7 @@ import {createGit,command,assertCleanupRoot} from './git.mjs';
 import {createCodeIndex} from './code-index.mjs';
 import {createFlowGit} from './git-flow.mjs';
 import {verifyCleanupArchive} from './cleanup-archive.mjs';
+import {verifyFilesystemPreservation} from './filesystem-preservation.mjs';
 import {createBranchCleanup} from './branch-cleanup.mjs';
 import {attestNativeCompletion,assertRootDirectory,verifyCompletionReceipt,importNativeCompletion} from './write-completion.mjs';
 
@@ -29,7 +30,7 @@ export function validateManifest(manifest,projectId){
   if(hash(canonical(payload))!==manifest_sha256)throw Error('MANIFEST_DIGEST_MISMATCH');
   if(!/^refs\/heads\/(?:feature|hotfix|codex)\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(manifest.branch.ref??'')||manifest.remote.ref!==manifest.branch.ref)throw Error('INVALID_MANIFEST');
   if(manifest.subject_type==='branch'){
-    if(manifest.workspace_id!==null||manifest.ownership.ref!==null||manifest.ownership.oid!==null||manifest.worktree.path!==null||manifest.worktree.registered!==false||manifest.index.scope!=='not_allocated_by_codeworks'||manifest.disposition.type!=='archived'||!manifest.provenance.some(p=>p?.kind==='reflog'))throw Error('INVALID_MANIFEST');
+    if(Object.hasOwn(manifest,'filesystem_preservation')||manifest.workspace_id!==null||manifest.ownership.ref!==null||manifest.ownership.oid!==null||manifest.worktree.path!==null||manifest.worktree.registered!==false||manifest.index.scope!=='not_allocated_by_codeworks'||manifest.disposition.type!=='archived'||!manifest.provenance.some(p=>p?.kind==='reflog'))throw Error('INVALID_MANIFEST');
   }else if(!path.isAbsolute(manifest.worktree.path??'')||path.normalize(manifest.worktree.path)!==manifest.worktree.path)throw Error('INVALID_MANIFEST');
   for(const item of manifest.provenance)if(!item||!['ownership-ref','reflog','workspace-record','bundle'].includes(item.kind)||typeof item.ref!=='string'||!/^[0-9a-f]{64}$/.test(item.sha256??''))throw Error('INVALID_PROVENANCE');
   return manifest;
@@ -112,6 +113,10 @@ export async function importCleanup(pool,projectId,manifest,{git,codeIndex,dryRu
     const snapshot=await git.inspectResources(project,workspace,{manifest});
     for(const key of ['branch','remote'])if(!equal(snapshot[key],key==='remote'?{...manifest[key],known:true}:manifest[key]))throw Error('GIT_SNAPSHOT_CHANGED');
     if(snapshot.ownership.ref!==manifest.ownership.ref||snapshot.ownership.oid!==manifest.ownership.oid||snapshot.worktree.path!==manifest.worktree.path||snapshot.worktree.registered!==manifest.worktree.registered||snapshot.worktree.lock!==manifest.worktree.lock||snapshot.worktree.head!==manifest.worktree.head||snapshot.worktree.pathExists!==manifest.worktree.pathExists||snapshot.worktree.dirty!==manifest.worktree.dirty||!equal(snapshot.tracking,manifest.tracking))throw Error('GIT_SNAPSHOT_CHANGED');
+    if(Object.hasOwn(manifest,'filesystem_preservation')){
+      if(typeof snapshot.worktree.pathExists!=='boolean')throw Error('GIT_SNAPSHOT_CHANGED');
+      await verifyFilesystemPreservation(project,workspace,manifest.filesystem_preservation,{phase:snapshot.worktree.pathExists?'source':'archive'});
+    }
     const index=await codeIndex.inspect(project,workspace,{manifest});
     if(index.complete!==true)throw Error('INDEX_SNAPSHOT_UNKNOWN');
     let proven=false;
