@@ -16,7 +16,8 @@ class BusinessLegacyPrivacyTests(unittest.TestCase):
         self.send()
         row = next(iter(self.backend.rows.values()))
         row['metadata']['info']['hermes_visibility'] = 'business_private'
-        self.assertEqual(self.provider.prefetch('private sentence'), '')
+        self.assertNotIn('private sentence', self.provider.prefetch('private sentence'))
+        self.assertEqual(self.provider.recall_status().count, 0)
         for tool in ('memos_read','memos_forget'):
             result = json.loads(self.provider.handle_tool_call(tool, {'memory_id':row['id']}))
             self.assertEqual(result['status'],'not_found')
@@ -83,7 +84,8 @@ class BusinessPrivacyTests(unittest.TestCase):
             row['metadata']['info']['hermes_visibility'] = 'business_private'
             row['metadata']['info']['hermes_business_scope'] = {'owner': 'alice', 'chat': '200'}
         self.provider.routing.router.transport = lambda payload: {'cubes': ['main']}
-        self.assertEqual(self.provider.prefetch('studying sales'), '')
+        self.assertNotIn('studying sales', self.provider.prefetch('studying sales'))
+        self.assertEqual(self.provider.recall_status().count, 0)
         for identifier in ids:
             for tool in ('memos_read','memos_forget','memos_replace'):
                 result = json.loads(self.provider.handle_tool_call(tool, {'memory_id':identifier,'content':'new'}))

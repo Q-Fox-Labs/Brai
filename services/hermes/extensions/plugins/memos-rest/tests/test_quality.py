@@ -25,6 +25,8 @@ class QualityTests(RoutingTests):
         for i in range(count):
             row = copy.deepcopy(base)
             row.update(id=f'recall-{i}', memory=content)
+            client = importlib.import_module(self.provider.__class__.__module__.rsplit('.', 1)[0] + '.client')
+            row['metadata']['info'].update(client.fact_fields(content))
             row['metadata']['info']['hermes_logical_id'] = f'fact-{i}'
             self.backend.rows[row['id']] = row
         self.provider.routing.router.transport = lambda _: {'cubes': ['life_intellect']}
@@ -38,9 +40,9 @@ class QualityTests(RoutingTests):
         manager = MemoryManager()
         manager.add_provider(self.provider)
         text = manager.prefetch_all('sales')
-        self.assertIn('recalled 12 memories', manager.describe_recall())
+        self.assertIn('найдено 12; передано 12', manager.describe_recall())
         self.assertIn('recall-11', text)
-        self.assertIn('found 12 matching memories', text)
+        self.assertIn('found 12 relevant evidence records', text)
 
     def test_search_slower_than_eight_seconds_is_delivered_by_native_manager(self):
         self.seed_recall_facts(12)
@@ -55,7 +57,7 @@ class QualityTests(RoutingTests):
             for thread in manager._external_prefetch_threads.values():
                 thread.join(timeout=3)
         self.assertIn('recall-11', text)
-        self.assertIn('recalled 12 memories', manager.describe_recall())
+        self.assertIn('найдено 12; передано 12', manager.describe_recall())
 
     def test_real_provider_failure_replaces_previous_success_with_visible_warning(self):
         self.seed_recall_facts(12)
@@ -87,7 +89,7 @@ class QualityTests(RoutingTests):
         self.assertLessEqual(len(text), 1000)
         self.assertGreater(self.provider.recall_status().count, 0)
         self.assertLess(self.provider.recall_status().count, 20)
-        self.assertIn('found 20 matching memories', text)
+        self.assertIn('found 20 relevant evidence records', text)
         self.assertIn('memos_search and memos_read', text)
 
     def test_unresolved_authors_and_mixed_checkpoints_never_create_personal_facts(self):
@@ -107,7 +109,8 @@ class QualityTests(RoutingTests):
             'start': 0, 'end': len(quote), 'quote': quote}, spheres=['life_intellect'])
         def model(payload):
             data = json.loads(payload[-1]['content'])
-            return ({'reviews': [{'index': 0, 'keep': True, 'spheres': ['life_work']}]}
+            return ({'reviews': [{'index': 0, 'keep': True, 'spheres': ['life_work'],
+                                 'supported': True, 'standalone': True, 'reason': 'Useful equipment research'}]}
                     if 'candidates' in data else {'facts': [candidate]})
         self.provider.routing.router.transport = model
         self.provider.sync_turn(quote, '')
@@ -128,7 +131,8 @@ class QualityTests(RoutingTests):
 
     def test_rejected_greeting_is_archived_but_not_an_ordinary_memory(self):
         self.provider.routing.router.transport = lambda p: ({'cubes': []} if 'query' in json.loads(p[-1]['content'])
-            else {'reviews': [{'index': 0, 'keep': False, 'spheres': []}]} if 'candidates' in json.loads(p[-1]['content'])
+            else {'reviews': [{'index': 0, 'keep': False, 'spheres': [],
+                              'supported': True, 'standalone': False, 'reason': 'Greeting has no durable content'}]} if 'candidates' in json.loads(p[-1]['content'])
             else {'facts': [self.fact(text='Спасибо.', source={'message_index': 0,'role':'user','start':0,'end':8,'quote':'Спасибо.'})]})
         self.provider.sync_turn('Спасибо.', '')
         self.send()
@@ -165,11 +169,11 @@ class QualityTests(RoutingTests):
         result=json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales','top_k':1000}))
         self.assertEqual(len(result['memories']),2,'An upper bound must not invent or fill more results')
         searches=[body for path,body in self.backend.calls if path=='/product/search']
-        self.assertEqual([b['readable_cube_ids'] for b in searches],[['life_intellect']])
+        self.assertEqual(searches, [], 'Semantic review must not trust backend fallback scores')
         self.assertTrue(all(b['dedup']=='no' for b in searches))
         self.backend.calls.clear()
         self.provider.handle_tool_call('memos_search',{'query':'sales','include_archive':True})
-        self.assertTrue(any(path=='/product/search' and body['readable_cube_ids']==['main']
+        self.assertTrue(any(path=='/product/get_memory' and body['mem_cube_id']=='main'
                             for path,body in self.backend.calls))
 
     def test_maximum_does_not_force_other_topics_and_expansion_is_available(self):
@@ -182,7 +186,8 @@ class QualityTests(RoutingTests):
         self.backend.rows[other['id']]=other
         self.provider.routing.router.transport=lambda _: {'cubes':['life_intellect']}
         self.backend.calls.clear()
-        result=json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales','top_k':1000}))
+        result=json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales','top_k':1000,
+                                                                         'cubes':['life_intellect']}))
         self.assertEqual(len(result['memories']),1)
         self.assertFalse(any(p=='/product/search' and b['readable_cube_ids']==['life_body'] for p,b in self.backend.calls))
         result=json.loads(self.provider.handle_tool_call('memos_search',{'query':'sales','all_cubes':True}))

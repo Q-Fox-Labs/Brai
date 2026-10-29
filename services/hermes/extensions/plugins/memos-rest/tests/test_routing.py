@@ -44,7 +44,15 @@ class MultiBackend(Backend):
 
 class RoutingTests(unittest.TestCase):
     tearDown = legacy.ProviderTests.tearDown
-    new_provider = legacy.ProviderTests.new_provider
+    def new_provider(self, *args, **kwargs):
+        """Изолировать модель релевантности в тестах транспорта и прав доступа."""
+        provider = legacy.ProviderTests.new_provider(self, *args, **kwargs)
+        if provider.routing:
+            provider.routing.router.rank = lambda query, rows: {
+                'matches': [{'index': i, 'relevance': 'direct', 'reason': 'Synthetic relevant evidence'}
+                            for i in range(len(rows))],
+                'needs_sources': False, 'source_query': query}
+        return provider
     send = legacy.ProviderTests.send
     retry_now = legacy.ProviderTests.retry_now
 
@@ -70,7 +78,8 @@ class RoutingTests(unittest.TestCase):
         def reply(payload):
             data = json.loads(payload[-1]['content'])
             if 'candidates' in data:
-                return {'reviews': [{'index': i, 'keep': True, 'spheres': f['spheres']}
+                return {'reviews': [{'index': i, 'keep': True, 'spheres': f['spheres'],
+                                     'supported': True, 'standalone': True, 'reason': 'Synthetic supported fact'}
                                     for i, f in enumerate(data['candidates'])]}
             return {'facts': facts}
         (provider or self.provider).routing.router.transport = reply
@@ -467,7 +476,9 @@ class RoutingTests(unittest.TestCase):
         self.provider.routing.router.transport = lambda payload: {'cubes': ['life_intellect']}
         self.assertIn('studying', self.provider.prefetch('sales study'))
         self.provider.on_turn_start(2, 'same query', author_id='bob')
-        self.assertEqual(self.provider.prefetch('sales study'), '', 'cached personal recall must never cross authors')
+        self.assertNotIn('I am studying sales.', self.provider.prefetch('sales study'),
+                         'cached personal recall must never cross authors')
+        self.assertEqual(self.provider.recall_status().count, 0)
         self.provider.on_turn_start(3, 'same query', author_id='alice')
         self.assertIn('studying', self.provider.prefetch('sales study'))
         self.cfg['enabled'] = False
@@ -562,7 +573,8 @@ class RoutingTests(unittest.TestCase):
         def router(payload):
             calls.append(payload)
             if 'candidates' in json.loads(payload[-1]['content']):
-                return {'reviews':[{'index':0,'keep':True,'spheres':['life_intellect','life_work']}]}
+                return {'reviews':[{'index':0,'keep':True,'spheres':['life_intellect','life_work'],
+                                    'supported':True,'standalone':True,'reason':'Synthetic supported fact'}]}
             return {'facts': [self.fact(spheres=['life_intellect', 'life_work'])]}
         self.provider.routing.router.transport = router
         original_request = self.provider.client.request
