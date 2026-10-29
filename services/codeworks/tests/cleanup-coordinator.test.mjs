@@ -4,6 +4,28 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {advanceCleanup} from '../src/cleanup-coordinator.mjs';
 
+test('historical zero требует два полных наблюдения и не вызывает удаление',async()=>{
+  const item={id:'id',epoch:1,owner_workflow_id:'owner',workspace_id:'workspace',project_id:'project',outcome:'released',step:'inspect',state:'pending',evidence:{historical_zero:{version:1,mode:'inspect_only',release_operation_id:'release',workspace_id:'workspace'}}};
+  const empty={branch:{oid:null},ownership:{oid:null},remote:{known:true,oid:null},tracking:{oid:null},worktree:{registered:false,pathExists:false}};
+  const snapshot={complete:true,owner:{present:false},resources:{collections:[],metadataPoints:[]}};
+  for(const missing of [false,true]){
+    let gitCalls=0,indexCalls=0,saved;
+    const db={query:async(sql,values)=>{
+      if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};
+      if(sql.includes('SELECT 1 FROM codeworks.workspaces w'))return {rowCount:1};
+      if(sql.includes('SELECT * FROM codeworks.cleanup_obligations'))return {rows:[item]};
+      if(sql.includes('UPDATE codeworks.cleanup_obligations')){saved=values;return {rowCount:1,rows:[{state:sql.includes("state='done'")?'done':'waiting_decision'}]};}
+      return {rowCount:0,rows:[]};
+    }};
+    const git={inspectHistoricalResources:async()=>{gitCalls++;return empty;},cleanupStep:async()=>{throw Error('unexpected deletion');}};
+    const codeIndex={inspectHistorical:async()=>{indexCalls++;return {complete:true,profiles:[{profile:'feature',snapshot},...(missing?[]:[{profile:'hotfix',snapshot}])]};},remove:async()=>{throw Error('unexpected deletion');}};
+    const result=await advanceCleanup(db,item,{id:'project'},{id:'workspace',project_id:'project'},{git,codeIndex});
+    assert.equal(result.state,missing?'waiting_decision':'done');
+    assert.equal(gitCalls,missing?1:2);assert.equal(indexCalls,missing?1:2);
+    if(!missing)assert.equal(JSON.parse(saved[1]).observations.length,2);
+  }
+});
+
 test('transfer сохраняет отдельную изменённую ветку или tracking ref',async()=>{
   for(const changed of ['branch','tracking']){
     const expected={branch:{oid:'head'},remote:{oid:'head'},tracking:{oid:'head'},worktree:{head:'head',pathExists:true,dirty:false}};
