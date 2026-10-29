@@ -141,7 +141,7 @@
       "services/codeworks/tests/write-notice.test.mjs",
       "services/codeworks/tests/integration/write-completion-delivery.test.mjs",
       "services/codeworks/tests/integration/native-completion-bridge.mjs",
-      "services/codeworks/tests/integration/native-completion-real.test.mjs",
+      "services/codeworks/tests/integration/native-completion-real.mjs",
       "services/codeworks/tests/filesystem-preservation.test.mjs",
       "services/codeworks/tests/integration/filesystem-preservation.test.mjs",
       "services/codeworks/tests/integration/write-completion-recovery.test.mjs",
