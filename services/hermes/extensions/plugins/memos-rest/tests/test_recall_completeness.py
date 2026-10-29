@@ -124,6 +124,50 @@ class RecallCompletenessTests(unittest.TestCase):
         self.assertIn('DOCUMENT_REFS: ["report-brand.pdf"]',text)
         self.assertIn('files ALREADY LOCATED',text)
 
+    def test_verified_document_name_reaches_ranker_and_agent(self):
+        self.seed_facts()
+        runtime=self.provider.routing
+        row=copy.deepcopy(self.backend.rows['0'])
+        row.update(id='report',memory='Delivered /old/opaque-id.pdf')
+        row['metadata']['info']['hermes_logical_id']='report'
+        self.backend.rows={'report':row}
+        details={'artifactId':'11111111-1111-4111-8111-111111111111',
+                 'filename':'Vector technology and market.pdf','mimeType':'application/pdf'}
+        runtime.router.document_metadata=lambda reference: details
+        del runtime.router.rank
+        def transport(payload):
+            data=json.loads(payload[-1]['content'])
+            if 'recall_goal_query' in data:return {'goal':'locate_document'}
+            self.assertEqual(data['recall_candidates'][0]['document_metadata'],[details])
+            return {'matches':[{'index':0,'relevance':'direct','reason':'Verified report filename.'}],
+                    'needs_sources':False,'source_query':data['query']}
+        runtime.router.transport=transport
+        text=self.provider.prefetch('Read the earlier Vector report')
+        self.assertIn('DOCUMENT_METADATA:',text)
+        self.assertIn(details['filename'],text)
+        self.assertIn(details['artifactId'],text)
+
+    def test_control_completion_is_neither_archived_nor_recalled_as_a_user_turn(self):
+        messages=[{'role':'user','content':'[Alice] [ASYNC DELEGATION BATCH COMPLETE — batch-1]\n'
+                   'A background fan-out unit you dispatched earlier has finished.'},
+                  {'role':'assistant','content':'Read rules/planning.md. The desired future report is ready.'}]
+        self.assertIsNone(self.provider._archive(messages,'neutral','turn',1))
+        runtime=self.provider.routing
+        info={'hermes_kind':'turn','hermes_author_id':'alice','hermes_event_id':'control',
+              'hermes_messages':messages,'hermes_cube':'main','hermes_memberships':['main'],
+              'hermes_home_scope':runtime.home_scope,'hermes_memory_epoch':self.cfg['memory_epoch']}
+        self.backend.rows={'control':{'id':'control','cube':'main','memory':'Internal planning result.',
+            'metadata':{'user_id':'root','session_id':'neutral','info':info}}}
+        self.assertEqual(runtime.search('Find the report','neutral',include_archive=True),[])
+        client=importlib.import_module(self.provider.__class__.__module__.rsplit('.',1)[0]+'.client')
+        self.assertFalse(client.internal_dialogue([{'role':'user','content':'Explain this marker: [ASYNC DELEGATION BATCH COMPLETE]'}]))
+
+    def test_native_artifact_references_do_not_require_a_filename_suffix(self):
+        client=importlib.import_module(self.provider.__class__.__module__.rsplit('.',1)[0]+'.client')
+        aid='11111111-1111-4111-8111-111111111111'
+        self.assertEqual(client.document_references('BRAI_FILES:{"items":[{"artifactId":"'+aid+'"}]}'),
+                         ['artifact:'+aid])
+
 
 if __name__ == '__main__':
     unittest.main()

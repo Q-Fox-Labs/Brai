@@ -90,6 +90,20 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
                                text='подпись ' + message, media_urls=[str(path or self.file(message))],
                                media_types=['image/jpeg'], metadata={})
 
+    def test_reference_metadata_resolves_migrated_name_without_fetching_bytes(self):
+        path = self.file(suffix='.pdf')
+        published = self.store.publish(path, ['metadata'])
+        path.unlink()
+        shutil.rmtree(self.cache / published['artifactId'])
+        self.backend.calls.clear()
+        details = native.reference_metadata(str(path))
+        self.assertEqual(details['filename'], path.name)
+        self.assertEqual(details['artifactId'], published['artifactId'])
+        self.assertEqual(self.backend.calls, [])
+        self.assertEqual(native.reference_metadata('artifact:'+published['artifactId']),details)
+        self.assertFalse((self.cache / published['artifactId']).exists())
+        self.assertIsNone(native.reference_metadata('rules/planning.md'))
+
     def test_installation_plans_bind_two_separate_engines_and_nodes(self):
         plans = []
         for account in ('dev', 'prod'):

@@ -15,7 +15,7 @@ from .client import MemOSError, document_references
 
 STATUSES = {'idea', 'plan', 'decision', 'reported_done', 'verified_done', 'observation', 'preference', 'unknown'}
 QUALITY_VERSION = 'grounded-facts-v4'
-RECALL_QUALITY_VERSION = 2
+RECALL_QUALITY_VERSION = 3
 
 
 def stable_id(value):
@@ -162,6 +162,24 @@ class SemanticRouter:
                 term in resolved['query'].casefold() for term in ('отмен', 'перенос', 'предоплат'))):
             raise MemOSError('Semantic qualification failed: recall_continuation_context')
         checked.append('recall_continuation_context')
+        documents = [
+            {'text': 'Исправляю прежнюю выдачу: готовый PDF отправлен. MEDIA:"/delivery/opaque.pdf"', 'kind':'turn'},
+            {'text': 'TASK: Исследовать Вектор и подготовить отчёт. Прочитать inputs/brief.md и rules/plan.md. '
+                     'Желаемый итог: единый аналитический отчёт о Векторе с пунктами 8, 9 и 10.', 'kind':'turn'}]
+        previous = getattr(self, 'document_metadata', None)
+        self.document_metadata = lambda reference: ({'artifactId':'11111111-1111-4111-8111-111111111111',
+            'filename':'Вектор: технология, рынок и выводы.pdf','mimeType':'application/pdf'}
+            if reference == '/delivery/opaque.pdf' else None)
+        try:
+            query = 'Что было в пунктах 8, 9 и 10 предыдущего отчёта о Векторе? Найди и прочитай сам отчёт.'
+            result = self.rank(query, documents, goal='locate_document')
+            if {match['index'] for match in result['matches']} != {0}:
+                raise MemOSError('Semantic qualification failed: recall_opaque_document')
+            if self.rank(query, documents[1:], goal='locate_document')['matches']:
+                raise MemOSError('Semantic qualification failed: recall_opaque_document')
+        finally:
+            self.document_metadata = previous
+        checked.append('recall_opaque_document')
         return {'verified': True, 'cases': checked, 'memos_writes': 0, 'version': QUALITY_VERSION,
                 'recall_version': RECALL_QUALITY_VERSION}
 
@@ -474,7 +492,8 @@ class SemanticRouter:
         """
         if not candidates:
             return {'matches': [], 'needs_sources': False, 'source_query': query}
-        indexed = list(enumerate(candidates))
+        indexed = [(i, {**c, 'document_refs': document_references(c['text'])})
+                   for i, c in enumerate(candidates)]
         if goal is None and any(c.get('kind') in ('turn', 'explicit', 'native') for c in candidates):
             # AIDEV-NOTE: Цель определяется по вопросу ДО чтения архивных команд.
             # Для поиска самого файла нужны реальные ссылки, а не упоминание отчёта.
@@ -482,10 +501,16 @@ class SemanticRouter:
         if goal == 'needs_topic':
             return {'matches': [], 'needs_sources': False, 'source_query': query, 'needs_topic': True}
         if goal == 'locate_document':
-            indexed = [(i, {**c, 'document_refs': document_references(c['text'])})
-                       for i, c in indexed if document_references(c['text'])]
+            indexed = [(i, c) for i, c in indexed if c['document_refs']]
             if not indexed:
                 return {'matches': [], 'needs_sources': True, 'source_query': query}
+        resolver = getattr(self, 'document_metadata', None)
+        references = list(dict.fromkeys(ref for _, c in indexed for ref in c['document_refs']))
+        if resolver and references:
+            with ThreadPoolExecutor(max_workers=min(4, len(references))) as executor:
+                metadata = dict(zip(references, executor.map(resolver, references)))
+            indexed = [(i, {**c, 'document_metadata': [metadata[ref] for ref in c['document_refs']
+                                                     if metadata[ref] is not None]}) for i, c in indexed]
         batches, batch, size = [], [], 0
         for index, candidate in indexed:
             width = len(json.dumps(candidate, ensure_ascii=False))
@@ -524,6 +549,10 @@ class SemanticRouter:
                 'the topic or a fact that a report was discussed. '
                 'document_refs are actual file references present in the source. A PDF/file pointer in the '
                 'matching conversation can locate the report even when the pointer omits its formal title. '
+                'document_metadata contains verified filenames from the artifact owner, not guesses. '
+                'Use those names to identify the requested deliverable even when its historical path is an opaque ID. '
+                'A planning packet, its input brief or instruction/rules files are not the finished report. '
+                'Requirements describing a desired future report do not prove that a linked file IS that report. '
                 'Output {"matches":[{"index":0,"relevance":"direct","reason":"short relevance explanation"'
                 '}],'
                 '"needs_sources":false,"source_query":"..."}.')},
@@ -553,6 +582,7 @@ class SemanticRouter:
                             raise ValueError('EVIDENCE_NOT_IN_CANDIDATE')
                         seen.add(index)
                         selected.append({**match, 'index': batch[index][0],
+                                         'document_metadata': batch[index][1].get('document_metadata', []),
                                          'evidence': batch[index][1]['text']})
                 except (KeyError, TypeError, ValueError) as error:
                     if attempt:

@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -19,7 +20,7 @@ from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_promp
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write, read_json_or_empty
 
-from .client import Client, MemOSError, public_memory
+from .client import Client, MemOSError, public_memory, internal_dialogue
 from .outbox import Outbox
 from .schemas import TOOLS, ROUTED_TOOLS
 
@@ -58,6 +59,17 @@ def text_content(content):
         return "\n".join(part.get("text", "") for part in content if isinstance(part, dict)
                          and part.get("type") in ("text", "input_text", "output_text"))
     return ""
+
+
+def document_metadata(reference):
+    """Использовать уже подключённый owner-bound порт файлов без загрузки байтов."""
+    files = sys.modules.get('brai_files')
+    if files is None:
+        return None
+    try:
+        return files.reference_metadata(reference)
+    except Exception:
+        raise MemOSError('Document metadata lookup failed') from None
 
 
 def dialogue(messages):
@@ -210,6 +222,7 @@ def excerpt(content, query, budget):
 
 
 class MemOSProvider(MemoryProvider):
+    document_metadata = staticmethod(document_metadata)
     pre_compress_checkpoint_api_version = 2
     manages_context_budget = True
 
@@ -361,7 +374,7 @@ class MemOSProvider(MemoryProvider):
 
     def _archive(self, rows, session_id, kind, ordinal, author=None, extra=None, delete_filter=None):
         rows = dialogue(rows)
-        if not rows:
+        if not rows or kind in ('turn', 'native') and internal_dialogue(rows):
             return None
         # Position distinguishes two identical exchanges; same hook replay is idempotent.
         event_id = digest([str(self.home.resolve()), session_id, kind, ordinal, rows])
@@ -567,6 +580,8 @@ class MemOSProvider(MemoryProvider):
                       f"status={memory.get('status')}; source_date={memory.get('source_date')}]\n")
             if memory.get('document_refs'):
                 header += 'DOCUMENT_REFS: ' + json.dumps(memory['document_refs'], ensure_ascii=False) + '\n'
+            if memory.get('document_metadata'):
+                header += 'DOCUMENT_METADATA: ' + json.dumps(memory['document_metadata'], ensure_ascii=False) + '\n'
             block = header + content
             if not fits([*blocks, block]):
                 low, high, selected = 64, min(len(content), int(self.config['excerpt_chars'])), None
