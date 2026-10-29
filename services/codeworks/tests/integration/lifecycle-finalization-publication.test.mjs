@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {writeFile,access} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
+import {Pool} from 'pg';
 import {Connection,Client} from '@temporalio/client';
 import {NativeConnection,Worker,bundleWorkflowCode} from '@temporalio/worker';
 import {setup,configured,prepareWith} from './fixture.mjs';
@@ -23,7 +24,7 @@ async function until(check,timeout=60000){const end=Date.now()+timeout;while(Dat
 
 test('explicit cleanup preserves failed A after a later verified B contains its exact result',{timeout:180000},async t=>{
   assert.ok(configured&&process.env.CODEWORKS_TEMPORAL_ADDRESS&&process.env.CODEWORKS_TEMPORAL_NAMESPACE,'explicit disposable PostgreSQL and Temporal are required');
-  const f=await setup();let connection,native,client,workflow;const ids=new Set();
+  const f=await setup({strictVerifier:true});let connection,native,client,workflow;const ids=new Set();
   t.after(async()=>{for(const id of ids)await client?.workflow.getHandle(id).terminate('isolated fixture cleanup').catch(()=>{});await native?.close();await connection?.close();await f.close();});
   const project=await f.project({github:{repository:'fixture/repository',required_checks:[{name:'checks',app_id:42}]},codeIndexDisabled:true});
   const flowGit=createFlowGit({localRemote:true,requireLock:()=>{}}),git=createGit({flowGit});
@@ -51,6 +52,40 @@ test('explicit cleanup preserves failed A after a later verified B contains its 
   await f.owner.query("INSERT INTO codeworks.deployments(operation_id,project_id,target,commit_sha,run_id,attempt,composition_digest,composition,receipt,release_operation_id) VALUES($1,$2,'dev',$3,'fixture','1',$4,$5,$6,$7)",[rollout,project.id,installed,digest,composition,receipt,delivery]);
   await f.owner.query("INSERT INTO codeworks.deployment_evidence(id,project_id,target,commit_sha,evidence_url) VALUES($1,$2,'dev',$3,$4)",[evidence,project.id,installed,url]);
   await f.owner.query("INSERT INTO codeworks.installed(project_id,target,operation_id,composition) VALUES($1,'dev',$2,$3)",[project.id,rollout,composition]);
+  // Exercise the production role split: app can read but cannot write trusted verifier data.
+  for(const table of ['installed','deployment_evidence','verified_ci']){
+    for(const privilege of ['INSERT','UPDATE']){
+      const permission=await f.app.query('SELECT has_table_privilege(current_user,$1,$2) AS allowed',['codeworks.'+table,privilege]);
+      assert.equal(permission.rows[0].allowed,false,`${table} ${privilege} must remain verifier-only`);
+    }
+  }
+  await assert.rejects(f.app.query("UPDATE codeworks.installed SET composition=composition WHERE project_id=$1",[project.id]),{code:'42501'});
+  await assert.rejects(f.app.query("INSERT INTO codeworks.installed(project_id,target,operation_id,composition) VALUES($1,'dev',$2,$3)",[project.id,rollout,composition]),{code:'42501'});
+  await assert.rejects(f.app.query("UPDATE codeworks.deployment_evidence SET evidence_url=evidence_url WHERE id=$1",[evidence]),{code:'42501'});
+  await assert.rejects(f.app.query("INSERT INTO codeworks.deployment_evidence(id,project_id,target,commit_sha,evidence_url) VALUES($1,$2,'dev',$3,$4)",[randomUUID(),project.id,installed,url+'/forged']),{code:'42501'});
+  const acl=(await f.owner.query("SELECT has_function_privilege('public','codeworks.lock_publication_evidence(text,uuid,uuid)','EXECUTE') AS public_execute")).rows[0];
+  assert.equal(acl.public_execute,false);
+  const definer=(await f.owner.query("SELECT prosecdef,proconfig,pg_get_userbyid(proowner)=current_user AS owned FROM pg_proc WHERE oid='codeworks.lock_publication_evidence(text,uuid,uuid)'::regprocedure")).rows[0];
+  assert.equal(definer.prosecdef,true);assert.equal(definer.owned,true);assert.deepEqual(definer.proconfig,['search_path=pg_catalog']);
+  const verifier=new Pool({connectionString:f.config.verifier_url,max:1}),locked=await f.app.connect(),verifierClient=await verifier.connect();
+  let pending;
+  try{
+    assert.equal((await verifierClient.query("SELECT has_table_privilege(current_user,'codeworks.installed','UPDATE') AS allowed")).rows[0].allowed,true);
+    assert.equal((await verifierClient.query("SELECT has_table_privilege(current_user,'codeworks.deployment_evidence','INSERT') AS allowed")).rows[0].allowed,true);
+    assert.equal((await locked.query("SELECT has_function_privilege(current_user,'codeworks.lock_publication_evidence(text,uuid,uuid)','EXECUTE') AS allowed")).rows[0].allowed,true);
+    await locked.query('BEGIN');
+    const appPid=(await locked.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+    const verifierPid=(await verifierClient.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+    assert.equal((await locked.query('SELECT codeworks.lock_publication_evidence($1,$2,$3) AS locked',[project.id,randomUUID(),evidence])).rows[0].locked,false);
+    assert.equal((await locked.query('SELECT codeworks.lock_publication_evidence($1,$2,$3) AS locked',[project.id,rollout,randomUUID()])).rows[0].locked,false);
+    assert.equal((await locked.query('SELECT codeworks.lock_publication_evidence($1,$2,$3) AS locked',[project.id,rollout,evidence])).rows[0].locked,true);
+    pending=verifierClient.query("UPDATE codeworks.installed SET composition=composition WHERE project_id=$1 AND target='dev'",[project.id]);
+    await until(async()=>((await f.owner.query('SELECT $1::int=ANY(pg_blocking_pids($2)) AS blocked',[appPid,verifierPid])).rows[0].blocked),10000);
+    await locked.query('COMMIT');assert.equal((await pending).rowCount,1);pending=null;
+  }finally{
+    await locked.query('ROLLBACK').catch(()=>{});if(pending)await pending.catch(()=>{});
+    locked.release();verifierClient.release();await verifier.end();
+  }
   workflow='codeworks/fixture/'+project.id+'/workspace/'+w.id;
   await f.owner.query("INSERT INTO codeworks.execution_control(project_id,instance_id,owner) VALUES($1,'fixture','temporal')",[project.id]);
   await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner) VALUES($1,$2,$3,'temporal')",[workflow,project.id,w.id]);

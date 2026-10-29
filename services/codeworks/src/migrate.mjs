@@ -19,7 +19,7 @@ export async function migrate(pool, appRole, verifierRole) {
     const { rowCount } = await db.query('SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=$1)', [appRole]);
     if (rowCount) throw new Error('APP_ROLE_MEMBERSHIP_FORBIDDEN');
     await db.query('CREATE TABLE IF NOT EXISTS public.codeworks_migrations(version integer PRIMARY KEY, sha256 text NOT NULL)');
-    for(const version of [1,2,3,4,5,6,7,8,9,10,11]) {
+    for(const version of [1,2,3,4,5,6,7,8,9,10,11,12]) {
       const sql=await readFile(new URL('../migrations/'+String(version).padStart(3,'0')+'.sql',import.meta.url),'utf8');
       const sha=createHash('sha256').update(sql).digest('hex');
       const applied=(await db.query('SELECT sha256 FROM public.codeworks_migrations WHERE version=$1',[version])).rows[0];
@@ -29,6 +29,8 @@ export async function migrate(pool, appRole, verifierRole) {
     const wrongOwner=(await db.query("SELECT 1 FROM pg_class WHERE relnamespace='codeworks'::regnamespace AND relowner<>(SELECT oid FROM pg_roles WHERE rolname=$1)",[owner.role])).rowCount;
     const schemaOwner=(await db.query("SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname='codeworks'")).rows[0]?.owner;
     if(wrongOwner||schemaOwner!==owner.role)throw new Error('SCHEMA_OWNER_MISMATCH');
+    const helper=(await db.query("SELECT pg_get_userbyid(proowner) AS owner,prosecdef,proconfig @> ARRAY['search_path=pg_catalog'] AS safe_path FROM pg_proc WHERE oid=to_regprocedure('codeworks.lock_publication_evidence(text,uuid,uuid)')")).rows[0];
+    if(!helper||helper.owner!==owner.role||helper.prosecdef!==true||helper.safe_path!==true)throw new Error('PUBLICATION_LOCK_HELPER_INVALID');
     await db.query('REVOKE CREATE ON SCHEMA public FROM PUBLIC');
     await db.query(`REVOKE CREATE ON SCHEMA public FROM ${quote(appRole)}`);
     await db.query('REVOKE ALL ON SCHEMA codeworks FROM PUBLIC');
@@ -37,6 +39,8 @@ export async function migrate(pool, appRole, verifierRole) {
     await db.query(`GRANT USAGE ON SCHEMA codeworks TO ${quote(appRole)}`);
     await db.query(`GRANT SELECT,INSERT,UPDATE ON ALL TABLES IN SCHEMA codeworks TO ${quote(appRole)}`);
     await db.query(`GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA codeworks TO ${quote(appRole)}`);
+    await db.query(`REVOKE ALL ON FUNCTION codeworks.lock_publication_evidence(text,uuid,uuid) FROM PUBLIC,${quote(appRole)}`);
+    await db.query(`GRANT EXECUTE ON FUNCTION codeworks.lock_publication_evidence(text,uuid,uuid) TO ${quote(appRole)}`);
     await db.query(`REVOKE UPDATE ON codeworks.verified_ci FROM ${quote(appRole)}`);
     if(verifierRole){
       const v=(await db.query('SELECT rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=$1',[verifierRole])).rows[0];

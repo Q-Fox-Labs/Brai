@@ -85,6 +85,8 @@ test('потеря подтверждения после внешней пров
   let reads=0,removed=false,rolledBack=false;
   const db={query:async(sql)=>{
     if(sql.includes('SELECT a.requested_sha'))return {rows:++reads===1?[row]:[]};
+    if(sql.startsWith('SELECT operation_id FROM codeworks.deployments'))return {rowCount:1,rows:[{operation_id:'rollout'}]};
+    if(sql.startsWith('SELECT codeworks.lock_publication_evidence'))return {rows:[{locked:true}]};
     if(sql.includes('SELECT 1 FROM codeworks.cleanup_obligations'))return {rowCount:1};
     if(sql.includes('SELECT 1 FROM codeworks.write_calls')||sql.includes('SELECT 1 FROM codeworks.release_queue')||sql.includes('SELECT 1 FROM codeworks.operations'))return {rowCount:0};
     if(sql.includes('SELECT * FROM codeworks.cleanup_obligations'))return {rows:[item]};

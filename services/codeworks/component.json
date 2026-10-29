@@ -79,6 +79,7 @@
       "services/codeworks/migrations/009.sql",
       "services/codeworks/migrations/010.sql",
       "services/codeworks/migrations/011.sql",
+      "services/codeworks/migrations/012.sql",
       "services/codeworks/src/write-admission.mjs",
       "services/codeworks/src/write-completion.mjs",
       "services/codeworks/src/filesystem-preservation.mjs",
@@ -141,6 +142,7 @@
       "services/codeworks/tests/branch*.test.mjs",
       "services/codeworks/tests/disposition.test.mjs",
       "services/codeworks/tests/publication.test.mjs",
+      "services/codeworks/tests/integration/publication-restore-acl.mjs",
       "services/codeworks/tests/integration/*finalization*.mjs",
       "services/codeworks/scripts/accept-finalization.mjs"
     ]

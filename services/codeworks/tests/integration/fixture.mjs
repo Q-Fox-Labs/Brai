@@ -31,11 +31,16 @@ export async function readConfig() {
   return config;
 }
 /** Применяет owner migrations только в указанной test DB и создаёт реальные Git fixtures. */
-export async function setup({git=createGit(),command=runCommand}={}) {
+export async function setup({git=createGit(),command=runCommand,strictVerifier=false}={}) {
   const config=await readConfig();
   const owner=new Pool({connectionString:config.owner_url,max:4}),app=new Pool({connectionString:config.app_url,max:8});
-  await migrate(owner,config.app_role);
-  await migrate(owner,config.app_role);
+  if(strictVerifier){
+    if(!config.verifier_role||!config.verifier_url)throw new Error('VERIFIER_FIXTURE_REQUIRED');
+    const verifier=new URL(config.verifier_url),appUrl=new URL(config.app_url);
+    if(!['postgres:','postgresql:'].includes(verifier.protocol)||verifier.pathname!==appUrl.pathname||verifier.hostname!==appUrl.hostname||verifier.port!==appUrl.port||decodeURIComponent(verifier.username)!==config.verifier_role||config.verifier_role===config.app_role)throw new Error('DISPOSABLE_VERIFIER_REQUIRED');
+  }
+  await migrate(owner,config.app_role,strictVerifier?config.verifier_role:undefined);
+  await migrate(owner,config.app_role,strictVerifier?config.verifier_role:undefined);
   await owner.query('TRUNCATE codeworks.requests,codeworks.legacy_attachments,codeworks.releases,codeworks.operations,codeworks.workspaces,codeworks.projects CASCADE');
   const allowedRepositories=[];
   const h=createHandlers(createStore(app),git,{allowedRepositories});
