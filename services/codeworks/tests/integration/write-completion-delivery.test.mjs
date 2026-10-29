@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
-import {mkdir} from 'node:fs/promises';
+import {mkdir,writeFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {Connection,Client} from '@temporalio/client';
 import {NativeConnection,Worker,bundleWorkflowCode} from '@temporalio/worker';
@@ -18,6 +18,7 @@ import {processProjectCompletions} from '../../src/completion-inbox.mjs';
 import {reconcileProjectLedger} from '../../src/reconciler.mjs';
 import {rawHash,canonicalHash,listNotices} from '../../src/write-notice.mjs';
 import {runHook} from '../../src/hook.mjs';
+import {importNativeCompletion,validateCompletionReceipt} from '../../src/write-completion.mjs';
 
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function until(fn,timeout=120000){const end=Date.now()+timeout;while(Date.now()<end){if(await fn())return;await sleep(100);}throw Error('COMPLETION_DELIVERY_TIMEOUT');}
@@ -120,4 +121,31 @@ test('not-started fences late begin and completes only the exact failed invocati
  assert.equal((await f.h.call('write.finish',post(lost),'codex')).state,'pending');await reconcileProjectLedger(f.app,p.id,'fixture-reconciler');
  const bound=(await f.app.query('SELECT workspace_id,operation_id FROM codeworks.write_calls WHERE id=$1',[callId])).rows[0];assert.equal(bound.workspace_id,w.id);assert.equal(bound.operation_id,operation);
  await processProjectCompletions(f.app,p.id,opts);assert.equal((await f.app.query('SELECT state FROM codeworks.write_calls WHERE id=$1',[callId])).rows[0].state,'finished');assert.equal(inspected,0);
+});
+
+test('synthetic owner-reviewed receipt v2 uses the guarded PG importer without finishing another writer',{timeout:120000},async t=>{
+ assert.ok(configured,'explicit disposable PostgreSQL required');const f=await setup();t.after(()=>f.close());
+ const p=await f.project({codeIndexDisabled:true}),prepared=await f.prepare({project_id:p.id,workspace_key:'operator-v2',request_key:'operator-v2'});await f.worker(p,prepared.operation_id);
+ const w=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[prepared.workspace_id])).rows[0],owner='fixture/'+randomUUID();
+ await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner) VALUES($1,$2,$3,'temporal')",[owner,p.id,w.id]);
+ const create=async(tool)=>{
+  const r={project_id:p.id,workspace_id:w.id,workspace_key:w.workspace_key,session_id:'review-session',turn_id:'turn',tool_use_id:tool,tool_name:'apply_patch',payload_sha256:rawHash('payload-'+tool),targets:['hello.txt'],request_key:'review-'+tool};
+  const call=await f.h.call('write.begin',r,'codex');const rewritten=rawHash('updated-'+tool);await f.h.call('write.admit',{project_id:p.id,write_call_id:call.write_call_id,rewritten_sha256:rewritten},'codex');return {...r,id:call.write_call_id,rewritten};
+ };
+ const reviewed=await create('reviewed'),other=await create('still-running');
+ await writeFile(w.path+'/hello.txt','partial fixture change\n');
+ await f.owner.query("UPDATE codeworks.workflow_registry SET state='draining',lifecycle='closing' WHERE workspace_id=$1",[w.id]);
+ const obligation=randomUUID();await f.owner.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,state,blocker,owner_workflow_id,epoch) VALUES($1,$2,$3,$4,'cancelled','waiting_decision','WRITER_OUTCOME_UNKNOWN',$5,1)",[obligation,p.id,w.id,'workspace:'+w.id,owner]);
+ await sleep(10); // PostgreSQL хранит время допуска точнее, чем JavaScript Date.
+ const receipt={version:2,provenance:'operator_reviewed_nested_patch',outcome:'error',reviewer:'owner',reviewed_at:new Date().toISOString(),write_call_id:reviewed.id,project_id:p.id,workspace_id:w.id,executor_id:'codex',session_id:reviewed.session_id,turn_id:reviewed.turn_id,tool_use_id:reviewed.tool_use_id,tool_name:'apply_patch',payload_sha256:reviewed.payload_sha256,rewritten_sha256:reviewed.rewritten,outer_tool_use_id:'fixture-outer',review_manifest_sha256:'1'.repeat(64),source_prefix_sha256:'2'.repeat(64),source_prefix_bytes:128,input_line_sha256:'3'.repeat(64),output_line_sha256:'4'.repeat(64)};
+ // Подмена verifier ограничена синтетической фикстурой; production проверяет root-владение файла.
+ const verified=value=>async()=>({...validateCompletionReceipt(value),receipt_sha256:rawHash(value)}),opts={allowedRepositories:[p.repo_path],git:createGit()};
+ await assert.rejects(importNativeCompletion(f.app,'fixture',{...opts,verifyReceipt:verified({...receipt,payload_sha256:'f'.repeat(64)})}),/WRITE_CALL_MISMATCH/);
+ const first=await importNativeCompletion(f.app,'fixture',{...opts,verifyReceipt:verified(receipt)});assert.equal(first.state,'finished');assert.equal(first.changed,true);
+ assert.deepEqual(await importNativeCompletion(f.app,'fixture',{...opts,verifyReceipt:verified(receipt)}),first);
+ const reviewedRow=(await f.app.query('SELECT state,tool_result FROM codeworks.write_calls WHERE id=$1',[reviewed.id])).rows[0];assert.equal(reviewedRow.state,'finished');assert.equal(reviewedRow.tool_result.outcome,'error');assert.equal(reviewedRow.tool_result.operator_completion.provenance,'operator_reviewed_nested_patch');assert.equal('exit_code' in reviewedRow.tool_result.operator_completion,false);
+ assert.equal((await f.app.query('SELECT state FROM codeworks.write_calls WHERE id=$1',[other.id])).rows[0].state,'in_flight');assert.deepEqual((await f.app.query('SELECT state,blocker FROM codeworks.cleanup_obligations WHERE id=$1',[obligation])).rows[0],{state:'waiting_decision',blocker:'WRITER_OUTCOME_UNKNOWN'});
+ const finish={project_id:p.id,session_id:other.session_id,turn_id:other.turn_id,tool_use_id:other.tool_use_id,tool_name:other.tool_name,input_sha256:other.rewritten,canonical_input_sha256:other.rewritten,outcome:'success'};
+ await f.h.call('write.finish',finish,'codex');await processProjectCompletions(f.app,p.id,{allowedRepositories:[p.repo_path]});
+ assert.deepEqual((await f.app.query('SELECT state,blocker FROM codeworks.cleanup_obligations WHERE id=$1',[obligation])).rows[0],{state:'pending',blocker:null});
 });
