@@ -19,6 +19,20 @@ async function fixture(t){
 test('matches native event and both ledger digests without recording command or output',async t=>{
  const f=await fixture(t),result=await attestNativeCompletion({sourcePath:f.file,...f});assert.equal(result.write_call_id,f.call.id);assert.equal(result.exit_code,0);assert.equal(result.native_event_sha256,hash(JSON.stringify(f.event)+'\n'));assert.ok(!JSON.stringify(result).includes('git status'));
 });
+test('literal foreground rm completion is attestable while dynamic or background rm is not',async t=>{
+ const f=await fixture(t);
+ const check=async(command,allowed)=>{
+  const input={command};f.event.payload.item.command[2]=command;
+  f.call.rewritten_sha256=hash(JSON.stringify(input));
+  f.call.payload_sha256=hash(JSON.stringify({tool_name:'Bash',tool_input:input,cwd:f.project.repo_path,project_id:f.project.id,workspace_id:f.workspace.id}));
+  await f.save(f.event);
+  if(allowed){const proof=await attestNativeCompletion({sourcePath:f.file,...f});assert.equal(proof.write_call_id,f.call.id);assert.ok(!JSON.stringify(proof).includes(command));}
+  else await assert.rejects(attestNativeCompletion({sourcePath:f.file,...f}),/NATIVE_COMPLETION_UNVERIFIED/);
+ };
+ await check('rm -rf -- /fixture/worktree/tmp/literal',true);
+ await check('rm -rf -- "$TARGET"',false);
+ await check('rm -rf -- /fixture/worktree/tmp/literal &',false);
+});
 test('rejects altered command, cwd, turn, exit, background and duplicate events',async t=>{
  const f=await fixture(t),check=async event=>{await f.save(event);await assert.rejects(attestNativeCompletion({sourcePath:f.file,...f}),/NATIVE_COMPLETION_UNVERIFIED/);};
  let e=structuredClone(f.event);e.payload.item.command[2]='printf altered';await check(e);

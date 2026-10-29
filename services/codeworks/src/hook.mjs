@@ -93,7 +93,7 @@ function shellTokens(command) {
       continue;
     }
     if (/\s/.test(c)) { flush(); continue; }
-    if ('$`\\*?(){}'.includes(c)) dynamic = true;
+    if ((c === '~' && !active) || '$`\\*?(){}'.includes(c)) dynamic = true;
     word += c; active = true;
   }
   if (quote || delimiter || heredocs.length || invalid) return [];
@@ -108,7 +108,17 @@ function readOnlyShell(command) {
   if (!tokens.length || tokens.some(t => t.operator || t.dynamic)) return false;
   const words = tokens.map(t=>t.word);
   if (words[0] === 'rtk' && words[1] === 'proxy') words.splice(0,2);
-  if (words[0] === 'git') return words[1] === 'status' && words.slice(2).every(w=>['--short','-s','--porcelain','--porcelain=v1','--branch','-b','--untracked-files=no'].includes(w));
+  if (words[0] === 'git') {
+    const action=words[1], args=words.slice(2);
+    if (action==='status') return args.every(w=>['--short','-s','--porcelain','--porcelain=v1','--branch','-b','--untracked-files=no'].includes(w));
+    if (action==='diff') return args.every(w=>['--stat','--check','--name-only','--no-ext-diff','--no-textconv'].includes(w));
+    if (action==='log') return args.every(w=>/^--format=[%a-zA-Z0-9 .:_-]+$/.test(w) || /^-[1-9][0-9]*$/.test(w) || /^--max-count=[1-9][0-9]*$/.test(w) || ['--oneline','--no-decorate'].includes(w));
+    if (action==='show') return args.length===1 && /^[0-9a-fA-F]{7,40}:[a-zA-Z0-9_./-]+$/.test(args[0]);
+    if (action==='rev-parse') return args.length===1 && args[0]==='HEAD';
+    return false;
+  }
+  if (words[0] === 'pwd') return words.length===1;
+  if (words[0] === 'ls') return words.slice(1).every(w=>!w.startsWith('-') || ['-a','-l','-la','-al','-1','--'].includes(w));
   if (words[0] === 'cat') return words.length > 1 && words.slice(1).every(w=>w !== '-' && !w.startsWith('-'));
   if (words[0] === 'rg') return words.length > 1 && words.slice(1).every(w=>!w.startsWith('-') || ['-n','-i','-l','--files','--hidden','--no-heading'].includes(w));
   return false;
@@ -148,6 +158,19 @@ export function foregroundCommand(command) {
     const words=segment.map(t=>t.word);
     const literal=words.map(w=>"'"+w.replaceAll("'", "'\\''")+"'").join(' ');
     if (readOnlyShell(literal) || synchronousGit(literal)) return true;
+    if (words[0]==='rm') {
+      let options=true, operands=0;
+      for (const word of words.slice(1)) {
+        if (options && word==='--') { options=false; continue; }
+        if (options && word.startsWith('-')) {
+          if (!/^-[frRd]+$/.test(word) && !['--force','--recursive','--dir','--preserve-root','--one-file-system'].includes(word)) return false;
+        } else {
+          if (!word) return false;
+          operands++;
+        }
+      }
+      return operands>0;
+    }
     if (words[0]==='cp') {
       const operands=words.slice(1);
       if (operands[0]==='--') operands.shift();
@@ -310,6 +333,10 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   }
   if (areas.size > 1) return denied('Разделите запись между рабочими областями.',[...areas.values()].map(a=>a.project));
   if (areas.size === 1 && shell && readOnlyShell(input?.command ?? input?.cmd)) return {};
+  // AIDEV-NOTE: Не допускаем writer, для которого Post и owner verifier не могут подтвердить завершение.
+  if (areas.size === 1 && shell && (input?.run_in_background || input?.background || input?.async || !foregroundCommand(input?.command ?? input?.cmd))) {
+    return denied('WRITER_COMPLETION_UNSUPPORTED: используйте native файловые инструменты или поддерживаемую команду проверки компонента.', [...areas.values()].map(a=>a.project));
+  }
   if (areas.size === 1) return existingWrite(event,[...areas.values()][0],{env,connect,files,shell,cwd,input,name});
   if (!files.length) return {};
   const matching = projects.filter(project => {

@@ -29,7 +29,7 @@ test('existing native and shell write use the registered workspace',async()=>{
  const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,calls=[];
  const cfg={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
  const connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:'c'};return {};},close:async()=>{}});
- for(const event of [{...patch(valid),cwd:root},{...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:'python3 script.py'}}]) {
+ for(const event of [{...patch(valid),cwd:root},{...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:'node --test tests/a'}}]) {
   const response=await runHook(event,{config:cfg,env,connect});assert.equal(response.hookSpecificOutput.permissionDecision,'allow');
   assert.equal(calls.at(-2).method,'write.begin');assert.equal(calls.at(-2).args.workspace_id,id);assert.equal(calls.at(-1).method,'write.admit');
  }
@@ -44,13 +44,13 @@ test('strict read-only commands in a worktree do not admit a writer',async()=>{
  const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id;
  const config={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
  const connect=()=>assert.fail('read-only call connects');
- for(const cmd of ['git status','git status --short','cat src/a','rg -n word src','rg --files']) assert.deepEqual(await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:cmd}},{config,env,connect}),{});
+ for(const cmd of ['git status','git status --short','git diff --stat','git diff --check','git show 0123456789abcdef:services/codeworks/src/hook.mjs','git log --format=%H','git rev-parse HEAD','ls','ls -la src','pwd','cat src/a','rg -n word src','rg --files']) assert.deepEqual(await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:cmd}},{config,env,connect}),{});
 });
 test('shell operators and unsafe flags are never classified as read-only',async()=>{
  const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,calls=[];
  const config={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
  const connect=async()=>({call:async(method,args)=>{calls.push(method);if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:'c'};return {};},close(){}});
- for(const cmd of ['git status; touch x','cat a > x','rg --pre evil word','git status --exec=evil']) {await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:cmd}},{config,env,connect});assert.equal(calls.at(-1),'write.admit');}
+ for(const cmd of ['git status; touch x','rg --pre evil word','git status --exec=evil']) {const result=await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:cmd}},{config,env,connect});assert.equal(result.hookSpecificOutput.permissionDecision,'deny');assert.match(result.hookSpecificOutput.additionalContext,/WRITER_COMPLETION_UNSUPPORTED/);assert.equal(calls.length,0);}
 });
 
 test('new calls get distinct request keys and retries preserve the same key',async()=>{
@@ -138,4 +138,52 @@ test('literal two-file cp completes while dynamic, multi-source and background v
  }
  for(const command of ['cp a b c','cp -r a b','cp a b &','cp $(evil) b','cp a "$DEST"','cp a b; python3 x','cp -- -r b']) assert.equal(foregroundCommand(command),false,command);
  const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:'cp a b'},tool_response:{session_id:23}},f.options);assert.equal(f.calls.length,0);
+});
+
+test('literal rm inside workspace is admitted and its native terminal Post finishes',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,calls=[];
+ const config={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};validate(method,args);if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:id};return {};},close(){}});
+ const event={...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:'rm -rf -- '+root+'/tmp/disposable'}};
+ assert.equal((await runHook(event,{config,env,connect})).hookSpecificOutput.permissionDecision,'allow');assert.deepEqual(calls.map(c=>c.method),['status','write.begin','write.admit']);
+ await runHook({...event,hook_event_name:'PostToolUse',tool_response:{exit_code:0}},{config,env,connect});assert.equal(calls.at(-1).method,'write.finish');
+});
+test('unfinishable or explicit background work is denied before contacting Codeworks',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id;
+ const config={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=()=>assert.fail('unsupported write must not connect');
+ for(const input of [{command:'python3 script.py'}, {command:'rm --no-preserve-root -rf tmp/a'}, {command:'rm -rf "$DEST"'}, {command:'rm -rf tmp/a &'}, {command:'rm -rf tmp/a',run_in_background:true}, {command:'rm -rf tmp/a',background:true}]) {
+  const r=await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:input},{config,env,connect});assert.equal(r.hookSpecificOutput.permissionDecision,'deny');assert.match(r.hookSpecificOutput.additionalContext,/WRITER_COMPLETION_UNSUPPORTED/);
+ }
+ const r=await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:'rm -rf -- /outside/disposable'}},{config,env,connect});assert.equal(r.hookSpecificOutput.permissionDecision,'deny');
+});
+
+test('read-only foreground or background inspection never creates a writer',async()=>{
+ const root='/test/areas/00000000-0000-4000-8000-000000000001',config={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=()=>assert.fail('read-only inspection must not contact Codeworks');
+ for(const input of [{command:'git status',async:true},{command:'git diff --stat',run_in_background:true},{command:'pwd',background:true}]) assert.deepEqual(await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:input},{config,env,connect}),{});
+});
+test('unsupported Git flags and potential execution or output paths are denied before API',async()=>{
+ const root='/test/areas/00000000-0000-4000-8000-000000000001',config={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=()=>assert.fail('unsupported inspection must not contact Codeworks');
+ for(const command of ['git diff --output=tmp/out','git diff --ext-diff','git diff --textconv','git -c diff.external=evil diff --stat','git log --output=tmp/out','git show --ext-diff 0123456789abcdef:path','git rev-parse --output=tmp/out','git status; touch file']) {
+  const r=await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command}},{config,env,connect});assert.equal(r.hookSpecificOutput.permissionDecision,'deny',command);
+ }
+});
+
+test('unquoted tilde expansion denies rm and cp before writer admission',async()=>{
+ const root='/test/areas/00000000-0000-4000-8000-000000000001',config={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=()=>assert.fail('tilde expansion must not contact Codeworks');
+ for(const command of ['rm -rf -- ~/x','rm -rf -- ~+/x','rm -rf -- ~-/x','rm -rf -- ~user/x','cp ~/a tmp/b']) {
+  const result=await runHook({...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command}},{config,env,connect});
+  assert.equal(result.hookSpecificOutput.permissionDecision,'deny',command);assert.match(result.hookSpecificOutput.additionalContext,/WRITER_COMPLETION_UNSUPPORTED/);
+ }
+});
+test('quoted tilde is literal and keeps workspace ownership',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id,calls=[];
+ const config={projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas'}]};
+ const connect=async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='status')return {workspace:{id,path:root,workspace_key:'task',kind:'feature',preparation_state:'ready'}};validate(method,args);if(method==='write.begin')return {workspace_id:id,path:root,write_call_id:id};return {};},close(){}});
+ const event={...patch(valid),cwd:root,tool_name:'Bash',tool_input:{command:"rm -rf -- '~/x'"}};
+ assert.equal((await runHook(event,{config,env,connect})).hookSpecificOutput.permissionDecision,'allow');
+ assert.deepEqual(calls.find(c=>c.method==='write.begin').args.targets,['~/x']);
 });
