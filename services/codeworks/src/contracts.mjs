@@ -3,6 +3,7 @@
 import { readFileSync } from 'node:fs';
 import Ajv from 'ajv';
 import { Fault } from './errors.mjs';
+import { validPreviewPolicy } from './web-preview-status.mjs';
 export const schema = JSON.parse(readFileSync(new URL('../schemas/api.schema.json', import.meta.url),'utf8'));
 export const methods = ['project.register','project.get','prepare','status','sync','release','cleanup','lifecycle.status','release.close','workspace.cancel','workspace.transfer'];
 export const internalMethods = ['write.begin','write.admit','write.finish','write.stop'];
@@ -12,7 +13,12 @@ const ajv = new Ajv({allErrors:false});
 ajv.addSchema(schema,'owner');
 const validators=Object.fromEntries(Object.keys(schema.definitions).map(name=>[name,ajv.compile({$ref:'owner#/definitions/'+name})]));
 /** Проверяет фактический DTO по owner схеме; ошибки не раскрывают входные данные. */
-export function validate(name,value) { if (!validators[name]?.(value)) throw new Fault('INVALID_ARGUMENT'); return value; }
+export function validate(name,value) {
+  if(!validators[name]?.(value))throw new Fault('INVALID_ARGUMENT');
+  const project=name==='project'?value:name==='project.register'||name==='projectResponse'?value.project:null;
+  if(project&&!validPreviewPolicy(project))throw new Fault('INVALID_ARGUMENT');
+  return value;
+}
 /** Раскрывает локальные ссылки для схем MCP без дублирования owner-определений. */
 export function expanded(name) {
   const visit=value=>Array.isArray(value)?value.map(visit):value&&typeof value==='object'?value.$ref?visit(schema.definitions[value.$ref.split('/').at(-1)]):Object.fromEntries(Object.entries(value).map(([k,v])=>[k,visit(v)])):value;

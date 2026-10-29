@@ -1,5 +1,5 @@
 // ABOUTME: Проверяет ранний HTML корневой заставки до гидратации любых дочерних страниц.
-// ABOUTME: Исполняет настоящие layout и startup компоненты, заменяет только шрифты и CSS imports.
+// ABOUTME: Исполняет настоящие layout и startup компоненты, заменяет шрифты, CSS и границу серверного запроса.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -17,6 +17,7 @@ function load(path: string): Record<string, unknown> {
   const module = { exports: {} as Record<string, unknown> };
   new Function("require", "module", "exports", output)((name: string) => {
     if (name.endsWith(".css")) return {};
+    if (name === "next/server") return { connection: async () => {} };
     if (name.startsWith("geist/font/")) return { GeistMono: { variable: "mono" }, GeistSans: { variable: "sans" } };
     if (name.endsWith("app-startup-boundary")) return load("../app/shell/app-startup-boundary.tsx");
     if (name === "./app-startup-splash") return load("../app/shell/app-startup-splash.tsx");
@@ -27,9 +28,9 @@ function load(path: string): Record<string, unknown> {
   return module.exports;
 }
 
-test("root layout covers an arbitrary future page before JavaScript without page-specific splash", () => {
-  const Layout = load("../app/layout.tsx").default as ComponentType<{ children: ReactNode }>;
-  const html = renderToStaticMarkup(createElement(Layout, null, createElement("main", null, createElement("button", null, "Future page"))));
+test("root layout covers an arbitrary future page before JavaScript without page-specific splash", async () => {
+  const Layout = load("../app/layout.tsx").default as (props: { children: ReactNode }) => Promise<ReactNode>;
+  const html = renderToStaticMarkup(await Layout({ children: createElement("main", null, createElement("button", null, "Future page")) }));
   assert.ok(html.includes('data-startup-splash="true"'));
   assert.ok(html.includes('/brand/brai-logo-transparent.svg'));
   assert.ok(html.includes('data-startup-content="true"'));

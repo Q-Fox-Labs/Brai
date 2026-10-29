@@ -61,9 +61,14 @@ async function codeworksWorkspace(state={generation:1,position:0}) {
 exports.codeworksWorkspace=codeworksWorkspace;
 /** Singleton проекта регулярно сверяет сохранённые обязательства и продолжает историю. */
 async function codeworksProjectReconciler(state){
-  let cycles=0;
+  let cycles=0,previewPass,nextPreviewAt=0;
   for(;;){
     let progressed=false,historicalEnabled=false;
+    if(patched('codeworks-web-preview-v1')&&!previewPass&&Date.now()>=nextPreviewAt){
+      nextPreviewAt=Date.now()+60000;
+      // AIDEV-NOTE: Публикация отдельно от очистки и не блокирует её длительным ожиданием.
+      previewPass=execution.maintainPreviews(state.projectId,state.previewCursor??null).then(result=>{state.previewCursor=result?.cursor??null;}).catch(()=>{}).finally(()=>{previewPass=undefined;});
+    }
     try{
       const cursorEnabled=patched('codeworks-reconciler-cursor-v1');
       const activity=(patched('codeworks-reconciler-progress-v2')?finalization:execution);
@@ -74,7 +79,7 @@ async function codeworksProjectReconciler(state){
       progressed=result?.state==='pending'||(cursorEnabled&&result?.hasMore===true)||(historicalEnabled&&(result?.historicalHasMore===true||result?.ready===true));
     }catch{}
     const continueAfter=historicalEnabled&&Number.isSafeInteger(state.continueAfter)&&state.continueAfter>=2&&state.continueAfter<=500?state.continueAfter:500;
-    if((workflowInfo().continueAsNewSuggested||++cycles>=continueAfter)&&allHandlersFinished())await continueAsNew(state);
+    if((workflowInfo().continueAsNewSuggested||++cycles>=continueAfter)&&allHandlersFinished()&&!previewPass)await continueAsNew(state);
     await condition(()=>false,progressed?1000:60000);
   }
 }

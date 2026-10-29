@@ -12,6 +12,8 @@ import {withExecutionContext} from './execution-context.mjs';
 import {createCodeIndex} from './code-index.mjs';
 import {reconcileProjectLedger} from './reconciler.mjs';
 import {verifyDisposition} from './disposition.mjs';
+import {reconcilePreviewProject} from './preview.mjs';
+import {createPreviewPorts} from './preview-ports.mjs';
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 /** Создаёт Activities; identity берётся из SDK, а не из переданного пользователем payload. */
 export function createActivities(pool,{allowedRepositories,execute=runOperation,adapters=createActivityGit(),codeIndex=createCodeIndex(pool),verifyTransfer=verifyDisposition,identity=()=>{const info=Context.current().info;if(!['codeworksWorkspace','codeworksProjectReconciler'].includes(info.workflowType))throw Error('ADMITTED_WORKFLOW_TYPE_REQUIRED');return info.workflowExecution.workflowId;}}={}) {
@@ -37,6 +39,22 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
     }finally{if(heartbeat)clearInterval(heartbeat);}
   };
   return {
+    /** Независимый ограниченный проход превью не задерживает очистку проекта. */
+    maintainPreviews:async (projectId,cursor=null)=>{
+      const id=identity();
+      const control=(await pool.query("SELECT instance_id FROM codeworks.execution_control WHERE project_id=$1 AND owner='temporal'",[projectId])).rows[0];
+      if(!control||id!==`codeworks/${control.instance_id}/${projectId}/reconciler`)throw Error('RECONCILER_OWNER_REQUIRED');
+      const project=(await pool.query('SELECT config FROM codeworks.projects WHERE id=$1',[projectId])).rows[0]?.config;
+      if(!project?.web_preview?.enabled)return {cursor:null};
+      if(!allowedRepositories.includes(project.repo_path))throw Error('PREVIEW_PROJECT_FORBIDDEN');
+      const verifierPool=process.env.CODEWORKS_VERIFIER_DATABASE_URL?new Pool({connectionString:process.env.CODEWORKS_VERIFIER_DATABASE_URL,max:1,connectionTimeoutMillis:3000}):null;
+      const verifier=await (verifierPool??pool).connect();let context;
+      try{try{context=Context.current();}catch{}const beat=setInterval(()=>context?.heartbeat({stage:'web-preview'}),2000);beat.unref();
+        const signal=AbortSignal.any([AbortSignal.timeout(150000),...(context?.cancellationSignal?[context.cancellationSignal]:[])]);
+        try{return await withExecutionContext({signal},()=>reconcilePreviewProject(pool,projectId,createPreviewPorts({flowGit:adapters.flowGit,verifier}),{cursor}));}
+        finally{clearInterval(beat);}}
+      finally{verifier.release();await verifierPool?.end();}
+    },
     /** Проектный singleton сверяет ledger, а затем исполняет только собственную обязанность. */
     reconcileProject:async (projectId,cursor=null,historicalCursor=null)=>{
       const id=identity();

@@ -27,6 +27,13 @@
     ],
     "runtime": [
       "services/codeworks/asyncapi.json",
+      "services/codeworks/preview.openrpc.json",
+      "services/codeworks/migrations/013.sql",
+      "services/codeworks/src/web-preview-status.mjs",
+      "services/codeworks/src/preview-domain.mjs",
+      "services/codeworks/src/preview.mjs",
+      "services/codeworks/src/preview-adapter.mjs",
+      "services/codeworks/src/preview-ports.mjs",
       "services/codeworks/migrations/001.sql",
       "services/codeworks/migrations/002.sql",
       "services/codeworks/package.json",
@@ -98,6 +105,9 @@
       "services/codeworks/components/package-runtime.mjs",
       "services/codeworks/components/package-runtime.test.mjs",
       "services/codeworks/tests/contracts.test.mjs",
+      "services/codeworks/tests/web-preview-status.test.mjs",
+      "services/codeworks/tests/preview*.test.mjs",
+      "services/codeworks/tests/integration/preview*.mjs",
       "services/codeworks/tests/git-flow.test.mjs",
       "services/codeworks/tests/historical-git.test.mjs",
       "services/codeworks/tests/integration/fixture.mjs",
@@ -157,6 +167,12 @@
     "kind": "ready-files",
     "files": [
       "services/codeworks/migrations",
+      "services/codeworks/preview.openrpc.json",
+      "services/codeworks/src/web-preview-status.mjs",
+      "services/codeworks/src/preview-domain.mjs",
+      "services/codeworks/src/preview.mjs",
+      "services/codeworks/src/preview-adapter.mjs",
+      "services/codeworks/src/preview-ports.mjs",
       "services/codeworks/package.json",
       "services/codeworks/schemas",
       "services/codeworks/ci/registry.mjs",
@@ -236,7 +252,7 @@
       "Git with merge-tree --write-tree; flock (util-linux)",
       "GitHub CLI (gh), operator authentication; origin HTTPS matches registered repository",
       "Existing GitHub OAuth operator identity with repo, workflow, read:packages/write:packages; Ed25519 identity in a protected file; durable Codeworks PG evidence backup; first owner catalog-v1 publication links the repository and inherits its Actions read access",
-      "Temporal server compatible with SDK 1.24.0; configured namespace and task queue; Codeworks migration 012"
+      "Temporal server compatible with SDK 1.24.0; configured namespace and task queue; Codeworks migration 013"
     ]
   },
   "deploy": {
