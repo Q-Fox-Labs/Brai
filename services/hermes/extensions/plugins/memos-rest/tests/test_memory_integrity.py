@@ -111,7 +111,7 @@ class MemoryIntegrityTests(RoutingTests):
                                     context_available_tokens=10000)
         text = self.provider.prefetch('What distinct facts were recorded?')
         self.assertGreater(len(text), 6000)
-        self.assertIn('найдено 60', self.provider.recall_status().summary)
+        self.assertEqual(self.provider.recall_status().found_count,60)
         from agent.model_metadata import estimate_messages_tokens_rough
         self.assertLessEqual(estimate_messages_tokens_rough([{'role': 'user', 'content': text}]), 6400)
 
