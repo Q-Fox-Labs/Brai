@@ -138,7 +138,7 @@ class Bridge:
                 return private.call_plugin(method, params, timeout)
             except Exception as error:
                 code = str(error)
-                allowed = {'HUMAN_OUTPUT_REQUIRED', 'HUMAN_FINAL_DECISION_REQUIRED', 'HUMAN_OUTPUT_MAPPING_REQUIRED', 'STALE_ACTION', 'NOT_FOUND'}
+                allowed = {'HUMAN_OUTPUT_REQUIRED', 'HUMAN_FINAL_DECISION_REQUIRED', 'HUMAN_OUTPUT_MAPPING_REQUIRED', 'LEGACY_RESULT_REVIEW_CHECK', 'STALE_ACTION', 'NOT_FOUND'}
                 raise BridgeError(code if code in allowed else 'RPC_REJECTED') from None
         request_id = secrets.token_hex(16)
         request = (json.dumps({"jsonrpc": "2.0", "id": request_id,
@@ -192,7 +192,7 @@ class Bridge:
                     raise BridgeError("RPC_MALFORMED")
                 if error["code"] == -32000 and isinstance(error.get("data"), dict) and error["data"].get("code") == "HUMAN_OUTPUT_REQUIRED":
                     raise BridgeError("HUMAN_OUTPUT_REQUIRED")
-                if error["code"] == -32000 and isinstance(error.get("data"), dict) and error["data"].get("code") in {"HUMAN_FINAL_DECISION_REQUIRED", "HUMAN_OUTPUT_MAPPING_REQUIRED", "STALE_ACTION"}:
+                if error["code"] == -32000 and isinstance(error.get("data"), dict) and error["data"].get("code") in {"HUMAN_FINAL_DECISION_REQUIRED", "HUMAN_OUTPUT_MAPPING_REQUIRED", "LEGACY_RESULT_REVIEW_CHECK", "STALE_ACTION"}:
                     raise BridgeError(error["data"]["code"])
                 code = error.get("data", {}).get("code") if isinstance(error.get("data"), dict) else None
                 if method == "files.publish" and isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,80}", code):
@@ -238,7 +238,7 @@ class Tokens:
                 # AIDEV-NOTE: Прежние кнопки могли принадлежать только личному чату owner.
                 db.execute("ALTER TABLE tokens ADD COLUMN chat_id TEXT NOT NULL DEFAULT ''")
                 db.execute("UPDATE tokens SET chat_id=owner")
-            for name in ("session_key", "session_id", "thread_id", "target_id", "decision", "resume_outcome"):
+            for name in ("session_key", "session_id", "thread_id", "target_id", "decision", "resume_outcome", "message_kind", "message_digest"):
                 if name not in columns:
                     db.execute(f"ALTER TABLE tokens ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             db.execute("""CREATE TABLE IF NOT EXISTS agent_attempts (
@@ -281,11 +281,11 @@ class Tokens:
                         context.get("session_key", ""), context.get("session_id", ""), context.get("thread_id", "")))
         return token
 
-    def bind(self, token, message_id):
+    def bind(self, token, message_id, kind="", digest=""):
         """Привязать токен к реально отправленному сообщению бота."""
         with self._connect() as db:
-            db.execute("UPDATE tokens SET message_id=? WHERE token=? AND consumed=0",
-                       (str(message_id), token))
+            db.execute("UPDATE tokens SET message_id=?,message_kind=?,message_digest=? WHERE token=? AND consumed=0",
+                       (str(message_id), kind, digest, token))
 
     def set_attempt(self, token, attempt_id, target_id="", stage=None):
         """Сохранить результат idempotent prepare перед отправкой кнопки."""
@@ -1135,8 +1135,10 @@ class TelegramPlugin:
         except Exception as error:
             code = str(error) if isinstance(error, BridgeError) and str(error) in {
                 "INVALID_ARGUMENT", "SESSION_CONTEXT_INVALID", "TELEGRAM_UNAVAILABLE",
-                "HUMAN_OUTPUT_REQUIRED", "SEND_UNCONFIRMED"} else "CONFIRMATION_FAILED"
-            message = HUMAN_OUTPUT_REQUIRED if code == "HUMAN_OUTPUT_REQUIRED" else "Кнопки не отправлены. Подтверждение пользователя не получено."
+                "HUMAN_OUTPUT_REQUIRED", "LEGACY_RESULT_REVIEW_CHECK", "SEND_UNCONFIRMED"} else "CONFIRMATION_FAILED"
+            message = (HUMAN_OUTPUT_REQUIRED if code == "HUMAN_OUTPUT_REQUIRED" else
+                       "Проверь исходное поручение: если отдельное принятие не требовалось, вызови game_core_result_review_skip и заверши результат. Если оно было явно поручено, перепланируй с явным признаком принятия."
+                       if code == "LEGACY_RESULT_REVIEW_CHECK" else "Кнопки не отправлены. Подтверждение пользователя не получено.")
             return json.dumps({"ok": False, "code": code, "message": message}, ensure_ascii=False)
 
     async def submit_feedback(self, args, **kwargs):
@@ -1296,6 +1298,7 @@ class TelegramPlugin:
 
     async def _request(self, args, context):
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        from telegram.error import BadRequest
         stage = args.get("stage", "planning")
         existing = None
         for pending in self.tokens.pending():
@@ -1356,13 +1359,13 @@ class TelegramPlugin:
                 text += ("\n\n" if action.get("confirmationText") is not None else "") + footer
             thread_id = self.tokens.unresolved(token)["thread_id"]
             route = {"message_thread_id": int(thread_id)} if thread_id and str(thread_id) != "1" else {}
+            route_id = self.tokens.unresolved(token)["chat_id"]
             # Файлы проходят через общий owner-bound Artifacts и тот же журнал доставки, что обычные ответы.
             files = sys.modules.get("brai_files")
             artifact_ids = action.get("confirmationFiles", [])
             if not isinstance(artifact_ids, list) or any(not _uuid(value) for value in artifact_ids):
                 raise BridgeError("INVALID_ARTIFACTS")
             if files is not None:
-                route_id = self.tokens.unresolved(token)["chat_id"]
                 stable = json.dumps([self.config.owner, route_id, thread_id, action["moveId"],
                                      action["revisionId"], text, artifact_ids], ensure_ascii=False)
                 identity = "confirmation:" + sha256(stable.encode()).hexdigest()
@@ -1391,31 +1394,76 @@ class TelegramPlugin:
                 raise BridgeError("FILE_DELIVERY_UNAVAILABLE")
             if self.config.result_root in text:
                 raise BridgeError("FILE_REFERENCE_UNRECOGNIZED")
-            # Форматирование и разбиение выполняет закреплённый Telegram adapter; обычный текст не является fallback.
+            # Одна выдача всегда остаётся одним сообщением или документом.
             formatted = self.adapter.format_message(text)
-            chunks = self.adapter.truncate_message(formatted, 4096, len_fn=lambda value: len(value.encode("utf-16-le")) // 2)
-            if len(chunks) > 1:
-                chunks = [re.sub(r" \((\d+)/(\d+)\)$", r" \\(\1/\2\\)", chunk) for chunk in chunks]
-                chunks = [re.sub(r"(?m)^``` (\\\(\d+/\d+\\\))$", r"```\n\1", chunk) for chunk in chunks]
-            for index, chunk in enumerate(chunks):
-                keyboard = {"reply_markup": InlineKeyboardMarkup(buttons)} if buttons and index == len(chunks) - 1 else {}
-                if existing and len(chunks) == 1:
-                    from telegram.error import BadRequest
+            keyboard = {"reply_markup": InlineKeyboardMarkup(buttons)} if buttons else {}
+            chat_id = int(self.tokens.unresolved(token)["chat_id"])
+            digest = sha256(json.dumps([text, artifact_ids], ensure_ascii=False).encode()).hexdigest()
+            observed_text, observed_files = text, []
+            if existing and existing["message_kind"] == "document" and existing["message_digest"] == digest:
+                return json.dumps({"ok": True, "status": "awaiting_owner", "moveId": action["moveId"],
+                                   "attemptId": action["attemptId"], "revisionId": action["revisionId"]})
+            if existing and existing["message_kind"] == "document":
+                await self.bot.edit_message_reply_markup(chat_id=chat_id, message_id=int(existing["message_id"]), reply_markup=None)
+                existing = None
+            if len(formatted.encode("utf-16-le")) // 2 <= 3500:
+                kind = "text"
+                if existing:
                     try:
-                        await self.bot.edit_message_text(chat_id=int(self.tokens.unresolved(token)["chat_id"]),
-                            message_id=int(existing["message_id"]), text=chunk, parse_mode="MarkdownV2", **keyboard,
+                        await self.bot.edit_message_text(chat_id=chat_id, message_id=int(existing["message_id"]),
+                            text=formatted, parse_mode="MarkdownV2", **keyboard,
                             connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
                     except BadRequest as error:
                         if "message is not modified" not in str(error).lower():
                             raise
+                    sent_id = existing["message_id"]
                 else:
-                    message = await self.bot.send_message(chat_id=int(self.tokens.unresolved(token)["chat_id"]), text=chunk, **route,
+                    message = await self.bot.send_message(chat_id=chat_id, text=formatted, **route,
                         parse_mode="MarkdownV2", **keyboard, connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
-                    self.tokens.bind(token, message.message_id)
-                from types import SimpleNamespace
-                sent_id = existing["message_id"] if existing and len(chunks) == 1 else message.message_id
-                await self.observe_send(self.tokens.unresolved(token)["chat_id"], route, chunk,
-                                        SimpleNamespace(success=True, message_id=sent_id))
+                    sent_id = message.message_id
+            else:
+                rich = self.adapter._rich_message_payload(text, skip_entity_detection=True)
+                content = rich.get("markdown", "")
+                if not isinstance(content, str) or not content:
+                    raise BridgeError("RICH_MESSAGE_UNAVAILABLE")
+                if len(content) > 32768 or len(content.encode("utf-8")) > 128 * 1024:
+                    sender = getattr(self.adapter, "send_brai_long_document", None)
+                    if not callable(sender):
+                        raise BridgeError("RICH_MESSAGE_TOO_LONG")
+                    if existing:
+                        await self.bot.edit_message_reply_markup(chat_id=chat_id, message_id=int(existing["message_id"]), reply_markup=None)
+                    receipt = await sender(chat_id, text, keyboard.get("reply_markup"), route,
+                                           "confirmation:" + digest)
+                    sent_id = receipt.get("message_id") if isinstance(receipt, dict) else None
+                    artifact = receipt.get("artifact") if isinstance(receipt, dict) else None
+                    if not isinstance(artifact, dict) or not _uuid(artifact.get("artifactId")):
+                        raise BridgeError("SEND_UNCONFIRMED")
+                    observed_text, observed_files = "Полный текст — в PDF.", [artifact]
+                    kind = "document"
+                else:
+                    kind = "rich"
+                    params = {"chat_id": chat_id, "rich_message": rich}
+                    if buttons:
+                        params["reply_markup"] = keyboard["reply_markup"].to_dict()
+                    if existing:
+                        params["message_id"] = int(existing["message_id"])
+                        try:
+                            await self.bot.do_api_request("editMessageText", api_kwargs=params,
+                                connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
+                        except BadRequest as error:
+                            if "message is not modified" not in str(error).lower():
+                                raise
+                        sent_id = existing["message_id"]
+                    else:
+                        response = await self.bot.do_api_request("sendRichMessage", api_kwargs={**params, **route},
+                            connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
+                        sent_id = (response.get("message_id") or (response.get("result") or {}).get("message_id")) if isinstance(response, dict) else getattr(response, "message_id", None)
+            if not sent_id:
+                raise BridgeError("SEND_UNCONFIRMED")
+            self.tokens.bind(token, sent_id, kind, digest)
+            from types import SimpleNamespace
+            await self.observe_send(self.tokens.unresolved(token)["chat_id"], route, observed_text,
+                                    SimpleNamespace(success=True, message_id=sent_id), observed_files)
             return json.dumps({"ok": True, "status": "awaiting_owner", "moveId": action["moveId"],
                                "attemptId": action["attemptId"], "revisionId": action["revisionId"]})
         except Exception as error:
@@ -1425,7 +1473,7 @@ class TelegramPlugin:
                 self.tokens.resolve(token)
             except Exception:
                 self._schedule_cleanup(token)  # Recovery всегда сверяет exact attempt перед cancel.
-            code = "HUMAN_OUTPUT_REQUIRED" if isinstance(error, BridgeError) and str(error) == "HUMAN_OUTPUT_REQUIRED" else "SEND_UNCONFIRMED"
+            code = str(error) if isinstance(error, BridgeError) and str(error) in {"HUMAN_OUTPUT_REQUIRED", "LEGACY_RESULT_REVIEW_CHECK"} else "SEND_UNCONFIRMED"
             raise BridgeError(code) from None
 
     async def _prepare(self, row):

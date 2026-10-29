@@ -82,7 +82,7 @@ class FakeBot:
     def __init__(self):
         """Запомнить текущий loop и отправленные сообщения."""
         self.loop = asyncio.get_running_loop()
-        self.sent, self.edited = [], []
+        self.sent, self.edited, self.rich = [], [], []
         self.fail = False
 
     async def send_message(self, **kwargs):
@@ -98,6 +98,14 @@ class FakeBot:
     async def edit_message_text(self, **kwargs):
         self.edited.append(kwargs)
         return NS(message_id=kwargs["message_id"])
+
+    async def do_api_request(self, method, **kwargs):
+        if asyncio.get_running_loop() is not self.loop:
+            raise AssertionError("wrong native loop")
+        if self.fail:
+            raise RuntimeError("Telegram failed")
+        self.rich.append((method, kwargs["api_kwargs"]))
+        return {"message_id": kwargs["api_kwargs"].get("message_id", 1)}
 
 
 class FakeQuery:
@@ -124,8 +132,11 @@ def ptb_stubs():
     class ApplicationHandlerStop(Exception):
         """Остановить дальнейшие группы fake PTB dispatch."""
 
+    def markup(rows):
+        return NS(inline_keyboard=rows, to_dict=lambda: {"inline_keyboard": [
+            [{"text": button.text, "callback_data": button.callback_data} for button in row] for row in rows]})
     telegram = NS(Update=object, InlineKeyboardButton=lambda label, callback_data: NS(text=label, callback_data=callback_data),
-                  InlineKeyboardMarkup=lambda rows: NS(inline_keyboard=rows))
+                  InlineKeyboardMarkup=markup)
     ext = NS(CallbackQueryHandler=lambda callback, pattern: NS(callback=callback, pattern=pattern),
              TypeHandler=lambda kind, callback: NS(callback=callback, update_type=kind),
              ApplicationHandlerStop=ApplicationHandlerStop)
@@ -160,7 +171,8 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             return value
         def truncate_message(value, maximum, len_fn):
             return [value[i:i + 1800] for i in range(0, len(value), 1800)]
-        self.adapter = NS(format_message=format_message, truncate_message=truncate_message)
+        self.adapter = NS(format_message=format_message, truncate_message=truncate_message,
+                          _rich_message_payload=lambda value, **kwargs: {"markdown": value, **kwargs})
         self.bot = FakeBot()
         self.app = NS(bot=self.bot, handlers=[])
         def add_handler(handler, group=0):
@@ -674,19 +686,69 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_saved_text_precedes_buttons_and_is_not_truncated(self):
         preview = 'Чек-лист подготовлен\nРезультат: три пункта.\n' + '👤 Ход\n' * 900
         self.bridge.action.update(confirmationStage='planning', confirmationText=preview)
-        await self.request()
-        self.assertGreater(len(self.bot.sent), 1)
-        text = ''.join(item['text'] for item in self.bot.sent)
-        plain = html.unescape(re.sub(r'</?b>', '', text))
-        self.assertIn(preview, plain)
-        self.assertNotIn(MOVE, plain)
-        for message in self.bot.sent:
-            self.assertLessEqual(len(message['text'].encode('utf-16-le')) // 2, 4096)
-            self.assertEqual(message['parse_mode'], 'MarkdownV2')
-        self.assertTrue(all('reply_markup' not in item for item in self.bot.sent[:-1]))
-        keyboard = self.bot.sent[-1]['reply_markup'].inline_keyboard
-        self.assertEqual([row[0].text for row in keyboard], ['Принять'])
-        self.assertEqual(self.plugin.tokens.pending()[0]['message_id'], str(len(self.bot.sent)))
+        result = json.loads(await self.plugin.request_confirmation({'moveId': MOVE, 'revisionId': REVISION}))
+        self.assertTrue(result['ok'])
+        self.assertEqual(self.bot.sent, [])
+        self.assertEqual(len(self.bot.rich), 1)
+        method, params = self.bot.rich[0]
+        self.assertEqual(method, 'sendRichMessage')
+        self.assertIn(preview, params['rich_message']['markdown'])
+        self.assertNotIn(MOVE, params['rich_message']['markdown'])
+        self.assertEqual(params['reply_markup']['inline_keyboard'][0][0]['text'], 'Принять')
+        self.assertEqual(self.plugin.tokens.pending()[0]['message_id'], '1')
+        result = json.loads(await self.plugin.request_confirmation({'moveId': MOVE, 'revisionId': REVISION}))
+        self.assertTrue(result['ok'])
+        self.assertEqual(self.bot.rich[-1][0], 'editMessageText')
+        self.assertEqual(self.bot.rich[-1][1]['message_id'], 1)
+
+    async def test_rich_failure_never_falls_back_to_split_or_plain_text(self):
+        self.bridge.action.update(confirmationStage='planning', confirmationText='Длинный план\n' * 900)
+        self.bot.fail = True
+        result = json.loads(await self.plugin.request_confirmation({'moveId': MOVE, 'revisionId': REVISION}))
+        self.assertFalse(result['ok'])
+        self.assertEqual(self.bot.sent, [])
+        self.assertTrue(any(method == 'actions.cancel' for method, _ in self.bridge.calls))
+
+    async def test_oversized_confirmation_is_one_pdf_and_repeat_does_not_resend(self):
+        preview = 'Раздел отчёта. ' * 3000
+        self.bridge.action.update(confirmationStage='planning', confirmationText=preview)
+        documents = []
+        async def send_document(chat, content, markup, route, identity):
+            documents.append((chat, content, markup, route, identity))
+            return {'message_id': 41, 'artifact': {'artifactId': ARTIFACT, 'filename': 'report.pdf', 'mimeType': 'application/pdf', 'sizeBytes': 12}}
+        self.adapter.send_brai_long_document = send_document
+        for _ in range(2):
+            result = json.loads(await self.plugin.request_confirmation({'moveId': MOVE, 'revisionId': REVISION}))
+            self.assertTrue(result['ok'])
+        self.assertEqual(len(documents), 1)
+        self.assertIn(preview, documents[0][1])
+        self.assertEqual(documents[0][2].inline_keyboard[0][0].text, 'Принять')
+        self.assertEqual(self.bot.sent, [])
+        self.assertEqual(self.bot.rich, [])
+        self.assertEqual(self.plugin.tokens.pending()[0]['message_id'], '41')
+
+    async def test_oversized_confirmation_without_pdf_sender_fails_without_splitting(self):
+        self.bridge.action.update(confirmationStage='planning', confirmationText='Большой отчёт. ' * 3000)
+        result = json.loads(await self.plugin.request_confirmation({'moveId': MOVE, 'revisionId': REVISION}))
+        self.assertFalse(result['ok'])
+        self.assertEqual(self.bot.sent, [])
+        self.assertEqual(self.bot.rich, [])
+
+    async def test_legacy_review_guard_returns_actionable_error_without_claim_or_message(self):
+        original = self.bridge.call
+        def guarded(method, params, timeout=15):
+            if method == 'actions.prepare':
+                raise mod.BridgeError('LEGACY_RESULT_REVIEW_CHECK')
+            if method == 'actions.read':
+                return {**self.bridge.action, 'status': 'planned'}
+            return original(method, params, timeout)
+        self.bridge.call = guarded
+        result = json.loads(await self.plugin.request_confirmation({'moveId': MOVE, 'revisionId': REVISION}))
+        self.assertEqual(result['code'], 'LEGACY_RESULT_REVIEW_CHECK')
+        self.assertIn('game_core_result_review_skip', result['message'])
+        self.assertEqual(self.bot.sent, [])
+        self.assertEqual(self.bot.rich, [])
+        self.assertEqual(self.plugin.tokens.pending(), [])
 
     async def test_confirmation_uses_native_formatter_for_new_and_edited_message(self):
         preview = 'Заголовок\n\n## Вывод\n\n**Важно**: [источник](https://example.org)'
