@@ -9,6 +9,9 @@ import {pathToFileURL} from 'node:url';
 import {connectClient, loadClientConfig} from './client.mjs';
 import {validateSpool,saveNotice,ackNotice,rawHash,canonicalHash} from './write-notice.mjs';
 
+const MAX_TOOL_INPUT_BYTES=8*1024*1024;
+const inputFits=(event,input)=>Buffer.byteLength(JSON.stringify(input))<=MAX_TOOL_INPUT_BYTES && Buffer.byteLength(JSON.stringify({...event,tool_input:input}))<=MAX_TOOL_INPUT_BYTES;
+
 /** Читает потоковый hook JSON; большой tool_response проверяет и не сохраняет. */
 export async function readHookJSON(input) {
   const decoder=new TextDecoder('utf-8',{fatal:true}), max=16*1024*1024, frames=[];
@@ -25,7 +28,7 @@ export async function readHookJSON(input) {
   }
   function valueDone(value,primitive=true){
     const f=top();
-    if(skip && frames.length===skipDepth+1 && f?.kind==='object' && f.state==='value' && ['isError','error','exit_code','status','session_id','sessionId'].includes(f.key)) {
+    if(skip && frames.length===skipDepth+1 && f?.kind==='object' && f.state==='value' && ['isError','error','exit_code','status','session_id','sessionId','execution_status','terminal'].includes(f.key)) {
       if(responseType==='object')response[f.key]=primitive?value:true;
     }
     if(f){if(f.kind==='object' && f.state==='value')f.state='commaOrEnd';else if(f.kind==='array'&&['value','valueOrEnd'].includes(f.state))f.state='commaOrEnd';else throw Error('INVALID_JSON');}
@@ -36,7 +39,7 @@ export async function readHookJSON(input) {
     let value;
     if(capture){if(captureOverflow)value='x';else try{value=JSON.parse(token);}catch{throw Error('INVALID_JSON');}}
     const f=top();
-    if(f?.kind==='object' && ['key','keyOrEnd'].includes(f.state)){if(f.seen.has(value))throw Error('INVALID_JSON');f.seen.add(value);f.key=value;f.state='colon';}
+    if(f?.kind==='object' && ['key','keyOrEnd'].includes(f.state)){if(f.seen){if(f.seen.has(value))throw Error('INVALID_JSON');f.seen.add(value);}f.key=value;f.state='colon';}
     else {if(skip&&frames.length===skipDepth&&responseType==='string')response='';valueDone(value);}
     token='';capture=false;
   }
@@ -45,7 +48,7 @@ export async function readHookJSON(input) {
   function consume(c){
     if(mode==='string'){
       append(c);
-      if(capture&&!captureOverflow){token+=c;if(token.length>2048){if(captureKey)throw Error('HOOK_INPUT_INVALID_OR_OVERSIZED');captureOverflow=true;token='';}}
+      if(capture&&!captureOverflow){token+=c;if(token.length>2048){if(captureKey&&!skip)throw Error('HOOK_INPUT_INVALID_OR_OVERSIZED');captureOverflow=true;token='';}}
       if(unicode){if(!/[0-9a-fA-F]/.test(c))throw Error('INVALID_JSON');unicode+=c;if(unicode.length===5){decoded(String.fromCharCode(parseInt(unicode.slice(1),16)));unicode='';escape=false;}return;}
       if(escape){if(c==='u'){unicode='u';return;}const map={'"':'"','\\':'\\','/':'/','b':'\b','f':'\f','n':'\n','r':'\r','t':'\t'};if(!Object.hasOwn(map,c))throw Error('INVALID_JSON');decoded(map[c]);escape=false;return;}
       if(c==='\\'){escape=true;return;}if(c==='"'){mode='idle';finishString();return;}if(c.charCodeAt(0)<0x20)throw Error('INVALID_JSON');decoded(c);return;
@@ -61,7 +64,7 @@ export async function readHookJSON(input) {
     }
     if(/[ \t\r\n]/.test(c)){append(c);return;}
     if(c==='"') {const f=top();if(!(f?.kind==='object'&&['key','keyOrEnd'].includes(f.state)))begin();append(c);startStringNoBegin();return;}
-    if(c==='{' || c==='['){begin();append(c);if(skip&&frames.length===skipDepth&&responseType===null){responseType=c==='{'?'object':'array';response=c==='{'?{}:[];}if(frames.length>=64)throw Error('INVALID_JSON');frames.push({kind:c==='{'?'object':'array',state:c==='{'?'keyOrEnd':'valueOrEnd',key:null,seen:new Set()});return;}
+    if(c==='{' || c==='['){begin();append(c);if(skip&&frames.length===skipDepth&&responseType===null){responseType=c==='{'?'object':'array';response=c==='{'?{}:[];}if(frames.length>=64)throw Error('INVALID_JSON');frames.push({kind:c==='{'?'object':'array',state:c==='{'?'keyOrEnd':'valueOrEnd',key:null,seen:skip?null:new Set()});return;}
     if(c==='}' || c===']'){
       const f=top();if(!f || (c==='}'?f.kind!=='object'||!['keyOrEnd','commaOrEnd'].includes(f.state):f.kind!=='array'||!['valueOrEnd','commaOrEnd'].includes(f.state)))throw Error('INVALID_JSON');
       append(c);frames.pop();const isResponse=skip&&frames.length===skipDepth;valueDone(isResponse?response:true,false);return;
@@ -377,6 +380,8 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     // AIDEV-NOTE: Только распознанный завершённый foreground вызов снимает учёт; произвольный shell может оставить потомков.
     if (shellPost && (!foregroundCommand(event.tool_input?.command ?? event.tool_input?.cmd) || !finished)) return {};
     if (eventName === 'PostToolUse') {
+      const response=event.tool_response;
+      if(response?.execution_status!==undefined && (!['completed','not_started'].includes(response.execution_status) || (response.execution_status==='not_started' && (response.isError!==true || response.terminal!==true)))) return {systemMessage:'POST_DELIVERY_UNAVAILABLE: неподтверждённое состояние запуска.'};
       const name=event.tool_name?.split('.').at(-1);
       if (!shellPost && !['apply_patch','Write','Edit','MultiEdit'].includes(name)) return {};
       const input=event.tool_input;
@@ -389,18 +394,23 @@ async function runHookInner(event, {env = process.env, config, connect = connect
       const files=writePaths(event);
       const paths=[...files,...(shellPost?[resolved(cwd,'/')]:[])];
       const ids=[...new Set(projects.filter(project=>{
-        const roots=(shellPost?[project.workspace_root]:[project.repo_path,project.workspace_root]).filter(p=>typeof p==='string'&&path.isAbsolute(p)).map(p=>resolved(p,'/'));
-        return paths.some(file=>roots.some(root=>inside(root,file)));
+        const workspaceRoot=typeof project.workspace_root==='string'&&path.isAbsolute(project.workspace_root)?resolved(project.workspace_root,'/'):null;
+        if(workspaceRoot && paths.some(file=>inside(workspaceRoot,file)))return true;
+        if(shellPost||typeof project.repo_path!=='string'||!path.isAbsolute(project.repo_path))return false;
+        const root=resolved(project.repo_path,'/');
+        const exceptions=[...(project.documentation_paths??[]),...(project.excluded_paths??[])].map(p=>resolved(p,root));
+        return paths.some(file=>inside(root,file)&&!exceptions.some(exception=>inside(exception,file)));
       }).map(p=>p.id))];
       if (!ids.length) return {};
       let client,notices=[];
       try {
         validateSpool(config.completion_spool);
         const clientConfig=await loadClientConfig(env);
+        const notStarted=event.tool_response?.execution_status==='not_started' && event.tool_response?.isError===true && event.tool_response?.terminal===true;
         const outcome=event.tool_response?.isError || event.tool_response?.error || (Number.isInteger(event.tool_response?.exit_code)&&event.tool_response.exit_code!==0) ? 'error' : 'success';
         for(const project_id of ids){
-          const request={project_id,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,input_sha256:rawHash(input),canonical_input_sha256:canonicalHash(input),outcome};
-          const notice={version:1,executor_id:clientConfig.executorId,request};
+          const request={project_id,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,input_sha256:rawHash(input),canonical_input_sha256:canonicalHash(input),outcome,execution_status:notStarted?'not_started':'completed'};
+          const notice={version:2,executor_id:clientConfig.executorId,request};
           notices.push({notice,...saveNotice(config.completion_spool,notice)});
         }
         client=await connect(clientConfig);
@@ -408,7 +418,8 @@ async function runHookInner(event, {env = process.env, config, connect = connect
         for(const item of notices){
           try {
             const result=await client.call('write.finish',item.notice.request);
-            if(!['pending','finished'].includes(result?.state))throw Error('NOTICE_NOT_ACCEPTED');
+            const fenced=item.notice.request.execution_status==='not_started' && result?.state==='not_started' && result.write_call_id===null && /^[a-f0-9]{64}$/.test(result.receipt_sha256??'');
+            if(!['pending','finished'].includes(result?.state) && !fenced)throw Error('NOTICE_NOT_ACCEPTED');
             ackNotice(config.completion_spool,item.id,item.notice);
           } catch(error) {
             if(error?.code==='WRITE_CALL_MISMATCH')deliveryIssue='POST_DELIVERY_CONFLICT';
@@ -457,6 +468,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     return denied('WRITER_COMPLETION_UNSUPPORTED: используйте native файловые инструменты или поддерживаемую команду проверки компонента.', [...areas.values()].map(a=>a.project));
   }
   if (areas.size === 1) {
+    if(!inputFits(event,input)) return denied('HOOK_INPUT_TOO_LARGE: размер записи превышает допустимый предел.', [...areas.values()].map(a=>a.project));
     try { validateSpool(config.completion_spool); } catch { return denied('POST_DELIVERY_UNAVAILABLE: журнал завершений недоступен.', [...areas.values()].map(a=>a.project)); }
     return existingWrite(event,[...areas.values()][0],{env,connect,files,shell,cwd,input,name});
   }
@@ -473,6 +485,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   if (matching.length !== 1 || files.some(file => !inside(root, file) || excluded.some(p => inside(p, file)))) return deny('Разделите запись по владельцам и исключениям.');
   // AIDEV-NOTE: Shell может содержать непрозрачный код; он не создаёт область и не переписывается.
   if (!['apply_patch', 'Write', 'Edit'].includes(name)) return deny('Используйте native файловую запись для подготовки области.');
+  if(!inputFits(event,input)) return deny('HOOK_INPUT_TOO_LARGE: размер записи превышает допустимый предел.');
   try { validateSpool(config.completion_spool); } catch { return deny('POST_DELIVERY_UNAVAILABLE: журнал завершений недоступен.'); }
   const key = env.CODEWORKS_WORKSPACE_KEY;
   if (!event.session_id || !event.turn_id || !event.tool_use_id) return deny('Для записи нужны идентификаторы сессии и вызова.');
@@ -496,7 +509,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
   const kind = env.CODEWORKS_WORKSPACE_KIND;
   const payload = hash({tool_name:event.tool_name, tool_input:input, cwd, project_id:project.id, workspace_key:key, kind});
-  const args = {project_id:project.id, ...(key ? {workspace_key:key} : {}), ...(kind ? {kind} : {}), session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, targets:[...new Set(files.map(f=>path.relative(root,f)))], request_key:'hook-'+hash([project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
+  const args = {project_id:project.id, ...(key ? {workspace_key:key} : {}), ...(kind ? {kind} : {}), session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, original_input_sha256:canonicalHash(input), targets:[...new Set(files.map(f=>path.relative(root,f)))], request_key:'hook-'+hash([project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
   let client, result;
   try {
     client = await connect(await loadClientConfig(env));
@@ -515,6 +528,10 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     const targetRoot = resolved(result.path, '/');
     if (files.some(file => !inside(targetRoot, resolved(path.join(targetRoot, path.relative(root, file)), '/')))) return deny('Цель записи выходит за пределы рабочей области.');
     const updatedInput = rewrite(targetRoot);
+    if(!inputFits(event,updatedInput)) {
+      await client.call('write.stop',{project_id:project.id,session_id:event.session_id,turn_id:event.turn_id,write_call_id:result.write_call_id,event:'Stop',reason:'prepare_pending'});
+      return deny('HOOK_INPUT_TOO_LARGE: размер перенаправленной записи превышает допустимый предел.');
+    }
     await client.call('write.admit', {project_id:project.id, write_call_id:result.write_call_id, rewritten_sha256:hash(updatedInput), completion_input_sha256:canonicalHash(updatedInput)});
     return {hookSpecificOutput:{hookEventName:'PreToolUse', permissionDecision:'allow', updatedInput, additionalContext:`Запись перенаправлена в область Codeworks ${result.workspace_key}: ${result.path}; ветка ${result.branch}; workspace_id=${result.workspace_id}. Продолжайте работу в этом дереве.`}};
   } catch (error) {
@@ -537,7 +554,7 @@ async function existingWrite(event, area, {env,connect,files,shell,cwd,input,nam
     const w = status.workspace;
     if (!w || resolved(w.path,'/') !== area.root || w.preparation_state !== 'ready') return deny('Рабочая область недоступна.');
     const key=w.workspace_key,kind=w.kind;
-    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),targets:files.length ? [...new Set(files.map(f=>path.relative(area.root,f)))] : ['.'],request_key:'hook-'+hash([area.project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
+    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),original_input_sha256:canonicalHash(input),targets:files.length ? [...new Set(files.map(f=>path.relative(area.root,f)))] : ['.'],request_key:'hook-'+hash([area.project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
     result=await client.call('write.begin',args);
     if (result.workspace_id!==area.id || resolved(result.path,'/')!==area.root) throw Error('WORKSPACE_MISMATCH');
     await client.call('write.admit',{project_id:area.project.id,write_call_id:result.write_call_id,rewritten_sha256:hash(input),completion_input_sha256:canonicalHash(input)});

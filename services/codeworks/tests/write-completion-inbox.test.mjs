@@ -23,3 +23,11 @@ test('unadmitted or unrelated terminal outcome cannot be treated as a Post',()=>
  assert.throws(()=>validatePostCompletion({...call,state:'finished',tool_result:{outcome:'error'}},notice,'codex'),{code:'WRITE_CALL_MISMATCH'});
  assert.doesNotThrow(()=>validatePostCompletion({...call,state:'uncertain'},notice,'codex'));
 });
+test('typed not-started accepts the original input only when execution failed',()=>{
+ const {notice,call}=make();call.original_input_sha256='d'.repeat(64);call.completion_input_sha256=notice.canonical_input_sha256;
+ const original={...notice,input_sha256:'d'.repeat(64),canonical_input_sha256:'d'.repeat(64),execution_status:'not_started',outcome:'error'};
+ for(const state of ['preparing','denied_pending','in_flight','uncertain'])assert.doesNotThrow(()=>validatePostCompletion({...call,state},original,'codex'));
+ assert.throws(()=>validatePostCompletion(call,{...original,execution_status:'completed'},'codex'),{code:'WRITE_CALL_MISMATCH'});
+ assert.throws(()=>validatePostCompletion(call,{...original,outcome:'success'},'codex'),{code:'WRITE_CALL_MISMATCH'});
+ assert.throws(()=>validatePostCompletion(call,{...original,canonical_input_sha256:'e'.repeat(64)},'codex'),{code:'WRITE_CALL_MISMATCH'});
+});

@@ -1462,6 +1462,10 @@
           "maxLength": 255,
           "pattern": "^[^\\u0000-\\u001f]+$"
         },
+        "original_input_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
         "payload_sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
@@ -1571,6 +1575,9 @@
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
         },
+        "execution_status": {
+          "enum": ["completed", "not_started"]
+        },
         "outcome": {
           "enum": [
             "success",
@@ -1588,6 +1595,8 @@
         "canonical_input_sha256",
         "outcome"
       ],
+      "if": {"required": ["execution_status"], "properties": {"execution_status": {"const": "not_started"}}},
+      "then": {"properties": {"outcome": {"const": "error"}}},
       "additionalProperties": false
     },
     "write.stop": {
@@ -1731,11 +1740,15 @@
       "type": "object",
       "properties": {
         "write_call_id": {
-          "type": "string",
+          "type": ["string", "null"],
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
         },
         "state": {
-          "enum": ["pending", "finished"]
+          "enum": ["pending", "finished", "not_started"]
+        },
+        "receipt_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         },
         "changed": {
           "type": "boolean"
@@ -1748,6 +1761,9 @@
       "if": {"properties": {"state": {"const": "finished"}}},
       "then": {"required": ["changed"]},
       "else": {"not": {"required": ["changed"]}},
+      "allOf": [
+        {"if": {"properties": {"state": {"const": "not_started"}}}, "then": {"properties": {"write_call_id": {"type": "null"}}, "required": ["receipt_sha256"]}, "else": {"properties": {"write_call_id": {"type": "string"}}}}
+      ],
       "additionalProperties": false
     },
     "writeStopResponse": {

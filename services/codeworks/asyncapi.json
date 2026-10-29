@@ -938,14 +938,14 @@
         "payload": {
           "$ref": "./schemas/api.schema.json#/definitions/write.finish"
         },
-        "description": "Точное уведомление о завершении содержит identity вызова, имя инструмента, digests входа и исход; текст и вывод не передаются."
+        "description": "Точные identity, digests входа и исход; optional execution_status различает completed и подтверждённый not_started. Текст и вывод не передаются."
       },
       "write_finishResponse": {
         "name": "write_finishResponse",
         "payload": {
           "$ref": "./schemas/api.schema.json#/definitions/writeFinishResponse"
         },
-        "description": "Pending подтверждает сохранённое уведомление; finished содержит результат проверки изменений."
+        "description": "Pending подтверждает сохранённое уведомление; finished содержит результат проверки; not_started подтверждает fence без созданного вызова."
       },
       "write_stopRequest": {
         "name": "write_stopRequest",

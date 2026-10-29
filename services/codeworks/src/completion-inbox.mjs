@@ -12,10 +12,13 @@ const digest=value=>createHash('sha256').update(canonical(value)).digest('hex');
 /** Проверяет исходный допуск, включая точный инструмент и хэш перенаправленного входа. */
 export function validatePostCompletion(call,notice,executorId) {
   const same=['project_id','session_id','turn_id','tool_use_id','tool_name'].every(key=>call?.[key]===notice[key]);
-  const inputMatches=call?.completion_input_sha256
+  const notStarted=notice.execution_status==='not_started'&&notice.outcome==='error';
+  const rewrittenMatches=call?.completion_input_sha256
     ? call.completion_input_sha256===notice.canonical_input_sha256
     : call?.rewritten_sha256===notice.input_sha256;
-  if(!same||call.executor_id!==executorId||!call.admitted_at||!inputMatches||!['in_flight','uncertain','finished'].includes(call.state))throw new Fault('WRITE_CALL_MISMATCH');
+  const inputMatches=rewrittenMatches||(notStarted&&!!call?.original_input_sha256&&call.original_input_sha256===notice.canonical_input_sha256);
+  const states=notStarted?['preparing','denied_pending','in_flight','uncertain','finished']:['in_flight','uncertain','finished'];
+  if(!same||call.executor_id!==executorId||(!notStarted&&!call.admitted_at)||!inputMatches||!states.includes(call.state)||(notice.execution_status==='not_started'&&!notStarted))throw new Fault('WRITE_CALL_MISMATCH');
   if(call.state==='finished'&&call.tool_result?.outcome!==notice.outcome)throw new Fault('WRITE_CALL_MISMATCH');
 }
 
@@ -27,14 +30,23 @@ export function createCompletionInbox(pool) {
     try {
       await db.query('BEGIN');
       const identity=[args.project_id,executorId,args.session_id,args.turn_id,args.tool_use_id];
+      // AIDEV-NOTE: Fence и begin сериализованы до создания строки: поздний запрос не возродит вызов.
+      await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',['write-session:'+JSON.stringify(identity.slice(0,3))]);
+      const notification={...args,execution_status:args.execution_status??'completed',executor_id:executorId},receipt=digest(notification);
       const initial=(await db.query('SELECT * FROM codeworks.write_calls WHERE project_id=$1 AND executor_id=$2 AND session_id=$3 AND turn_id=$4 AND tool_use_id=$5',identity)).rows[0];
-      if(!initial)throw new Fault('NOT_FOUND');
+      if(!initial){
+        if(notification.execution_status!=='not_started'||notification.outcome!=='error')throw new Fault('NOT_FOUND');
+        await db.query(`INSERT INTO codeworks.write_call_fences(project_id,executor_id,session_id,turn_id,tool_use_id,tool_name,original_input_sha256,receipt_sha256)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`,[...identity,args.tool_name,args.canonical_input_sha256,receipt]);
+        const fence=(await db.query('SELECT * FROM codeworks.write_call_fences WHERE project_id=$1 AND executor_id=$2 AND session_id=$3 AND turn_id=$4 AND tool_use_id=$5',identity)).rows[0];
+        if(fence?.receipt_sha256!==receipt||fence.tool_name!==args.tool_name||fence.original_input_sha256!==args.canonical_input_sha256)throw new Fault('WRITE_CALL_MISMATCH');
+        await db.query('COMMIT');return {write_call_id:null,state:'not_started',receipt_sha256:receipt};
+      }
       // AIDEV-NOTE: Сохраняем общий порядок блокировок admission/cleanup перед строкой вызова.
       await db.query('SELECT id FROM codeworks.workspaces WHERE id=$1 FOR UPDATE',[initial.workspace_id]);
       await db.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[initial.workspace_id]);
       const call=(await db.query('SELECT * FROM codeworks.write_calls WHERE id=$1 FOR UPDATE',[initial.id])).rows[0];
-      validatePostCompletion(call,args,executorId);
-      const notification={...args,executor_id:executorId},receipt=digest(notification);
+      validatePostCompletion(call,notification,executorId);
       const old=(await db.query('SELECT * FROM codeworks.write_completions WHERE write_call_id=$1 FOR UPDATE',[call.id])).rows[0];
       if(old&&(old.receipt_sha256!==receipt||canonical(old.notification)!==canonical(notification)))throw new Fault('WRITE_CALL_MISMATCH');
       if(!old)await db.query('INSERT INTO codeworks.write_completions(write_call_id,receipt_sha256,notification) VALUES($1,$2,$3::jsonb)',[call.id,receipt,JSON.stringify(notification)]);
@@ -49,7 +61,7 @@ export function createCompletionInbox(pool) {
 async function processOne(pool,item,{allowedRepositories,git}) {
   const db=await pool.connect();let locked=false,lost=false;
   const onError=()=>{lost=true;};db.on('error',onError);
-  const key='execution:workspace:'+item.workspace_id;
+  const key=item.workspace_id?'execution:workspace:'+item.workspace_id:'execution:write-call:'+item.write_call_id;
   try {
     locked=!!(await db.query('SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS acquired',[key])).rows[0]?.acquired;
     if(!locked)return false;
@@ -68,7 +80,7 @@ async function processOne(pool,item,{allowedRepositories,git}) {
       const result=await git.inspect(project,w);
       if(lost)throw Error('EXECUTION_GUARD_LOST');return result;
     }});
-    await admission.finish(notice,executorId,{postProof:{...notice,executor_id:executorId,receipt_sha256:current.receipt_sha256}});
+    await admission.finish(notice,executorId,{postProof:{...notice,executor_id:executorId,receipt_sha256:current.receipt_sha256},expectedWorkspaceId:item.workspace_id});
     if(lost)throw Error('EXECUTION_GUARD_LOST');
     await db.query("UPDATE codeworks.write_completions SET state='done',error=NULL,next_attempt_at=NULL,finished_at=now(),updated_at=now() WHERE write_call_id=$1 AND receipt_sha256=$2 AND state='pending'",[item.write_call_id,current.receipt_sha256]);
     return true;

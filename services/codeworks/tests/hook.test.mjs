@@ -2,6 +2,7 @@
 // ABOUTME: Подменяет backend и не запускает пользовательские сессии Codex.
 import test, {after} from 'node:test';
 import {mkdtempSync,rmSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
 import {listNotices,rawHash,canonicalHash} from '../src/write-notice.mjs';
 import assert from 'node:assert/strict';
 import {runHook,writePaths,foregroundCommand,readHookJSON} from '../src/hook.mjs';
@@ -18,7 +19,7 @@ test('timeout denies without admitting',async()=>{const f=fixture(false);const r
 test('mixed owners and shell do not create a workspace',async()=>{for(const event of [patch(valid.replace('*** End Patch','*** Add File: /outside/admin/a\n+x\n*** End Patch')),{...patch(valid),tool_name:'Bash',tool_input:{command:'touch src/a'}}]){const f=fixture();assert.equal((await runHook(event,f.options)).hookSpecificOutput.permissionDecision,'deny');assert.equal(f.calls.length,0);}});
 test('missing key uses actual write, missing identifiers deny',async()=>{const f=fixture();f.options.env={CODEWORKS_EXECUTOR_ID:'codex'};assert.equal((await runHook(patch(valid),f.options)).hookSpecificOutput.permissionDecision,'allow');assert.equal(f.calls[0].method,'write.begin');assert.equal('workspace_key' in f.calls[0].args,false);f.calls.length=0;assert.equal((await runHook({...patch(valid),session_id:undefined},f.options)).hookSpecificOutput.permissionDecision,'deny');assert.equal(f.calls.length,0);});
 test('reads and Admin targets do not connect',async()=>{const f=fixture();assert.deepEqual(await runHook(patch(valid.replace('src/a','/outside/admin/a')),f.options),{});assert.equal(f.calls.length,0);});
-test('post and stop report only safe outcome',async()=>{const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_response:{error:'private'}},f.options);assert.deepEqual(f.calls[0],{method:'write.finish',args:{project_id:'demo',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'apply_patch',input_sha256:rawHash(patch(valid).tool_input),canonical_input_sha256:canonicalHash(patch(valid).tool_input),outcome:'error'}});await runHook({...patch(valid),hook_event_name:'Stop'},f.options);assert.equal(f.calls[1].method,'write.stop');});
+test('post and stop report only safe outcome',async()=>{const f=fixture();await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_response:{error:'private'}},f.options);assert.deepEqual(f.calls[0],{method:'write.finish',args:{project_id:'demo',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'apply_patch',input_sha256:rawHash(patch(valid).tool_input),canonical_input_sha256:canonicalHash(patch(valid).tool_input),outcome:'error',execution_status:'completed'}});await runHook({...patch(valid),hook_event_name:'Stop'},f.options);assert.equal(f.calls[1].method,'write.stop');});
 
 const bash = command => ({tool_name:'Bash',cwd:'/test/main',tool_input:{command}});
 test('simple shell targets and heredoc bodies retain parser coverage',()=>{
@@ -235,4 +236,54 @@ test('huge chunked native Post output is discarded while input identity is retai
  async function* pieces(){yield Buffer.from(JSON.stringify(meta).slice(0,-1)+',"tool_response":"');for(let i=0;i<257;i++)yield Buffer.alloc(65536,120);yield Buffer.from('"}');}
  const event=await readHookJSON(pieces());assert.equal(event.tool_response,'');assert.deepEqual(event.tool_input,input);
  const isolated=mkdtempSync('/tmp/cw-large-post-');try{const f=fixture();f.options.config={...config,completion_spool:isolated};f.options.connect=async()=>{throw Error('offline');};const result=await runHook({...event,cwd:'/test/main'},f.options);assert.match(result.systemMessage,/POST_DELIVERY_PENDING/);const stored=listNotices(isolated,{projectId:'demo'})[0].notice;assert.equal(stored.request.input_sha256,rawHash(input));assert.equal(stored.request.canonical_input_sha256,canonicalHash(input));assert.doesNotMatch(JSON.stringify(stored),/xxxxxxxx/);}finally{rmSync(isolated,{recursive:true,force:true});}
+});
+
+test('docs-only and excluded Post create no notice or connection',async()=>{
+ const f=fixture();f.options.config={...config,projects:[{...config.projects[0],workspace_root:'/test/areas'}]};f.options.connect=()=>assert.fail('untracked documentation must not connect');
+ for(const name of ['docs/allowed.md','tmp/a']) assert.deepEqual(await runHook({...patch(valid.replace('src/a',name)),hook_event_name:'PostToolUse',tool_response:'ok'},f.options),{});
+});
+test('docs inside admitted workspace still deliver Post',async()=>{
+ const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id;
+ const f=fixture();f.options.config={completion_spool:spool,projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/areas',documentation_paths:['docs']}]};
+ const e={...patch(valid.replace('src/a',root+'/docs/allowed.md')),hook_event_name:'PostToolUse',tool_response:'ok'};
+ await runHook(e,f.options);assert.equal(f.calls[0]?.method,'write.finish');
+});
+
+
+test('large skipped response object keeps bounded memory and parses escaped keys',async()=>{
+ const meta={hook_event_name:'PostToolUse',tool_name:'Bash',session_id:'сессия',turn_id:'t',tool_use_id:'u',tool_input:{command:'node --test tests/a'}};
+ async function* chunks(){yield Buffer.from(JSON.stringify(meta).slice(0,-1)+',"tool_response":{');for(let i=0;i<18000;i++)yield Buffer.from(JSON.stringify('key'+i+'я')+':"'+ 'x'.repeat(1000)+'",');yield Buffer.from('"isError":false}}');}
+ const event=await readHookJSON(chunks());assert.equal(event.session_id,'сессия');assert.deepEqual(event.tool_response,{isError:false});assert.deepEqual(event.tool_input,meta.tool_input);
+});
+
+test('input size bound denies before begin and after path rewrite before admit',async()=>{
+ const limit=8*1024*1024;const base=patch(valid);
+ let oversized={...base,tool_input:{command:valid+'я'.repeat(limit/2)}};let f=fixture();let out=await runHook(oversized,f.options);assert.match(out.hookSpecificOutput.additionalContext,/HOOK_INPUT_TOO_LARGE/);assert.equal(f.calls.length,0);
+ const prefix='*** Begin Patch\n*** Add File: src/a\n+',suffix='\n*** End Patch';
+ let event=patch(prefix+suffix);const padding=limit-Buffer.byteLength(JSON.stringify(event))-4;event=patch(prefix+'x'.repeat(padding)+suffix);f=fixture();out=await runHook(event,f.options);assert.match(out.hookSpecificOutput.additionalContext,/HOOK_INPUT_TOO_LARGE/);assert.deepEqual(f.calls.map(c=>c.method),['write.begin','status','write.stop']);
+});
+
+
+test('millions of distinct skipped response keys fit a bounded heap',()=>{
+ const reader=new URL('../src/hook.mjs',import.meta.url).href;
+ const script=`import {readHookJSON} from ${JSON.stringify(reader)};async function* input(){yield '{"tool_response":{';for(let i=0;i<1200000;i++)yield (i?',':'')+JSON.stringify('ключ'+i)+':0';yield '}}';}const x=await readHookJSON(input());if(Object.keys(x.tool_response).length)process.exit(3);`;
+ const child=spawnSync(process.execPath,['--max-old-space-size=64','--input-type=module','-e',script],{encoding:'utf8',timeout:60000});assert.equal(child.status,0,child.stderr);
+});
+
+
+test('typed not_started preserves native identity and never infers from text',async()=>{
+ const pre=fixture();await runHook(patch(valid),pre.options);assert.equal(pre.calls[0].args.original_input_sha256,canonicalHash(patch(valid).tool_input));
+ for(const response of [{execution_status:'not_started',isError:true,terminal:true},{execution_status:'not_started',isError:true},{execution_status:'not_started',terminal:true},'not_started']) {
+  const f=fixture(),event={...patch(valid),hook_event_name:'PostToolUse',tool_response:response};const decoded=await readHookJSON([JSON.stringify(event)]);const result=await runHook(decoded,f.options);if(response?.execution_status==='not_started' && (response.isError!==true||response.terminal!==true)){assert.match(result.systemMessage,/POST_DELIVERY_UNAVAILABLE/);assert.equal(f.calls.length,0);continue;}const request=f.calls[0].args;assert.equal(request.canonical_input_sha256,canonicalHash(event.tool_input));assert.equal(request.execution_status,response?.terminal===true&&response?.isError===true?'not_started':'completed');
+ }
+});
+
+
+test('durable not_started fence acknowledges only a valid exact receipt',async()=>{
+ for(const mode of ['fenced','bad-receipt','missing','normal']){
+  const isolated=mkdtempSync('/tmp/cw-fence-');try{const f=fixture();f.options.config={...config,completion_spool:isolated};f.options.connect=async()=>({call:async()=>{if(mode==='missing')throw Object.assign(Error('absent'),{code:'NOT_FOUND'});return {state:'not_started',write_call_id:null,receipt_sha256:mode==='bad-receipt'?'bad':'a'.repeat(64)};},close(){}});
+  const tool_response=mode==='normal'?{}:{execution_status:'not_started',isError:true,terminal:true};const result=await runHook({...patch(valid),hook_event_name:'PostToolUse',tool_response},f.options);
+  if(mode==='fenced'){assert.deepEqual(result,{});assert.equal(listNotices(isolated,{projectId:'demo'}).length,0);}else{assert.match(result.systemMessage,mode==='missing'?/POST_DELIVERY_UNMATCHED/:/POST_DELIVERY_PENDING/);assert.equal(listNotices(isolated,{projectId:'demo'}).length,1);}
+  }finally{rmSync(isolated,{recursive:true,force:true});}
+ }
 });

@@ -15,6 +15,7 @@ import {createHandlers} from '../../src/domain.mjs';
 import {createStore} from '../../src/storage.mjs';
 import {createActivities} from '../../src/temporal.mjs';
 import {processProjectCompletions} from '../../src/completion-inbox.mjs';
+import {reconcileProjectLedger} from '../../src/reconciler.mjs';
 import {rawHash,canonicalHash,listNotices} from '../../src/write-notice.mjs';
 import {runHook} from '../../src/hook.mjs';
 
@@ -77,4 +78,45 @@ test('durable Post survives inspect outage and lost ack, then Temporal retries w
   await until(async()=>(await f.app.query('SELECT state FROM codeworks.cleanup_obligations WHERE id=$1',[obligation])).rows[0]?.state==='done');
   const history=await handle.fetchHistory();assert.ok(history.events.some(e=>e.activityTaskScheduledEventAttributes?.activityType?.name==='reconcileProject'));
  });
+});
+
+test('not-started fences late begin and completes only the exact failed invocation',{timeout:120000},async t=>{
+ assert.ok(configured,'explicit disposable PostgreSQL required');const f=await setup();t.after(()=>f.close());const p=await f.project({codeIndexDisabled:true});
+ const original={command:'*** Begin Patch\n*** Update File: hello.txt\n@@\n-missing\n+value\n*** End Patch'},rewritten={command:original.command.replace('hello.txt','other/hello.txt')};
+ const req=tool=>({project_id:p.id,workspace_key:'not-started',session_id:'s-'+tool,turn_id:'turn',tool_use_id:tool,tool_name:'apply_patch',payload_sha256:'a'.repeat(64),original_input_sha256:canonicalHash(original),targets:['hello.txt'],request_key:'request-'+tool});
+ const post=r=>({project_id:p.id,session_id:r.session_id,turn_id:r.turn_id,tool_use_id:r.tool_use_id,tool_name:r.tool_name,input_sha256:rawHash(original),canonical_input_sha256:canonicalHash(original),execution_status:'not_started',outcome:'error'});
+ const absent=req('post-first'),notice=post(absent);
+ await assert.rejects(f.h.call('write.finish',{...notice,execution_status:'completed'},'codex'),{code:'NOT_FOUND'});
+ const fenced=await f.h.call('write.finish',notice,'codex');assert.equal(fenced.state,'not_started');assert.equal(fenced.write_call_id,null);assert.match(fenced.receipt_sha256,/^[a-f0-9]{64}$/);
+ assert.deepEqual(await f.h.call('write.finish',notice,'codex'),fenced);
+ await assert.rejects(f.h.call('write.finish',{...notice,canonical_input_sha256:'f'.repeat(64)},'codex'),{code:'WRITE_CALL_MISMATCH'});
+ await assert.rejects(f.h.call('write.begin',absent,'codex'),{code:'CONFLICT'});
+ assert.equal((await f.app.query('SELECT count(*)::int AS n FROM codeworks.workspaces WHERE project_id=$1',[p.id])).rows[0].n,0,'late begin creates no area');
+ const initial=await f.prepare({project_id:p.id,workspace_key:'not-started',request_key:'prepared'});await f.worker(p,initial.operation_id);
+ const w=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[initial.workspace_id])).rows[0],activation=w.activation_state;let inspected=0;
+ const git={...createGit(),inspect:async()=>{inspected++;throw Error('unexpected inspection');}},opts={allowedRepositories:[p.repo_path],git};
+ for(const phase of ['preparing','denied_pending','in_flight']){
+  const r={...req(phase),workspace_id:w.id};const call=await f.h.call('write.begin',r,'codex');
+  if(phase==='denied_pending')await f.h.call('write.stop',{project_id:p.id,session_id:r.session_id,turn_id:r.turn_id,event:'Stop'},'codex');
+  if(phase==='in_flight'){
+   await f.h.call('write.admit',{project_id:p.id,write_call_id:call.write_call_id,rewritten_sha256:rawHash(rewritten),completion_input_sha256:canonicalHash(rewritten)},'codex');
+   await assert.rejects(f.h.call('write.finish',{...post(r),execution_status:'completed'},'codex'),{code:'WRITE_CALL_MISMATCH'});
+  }
+  assert.equal((await f.h.call('write.finish',post(r),'codex')).state,'pending');
+  if(phase==='preparing'){
+   const [processed,admit]=await Promise.allSettled([processProjectCompletions(f.app,p.id,opts),f.h.call('write.admit',{project_id:p.id,write_call_id:call.write_call_id,rewritten_sha256:rawHash(rewritten),completion_input_sha256:canonicalHash(rewritten)},'codex')]);
+   assert.equal(processed.status,'fulfilled');if(admit.status==='rejected')assert.equal(admit.reason.code,'CONFLICT');else assert.equal(admit.value.state,'in_flight');
+  }else await processProjectCompletions(f.app,p.id,opts);
+  const row=(await f.app.query('SELECT state,tool_result FROM codeworks.write_calls WHERE id=$1',[call.write_call_id])).rows[0];assert.equal(row.state,'finished');assert.equal(row.tool_result.changed,false);assert.equal(row.tool_result.outcome,'error');
+  await assert.rejects(f.h.call('write.admit',{project_id:p.id,write_call_id:call.write_call_id,rewritten_sha256:rawHash(rewritten),completion_input_sha256:canonicalHash(rewritten)},'codex'),{code:'CONFLICT'});
+ }
+ assert.equal(inspected,0,'not-started does not inspect Git');assert.equal((await f.app.query('SELECT activation_state FROM codeworks.workspaces WHERE id=$1',[w.id])).rows[0].activation_state,activation);
+ // Prepare committed while its caller lost the association: ledger reconciliation binds it before completion processing.
+ const lost=req('lost-association'),callId=randomUUID(),operation=randomUUID();
+ await f.owner.query("INSERT INTO codeworks.operations(id,project_id,workspace_id,executor_id,kind,status,step,request) VALUES($1,$2,$3,'codex','prepare','failed','fixture',$4)",[operation,p.id,w.id,{workspace_key:'not-started',kind:'feature'}]);
+ await f.owner.query("INSERT INTO codeworks.requests(project_id,executor_id,idempotency_key,payload_sha256,operation_id) VALUES($1,'codex',$2,$3,$4)",[p.id,lost.request_key,'a'.repeat(64),operation]);
+ await f.owner.query("INSERT INTO codeworks.write_calls(id,project_id,executor_id,session_id,turn_id,tool_use_id,tool_name,payload_sha256,original_input_sha256,targets,workspace_key,kind,request_key,state) VALUES($1,$2,'codex',$3,$4,$5,'apply_patch',$6,$7,'[\"hello.txt\"]','not-started','feature',$8,'preparing')",[callId,p.id,lost.session_id,lost.turn_id,lost.tool_use_id,'a'.repeat(64),lost.original_input_sha256,lost.request_key]);
+ assert.equal((await f.h.call('write.finish',post(lost),'codex')).state,'pending');await reconcileProjectLedger(f.app,p.id,'fixture-reconciler');
+ const bound=(await f.app.query('SELECT workspace_id,operation_id FROM codeworks.write_calls WHERE id=$1',[callId])).rows[0];assert.equal(bound.workspace_id,w.id);assert.equal(bound.operation_id,operation);
+ await processProjectCompletions(f.app,p.id,opts);assert.equal((await f.app.query('SELECT state FROM codeworks.write_calls WHERE id=$1',[callId])).rows[0].state,'finished');assert.equal(inspected,0);
 });
