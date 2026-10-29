@@ -47,9 +47,19 @@ def fact_fields(content):
 
 def document_references(text):
     """Найти реальные файловые ссылки без угадывания темы документа."""
-    return list(dict.fromkeys(re.findall(
-        r'''[^\s<>"']+\.(?:pdf|docx?|odt|md|txt|html|xlsx?|csv)(?:\?[^\s<>"']*)?''',
-        text, re.IGNORECASE)))
+    paths = re.findall(
+        r'''(?<![^\s<>"'`])[^\s<>"'`]+\.(?:pdf|docx?|odt|md|txt|html|xlsx?|csv)(?:\?[^\s<>"'`]*)?''',
+        text, re.IGNORECASE)
+    identifiers = re.findall(r'''(?:artifact:/{0,2}|\[artifactId=|"artifactId"\s*:\s*")([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})''', text)
+    return list(dict.fromkeys([*paths, *('artifact:' + value.lower() for value in identifiers)]))
+
+
+def internal_dialogue(messages):
+    """Распознать протокол фонового результата Hermes, а не слова о делегировании."""
+    users = [m.get('content', '') for m in messages or [] if m.get('role') == 'user']
+    return bool(users) and all(isinstance(text, str) and re.match(
+        r'^(?:\[[^\]\n]+\]\s*)?\[ASYNC DELEGATION BATCH COMPLETE[^\n]*\]\s*'
+        r'A background fan-out unit you dispatched earlier', text) for text in users)
 
 
 def memory_text(row):
@@ -80,6 +90,7 @@ def public_memory(row):
     return {
         "id": row.get("id"), "content": memory_text(row),
         "document_refs": document_references(memory_text(row)),
+        "document_metadata": row.get('_document_metadata', []),
         "session_id": meta.get("session_id"), "created_at": meta.get("created_at"),
         "source_date": row.get('_source_date'),
         "relevance": (1.0 if row.get('_relevance') == 'direct' else .5

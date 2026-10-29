@@ -936,6 +936,29 @@ def known_alias(path):
         return db.execute('SELECT 1 FROM aliases WHERE path=?', (str(path),)).fetchone() is not None
 
 
+def reference_metadata(reference):
+    """Прочитать сохранённое проверенное имя; текущий доступ проверит fetch/read."""
+    value = str(reference)
+    identifier = value.split(':', 1)[1].lstrip('/') if value.startswith('artifact:') else value
+    if re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', identifier):
+        identifier = str(uuid.UUID(identifier))
+        with store().db() as db:
+            row = db.execute('SELECT artifact,ref FROM aliases WHERE artifact=? LIMIT 1', (identifier,)).fetchone()
+    elif Path(value).is_absolute():
+        with store().db() as db:
+            row = db.execute('SELECT artifact,ref FROM aliases WHERE path=?', (value,)).fetchone()
+    else:
+        return None
+    if row is None:
+        return None
+    result = json.loads(row['ref'])
+    if (result.get('artifactId') != row['artifact']
+            or not isinstance(result.get('filename'), str)
+            or not result['filename'] or Path(result['filename']).name != result['filename']):
+        raise FileError('INVALID_FILE_RESULT')
+    return {key: result[key] for key in ('artifactId', 'filename', 'mimeType') if key in result}
+
+
 def guard_write(path, task_id):
     """Закрыть также прямые вызовы write/patch в обход model_tools."""
     base = Path(workspace_for(task_id))

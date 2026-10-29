@@ -8,7 +8,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from .client import Client, MemOSError, fact_fields, memory_text
+from .client import Client, MemOSError, fact_fields, memory_text, internal_dialogue
 from .router import Catalog, SemanticRouter, stable_id, QUALITY_VERSION, evidence_context
 
 
@@ -49,6 +49,7 @@ class RoutedRuntime:
         self.api = provider.client
         self.catalog = Catalog(self.home)
         self.router = SemanticRouter(provider.config.get('router', {}), self.catalog)
+        self.router.document_metadata = getattr(provider, 'document_metadata', None)
         self.epoch = provider.config['memory_epoch']
         self.generation = provider.config.get('generation', 1)
         self.home_scope = stable_id(str(self.home.resolve()))
@@ -338,6 +339,8 @@ class RoutedRuntime:
                 if not self.allowed(row, config):
                     continue
                 info = row['metadata']['info']
+                if info.get('hermes_kind') in ('turn', 'native') and internal_dialogue(info.get('hermes_messages')):
+                    continue
                 if info.get('hermes_kind') in ('turn', 'explicit', 'native'):
                     source_dates[info.get('hermes_event_id')] = row['metadata'].get('created_at')
                 if info.get('hermes_kind') == 'checkpoint':
@@ -370,7 +373,8 @@ class RoutedRuntime:
                 'date': row.get('_source_date')} for row in pool]
             result = self.router.rank(query, candidates, **({'goal': plan['goal']} if plan else {}))
             rows = [{**pool[m['index']], '_relevance': m['relevance'],
-                     '_relevance_reason': m['reason']} for m in result['matches']]
+                     '_relevance_reason': m['reason'],
+                     '_document_metadata': m.get('document_metadata', [])} for m in result['matches']]
             return rows, result
         document_lookup = bool(plan and plan['goal'] == 'locate_document')
         initial = ([row for row in ordered if row['metadata']['info'].get('hermes_kind') == 'fact']

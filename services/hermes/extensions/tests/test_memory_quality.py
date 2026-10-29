@@ -22,6 +22,9 @@ class QualityContractTests(unittest.TestCase):
     def setUp(self):
         self.router = router_module.SemanticRouter({}, router_module.Catalog(Path('/nonexistent-neutral-home')))
 
+    def test_long_plain_source_does_not_backtrack_for_a_document_path(self):
+        self.assertEqual(router_module.document_references('x' * 100000 + ' report.pdf'), ['report.pdf'])
+
     def test_proposed_wrong_category_is_replaced_by_review_and_noise_is_removed(self):
         text = 'I researched an appliance for my paid massage service.'
         candidate = {'text': text, 'source': {'message_index':0,'role':'user','start':0,'end':len(text),'quote':text},
