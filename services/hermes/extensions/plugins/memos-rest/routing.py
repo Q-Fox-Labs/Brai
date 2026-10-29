@@ -376,7 +376,7 @@ class RoutedRuntime:
                      '_relevance_reason': m['reason'],
                      '_document_metadata': m.get('document_metadata', [])} for m in result['matches']]
             return rows, result
-        document_lookup = bool(plan and plan['goal'] in ('locate_document', 'latest_conversation'))
+        document_lookup = bool(plan and plan['goal'] in ('locate_document', 'latest_conversation', 'latest_topic'))
         initial = ([row for row in ordered if row['metadata']['info'].get('hermes_kind') == 'fact']
                    if expand_sources and not include_archive and not document_lookup else ordered)
         rows, result = select(initial)
