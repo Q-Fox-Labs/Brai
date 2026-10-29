@@ -32,6 +32,7 @@
       "services/game-core/planning/planning-system.py",
       "services/game-core/planning/quest-planning-rules.md",
       "services/game-core/planning/runner.py",
+      "services/game-core/planning/smoke.mjs",
       "services/game-core/schemas/messages.schema.json",
       "services/game-core/schemas/tools.schema.json",
       "services/game-core/src/config.ts",
@@ -83,6 +84,7 @@
       "services/game-core/planning/planning-system.py",
       "services/game-core/planning/quest-planning-rules.md",
       "services/game-core/planning/runner.py",
+      "services/game-core/planning/smoke.mjs",
       "services/game-core/schemas"
     ],
     "entrypoints": [
@@ -94,7 +96,8 @@
     ],
     "smokeImports": [],
     "systemRequirements": [
-      "Node.js 24.22.1"
+      "Node.js 24.22.1",
+      "Python 3.13 (standard library)"
     ]
   },
   "deploy": {

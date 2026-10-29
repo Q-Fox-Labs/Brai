@@ -209,6 +209,32 @@ test('standalone image smoke failure occurs before any registry publication',asy
   assert.deepEqual(docker,['buildx','run']);assert.deepEqual(io.publications,[]);
 });
 
+test('game-core image includes Python and a failed planning smoke prevents publication',async t=>{
+  const f=fixture(t),descriptor=JSON.parse(readFileSync(join(f.root,'services/probe/component.json'),'utf8'));
+  descriptor.id='game-core';descriptor.type='container';descriptor.delivery.kind='oci-context';
+  descriptor.delivery.entrypoints=['services/probe/main.mjs'];f.put('services/probe/component.json',JSON.stringify(descriptor));
+  f.put('docs/components/README.md','[game-core](game-core.md) [probe](probe.md) [web](web.md)\n');
+  f.put('docs/components/game-core.md','[Технический README](../../services/probe/README.md)\n');
+  const plan=makePlan(f.root,f.source),io=ports(f.root),docker=[];
+  const commands=async(executable,args,options)=>{
+    if(executable!=='docker')return io.commands(executable,args,options);
+    if(args[0]==='buildx') {
+      const dockerfile=readFileSync(join(args.at(-1),'Dockerfile'),'utf8');
+      assert.match(dockerfile,/COPY --from=planning_python \/usr\/local\//);
+      assert.match(dockerfile,/\/usr\/bin\/python3/);
+    }
+    docker.push(args);
+    if(args[0]==='run'&&args.includes('/payload/services/game-core/planning/smoke.mjs'))throw Error('PLANNING_SMOKE_FAILED');
+    return {stdout:'',stderr:''};
+  };
+  await assert.rejects(executePlan(config(f.source),io.registry,plan,{repositoryRoot:f.root,commands}),/PLANNING_SMOKE_FAILED/);
+  const smoke=docker.find(args=>args.includes('/payload/services/game-core/planning/smoke.mjs'));
+  assert.ok(smoke.includes('--read-only'));
+  assert.ok(smoke.includes('--network')&&smoke.includes('none'));
+  assert.ok(smoke.includes('--tmpfs')&&smoke.includes('1000:1000'));
+  assert.deepEqual(io.publications,[]);
+});
+
 
 test('ready-files and OCI contexts retain portable workspace links without the source stage', async t => {
   for (const kind of ['ready-files', 'oci-context']) await t.test(kind, async t => {
