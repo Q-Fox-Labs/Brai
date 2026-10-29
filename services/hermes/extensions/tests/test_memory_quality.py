@@ -28,13 +28,15 @@ class QualityContractTests(unittest.TestCase):
         calls=[]
         def model(payload):
             data=json.loads(payload[-1]['content']);calls.append(data)
-            return {'reviews':[{'index':0,'keep':True,'spheres':['life_work']}]} if 'candidates' in data else {'facts':[candidate]}
+            return {'reviews':[{'index':0,'keep':True,'spheres':['life_work'],
+                'supported':True,'standalone':True,'reason':'Explicit paid service purpose.'}]} if 'candidates' in data else {'facts':[candidate]}
         self.router.transport=model
         facts=self.router.extract([{'role':'user','content':text}],context=['Growing my business.'])
         self.assertEqual(facts[0]['memberships'],['life_work'])
-        self.assertNotIn('conversation_context',calls[0])
-        self.assertEqual(calls[1]['conversation_context'],['Growing my business.'])
-        self.router.transport=lambda _: {'reviews':[{'index':0,'keep':False,'spheres':[]}]}
+        self.assertEqual(calls[0]['conversation_context'],['Growing my business.'])
+        self.assertEqual(calls[1]['conversation_context'],['Growing my business.',text])
+        self.router.transport=lambda _: {'reviews':[{'index':0,'keep':False,'spheres':[],
+            'supported':False,'standalone':True,'reason':'No useful supported fact.'}]}
         self.assertEqual(self.router.review(facts),[])
 
     def test_unreviewed_candidates_and_unquoted_context_cannot_become_facts(self):
@@ -51,7 +53,7 @@ class QualityContractTests(unittest.TestCase):
         schema=self.router._response_schema([{'content':json.dumps({'candidates':[{},{}]})}])
         reviews=schema['properties']['reviews']
         self.assertEqual((reviews['minItems'],reviews['maxItems']),(2,2))
-        self.assertEqual(set(reviews['items']['required']),{'index','keep','spheres'})
+        self.assertEqual(set(reviews['items']['required']),{'index','keep','spheres','supported','standalone','reason'})
 
     def test_schema_binds_evidence_role_to_the_actual_message(self):
         schema=self.router._response_schema([{'content':json.dumps({'messages':[{'role':'assistant','content':'Research finding.'}]})}])
@@ -60,7 +62,8 @@ class QualityContractTests(unittest.TestCase):
         self.assertNotIn('quote',source)
         self.assertEqual(source['message_index']['enum'],[0])
         candidate={'text':'Research finding.','source':{'message_index':0},'spheres':['life_work'],'projects':[],'status':'observation'}
-        self.router.transport=lambda p: {'reviews':[{'index':0,'keep':True,'spheres':['life_work']}]} if 'candidates' in json.loads(p[-1]['content']) else {'facts':[candidate]}
+        self.router.transport=lambda p: {'reviews':[{'index':0,'keep':True,'spheres':['life_work'],
+            'supported':True,'standalone':True,'reason':'Attributed research finding.'}]} if 'candidates' in json.loads(p[-1]['content']) else {'facts':[candidate]}
         fact=self.router.extract([{'role':'assistant','content':'Research finding.'}])[0]
         self.assertEqual(fact['source']['role'],'assistant')
         self.assertEqual(fact['source']['quote'],'Research finding.')
@@ -76,10 +79,24 @@ class QualityContractTests(unittest.TestCase):
         text='I chose this business name.'
         candidate={'text':text,'source':{'message_index':0,'role':'user','start':0,'end':999,'quote':text+' '},
                    'spheres':['life_work'],'projects':[],'status':'decision'}
-        self.router.transport=lambda p: {'reviews':[{'index':0,'keep':True,'spheres':['life_work']}]} if 'candidates' in json.loads(p[-1]['content']) else {'facts':[candidate]}
+        self.router.transport=lambda p: {'reviews':[{'index':0,'keep':True,'spheres':['life_work'],
+            'supported':True,'standalone':True,'reason':'Exact source confirms a decision.'}]} if 'candidates' in json.loads(p[-1]['content']) else {'facts':[candidate]}
         fact=self.router.extract([{'role':'user','content':text}])[0]
         self.assertEqual(fact['source']['quote'],text)
         self.assertEqual(fact['source']['end'],len(text))
+
+    def test_keep_flag_cannot_admit_unsupported_or_incomplete_facts(self):
+        candidate={'text':'Remember those options.','source':{'quote':'Remember those options.'}}
+        for supported, standalone in [(False,True),(True,False)]:
+            self.router.transport=lambda _: {'reviews':[{'index':0,'keep':True,'spheres':['life_work'],
+                'supported':supported,'standalone':standalone,'reason':'Incomplete or ungrounded candidate.'}]}
+            self.assertEqual(self.router.review([candidate]),[])
+
+    def test_recall_index_cannot_borrow_evidence_from_another_candidate(self):
+        self.router.transport=lambda _: {'matches':[{'index':1,'relevance':'direct',
+            'reason':'Chosen practice name.','evidence':'Quiet Studio'}], 'needs_sources':False,'source_query':''}
+        with self.assertRaisesRegex(router_module.MemOSError,'invalid evidence'):
+            self.router.rank('Which name was chosen?',[{'text':'Quiet Studio'},{'text':'Oil pressure warning'}])
 
 
 if __name__=='__main__':

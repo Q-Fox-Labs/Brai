@@ -26,6 +26,8 @@ def register_cli(subparser):
         if name == 'quality-apply':
             admin.add_argument('--plan-id', required=True)
             admin.add_argument('--plan-sha', required=True)
+        if name == 'quality-plan':
+            admin.add_argument('--restore-plan-id', help='Completed historical snapshot to restore before review')
         if name == 'prepare':
             admin.add_argument('--memory-epoch')
             admin.add_argument('--router-url')
@@ -80,7 +82,7 @@ def cmd_admin(args):
                 router[key] = value
         result = admin.prepare(scope, router, args.memory_epoch)
     elif name == 'quality-plan':
-        result = admin.quality_plan(scope)
+        result = admin.quality_plan(scope, args.restore_plan_id)
     elif name == 'quality-apply':
         result = admin.quality_apply(scope, args.plan_id, args.plan_sha, args.timeout)
     elif name == 'handoff-empty':
