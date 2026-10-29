@@ -25,7 +25,7 @@ from .schemas import TOOLS, ROUTED_TOOLS
 logger = logging.getLogger(__name__)
 DEFAULTS = {
     "base_url": "http://127.0.0.1:8001", "user_id": "root", "cube_id": "main",
-    "top_k": 6, "relativity": 0.45, "context_chars": 6000, "excerpt_chars": 1400,
+    "relativity": 0.45, "context_chars": 6000, "excerpt_chars": 1400,
     "request_timeout": 30, "tool_write_timeout": 10, "flush_timeout": 10,
 }
 
@@ -243,8 +243,6 @@ class MemOSProvider(MemoryProvider):
     @staticmethod
     def _validate(config):
         Client(config)
-        if type(config['top_k']) is not int or config['top_k'] < 1:
-            raise ValueError('Invalid MemOS setting: top_k')
         for key, low, high in (("relativity", 0, 1), ("context_chars", 1000, 20000),
                                ("excerpt_chars", 200, 6000), ("request_timeout", 1, 120),
                                ("tool_write_timeout", 1, 60), ("flush_timeout", 1, 60)):
@@ -285,6 +283,8 @@ class MemOSProvider(MemoryProvider):
         return ("MemOS is the external persistent memory provider. Completed user/assistant dialogue is archived "
                 "automatically in the existing MemOS service. Relevant fragments are recalled for each question; "
                 "use memos_search for additional recall and memos_remember for explicit facts or preferences. "
+                "Automatic recall contains excerpts, not a complete account of past work. When the user refers "
+                "to a previous report or numbered sections, retrieve and read that source before relying on it. "
                 "Before asking the user to repeat earlier details, search memory; if needed broaden with all_cubes "
                 "and include_archive, then read the original source. "
                 "Only a verified write is confirmed saved; queued writes are still pending. "
@@ -475,14 +475,18 @@ class MemOSProvider(MemoryProvider):
         with self._lock:
             cached = self._cache.get(key)
         try:
-            rows = cached[1] if cached and time.monotonic() - cached[0] < 30 else self._search(query, sid, int(self.config["top_k"]))
+            rows = cached[1] if cached and time.monotonic() - cached[0] < 30 else self._search(query, sid, None)
             if self._recall_key(sid, query) != key:
                 return ""
         except MemOSError as exc:
             logger.warning("MemOS recall unavailable: %s", exc)
             return ""
         blocks = []
-        budget = int(self.config["context_chars"])
+        guidance = (f"Automatic recall found {len(rows)} matching memories in the searched scope. "
+                    "The excerpts below are a selection within the context budget. "
+                    "Use memos_search and memos_read for missing details or earlier reports; "
+                    "do not treat this selection as the whole memory.")
+        budget = int(self.config["context_chars"]) - len(guidance) - 2
         for row in rows:
             memory = public_memory(row)
             snippet = excerpt(scrub(memory["content"]), query, int(self.config["excerpt_chars"]))
@@ -495,7 +499,7 @@ class MemOSProvider(MemoryProvider):
             self._cache[key] = (time.monotonic(), rows)
             if blocks:
                 self._recall = RecallStatus("MemOS", len(blocks))
-        return "\n\n".join(blocks)
+        return guidance + "\n\n" + "\n\n".join(blocks) if blocks else ""
 
     def queue_prefetch(self, query, *, session_id=""):
         if is_trivial_prompt(query):
@@ -509,7 +513,7 @@ class MemOSProvider(MemoryProvider):
                     key = self._recall_key(sid, query)
                     if key is None:
                         return
-                    rows = self._search(query, sid, int(self.config["top_k"]))
+                    rows = self._search(query, sid, None)
                     with self._lock:
                         if self._recall_key(sid, query) == key:
                             self._cache[key] = (time.monotonic(), rows)
@@ -639,7 +643,7 @@ class MemOSProvider(MemoryProvider):
 
     def get_status_config(self, provider_config=None):
         config = self._config(get_hermes_home())
-        return {key: config[key] for key in ("base_url", "user_id", "cube_id", "top_k", "context_chars")}
+        return {key: config[key] for key in ("base_url", "user_id", "cube_id", "context_chars")}
 
     def post_setup(self, hermes_home, config):
         """Native headless setup for this existing local deployment, with a real API check."""
