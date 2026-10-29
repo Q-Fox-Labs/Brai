@@ -32,6 +32,6 @@ SOUL.md — штатная точка входа Hermes. В начале сес�
 - [instaloader](skills/social-media/instaloader/SKILL.md)
 - [requesting-code-review](skills/software-development/requesting-code-review/SKILL.md)
 
-Для настройки и диагностики плагинов используй руководства рядом с их установленным кодом и [README адаптера Hermes](../../../../services/hermes/README.md). Промпт Telegram Business — [здесь](prompts/telegram-reply.md); отправка требует подтверждения владельца. [Внешний движок Hermes](../../../environment/hermes.md) описан отдельно от адаптеров Brai.
+Для настройки и диагностики плагинов используй руководства рядом с их установленным кодом и установленный [навык Hermes](skills/autonomous-ai-agents/hermes-agent/SKILL.md) с его справочниками. Промпт Telegram Business — [здесь](prompts/telegram-reply.md); отправка требует подтверждения владельца.
 
 Документы установщика и правила разработки не являются инструкциями пользовательского агента. Секреты, память и переписка в этот раздел не переносятся.

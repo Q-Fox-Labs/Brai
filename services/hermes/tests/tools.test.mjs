@@ -141,6 +141,39 @@ test('trusted prepare привязывает human attempt; stale revision и ч
   await assert.rejects(human.complete(params), /STALE_ACTION/);
 });
 
+test('старый артефакт после замечаний не получает повторную кнопку без явного признака принятия', async () => {
+  const { ports, graph, calls } = fixture();
+  graph.elements[0].fields = { result_types: ['Артефакт'] };
+  graph.revisions = [{ id: ids[1], owner_id: owner, created_by_attempt_id: ids[6] }];
+  graph.moves = [
+    { id: ids[2], kind: 'action', targetId: ids[0], previousId: ids[4], status: 'planned', purpose: 'review',
+      fields: { planning: { decision: 'final', output_contracts: [{ key: ids[3] }] } } },
+    { id: ids[4], kind: 'operation', targetId: ids[0], previousId: ids[5], status: 'succeeded', purpose: 'work', fields: {} },
+    { id: ids[5], kind: 'action', targetId: ids[0], status: 'succeeded', purpose: 'review', fields: { planning: { decision: 'final' } } },
+  ];
+  graph.attempts = [
+    { id: ids[6], result: { planning: {} } },
+    { id: ids[7], moveId: ids[5], status: 'succeeded' },
+  ];
+  graph.resources = [{ attemptId: ids[7], metadata: { stage: 'review', outcome: 'changes', revision_id: ids[1] } }];
+  ports.mcp = async (endpoint, name, args) => {
+    calls.push({ endpoint, name, args });
+    if (name === 'game_core_graph_get') return graph;
+    if (name === 'game_core_move_claim') return { attempt: { id: ids[3], executor_kind: 'human', status: 'running' } };
+    throw new Error('unexpected call');
+  };
+  const runtime = await createBraiTools(config, ports), human = createHumanActions(runtime);
+  const step = await runtime.call('game_core_request_human_action', { moveId: ids[2] });
+  assert.equal(step.nextTool, 'game_core_result_review_skip');
+  await assert.rejects(human.prepare({ moveId: ids[2], revisionId: ids[1], idempotencyKey: 'review', inputResourceIds: [] }), /LEGACY_RESULT_REVIEW_CHECK/);
+  assert.equal(calls.some(call => call.name === 'game_core_move_claim'), false);
+  graph.moves[0].previousId = null;
+  assert.equal((await runtime.call('game_core_request_human_action', { moveId: ids[2] })).nextTool, 'game_core_result_review_skip');
+  graph.attempts[0].result.planning.approval_required = true;
+  assert.equal((await runtime.call('game_core_request_human_action', { moveId: ids[2] })).nextTool, 'brai_telegram_request_confirmation');
+  assert.equal((await human.prepare({ moveId: ids[2], revisionId: ids[1], idempotencyKey: 'review', inputResourceIds: [] })).status, 'running');
+});
+
 test('integrated decision-only Actions derive canonical stage and write review/changes', async () => {
   const document = JSON.parse(await readFile(new URL('../trusted.openrpc.json', import.meta.url), 'utf8'));
   const validateAction = compileInput({ $ref: '#/components/schemas/Action', components: document.components });

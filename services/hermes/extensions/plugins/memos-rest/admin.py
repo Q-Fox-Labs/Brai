@@ -11,7 +11,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 
 from utils import atomic_json_write
-from .client import Client, MemOSError, business_private
+from .client import Client, MemOSError, business_private, fact_fields, memory_text
 from .router import Catalog, SemanticRouter, stable_id, QUALITY_VERSION
 
 
@@ -111,7 +111,7 @@ class Admin:
             pass
         return self.status()
 
-    def quality_plan(self, scope):
+    def quality_plan(self, scope, restore_plan_id=None):
         """Проверить факты без изменения MemOS, сохранив обратимый план в профиле.
 
         Источники и копии проверяются по owner/home/epoch. Пользовательские данные
@@ -127,6 +127,21 @@ class Admin:
             client.request = api.request
         rows = [row for client in clients.values() for row in client.get({})
                 if self._quality_allowed(row, config)]
+        restore = {}
+        if restore_plan_id is not None:
+            if not isinstance(restore_plan_id, str) or uuid.UUID(restore_plan_id).hex != restore_plan_id:
+                raise ValueError('Invalid restoration plan ID')
+            previous_path = self.root / 'quality' / (restore_plan_id + '.json')
+            previous = json_file(previous_path)
+            previous_state = json_file(previous_path.with_suffix('.progress.json'))
+            if (previous.get('complete') is not True or previous_state.get('complete') is not True
+                    or previous.get('scope') != scope or previous.get('epoch') != config['memory_epoch']
+                    or previous.get('home_scope') != stable_id(str(self.home.resolve()))
+                    or previous_state.get('plan_sha') != stable_id(previous)):
+                raise ValueError('Restoration requires a completed matching historical snapshot')
+            for item in previous['items']:
+                if item.get('accepted'):
+                    restore[item['logical_id']] = (previous['version'], memory_text(item['before'][0]))
         sources = {}
         groups = {}
         for row in rows:
@@ -145,9 +160,8 @@ class Admin:
         path = directory / (plan_id + '.json')
         for key, logical in groups.items():
             events = sources.get(key, {})
-            context = [m['content'] for event in events.values() for m in event if m.get('role') == 'user']
-            context = context if sum(map(len, context)) <= 48000 else context[:2] + context[-12:]
-            context = [t if len(t) <= 4000 else t[:2000] + '\n[context excerpt]\n' + t[-2000:] for t in context]
+            context = [m['content'] if m.get('role') == 'user' else '[assistant historical source]\n' + m['content']
+                       for event in events.values() for m in event if m.get('role') in ('user', 'assistant')]
             candidates, items = [], []
             for logical_id, copies in logical.items():
                 info = copies[0]['metadata']['info']
@@ -155,26 +169,38 @@ class Admin:
                 role = info.get('hermes_source', {}).get('role')
                 grounded = bool(quote) and any(quote in m.get('content', '') and m.get('role') == role
                     for m in events.get(info.get('hermes_source_event'), []))
-                item = {'logical_id': logical_id, 'before': copies, 'accepted': False,
-                        'grounded': grounded, 'memberships': []}
+                content = memory_text(copies[0])
+                restored_from = None
+                if logical_id in restore:
+                    version, original_text = restore[logical_id]
+                    exact_transition = all(r['metadata']['info'].get('hermes_event_id')
+                        == stable_id([version, logical_id, r['_cube_id']]) for r in copies)
+                    if exact_transition and original_text != content:
+                        content, restored_from = original_text, restore_plan_id
+                item = {'logical_id': logical_id, 'before': copies, 'text': content, 'accepted': False,
+                        'grounded': grounded, 'memberships': [], 'restored_from': restored_from}
                 items.append(item)
                 if grounded:
-                    candidates.append({'_logical_id': logical_id, 'text': info['hermes_messages'][0]['content'],
+                    candidates.append({'_logical_id': logical_id, 'text': content,
                         'source': info['hermes_source'], 'status': info.get('hermes_status', 'unknown'),
                         'spheres': info.get('hermes_spheres', []), 'projects': info.get('hermes_projects', []),
                         'memberships': info.get('hermes_memberships', [])})
             accepted = {}
+            from .router import evidence_context
             for start in range(0, len(candidates), 20):
-                for fact in router.review(candidates[start:start + 20], context):
+                batch = candidates[start:start + 20]
+                for fact in router.review(batch, evidence_context(context, batch)):
                     accepted[fact['_logical_id']] = fact
             rejected = [fact for fact in candidates if fact['_logical_id'] not in accepted]
             for start in range(0, len(rejected), 20):
-                for fact in router.review(rejected[start:start + 20], context, conservative=True):
+                batch = rejected[start:start + 20]
+                for fact in router.review(batch, evidence_context(context, batch), conservative=True):
                     accepted[fact['_logical_id']] = fact
             for item in items:
                 if item['logical_id'] in accepted:
                     fact = accepted[item['logical_id']]
-                    item.update(accepted=True, memberships=fact['memberships'], spheres=fact['spheres'])
+                    item.update(accepted=True, memberships=fact['memberships'], spheres=fact['spheres'],
+                                reason=fact.get('_review_reason', 'Reviewed useful fact'))
                 plan['items'].append(item)
             atomic_json_write(path, plan, mode=0o600, fsync_dir=True)
         plan['complete'] = True
@@ -199,7 +225,10 @@ class Admin:
                 'retained': sum(i['accepted'] for i in items),
                 'rerouted': sum(i['accepted'] and set(i['memberships']) !=
                     {r['_cube_id'] for r in i['before']} for i in items),
-                'ungrounded': sum(not i['grounded'] for i in items)}
+                'ungrounded': sum(not i['grounded'] for i in items),
+                'restored': sum(i['accepted'] and bool(i.get('restored_from')) for i in items),
+                'changed': sum(not i['accepted'] or set(i['memberships']) != {r['_cube_id'] for r in i['before']}
+                    or i['text'] != memory_text(i['before'][0]) for i in items)}
 
     def quality_apply(self, scope, plan_id, plan_sha, timeout=120):
         """Применить согласованный точный план под locks, сохраняя исходники и logical ID.
@@ -245,6 +274,10 @@ class Admin:
                 logical = item['logical_id']
                 if logical in seen or not item['before']:
                     raise ValueError('Invalid duplicate/empty quality item')
+                if (not isinstance(item.get('text'), str) or not item['text'].strip()
+                        or type(item.get('accepted')) is not bool
+                        or item['accepted'] and (not item.get('grounded') or not item.get('memberships'))):
+                    raise ValueError('Quality item lacks canonical text or grounded approval')
                 seen.add(logical)
                 for row in item['before']:
                     info = row.get('metadata', {}).get('info', {})
@@ -268,7 +301,8 @@ class Admin:
                 original = item['before'][0]
                 info = original['metadata']['info']
                 if (item['accepted'] and set(item['memberships']) == {r['_cube_id'] for r in item['before']}
-                        and set(item['spheres']) == set(info.get('hermes_spheres', []))):
+                        and set(item['spheres']) == set(info.get('hermes_spheres', []))
+                        and item['text'] == memory_text(original)):
                     progress['done'] = True
                     save()
                     continue
@@ -276,13 +310,14 @@ class Admin:
                 if item['accepted']:
                     for cube in item['memberships']:
                         if cube not in progress['units']:
-                            updated = {**info, 'hermes_event_id': stable_id([QUALITY_VERSION, logical, cube]),
+                            updated = {**info, **fact_fields(item['text']),
+                                'hermes_event_id': stable_id([QUALITY_VERSION, logical, cube]),
                                 'hermes_quality_version': QUALITY_VERSION, 'hermes_spheres': item['spheres'],
                                 'hermes_cube': cube, 'hermes_primary_cube': item['memberships'][0],
                                 'hermes_memberships': item['memberships']}
                             updated['hermes_payload_hash'] = stable_id({k:v for k,v in updated.items() if k != 'hermes_payload_hash'})
                             progress['units'][cube] = {'body': {'session_id': original['metadata']['session_id'],
-                                'messages': info['hermes_messages'], 'info': updated}}
+                                'messages': [{'role': 'user', 'content': item['text']}], 'info': updated}}
                             save()
                         kept.extend(client(cube).execute(progress['units'][cube], lambda _: save()))
                 for row in item['before']:

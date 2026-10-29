@@ -33,9 +33,9 @@ for tool in ROUTED_TOOLS:
     if tool['name'] in ('memos_search', 'memos_remember'):
         tool['parameters']['properties']['project'] = {'type': 'string', 'description': 'Explicit approved project catalog ID; overrides session binding.'}
     if tool['name'] == 'memos_search':
-        tool['parameters']['properties']['all_cubes'] = {'type': 'boolean', 'description': 'Broaden recall to every authorized managed cube when the initial topic search is insufficient. Default false; an empty initial recall widens automatically.'}
+        tool['parameters']['properties']['all_cubes'] = {'type': 'boolean', 'description': 'Search every authorized managed cube, overriding an explicit cubes selection. Without cubes the full authorized scope is already searched.'}
         tool['parameters']['properties']['include_archive'] = {'type': 'boolean', 'description': 'Also search original dialogue, including pending or rejected material. Default false: only useful extracted facts.'}
-        tool['parameters']['properties']['cubes'] = {'type': 'array', 'items': {'type': 'string'}, 'description': 'Optional approved initial cube scope; may widen only inside authorized scope.'}
+        tool['parameters']['properties']['cubes'] = {'type': 'array', 'items': {'type': 'string'}, 'description': 'Optional explicit approved cube scope. Omit to search the full authorized scope.'}
     if tool['name'] == 'memos_remember':
         tool['parameters']['properties']['operation_id'] = {'type': 'string', 'description': 'Optional stable request ID for repeat/recovery.'}
         tool['parameters']['properties']['shared_infra'] = {'type': 'boolean', 'description': 'Explicitly share grounded infra copies for read-only recall; requires catalog permission, default false.'}

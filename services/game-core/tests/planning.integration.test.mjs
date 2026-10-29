@@ -113,6 +113,21 @@ test('planning PostgreSQL: apply/replay/rollback, future outputs, retry, remarks
   assert.ok(!afterSkip.attempts.some(a=>a.moveId===legacyReview.id));
   await done(transition.finish_id,'Сигнал: МАЯК');
   assert.equal((await graph()).elements.find(e=>e.id===legacy.element.id).status,'completed');
+  // Прежнее рассмотрение уже получило замечания: после доработки переход всё ещё доступен.
+  const reworked=await prepare('legacy');await h.planningApply(reworked.apply);
+  const reworkRecords=reworked.built.stage.records, reworkConfirm=reworkRecords.find(m=>m.purpose==='confirm');
+  const reworkWork=reworkRecords.filter(m=>m.purpose==='work'), reworkReview=reworkRecords.find(m=>m.decision==='final');
+  await done(reworkConfirm.id,'TEST план подтверждён',{stage:'planning',outcome:'approved'});
+  await done(reworkWork[0].id,'МАЯК');await done(reworkWork[1].id,'Сигнал: МАЯК');
+  await done(reworkReview.id,'TEST доставить файл',{stage:'review',outcome:'changes'});
+  const beforeFix=await graph(), fixMove=beforeFix.moves.find(m=>m.previousId===reworkReview.id && m.purpose==='work');
+  const secondReview=beforeFix.moves.find(m=>m.previousId===fixMove.id && m.purpose==='review');
+  await done(fixMove.id,'Исправленный результат');
+  const reworkRevision=(await graph()).elements.find(e=>e.id===reworked.element.id).revision;
+  const afterRework=await h.resultReviewSkip(req({move_id:secondReview.id,revision_id:reworkRevision}));
+  assert.ok(!(await graph()).attempts.some(a=>a.moveId===secondReview.id));
+  await done(afterRework.finish_id,'Исправленный результат');
+  assert.equal((await graph()).elements.find(e=>e.id===reworked.element.id).status,'completed');
   // Текстовые замечания к постановке: новая Операция и новая ревизия, без запуска старого плана.
   const draft=await prepare();await h.planningApply(draft.apply);
   const originalRecords=draft.built.stage.records;

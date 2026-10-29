@@ -4,6 +4,15 @@ const readable = value => text(value).replace(/Игроком/gu, 'тобой').
 const fieldsOf = element => element.fields?.draft ?? element.fields ?? {};
 const management = new Set(['plan', 'start', 'accept', 'finish', 'confirm', 'review']);
 
+export function needsLegacyArtifactReviewCheck(graph, move, target) {
+  if (move.status !== 'planned' || move.purpose !== 'review' || move.fields?.planning?.decision !== 'final' ||
+      !Array.isArray(target.fields?.result_types) || target.fields.result_types.length !== 1 ||
+      target.fields.result_types[0] !== 'Артефакт') return false;
+  const revision = (graph.revisions ?? []).find(item => item.id === target.revision);
+  const planner = (graph.attempts ?? []).find(item => item.id === revision?.created_by_attempt_id);
+  return !!planner?.result?.planning && planner.result.planning.approval_required !== true;
+}
+
 function roles(fields) {
   // Explicit author text, not an inference from a title, result, or a shared start Operation.
   return text(fields.scope).split(/\n/).map(line => line.match(/^\s*(Я|Ты):\s*(.+)$/u))

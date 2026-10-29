@@ -56,6 +56,31 @@ def main():
             print(json.dumps({'case':name,'neutral_fixture_response':captured},ensure_ascii=False),flush=True)
         captured.clear()
         print(json.dumps({'case': name, 'passed': ok, 'facts': len(facts), 'spheres': sorted(spheres)}, ensure_ascii=False), flush=True)
+    # AIDEV-NOTE: Контрольные тексты не повторяют формулировки запросов и не
+    # содержат ответов, которые модель сама сгенерировала в ходе этой проверки.
+    corpus = [
+        {'text': 'Предпочитаю название «Тихая гавань» для своего массажного кабинета.', 'kind': 'fact', 'status': 'preference'},
+        {'text': 'Обсуждались названия «Речной берег» и «Тихая гавань», выбор ещё не сделан.', 'kind': 'fact', 'status': 'idea'},
+        {'text': 'Хочу продать участок за городом и купить автомобиль.', 'kind': 'fact', 'status': 'plan'},
+        {'text': 'У меня аппарат «Вектор 4». Первая процедура с диагностикой — 3 500 рублей.', 'kind': 'fact', 'status': 'observation'},
+        {'text': 'Мой автомобиль потребляет много масла.', 'kind': 'fact', 'status': 'observation'},
+        {'text': 'Брай, запомни эти варианты. Запомнишь?', 'kind': 'fact', 'status': 'unknown'},
+        {'text': 'Прочитана страница производителя массажного оборудования.', 'kind': 'fact', 'status': 'reported_done'},
+    ]
+    retrieval_cases = [
+        ('preferred_name', 'Какое имя мастер предпочитает для своего массажного бизнеса?', {0}),
+        ('equipment_price', 'Каким аппаратом пользуется мастер и во сколько обойдётся первый приём?', {3}),
+        ('absent_subject', 'Как откалибровать детектор нейтрино?', set()),
+    ]
+    for name, question, required in retrieval_cases:
+        result = router.rank(question, corpus)
+        direct = {m['index'] for m in result['matches'] if m['relevance'] == 'direct'}
+        found = {m['index'] for m in result['matches']}
+        ok = direct == required and not (found - (required | ({1} if name == 'preferred_name' else set())))
+        if not ok:
+            failures.append(name)
+        print(json.dumps({'case': name, 'passed': ok, 'direct': sorted(direct),
+                          'selected': sorted(found)}, ensure_ascii=False), flush=True)
     print(json.dumps({'failures': failures, 'memos_writes': 0}), flush=True)
     if failures:
         raise SystemExit(1)

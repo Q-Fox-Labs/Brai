@@ -2,7 +2,9 @@
 # ABOUTME: Длинные сообщения сохраняются частями без потери исходного диалога.
 """MemOS product API; all reads and writes explicitly select one configured cube."""
 
+import hashlib
 import json
+import re
 import socket
 import urllib.error
 import urllib.parse
@@ -32,13 +34,49 @@ def business_private(row):
     return info.get('hermes_visibility') == 'business_private' or info.get('hermes_business_scope') is not None
 
 
+def stored_text(value):
+    """Снять только служебный префикс SimpleStruct, сохранив само содержимое."""
+    return re.sub(r'^(?:user|assistant): \[[^\]\n]+\]:[ \t]*', '', str(value)).rstrip('\n')
+
+
+def fact_fields(content):
+    """Закрепить отдельный текст факта и его SHA-256; цитата хранится независимо."""
+    return {'hermes_fact_text': content,
+            'hermes_fact_sha256': hashlib.sha256(content.encode('utf-8')).hexdigest()}
+
+
+def memory_text(row):
+    """Прочитать факт без подмены источником и проверить новое каноническое поле."""
+    info = (row.get('metadata') or {}).get('info') or {}
+    if info.get('hermes_kind') != 'fact':
+        return row.get('memory', '')
+    text = info.get('hermes_fact_text')
+    if text is None:
+        return stored_text(row.get('memory', ''))
+    if not isinstance(text, str) or fact_fields(text)['hermes_fact_sha256'] != info.get('hermes_fact_sha256'):
+        raise MemOSError('Fact text checksum mismatch')
+    expected = text
+    if 'hermes_chunk_index' in info:
+        parts = dialogue_parts([{'role': 'user', 'content': text}])
+        index = info['hermes_chunk_index']
+        if type(index) is not int or not 0 <= index < len(parts) or len(parts) != info.get('hermes_chunk_count'):
+            raise MemOSError('Fact text part identity mismatch')
+        expected = parts[index]['content']
+    if stored_text(row.get('memory', '')) != expected.rstrip('\n'):
+        raise MemOSError('Stored fact content differs from canonical text')
+    return text
+
+
 def public_memory(row):
     meta = row.get("metadata") or {}
     info = meta.get("info") or {}
     return {
-        "id": row.get("id"), "content": row.get("memory", ""),
+        "id": row.get("id"), "content": memory_text(row),
         "session_id": meta.get("session_id"), "created_at": meta.get("created_at"),
-        "relevance": meta.get("relativity"),
+        "source_date": row.get('_source_date'),
+        "relevance": (1.0 if row.get('_relevance') == 'direct' else .5
+                      if row.get('_relevance') == 'supporting' else meta.get("relativity")),
+        "relevance_kind": row.get('_relevance'), "relevance_reason": row.get('_relevance_reason'),
         "author_id": info.get("hermes_author_id"),
         "author_name": info.get("hermes_author_name"),
         "kind": info.get("hermes_kind"),
@@ -178,6 +216,21 @@ class Client:
         expected = set(ids)
         verified = set()
         mismatches = set()
+        expected_text = '\n'.join(message['content'] for message in job['body']['messages'])
+        def content_matches(row):
+            if info.get('hermes_kind') == 'fact':
+                expected_part = expected_text
+                stored_info = (row.get('metadata') or {}).get('info') or {}
+                if 'hermes_chunk_index' not in info and 'hermes_chunk_index' in stored_info:
+                    parts = dialogue_parts(job['body']['messages'])
+                    index = stored_info['hermes_chunk_index']
+                    if (type(index) is not int or not 0 <= index < len(parts)
+                            or len(parts) != stored_info.get('hermes_chunk_count')):
+                        return False
+                    expected_part = parts[index]['content']
+                return stored_text(row.get('memory', '')) == expected_part.rstrip('\n')
+            return ('hermes_chunk_index' not in info
+                    or job['body']['messages'][0]['content'] in row.get('memory', ''))
         for row in rows:
             meta = row.get("metadata") or {}
             stored = meta.get("info") or {}
@@ -187,13 +240,20 @@ class Client:
                     mismatches.add("user_id")
                 if meta.get("session_id") != job["body"]["session_id"]:
                     mismatches.add("session_id")
-                if "hermes_chunk_index" in info and job["body"]["messages"][0]["content"] not in row.get("memory", ""):
-                    mismatches.add("chunk_content")
+                if not content_matches(row):
+                    mismatches.add("chunk_content" if 'hermes_chunk_index' in info else "content")
             if (row.get("id") in expected and meta.get("user_id") == self.user_id
                     and meta.get("session_id") == job["body"]["session_id"]
-                    and ("hermes_chunk_index" not in info or job["body"]["messages"][0]["content"] in row.get("memory", ""))
+                    and content_matches(row)
                     and all(stored.get(key) == value for key, value in info.items())):
                 verified.add(row["id"])
+        if info.get('hermes_kind') == 'fact' and 'hermes_chunk_index' not in info:
+            committed = [row for row in rows if row.get('id') in verified]
+            if any('hermes_chunk_index' in row['metadata']['info'] for row in committed):
+                indices = [row['metadata']['info'].get('hermes_chunk_index') for row in committed]
+                if sorted(indices, key=str) != sorted(range(len(dialogue_parts(job['body']['messages']))), key=str):
+                    mismatches.add('incomplete_fact_parts')
+                    verified.clear()
         if not expected or verified != expected:
             detail = ", ".join(sorted(mismatches)) if mismatches else "missing memory IDs"
             raise MemOSError("MemOS read-back did not verify the complete dialogue payload: " + detail)

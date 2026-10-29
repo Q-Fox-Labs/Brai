@@ -2,10 +2,40 @@
 # ABOUTME: Переписка хранится отдельно от фактов; автор и область проверяются локально.
 """Profile-local multi-cube worker. Durable jobs pin extraction before delivery."""
 import json
+import math
+import re
+from collections import Counter
 from pathlib import Path
 
-from .client import Client, MemOSError
-from .router import Catalog, SemanticRouter, stable_id, QUALITY_VERSION
+from .client import Client, MemOSError, fact_fields, memory_text
+from .router import Catalog, SemanticRouter, stable_id, QUALITY_VERSION, evidence_context
+
+
+class RecallRows(list):
+    """Передать выдачу и полноту поиска вместе, без общего изменяемого статуса."""
+
+    def __init__(self, rows=(), *, scanned=0, needs_sources=False, source_query=''):
+        super().__init__(rows)
+        self.scanned = scanned
+        self.needs_sources = needs_sources
+        self.source_query = source_query
+
+
+def lexical_order(query, rows):
+    """Упорядочить полный набор по BM25; не исключать кандидатов по словам."""
+    def tokens(text):
+        return re.findall(r'[\w]+', text.casefold().replace('ё', 'е'))
+    terms = set(tokens(query))
+    documents = [Counter(tokens(memory_text(row))) for row in rows]
+    lengths = [sum(doc.values()) for doc in documents]
+    average = sum(lengths) / max(1, len(lengths)) or 1
+    frequency = {term: sum(term in doc for doc in documents) for term in terms}
+    def score(index):
+        doc, length = documents[index], lengths[index]
+        return sum(math.log(1 + (len(rows) - frequency[t] + .5) / (frequency[t] + .5))
+            * doc[t] * 2.2 / (doc[t] + 1.2 * (.25 + .75 * length / average))
+            for t in terms if doc[t])
+    return [rows[i] for i in sorted(range(len(rows)), key=score, reverse=True)]
 
 
 class RoutedRuntime:
@@ -124,12 +154,13 @@ class RoutedRuntime:
             if info.get('hermes_kind') not in ('turn', 'explicit', 'native') or event in seen:
                 continue
             seen.add(event)
-            context.extend(m['content'] for m in info.get('hermes_messages', []) if m.get('role') == 'user')
+            context.extend(m['content'] if m.get('role') == 'user'
+                           else '[assistant historical source]\n' + m['content']
+                           for m in info.get('hermes_messages', []) if m.get('role') in ('user', 'assistant'))
         if not context:
             context = [m['content'] for m in body['messages'] if m.get('role') == 'user']
-        selected = context if sum(map(len, context)) <= 48000 else context[:2] + context[-12:]
-        return [text if len(text) <= 4000 else text[:2000] + '\n[context excerpt]\n' + text[-2000:]
-                for text in selected]
+        return evidence_context(context, [{'text': m['content'], 'source': {'quote': m['content']}}
+                                         for m in body['messages']])
 
     def execute(self, job, checkpoint):
         self.writable(job)
@@ -198,7 +229,7 @@ class RoutedRuntime:
                     info = {**job['body']['info'], 'hermes_kind': 'fact', 'hermes_classification': 'classified',
                             'hermes_logical_id': logical_id, 'hermes_event_id': stable_id([logical_id, cube, job['event_id'], QUALITY_VERSION]),
                             'hermes_source_event': job['event_id'], 'hermes_source_ids': archive_ids,
-                            'hermes_quality_version': QUALITY_VERSION,
+                            'hermes_quality_version': QUALITY_VERSION, **fact_fields(fact['text']),
                             'hermes_source': fact['source'], 'hermes_status': fact['status'],
                             'hermes_spheres': fact['spheres'], 'hermes_projects': fact['projects'],
                             'hermes_memberships': fact['memberships'], 'hermes_primary_cube': fact['memberships'][0],
@@ -273,55 +304,60 @@ class RoutedRuntime:
         return row
 
     def search(self, query, sid, top_k=None, project=None, cubes=None, include_archive=False, all_cubes=False):
-        """Вернуть релевантные факты без скрытого потолка; архив включается явно."""
+        """Проверить всю разрешённую область и отобрать свидетельства по вопросу.
+
+        Кубы задают явную область, но автоматическая классификация не закрывает
+        остальные знания. BM25 только упорядочивает кандидатов; смысловой
+        проверяющий решает, относятся ли они к вопросу, и может вернуть ноль.
+        """
         config = self.reload()
         if not config.get('enabled', True) or config.get('suspended', False):
-            return []
+            return RecallRows()
         project = self.catalog.project(self.provider.context.get('gateway_session_key', ''), project)
         if cubes is not None:
             if not isinstance(cubes, list) or any(c not in self.catalog.cubes for c in cubes):
                 raise ValueError('Recall cubes are not catalogued')
-            selected = cubes
-        else:
-            try:
-                selected = self.router.select(query, project)
-            except MemOSError:
-                selected = []
-        selected = self.catalog.cubes if all_cubes else selected or self.catalog.cubes
-        candidates = {}
-        def collect(cube):
-            client = self.client(cube)
-            # AIDEV-NOTE: Лимит до фильтра автора/дедупликации теряет воспоминания.
-            pool = client.get({})
-            count = len(pool)
-            # An archive-only or foreign cube cannot contribute results. Avoid
-            # ranking it; the full candidate count is retained for eligible cubes.
-            if not any(self.allowed(row, config)
-                       and row['metadata']['info'].get('hermes_kind') != 'checkpoint'
-                       and (include_archive or row['metadata']['info'].get('hermes_kind') == 'fact')
-                       for row in pool):
-                return
-            for row in client.search(query, sid, top_k=count, relativity=float(config.get('relativity', .45))):
+        selected = self.catalog.cubes if all_cubes or cubes is None else cubes
+        candidates, source_dates = {}, {}
+        for cube in selected:
+            for row in self.client(cube).get({}):
                 if not self.allowed(row, config):
                     continue
                 info = row['metadata']['info']
+                if info.get('hermes_kind') in ('turn', 'explicit', 'native'):
+                    source_dates[info.get('hermes_event_id')] = row['metadata'].get('created_at')
                 if info.get('hermes_kind') == 'checkpoint':
                     continue
                 if info.get('hermes_kind') != 'fact' and not include_archive:
                     continue
+                if project and project not in info.get('hermes_projects', []):
+                    continue
                 decorated = self.decorate(row)
-                key = info.get('hermes_logical_id') or row['id']
+                if info.get('hermes_kind') == 'fact':
+                    key = info.get('hermes_logical_id') or row['id']
+                else:
+                    key = 'source:' + str(info.get('hermes_event_id') or row['id'])
+                    # У исходника остаётся физический ID, полный диалог читается
+                    # memos_read(include_transcript=true), без потери частей.
+                    dialogue = info.get('hermes_messages') or []
+                    if dialogue:
+                        decorated = {**decorated, 'memory': '\n\n'.join(
+                            str(m.get('role', 'source')) + ': ' + str(m.get('content', '')) for m in dialogue)}
                 if key not in candidates:
                     candidates[key] = decorated
-        for cube in selected:
-            collect(cube)
-        # top_k is a maximum, not a target that forces unrelated topic scans.
-        # A caller can broaden deliberately; an empty scoped recall widens itself.
-        if not candidates:
-            for cube in self.catalog.cubes:
-                if cube not in selected:
-                    collect(cube)
-        return sorted(candidates.values(), key=lambda r: float((r.get('metadata') or {}).get('relativity') or 0), reverse=True)[:top_k]
+        ordered = lexical_order(query, [{**row, '_source_date': (source_dates.get(
+            row['metadata']['info'].get('hermes_source_event'))
+            if row['metadata']['info'].get('hermes_kind') == 'fact' else row['metadata'].get('created_at'))}
+            for row in candidates.values()])
+        result = self.router.rank(query, [{'text': memory_text(row),
+            'kind': row['metadata']['info'].get('hermes_kind'),
+            'status': row['metadata']['info'].get('hermes_status'),
+            'date': row.get('_source_date')} for row in ordered])
+        matches = sorted(result['matches'], key=lambda m: m['relevance'] != 'direct')
+        rows = [{**ordered[match['index']], '_relevance': match['relevance'],
+                 '_relevance_reason': match['reason']} for match in matches]
+        return RecallRows(rows[:top_k], scanned=len(ordered), needs_sources=result['needs_sources'],
+                          source_query=result['source_query'])
 
     def forget(self, identifier):
         config = self.writable()

@@ -588,21 +588,10 @@ def release_set(identity):
 def telegram_format(adapter, text):
     """Форматировать подпись тем же Telegram adapter, который обслуживает обычный ответ."""
     formatter = getattr(adapter, 'format_message', None)
-    splitter = getattr(adapter, 'truncate_message', None)
-    if formatter is None or splitter is None:
+    if formatter is None:
         from plugins.platforms.telegram.adapter import TelegramAdapter
         formatter = lambda value: TelegramAdapter.format_message(adapter, value)
-        splitter = TelegramAdapter.truncate_message
-    return formatter(text), splitter
-
-
-def telegram_chunks(formatted, splitter):
-    """Сохранить ограничения Telegram и экранировать добавленные нумератором скобки."""
-    chunks = splitter(formatted, 4096, len_fn=text_units)
-    if len(chunks) > 1:
-        chunks = [re.sub(r' \((\d+)/(\d+)\)$', r' \\(\1/\2\\)', chunk) for chunk in chunks]
-        chunks = [re.sub(r'(?m)^``` (\\\(\d+/\d+\\\))$', r'```\n\1', chunk) for chunk in chunks]
-    return chunks
+    return formatter(text)
 
 
 async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback):
@@ -620,12 +609,31 @@ async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback):
     captions = []
     for item in items:
         caption = item.get('caption', '')
-        formatted, splitter = telegram_format(adapter, caption) if caption else ('', None)
+        formatted = telegram_format(adapter, caption) if caption else ''
         if text_units(formatted) > 1024:
-            for chunk in telegram_chunks(formatted, splitter):
-                notice = await bot.send_message(**target, text=chunk, parse_mode='MarkdownV2')
-                if not getattr(notice, 'message_id', None):
-                    raise FileError('DELIVERY_UNKNOWN')
+            if text_units(formatted) <= 3500:
+                notice = await bot.send_message(**target, text=formatted, parse_mode='MarkdownV2')
+                message_id = getattr(notice, 'message_id', None)
+            else:
+                formatter = getattr(adapter, '_rich_message_payload', None)
+                if not callable(formatter):
+                    raise FileError('RICH_MESSAGE_UNAVAILABLE')
+                rich = formatter(caption, skip_entity_detection=True)
+                content = rich.get('markdown', '')
+                if not isinstance(content, str) or not content:
+                    raise FileError('RICH_MESSAGE_UNAVAILABLE')
+                if len(content) > 32768 or len(content.encode('utf-8')) > 128 * 1024:
+                    sender = getattr(adapter, 'send_brai_long_document', None)
+                    if not callable(sender):
+                        raise FileError('RICH_MESSAGE_TOO_LONG')
+                    receipt = await sender(int(chat_id), caption, None, metadata or {},
+                                           'caption:' + key([str(chat_id), target, caption]))
+                    message_id = receipt.get('message_id') if isinstance(receipt, dict) else None
+                else:
+                    response = await bot.do_api_request('sendRichMessage', api_kwargs={**target, 'rich_message': rich})
+                    message_id = (response.get('message_id') or (response.get('result') or {}).get('message_id')) if isinstance(response, dict) else getattr(response, 'message_id', None)
+            if not message_id:
+                raise FileError('DELIVERY_UNKNOWN')
             captions.append(None)
         else:
             captions.append(formatted or None)
