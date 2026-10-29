@@ -3,6 +3,7 @@
 """Behaviour tests against the real Hermes loader/manager and a fake MemOS API."""
 
 import copy
+from importlib import import_module
 import json
 import os
 import shutil
@@ -316,7 +317,8 @@ class ProviderTests(unittest.TestCase):
         self.assertLessEqual(len(text), 6000)
         self.assertEqual(self.provider.recall_status().count, 1)
         self.backend.offline = True
-        self.assertEqual(self.provider.prefetch("a different question"), "")
+        with self.assertRaises(import_module(self.provider.client.__class__.__module__).MemOSError):
+            self.provider.prefetch("a different question")
         self.assertIsNone(self.provider.recall_status())
         self.assertEqual(self.provider.prefetch("ok"), "")
 

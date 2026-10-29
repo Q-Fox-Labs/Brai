@@ -20,6 +20,8 @@ PLUGIN_ROOT = legacy.PLUGIN_ROOT
 
 class MultiBackend(Backend):
     def request(self, client, path, body=None, **kwargs):
+        if self.offline:
+            return super().request(client, path, body, **kwargs)
         cube = (body or {}).get('mem_cube_id') or ((body or {}).get('writable_cube_ids') or [client.cube_id])[0]
         if path == '/product/add':
             proxy = copy.copy(client)
