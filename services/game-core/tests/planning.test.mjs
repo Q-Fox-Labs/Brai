@@ -24,6 +24,17 @@ test('нормативная сборка сохраняет границы, в�
  await assert.rejects(()=>assemble({files:f.files,baseline:f.criteria,candidate:f.candidate,review:{...review,candidate_sha256:'0'.repeat(64)}}),/INVALID_ARGUMENT/);
 });
 
+test('готовый артефакт завершается без создания решения человека',async()=>{
+ const f=fixture();
+ const candidate={...f.candidate,approval_required:false,fields:{...f.candidate.fields,result_types:['Артефакт']}};
+ const built=await assemble({files:f.files,baseline:f.criteria,candidate});
+ assert.equal(built.stage.records.some(m=>m.decision==='final'),false);
+ assert.equal(built.stage.resources.some(r=>r.name==='Итоговое решение Игрока'),false);
+ assert.equal(built.stage.finish.auto_finish,true);
+ assert.equal(built.stage.finish.requires_confirmation,true);
+ assert.ok(built.stage.finish.inputs.includes(built.stage.symbols.signal));
+});
+
 test('отказ сохраняет этап и причину, исправленная цитата проходит bind',async()=>{
  const f=fixture(),invalid=structuredClone(f.criteria);
  invalid.requirements[0].quote='Цитата, которой нет в исходном поручении.';

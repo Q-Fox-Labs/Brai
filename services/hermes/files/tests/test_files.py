@@ -554,7 +554,8 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         module = ModuleType('telegram')
         for name in ['Photo', 'Video', 'Audio', 'Document']:
             setattr(module, 'InputMedia' + name, Media)
-        adapter = SimpleNamespace(_bot=Bot())
+        adapter = SimpleNamespace(_bot=Bot(), format_message=lambda value: value,
+                                  truncate_message=lambda value, maximum, len_fn: list(native.text_chunks(value, maximum)))
         with self.store.materialize([i['file'] for i in items], 'tg') as values:
             prepared = [{**i, 'localPath': v['localPath']} for i, v in zip(items, values)]
             with patch.dict(sys.modules, {'telegram': module}):
@@ -564,6 +565,29 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(c[1]['chat_id'] == 123 and c[1]['message_thread_id'] == 77 for c in calls))
         self.assertEqual(adapter._bot.captions, [None, '1'])
         self.assertEqual(adapter._bot.bytes, [b'fixture-0', b'fixture-1'])
+
+    async def test_caption_uses_telegram_formatter_and_does_not_fallback_to_raw_text(self):
+        item = self.items(1)[0]
+        item['caption'] = '**Вывод** [источник](https://example.org)'
+        received = []
+        class Media:
+            def __init__(self, media, caption=None, parse_mode=None):
+                self.media, self.caption = media, caption
+        class Bot:
+            async def send_photo(self, **kwargs):
+                received.append(kwargs)
+                return SimpleNamespace(message_id=1)
+        telegram = ModuleType('telegram')
+        for kind in ['Photo', 'Video', 'Audio', 'Document']:
+            setattr(telegram, 'InputMedia' + kind, Media)
+        adapter = SimpleNamespace(_bot=Bot(), format_message=lambda value: 'FORMATTED',
+                                  truncate_message=lambda value, maximum, len_fn: [value])
+        with self.store.materialize([item['file']], 'tg-format') as values:
+            with patch.dict(sys.modules, {'telegram': telegram}):
+                await native.telegram_sender(adapter, '123', {}, 'single',
+                    [{**item, 'localPath': values[0]['localPath']}], False)
+        self.assertEqual(received[0]['caption'], 'FORMATTED')
+        self.assertEqual(received[0]['parse_mode'], 'MarkdownV2')
 
     async def test_parallel_outgoing_sets_keep_their_own_captions_and_copies(self):
         item = self.items(1)[0]

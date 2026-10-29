@@ -14,7 +14,9 @@ import { LoginGalaxy } from "../shell/login-galaxy";
 import "./auth.css";
 export type OtpSendResult = { expires_in_seconds?: number; resend_after_seconds?: number; resend_strategy?: "reuse" | "replace" };
 /** Сохраняет уточняющее сообщение HTTP адаптера при неоднозначном результате входа. */
-export class AuthRequestError extends Error {}
+export class AuthRequestError extends Error {
+ constructor(message: string, readonly checkSession = false) { super(message); }
+}
 export const authDarkThemeStyle = {
   "--background": "#050607",
   "--foreground": "#f4f4f5",
@@ -66,6 +68,7 @@ export function AuthPanel({
   const [otpFocusKey, setOtpFocusKey] = useState(0);
   const [otpTimer, setOtpTimer] = useState<AuthOtpTimer>(defaultOtpTimer);
   const [error, setError] = useState("");
+  const [checkingSession, setCheckingSession] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
   const pending = busy || submitting;
@@ -86,7 +89,8 @@ export function AuthPanel({
       onAuthenticated?.();
       authenticated = true;
     } catch (error) {
-      setError(error instanceof AuthRequestError ? error.message : otpSent ? "Код не подошел" : "Не удалось отправить код");
+      setCheckingSession(error instanceof AuthRequestError && error.checkSession);
+      setError(error instanceof AuthRequestError ? error.message : otpSent ? "Не удалось проверить код" : "Не удалось отправить код");
     } finally {
       if (!authenticated) {
         submittingRef.current = false;
@@ -177,13 +181,14 @@ export function AuthPanel({
       <CardFooter>
         <Button className="w-full" disabled={pending || !email || (otpSent && !otp)} aria-busy={pending}>
           {pending ? <Loader2 className="animate-spin" aria-hidden="true" /> : otpSent ? <KeyRound aria-hidden="true" /> : <Mail aria-hidden="true" />}
-          {otpSent ? "Войти" : "Получить код"}
+          {checkingSession ? "Проверить вход" : otpSent ? "Войти" : "Получить код"}
         </Button>
       </CardFooter>
     </Card>
   );
 
   function applyOtpResult(result: OtpSendResult) {
+    setCheckingSession(false);
     const nowMs = Date.now();
     const previousSentAtMs = otpTimer.sentAtMs;
     const previousStillValid =

@@ -61,12 +61,14 @@ async function latestDecision(c:PoolClient,owner:string,move:Value):Promise<Valu
  ORDER BY a.recorded_at DESC,r.id DESC LIMIT 1`,[owner,target.id,!move.fields?.planning,target.current_revision_id,move.fields?.planning?.scope??null])).rows[0];
  return row??null;
 }
+// AIDEV-NOTE: Автоматическое завершение создаёт только принятый сборщик; ручные Ходы не получают этот признак.
+const needsDecision = (move:Value):boolean => (['finish','accept'].includes(move.purpose)||!!move.fields?.wait_decision)&&move.fields?.auto_finish!==true;
 async function minimalInputs(c:PoolClient,owner:string,move:Value,available:string[]):Promise<string[]> {
  const required=[...ids(move.conditions.required_resources),...await requiredOutputs(c,owner,move)];
  const el=await one(c,owner,'elements',move.element_id);
  const decisions=[...list(move.conditions.decisions??[])];
  if((el.kind==='task'&&move.purpose==='work')||move.purpose==='start'&&!move.fields?.replanning_target)decisions.push({element_id:el.id,stage:'planning',outcome:'approved'});
- if(['finish','accept'].includes(move.purpose)||move.fields?.wait_decision){const latest=await latestDecision(c,owner,move);if(!latest||latest.metadata.outcome!=='success')return fail('INVALID_STATE');required.push(latest.id);}
+ if(needsDecision(move)){const latest=await latestDecision(c,owner,move);if(!latest||latest.metadata.outcome!=='success')return fail('INVALID_STATE');required.push(latest.id);}
  for(const d of decisions){const target=await one(c,owner,'elements',d.element_id);const resource=(await c.query(`SELECT id FROM game_core.resources WHERE owner_id=$1 AND id=ANY($2::uuid[]) AND metadata->>'element_id'=$3 AND metadata->>'stage'=$4 AND metadata->>'outcome'=$5 AND metadata->>'confirmed_by'=$1 AND COALESCE(metadata->>'plan_scope','')=COALESCE($8,'') AND (metadata->>'revision_id'=$6 OR ($4<>'planning' AND $7)) ORDER BY id LIMIT 1`,[owner,available,d.element_id,d.stage,d.outcome??'success',target.current_revision_id,!move.fields?.planning,d.scope??null])).rows[0];if(!resource)return fail('INVALID_STATE');required.push(resource.id);}
  return [...new Set(required)];
 }
@@ -92,7 +94,7 @@ async function ready(c: PoolClient, owner: string, move: Value, selected?: strin
   const target=await one(c,owner,'elements',requirement.element_id);
   if(!resources.some(r=>r.metadata.element_id===target.id && r.metadata.stage===requirement.stage && r.metadata.outcome===(requirement.outcome??'success') && (!move.fields?.planning&&requirement.stage!=='planning'||r.metadata.revision_id===target.current_revision_id) && r.metadata.confirmed_by===owner && (r.metadata.plan_scope??null)===(requirement.scope??null))) return fail('INVALID_STATE');
  }
- if(['accept','finish'].includes(move.purpose)||move.fields?.wait_decision) {const latest=await latestDecision(c,owner,move);if(!latest||latest.metadata.outcome!=='success'||!ids.includes(latest.id))return fail('INVALID_STATE');}
+ if(needsDecision(move)) {const latest=await latestDecision(c,owner,move);if(!latest||latest.metadata.outcome!=='success'||!ids.includes(latest.id))return fail('INVALID_STATE');}
  const busy=(await c.query("SELECT 1 FROM game_core.move_attempts a JOIN game_core.moves m ON m.id=a.move_id WHERE a.owner_id=$1 AND m.element_id=$2 AND a.status='running' AND ($3::boolean OR m.target_element_id=$4)",[owner,move.element_id,el.kind==='task',move.target_element_id])).rowCount;
  if(busy) return fail('CONFLICT');
  return ids;
@@ -128,7 +130,8 @@ async function createElement(c:PoolClient,owner:string,v:Value) {
  }
  return {id,revision};
 }
-async function createMove(c:PoolClient,owner:string,v:Value) {
+async function createMove(c:PoolClient,owner:string,v:Value,fromPlanner=false) {
+ if(v.fields?.auto_finish===true&&!fromPlanner)return fail('FORBIDDEN');
  const id=v.id?uuid(v.id):randomUUID();
  const element=await one(c,owner,'elements',v.element_id??v.ownerId);
  const target=await one(c,owner,'elements',v.target_element_id??v.targetId??element.id);
@@ -262,7 +265,7 @@ export function createGameHandlers(pool:Pool, legacy:GameCoreStore, verifyArtifa
        const fields:Value=contract(record);if(purpose==='start')fields.planning.child_inputs=stage.children.find((x:Value)=>x.element.id===record.target).draft.inputs;
        const draft={id:record.id,element_id:record.owner,target_element_id:record.target,previous_move_id:previous,kind:record.actor==='player'?'action':'operation',purpose,title:record.title,instructions:record.instruction??'',fields,conditions:await conditions(record)};
        if(existingEnd&&record.id===existingEnd.id)await c.query('UPDATE game_core.moves SET previous_move_id=$1,title=$2,instructions=$3,fields=$4,conditions=$5 WHERE id=$6',[draft.previous_move_id,draft.title,draft.instructions,draft.fields,draft.conditions,existingEnd.id]);
-       else {const pending=(await c.query('SELECT * FROM game_core.moves WHERE owner_id=$1 AND id=$2',[owner,draft.id])).rows[0];if(pending&&draft.id===m.fields?.pending_confirmation_id&&pending.status==='planned')await c.query('UPDATE game_core.moves SET previous_move_id=$1,title=$2,instructions=$3,fields=$4,conditions=$5 WHERE id=$6',[draft.previous_move_id,draft.title,draft.instructions,draft.fields,draft.conditions,draft.id]);else await createMove(c,owner,draft);}
+       else {const pending=(await c.query('SELECT * FROM game_core.moves WHERE owner_id=$1 AND id=$2',[owner,draft.id])).rows[0];if(pending&&draft.id===m.fields?.pending_confirmation_id&&pending.status==='planned')await c.query('UPDATE game_core.moves SET previous_move_id=$1,title=$2,instructions=$3,fields=$4,conditions=$5 WHERE id=$6',[draft.previous_move_id,draft.title,draft.instructions,draft.fields,draft.conditions,draft.id]);else await createMove(c,owner,draft,true);}
       }
       // Child acceptance preserves its output UUIDs but now produces them in the child's actual revision.
       if(existingEnd){const consumers=(await c.query("SELECT * FROM game_core.moves WHERE owner_id=$1 AND status='planned'",[owner])).rows;for(const consumer of consumers){let changed=false;const outputs=(consumer.conditions.required_outputs??[]).map((r:Value)=>{if(r.move_id===existingEnd.id){changed=true;return {...r,revision_id:rid};}return r;});if(changed)await c.query('UPDATE game_core.moves SET conditions=$1 WHERE id=$2',[{...consumer.conditions,required_outputs:outputs},consumer.id]);}}
@@ -326,6 +329,30 @@ export function createGameHandlers(pool:Pool, legacy:GameCoreStore, verifyArtifa
      await c.query(`UPDATE game_core.${v.kind==='element'?'elements':'moves'} SET status=$1 WHERE owner_id=$2 AND id=$3`,[v.status,owner,id]);
      await event(c,owner,type,id,{manual:true,environment:'dev',reason:'manual_test_status',previous_status:row.status,status:v.status,request_id:requestId},{id:requestId,kind:v.kind,actor:owner});
      result={id,status:v.status,event_id:requestId,changed:row.status!==v.status};
+    }
+   }
+   else if(operation==='skipResultReview') {
+    const review=await one(c,owner,'moves',v.move_id),target=await one(c,owner,'elements',review.target_element_id);
+    if(uuid(v.revision_id)!==target.current_revision_id)return fail('CONFLICT');
+    const revision=await one(c,owner,'element_revisions',target.current_revision_id);
+    if(!Array.isArray(revision.fields?.result_types)||revision.fields.result_types.length!==1||revision.fields.result_types[0]!=='Артефакт')return fail('FORBIDDEN');
+    const already=(await c.query("SELECT * FROM game_core.moves WHERE owner_id=$1 AND target_element_id=$2 AND fields->>'skipped_review_id'=$3",[owner,target.id,review.id])).rows;
+    if(review.status==='cancelled'&&already.length===1){result={review_id:review.id,finish_id:already[0].id};}
+    else {
+     if(target.status!=='active'||review.status!=='planned'||review.kind!=='action'||review.purpose!=='review'||review.fields?.planning?.decision!=='final'||review.fields.planning.revision_id!==target.current_revision_id)return fail('INVALID_STATE');
+     await ready(c,owner,review);
+     const sourceOutputs=await requiredOutputs(c,owner,review);
+     if(!sourceOutputs.length)return fail('INVALID_STATE');
+     const next=(await c.query("SELECT * FROM game_core.moves WHERE owner_id=$1 AND previous_move_id=$2 AND status='planned'",[owner,review.id])).rows;
+     if(next.length!==1||!['accept','finish'].includes(next[0].purpose)||next[0].target_element_id!==target.id)return fail('INVALID_STATE');
+     const finish=next[0],outputs=[...(finish.conditions.required_outputs??[]).filter((item:Value)=>item.move_id!==review.id),...(review.conditions.required_outputs??[])];
+     const unique=(items:Value[])=>[...new Map(items.map(item=>[json(item),item])).values()];
+     const conditions={...finish.conditions,required_resources:[...new Set([...(finish.conditions.required_resources??[]),...(review.conditions.required_resources??[])])],required_outputs:unique(outputs),decisions:unique([...(finish.conditions.decisions??[]),...(review.conditions.decisions??[])])};
+     const fields={...finish.fields,auto_finish:true,skipped_review_id:review.id};delete fields.wait_decision;
+     await c.query("UPDATE game_core.moves SET status='cancelled' WHERE owner_id=$1 AND id=$2",[owner,review.id]);
+     await c.query('UPDATE game_core.moves SET previous_move_id=$1,fields=$2,conditions=$3,title=$4,instructions=$5 WHERE owner_id=$6 AND id=$7',[review.previous_move_id,fields,conditions,'Завершить: '+revision.title,'Сохранить готовый результат и передать его пользователю штатным каналом.',owner,finish.id]);
+     result={review_id:review.id,finish_id:finish.id};
+     await event(c,owner,'move.result_review_skipped',review.id,{finish_id:finish.id,revision_id:target.current_revision_id});
     }
    }
    else if(operation==='create') {
@@ -395,7 +422,7 @@ export function createGameHandlers(pool:Pool, legacy:GameCoreStore, verifyArtifa
      const body:Value={...object(v.result??{}),claim:a.result?.claim};const outputs:string[]=[];
      const planning=m.fields?.planning,expected=list(planning?.output_contracts??[]),seen=new Set<string>();
      if(planning&&(await one(c,owner,'elements',m.target_element_id)).current_revision_id!==planning.revision_id)return fail('CONFLICT');
-     if(['accept','finish'].includes(m.purpose)||m.fields?.wait_decision){const latest=await latestDecision(c,owner,m);if(!latest||latest.metadata.outcome!=='success'||!(await c.query('SELECT 1 FROM game_core.attempt_resources WHERE owner_id=$1 AND attempt_id=$2 AND resource_id=$3',[owner,a.id,latest.id])).rowCount)return fail('INVALID_STATE');}
+     if(needsDecision(m)){const latest=await latestDecision(c,owner,m);if(!latest||latest.metadata.outcome!=='success'||!(await c.query('SELECT 1 FROM game_core.attempt_resources WHERE owner_id=$1 AND attempt_id=$2 AND resource_id=$3',[owner,a.id,latest.id])).rowCount)return fail('INVALID_STATE');}
      if(['plan','start','update','expand','expand-repeat'].includes(m.purpose)&&planning||m.purpose==='plan')return fail('FORBIDDEN');
      for(const r of list(body.resources??[])) {
       // AIDEV-NOTE: Файлы принадлежат Artifacts. Этот текстовый API не выдаёт непроверенные ссылки.
@@ -479,5 +506,5 @@ export function createGameHandlers(pool:Pool, legacy:GameCoreStore, verifyArtifa
   finally{c.release();}
  }
  const handler=(op:string)=>(v:unknown,c?:OperationContext)=>run(op,v,c);
- return {ready:async()=>{await pool.query('SELECT 1 FROM game_core.elements LIMIT 0');},graphGet:handler('graph'),elementGet:handler('element'),timelineGet:handler('timeline'),movesAvailable:handler('available'),structureCreate:handler('create'),elementCreate:handler('elementCreate'),elementRevise:handler('revise'),moveCreate:handler('moveCreate'),moveLink:handler('link'),elementActivate:handler('activate'),moveClaim:handler('claim'),moveComplete:handler('complete'),moveFail:handler('fail'),devStatus:handler('devStatus'),planningPacket:handler('planningPacket'),planningBind:handler('planningBind'),planningBuild:handler('planningBuild'),planningApply:handler('planningApply'),elementReclassify:handler('reclassify'),planningExpandRepeat:handler('expandRepeat')} as GameCoreHandlers;
+ return {ready:async()=>{await pool.query('SELECT 1 FROM game_core.elements LIMIT 0');},graphGet:handler('graph'),elementGet:handler('element'),timelineGet:handler('timeline'),movesAvailable:handler('available'),structureCreate:handler('create'),elementCreate:handler('elementCreate'),elementRevise:handler('revise'),moveCreate:handler('moveCreate'),moveLink:handler('link'),elementActivate:handler('activate'),moveClaim:handler('claim'),moveComplete:handler('complete'),moveFail:handler('fail'),devStatus:handler('devStatus'),planningPacket:handler('planningPacket'),planningBind:handler('planningBind'),planningBuild:handler('planningBuild'),planningApply:handler('planningApply'),elementReclassify:handler('reclassify'),planningExpandRepeat:handler('expandRepeat'),resultReviewSkip:handler('skipResultReview')} as GameCoreHandlers;
 }

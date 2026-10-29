@@ -1,5 +1,7 @@
 ## Parallel Issue Fixing with Worktrees
 
+For a repository governed by Codeworks, follow its project instructions instead of the manual worktree commands below. A new area is prepared by the supported native file-write hook; public prepare resumes an existing area. Check status after an uncertain outcome.
+
 ```
 # Create worktrees
 terminal(command="git worktree add -b fix/issue-78 ~/.hermes/cache/scratch/issue-78 main", workdir="~/project")

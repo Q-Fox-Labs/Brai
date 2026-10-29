@@ -64,8 +64,14 @@ class RoutingTests(unittest.TestCase):
     def save_config(self):
         (self.home / 'memos-rest.json').write_text(json.dumps(self.cfg))
 
-    def router_reply(self, facts):
-        self.provider.routing.router.transport = lambda payload: {'facts': facts}
+    def router_reply(self, facts, provider=None):
+        def reply(payload):
+            data = json.loads(payload[-1]['content'])
+            if 'candidates' in data:
+                return {'reviews': [{'index': i, 'keep': True, 'spheres': f['spheres']}
+                                    for i, f in enumerate(data['candidates'])]}
+            return {'facts': facts}
+        (provider or self.provider).routing.router.transport = reply
 
     def fact(self, **changes):
         return {'text': 'I am studying sales.', 'source': {'message_index': 0, 'role': 'user',
@@ -292,6 +298,57 @@ class RoutingTests(unittest.TestCase):
         original = next(r for r in self.backend.rows.values() if r['cube'] == 'main')
         self.assertIn('Unrelated private detail.', original['memory'])
 
+    def test_long_dialogue_is_chunked_recovered_and_forgotten_as_one_memory(self):
+        text = ('Массаж 🟢 и уход. ' * 300)
+        self.router_reply([])
+        self.provider.sync_turn(text, '')
+        original_request = self.provider.client.request
+        lost = [False]
+        def limited_api(path, body=None, **extra):
+            if path == '/product/add':
+                part = body['messages'][0]['content']
+                self.assertLessEqual(len(part.encode('utf-8')), 768)
+                if not lost[0]:
+                    lost[0] = True
+                    self.backend.lose_response = True
+            return original_request(path, body, **extra)
+        self.provider.client.request = limited_api
+        self.send()
+        self.assertEqual(self.provider.outbox.status()['pending'], 1)
+        self.retry_now()
+        self.send()
+        self.assertEqual(self.provider.outbox.status()['pending'], 0)
+        rows = sorted(self.backend.rows.values(), key=lambda row: row['metadata']['info']['hermes_chunk_index'])
+        self.assertGreater(len(rows), 1)
+        self.assertEqual(''.join(row['memory'] for row in rows), text)
+        self.assertTrue(all(row['metadata']['info']['hermes_messages'][0]['content'] == text for row in rows))
+        self.assertEqual(len(rows), self.backend.add_count, 'lost response must not duplicate a part')
+        result = json.loads(self.provider.handle_tool_call('memos_forget', {'memory_id': rows[0]['id']}))
+        self.assertEqual(result['status'], 'pending')
+        self.send()
+        self.assertEqual(self.backend.rows, {}, 'forget must delete every part')
+
+    def test_corrupted_part_never_receives_a_delivery_receipt(self):
+        self.router_reply([])
+        self.provider.sync_turn('Сохранить текст. ' * 100, '')
+        original_request = self.provider.client.request
+        def corrupt_part(path, body=None, **extra):
+            result = original_request(path, body, **extra)
+            if path == '/product/get_memory':
+                for group in result['data']['text_mem']:
+                    for row in group['memories']:
+                        row['memory'] = 'corrupted'
+            return result
+        self.provider.client.request = corrupt_part
+        self.send()
+        self.assertEqual(self.provider.outbox.status()['pending'], 1)
+        self.assertEqual(self.provider.outbox.status()['verified_events'], 0)
+        self.assertIn('chunk_content', self.provider.outbox.status()['last_error'])
+        self.provider.client.request = original_request
+        self.retry_now()
+        self.send()
+        self.assertEqual(self.provider.outbox.status()['pending'], 0)
+
     def test_worker_archives_original_and_routes_grounded_atomic_fact(self):
         self.assertIsNotNone(getattr(self.provider, 'routing', None), 'semantic runtime must be enabled')
         self.router_reply([self.fact()])
@@ -444,7 +501,7 @@ class RoutingTests(unittest.TestCase):
                    'shared_infra': False}
         (self.home / 'memos-catalog.json').write_text(json.dumps(catalog))
         p = self.new_provider('session-project', user_id='alice', gateway_session_key='topic-1')
-        p.routing.router.transport = lambda payload: {'facts': [self.fact()]}
+        self.router_reply([self.fact()], p)
         result = json.loads(p.handle_tool_call('memos_remember', {'content': 'I am studying sales.',
                                       'project': 'project_other', 'operation_id': 'remember-1'}))
         self.assertEqual(result['status'], 'pending')
@@ -502,6 +559,8 @@ class RoutingTests(unittest.TestCase):
         calls = []
         def router(payload):
             calls.append(payload)
+            if 'candidates' in json.loads(payload[-1]['content']):
+                return {'reviews':[{'index':0,'keep':True,'spheres':['life_intellect','life_work']}]}
             return {'facts': [self.fact(spheres=['life_intellect', 'life_work'])]}
         self.provider.routing.router.transport = router
         original_request = self.provider.client.request
@@ -512,7 +571,7 @@ class RoutingTests(unittest.TestCase):
         self.provider.client.request = fail_last_copy
         self.retry_now()
         self.send()
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
         self.assertEqual(self.provider.outbox.status()['pending'], 1)
         self.provider.client.request = original_request
         self.provider.routing.router.transport = unavailable
@@ -521,7 +580,7 @@ class RoutingTests(unittest.TestCase):
         self.send()
         self.assertEqual(self.provider.outbox.status()['pending'], 0)
         self.assertEqual(self.backend.add_count, count, 'lost response may not create a second linked copy')
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
 
 
     def test_freeze_between_recovery_read_and_add_blocks_the_network_write(self):
@@ -549,7 +608,7 @@ class RoutingTests(unittest.TestCase):
     def test_exact_unique_quote_resolves_model_offset_errors_without_guessing_evidence(self):
         router = self.provider.routing.router
         source = {'message_index': 0, 'role': 'user', 'start': 60, 'end': 121, 'quote': 'I am studying sales.'}
-        router.transport = lambda payload: {'facts': [self.fact(source=source)]}
+        self.router_reply([self.fact(source=source)])
         rows = [{'role': 'user', 'content': 'Unrelated introduction.'}, {'role': 'user', 'content': 'I am studying sales.'}]
         try:
             facts = router.extract(rows)
@@ -577,13 +636,15 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(self.provider.outbox.status()['pending'], 0)
 
 
-    def test_uncertain_material_remains_recallable_in_main_after_successful_empty_extraction(self):
+    def test_rejected_material_requires_explicit_archive_search(self):
         self.router_reply([])
         self.provider.sync_turn('An uncertain neutral note.', '')
         self.send()
         self.provider.routing.router.transport = lambda payload: {'cubes': []}
         result = json.loads(self.provider.handle_tool_call('memos_search', {'query': 'uncertain note'}))
-        self.assertEqual(len(result['memories']), 1, 'no extracted fact may not hide the original')
+        self.assertEqual(result['memories'], [], 'unclassified dialogue is not a useful fact')
+        result = json.loads(self.provider.handle_tool_call('memos_search', {'query': 'uncertain note', 'include_archive': True}))
+        self.assertEqual(len(result['memories']), 1, 'the transcript remains available explicitly')
         self.assertEqual(result['memories'][0]['classification'], 'unclassified')
         self.assertEqual(result['memories'][0]['cube_id'], 'main')
 
@@ -610,9 +671,9 @@ class RoutingTests(unittest.TestCase):
         (self.home / 'memos-catalog.json').write_text(json.dumps(catalog))
         text = 'Service listens on localhost.'
         p = self.new_provider('shared-session', user_id='bob')
-        p.routing.router.transport = lambda payload: {'facts': [self.fact(text=text, source={
+        self.router_reply([self.fact(text=text, source={
             'message_index': 0, 'role': 'user', 'start': 0, 'end': len(text), 'quote': text},
-            spheres=['infra', 'life_systems'])]}
+            spheres=['infra', 'life_systems'])], p)
         result = json.loads(p.handle_tool_call('memos_remember', {'content': text + ' A private unrelated note.', 'shared_infra': True}))
         self.assertEqual(result['status'], 'pending')
         self.send(p)

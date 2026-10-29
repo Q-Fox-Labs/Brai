@@ -40,6 +40,7 @@ test('MCP публикует полный набор инструментов Ga
     'game_core_planning_build',
     'game_core_planning_apply',
     'game_core_planning_expand_repeat',
+    'game_core_result_review_skip',
   ]);
   for (const name of toolNames) {
     const schema = toolInputs[name];

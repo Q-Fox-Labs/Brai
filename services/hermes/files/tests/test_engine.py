@@ -8,6 +8,7 @@ import asyncio
 from contextlib import nullcontext, suppress
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -541,6 +542,92 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn(value['artifactId'], self.backend.remote)
         self.assertNotEqual(value['image'], str(path))
 
+    def test_pinned_telegram_hides_bare_urls_in_rich_and_markdown_output(self):
+        scope = {'re': re, '_MDV2_ESCAPE_RE': re.compile(r'([_*\[\]()~`>#\+\-=|{}.!\\])'),
+                 '_wrap_markdown_tables': lambda value: value, '_rich_normalize_linebreaks': lambda value: value}
+        function('plugins/platforms/telegram/adapter.py',
+                 ['_brai_hide_bare_urls', '_escape_mdv2', '_escape_bare_bracket', 'format_message', '_rich_message_payload'], scope)
+        scope['TelegramAdapter'] = SimpleNamespace(_escape_bare_bracket=scope['_escape_bare_bracket'])
+        source = '# Источники\n[Название](https://example.org/a) и https://example.org/b. `https://example.org/code`'
+        rich = scope['_rich_message_payload'](None, source)['markdown']
+        formatted = scope['format_message'](None, source)
+        self.assertIn('[Название](https://example.org/a)', rich)
+        self.assertIn('[Ссылка](https://example.org/b).', rich)
+        self.assertIn('[Название](https://example.org/a)', formatted)
+        self.assertIn('[Ссылка](https://example.org/b)', formatted)
+        self.assertIn('`https://example.org/code`', rich)
+        self.assertIn('`https://example.org/code`', formatted)
+        self.assertTrue(formatted.startswith('*Источники*'))
+
+    async def test_pinned_telegram_never_retries_raw_text_after_format_rejection(self):
+        async def deadline(value, **kwargs):
+            return await value
+        class Bot:
+            def __init__(self):
+                self.calls = []
+            async def send_message(self, **kwargs):
+                self.calls.append(kwargs)
+                raise ValueError('cannot parse entities')
+        bot = Bot()
+        scope = {'_await_with_thread_deadline': deadline, '_TEXT_SEND_DEADLINE': 1,
+                 'ParseMode': SimpleNamespace(MARKDOWN_V2='MarkdownV2')}
+        function('plugins/platforms/telegram/adapter.py', ['_send_chunk_markdown_or_plain'], scope)
+        with self.assertRaisesRegex(ValueError, 'cannot parse'):
+            await scope['_send_chunk_markdown_or_plain'](SimpleNamespace(_bot=bot), '*formatted*', {'chat_id': 1})
+        self.assertEqual(len(bot.calls), 1)
+        self.assertEqual(bot.calls[0]['parse_mode'], 'MarkdownV2')
+
+        edits = []
+        async def edit(chat, message, text, mode=None):
+            edits.append((text, mode))
+            raise ValueError('cannot parse entities')
+        scope = {'ParseMode': SimpleNamespace(MARKDOWN_V2='MarkdownV2')}
+        function('plugins/platforms/telegram/adapter.py', ['_edit_markdown_or_plain'], scope)
+        with self.assertRaisesRegex(ValueError, 'cannot parse'):
+            await scope['_edit_markdown_or_plain'](SimpleNamespace(_edit_text=edit), '1', '2', '*formatted*', '**raw**', '')
+        self.assertEqual(edits, [('*formatted*', 'MarkdownV2')])
+
+    async def test_pinned_telegram_draft_never_retries_with_raw_markup(self):
+        async def deadline(value, **kwargs):
+            return await value
+        class Bot:
+            def __init__(self):
+                self.calls = []
+            async def send_message_draft(self, **kwargs):
+                self.calls.append(kwargs)
+                raise ValueError('cannot parse entities')
+        bot = Bot()
+        adapter = SimpleNamespace(_bot=bot, strip_media_directives_for_display=lambda value: value,
+            _should_attempt_rich_draft=lambda value: False, MAX_MESSAGE_LENGTH=4096,
+            format_message=lambda value: '*formatted*', _thread_kwargs_for_draft=lambda chat, meta: {}, name='test')
+        scope = {'SendResult': lambda **kwargs: SimpleNamespace(**kwargs),
+                 '_await_with_thread_deadline': deadline, '_TEXT_SEND_DEADLINE': 1,
+                 'ParseMode': SimpleNamespace(MARKDOWN_V2='MarkdownV2'),
+                 'normalize_telegram_chat_id': int, '_redact_telegram_error_text': str,
+                 'logger': SimpleNamespace(debug=lambda *args: None)}
+        function('plugins/platforms/telegram/adapter.py', ['send_draft'], scope)
+        result = await scope['send_draft'](adapter, '1', 2, '**raw**')
+        self.assertFalse(result.success)
+        self.assertEqual(len(bot.calls), 1)
+        self.assertEqual(bot.calls[0]['text'], '*formatted*')
+        self.assertEqual(bot.calls[0]['parse_mode'], 'MarkdownV2')
+
+    async def test_pinned_standalone_telegram_rejects_direct_file_and_raw_fallback(self):
+        scope = {}
+        function('tools/send_message_senders.py', ['_send_telegram'], scope)
+        result = await scope['_send_telegram']('token', '1', 'text', media_files=[('/raw/file.pdf', False)])
+        self.assertIn('Artifacts', result['error'])
+        calls = []
+        async def send(bot, **kwargs):
+            calls.append(kwargs)
+            raise ValueError('cannot parse entities')
+        scope = {'_send_telegram_message_with_retry': send, '_is_telegram_thread_not_found': lambda error: False}
+        function('tools/send_message_senders.py', ['_telegram_send_text_chunk'], scope)
+        with self.assertRaisesRegex(ValueError, 'cannot parse'):
+            await scope['_telegram_send_text_chunk'](None, '1', '*formatted*', 'MarkdownV2', False, {})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]['parse_mode'], 'MarkdownV2')
+
     async def test_actual_base_delivery_uses_full_album_preflight_and_unknown_receipt(self):
         namespace = {}
         function('gateway/platforms/base.py', ['_deliver_attachments'], namespace)
@@ -576,7 +663,8 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             event = SimpleNamespace(source=SimpleNamespace(platform='telegram', chat_id='1', thread_id='2', user_id='3', profile=None),
                                     message_id=str(count), ledger_message_id=None)
             bot = Bot()
-            adapter, receipts = SimpleNamespace(platform='telegram', _bot=bot), []
+            adapter, receipts = SimpleNamespace(platform='telegram', _bot=bot, format_message=lambda value: value,
+                truncate_message=lambda value, maximum, len_fn: list(native.text_chunks(value, maximum))), []
             if count == 2:
                 bot.lost = True
             with patch.dict(sys.modules, ports):

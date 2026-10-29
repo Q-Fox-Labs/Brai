@@ -17,7 +17,7 @@ Connection: CODEWORKS_CLIENT_CONFIG or CODEWORKS_NATS_URL,
 CODEWORKS_NATS_CONFIG / CODEWORKS_NATS_CREDS_FILE, CODEWORKS_EXECUTOR_ID.
 Protected NATS JSON preserves user/pass/inboxPrefix; .creds requires an endpoint.
 CODEWORKS_NATS_URL overrides the JSON endpoint; environment overrides public config.
-New prepare needs a descriptive workspace_key, e.g. codeworks-auto-cleanup.
+Prepare resumes an existing workspace; a native write starts a new workspace.
 CODEWORKS_WORKSPACE_KEY can supply it; thread/session hints resume existing areas only.
 `;
 

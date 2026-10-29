@@ -14,13 +14,21 @@ export function createFlowGit({run=command,localRemote=false,requireLock=()=>{if
     const expected='https://github.com/'+p.github.repository+'.git';
     if(url!==read||(!localRemote&&url!==expected))throw new Fault('OWNERSHIP_CONFLICT','Origin differs from registered GitHub repository.');
   }
-  async function remote(p,b) {
-    if(!branch(b))throw new Fault('INVALID_ARGUMENT');await origin(p);
+  async function readRemote(p,b) {
+    await origin(p);
     const raw=(await git(p,['ls-remote','--refs','origin','refs/heads/'+b])).stdout;
     if(!raw)return null;
     const rows=raw.split('\n');const [head,ref]=rows[0].split(/\s+/);
     if(rows.length!==1||!sha(head)||ref!=='refs/heads/'+b)throw new Fault('GIT_FAILED');
     return head;
+  }
+  async function remote(p,b,{legacy=false}={}) {
+    if(!branch(b)&&!(legacy&&/^(?:codex|feature)\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(b)))throw new Fault('INVALID_ARGUMENT');
+    return readRemote(p,b);
+  }
+  async function remoteHistorical(p,b) {
+    if(!/^(?:(?:feature|hotfix)\/[A-Za-z0-9][A-Za-z0-9._-]*|release\/codeworks-[0-9a-f-]{36})$/.test(b))throw new Fault('INVALID_ARGUMENT');
+    return readRemote(p,b);
   }
   async function ancestor(p,a,b){if(!sha(a)||!sha(b))throw new Fault('INVALID_ARGUMENT');return (await git(p,['merge-base','--is-ancestor',a,b],{allowFailure:true})).code===0;}
   async function fetch(p,b,expected) {
@@ -32,7 +40,7 @@ export function createFlowGit({run=command,localRemote=false,requireLock=()=>{if
     await git(p,['cat-file','-e',expected+'^{commit}']);
   }
   return {
-    remote,ancestor,
+    remote,remoteHistorical,ancestor,
     /** Fetch не меняет checkout; результат должен совпасть с закреплённой remote версией. */
     fetch,
     /** Требует происхождение от frozen base; hotfix не может импортировать merge dev. */
@@ -63,12 +71,12 @@ export function createFlowGit({run=command,localRemote=false,requireLock=()=>{if
       await git(p,['push','--porcelain','origin',head+':refs/heads/'+b]);
     },
     /** Удаляет только feature/hotfix ref с ожидаемым SHA; отсутствие после сбоя означает успех. */
-    async removeBranch(p,b,expected) {
-      locked();if(!branch(b)||!b.startsWith('feature/')&&!b.startsWith('hotfix/')||!sha(expected))throw new Fault('INVALID_ARGUMENT');
-      const current=await remote(p,b);if(current===null)return;
+    async removeBranch(p,b,expected,{legacy=false}={}) {
+      locked();if((!branch(b)&&!(legacy&&/^(?:codex|feature)\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(b)))||(!b.startsWith('feature/')&&!b.startsWith('hotfix/')&&!(legacy&&b.startsWith('codex/')))||!sha(expected))throw new Fault('INVALID_ARGUMENT');
+      const current=await remote(p,b,{legacy});if(current===null)return;
       if(current!==expected)throw new Fault('TARGET_CHANGED','Task branch changed after release; cleanup preserved it.');
       await git(p,['push','--porcelain','--force-with-lease=refs/heads/'+b+':'+expected,'origin',':refs/heads/'+b]);
-      if(await remote(p,b)!==null)throw new Fault('TARGET_CHANGED','Task branch still exists; retry cleanup after inspection.');
+      if(await remote(p,b,{legacy})!==null)throw new Fault('TARGET_CHANGED','Task branch still exists; retry cleanup after inspection.');
     },
     /** Доказывает точные parents слияния и наличие commit в фактическом remote target. */
     async verifyMerge(p,leg) {

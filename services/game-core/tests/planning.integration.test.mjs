@@ -11,8 +11,9 @@ import {fixture} from './planning-fixture.mjs';
 test('planning PostgreSQL: apply/replay/rollback, future outputs, retry, remarks and acceptance',{skip:!process.env.GAME_CORE_OWNER_DATABASE_URL||!process.env.GAME_CORE_DATABASE_URL},async()=>{
  const admin=new Pool({connectionString:process.env.GAME_CORE_OWNER_DATABASE_URL}),app=new Pool({connectionString:process.env.GAME_CORE_DATABASE_URL});
  const owner=`planning-test-${randomUUID()}`,h=createGameHandlers(app,{}),req=v=>({user_id:owner,...v});
- async function prepare(){
+ async function prepare(artifactOnly=false){
   const f=fixture();
+  if(artifactOnly){f.candidate.fields.result_types=['Артефакт'];if(artifactOnly!=='legacy')f.candidate.approval_required=false;}
   const created=await h.structureCreate(req({elements:[{id:f.element.id,kind:'task',title:'TEST планировщик',initial_resources:[{id:f.resource.id,title:f.resource.title,content:f.resource.content}]}],moves:[{id:f.move.id,element_id:f.element.id,kind:'operation',purpose:'plan',title:f.move.title}]}));
   const a=(await h.moveClaim(req({move_id:f.move.id,idempotency_key:randomUUID(),executor_kind:'agent',input_resource_ids:[f.resource.id]}))).attempt;
   const packet=await h.planningPacket(req({attempt_id:a.id}));
@@ -81,6 +82,37 @@ test('planning PostgreSQL: apply/replay/rollback, future outputs, retry, remarks
   assert.equal(reloaded.elements.find(e=>e.id===f.element.id).output.length,1);
   assert.equal(reloaded.attempts.filter(a=>a.moveId===work).length,2);
   assert.ok((await admin.query("SELECT 1 FROM game_core.outbox WHERE owner_id=$1 AND event_type='plan.applied'",[owner])).rowCount);
+  // Артефакт закрывается после работы без записи фиктивного решения владельца.
+  const automatic=await prepare(true);await h.planningApply(automatic.apply);
+  const records=automatic.built.stage.records;
+  assert.equal(records.some(m=>m.decision==='final'),false);
+  const autoConfirm=records.find(m=>m.purpose==='confirm');
+  const autoWork=records.filter(m=>m.purpose==='work');
+  const autoFinish=automatic.built.stage.finish;
+  await assert.rejects(()=>take(autoFinish.id),/INVALID_STATE/);
+  await done(autoConfirm.id,'TEST план подтверждён',{stage:'planning',outcome:'approved'});
+  await done(autoWork[0].id,'МАЯК');await done(autoWork[1].id,'Сигнал: МАЯК');
+  await done(autoFinish.id,'Сигнал: МАЯК');
+  const finished=await graph();
+  assert.equal(finished.elements.find(e=>e.id===automatic.element.id).status,'completed');
+  assert.ok(!finished.resources.some(r=>r.metadata?.element_id===automatic.element.id&&r.metadata?.stage==='final'));
+  await assert.rejects(()=>h.moveCreate(req({element_id:automatic.element.id,kind:'operation',purpose:'finish',
+    title:'TEST forged',fields:{auto_finish:true}})),/FORBIDDEN/);
+  // Прежний план артефакта переводится на завершение без человеческой попытки.
+  const legacy=await prepare('legacy');await h.planningApply(legacy.apply);
+  const legacyRecords=legacy.built.stage.records,legacyConfirm=legacyRecords.find(m=>m.purpose==='confirm');
+  const legacyWork=legacyRecords.filter(m=>m.purpose==='work'),legacyReview=legacyRecords.find(m=>m.decision==='final');
+  await assert.rejects(()=>h.resultReviewSkip(req({move_id:legacyReview.id,revision_id:randomUUID()})),/CONFLICT/);
+  const legacyRevision=(await graph()).elements.find(e=>e.id===legacy.element.id).revision;
+  await assert.rejects(()=>h.resultReviewSkip(req({move_id:legacyReview.id,revision_id:legacyRevision})),/INVALID_STATE/);
+  await done(legacyConfirm.id,'TEST план подтверждён',{stage:'planning',outcome:'approved'});
+  await done(legacyWork[0].id,'МАЯК');await done(legacyWork[1].id,'Сигнал: МАЯК');
+  const transition=await h.resultReviewSkip(req({move_id:legacyReview.id,revision_id:legacyRevision}));
+  assert.deepEqual(await h.resultReviewSkip(req({move_id:legacyReview.id,revision_id:legacyRevision})),transition);
+  const afterSkip=await graph();assert.equal(afterSkip.moves.find(m=>m.id===legacyReview.id).status,'cancelled');
+  assert.ok(!afterSkip.attempts.some(a=>a.moveId===legacyReview.id));
+  await done(transition.finish_id,'Сигнал: МАЯК');
+  assert.equal((await graph()).elements.find(e=>e.id===legacy.element.id).status,'completed');
   // Текстовые замечания к постановке: новая Операция и новая ревизия, без запуска старого плана.
   const draft=await prepare();await h.planningApply(draft.apply);
   const originalRecords=draft.built.stage.records;

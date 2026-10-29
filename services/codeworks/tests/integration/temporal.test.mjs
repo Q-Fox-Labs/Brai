@@ -17,18 +17,18 @@ import {Pool} from 'pg';
 import {createHandlers} from '../../src/domain.mjs';
 import {createStore} from '../../src/storage.mjs';
 import {createGit,command} from '../../src/git.mjs';
-import {transitionInventory,importTransition,resumeReconciledCommand} from '../../src/transition.mjs';
+import {transitionInventory,importTransition} from '../../src/transition.mjs';
 import {connectionProxy} from './temporal-proxy.mjs';
 import proto from '@temporalio/proto';
 const {temporal}=proto;
-import {setup,configured} from './fixture.mjs';
+import {setup,configured,prepareWith} from './fixture.mjs';
 import {deliverCommands,createActivities} from '../../src/temporal.mjs';
 import {authorizeCommand,acquireTarget,releaseTarget} from '../../src/lifecycle.mjs';
 import {launchWorker,startRuntime} from '../../src/runtime.mjs';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(work,timeout=60000){const end=Date.now()+timeout;for(;;){if(await work())return;assert.ok(Date.now()<end,'fixture condition timed out');await sleep(100);}}
 test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODEWORKS_TEMPORAL_TEST!=='1',timeout:360000},async t=>{
-  const f=await setup(),project=await f.project();
+  const f=await setup(),project=await f.project({codeIndexDisabled:true});
   const root=path.join(project.workspace_root,'temporal-fixture');await mkdir(root);
   const config={databaseURL:f.config.app_url,allowedRepositories:[project.repo_path],address:process.env.CODEWORKS_TEMPORAL_ADDRESS??'127.0.0.1:7233',namespace:process.env.CODEWORKS_TEMPORAL_NAMESPACE??'brai',taskQueue:'codeworks-fixture-'+randomUUID(),...(process.env.CODEWORKS_PREVIOUS_WORKFLOW_BUNDLE?{bundle:process.env.CODEWORKS_PREVIOUS_WORKFLOW_BUNDLE}:{}),crashOnce:path.join(root,'crashed')};
   const configFile=path.join(root,'private.json');await writeFile(configFile,JSON.stringify(config),{mode:0o600});
@@ -38,7 +38,7 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
   async function stop(signal='SIGTERM'){if(!child)return;const c=child;child=null;if(c.exitCode!==null||c.signalCode!==null)return;const done=new Promise(r=>c.once('close',r));c.kill(signal);await done;}
   t.after(async()=>{await stop();for(const id of workflowIds)await client.workflow.getHandle(id).terminate('isolated fixture cleanup').catch(()=>{});await connection.close();await f.close();});
   await f.owner.query("INSERT INTO codeworks.execution_control(project_id,instance_id,owner) VALUES($1,'fixture','temporal')",[project.id]);
-  const prepare=(key)=>f.h.call('prepare',{project_id:project.id,workspace_key:key,request_key:'prepare-'+key},'codex');
+  const prepare=(key)=>f.prepare({project_id:project.id,workspace_key:key,request_key:'prepare-'+key},'codex');
   const status=id=>f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[id]).then(r=>r.rows[0].status);
   const first=await prepare('first');
   const row=(await f.app.query('SELECT * FROM codeworks.commands WHERE operation_id=$1',[first.operation_id])).rows[0];workflowIds.add(row.workflow_id);
@@ -54,7 +54,7 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
     const url=new URL(f.config.app_url),proxy=await connectionProxy(url.hostname,Number(url.port),{dropOnCommit:true});url.hostname='127.0.0.1';url.port=proxy.address.split(':')[1];
     const runtime=await startRuntime({databaseURL:url.toString(),startRecovery:false,allowedRepositories:[project.repo_path]});
     try{
-      await assert.rejects(runtime.call('prepare',{project_id:project.id,workspace_key:'lost-commit',request_key:'prepare-lost-commit'},'codex'));
+      await assert.rejects(prepareWith(runtime.call,{project_id:project.id,workspace_key:'lost-commit',request_key:'prepare-lost-commit'},'codex'));
       const admitted=await prepare('lost-commit');
       const record=(await f.app.query('SELECT workflow_id FROM codeworks.commands WHERE operation_id=$1',[admitted.operation_id])).rows[0];workflowIds.add(record.workflow_id);
       assert.equal((await f.app.query("SELECT count(*) FROM codeworks.requests WHERE idempotency_key='prepare-lost-commit'")).rows[0].count,'1');
@@ -80,14 +80,15 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
     await stop('SIGKILL');
     let history=await client.workflow.getHandle(row.workflow_id).fetchHistory();
     // Continue-As-New может уже открыть пустой run: replay проверяет именно run с исполненной подготовкой.
+    const preparationHistory=history=>history.events.some(e=>['executeCommand','prepareBranch','prepareCheckout','prepareDependencies','confirmWorkspace'].includes(e.activityTaskScheduledEventAttributes?.activityType?.name));
     for(;;){
       const previous=history.events[0]?.workflowExecutionStartedEventAttributes?.continuedExecutionRunId;
-      if(history.events.some(e=>e.activityTaskScheduledEventAttributes?.activityType?.name==='executeCommand')||!previous)break;
+      if(preparationHistory(history)||!previous)break;
       history=await client.workflow.getHandle(row.workflow_id,previous).fetchHistory();
     }
     const serialized=temporal.api.history.v1.History.toObject(history,{longs:String,enums:String,bytes:String});
     await writeFile(path.join(root,'history.json'),JSON.stringify(serialized));
-    if(process.env.CODEWORKS_PREVIOUS_WORKFLOW_BUNDLE)assert.ok(history.events.some(e=>e.activityTaskScheduledEventAttributes?.activityType?.name==='executeCommand'),'replay must cover the installed coarse Activity history');
+    if(process.env.CODEWORKS_PREVIOUS_WORKFLOW_BUNDLE)assert.ok(preparationHistory(history),'replay must cover preparation executed by the installed worker');
     const bundle=fileURLToPath(new URL('../../dist/workflows.js',import.meta.url));
     await Worker.runReplayHistory({workflowBundle:{codePath:bundle}},temporal.api.history.v1.History.fromObject(serialized),row.workflow_id);
     const generated=fileURLToPath(new URL('../../../../tmp/codeworks-temporal/',import.meta.url));await mkdir(generated,{recursive:true});
@@ -104,9 +105,9 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
     const cancelled=await f.h.call('workspace.cancel',{project_id:project.id,workspace_id:second.workspace_id,request_key:'cancel-second',reason:'fixture complete'},'codex');
     await deliverCommands(f.app,client,{taskQueue:config.taskQueue,continueAfter:2});await until(async()=>await status(cancelled.operation_id)==='succeeded');
     await until(async()=>(await f.app.query('SELECT state FROM codeworks.workflow_registry WHERE workflow_id=$1',[c.workflow_id])).rows[0].state==='completed');
-    const lifecycle=await f.h.call('lifecycle.status',{project_id:project.id,workspace_id:second.workspace_id},'codex');assert.equal(lifecycle.task_status,'cancelled');
+    const lifecycle=await f.h.call('lifecycle.status',{project_id:project.id,workspace_id:second.workspace_id},'codex');assert.equal(lifecycle.task_status,'removed');
     await assert.rejects(f.h.call('prepare',{project_id:project.id,workspace_key:'second',request_key:'revive'},'codex'),{code:'CONFLICT'});
-    assert.equal((await f.h.call('status',{project_id:project.id,workspace_id:second.workspace_id},'codex')).git.dirty,false);
+    const removed=(await f.h.call('status',{project_id:project.id,workspace_id:second.workspace_id},'codex')).workspace;assert.ok(removed.removed_at);
   });
   await t.test('a direct Temporal activity without the admitted Workflow ID cannot authorize effects',async()=>{
     const id='codeworks-fixture-unadmitted-'+randomUUID();workflowIds.add(id);
@@ -142,6 +143,8 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
     }finally{db.release();}
   });
   await t.test('closing an unknown installation keeps its lane; confirmed failure frees only the attempt',async()=>{
+    const first=await prepare('close-release');const own=(await f.app.query('SELECT workflow_id FROM codeworks.commands WHERE operation_id=$1',[first.operation_id])).rows[0];workflowIds.add(own.workflow_id);
+    await deliverCommands(f.app,client,{taskQueue:config.taskQueue});await until(async()=>await status(first.operation_id)==='succeeded');
     const releaseId=randomUUID(),deploymentId=randomUUID(),merge='b'.repeat(40),head='a'.repeat(40);
     await f.owner.query("INSERT INTO codeworks.operations(id,project_id,workspace_id,executor_id,kind,status,step,request) VALUES($1,$2,$3,'codex','release','awaiting_reconciliation','fixture',$4)",[releaseId,project.id,first.workspace_id,{commit_sha:head}]);
     await f.owner.query("INSERT INTO codeworks.operations(id,project_id,executor_id,kind,status,step,request) VALUES($1,$2,'codeworks_owner','rollout','awaiting_reconciliation','fixture',$3)",[deploymentId,project.id,{target:'dev',commit_sha:merge}]);
@@ -156,14 +159,14 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
     await until(async()=>(await f.app.query('SELECT step FROM codeworks.operations WHERE id=$1',[close.operation_id])).rows[0].step==='ROLLOUT_NOT_TERMINAL');
     assert.equal((await f.app.query("SELECT state FROM codeworks.release_queue WHERE operation_id=$1",[releaseId])).rows[0].state,'held');
     const cancellation=await f.h.call('workspace.cancel',{project_id:project.id,workspace_id:first.workspace_id,request_key:'unsafe-cancel',reason:'fixture'},'codex');
-    await deliverCommands(f.app,client,{taskQueue:config.taskQueue});await until(async()=>await status(cancellation.operation_id)==='failed');
+    await deliverCommands(f.app,client,{taskQueue:config.taskQueue});await until(async()=>await status(cancellation.operation_id)==='awaiting_reconciliation');
+    assert.equal((await f.app.query('SELECT removed_at FROM codeworks.workspaces WHERE id=$1',[first.workspace_id])).rows[0].removed_at,null);
     await f.owner.query("UPDATE codeworks.operations SET status='failed' WHERE id=$1",[deploymentId]);
     await f.owner.query("UPDATE codeworks.deployments SET receipt=$2 WHERE operation_id=$1",[deploymentId,{status:'failed',operation_id:deploymentId,code:'CONFIRMED_FIXTURE_FAILURE'}]);
-    await client.workflow.getHandle(row.workflow_id).signal('commandsAvailable');await until(async()=>await status(close.operation_id)==='succeeded');
+    await client.workflow.getHandle(own.workflow_id).signal('commandsAvailable');await until(async()=>await status(close.operation_id)==='succeeded');
     assert.deepEqual(await f.h.call('release.close',request,'codex'),close);
     assert.equal((await f.app.query("SELECT state FROM codeworks.release_queue WHERE operation_id=$1",[releaseId])).rows[0].state,'closed');
-    const task=await f.h.call('lifecycle.status',{project_id:project.id,workspace_id:first.workspace_id},'codex');assert.equal(task.task_status,'active');
-    assert.equal((await f.h.call('status',{project_id:project.id,workspace_id:first.workspace_id},'codex')).git.dirty,false);
+    const task=await f.h.call('lifecycle.status',{project_id:project.id,workspace_id:first.workspace_id},'codex');assert.ok(['closing','removed'].includes(task.task_status));
   });
   await t.test('duplicate and reversed notifications do not create business attempts',async()=>{
     const before=(await f.app.query('SELECT count(*) FROM codeworks.operations')).rows[0].count;
@@ -171,19 +174,17 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
     await deliverCommands(f.app,client,{taskQueue:config.taskQueue,continueAfter:2});await sleep(1000);
     assert.equal((await f.app.query('SELECT count(*) FROM codeworks.operations')).rows[0].count,before);
   });
-  await t.test('bounded Activity retries freeze one command; confirmed reconciliation resumes the same ID',async()=>{
+  await t.test('bounded Activity retries defer the same command and automatically resume it',async()=>{
     const request=await prepare('technical-failure'),record=(await f.app.query('SELECT workflow_id FROM codeworks.commands WHERE operation_id=$1',[request.operation_id])).rows[0];workflowIds.add(record.workflow_id);
     await stop();config.failOperation=request.operation_id;await writeFile(configFile,JSON.stringify(config),{mode:0o600});await start();
     await deliverCommands(f.app,client,{taskQueue:config.taskQueue});
     await until(async()=>await status(request.operation_id)==='awaiting_reconciliation');
-    assert.equal((await f.app.query('SELECT state FROM codeworks.commands WHERE operation_id=$1',[request.operation_id])).rows[0].state,'reconciliation');
+    const retry=(await f.app.query('SELECT state,technical_attempts,retry_at FROM codeworks.commands WHERE operation_id=$1',[request.operation_id])).rows[0];
+    assert.equal(retry.state,'pending');assert.ok(retry.technical_attempts>0);assert.ok(retry.retry_at);
     assert.equal((await client.workflow.getHandle(record.workflow_id).describe()).status.name,'RUNNING');
-    const db=await f.owner.connect();try{
-      await assert.rejects(resumeReconciledCommand(db,request.operation_id),/CONFIRMED_RECONCILIATION_REQUIRED/);
-      await resumeReconciledCommand(db,request.operation_id,{confirmed:true});
-    }finally{db.release();}
     await stop();delete config.failOperation;await writeFile(configFile,JSON.stringify(config),{mode:0o600});await start();
-    await deliverCommands(f.app,client,{taskQueue:config.taskQueue});await until(async()=>await status(request.operation_id)==='succeeded');
+    await f.owner.query("UPDATE codeworks.commands SET retry_at=now()-interval '1 second' WHERE operation_id=$1",[request.operation_id]);
+    await client.workflow.getHandle(record.workflow_id).signal('commandsAvailable');await until(async()=>await status(request.operation_id)==='succeeded');
     assert.deepEqual(await prepare('technical-failure'),request);
   });
   await t.test('independent Ansible installs immutable Codeworks A → B while its Temporal rollout survives restart',{skip:!process.env.CODEWORKS_TEMPORAL_FIXTURE_ROOT,timeout:180000},async()=>{
@@ -221,7 +222,7 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
     await f.owner.query("INSERT INTO codeworks.execution_control(project_id,instance_id,owner) VALUES($1,'fixture','temporal')",[p.id]);
     const flowGit=createFlowGit({localRemote:true,requireLock:()=>{}}),adapters=createActivityGit({flowGit});
     const handlers=createHandlers(createStore(f.app),createGit({flowGit}),{allowedRepositories:[p.repo_path]});
-    const prepareArea=key=>handlers.call('prepare',{project_id:p.id,workspace_key:key,request_key:'prepare-'+key},'codex');
+    const prepareArea=key=>prepareWith(handlers.call,{project_id:p.id,workspace_key:key,request_key:'prepare-'+key},'codex');
     const remember=async op=>{workflowIds.add((await f.app.query('SELECT workflow_id FROM codeworks.commands WHERE operation_id=$1',[op.operation_id])).rows[0].workflow_id);return op;};
     let releaseSlow,entered=false,requests=0,pgBlocked=false,pgEntered=false,releasePG;const created=new Map();
     const pgGate=new Promise(resolve=>{releasePG=resolve;});
@@ -287,7 +288,7 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
       let readStarted=false,releaseRead;const readGate=new Promise(resolve=>{releaseRead=resolve;});
       const realGit=createGit({flowGit});
       const slowAdmission=createHandlers(createStore(f.app),{...realGit,readBase:async(...args)=>{readStarted=true;await readGate;return realGit.readBase(...args);}},{allowedRepositories:[p.repo_path]});
-      const waiting=slowAdmission.call('prepare',{project_id:p.id,workspace_key:'slow-base-read',request_key:'slow-base-read'},'codex');
+      const waiting=prepareWith(slowAdmission.call,{project_id:p.id,workspace_key:'slow-base-read',request_key:'slow-base-read'},'codex');
       try{
         await until(()=>readStarted);
         await remember(await prepareArea('admitted-during-base-read'));
@@ -305,7 +306,7 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
         const base=(await command('git',['-C',p.repo_path,'rev-parse','dev'])).stdout;
         await f.owner.query("INSERT INTO codeworks.deployment_evidence(id,project_id,target,commit_sha,evidence_url) VALUES($1,$2,'prod',$3,'https://fixture.invalid/production-base')",[randomUUID(),p.id,base]);
       }
-      const prepared=await f.h.call('prepare',{project_id:p.id,workspace_key:'migration-'+state,request_key:'migration-'+state,...(state==='hotfix'?{kind:'hotfix'}:{})},'codex');
+      const prepared=await f.prepare({project_id:p.id,workspace_key:'migration-'+state,request_key:'migration-'+state,...(state==='hotfix'?{kind:'hotfix'}:{})},'codex');
       await f.worker(p,prepared.operation_id,state==='preparation'?'after-checkout':undefined);
       const w=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[prepared.workspace_id])).rows[0];
       let rollout;
@@ -350,7 +351,7 @@ test('Temporal durable lifecycle acceptance',{skip:!configured||process.env.CODE
     assert.equal(result.code,0,'isolated backup/restore: '+result.stdout.slice(-1500));
     const restored=new Pool({connectionString:f.config.restore_owner_url,max:1});
     try{
-      for(const table of ['projects','workspaces','operations','requests','releases','deployments','verified_ci','deployment_evidence','installed','execution_control','workflow_registry','commands','release_queue']){
+      for(const table of ['projects','workspaces','operations','requests','releases','deployments','verified_ci','deployment_evidence','installed','execution_control','workflow_registry','commands','release_queue','write_calls','cleanup_obligations']){
         const sql='SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text),\'[]\') AS rows FROM codeworks.'+table+' t';
         assert.deepEqual((await restored.query(sql)).rows,(await f.owner.query(sql)).rows,'restored '+table);
       }

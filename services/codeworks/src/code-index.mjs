@@ -3,6 +3,7 @@
 import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
+import path from 'node:path';
 import {command} from './git.mjs';
 import {Fault} from './errors.mjs';
 import {executionContext,withExecutionContext} from './execution-context.mjs';
@@ -32,7 +33,7 @@ export function createCodeIndex(pool,{configFile=process.env.CODEWORKS_CODE_INDE
     /** Один проход: отсутствующий источник ждёт следующего таймера; чужой индекс не принимается. */
     async maintain(project,w){
       let state=w.code_index;
-      if(w.removed_at||w.preparation_state!=='ready'||['skipped','removed'].includes(state?.state))return;
+      if(project.code_index_policy?.enabled===false||w.removed_at||w.preparation_state!=='ready'||w.activation_state==='awaiting_first_write'||['skipped','removed'].includes(state?.state))return;
       try{
         const settings=await config(),source=settings?.sources?.[project.id]?.[w.kind];
         if(!source)return;
@@ -43,8 +44,8 @@ export function createCodeIndex(pool,{configFile=process.env.CODEWORKS_CODE_INDE
         if(state.identity!==indexIdentity(w.path)||state.source_path!==source||state.source_sha!==w.base_sha)throw Error('INDEX_OWNERSHIP_CONFLICT');
         await exclusive(async()=>{
           // AIDEV-NOTE: UUID поколения workflow проверяет Activity; строка дополнительно запрещает запись после cleanup/cancel.
-          const live=(await pool.query("SELECT w.removed_at,r.lifecycle FROM codeworks.workspaces w JOIN codeworks.workflow_registry r ON r.workspace_id=w.id WHERE w.id=$1",[w.id])).rows[0];
-          if(!live||live.removed_at||live.lifecycle!=='active')return;
+          const live=(await pool.query("SELECT w.removed_at,w.activation_state,r.lifecycle FROM codeworks.workspaces w JOIN codeworks.workflow_registry r ON r.workspace_id=w.id WHERE w.id=$1",[w.id])).rows[0];
+          if(!live||live.removed_at||live.activation_state==='awaiting_first_write'||live.lifecycle!=='active')return;
           const updating=!!state.last_success_at;
           await save(w.id,{...state,state:updating?'updating':'copying',error:null});
           const result=await invoke(updating?'update':'clone',settings,project,w,state);
@@ -59,24 +60,67 @@ export function createCodeIndex(pool,{configFile=process.env.CODEWORKS_CODE_INDE
         await save(w.id,{...state,state:'error',error:error.indexCode??'INDEX_MAINTENANCE_FAILED'});
       }
     },
-    /** Вызывается после Git-cleanup; отсутствие каталога не мешает удалить сохранённую identity. */
-    async remove(project,w){
-      if(!w.code_index||w.code_index.state==='removed')return;
+    /** Проверяет все ресурсы под барьером; недоступное хранилище не считается пустым. */
+    async inspect(project,w,{manifest,checkpointState}={}){
+      const index=cleanupIdentity(project,w,manifest);
+      if(disabledWithoutHistory(project,w,manifest))return emptySnapshot(index.identity);
       const settings=await config();
       if(!settings)throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
-      if(w.code_index.identity!==indexIdentity(w.path))throw Error('INDEX_OWNERSHIP_CONFLICT');
-      await exclusive(async()=>{
-        await invoke('remove',settings,project,w,w.code_index);
-        await save(w.id,{...w.code_index,state:'removed',error:null});
+      return exclusive(()=>invoke('inspect',settings,project,w,index,manifest,checkpointState));
+    },
+    /** Проверяет все настроенные исторические backend; неполный ответ или ошибка блокируют сверку. */
+    async inspectHistorical(project,w){
+      const index=cleanupIdentity(project,w);
+      const settings=await config(),profiles=settings?.socraticodeConfig;
+      if(!profiles||typeof profiles!=='object'||Array.isArray(profiles)||!['feature','hotfix'].every(name=>typeof profiles[name]==='string'&&path.isAbsolute(profiles[name])))throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
+      const names=Object.keys(profiles).sort();
+      if(names.some(name=>typeof profiles[name]!=='string'||!path.isAbsolute(profiles[name])))throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
+      return exclusive(async()=>{
+        const observations=[];
+        for(const profile of names){
+          const snapshot=await invoke('inspect',settings,project,w,index,undefined,undefined,profile);
+          if(snapshot?.complete!==true||snapshot.identity!==index.identity||typeof snapshot.owner?.present!=='boolean'||!Array.isArray(snapshot.resources?.collections)||!Array.isArray(snapshot.resources?.metadataPoints)||!/^[0-9a-f]{64}$/.test(snapshot.backendScope??''))throw Error('INDEX_INSPECTION_INCOMPLETE');
+          observations.push({profile,snapshot});
+        }
+        return {complete:true,profiles:observations};
+      });
+    },
+    /** Повторно проверяет ресурсы даже после частичной или завершённой очистки. */
+    async remove(project,w,{manifest,checkpoint,checkpointState}={}){
+      const index=cleanupIdentity(project,w,manifest);
+      if(disabledWithoutHistory(project,w,manifest))return;
+      const settings=await config();
+      if(!settings)throw Error('INDEX_CONFIGURATION_REQUIRED_FOR_CLEANUP');
+      return exclusive(async()=>{
+        const snapshot=await invoke('inspect',settings,project,w,index,manifest,checkpointState);
+        if(manifest&&!checkpointState){
+          if(typeof checkpoint!=='function')throw Error('INDEX_CHECKPOINT_REQUIRED');
+          checkpointState={manifest_sha256:manifest.manifest_sha256,identity:snapshot.identity,ownerRecordHash:snapshot.owner.recordHash,resources:snapshot.resources};
+          await checkpoint(checkpointState);
+        }
+        await invoke('remove',settings,project,w,index,manifest,checkpointState);
+        if(w.code_index)await save(w.id,{...w.code_index,state:'removed',error:null});
       });
     },
   };
 }
 
+// AIDEV-NOTE: Только явно отключённая политика нового поколения доказывает, что индекс никогда не создавался.
+const disabledWithoutHistory=(project,w,manifest)=>project.code_index_policy?.enabled===false&&!manifest&&!w.code_index&&['active','awaiting_first_write'].includes(w.activation_state);
+const emptySnapshot=identity=>({identity,owner:{present:false,tokenMatches:false,pathMatches:false,recordHash:null},resources:{collections:[],metadataPoints:[]},complete:true});
+
+function cleanupIdentity(project,w,manifest){
+  const rootAllowed=path.dirname(w.path)===project.workspace_root||manifest&&(project.legacy_workspace_roots??[]).includes(path.dirname(w.path));
+  if((!w.ownership_token&&!manifest)||!path.isAbsolute(w.path)||path.normalize(w.path)!==w.path||!rootAllowed)throw Error('INDEX_OWNERSHIP_CONFLICT');
+  const identity=indexIdentity(w.path);
+  if(w.code_index&&w.code_index.identity!==identity)throw Error('INDEX_OWNERSHIP_CONFLICT');
+  return {...w.code_index,identity};
+}
+
 /** Отдельный процесс имеет собственные env/cache; общий MCP и службы не перенастраиваются. */
-async function invokeEngine(action,config,project,workspace,index){
+async function invokeEngine(action,config,project,workspace,index,manifest,checkpointState,runtimeProfile){
   const result=await command(process.execPath,[fileURLToPath(new URL('./code-index-engine.mjs',import.meta.url))],{
-    input:JSON.stringify({action,config,project,workspace,index}),timeout:1800000,allowFailure:true,
+    input:JSON.stringify({action,config,project,workspace,index,manifest,checkpointState,runtimeProfile}),timeout:1800000,allowFailure:true,
   });
   const value=JSON.parse(result.stdout);
   if(result.code!==0){

@@ -1,3 +1,5 @@
+# ABOUTME: Доставляет и проверяет записи памяти через ограниченный API MemOS.
+# ABOUTME: Длинные сообщения сохраняются частями без потери исходного диалога.
 """MemOS product API; all reads and writes explicitly select one configured cube."""
 
 import json
@@ -5,6 +7,9 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+
+
+MAX_MEMORY_PART_BYTES = 768
 
 
 class MemOSError(RuntimeError):
@@ -45,6 +50,24 @@ def public_memory(row):
         "deployment_phase": info.get("hermes_deployment_phase"), "memory_epoch": info.get("hermes_memory_epoch"),
         "classification": row.get("_classification", info.get("hermes_classification")),
     }
+
+
+def dialogue_parts(messages, limit=MAX_MEMORY_PART_BYTES):
+    """Разделить текст на части по UTF-8 без потери символов и порядка ролей."""
+    parts = []
+    for message in messages:
+        text = message['content']
+        start = 0
+        size = 0
+        for index, char in enumerate(text):
+            width = len(char.encode('utf-8'))
+            if size + width > limit:
+                parts.append({**message, 'content': text[start:index]})
+                start, size = index, 0
+            size += width
+        if start < len(text):
+            parts.append({**message, 'content': text[start:]})
+    return parts
 
 
 class Client:
@@ -118,14 +141,22 @@ class Client:
         return next((row for row in rows if row.get("id") == memory_id
                      and (include_private or not business_private(row))), None)
 
-    def search(self, query, session_id, *, top_k=6, relativity=0.45):
+    def search(self, query, session_id, *, top_k=None, relativity=0.45):
+        """Искать без скрытого лимита; None выбирает все хранимые кандидаты."""
+        if top_k is None:
+            top_k = len(self.get({}))
+        if not top_k:
+            return []
         result = self.request("/product/search", {
             "user_id": self.user_id, "readable_cube_ids": [self.cube_id],
             "session_id": session_id or None, "query": query, "top_k": top_k,
-            "mode": "fast", "relativity": relativity, "rerank": True, "dedup": "mmr",
+            # Routed recall deduplicates source/logical IDs after scope checks.
+            # MMR over the complete archive is quadratic and removes independent
+            # facts before that boundary; no semantic dedup is needed here.
+            "mode": "fast", "relativity": relativity, "rerank": True, "dedup": "no",
             "include_preference": False, "search_tool_memory": False, "include_skill_memory": False,
             "internet_search": False, "chat_history": [],
-        }, timeout=min(self.timeout, 5))
+        }, timeout=self.timeout)
         return [row for row in memory_rows(result)
                 if (row.get("metadata") or {}).get("user_id") == self.user_id and not business_private(row)]
 
@@ -156,8 +187,11 @@ class Client:
                     mismatches.add("user_id")
                 if meta.get("session_id") != job["body"]["session_id"]:
                     mismatches.add("session_id")
+                if "hermes_chunk_index" in info and job["body"]["messages"][0]["content"] not in row.get("memory", ""):
+                    mismatches.add("chunk_content")
             if (row.get("id") in expected and meta.get("user_id") == self.user_id
                     and meta.get("session_id") == job["body"]["session_id"]
+                    and ("hermes_chunk_index" not in info or job["body"]["messages"][0]["content"] in row.get("memory", ""))
                     and all(stored.get(key) == value for key, value in info.items())):
                 verified.add(row["id"])
         if not expected or verified != expected:
@@ -174,20 +208,62 @@ class Client:
             raise MemOSError("MemOS did not verify deletion")
 
     def execute(self, job, checkpoint):
+        """Доставить событие с восстановлением подтверждённых частей после сбоя."""
         if job.get("operation") == "delete":
-            ids = [row["id"] for row in self.get(job["filter"])]
+            rows = self.get(job["filter"])
+            ids = [row["id"] for row in rows if not job.get("exclude_private") or not business_private(row)]
             self.delete(ids)
             return ids
         ids = job.get("memory_ids", [])
+        if ids:
+            verified = self.verify(job, ids)
+        else:
+            body = job["body"]
+            parts = dialogue_parts(body["messages"])
+            split = len(parts) > 1 and sum(len(row["content"].encode("utf-8")) for row in body["messages"]) > MAX_MEMORY_PART_BYTES
+            if split or "memory_parts" in job:
+                # AIDEV-NOTE: Запись плана до первого add позволяет восстановить потерянный ответ
+                # по event ID и номеру части, не создавая повторную копию.
+                if "memory_parts" not in job:
+                    existing = self.get({"hermes_event_id": body["info"]["hermes_event_id"]})
+                    if existing:
+                        ids = [row["id"] for row in existing]
+                        verified = self.verify(job, ids)
+                        job["memory_ids"] = ids
+                        checkpoint(job)
+                    else:
+                        job["memory_parts"] = [{} for _ in parts]
+                        checkpoint(job)
+                if "memory_parts" in job:
+                    if len(job["memory_parts"]) != len(parts):
+                        raise MemOSError("Memory part plan does not match the dialogue")
+                    ids = []
+                    for index, part in enumerate(parts):
+                        info = {**body["info"], "hermes_chunk_index": index, "hermes_chunk_count": len(parts)}
+                        unit = job["memory_parts"][index]
+                        unit["body"] = {**body, "messages": [part], "info": info}
+                        ids.extend(self._execute_one(unit, lambda _: checkpoint(job)))
+                    job["memory_ids"] = ids
+                    checkpoint(job)
+                    verified = self.verify(job, ids)
+            else:
+                verified = self._execute_one(job, checkpoint)
+                ids = job["memory_ids"]
+        if job.get("delete_filter"):
+            self.delete([row["id"] for row in self.get(job["delete_filter"]) if row["id"] not in ids])
+        return verified
+
+    def _execute_one(self, job, checkpoint):
+        ids = job.get("memory_ids", [])
         if not ids:
-            # Recover a successful commit whose response/acknowledgement was lost.
-            rows = self.get({"hermes_event_id": job["body"]["info"]["hermes_event_id"]})
+            info = job["body"]["info"]
+            filter_ = {"hermes_event_id": info["hermes_event_id"]}
+            if "hermes_chunk_index" in info:
+                filter_["hermes_chunk_index"] = info["hermes_chunk_index"]
+            rows = self.get(filter_)
             ids = [row["id"] for row in rows]
             if not ids:
                 ids = self.add(job["body"])
             job["memory_ids"] = ids
             checkpoint(job)
-        verified = self.verify(job, ids)
-        if job.get("delete_filter"):
-            self.delete([row["id"] for row in self.get(job["delete_filter"]) if row["id"] not in ids])
-        return verified
+        return self.verify(job, ids)

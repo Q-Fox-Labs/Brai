@@ -2,7 +2,7 @@
 // ABOUTME: Использует явные порты без PostgreSQL, процессов агентов и проверки UI.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { canonical,validate,expanded,methods,outputNames } from '../src/contracts.mjs';
+import { canonical,validate,expanded,methods,internalMethods,allMethods,outputNames } from '../src/contracts.mjs';
 import { createHandlers } from '../src/domain.mjs';
 import { runNats } from '../src/nats.mjs';
 import { Fault } from '../src/errors.mjs';
@@ -17,7 +17,8 @@ function fixture() {
   const created='2026-10-23T00:00:00.000Z';
   let current={head:sha,branch:'feature/test',dirty:false},successful=null,evidence=null,inspectionError=null;
   const db={
-    project:async key=>key==='p'?project:null,
+    query:async sql=>sql.includes('FROM codeworks.write_calls')?{rows:[{id}]}:{rows:[],rowCount:0},
+    project:async key=>key==='p'?project:null,lifecycle:async()=>null,
     workspace:async(_,key)=>workspaces.get(key),workspaceByKey:async(_,key)=>[...workspaces.values()].find(w=>w.workspace_key===key),
     workspaces:async()=>[...workspaces.values()],
     insertWorkspace:async w=>workspaces.set(w.id,{...w,element_id:null,preparation_state:'intent',legacy_writer:null,created_at:created,removed_at:null}),
@@ -32,12 +33,13 @@ function fixture() {
   };
   const store={read:async(_,work)=>work(db),transaction:async(_,work)=>work(db)};
   const git={readBase:async()=>sha,inspect:async()=>{if(inspectionError)throw inspectionError;return {...current};}};
-  const h=createHandlers(store,git,{allowedRepositories:['/repo']});
-  return {h,project,workspaces,operations,requests,releases,failedDeployments,set current(value){current=value;},set inspectionError(value){inspectionError=value;},set successful(value){successful=value;},set evidence(value){evidence=value;}};
+  const owner=createHandlers(store,git,{allowedRepositories:['/repo']});
+  const h={call:(method,args,executor)=>owner.call(method,args,executor,method==='prepare'?id:null)};
+  return {h,owner,project,workspaces,operations,requests,releases,failedDeployments,set current(value){current=value;},set inspectionError(value){inspectionError=value;},set successful(value){successful=value;},set evidence(value){evidence=value;}};
 }
 
 test('owner API exposes project administration and compatible lifecycle methods',()=>{
-  assert.deepEqual(methods,['project.register','project.get','prepare','status','sync','release','cleanup','lifecycle.status','release.close','workspace.cancel']);
+  assert.deepEqual(methods,['project.register','project.get','prepare','status','sync','release','cleanup','lifecycle.status','release.close','workspace.cancel','workspace.transfer']);
   assert.equal(canonical({b:1,a:{d:2,c:3}}),canonical({a:{c:3,d:2},b:1}));
   validate('prepare',prepare);validate('prepare',{...prepare,kind:'hotfix'});
   for(const method of ['sync','release'])validate(method,scoped);
@@ -88,7 +90,7 @@ test('status finds task, workspace, operation or list without exposing historica
   assert.equal('legacy_writer' in byKey.workspace,false);assert.equal('writer' in byKey.workspace,false);assert.equal('ownership_token' in byKey.workspace,false);
   assert.deepEqual(await f.h.call('status',{project_id:'p',workspace_id:w.id},'codex'),byKey);
   assert.deepEqual(await f.h.call('status',{project_id:'p',operation_id:accepted.operation_id},'codex'),byKey);
-  assert.deepEqual(await f.h.call('status',{project_id:'p'},'codex'),{workspaces:[byKey.workspace]});
+  assert.deepEqual(await f.h.call('status',{project_id:'p'},'codex'),{workspaces:[byKey.workspace],next_offset:null});
   w.removed_at='2026-10-23T01:00:00.000Z';assert.equal((await f.h.call('status',{project_id:'p',workspace_key:'task'},'codex')).git,null);
   await assert.rejects(f.h.call('prepare',prepare,'codex'),{code:'CONFLICT'});
   await assert.rejects(f.h.call('prepare',{...prepare,request_key:'finished-task'},'codex'),{code:'CONFLICT'});
@@ -196,13 +198,13 @@ test('NATS v2 endpoint supplies identity and returns structured parse errors',as
   await ep.handler(null,{data:Buffer.from('{"executor_id":"hermes"}'),respond:value=>result=JSON.parse(value)});
   assert.equal(calls[0].executor,'codex');assert.equal(calls[0].method,'prepare');assert.equal(result.operation_id,id);
   await ep.handler(null,{data:Buffer.from('{'),respondError:(status,code,data)=>{assert.equal(status,400);assert.equal(code,'INVALID_ARGUMENT');assert.equal(JSON.parse(data).code,code);}});
-  assert.equal(endpoints.size,methods.length);
+  assert.equal(endpoints.size,allMethods.length);
 });
 test('AsyncAPI request/reply includes exactly the seven v2 methods and owner schemas',async()=>{
   const {readFile}=await import('node:fs/promises');
   const doc=JSON.parse(await readFile(new URL('../asyncapi.json',import.meta.url),'utf8'));
-  assert.equal(doc.asyncapi,'3.1.0');assert.equal(Object.keys(doc.operations).length,methods.length);
-  for(const method of methods){
+  assert.equal(doc.asyncapi,'3.1.0');assert.equal(Object.keys(doc.operations).length,allMethods.length);
+  for(const method of allMethods){
     const key=method.replaceAll(/[.-]/g,'_');
     assert.equal(doc.channels[key].address,'brai.codeworks.v2.{executor}.'+method);
     assert.equal(doc.components.messages[key+'Request'].payload.$ref,'./schemas/api.schema.json#/definitions/'+method);
@@ -233,4 +235,74 @@ test('existing task with a legacy identifier resumes its original branch',async(
   const resumed=await f.h.call('prepare',{...prepare,workspace_key:w.id,request_key:'resume-legacy'},'codex');
   assert.equal(resumed.branch,w.branch);assert.equal(resumed.workspace_id,w.id);
   assert.equal(f.workspaces.size,1);assert.equal(f.operations.size,1);
+});
+
+
+test('internal write admission has strict schemas and is excluded from user methods',()=>{
+  assert.deepEqual(internalMethods,['write.begin','write.admit','write.finish','write.stop']);
+  assert.ok(internalMethods.every(method=>!methods.includes(method)));
+  const common={project_id:'p',session_id:'session',turn_id:'turn',tool_use_id:'call'};
+  const begin={...common,workspace_key:'task',tool_name:'shell',payload_sha256:'b'.repeat(64),targets:['/repo/file'],request_key:'request'};
+  validate('write.begin',begin);validate('write.begin',{...begin,workspace_id:id,kind:'hotfix'});
+  const {workspace_key,...automatic}=begin;validate('write.begin',automatic);validate('write.begin',{...automatic,workspace_id:id});
+  validate('write.admit',{project_id:'p',write_call_id:id,rewritten_sha256:'b'.repeat(64)});
+  validate('write.finish',{...common,outcome:'success'});
+  validate('write.stop',{project_id:'p',session_id:'session',turn_id:'turn',event:'Stop',tool_use_id:'call',reason:'prepare_pending'});
+  validate('writeBeginResponse',{write_call_id:id,state:'preparing',workspace_id:id,path:'/area',branch:'feature/task',workspace_key:'task',kind:'feature'});
+  assert.throws(()=>validate('writeBeginResponse',{write_call_id:id,state:'preparing',workspace_id:id,path:'/area',branch:'feature/task'}));
+  validate('writeAdmitResponse',{write_call_id:id,state:'in_flight'});validate('writeFinishResponse',{write_call_id:id,state:'finished',changed:true});validate('writeStopResponse',{closed:1,uncertain:0});
+  assert.throws(()=>validate('write.begin',{...begin,executor_id:'forged'}));
+  assert.throws(()=>validate('write.finish',{...common,outcome:'success',output:'private'}));
+  assert.throws(()=>validate('write.stop',{...common,event:'Stop',write_call_id:id}));
+  assert.throws(()=>validate('status',{project_id:'p',limit:501}));
+  validate('status',{project_id:'p',offset:500,limit:500});
+});
+
+test('transfer proof accepts only bounded structured file evidence',()=>{
+  const oid='a'.repeat(40),file={status:'M',source_path:'src/a',destination_path:'src/a',source_blob:oid,destination_blob:oid};
+  const args={project_id:'p',workspace_id:id,request_key:'transfer',evidence:{destination:{repo_path:'/repo',commit_sha:oid},source_head:oid,source_base:oid,files:[file]}};
+  validate('workspace.transfer',args);
+  validate('workspace.transfer',{...args,evidence:{...args.evidence,files:[{...file,status:'D',source_blob:null,destination_blob:null}]}});
+  for(const bad of [{...file,extra:'x'},{...file,status:'D'},{...file,source_blob:null}])assert.throws(()=>validate('workspace.transfer',{...args,evidence:{...args.evidence,files:[bad]}}));
+  assert.throws(()=>validate('workspace.transfer',{...args,evidence:{...args.evidence,verified:true}}));
+});
+test('client accepts internal methods on executor-scoped NATS subjects',async()=>{
+  const {connectClient}=await import('../src/client.mjs');let subject;
+  const client=await connectClient({server:'nats://test',credsFile:'/creds',executorId:'codex'},{readCredentials:async()=>Buffer.from('{"user":"u","pass":"p"}'),connectNats:async()=>({request:async(s)=>{subject=s;return {data:Buffer.from(JSON.stringify({write_call_id:id,state:'in_flight'}))};},close:async()=>{}})});
+  await client.call('write.admit',{project_id:'p',write_call_id:id,rewritten_sha256:'b'.repeat(64)});
+  assert.equal(subject,'brai.codeworks.v2.codex.write.admit');await client.close();
+});
+
+
+test('public prepare requires a native write for a new workspace but can resume an existing one',async()=>{
+  const f=fixture();
+  await assert.rejects(f.owner.call('prepare',prepare,'codex'),{code:'WORKSPACE_WRITE_REQUIRED'});
+  assert.equal(f.workspaces.size,0);assert.equal(f.operations.size,0);
+  const created=await f.h.call('prepare',prepare,'codex');
+  const resumed=await f.owner.call('prepare',{...prepare,request_key:'resume'},'codex');
+  assert.equal(resumed.workspace_id,created.workspace_id);
+});
+
+
+test('project index policy and transfer destinations are explicit and strict',()=>{
+  const {project}=fixture();
+  validate('project',{...project,code_index_policy:{enabled:false},transfer_destinations:[{repo_path:'/srv/destination',origin:'https://github.com/example/repository.git'}]});
+  for(const policy of [{enabled:false,extra:true},{enabled:'false'},{}])assert.throws(()=>validate('project',{...project,code_index_policy:policy}));
+  for(const destination of [{repo_path:'relative',origin:'https://github.com/example/repository.git'},{repo_path:'/srv/../repo',origin:'https://github.com/example/repository.git'},{repo_path:'/srv/repo',origin:'http://github.com/example/repository.git'},{repo_path:'/srv/repo',origin:'https://github.com/example/repository.git',extra:true}])assert.throws(()=>validate('project',{...project,transfer_destinations:[destination]}));
+});
+
+
+test('project cleanup archive configuration requires absolute roots and a nonnegative uid',()=>{
+  const {project}=fixture();
+  validate('project',{...project,cleanup_archive_roots:['/var/lib/codeworks/archive'],cleanup_archive_uid:0});
+  for(const fields of [{cleanup_archive_roots:['relative']},{cleanup_archive_uid:-1},{cleanup_archive_uid:'0'},{cleanup_archive_roots:['/ok',42]}])assert.throws(()=>validate('project',{...project,...fields}));
+});
+
+
+test('lifecycle exposes only safe cleanup progress',()=>{
+  const cleanup={id,state:'waiting_decision',step:'inspect',outcome:'cancelled',owner_workflow_id:'workflow',epoch:2,next_attempt_at:null,blocker:'UNIQUE_CHANGES'};
+  const response={workspace_id:id,task_status:'closing',outcome:'cancelled',workflow:null,blockers:[],cleanup};
+  validate('lifecycleResponse',response);validate('lifecycleResponse',{...response,cleanup:null});
+  for(const field of ['expected','evidence','ownership_token'])assert.throws(()=>validate('lifecycleResponse',{...response,cleanup:{...cleanup,[field]:{}}}));
+  assert.throws(()=>validate('lifecycleResponse',{...response,cleanup:{...cleanup,epoch:-1}}));
 });

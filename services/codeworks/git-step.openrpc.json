@@ -20,7 +20,9 @@
               "registerCheckout",
               "checkout",
               "dependencies",
-              "cleanupLocal"
+              "cleanupLocal",
+              "cleanupStep",
+              "cleanupBranchLocal"
             ]
           }
         },
@@ -51,6 +53,7 @@
         "schema": {
           "type": [
             "boolean",
+            "object",
             "null"
           ]
         }

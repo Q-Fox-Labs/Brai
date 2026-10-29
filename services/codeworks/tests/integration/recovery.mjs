@@ -24,12 +24,12 @@ if(process.argv[2]==='prepare') {
     const ciProof={published:{digest:'sha256:'+'b'.repeat(64)},composition:{runId:'123',attempt:'1',components:[]}};
     await createCIEvidence(f.app).save(ciProject,ciProof);
     const request=key=>({project_id:project.id,request_key:key,workspace_key:key,kind:'feature'});
-    const ready=await f.h.call('prepare',request('ready'),'codex');await f.worker(project,ready.operation_id);
+    const ready=await f.prepare(request('ready'),'codex');await f.worker(project,ready.operation_id);
     const status=await f.h.call('status',{project_id:project.id,workspace_id:ready.workspace_id},'codex');
     const release=await f.h.call('release',{project_id:project.id,workspace_id:ready.workspace_id,request_key:'release',commit_sha:status.git.head},'codex');
-    const archived=await f.h.call('prepare',request('archived'),'codex');
+    const archived=await f.prepare(request('archived'),'codex');
     await f.owner.query('UPDATE codeworks.operations SET archived=true WHERE id=$1',[archived.operation_id]);
-    const pending=await f.h.call('prepare',request('pending'),'codex');
+    const pending=await f.prepare(request('pending'),'codex');
     assert.equal((await f.worker(project,pending.operation_id,'after-branch')).signal,'SIGKILL');
     await mkdir(temporaryRoot,{recursive:true});
     await writeFile(stateFile,JSON.stringify({project,ciProject,ciProof,ready,release,pending,archived,base_sha:status.git.head})+'\n',{mode:0o600});

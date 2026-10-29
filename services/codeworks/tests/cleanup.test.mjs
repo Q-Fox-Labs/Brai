@@ -6,7 +6,7 @@ import {mkdtemp,mkdir,writeFile,rm,access} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {createGit,command} from '../src/git.mjs';
+import {createGit,command,gitResourcesAbsent} from '../src/git.mjs';
 import {createFlowGit} from '../src/git-flow.mjs';
 for(const kind of ['feature','hotfix'])test(kind+' cleanup preserves dirty/unmerged/foreign resources and requires every merged leg',async t=>{
  const temporary=fileURLToPath(new URL('../../../tmp/',import.meta.url));await mkdir(temporary,{recursive:true});
@@ -41,4 +41,67 @@ for(const kind of ['feature','hotfix'])test(kind+' cleanup preserves dirty/unmer
  assert.equal(await cleanup(heads),true);
  await mkdir(w.path);await writeFile(w.path+'/foreign','preserve');
  assert.equal(await cleanup(heads),false);await access(w.path+'/foreign');
+});
+
+
+test('scoped cleanup rejects races and resumes after each step',async t=>{
+ const temporary=fileURLToPath(new URL('../../../tmp/',import.meta.url));await mkdir(temporary,{recursive:true});
+ const root=await mkdtemp(path.join(temporary,'codeworks-steps-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const repo=root+'/repo',areas=root+'/areas',bare=root+'/origin.git';await mkdir(areas);
+ await command('git',['init','-b','dev',repo]);const run=(...args)=>command('git',['-C',repo,...args]);
+ await run('config','user.name','Fixture');await run('config','user.email','fixture@example.invalid');await writeFile(repo+'/base','base');await run('add','.');await run('commit','-m','base');
+ const base=(await run('rev-parse','HEAD')).stdout;await command('git',['init','--bare',bare]);await run('remote','add','origin',bare);
+ const project={id:'fixture',repo_path:repo,common_dir:repo+'/.git',workspace_root:areas,github:{repository:'fixture/repository'}};
+ const w={id:randomUUID(),ownership_token:randomUUID(),base_sha:base,branch:'feature/steps',path:areas+'/steps'};
+ const previous=process.env.CODEWORKS_LOCK_HELD;process.env.CODEWORKS_LOCK_HELD='1';t.after(()=>{if(previous===undefined)delete process.env.CODEWORKS_LOCK_HELD;else process.env.CODEWORKS_LOCK_HELD=previous;});
+ const flow=createFlowGit({localRemote:true}),git=createGit({flowGit:flow});await git.branch(project,w);await git.checkout(project,w);await run('push','origin',w.branch);
+ const snapshot=await git.inspectResources(project,w);assert.equal(snapshot.ownership.matches,true);assert.equal(snapshot.worktree.dirty,false);assert.equal(snapshot.tracking.oid,base);assert.equal(gitResourcesAbsent(snapshot),false);
+ await writeFile(w.path+'/dirty','preserve');await assert.rejects(git.cleanupStep(project,w,snapshot,'worktree'),{code:'OWNERSHIP_CONFLICT'});await rm(w.path+'/dirty');
+ await writeFile(repo+'/advanced','new');await run('add','.');await run('commit','-m','advanced');const advanced=(await run('rev-parse','HEAD')).stdout;await run('push','origin',advanced+':refs/heads/'+w.branch);
+ await assert.rejects(git.cleanupStep(project,w,snapshot,'remote'),{code:'TARGET_CHANGED'});
+ await command('git',['-C',bare,'update-ref','refs/heads/'+w.branch,base,advanced]);
+ await run('update-ref',snapshot.tracking.ref,snapshot.tracking.oid,advanced);
+ assert.equal((await git.cleanupStep(project,w,snapshot,'remote')).outcome,'removed');assert.equal((await git.cleanupStep(project,w,snapshot,'remote')).outcome,'already_absent');
+ assert.equal((await git.cleanupStep(project,w,snapshot,'worktree')).outcome,'removed');assert.equal((await git.cleanupStep(project,w,snapshot,'worktree')).outcome,'already_absent');
+ assert.equal((await git.cleanupStep(project,w,snapshot,'local_refs')).outcome,'removed');assert.ok(gitResourcesAbsent(await git.inspectResources(project,w)));
+});
+
+
+test('legacy cleanup requires exact manifest and rejects changed local refs',async t=>{
+ const tmp=fileURLToPath(new URL('../../../tmp/',import.meta.url));await mkdir(tmp,{recursive:true});const root=await mkdtemp(path.join(tmp,'codeworks-legacy-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const repo=root+'/repo',areas=root+'/areas';await mkdir(areas);await command('git',['init','-b','dev',repo]);const run=(...args)=>command('git',['-C',repo,...args]);
+ await run('config','user.name','Fixture');await run('config','user.email','fixture@example.invalid');await writeFile(repo+'/base','base');await run('add','.');await run('commit','-m','base');const base=(await run('rev-parse','HEAD')).stdout;
+ const w={id:randomUUID(),ownership_token:randomUUID(),base_sha:base,branch:'codex/old',path:areas+'/old'},project={id:'fixture',repo_path:repo,common_dir:repo+'/.git',workspace_root:areas,legacy_workspace_roots:[areas]};
+ await run('branch',w.branch);const old=process.env.CODEWORKS_LOCK_HELD;process.env.CODEWORKS_LOCK_HELD='1';t.after(()=>{if(old===undefined)delete process.env.CODEWORKS_LOCK_HELD;else process.env.CODEWORKS_LOCK_HELD=old;});
+ const git=createGit(),snapshot=await git.inspectResources(project,w),manifest={manifestVersion:1,reviewed:true,project_id:project.id,common_dir:project.common_dir,workspace_id:w.id,branch:snapshot.branch,ownership:snapshot.ownership,remote:snapshot.remote,worktree:snapshot.worktree,provenance:[{kind:'fixture'}],disposition:{type:'historical-extra'},manifest_sha256:'a'.repeat(64)};
+ await assert.rejects(git.cleanupStep(project,w,snapshot,'local_refs'),{code:'OWNERSHIP_CONFLICT'});
+ await writeFile(repo+'/new','new');await run('add','.');await run('commit','-m','new');const changed=(await run('rev-parse','HEAD')).stdout;await run('update-ref',snapshot.branch.ref,changed,base);
+ await assert.rejects(git.cleanupStep(project,w,snapshot,'local_refs',{manifest}),{code:'TARGET_CHANGED'});await run('update-ref',snapshot.branch.ref,base,changed);
+ assert.equal((await git.cleanupStep(project,w,snapshot,'local_refs',{manifest})).outcome,'removed');assert.ok(gitResourcesAbsent(await git.inspectResources(project,w,{manifest})));
+});
+
+
+test('lone owned marker and stale registration are inspected and removed separately',async t=>{
+ const tmp=fileURLToPath(new URL('../../../tmp/',import.meta.url));await mkdir(tmp,{recursive:true});const root=await mkdtemp(path.join(tmp,'codeworks-stale-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const repo=root+'/repo',areas=root+'/areas';await mkdir(areas);await command('git',['init','-b','dev',repo]);const run=(...args)=>command('git',['-C',repo,...args]);
+ await run('config','user.name','Fixture');await run('config','user.email','fixture@example.invalid');await writeFile(repo+'/base','base');await run('add','.');await run('commit','-m','base');const base=(await run('rev-parse','HEAD')).stdout;
+ const w={id:randomUUID(),ownership_token:randomUUID(),base_sha:base,branch:'feature/stale',path:areas+'/stale'},project={repo_path:repo,common_dir:repo+'/.git',workspace_root:areas};
+ const old=process.env.CODEWORKS_LOCK_HELD;process.env.CODEWORKS_LOCK_HELD='1';t.after(()=>{if(old===undefined)delete process.env.CODEWORKS_LOCK_HELD;else process.env.CODEWORKS_LOCK_HELD=old;});
+ const git=createGit();await git.branch(project,w);await git.checkout(project,w);await rm(w.path,{recursive:true});
+ const observed=await git.inspectResources(project,w);assert.equal(observed.worktree.registered,true);assert.equal(observed.worktree.pathExists,false);
+ assert.equal((await git.cleanupStep(project,w,observed,'worktree')).outcome,'removed');
+ await run('update-ref','-d',observed.branch.ref,base);const lone=await git.inspectResources(project,w);assert.equal(lone.branch.oid,null);assert.ok(lone.ownership.oid);
+ assert.equal((await git.cleanupStep(project,w,lone,'local_refs')).outcome,'removed');assert.ok(gitResourcesAbsent(await git.inspectResources(project,w)));
+});
+
+
+test('legacy refs clean with absent approved root without creating directories',async t=>{
+ const tmp=fileURLToPath(new URL('../../../tmp/',import.meta.url));await mkdir(tmp,{recursive:true});const root=await mkdtemp(path.join(tmp,'codeworks-missing-root-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const repo=root+'/repo',current=root+'/current',missing=root+'/old/workspaces';await mkdir(current);await command('git',['init','-b','dev',repo]);const run=(...args)=>command('git',['-C',repo,...args]);
+ await run('config','user.name','Fixture');await run('config','user.email','fixture@example.invalid');await writeFile(repo+'/base','base');await run('add','.');await run('commit','-m','base');const base=(await run('rev-parse','HEAD')).stdout;
+ const w={id:randomUUID(),ownership_token:randomUUID(),base_sha:base,branch:'codex/missing-root',path:missing+'/task'},project={id:'fixture',repo_path:repo,common_dir:repo+'/.git',workspace_root:current,legacy_workspace_roots:[missing]};await run('branch',w.branch);
+ const old=process.env.CODEWORKS_LOCK_HELD;process.env.CODEWORKS_LOCK_HELD='1';t.after(()=>{if(old===undefined)delete process.env.CODEWORKS_LOCK_HELD;else process.env.CODEWORKS_LOCK_HELD=old;});
+ const git=createGit(),snapshot=await git.inspectResources(project,w,{manifest:{ownership:{ref:'refs/codeworks/ownership/'+w.id}}});
+ const manifest={manifestVersion:1,reviewed:true,project_id:project.id,common_dir:project.common_dir,workspace_id:w.id,branch:snapshot.branch,ownership:snapshot.ownership,remote:snapshot.remote,tracking:snapshot.tracking,worktree:snapshot.worktree,provenance:[{kind:'fixture'}],disposition:{type:'retained'},manifest_sha256:'a'.repeat(64)};
+ assert.equal((await git.cleanupStep(project,w,snapshot,'local_refs',{manifest})).outcome,'removed');await assert.rejects(access(missing));assert.ok(gitResourcesAbsent(await git.inspectResources(project,w,{manifest})));
 });

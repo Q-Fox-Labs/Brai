@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// ABOUTME: Останавливает распознанную запись в основную копию и показывает область Codeworks.
-// ABOUTME: Не переписывает инструменты, не исполняет shell и не заменяет файловые права sandbox.
+// ABOUTME: Направляет поддержанную запись в подготовленную область Codeworks.
+// ABOUTME: Не исполняет shell и не заменяет файловые права sandbox.
 import {readFile} from 'node:fs/promises';
 import {realpathSync} from 'node:fs';
 import path from 'node:path';
@@ -17,7 +17,8 @@ function resolved(value, cwd) {
   // AIDEV-NOTE: Проверяем существующего предка, чтобы новые файлы через symlink тоже имели правильный repo.
   while (true) {
     try { return path.join(realpathSync(parent), path.relative(parent, absolute)); }
-    catch {
+    catch (error) {
+      if (!['ENOENT','ENOTDIR'].includes(error?.code)) throw error;
       const next = path.dirname(parent);
       if (next === parent) return absolute;
       parent = next;
@@ -100,6 +101,92 @@ function shellTokens(command) {
   return tokens;
 }
 
+// Допускаем только один простой вызов с явно безопасными аргументами.
+function readOnlyShell(command) {
+  if (typeof command !== 'string') return false;
+  const tokens = shellTokens(command);
+  if (!tokens.length || tokens.some(t => t.operator || t.dynamic)) return false;
+  const words = tokens.map(t=>t.word);
+  if (words[0] === 'rtk' && words[1] === 'proxy') words.splice(0,2);
+  if (words[0] === 'git') return words[1] === 'status' && words.slice(2).every(w=>['--short','-s','--porcelain','--porcelain=v1','--branch','-b','--untracked-files=no'].includes(w));
+  if (words[0] === 'cat') return words.length > 1 && words.slice(1).every(w=>w !== '-' && !w.startsWith('-'));
+  if (words[0] === 'rg') return words.length > 1 && words.slice(1).every(w=>!w.startsWith('-') || ['-n','-i','-l','--files','--hidden','--no-heading'].includes(w));
+  return false;
+}
+
+// Разрешаем только обычные Git argv; shell операторы и нестандартные опции исключены.
+function synchronousGit(command) {
+  if (typeof command !== 'string') return false;
+  const tokens=shellTokens(command);
+  if (!tokens.length || tokens.some(t=>t.operator || t.dynamic)) return false;
+  const words=tokens.map(t=>t.word);
+  if (words[0]==='rtk' && words[1]==='proxy') words.splice(0,2);
+  if (words.shift()!=='git') return false;
+  const action=words.shift();
+  if (action==='add') return words.length>0 && words.every(w=>!w.startsWith('-') || ['-A','--all','-u','--update','--'].includes(w));
+  if (action==='push') return words.length>0 && words.every(w=>!w.startsWith('-') || ['-u','--set-upstream','--'].includes(w));
+  if (action==='commit') {
+    let message=false;
+    for (let i=0;i<words.length;i++) {
+      const w=words[i];
+      if (w==='-m' || w==='--message') { if (++i>=words.length) return false; message=true; continue; }
+      if (w.startsWith('--message=')) {message=true; continue;}
+      if (!['-a','--all','--amend','--no-edit'].includes(w)) return false;
+    }
+    return message || words.includes('--no-edit');
+  }
+  return false;
+}
+/** Распознаёт ограниченный набор foreground argv; неизвестные и фоновые команды возвращают false. */
+export function foregroundCommand(command) {
+  if (typeof command !== 'string') return false;
+  const tokens=shellTokens(command);
+  if (!tokens.length || tokens.some(t=>t.dynamic)) return false;
+  let segment=[];
+  const allowed = () => {
+    if (!segment.length) return false;
+    const words=segment.map(t=>t.word);
+    const literal=words.map(w=>"'"+w.replaceAll("'", "'\\''")+"'").join(' ');
+    if (readOnlyShell(literal) || synchronousGit(literal)) return true;
+    if (words[0]==='cp') {
+      const operands=words.slice(1);
+      if (operands[0]==='--') operands.shift();
+      return operands.length===2 && operands.every(w=>w.length>0 && !w.startsWith('-'));
+    }
+    if (words[0]==='head' || words[0]==='tail') return words.slice(1).every(w=>!w.startsWith('-') || /^-(?:n)?[0-9]+$/.test(w) || w==='-n');
+    if (words[0]==='sed') return words[1]==='-n' && /^\d+(?:,\d+)?p$/.test(words[2]??'') && words.slice(3).every(w=>!w.startsWith('-'));
+    if (words[0]!=='node') return false;
+    if (words[1]==='--test') return words.slice(2).every(w=>!w.startsWith('-') || /^--test-(?:reporter|name-pattern|concurrency)=.+$/.test(w));
+    if (!/^(?:\.\/)?services\/codeworks\/components\/cli\.mjs$/.test(words[1]??'') || !['build','check','package','run','plan','validate'].includes(words[2])) return false;
+    return words.slice(3).every(w=>!w.startsWith('-') || ['--base','--root','--no-deps'].includes(w));
+  };
+  for (let i=0; i<tokens.length; i++) {
+    const token=tokens[i];
+    if (!token.operator) {segment.push(token);continue;}
+    if (['>','>>'].includes(token.operator)) {
+      // AIDEV-NOTE: Только literal redirect и stderr-to-stdout; отдельный & не является завершённым foreground вызовом.
+      const fd=['1','2'].includes(segment.at(-1)?.word) ? segment.pop().word : null;
+      const next=tokens[++i];
+      if (next?.operator==='&') {
+        const target=tokens[++i];
+        if (token.operator!=='>' || fd!=='2' || target?.operator || target?.word!=='1') return false;
+      } else if (!next || next.operator || next.dynamic || !next.word) return false;
+      continue;
+    }
+    if (!['&&',';','|','\n'].includes(token.operator) || !allowed()) return false;
+    segment=[];
+  }
+  return allowed();
+}
+function completedShell(event) {
+  const name=event.tool_name?.split('.').at(-1), input=event.tool_input, response=event.tool_response;
+  if (input?.run_in_background || input?.background || input?.async) return false;
+  if (response && typeof response==='object') return !response.session_id && !response.sessionId && !['running','pending'].includes(response.status) && (name==='Bash' || Number.isInteger(response.exit_code));
+  if (typeof response!=='string' || /(?:session[_ ]id|process running|still running)/i.test(response)) return false;
+  // AIDEV-NOTE: Native Bash PostToolUse подтверждает ответ инструмента; его stdout не является exit code.
+  return name==='Bash' || /^Process exited with code\s*:?\s*\d+\s*$/im.test(response.split(/\nOutput:\s*\n/)[0]);
+}
+
 function shellPaths(command, cwd) {
   const found = [];
   let segment = [];
@@ -140,17 +227,17 @@ function shellPaths(command, cwd) {
 }
 
 /** Извлекает только явные цели поддержанных edits и простых shell writes; неизвестное оставляет инструменту. */
-export function writePaths(event) {
+export function writePaths(event, resolveTarget = resolved) {
   const input = event.tool_input;
   const name = event.tool_name?.split('.').at(-1);
   const cwd = input?.workdir || input?.cwd || event.cwd || process.cwd();
   if (name === 'apply_patch') {
     const patch = typeof input === 'string' ? input : input?.command ?? input?.patch;
-    return typeof patch === 'string' ? [...patch.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)\r?$/gm)].map(match => resolved(match[1].replace(/\r$/, ''), cwd)) : [];
+    return typeof patch === 'string' ? [...patch.matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)\r?$/gm)].map(match => resolveTarget(match[1].replace(/\r$/, ''), cwd)) : [];
   }
   if (name === 'Edit' || name === 'Write' || name === 'MultiEdit') {
     const file = input?.file_path ?? input?.path;
-    return typeof file === 'string' ? [resolved(file, cwd)] : [];
+    return typeof file === 'string' ? [resolveTarget(file, cwd)] : [];
   }
   if (name === 'Bash' || name === 'exec_command') {
     const command = input?.command ?? input?.cmd;
@@ -164,40 +251,151 @@ function denied(context, projects) {
   return {hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `Запись в основную копию требует рабочей области Codeworks. Защищённые проекты: ${scope}.`, additionalContext: context}};
 }
 
-/** Возвращает официальный PreToolUse DTO; подключается только для распознанной защищённой записи. */
-export async function runHook(event, {env = process.env, config, connect = connectClient} = {}) {
-  if (event.hook_event_name && event.hook_event_name !== 'PreToolUse') return {};
-  const files = writePaths(event);
-  if (!files.length) return {};
+const safeHookCodes=new Set(['FORBIDDEN','CONFLICT','WRITE_CALL_MISMATCH','CLEANUP_ALREADY_STARTED','INVALID_ARGUMENT','INTERNAL','NOT_FOUND','WORKSPACE_WRITE_REQUIRED','WRITER_OUTCOME_UNKNOWN','PREPARE_PENDING','BUSY']);
+function hookFailure(error) {
+  const code=safeHookCodes.has(error?.code) ? error.code : 'BACKEND_UNAVAILABLE';
+  return `${code}: запись остановлена; проверьте состояние Codeworks.`;
+}
+
+/** Обрабатывает native write и завершения; не исполняет исходный инструмент. */
+export async function runHook(event, options = {}) {
+  try { return await runHookInner(event, options); }
+  catch { return denied('Невозможно безопасно определить цель записи; проверьте доступ к пути.', []); }
+}
+async function runHookInner(event, {env = process.env, config, connect = connectClient, wait = ms => new Promise(resolve => setTimeout(resolve, ms)), polls = 8, resolveTarget = resolved} = {}) {
   if (!config) {
     if (!env.CODEWORKS_HOOK_CONFIG) return {};
     try { config = JSON.parse(await readFile(env.CODEWORKS_HOOK_CONFIG, 'utf8')); }
-    catch { return {systemMessage: 'Codeworks hook: публичная конфигурация недоступна; проверьте CODEWORKS_HOOK_CONFIG.'}; }
+    catch { return {systemMessage: 'Codeworks hook: конфигурация недоступна.'}; }
   }
-  const projects = (config.projects ?? []).filter(project => {
+  const projects = config.projects ?? [];
+  const eventName = event.hook_event_name ?? 'PreToolUse';
+  if (['PostToolUse', 'Stop', 'SubagentStop', 'Interrupt', 'SessionEnd'].includes(eventName)) {
+    if (!event.session_id || !event.turn_id || (eventName === 'PostToolUse' && !event.tool_use_id)) return {};
+    const shellPost = eventName === 'PostToolUse' && ['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1));
+    const finished = shellPost && completedShell(event);
+    // AIDEV-NOTE: Только распознанный завершённый foreground вызов снимает учёт; произвольный shell может оставить потомков.
+    if (shellPost && (!foregroundCommand(event.tool_input?.command ?? event.tool_input?.cmd) || !finished)) return {};
+    let client;
+    try {
+      client = await connect(await loadClientConfig(env));
+      for (const project of projects) {
+        const args = {project_id: project.id, session_id: event.session_id, turn_id: event.turn_id};
+        if (eventName === 'PostToolUse') {
+          args.tool_use_id = event.tool_use_id;
+          args.outcome = event.tool_response?.isError || event.tool_response?.error || (Number.isInteger(event.tool_response?.exit_code) && event.tool_response.exit_code !== 0) ? 'error' : 'success';
+        } else args.event = eventName;
+        try { await client.call(eventName === 'PostToolUse' ? 'write.finish' : 'write.stop', args); } catch { /* Другому проекту вызов не принадлежит. */ }
+      }
+    } catch { /* Отсутствие Post оставляет write неопределённым. */ }
+    finally { try { await client?.close(); } catch {} }
+    return {};
+  }
+  if (eventName !== 'PreToolUse') return {};
+  const files = writePaths(event, resolveTarget);
+  const input = event.tool_input, cwd = input?.workdir || input?.cwd || event.cwd || process.cwd();
+  const name = event.tool_name?.split('.').at(-1);
+  const shell = ['Bash','exec_command'].includes(name);
+  const candidates = [...files, ...(shell ? [resolved(cwd, '/')] : [])];
+  const areas = new Map();
+  for (const project of projects) {
+    if (!path.isAbsolute(project.workspace_root ?? '')) continue;
+    const base = resolved(project.workspace_root, '/');
+    for (const file of candidates) {
+      if (!inside(base,file) || file === base) continue;
+      const id = path.relative(base,file).split(path.sep)[0];
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) continue;
+      areas.set(project.id+':'+id,{project,id,root:path.join(base,id)});
+    }
+  }
+  if (areas.size > 1) return denied('Разделите запись между рабочими областями.',[...areas.values()].map(a=>a.project));
+  if (areas.size === 1 && shell && readOnlyShell(input?.command ?? input?.cmd)) return {};
+  if (areas.size === 1) return existingWrite(event,[...areas.values()][0],{env,connect,files,shell,cwd,input,name});
+  if (!files.length) return {};
+  const matching = projects.filter(project => {
     if (typeof project.repo_path !== 'string' || !path.isAbsolute(project.repo_path) || typeof project.id !== 'string') return false;
     const root = resolved(project.repo_path, '/');
     return files.some(file => inside(root, file) && ![...(project.documentation_paths ?? []), ...(project.excluded_paths ?? [])].some(exception => inside(resolved(exception, root), file)));
   });
-  if (!projects.length) return {};
-  const deny = context => denied(context, projects);
-  const workspaceKey = env.CODEWORKS_WORKSPACE_KEY || env.CODEX_THREAD_ID || env.CODEX_SESSION_ID || event.thread_id || event.session_id;
-  if (projects.length !== 1 || !workspaceKey) return deny('Задайте CODEWORKS_WORKSPACE_KEY и выберите один проект. Найдите существующие области через status с project_id. Чтение и диагностика доступны.');
-  const project = projects[0];
-  const kind = env.CODEWORKS_WORKSPACE_KIND || 'feature';
-  const requestKey = 'hook-prepare-' + createHash('sha256').update(JSON.stringify([project.id, workspaceKey, kind])).digest('hex');
-  const args = {project_id: project.id, workspace_key: workspaceKey, kind, request_key: requestKey};
-  let client;
+  if (!matching.length) return {};
+  const deny = message => denied(message, matching);
+  const project = matching[0], root = resolved(project.repo_path, '/');
+  const excluded = [...(project.documentation_paths ?? []), ...(project.excluded_paths ?? [])].map(p => resolved(p, root));
+  if (matching.length !== 1 || files.some(file => !inside(root, file) || excluded.some(p => inside(p, file)))) return deny('Разделите запись по владельцам и исключениям.');
+  // AIDEV-NOTE: Shell может содержать непрозрачный код; он не создаёт область и не переписывается.
+  if (!['apply_patch', 'Write', 'Edit'].includes(name)) return deny('Используйте native файловую запись для подготовки области.');
+  const key = env.CODEWORKS_WORKSPACE_KEY;
+  if (!event.session_id || !event.turn_id || !event.tool_use_id) return deny('Для записи нужны идентификаторы сессии и вызова.');
+  let rewrite;
+  if (name === 'apply_patch') {
+    const field = typeof input === 'string' ? null : typeof input?.command === 'string' ? 'command' : typeof input?.patch === 'string' ? 'patch' : null;
+    const value = field ? input[field] : input;
+    if (typeof value !== 'string' || !/^\*\*\* Begin Patch\r?\n/.test(value) || !/\*\*\* End Patch\r?\n?$/.test(value)) return deny('Не удалось однозначно разобрать patch.');
+    const headers = [...value.matchAll(/^\*\*\* (Add File|Update File|Delete File|Move to): (.+)\r?$/gm)];
+    if (!headers.length || headers.length !== files.length || /^\*\*\* (?!Begin Patch|End Patch|End of File|Add File: |Update File: |Delete File: |Move to: ).+$/m.test(value)) return deny('Не удалось однозначно разобрать patch.');
+    rewrite = target => {
+      let i = 0;
+      const result = value.replace(/^(\*\*\* (?:Add File|Update File|Delete File|Move to): )(.+?)(\r?)$/gm, (_, prefix, original, cr) => prefix + path.join(target, path.relative(root, files[i++])) + cr);
+      return field ? {...input, [field]: result} : result;
+    };
+  } else {
+    const field = typeof input?.file_path === 'string' ? 'file_path' : typeof input?.path === 'string' ? 'path' : null;
+    if (!field || files.length !== 1) return deny('Не удалось однозначно разобрать запись.');
+    rewrite = target => ({...input, [field]: path.join(target, path.relative(root, files[0]))});
+  }
+  const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const kind = env.CODEWORKS_WORKSPACE_KIND;
+  const payload = hash({tool_name:event.tool_name, tool_input:input, cwd, project_id:project.id, workspace_key:key, kind});
+  const args = {project_id:project.id, ...(key ? {workspace_key:key} : {}), ...(kind ? {kind} : {}), session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, targets:[...new Set(files.map(f=>path.relative(root,f)))], request_key:'hook-'+hash([project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
+  let client, result;
   try {
     client = await connect(await loadClientConfig(env));
-    const result = await client.call('prepare', args);
-    return deny(`Область Codeworks: ${JSON.stringify(result)}. Дождитесь ready через status с project_id=${project.id}, workspace_id=${result.workspace_id}, operation_id=${result.operation_id}. Затем повторите исходную запись штатным инструментом по path области, с её рабочим каталогом. Ветка: ${result.branch}. Hook не переносит правки автоматически. workspace_key=${workspaceKey}; request_key=${requestKey}.`);
+    result = await client.call('write.begin', args);
+    let ready = false;
+    for (let i=0; i<polls; i++) {
+      const status = await client.call('status', {project_id:project.id, workspace_id:result.workspace_id, operation_id:result.operation_id});
+      if (status.workspace?.preparation_state === 'ready') { ready=true; break; }
+      if (status.operation?.status === 'failed') break;
+      await wait(250);
+    }
+    if (!ready) {
+      await client.call('write.stop', {project_id:project.id,session_id:event.session_id,turn_id:event.turn_id,event:'Stop',write_call_id:result.write_call_id,reason:'prepare_pending'});
+      return deny(`PREPARE_PENDING: операция ${result.operation_id}; дождитесь status и повторите запись.`);
+    }
+    const targetRoot = resolved(result.path, '/');
+    if (files.some(file => !inside(targetRoot, resolved(path.join(targetRoot, path.relative(root, file)), '/')))) return deny('Цель записи выходит за пределы рабочей области.');
+    const updatedInput = rewrite(targetRoot);
+    await client.call('write.admit', {project_id:project.id, write_call_id:result.write_call_id, rewritten_sha256:hash(updatedInput)});
+    return {hookSpecificOutput:{hookEventName:'PreToolUse', permissionDecision:'allow', updatedInput, additionalContext:`Запись перенаправлена в область Codeworks ${result.workspace_key}: ${result.path}; ветка ${result.branch}; workspace_id=${result.workspace_id}. Продолжайте работу в этом дереве.`}};
   } catch (error) {
-    if(error?.code==='INVALID_ARGUMENT')return deny('Для новой задачи вызовите prepare с коротким осмысленным workspace_key, например codeworks-auto-cleanup; ID чата не является названием задачи. Для продолжения найдите прежнюю область через status. Затем повторите запись в возвращённом дереве.');
-    return deny(`Codeworks недоступен или prepare завершился ошибкой. Исходная запись остановлена; чтение и диагностика доступны. Проверьте status с project_id=${project.id}, workspace_key=${workspaceKey}; повтор prepare использует тот же запрос ${JSON.stringify(args)}. Ошибка ожидания не отменяет операцию.`);
-  } finally {
-    try { await client?.close(); } catch { /* Не скрываем решение hook при ошибке закрытия соединения. */ }
+    if (client) try { await client.call('write.stop', {project_id:project.id,session_id:event.session_id,turn_id:event.turn_id,event:'Stop',...(result?.write_call_id ? {write_call_id:result.write_call_id} : {tool_use_id:event.tool_use_id}),reason:'prepare_pending'}); } catch {}
+    return deny(hookFailure(error));
   }
+  finally { try { await client?.close(); } catch {} }
+}
+
+// AIDEV-NOTE: Для shell сохраняется незавершённая запись до независимой проверки процессов.
+async function existingWrite(event, area, {env,connect,files,shell,cwd,input,name}) {
+  const deny = message => denied(message,[area.project]);
+  if (!event.session_id || !event.turn_id || !event.tool_use_id) return deny('Нет идентификаторов вызова записи.');
+  if ((!shell && !['apply_patch','Write','Edit'].includes(name)) || files.some(f=>!inside(area.root,f))) return deny('Разделите запись по владельцам.');
+  const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  let client,result;
+  try {
+    client = await connect(await loadClientConfig(env));
+    const status = await client.call('status',{project_id:area.project.id,workspace_id:area.id});
+    const w = status.workspace;
+    if (!w || resolved(w.path,'/') !== area.root || w.preparation_state !== 'ready') return deny('Рабочая область недоступна.');
+    const key=w.workspace_key,kind=w.kind;
+    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),targets:files.length ? [...new Set(files.map(f=>path.relative(area.root,f)))] : ['.'],request_key:'hook-'+hash([area.project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
+    result=await client.call('write.begin',args);
+    if (result.workspace_id!==area.id || resolved(result.path,'/')!==area.root) throw Error('WORKSPACE_MISMATCH');
+    await client.call('write.admit',{project_id:area.project.id,write_call_id:result.write_call_id,rewritten_sha256:hash(input)});
+    return {hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'allow'}};
+  } catch (error) {
+    if (client) try { await client.call('write.stop',{project_id:area.project.id,session_id:event.session_id,turn_id:event.turn_id,event:'Stop',...(result?.write_call_id ? {write_call_id:result.write_call_id} : {tool_use_id:event.tool_use_id}),reason:'prepare_pending'}); } catch {}
+    return deny(hookFailure(error));
+  } finally { try { await client?.close(); } catch {} }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
