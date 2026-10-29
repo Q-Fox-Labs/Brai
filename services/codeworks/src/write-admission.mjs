@@ -2,6 +2,7 @@
 // ABOUTME: Не исполняет инструменты и не считает намерение доказательством записи.
 import {randomUUID, createHash} from 'node:crypto';
 import {Fault} from './errors.mjs';
+import {canonical} from './contracts.mjs';
 
 async function transaction(pool, work) {
   const db = await pool.connect();
@@ -18,6 +19,15 @@ function validateNativeCompletion(call,args,executorId,proof) {
     const saved=call.tool_result?.native_completion;
     if(!saved||saved.receipt_sha256!==proof.receipt_sha256||saved.native_event_sha256!==proof.native_event_sha256||saved.exit_code!==proof.exit_code||call.tool_result?.outcome!==args.outcome)throw new Fault('WRITE_CALL_MISMATCH');
   }
+}
+
+function validatePostProof(call,args,executorId,proof) {
+  if(!proof)return;
+  const {receipt_sha256,...notice}=proof;
+  const same=['project_id','session_id','turn_id','tool_use_id','tool_name','outcome','input_sha256','canonical_input_sha256'].every(key=>notice[key]===args[key]);
+  const inputMatches=call.completion_input_sha256?call.completion_input_sha256===proof.canonical_input_sha256:call.rewritten_sha256===proof.input_sha256;
+  if(!same||proof.executor_id!==executorId||call.executor_id!==executorId||!call.admitted_at||!inputMatches||['project_id','session_id','turn_id','tool_use_id','tool_name'].some(key=>call[key]!==proof[key])||receipt_sha256!==createHash('sha256').update(canonical(notice)).digest('hex'))throw new Fault('WRITE_CALL_MISMATCH');
+  if(call.state==='finished'&&(call.tool_result?.outcome!==args.outcome||(call.tool_result?.post_completion&&call.tool_result.post_completion.receipt_sha256!==receipt_sha256)))throw new Fault('WRITE_CALL_MISMATCH');
 }
 
 /** Создаёт durable учёт вызовов; prepare и Git inspection выполняются вне транзакции. */
@@ -104,16 +114,18 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
       if ((await db.query("SELECT 1 FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state<>'done' LIMIT 1",[w.id])).rowCount) throw new Fault('CLEANUP_ALREADY_STARTED');
       const locked = (await db.query('SELECT * FROM codeworks.write_calls WHERE id=$1 FOR UPDATE',[call.id])).rows[0];
       if (locked.rewritten_sha256 && locked.rewritten_sha256 !== args.rewritten_sha256) throw new Fault('WRITE_CALL_MISMATCH');
+      if (locked.completion_input_sha256 && locked.completion_input_sha256 !== args.completion_input_sha256) throw new Fault('WRITE_CALL_MISMATCH');
       if (!['preparing','in_flight'].includes(locked.state)) throw new Fault('CONFLICT');
-      await db.query("UPDATE codeworks.write_calls SET state='in_flight',rewritten_sha256=$2,admitted_at=COALESCE(admitted_at,now()),updated_at=now() WHERE id=$1",[call.id,args.rewritten_sha256]);
+      await db.query("UPDATE codeworks.write_calls SET state='in_flight',rewritten_sha256=$2,completion_input_sha256=$3,admitted_at=COALESCE(admitted_at,now()),updated_at=now() WHERE id=$1",[call.id,args.rewritten_sha256,args.completion_input_sha256??null]);
       return {write_call_id:call.id,state:'in_flight'};
     });
   }
   /** Подтверждает Post либо уже проверенный owner receipt; не принимает доказательства из API payload. */
-  async function finish(args, executorId, {completionProof}={}) {
+  async function finish(args, executorId, {completionProof,postProof}={}) {
     const call = (await pool.query('SELECT * FROM codeworks.write_calls WHERE project_id=$1 AND executor_id=$2 AND session_id=$3 AND turn_id=$4 AND tool_use_id=$5',[args.project_id,executorId,args.session_id,args.turn_id,args.tool_use_id])).rows[0];
     if (!call) throw new Fault('NOT_FOUND');
     validateNativeCompletion(call,args,executorId,completionProof);
+    validatePostProof(call,args,executorId,postProof);
     if (call.state === 'finished') return {write_call_id:call.id,state:'finished',changed:!!call.tool_result?.changed};
     if (!['in_flight','uncertain'].includes(call.state) || !call.workspace_id) throw new Fault('CONFLICT');
     const found = await workspace(args.project_id,call.workspace_id);
@@ -127,10 +139,11 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
       await db.query("SELECT id FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state='waiting_decision' AND blocker='WRITER_OUTCOME_UNKNOWN' FOR UPDATE",[w.id]);
       const locked = (await db.query('SELECT * FROM codeworks.write_calls WHERE id=$1 FOR UPDATE',[call.id])).rows[0];
       validateNativeCompletion(locked,args,executorId,completionProof);
+      validatePostProof(locked,args,executorId,postProof);
       if (locked.state === 'finished') return {write_call_id:call.id,state:'finished',changed:!!locked.tool_result?.changed};
       if (!['in_flight','uncertain'].includes(locked.state)) throw new Fault('CONFLICT');
       if (changed) await db.query("UPDATE codeworks.workspaces SET activation_state='active',first_write_at=COALESCE(first_write_at,now()) WHERE id=$1",[w.id]);
-      const toolResult={outcome:args.outcome,changed,...(completionProof?{native_completion:{receipt_sha256:completionProof.receipt_sha256,native_event_sha256:completionProof.native_event_sha256,exit_code:completionProof.exit_code}}:{})};
+      const toolResult={outcome:args.outcome,changed,...(completionProof?{native_completion:{receipt_sha256:completionProof.receipt_sha256,native_event_sha256:completionProof.native_event_sha256,exit_code:completionProof.exit_code}}:{}),...(postProof?{post_completion:{receipt_sha256:postProof.receipt_sha256,tool_name:postProof.tool_name,input_sha256:postProof.input_sha256,canonical_input_sha256:postProof.canonical_input_sha256}}:{})};
       await db.query("UPDATE codeworks.write_calls SET state='finished',tool_result=$2::jsonb,finished_at=now(),updated_at=now() WHERE id=$1",[call.id,JSON.stringify(toolResult)]);
       await db.query(`UPDATE codeworks.cleanup_obligations o SET state='pending',blocker=NULL,next_attempt_at=NULL,updated_at=now()
         WHERE o.workspace_id=$1 AND o.state='waiting_decision' AND o.blocker='WRITER_OUTCOME_UNKNOWN'

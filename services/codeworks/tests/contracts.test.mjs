@@ -245,14 +245,20 @@ test('internal write admission has strict schemas and is excluded from user meth
   const begin={...common,workspace_key:'task',tool_name:'shell',payload_sha256:'b'.repeat(64),targets:['/repo/file'],request_key:'request'};
   validate('write.begin',begin);validate('write.begin',{...begin,workspace_id:id,kind:'hotfix'});
   const {workspace_key,...automatic}=begin;validate('write.begin',automatic);validate('write.begin',{...automatic,workspace_id:id});
-  validate('write.admit',{project_id:'p',write_call_id:id,rewritten_sha256:'b'.repeat(64)});
-  validate('write.finish',{...common,outcome:'success'});
+  const admit={project_id:'p',write_call_id:id,rewritten_sha256:'b'.repeat(64)};
+  validate('write.admit',admit);validate('write.admit',{...admit,completion_input_sha256:'c'.repeat(64)});
+  const notice={...common,tool_name:'apply_patch',input_sha256:'b'.repeat(64),canonical_input_sha256:'c'.repeat(64),outcome:'success'};
+  validate('write.finish',notice);validate('write.finish',{...notice,outcome:'error'});
+  for(const field of Object.keys(notice)){const incomplete={...notice};delete incomplete[field];assert.throws(()=>validate('write.finish',incomplete));}
+  assert.throws(()=>validate('write.finish',{...notice,input_sha256:'invalid'}));
   validate('write.stop',{project_id:'p',session_id:'session',turn_id:'turn',event:'Stop',tool_use_id:'call',reason:'prepare_pending'});
   validate('writeBeginResponse',{write_call_id:id,state:'preparing',workspace_id:id,path:'/area',branch:'feature/task',workspace_key:'task',kind:'feature'});
   assert.throws(()=>validate('writeBeginResponse',{write_call_id:id,state:'preparing',workspace_id:id,path:'/area',branch:'feature/task'}));
-  validate('writeAdmitResponse',{write_call_id:id,state:'in_flight'});validate('writeFinishResponse',{write_call_id:id,state:'finished',changed:true});validate('writeStopResponse',{closed:1,uncertain:0});
+  validate('writeAdmitResponse',{write_call_id:id,state:'in_flight'});validate('writeFinishResponse',{write_call_id:id,state:'pending'});validate('writeFinishResponse',{write_call_id:id,state:'finished',changed:true});validate('writeStopResponse',{closed:1,uncertain:0});
+  assert.throws(()=>validate('writeFinishResponse',{write_call_id:id,state:'pending',changed:true}));
+  assert.throws(()=>validate('writeFinishResponse',{write_call_id:id,state:'finished'}));
   assert.throws(()=>validate('write.begin',{...begin,executor_id:'forged'}));
-  assert.throws(()=>validate('write.finish',{...common,outcome:'success',output:'private'}));
+  assert.throws(()=>validate('write.finish',{...notice,output:'private'}));
   assert.throws(()=>validate('write.stop',{...common,event:'Stop',write_call_id:id}));
   assert.throws(()=>validate('status',{project_id:'p',limit:501}));
   validate('status',{project_id:'p',offset:500,limit:500});

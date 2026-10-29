@@ -11,10 +11,11 @@ import {createActivityGit} from './git-steps.mjs';
 import {withExecutionContext} from './execution-context.mjs';
 import {createCodeIndex} from './code-index.mjs';
 import {reconcileProjectLedger} from './reconciler.mjs';
+import {processProjectCompletions} from './completion-inbox.mjs';
 import {verifyDisposition} from './disposition.mjs';
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 /** Создаёт Activities; identity берётся из SDK, а не из переданного пользователем payload. */
-export function createActivities(pool,{allowedRepositories,execute=runOperation,adapters=createActivityGit(),codeIndex=createCodeIndex(pool),verifyTransfer=verifyDisposition,identity=()=>{const info=Context.current().info;if(!['codeworksWorkspace','codeworksProjectReconciler'].includes(info.workflowType))throw Error('ADMITTED_WORKFLOW_TYPE_REQUIRED');return info.workflowExecution.workflowId;}}={}) {
+export function createActivities(pool,{allowedRepositories,execute=runOperation,adapters=createActivityGit(),codeIndex=createCodeIndex(pool),verifyTransfer=verifyDisposition,completionSpoolDirectory=process.env.CODEWORKS_COMPLETION_SPOOL,identity=()=>{const info=Context.current().info;if(!['codeworksWorkspace','codeworksProjectReconciler'].includes(info.workflowType))throw Error('ADMITTED_WORKFLOW_TYPE_REQUIRED');return info.workflowExecution.workflowId;}}={}) {
   const session=async work=>{const db=await pool.connect();try{return await work(db,identity());}finally{db.release();}};
   const registry=async(db,id,generation)=>{
     const r=(await db.query("SELECT * FROM codeworks.workflow_registry WHERE workflow_id=$1 AND generation=$2 AND owner='temporal'",[id,generation])).rows[0];
@@ -42,6 +43,7 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
       const id=identity();
       const control=(await pool.query("SELECT instance_id FROM codeworks.execution_control WHERE project_id=$1 AND owner='temporal'",[projectId])).rows[0];
       if(!control||id!==`codeworks/${control.instance_id}/${projectId}/reconciler`)throw Error('RECONCILER_OWNER_REQUIRED');
+      await processProjectCompletions(pool,projectId,{allowedRepositories,git:adapters.git,spoolDirectory:completionSpoolDirectory});
       const item=await reconcileProjectLedger(pool,projectId,id,{cursor,historicalCursor});
       const cursors={nextCursor:item.nextCursor,hasMore:item.hasMore,nextHistoricalCursor:item.nextHistoricalCursor,historicalHasMore:item.historicalHasMore};
       if(!item.id)return cursors;

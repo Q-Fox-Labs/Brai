@@ -937,13 +937,15 @@
         "name": "write_finishRequest",
         "payload": {
           "$ref": "./schemas/api.schema.json#/definitions/write.finish"
-        }
+        },
+        "description": "Точное уведомление о завершении содержит identity вызова, имя инструмента, digests входа и исход; текст и вывод не передаются."
       },
       "write_finishResponse": {
         "name": "write_finishResponse",
         "payload": {
           "$ref": "./schemas/api.schema.json#/definitions/writeFinishResponse"
-        }
+        },
+        "description": "Pending подтверждает сохранённое уведомление; finished содержит результат проверки изменений."
       },
       "write_stopRequest": {
         "name": "write_stopRequest",

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { canonical, methods, internalMethods, validate, outputNames, schema } from './contracts.mjs';
 import { Fault, safeFault } from './errors.mjs';
 import {createWriteAdmission} from './write-admission.mjs';
+import {createCompletionInbox} from './completion-inbox.mjs';
 import {createFlowGit} from './git-flow.mjs';
 import {verifyPublication,recheckPublication} from './publication.mjs';
 const dto=value=>JSON.parse(JSON.stringify(value));
@@ -36,7 +37,7 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
           return {project:config,workspace:w};
         }),
       });
-      value=await admission[method.split('.')[1]](args,executorId);
+      value=method==='write.finish'?await createCompletionInbox(store.pool).receive(args,executorId):await admission[method.split('.')[1]](args,executorId);
     } else if(method==='project.register') {
       if(executorId!==adminExecutor||!allowedRepositories.includes(args.project.repo_path))throw new Fault('FORBIDDEN');
       await git.validateProject(args.project);
