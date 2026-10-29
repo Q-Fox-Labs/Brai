@@ -18,6 +18,8 @@ class RecallEvidenceRecoveryTests(unittest.TestCase):
         calls = []
         def transport(payload):
             data = json.loads(payload[-1]['content'])
+            if 'recall_goal_query' in data:
+                return {'goal': 'evidence'}
             calls.append(data)
             if len(calls) == 2:
                 evidence = 'The report contains invented numbered sections.'
