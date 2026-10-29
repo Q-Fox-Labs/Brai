@@ -26,7 +26,7 @@ test('historical release records are observed to zero without destructive calls'
   const base=(await command('git',['-C',p.repo_path,'rev-parse','HEAD'])).stdout,owner=`codeworks/history-fixture/${p.id}/reconciler`;
   for(let i=0;i<103;i++){
     const id=randomUUID(),release=randomUUID(),kind=i===0?'promotion':'feature',branch=kind==='promotion'?'release/codeworks-'+id:'feature/history-'+id;
-    await f.owner.query("INSERT INTO codeworks.workspaces(id,project_id,workspace_key,kind,base_ref,base_sha,branch,path,ownership_token,preparation_state,removed_at) VALUES($1,$2,$3,$4,'refs/heads/dev',$5,$6,$7,$8,'ready',now())",[id,p.id,'history-'+i,kind,base,branch,p.workspace_root+'/'+id,randomUUID()]);
+    await f.owner.query("INSERT INTO codeworks.workspaces(id,project_id,workspace_key,kind,base_ref,base_sha,branch,path,ownership_token,preparation_state,removed_at,legacy_writer) VALUES($1,$2,$3,$4,'refs/heads/dev',$5,$6,$7,$8,'ready',now(),$9)",[id,p.id,'history-'+i,kind,base,branch,p.workspace_root+'/'+id,randomUUID(),kind==='promotion'?{state:'quiesced'}:null]);
     await f.owner.query("INSERT INTO codeworks.operations(id,project_id,workspace_id,executor_id,kind,status,step,request) VALUES($1,$2,$3,'codex','release','succeeded','done','{}')",[release,p.id,id]);
     await f.owner.query("INSERT INTO codeworks.releases(id,workspace_id,operation_id,target,requested_sha,state) VALUES($1,$2,$3,'dev',$4,'succeeded')",[randomUUID(),id,release,base]);
     if(i<7)await f.owner.query('UPDATE codeworks.operations SET archived=true WHERE id=$1',[release]);
