@@ -1,0 +1,67 @@
+# ABOUTME: Описывает фактический общий вход и выход Приёма v1.
+# ABOUTME: Полезная нагрузка ссылается на owner JSON Schema; request-reply без JSON-RPC.
+asyncapi: 3.0.0
+info:
+  title: Brai Intake
+  version: 1.0.0
+defaultContentType: application/json
+channels:
+  ingress:
+    address: brai.intake.v1.ingress.{sourceId}
+    parameters:
+      sourceId:
+        description: Identity from NATS ACL and runtime binding
+    messages:
+      event:
+        payload:
+          $ref: ./schemas/messages.schema.json
+  dispatch:
+    address: brai.intake.v1.dispatch.{recipientId}
+    parameters:
+      recipientId:
+        description: Allowlisted recipient
+    messages:
+      event:
+        payload:
+          $ref: ./schemas/messages.schema.json
+  get:
+    address: brai.intake.v1.get.{callerId}
+    parameters:
+      callerId:
+        description: Identity with owner-scoped read permission
+    messages:
+      query:
+        payload:
+          $ref: './schemas/messages.schema.json#/definitions/GetRequest'
+  replies:
+    address: null
+    description: NATS request reply inbox; errors carry Nats-Service-Error and Nats-Service-Error-Code
+    messages:
+      packet:
+        payload:
+          $ref: './schemas/messages.schema.json#/definitions/GetResponse'
+      health:
+        payload:
+          $ref: './schemas/messages.schema.json#/definitions/StatusResponse'
+  status:
+    address: brai.intake.v1.status
+    messages:
+      query:
+        payload: {type: object}
+operations:
+  receiveEvent:
+    action: receive
+    channel: {$ref: '#/channels/ingress'}
+  forwardEvent:
+    action: send
+    channel: {$ref: '#/channels/dispatch'}
+  getPacket:
+    action: receive
+    channel: {$ref: '#/channels/get'}
+    reply:
+      channel: {$ref: '#/channels/replies'}
+  status:
+    action: receive
+    channel: {$ref: '#/channels/status'}
+    reply:
+      channel: {$ref: '#/channels/replies'}

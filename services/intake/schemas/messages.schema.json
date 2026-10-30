@@ -1,0 +1,572 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "eventId",
+    "source",
+    "type",
+    "occurredAt",
+    "correlationId",
+    "causationId",
+    "data"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "eventId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "source": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "type": {
+      "enum": [
+        "message.incoming",
+        "message.outgoing",
+        "event.recorded",
+        "operation.result",
+        "processing.resume"
+      ]
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "correlationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "causationId": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "data": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "enum": [
+              "message.incoming",
+              "message.outgoing"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "materialId",
+              "revision",
+              "conversationId",
+              "replyToMessageId",
+              "author",
+              "sourceRef",
+              "text",
+              "attachments"
+            ],
+            "properties": {
+              "materialId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "revision": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 2147483647
+              },
+              "conversationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "replyToMessageId": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "author": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "id"
+                ],
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "human",
+                      "agent"
+                    ]
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 255
+                  },
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 255
+                  },
+                  "username": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "maxLength": 255
+                  },
+                  "photoArtifactId": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "format": "uuid"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              },
+              "sourceRef": {
+                "type": "object"
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "filename",
+                    "mimeType"
+                  ],
+                  "properties": {
+                    "artifactId": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "fileId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255
+                    },
+                    "filename": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255
+                    },
+                    "mimeType": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255
+                    },
+                    "caption": {
+                      "type": "string"
+                    }
+                  },
+                  "oneOf": [
+                    {
+                      "required": [
+                        "artifactId"
+                      ],
+                      "not": {
+                        "required": [
+                          "fileId"
+                        ]
+                      }
+                    },
+                    {
+                      "required": [
+                        "fileId"
+                      ],
+                      "not": {
+                        "required": [
+                          "artifactId"
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "anyOf": [
+              {
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "attachments": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "message.incoming"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "properties": {
+              "author": {
+                "properties": {
+                  "kind": {
+                    "const": "human"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "message.outgoing"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "properties": {
+              "author": {
+                "properties": {
+                  "kind": {
+                    "const": "agent"
+                  }
+                }
+              },
+              "attachments": {
+                "items": {
+                  "required": [
+                    "artifactId"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "event.recorded"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": [
+              "recipient",
+              "payload"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "recipient": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{0,63}$"
+              },
+              "payload": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "operation.result"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "packetId",
+              "operationId",
+              "outcome",
+              "result"
+            ],
+            "properties": {
+              "packetId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "operationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "outcome": {
+                "enum": [
+                  "succeeded",
+                  "failed",
+                  "unknown"
+                ]
+              },
+              "result": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "processing.resume"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "packetId",
+              "expectedResumeVersion"
+            ],
+            "properties": {
+              "packetId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "expectedResumeVersion": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$id": "urn:brai:intake:v1",
+  "definitions": {
+    "GetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "eventId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "expectedHash": {
+          "type": "string"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "eventId"
+          ],
+          "not": {
+            "required": [
+              "sequence"
+            ]
+          }
+        },
+        {
+          "required": [
+            "sequence"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "eventId"
+                ]
+              },
+              {
+                "required": [
+                  "expectedHash"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "StatusResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jetstream",
+        "temporal"
+      ],
+      "properties": {
+        "jetstream": {
+          "type": "boolean"
+        },
+        "temporal": {
+          "type": "boolean"
+        }
+      }
+    },
+    "GetResponse": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "id",
+            "ownerId",
+            "source",
+            "eventId",
+            "inputHash",
+            "original",
+            "mode",
+            "scenario",
+            "state",
+            "jobs"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "ownerId": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "eventId": {
+              "type": "string"
+            },
+            "inputHash": {
+              "type": "string"
+            },
+            "original": {
+              "$ref": "#"
+            },
+            "mode": {
+              "enum": [
+                "temporal",
+                "jetstream"
+              ]
+            },
+            "scenario": {
+              "enum": [
+                "incoming.v1",
+                "outgoing.v1",
+                "forward.v1"
+              ]
+            },
+            "state": {
+              "enum": [
+                "registered",
+                "processing",
+                "forwarded",
+                "completed",
+                "needs_attention"
+              ]
+            },
+            "jobs": {
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "state",
+            "delivery",
+            "code"
+          ],
+          "properties": {
+            "state": {
+              "const": "rejected"
+            },
+            "delivery": {
+              "type": "object"
+            },
+            "code": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

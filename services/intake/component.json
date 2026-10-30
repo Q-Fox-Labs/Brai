@@ -1,0 +1,105 @@
+{
+  "formatVersion": 1,
+  "id": "intake",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [
+    "services/intake/src/main.ts",
+    "services/intake/src/worker.ts",
+    "services/intake/src/migrate.ts",
+    "services/intake/deploy/provision.mjs"
+  ],
+  "inputs": {
+    "build": [
+      "services/intake/tsconfig.json"
+    ],
+    "runtime": [
+      "services/intake/src/types.ts",
+      "services/intake/src/contracts.ts",
+      "services/intake/src/domain.ts",
+      "services/intake/src/storage.ts",
+      "services/intake/src/migrate.ts",
+      "services/intake/src/config.ts",
+      "services/intake/src/activities.ts",
+      "services/intake/src/workflows.ts",
+      "services/intake/src/ports.ts",
+      "services/intake/src/nats.ts",
+      "services/intake/src/main.ts",
+      "services/intake/src/worker.ts",
+      "services/intake/CONTRACT.md",
+      "services/intake/asyncapi.yaml",
+      "services/intake/schemas/messages.schema.json",
+      "services/intake/migrations/001.sql",
+      "services/intake/package.json",
+      "services/intake/README.md",
+      "services/intake/DEPLOYMENT.md",
+      "services/intake/compose.yml",
+      "services/intake/deploy/provision.mjs",
+      "services/intake/deploy/broker.json"
+    ],
+    "checks": [
+      "deploy/compose.intake-test.yml",
+      "deploy/intake-test-database.sql",
+      "deploy/intake-test-nats.conf",
+      "services/intake/tests/activities.test.mjs",
+      "services/intake/tests/domain.test.mjs",
+      "services/intake/tests/integration/benchmark.test.mjs",
+      "services/intake/tests/integration/benchmark.workflow.mjs",
+      "services/intake/tests/integration/fixtures.mjs",
+      "services/intake/tests/integration/intake.test.mjs",
+      "services/intake/tests/integration/owners.test.mjs",
+      "services/intake/tests/integration/peers.mjs",
+      "services/intake/tests/integration/workflow.test.mjs"
+    ]
+  },
+  "dependencies": [],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/intake/dist",
+      "services/intake/package.json",
+      "services/intake/schemas",
+      "services/intake/migrations",
+      "services/intake/CONTRACT.md",
+      "services/intake/asyncapi.yaml",
+      "services/intake/README.md",
+      "services/intake/DEPLOYMENT.md",
+      "services/intake/compose.yml",
+      "services/intake/deploy"
+    ],
+    "entrypoints": [
+      "services/intake/dist/main.js",
+      "services/intake/dist/worker.js",
+      "services/intake/dist/migrate.js",
+      "services/intake/deploy/provision.mjs"
+    ],
+    "smokeImports": [],
+    "systemRequirements": [
+      "Node.js 24.22.1",
+      "PostgreSQL, NATS JetStream, Temporal Server; prepared by operator"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "intake",
+      "intake-worker",
+      "intake-migrate"
+    ],
+    "migrations": [
+      "services/intake/migrations"
+    ],
+    "health": "NATS brai.intake.v1.status; modes reported separately"
+  },
+  "npm": {
+    "workspaces": [
+      "services/intake"
+    ]
+  }
+}

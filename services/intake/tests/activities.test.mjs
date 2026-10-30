@@ -1,0 +1,51 @@
+// ABOUTME: Проверяет сохранение snapshot и безопасные повторные попытки внешних заданий.
+// ABOUTME: Не обращается к Temporal серверу; проверяет границу Activities через собственные порты.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {createActivities} from '../dist/activities.js';
+function fixture(){
+ const p={id:'packet',ownerId:'owner',source:'telegram',receivedAt:'2026-10-30T00:00:00Z',scenario:'incoming.v1',state:'registered',original:{type:'message.incoming',causationId:null,data:{conversationId:'conversation',attachments:[]}},jobs:{},attempts:{},resumeVersion:0};
+ const rows=new Map([['packet',p]]),calls=[];
+ const store={async get(id){return rows.has(id)?structuredClone(rows.get(id)):null;},async update(id,fn){const v=structuredClone(rows.get(id));fn(v);rows.set(id,v);return structuredClone(v);}};
+ const ports={async call(name,packet,id){calls.push({name,id});if(name==='channel')return {channelId:'channel',rulesVersion:'v1',locationRef:'project',destination:{chat:'chat'}};if(name==='contact')return {contactId:'person'};if(name==='inbox')return {messageId:'saved'};return {accepted:true,operationId:id};},async prepareFiles(){return [];},async history(){}};
+ const configs=Object.fromEntries(['hermes','understand','memory','deliver'].map(k=>[k,{subject:'subject',resultSource:'source'}]));
+ return {store,ports,rows,calls,a:createActivities(store,ports,configs)};
+}
+test('snapshot and prepared input survive repeated preparation',async()=>{
+ const f=fixture();await f.a.prepare('packet');await f.a.prepare('packet');
+ assert.equal(f.calls.filter(v=>v.name==='channel').length,1);
+ assert.equal((await f.store.get('packet')).context.rulesVersion,'v1');
+});
+test('retry of a lost start response uses one operation; unknown never becomes a new execution',async()=>{
+ const f=fixture();const first=await f.a.startJob('packet','deliver'),same=await f.a.startJob('packet','deliver');
+ assert.equal(first,same);
+ await f.store.update('packet',p=>{p.jobs[first].state='unknown';});
+ assert.equal(await f.a.startJob('packet','deliver'),first);
+ assert.equal(f.calls.length,2);
+ await assert.rejects(f.a.retryJob('packet','deliver',first),{message:'UNSAFE_RETRY'});
+});
+test('explicit retry after confirmed failure preserves old job and increments its attempt',async()=>{
+ const f=fixture();const first=await f.a.startJob('packet','hermes');
+ await f.store.update('packet',p=>{p.jobs[first].state='failed';});
+ await f.a.retryJob('packet','hermes',first);
+ const second=await f.a.startJob('packet','hermes');assert.notEqual(second,first);
+ assert.equal(Object.keys((await f.store.get('packet')).jobs).length,2);
+});
+test('reply cannot claim a foreign parent context',async()=>{
+ const f=fixture();await f.store.update('packet',p=>{p.original.type='message.outgoing';p.original.causationId='parent';});
+ f.rows.set('parent',{ownerId:'foreign'});
+ await assert.rejects(f.a.prepare('packet'),{message:'INVALID_REPLY_LINK'});
+ assert.equal(f.calls.length,0);
+});
+test('completed process requires durable recipient, analysis and memory confirmations',async()=>{
+ const f=fixture();await assert.rejects(f.a.complete('packet'),{message:'INCOMPLETE_PROCESS'});
+});
+
+test('success in another branch cannot hide or clear a pending stop',async()=>{
+ const f=fixture();const v=await f.a.attention('packet','HISTORY_FAILED','audit');
+ await f.a.prepare('packet');assert.equal((await f.store.get('packet')).state,'needs_attention');
+ await f.a.attention('packet','DELIVERY_FAILED','deliver');
+ await f.a.clearAttention('packet','audit',v);
+ const p=await f.store.get('packet');assert.equal(p.state,'needs_attention');assert.equal(p.reason,'DELIVERY_FAILED');
+ await f.a.clearAttention('packet','deliver',v);assert.equal((await f.store.get('packet')).state,'processing');
+});

@@ -1,0 +1,32 @@
+# ABOUTME: Предоставляет disposable PostgreSQL/NATS только для проверки Приёма.
+# ABOUTME: Loopback, tmpfs, собственная сеть и pull never; рабочие службы не меняются.
+name: brai-intake-test
+services:
+  db:
+    image: postgres:17.6-alpine3.22
+    pull_policy: never
+    environment:
+      POSTGRES_PASSWORD: intake-test
+    ports: ["127.0.0.1:25643:5432"]
+    tmpfs: [/var/lib/postgresql/data]
+    volumes:
+      - ${INTAKE_TEST_INPUT_ROOT:-.}/intake-test-database.sql:/docker-entrypoint-initdb.d/01-intake.sql:ro
+    healthcheck:
+      test: [CMD, pg_isready, -U, intake_test_owner, -d, brai_intake_test]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    networks: [fixture]
+  nats:
+    image: nats:2.15.0
+    pull_policy: never
+    command: [--config, /etc/nats/nats.conf]
+    ports: ["127.0.0.1:24343:4222"]
+    tmpfs: [/data]
+    volumes:
+      - ${INTAKE_TEST_INPUT_ROOT:-.}/intake-test-nats.conf:/etc/nats/nats.conf:ro
+    networks: [fixture]
+networks:
+  fixture:
+    labels:
+      com.brai.fixture: intake-test

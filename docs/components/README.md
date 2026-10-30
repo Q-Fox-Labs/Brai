@@ -13,6 +13,7 @@
 | [artifacts](artifacts.md) | Файлы, вложения и результаты |
 | [history](history.md) | История событий продукта |
 | [alerts](alerts.md) | Уведомления и состояние прочтения |
+| [intake](intake.md) | Общий вход событий и сквозные процессы сообщений |
 | [local-ai](local-ai.md) | Каталог моделей и локальные вычисления |
 | [transcription](transcription.md) | Задания расшифровки аудио |
 | [providers](providers.md) | Подключения к поставщикам моделей |
