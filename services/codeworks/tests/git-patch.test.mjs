@@ -26,7 +26,7 @@ test('ambiguous shell or escaping patch is never admitted as a literal git patch
 });
 test('unsupported native first edit creates no area and admits no unknown writer',async()=>{
   const connect=()=>assert.fail('unsupported native call contacted backend');
-  const result=await runHook({hook_event_name:'PreToolUse',tool_name:'apply_patch',session_id:'s',turn_id:'t',tool_use_id:'nested',cwd:'/test/source',tool_input:{command:'*** Begin Patch\n*** Add File: src/a\n+x\n*** End Patch'}},{config:{native_file_writes:false,projects:[{id:'p',repo_path:'/test/source',workspace_root:'/test/areas'}]},connect});
+  const result=await runHook({hook_event_name:'PreToolUse',tool_name:'apply_patch',session_id:'s',turn_id:'t',tool_use_id:'nested',cwd:'/test/source',tool_input:{command:'*** Begin Patch\n*** Add File: src/a\n+x\n*** End Patch'}},{config:{projects:[{id:'p',repo_path:'/test/source',workspace_root:'/test/areas'}]},connect});
   assert.equal(result.hookSpecificOutput.permissionDecision,'deny');assert.match(result.hookSpecificOutput.additionalContext,/WORKSPACE_WRITE_TRANSPORT_REQUIRED/);
 });
 

@@ -491,7 +491,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     }
   }
   if (areas.size > 1) return denied('Разделите запись между рабочими областями.',[...areas.values()].map(a=>a.project));
-  if (areas.size && !shell && config.native_file_writes===false) return denied('WORKSPACE_WRITE_TRANSPORT_REQUIRED: используйте один git -C <дерево> apply --whitespace=nowarn с литеральным патчем через quoted heredoc и штатным запросом доступа командного инструмента. Файловый вызов не допущен.',[...areas.values()].map(a=>a.project));
+  if (areas.size && !shell && config.native_file_writes!==true) return denied('WORKSPACE_WRITE_TRANSPORT_REQUIRED: используйте один git -C <дерево> apply --whitespace=nowarn с литеральным патчем через quoted heredoc и штатным запросом доступа командного инструмента. Файловый вызов не допущен.',[...areas.values()].map(a=>a.project));
   if (areas.size === 1 && shell && readOnlyShell(input?.command ?? input?.cmd)) return {};
   // AIDEV-NOTE: Не допускаем writer, для которого Post и owner verifier не могут подтвердить завершение.
   if (areas.size === 1 && shell && (input?.run_in_background || input?.background || input?.async || !foregroundCommand(input?.command ?? input?.cmd))) {
@@ -515,7 +515,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   if (matching.length !== 1 || files.some(file => !inside(root, file) || excluded.some(p => inside(p, file)))) return deny('Разделите запись по владельцам и исключениям.');
   // AIDEV-NOTE: Shell может содержать непрозрачный код; он не создаёт область и не переписывается.
   const patchCommand=shell?gitPatch(input?.command??input?.cmd):null;
-  if (!patchCommand && (!['apply_patch', 'Write', 'Edit'].includes(name) || config.native_file_writes===false)) return deny('WORKSPACE_WRITE_TRANSPORT_REQUIRED: используйте git -C <репозиторий> apply --whitespace=nowarn с одним литеральным патчем через quoted heredoc и штатным запросом доступа командного инструмента. Область не создана.');
+  if (!patchCommand && (!['apply_patch', 'Write', 'Edit'].includes(name) || config.native_file_writes!==true)) return deny('WORKSPACE_WRITE_TRANSPORT_REQUIRED: используйте git -C <репозиторий> apply --whitespace=nowarn с одним литеральным патчем через quoted heredoc и штатным запросом доступа командного инструмента. Область не создана.');
   if(!inputFits(event,input)) return deny('HOOK_INPUT_TOO_LARGE: размер записи превышает допустимый предел.');
   try { validateSpool(config.completion_spool); } catch { return deny('POST_DELIVERY_UNAVAILABLE: журнал завершений недоступен.'); }
   const key = env.CODEWORKS_WORKSPACE_KEY;

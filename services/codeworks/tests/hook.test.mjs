@@ -5,8 +5,10 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {listNotices,rawHash,canonicalHash} from '../src/write-notice.mjs';
 import assert from 'node:assert/strict';
-import {runHook,writePaths,foregroundCommand,readHookJSON} from '../src/hook.mjs';
+import {runHook as nativeHook,writePaths,foregroundCommand,readHookJSON} from '../src/hook.mjs';
 import {validate} from '../src/contracts.mjs';
+// AIDEV-NOTE: Эти fixtures проверяют прежний файловый режим; новый безопасный default проверяет git-patch.test.
+const runHook=(event,options={})=>nativeHook(event,{...options,config:options.config?{native_file_writes:true,...options.config}:undefined});
 const spool=mkdtempSync('/tmp/cw-hook-spool-');
 after(()=>rmSync(spool,{recursive:true,force:true}));
 const config={completion_spool:spool,projects:[{id:'demo',repo_path:'/test/main',workspace_root:'/test/main',documentation_paths:['docs'],excluded_paths:['tmp']}]};
