@@ -10,10 +10,15 @@ const hash=value=>createHash('sha256').update(canonical(value)).digest('hex');
 
 /** Читает одну страницу items; соединение не умеет запускать ходы или менять настройки. */
 export async function readExecutorItems(socketPath,threadId,turnId,cursor=null) {
-  if(!path.isAbsolute(socketPath)||await realpath(socketPath)!==socketPath)throw Error('EXECUTOR_SOCKET_INVALID');
-  const socket=await lstat(socketPath),parent=await lstat(path.dirname(socketPath));
-  if(!socket.isSocket()||socket.uid!==process.getuid()||!parent.isDirectory()||parent.uid!==socket.uid||(parent.mode&0o077))throw Error('EXECUTOR_SOCKET_INVALID');
-  const ws=new WebSocket('ws+unix://'+socketPath+':/',{maxPayload:16*1024*1024});
+  if(!path.isAbsolute(socketPath)||path.normalize(socketPath)!==socketPath)throw Error('EXECUTOR_SOCKET_INVALID');
+  // AIDEV-NOTE: Штатный Codex публикует alias на короткий сокет в закрытом каталоге daemon UID.
+  const target=await realpath(socketPath),alias=await lstat(socketPath),socket=await lstat(target);
+  for(const directory of [path.dirname(socketPath),path.dirname(target)]){
+    const parent=await lstat(directory);
+    if(!parent.isDirectory()||parent.isSymbolicLink()||parent.uid!==process.getuid()||(parent.mode&0o077))throw Error('EXECUTOR_SOCKET_INVALID');
+  }
+  if(alias.uid!==process.getuid()||!socket.isSocket()||socket.uid!==process.getuid()||(socket.mode&0o077))throw Error('EXECUTOR_SOCKET_INVALID');
+  const ws=new WebSocket('ws+unix://'+target+':/',{maxPayload:16*1024*1024});
   const pending=new Map();let sequence=0;
   const call=(method,params)=>new Promise((resolve,reject)=>{const id=++sequence;pending.set(id,{resolve,reject});ws.send(JSON.stringify({id,method,params}));});
   const cancel=error=>{for(const entry of pending.values())entry.reject(error);pending.clear();};
