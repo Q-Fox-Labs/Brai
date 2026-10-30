@@ -325,7 +325,7 @@ function shellPaths(command, cwd) {
     const name = path.basename(first.word);
     if (name === 'cd' && words.length === 1 && !words[0].dynamic) { cwd = resolved(words[0].word, cwd); explicitCwd=true; return; }
     if(name==='git' && words[0]?.word==='-C' && !words[1]?.dynamic && path.isAbsolute(words[1]?.word??'') && ['add','commit','push'].includes(words[2]?.word)){add(words[1]);return;}
-    if((name==='git'&&['add','commit','push'].includes(words[0]?.word))||(explicitCwd&&name==='node'&&(words[0]?.word==='--test'||/^(?:\.\/)?services\/codeworks\/components\/cli\.mjs$/.test(words[0]?.word??'')))){found.push(resolved(cwd,'/'));return;}
+    if(explicitCwd&&((name==='git'&&['add','commit','push'].includes(words[0]?.word))||(name==='node'&&(words[0]?.word==='--test'||/^(?:\.\/)?services\/codeworks\/components\/cli\.mjs$/.test(words[0]?.word??''))))){found.push(resolved(cwd,'/'));return;}
     const operands = words.filter(token => !token.word.startsWith('-'));
     if (['touch', 'rm', 'rmdir', 'mkdir', 'tee'].includes(name)) operands.forEach(add);
     if (['mv'].includes(name)) operands.forEach(add);

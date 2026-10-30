@@ -46,3 +46,8 @@ test('explicit workspace survives native Bash loss of per-tool cwd for commits a
     assert.deepEqual(writePaths({tool_name:'Bash',cwd:'/test/source',tool_input:{command}}),[root]);
   }
 });
+
+test('chat directory cannot classify an unlocated Admin Git command as Brai',async()=>{
+  const config={projects:[{id:'p',repo_path:'/test/source',workspace_root:'/test/areas'}]};
+  for(const command of ['git add docs/guide.md',"git commit -m 'Admin change'",'git push origin main'])assert.deepEqual(await runHook({tool_name:'Bash',cwd:'/test/source',tool_input:{command}},{config,connect:()=>assert.fail('ambiguous cwd contacted Codeworks')}),{});
+});
