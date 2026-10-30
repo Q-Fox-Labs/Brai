@@ -12,6 +12,7 @@ import {withExecutionContext} from './execution-context.mjs';
 import {createCodeIndex} from './code-index.mjs';
 import {reconcileProjectLedger} from './reconciler.mjs';
 import {processProjectCompletions} from './completion-inbox.mjs';
+import {recoverExecutorCompletions} from './executor-completion.mjs';
 import {verifyDisposition} from './disposition.mjs';
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 /** Создаёт Activities; identity берётся из SDK, а не из переданного пользователем payload. */
@@ -48,6 +49,7 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
       const beat=setInterval(()=>context?.heartbeat({stage:'project-reconciliation'}),2000);beat.unref();
       try{
         await processProjectCompletions(pool,projectId,{allowedRepositories,git:adapters.git,spoolDirectory:completionSpoolDirectory});
+        await recoverExecutorCompletions(pool,projectId,{allowedRepositories,git:adapters.git,socketPath:process.env.CODEWORKS_EXECUTOR_SOCKET});
         const item=await reconcileProjectLedger(pool,projectId,id,{cursor,historicalCursor});
         const cursors={nextCursor:item.nextCursor,hasMore:item.hasMore,nextHistoricalCursor:item.nextHistoricalCursor,historicalHasMore:item.historicalHasMore};
         if(!item.id)return cursors;

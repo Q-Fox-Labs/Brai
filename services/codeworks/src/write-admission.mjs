@@ -15,6 +15,12 @@ function validateNativeCompletion(call,args,executorId,proof) {
   if(!proof)return;
   const same=['project_id','session_id','turn_id','tool_use_id'].every(key=>proof[key]===args[key]&&call[key]===proof[key]);
   if(!same||proof.executor_id!==executorId||call.executor_id!==executorId||proof.write_call_id!==call.id||proof.tool_name!==call.tool_name||proof.payload_sha256!==call.payload_sha256||!call.rewritten_sha256||proof.rewritten_sha256!==call.rewritten_sha256||!call.admitted_at||!/^([a-f0-9]{64})$/.test(proof.receipt_sha256??''))throw new Fault('WRITE_CALL_MISMATCH');
+  if(proof.version===3){
+    const {receipt_sha256,...metadata}=proof;
+    if(proof.provenance!=='executor_api'||proof.workspace_id!==call.workspace_id||proof.outcome!==args.outcome||!['success','error'].includes(proof.outcome)||!/^([a-f0-9]{64})$/.test(proof.observation_sha256??'')||createHash('sha256').update(canonical(metadata)).digest('hex')!==receipt_sha256)throw new Fault('WRITE_CALL_MISMATCH');
+    if(call.state==='finished'&&(call.tool_result?.outcome!==args.outcome||call.tool_result?.executor_completion?.receipt_sha256!==receipt_sha256))throw new Fault('WRITE_CALL_MISMATCH');
+    return;
+  }
   if(proof.version===2){
     if(proof.workspace_id!==call.workspace_id||proof.provenance!=='operator_reviewed_nested_patch'||proof.tool_name!=='apply_patch'||proof.outcome!=='error'||args.outcome!=='error'||proof.reviewer!=='owner'||!Number.isFinite(Date.parse(proof.reviewed_at))||Date.parse(proof.reviewed_at)<Date.parse(call.admitted_at)||Object.hasOwn(proof,'exit_code')||Object.hasOwn(proof,'native_event_sha256')||!/^([a-f0-9]{64})$/.test(proof.review_manifest_sha256??''))throw new Fault('WRITE_CALL_MISMATCH');
     if(call.state==='finished'&&(call.tool_result?.outcome!=='error'||!call.tool_result.operator_completion||canonical(call.tool_result.operator_completion)!==canonical(ownerCompletionMetadata(proof))))throw new Fault('WRITE_CALL_MISMATCH');
@@ -181,7 +187,7 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
       if (locked.state === 'finished') return {write_call_id:call.id,state:'finished',changed:!!locked.tool_result?.changed};
       if (!['in_flight','uncertain'].includes(locked.state)) throw new Fault('CONFLICT');
       if (changed) await db.query("UPDATE codeworks.workspaces SET activation_state='active',first_write_at=COALESCE(first_write_at,now()) WHERE id=$1",[w.id]);
-      const toolResult={outcome:args.outcome,changed,...(completionProof?.version===2?{operator_completion:ownerCompletionMetadata(completionProof)}:completionProof?{native_completion:{receipt_sha256:completionProof.receipt_sha256,native_event_sha256:completionProof.native_event_sha256,exit_code:completionProof.exit_code}}:{}),...(postProof?{post_completion:{receipt_sha256:postProof.receipt_sha256,tool_name:postProof.tool_name,input_sha256:postProof.input_sha256,canonical_input_sha256:postProof.canonical_input_sha256,execution_status:postProof.execution_status??'completed'}}:{})};
+      const toolResult={outcome:args.outcome,changed,...(completionProof?.version===3?{executor_completion:{receipt_sha256:completionProof.receipt_sha256,observation_sha256:completionProof.observation_sha256,item_type:completionProof.item_type,item_status:completionProof.item_status}}:completionProof?.version===2?{operator_completion:ownerCompletionMetadata(completionProof)}:completionProof?{native_completion:{receipt_sha256:completionProof.receipt_sha256,native_event_sha256:completionProof.native_event_sha256,exit_code:completionProof.exit_code}}:{}),...(postProof?{post_completion:{receipt_sha256:postProof.receipt_sha256,tool_name:postProof.tool_name,input_sha256:postProof.input_sha256,canonical_input_sha256:postProof.canonical_input_sha256,execution_status:postProof.execution_status??'completed'}}:{})};
       await db.query("UPDATE codeworks.write_calls SET state='finished',tool_result=$2::jsonb,finished_at=now(),updated_at=now() WHERE id=$1",[call.id,JSON.stringify(toolResult)]);
       await db.query(`UPDATE codeworks.cleanup_obligations o SET state='pending',blocker=NULL,next_attempt_at=NULL,updated_at=now()
         WHERE o.workspace_id=$1 AND o.state='waiting_decision' AND o.blocker='WRITER_OUTCOME_UNKNOWN'

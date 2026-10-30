@@ -77,7 +77,7 @@ export async function importNativeCompletion(pool,receiptPath,{allowedRepositori
   const workspace=async(projectId,id)=>{const p=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1',[projectId])).rows[0]?.config,w=(await db.query('SELECT * FROM codeworks.workspaces WHERE id=$1 AND project_id=$2',[id,projectId])).rows[0];if(!p||!w||!allowedRepositories?.includes(p.repo_path))fail();return {project:p,workspace:w};};
   const session={query:(...args)=>db.query(...args),connect:async()=>({query:(...args)=>db.query(...args),release:()=>{}})};
   const admission=createWriteAdmission(session,{workspace,inspect:async(p,w)=>{const result=await git.inspect(p,w);if(lost)throw Error('EXECUTION_GUARD_LOST');return result;}});
-  const args={project_id:proof.project_id,session_id:proof.session_id,turn_id:proof.turn_id,tool_use_id:proof.tool_use_id,outcome:proof.version===2?proof.outcome:proof.exit_code===0?'success':'error'};
+  const args={project_id:proof.project_id,session_id:proof.session_id,turn_id:proof.turn_id,tool_use_id:proof.tool_use_id,outcome:[2,3].includes(proof.version)?proof.outcome:proof.exit_code===0?'success':'error'};
   return await admission.finish(args,proof.executor_id,{completionProof:proof,expectedWorkspaceId:proof.workspace_id});
  }finally{if(locked&&!lost)await db.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',['execution:workspace:'+proof.workspace_id]).catch(()=>{});db.removeListener('error',onError);db.release(lost?new Error('EXECUTION_GUARD_LOST'):undefined);}
 }

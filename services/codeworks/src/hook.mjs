@@ -8,6 +8,7 @@ import {createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import {connectClient, loadClientConfig} from './client.mjs';
 import {validateSpool,saveNotice,ackNotice,rawHash,canonicalHash} from './write-notice.mjs';
+import {gitPatch} from './git-patch.mjs';
 
 const MAX_TOOL_INPUT_BYTES=8*1024*1024;
 const inputFits=(event,input)=>Buffer.byteLength(JSON.stringify(input))<=MAX_TOOL_INPUT_BYTES && Buffer.byteLength(JSON.stringify({...event,tool_input:input}))<=MAX_TOOL_INPUT_BYTES;
@@ -238,6 +239,7 @@ function synchronousGit(command) {
 /** Распознаёт ограниченный набор foreground argv; неизвестные и фоновые команды возвращают false. */
 export function foregroundCommand(command) {
   if (typeof command !== 'string') return false;
+  if (gitPatch(command)) return true;
   const tokens=shellTokens(command);
   if (!tokens.length || tokens.some(t=>t.dynamic)) return false;
   let segment=[];
@@ -352,6 +354,8 @@ export function writePaths(event, resolveTarget = resolved) {
   }
   if (name === 'Bash' || name === 'exec_command') {
     const command = input?.command ?? input?.cmd;
+    const patch = gitPatch(command);
+    if (patch) return patch.targets.map(p=>resolveTarget(p,cwd));
     return typeof command === 'string' ? shellPaths(command, cwd) : [];
   }
   return [];
@@ -476,6 +480,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     }
   }
   if (areas.size > 1) return denied('Разделите запись между рабочими областями.',[...areas.values()].map(a=>a.project));
+  if (areas.size && !shell && config.native_file_writes===false) return denied('WORKSPACE_WRITE_TRANSPORT_REQUIRED: используйте один git -C <дерево> apply --whitespace=nowarn с литеральным патчем через quoted heredoc и штатным запросом доступа командного инструмента. Файловый вызов не допущен.',[...areas.values()].map(a=>a.project));
   if (areas.size === 1 && shell && readOnlyShell(input?.command ?? input?.cmd)) return {};
   // AIDEV-NOTE: Не допускаем writer, для которого Post и owner verifier не могут подтвердить завершение.
   if (areas.size === 1 && shell && (input?.run_in_background || input?.background || input?.async || !foregroundCommand(input?.command ?? input?.cmd))) {
@@ -498,13 +503,17 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   const excluded = [...(project.documentation_paths ?? []), ...(project.excluded_paths ?? [])].map(p => resolved(p, root));
   if (matching.length !== 1 || files.some(file => !inside(root, file) || excluded.some(p => inside(p, file)))) return deny('Разделите запись по владельцам и исключениям.');
   // AIDEV-NOTE: Shell может содержать непрозрачный код; он не создаёт область и не переписывается.
-  if (!['apply_patch', 'Write', 'Edit'].includes(name)) return deny('Используйте native файловую запись для подготовки области.');
+  const patchCommand=shell?gitPatch(input?.command??input?.cmd):null;
+  if (!patchCommand && (!['apply_patch', 'Write', 'Edit'].includes(name) || config.native_file_writes===false)) return deny('WORKSPACE_WRITE_TRANSPORT_REQUIRED: используйте git -C <репозиторий> apply --whitespace=nowarn с одним литеральным патчем через quoted heredoc и штатным запросом доступа командного инструмента. Область не создана.');
   if(!inputFits(event,input)) return deny('HOOK_INPUT_TOO_LARGE: размер записи превышает допустимый предел.');
   try { validateSpool(config.completion_spool); } catch { return deny('POST_DELIVERY_UNAVAILABLE: журнал завершений недоступен.'); }
   const key = env.CODEWORKS_WORKSPACE_KEY;
   if (!event.session_id || !event.turn_id || !event.tool_use_id) return deny('Для записи нужны идентификаторы сессии и вызова.');
   let rewrite;
-  if (name === 'apply_patch') {
+  if (patchCommand) {
+    const field=typeof input?.command==='string'?'command':'cmd';
+    rewrite=target=>({...input,[field]:patchCommand.rewrite(target)});
+  } else if (name === 'apply_patch') {
     const field = typeof input === 'string' ? null : typeof input?.command === 'string' ? 'command' : typeof input?.patch === 'string' ? 'patch' : null;
     const value = field ? input[field] : input;
     if (typeof value !== 'string' || !/^\*\*\* Begin Patch\r?\n/.test(value) || !/\*\*\* End Patch\r?\n?$/.test(value)) return deny('Не удалось однозначно разобрать patch.');
