@@ -35,7 +35,8 @@ export async function startPeers(nc,pool,{holdMemory=false}={}){
  });
  for(const kind of ['hermes','understand','memory','deliver'])endpoint(kind,async p=>{
   const output=kind==='hermes'?event('fixture_hermes','message.outgoing',{materialId:'response/'+p.packetId,revision:1,conversationId:p.event.data.conversationId,replyToMessageId:p.inboxRef.messageId,author:{kind:'agent',id:'hermes'},sourceRef:p.event.data.sourceRef,text:'Ответ Hermes',attachments:[]},p):null;
-  const result=event('fixture_'+kind,'operation.result',{packetId:p.packetId,operationId:p.operationId,outcome:'succeeded',result:kind==='hermes'?{outputs:[output.eventId]}:{resultRef:randomUUID()}},p);
+  const value=kind==='hermes'?{outputs:[output.eventId]}:kind==='deliver'?{receiptRef:randomUUID()}:{resultRef:randomUUID(),provenance:{packetId:p.packetId,materialId:p.event.data.materialId,revision:p.event.data.revision,inputHash:inputHash(p.event)},...(kind==='memory'?{understandingRef:p.priorResults.find(r=>r.kind==='understand')?.result.resultRef}:{})};
+  const result=event('fixture_'+kind,'operation.result',{packetId:p.packetId,operationId:p.operationId,outcome:'succeeded',result:value},p);
   const row=(await pool.query('INSERT INTO intake_fixture.jobs(id,hash,body) VALUES($1,$2,$3) ON CONFLICT(id) DO UPDATE SET id=EXCLUDED.id RETURNING *',[p.operationId,inputHash(p),{kind,output,result}])).rows[0];
   if(row.hash!==inputHash(p))throw Error('FIXTURE_CONFLICT');
   launch(row);return {accepted:true,operationId:p.operationId};

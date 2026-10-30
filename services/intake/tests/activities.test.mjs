@@ -49,3 +49,22 @@ test('success in another branch cannot hide or clear a pending stop',async()=>{
  const p=await f.store.get('packet');assert.equal(p.state,'needs_attention');assert.equal(p.reason,'DELIVERY_FAILED');
  await f.a.clearAttention('packet','deliver',v);assert.equal((await f.store.get('packet')).state,'processing');
 });
+
+test('replayed attention preserves the stop threshold across an accepted resume',async()=>{
+ const f=fixture();assert.equal(await f.a.attention('packet','FAILED','step'),0);
+ await f.store.update('packet',p=>{p.resumeVersion=1;});
+ assert.equal(await f.a.attention('packet','FAILED','step'),0);
+ await f.a.clearAttention('packet','step',0);
+ assert.equal((await f.store.get('packet')).state,'processing');
+ assert.equal(await f.a.attention('packet','FAILED_AGAIN','step'),1);
+});
+test('retry transition is idempotent even after a later failed business attempt',async()=>{
+ const f=fixture(),first=await f.a.startJob('packet','deliver');
+ await f.store.update('packet',p=>{p.jobs[first].state='failed';});
+ await f.a.retryJob('packet','deliver',first);await f.a.retryJob('packet','deliver',first);
+ const second=await f.a.startJob('packet','deliver');assert.equal(second,'packet/deliver/1');
+ await f.store.update('packet',p=>{p.jobs[second].state='failed';});
+ await f.a.retryJob('packet','deliver',second);await f.a.retryJob('packet','deliver',first);
+ assert.equal((await f.store.get('packet')).attempts.deliver,2);
+ await assert.rejects(f.a.retryJob('packet','hermes',first),{message:'UNSAFE_RETRY'});
+});

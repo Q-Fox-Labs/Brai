@@ -17,6 +17,12 @@ Compose project имеет собственное имя окружения, п�
 Worker ограничен 4 Activity, 8 Workflow Tasks, 32 cached workflows.
 Все ссылки на конфигурацию находятся вне Git; payload не задаёт transport endpoints.
 
+Owner migrate применяет 001.sql и 002.sql в одной транзакции. Перед запуском
+исправленных main/worker требуется таблица intake_control_events; ready проверяет
+её доступность. Миграция расширяет собственную схему без удаления старых пакетов.
+Успешные результаты тестовых соседей должны соответствовать MaterialResult/MemoryResult
+в обновлённой owner JSON Schema; старый пустой result не считается подтверждением.
+
 Оператор сначала создаёт отдельную PostgreSQL БД с owner и ограниченной runtime
 ролью, готовит NATS identities/ACL и Temporal namespace. Потом запускает migrate,
 provision и обе программы из одного принятого образа. Provision создаёт только

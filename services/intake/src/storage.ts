@@ -14,12 +14,13 @@ export function createStore(pool: Pool): Store {
  const find = async (source: string, eventId: string): Promise<Packet | null> => (await pool.query('SELECT body FROM intake.intake_packets WHERE source=$1 AND event_id=$2',[source,eventId])).rows[0]?.body ?? null;
  return {
   get, find,
-  async ready() { await pool.query('SELECT id FROM intake.intake_packets LIMIT 0'); },
+  async ready() { await pool.query('SELECT id FROM intake.intake_packets LIMIT 0'); await pool.query('SELECT source FROM intake.intake_control_events LIMIT 0'); },
   async register(event: Event, binding: Binding, hash: string, acceptedAt?: string) {
    return transaction(async c => {
     // AIDEV-NOTE: Advisory lock живёт только в транзакции; это сериализация ключа, не lease/очередь.
     await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[event.source + '/' + event.eventId]);
     const prior = (await c.query('SELECT body FROM intake.intake_packets WHERE source=$1 AND event_id=$2',[event.source,event.eventId])).rows[0]?.body as Packet | undefined;
+    if ((await c.query('SELECT 1 FROM intake.intake_control_events WHERE source=$1 AND event_id=$2',[event.source,event.eventId])).rowCount) throw new Fault('EVENT_ID_CONFLICT');
     if (prior) { if (prior.inputHash !== hash || prior.ownerId !== binding.ownerId) throw new Fault('EVENT_ID_CONFLICT'); return prior; }
     let receiptId: string | null = null;
     const mode = event.type === 'event.recorded' ? 'jetstream' : 'temporal';
@@ -36,14 +37,26 @@ export function createStore(pool: Pool): Store {
     return packet;
    });
   },
-  async update(id, change) {
+  async update(id, change, control) {
    return transaction(async c => {
+    let replay=false;
+    if(control) {
+     await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[control.source+'/'+control.eventId]);
+     if((await c.query('SELECT 1 FROM intake.intake_packets WHERE source=$1 AND event_id=$2',[control.source,control.eventId])).rowCount) throw new Fault('EVENT_ID_CONFLICT');
+     const prior=(await c.query('SELECT owner_id,input_hash,packet_id FROM intake.intake_control_events WHERE source=$1 AND event_id=$2',[control.source,control.eventId])).rows[0];
+     if(prior) {
+      if(prior.owner_id!==control.ownerId || prior.input_hash!==control.inputHash || prior.packet_id!==id) throw new Fault('EVENT_ID_CONFLICT');
+      replay=true;
+     }
+    }
     const p = (await c.query('SELECT body FROM intake.intake_packets WHERE id=$1 FOR UPDATE',[id])).rows[0]?.body as Packet | undefined;
-    if (!p) throw new Fault('NOT_FOUND');
+    if (!p || (control && p.ownerId!==control.ownerId)) throw new Fault('NOT_FOUND');
+    if(replay) return p;
     const original = JSON.stringify(p.original), prepared = p.prepared && JSON.stringify(p.prepared), context=p.context && JSON.stringify(p.context);
     change(p);
     if (JSON.stringify(p.original) !== original || (prepared && JSON.stringify(p.prepared) !== prepared) || (context && JSON.stringify(p.context)!==context)) throw new Fault('IMMUTABLE_INPUT');
     await c.query('UPDATE intake.intake_packets SET body=$2 WHERE id=$1',[id,p]);
+    if(control) await c.query('INSERT INTO intake.intake_control_events(source,event_id,owner_id,input_hash,packet_id) VALUES($1,$2,$3,$4,$5)',[control.source,control.eventId,control.ownerId,control.inputHash,id]);
     return p;
    });
   },

@@ -15,6 +15,7 @@ channels:
       event:
         payload:
           $ref: ./schemas/messages.schema.json
+        description: Control event identity is durable; succeeded understand/memory results are contextually checked against MaterialResult/MemoryResult and packet provenance
   dispatch:
     address: brai.intake.v1.dispatch.{recipientId}
     parameters:

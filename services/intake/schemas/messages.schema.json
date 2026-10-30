@@ -186,7 +186,13 @@
                     "fileId": {
                       "type": "string",
                       "minLength": 1,
-                      "maxLength": 255
+                      "maxLength": 255,
+                      "not": {
+                        "enum": [
+                          ".",
+                          ".."
+                        ]
+                      }
                     },
                     "filename": {
                       "type": "string",
@@ -565,6 +571,70 @@
               "type": "string"
             }
           }
+        }
+      ]
+    },
+    "MaterialResult": {
+      "type": "object",
+      "required": [
+        "resultRef",
+        "provenance"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "resultRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "provenance": {
+          "type": "object",
+          "required": [
+            "packetId",
+            "materialId",
+            "revision",
+            "inputHash"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "packetId": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "materialId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            },
+            "inputHash": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        },
+        "understandingRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "MemoryResult": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/MaterialResult"
+        },
+        {
+          "required": [
+            "understandingRef"
+          ]
         }
       ]
     }

@@ -20,10 +20,11 @@ export interface Packet {
 }
 export interface Delivery { stream: string; sequence: number; source: string; receivedAt?: string; }
 export interface Reject { delivery: Delivery; ownerId: string | null; eventId: string | null; hash: string; code: string; }
+export interface ControlIdentity { source: string; eventId: string; inputHash: string; ownerId: string; }
 export interface Store {
  register(event: Event, binding: Binding, hash: string, receivedAt?: string): Promise<Packet>;
  get(id: string): Promise<Packet | null>; find(source: string, eventId: string): Promise<Packet | null>;
- update(id: string, change: (packet: Packet) => void): Promise<Packet>; reject(rejection: Reject): Promise<void>; rejection(source: string, sequence: number): Promise<Reject | null>; ready(): Promise<void>;
+ update(id: string, change: (packet: Packet) => void, control?: ControlIdentity): Promise<Packet>; reject(rejection: Reject): Promise<void>; rejection(source: string, sequence: number): Promise<Reject | null>; ready(): Promise<void>;
 }
 export interface Ports {
  call(name: PortName, packet: Packet, operationId: string, extra?: Data): Promise<Data>;

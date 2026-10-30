@@ -1,6 +1,6 @@
 // ABOUTME: Регистрирует события и передаёт ответственность выбранному исполнителю.
 // ABOUTME: Не содержит очередей повторов; успех разрешает подтверждение входного события.
-import { inputHash } from './contracts.js';
+import { inputHash, isJobSuccess } from './contracts.js';
 import { Fault, type Binding, type Delivery, type Event, type Data, type Packet, type Ports, type Store } from './types.js';
 /** Обрабатывает одно доставленное событие с доверенной идентичностью subject. */
 export async function ingest(store: Store, ports: Ports, bindings: Record<string, Binding>, event: Event, delivery: Delivery): Promise<void> {
@@ -15,7 +15,7 @@ export async function ingest(store: Store, ports: Ports, bindings: Record<string
   return;
  }
  const recipient = String(event.data.recipient);
- if (!packet.dispatch[recipient]) {
+ if (!Object.hasOwn(packet.dispatch,recipient) || packet.dispatch[recipient] !== true) {
   await ports.publish('brai.intake.v1.dispatch.' + recipient, event, packet.id + '/' + recipient, packet.ownerId);
   await store.update(packet.id, p => { p.dispatch[recipient] = true; p.state = 'forwarded'; });
  }
@@ -32,7 +32,7 @@ async function control(store: Store, ports: Ports, binding: Binding, event: Even
    if (p.resumeVersion >= version + 1) return;
    if (p.resumeVersion !== version || p.state !== 'needs_attention') throw new Fault('CONFLICT');
    p.resumeVersion++;
-  });
+  }, {source:event.source,eventId:event.eventId,inputHash:inputHash(event),ownerId:binding.ownerId});
  } else {
   const operationId = String(event.data.operationId);
   const state = String(event.data.outcome) as 'succeeded' | 'failed' | 'unknown';
@@ -44,10 +44,11 @@ async function control(store: Store, ports: Ports, binding: Binding, event: Even
     if (job.state !== state || inputHash(job.result ?? {}) !== inputHash(result)) throw new Fault('RESULT_CONFLICT');
     return;
    }
+   if (state==='succeeded' && !isJobSuccess(p,job,result)) throw new Fault('INVALID_JOB_RESULT');
    if (job.state !== state || inputHash(job.result ?? {}) !== inputHash(result)) {
     job.state = state; job.result = result; job.resultVersion = (job.resultVersion ?? 0) + 1;
    }
-  });
+  }, {source:event.source,eventId:event.eventId,inputHash:inputHash(event),ownerId:binding.ownerId});
  }
  const current = (await store.get(id))!;
  if (current.state === 'completed') return;

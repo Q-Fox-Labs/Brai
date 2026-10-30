@@ -43,6 +43,10 @@ export function createPorts(nc:NatsConnection,client:Client,cfg:Config):Ports {
     else {
      const base=cfg.sources[p.source].fileBaseUrl;
      if(!base) throw new Fault('SOURCE_FILES_NOT_CONFIGURED');
+     if(item.fileId==='.' || item.fileId==='..') throw new Fault('INVALID_ARGUMENT');
+     const prefix=new URL(base);prefix.pathname=prefix.pathname.replace(/\/$/,'')+'/';
+     const sourceUrl=new URL(encodeURIComponent(item.fileId!),prefix);
+     if(sourceUrl.origin!==prefix.origin || !sourceUrl.pathname.startsWith(prefix.pathname)) throw new Fault('INVALID_ARGUMENT');
      const ext=item.filename.includes('.')?item.filename.split('.').pop()!:'';
      const key='intake/'+createHash('sha256').update(p.ownerId+'/'+p.source+'/'+p.original.data.materialId+'/'+item.fileId).digest('hex');
      const prepared=await rpc('brai.artifacts.v1.prepare',{requestId:key,ownerId:p.ownerId,kind:'original',metadata:{title:item.filename,filename:item.filename,extension:ext,mimeType:item.mimeType,source:'intake'}});
@@ -51,7 +55,7 @@ export function createPorts(nc:NatsConnection,client:Client,cfg:Config):Ports {
      if(a.status!=='ready') {
       const upload=new URL(String(prepared.uploadUrl));
       if(upload.origin!==new URL(cfg.artifactBaseUrl).origin) throw new Fault('INVALID_ARTIFACT_ORIGIN');
-      const input=await fetch(base.replace(/\/$/,'')+'/'+encodeURIComponent(item.fileId!),{signal:signal?AbortSignal.any([signal,AbortSignal.timeout(1800000)]):AbortSignal.timeout(1800000),redirect:'error'});
+      const input=await fetch(sourceUrl,{signal:signal?AbortSignal.any([signal,AbortSignal.timeout(1800000)]):AbortSignal.timeout(1800000),redirect:'error'});
       if(!input.ok || !input.body) throw new Fault('SOURCE_FILE_UNAVAILABLE',input.status>=500);
       let size=0;
       const body=input.body.pipeThrough(new TransformStream({transform(chunk,controller){size+=chunk.length;if(size>2147483648)throw new Fault('FILE_TOO_LARGE');controller.enqueue(chunk);}}));

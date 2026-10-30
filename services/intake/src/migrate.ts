@@ -15,6 +15,7 @@ export async function migrate(pool: Pool, role: string): Promise<void> {
   const app=(await c.query('SELECT rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls FROM pg_roles WHERE rolname=$1',[role])).rows[0];
   if(!app || Object.values(app).some(Boolean) || (await c.query('SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname=$1)',[role])).rowCount)throw Error('UNSAFE_RUNTIME_ROLE');
   await c.query(await readFile(new URL('../migrations/001.sql', import.meta.url), 'utf8'));
+  await c.query(await readFile(new URL('../migrations/002.sql', import.meta.url), 'utf8'));
   await c.query('REVOKE CREATE ON SCHEMA public FROM PUBLIC');
   await c.query('REVOKE ALL ON SCHEMA intake FROM "'+role+'"');
   await c.query('REVOKE ALL ON ALL TABLES IN SCHEMA intake FROM "'+role+'"');
@@ -22,7 +23,7 @@ export async function migrate(pool: Pool, role: string): Promise<void> {
   await c.query('GRANT SELECT,INSERT ON intake.intake_receipts,intake.intake_packets TO "' + role + '"');
   await c.query('GRANT UPDATE(current_revision) ON intake.intake_receipts TO "'+role+'"');
   await c.query('GRANT UPDATE(body) ON intake.intake_packets TO "'+role+'"');
-  await c.query('GRANT SELECT,INSERT ON intake.intake_rejections TO "' + role + '"');
+  await c.query('GRANT SELECT,INSERT ON intake.intake_rejections,intake.intake_control_events TO "' + role + '"');
   await c.query('COMMIT');
  } catch(e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
 }
