@@ -104,9 +104,11 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
         const values=[randomUUID(),...identity,args.tool_name,args.payload_sha256,JSON.stringify(args.targets),key,kind,args.request_key,args.original_input_sha256??null];
         await db.query(`INSERT INTO codeworks.write_calls(id,project_id,executor_id,session_id,turn_id,tool_use_id,tool_name,payload_sha256,targets,workspace_key,kind,request_key,state,original_input_sha256)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,'preparing',$13)`,values);
+        if(args.executor_thread_id)await db.query("UPDATE codeworks.write_calls SET tool_result=jsonb_build_object('executor_thread_id',$2::text) WHERE id=$1",[values[0],args.executor_thread_id]);
         found=(await db.query('SELECT * FROM codeworks.write_calls WHERE project_id=$1 AND executor_id=$2 AND session_id=$3 AND turn_id=$4 AND tool_use_id=$5 FOR UPDATE',identity)).rows[0];
       }
       if (!found || found.tool_name !== args.tool_name || found.payload_sha256 !== args.payload_sha256 || (found.original_input_sha256??null)!==(args.original_input_sha256??null) || JSON.stringify(found.targets) !== JSON.stringify(args.targets) || (args.workspace_key && found.workspace_key !== args.workspace_key) || (args.kind && found.kind !== args.kind) || found.request_key !== args.request_key) throw new Fault('WRITE_CALL_MISMATCH');
+      if(found.tool_result?.executor_thread_id&&found.tool_result.executor_thread_id!==args.executor_thread_id)throw new Fault('WRITE_CALL_MISMATCH');
       return found;
     });
     if (row.workspace_id) {

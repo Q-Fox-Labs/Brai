@@ -36,3 +36,13 @@ test('unsupported git apply cannot silently write to the source checkout',async(
     assert.equal(result.hookSpecificOutput.permissionDecision,'deny');
   }
 });
+
+test('explicit workspace survives native Bash loss of per-tool cwd for commits and checks',async()=>{
+  const id='00000000-0000-4000-8000-000000000001',root='/test/areas/'+id;
+  const config={projects:[{id:'p',repo_path:'/test/source',workspace_root:'/test/areas'}]};
+  assert.deepEqual(await runHook({tool_name:'Bash',cwd:'/test/source',tool_input:{command:`git -C '${root}' status --short`}},{config,connect:()=>assert.fail('read connected')}),{});
+  for(const command of [`git -C '${root}' add -A`,`git -C '${root}' commit -m 'fixture'`,`git -C '${root}' push origin feature/test`,`cd '${root}' && node --test tests/a.test.mjs`]){
+    assert.equal(foregroundCommand(command),true,command);
+    assert.deepEqual(writePaths({tool_name:'Bash',cwd:'/test/source',tool_input:{command}}),[root]);
+  }
+});

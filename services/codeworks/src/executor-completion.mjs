@@ -9,7 +9,7 @@ import {importNativeCompletion} from './write-completion.mjs';
 const hash=value=>createHash('sha256').update(canonical(value)).digest('hex');
 
 /** Читает одну страницу items; соединение не умеет запускать ходы или менять настройки. */
-export async function readExecutorItems(socketPath,threadId,turnId,cursor=null) {
+export async function readExecutorItems(socketPath,threadId,turnId,cursor=null,logicalThreadId=threadId) {
   if(!path.isAbsolute(socketPath)||path.normalize(socketPath)!==socketPath)throw Error('EXECUTOR_SOCKET_INVALID');
   // AIDEV-NOTE: Штатный Codex публикует alias на короткий сокет в закрытом каталоге daemon UID.
   const target=await realpath(socketPath),alias=await lstat(socketPath),socket=await lstat(target);
@@ -30,6 +30,10 @@ export async function readExecutorItems(socketPath,threadId,turnId,cursor=null) 
     await new Promise((resolve,reject)=>{ws.once('open',resolve);ws.once('error',reject);ws.once('close',()=>reject(Error('EXECUTOR_DISCONNECTED')));});
     await call('initialize',{clientInfo:{name:'codeworks_completion_reader',version:'1'}});
     ws.send(JSON.stringify({method:'initialized',params:{}}));
+    if(threadId!==logicalThreadId){
+      const info=(await call('thread/read',{threadId})).thread,spawn=info?.source?.subAgent?.thread_spawn;
+      if(info?.id!==threadId||info.parentThreadId!==logicalThreadId||spawn?.parent_thread_id!==logicalThreadId||spawn.depth!==1)throw Error('EXECUTOR_LINEAGE_INVALID');
+    }
     // AIDEV-NOTE: turns/list поддерживает также старые legacy histories; items/list может их отвергать.
     const response=await call('thread/turns/list',{threadId,limit:1,itemsView:'full',sortDirection:'desc',...(cursor?{cursor}: {})});
     if(!Array.isArray(response?.data)||response.data.length>1||(response.nextCursor!==null&&typeof response.nextCursor!=='string'))throw Error('EXECUTOR_READ_INVALID');
@@ -58,12 +62,12 @@ export async function recoverExecutorCompletions(pool,projectId,{socketPath,allo
   const calls=(await pool.query(`SELECT c.* FROM codeworks.write_calls c JOIN codeworks.workspaces w ON w.id=c.workspace_id
     WHERE c.project_id=$1 AND c.executor_id='codex' AND c.state IN ('in_flight','uncertain')
     AND c.admitted_at IS NOT NULL AND w.removed_at IS NULL
-    AND (w.activation_state='awaiting_first_write' OR EXISTS(SELECT 1 FROM codeworks.cleanup_obligations o WHERE o.workspace_id=w.id AND o.state<>'done'))
+    AND ((w.activation_state='awaiting_first_write' AND c.tool_name='Bash') OR EXISTS(SELECT 1 FROM codeworks.cleanup_obligations o WHERE o.workspace_id=w.id AND o.state<>'done'))
     ORDER BY c.updated_at,c.id LIMIT 8`,[projectId])).rows;
   let recovered=0;
   for(const call of calls){
     try{
-      const page=await read(socketPath,call.session_id,call.turn_id,call.tool_result?.executor_scan_cursor??null);
+      const page=await read(socketPath,call.tool_result?.executor_thread_id??call.session_id,call.turn_id,call.tool_result?.executor_scan_cursor??null,call.session_id);
       const entries=page.data.filter(entry=>entry.turnId===call.turn_id&&entry.item?.id===call.tool_use_id);
       if(entries.length>1)throw Error('EXECUTOR_ITEM_CONFLICT');
       const proof=entries.length===1?executorProof(call,entries[0]):null;

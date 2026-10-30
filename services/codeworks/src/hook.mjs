@@ -12,6 +12,8 @@ import {gitPatch,gitApplyDirectory} from './git-patch.mjs';
 
 const MAX_TOOL_INPUT_BYTES=8*1024*1024;
 const inputFits=(event,input)=>Buffer.byteLength(JSON.stringify(input))<=MAX_TOOL_INPUT_BYTES && Buffer.byteLength(JSON.stringify({...event,tool_input:input}))<=MAX_TOOL_INPUT_BYTES;
+// AIDEV-NOTE: Это только адрес для чтения; принадлежность дочернего потока проверяет API, а не имя файла.
+function executorThread(event){const id=/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(path.basename(event.transcript_path??''))?.[1];return id?{executor_thread_id:id}:{};}
 
 /** Читает потоковый hook JSON; большой tool_response проверяет и не сохраняет. */
 export async function readHookJSON(input) {
@@ -196,6 +198,7 @@ function readOnlyShell(command) {
     let hasPath=false;for(let i=2;i<words.length;i++){const w=words[i];if(w==='-name'||w==='-iname'){if(!words[++i]||words[i].startsWith('-'))return false;}else if(w==='-type'){if(!['f','d','l'].includes(words[++i]))return false;}else if(w==='-maxdepth'||w==='-mindepth'){if(!/^[0-9]+$/.test(words[++i]??''))return false;}else if(w==='-print'){}else if(w.startsWith('-')||w==='!')return false;else hasPath=true;}return hasPath;
   }
   if (words[0] === 'git') {
+    if(words[1]==='-C' && path.isAbsolute(words[2]??''))words.splice(1,2);
     const action=words[1], args=words.slice(2);
     if (action==='status') return args.every(w=>['--short','-s','--porcelain','--porcelain=v1','--branch','-b','--untracked-files=no'].includes(w));
     if (action==='diff') return args.every(w=>['--stat','--check','--name-only','--no-ext-diff','--no-textconv'].includes(w));
@@ -221,6 +224,7 @@ function synchronousGit(command) {
   if (words[0]==='rtk' && words[1]==='proxy') words.splice(0,2);
   else if(words[0]==='rtk' && words[1]==='git')words.shift();
   if (words.shift()!=='git') return false;
+  if(words[0]==='-C' && path.isAbsolute(words[1]??''))words.splice(0,2);
   const action=words.shift();
   if (action==='add') return words.length>0 && words.every(w=>!w.startsWith('-') || ['-A','--all','-u','--update','--'].includes(w));
   if (action==='push') return words.length>0 && words.every(w=>!w.startsWith('-') || ['-u','--set-upstream','--'].includes(w));
@@ -248,6 +252,7 @@ export function foregroundCommand(command) {
     const words=segment.map(t=>t.word);
     const literal=words.map(w=>"'"+w.replaceAll("'", "'\\''")+"'").join(' ');
     if (readOnlyShell(literal) || synchronousGit(literal)) return true;
+    if(words[0]==='cd')return words.length===2&&path.isAbsolute(words[1]);
     if(words[0]==='RTK_DISABLED=1') words.shift();
     if (words[0]==='rm') {
       let options=true, operands=0;
@@ -302,6 +307,7 @@ function completedShell(event) {
 
 function shellPaths(command, cwd) {
   const found = [];
+  let explicitCwd=false;
   let segment = [];
   const add = token => { if (token && !token.dynamic && token.word && token.word !== '-') found.push(resolved(token.word, cwd)); };
   const flush = () => {
@@ -317,7 +323,9 @@ function shellPaths(command, cwd) {
     const first = words.shift();
     if (!first || first.dynamic) return;
     const name = path.basename(first.word);
-    if (name === 'cd' && words.length === 1 && !words[0].dynamic) { cwd = resolved(words[0].word, cwd); return; }
+    if (name === 'cd' && words.length === 1 && !words[0].dynamic) { cwd = resolved(words[0].word, cwd); explicitCwd=true; return; }
+    if(name==='git' && words[0]?.word==='-C' && !words[1]?.dynamic && path.isAbsolute(words[1]?.word??'') && ['add','commit','push'].includes(words[2]?.word)){add(words[1]);return;}
+    if((name==='git'&&['add','commit','push'].includes(words[0]?.word))||(explicitCwd&&name==='node'&&(words[0]?.word==='--test'||/^(?:\.\/)?services\/codeworks\/components\/cli\.mjs$/.test(words[0]?.word??'')))){found.push(resolved(cwd,'/'));return;}
     const operands = words.filter(token => !token.word.startsWith('-'));
     if (['touch', 'rm', 'rmdir', 'mkdir', 'tee'].includes(name)) operands.forEach(add);
     if (['mv'].includes(name)) operands.forEach(add);
@@ -365,7 +373,7 @@ export function writePaths(event, resolveTarget = resolved) {
 
 function denied(context, projects) {
   const scope = JSON.stringify(projects.map(({id, repo_path}) => ({id, repo_path})));
-  return {hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `Запись в основную копию требует рабочей области Codeworks. Защищённые проекты: ${scope}.`, additionalContext: context}};
+  return {hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `${context} Защищённые проекты: ${scope}.`, additionalContext: context}};
 }
 
 const safeHookCodes=new Set(['FORBIDDEN','CONFLICT','WRITE_CALL_MISMATCH','CLEANUP_ALREADY_STARTED','INVALID_ARGUMENT','INTERNAL','NOT_FOUND','WORKSPACE_WRITE_REQUIRED','WRITER_OUTCOME_UNKNOWN','PREPARE_PENDING','BUSY']);
@@ -465,6 +473,7 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     return {};
   }
   if (eventName !== 'PreToolUse') return {};
+  if(['Bash','exec_command'].includes(event.tool_name?.split('.').at(-1))&&readOnlyShell(event.tool_input?.command??event.tool_input?.cmd))return {};
   const files = writePaths(event, resolveTarget);
   const input = event.tool_input, cwd = input?.workdir || input?.cwd || event.cwd || process.cwd();
   const name = event.tool_name?.split('.').at(-1);
@@ -533,12 +542,12 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   }
   const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
   const kind = env.CODEWORKS_WORKSPACE_KIND;
-  const payload = hash({tool_name:event.tool_name, tool_input:input, cwd, project_id:project.id, workspace_key:key, kind});
+  const payload = hash({tool_name:event.tool_name, tool_input:input, cwd, project_id:project.id, workspace_key:key, kind,...executorThread(event)});
   const args = {project_id:project.id, ...(key ? {workspace_key:key} : {}), ...(kind ? {kind} : {}), session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, original_input_sha256:canonicalHash(input), targets:[...new Set(files.map(f=>path.relative(root,f)))], request_key:'hook-'+hash([project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
   let client, result;
   try {
     client = await connect(await loadClientConfig(env));
-    result = await client.call('write.begin', args);
+    result = await client.call('write.begin', {...args,...executorThread(event)});
     let ready = false;
     for (let i=0; i<polls; i++) {
       const status = await client.call('status', {project_id:project.id, workspace_id:result.workspace_id, operation_id:result.operation_id});
@@ -579,8 +588,8 @@ async function existingWrite(event, area, {env,connect,files,shell,cwd,input,nam
     const w = status.workspace;
     if (!w || resolved(w.path,'/') !== area.root || w.preparation_state !== 'ready') return deny('Рабочая область недоступна.');
     const key=w.workspace_key,kind=w.kind;
-    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),original_input_sha256:canonicalHash(input),targets:files.length ? [...new Set(files.map(f=>path.relative(area.root,f)))] : ['.'],request_key:'hook-'+hash([area.project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
-    result=await client.call('write.begin',args);
+    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),original_input_sha256:canonicalHash(input),targets:files.length ? [...new Set(files.map(f=>path.relative(area.root,f)||'.'))] : ['.'],request_key:'hook-'+hash([area.project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
+    result=await client.call('write.begin',{...args,...executorThread(event)});
     if (result.workspace_id!==area.id || resolved(result.path,'/')!==area.root) throw Error('WORKSPACE_MISMATCH');
     await client.call('write.admit',{project_id:area.project.id,write_call_id:result.write_call_id,rewritten_sha256:hash(input),completion_input_sha256:canonicalHash(input)});
     return {hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'allow'}};
