@@ -37,6 +37,12 @@ function ownerCompletionMetadata(proof){
   return {receipt_sha256:proof.receipt_sha256,provenance:proof.provenance,review_manifest_sha256:proof.review_manifest_sha256,outer_tool_use_id:proof.outer_tool_use_id,source_prefix_sha256:proof.source_prefix_sha256,source_prefix_bytes:proof.source_prefix_bytes,input_line_sha256:proof.input_line_sha256,output_line_sha256:proof.output_line_sha256,reviewer:proof.reviewer,reviewed_at:proof.reviewed_at};
 }
 
+/** Подтверждённый API/owner исход команды сильнее generic успешного возврата Bash-инструмента. */
+export function terminalBashEvidence(call,executionStatus='completed') {
+  const evidence=call.tool_result?.executor_completion??call.tool_result?.native_completion;
+  return call.state==='finished'&&call.tool_name==='Bash'&&executionStatus==='completed'&&/^[a-f0-9]{64}$/.test(evidence?.receipt_sha256??'');
+}
+
 function validatePostProof(call,args,executorId,proof) {
   if(!proof)return;
   const {receipt_sha256,...notice}=proof;
@@ -45,7 +51,7 @@ function validatePostProof(call,args,executorId,proof) {
   const rewrittenMatches=call.completion_input_sha256?call.completion_input_sha256===proof.canonical_input_sha256:call.rewritten_sha256===proof.input_sha256;
   const inputMatches=rewrittenMatches||(notStarted&&!!call.original_input_sha256&&call.original_input_sha256===proof.canonical_input_sha256);
   if(!same||proof.executor_id!==executorId||call.executor_id!==executorId||(!notStarted&&!call.admitted_at)||!inputMatches||(proof.execution_status==='not_started'&&!notStarted)||['project_id','session_id','turn_id','tool_use_id','tool_name'].some(key=>call[key]!==proof[key])||receipt_sha256!==createHash('sha256').update(canonical(notice)).digest('hex'))throw new Fault('WRITE_CALL_MISMATCH');
-  if(call.state==='finished'&&(call.tool_result?.outcome!==args.outcome||(call.tool_result?.post_completion&&call.tool_result.post_completion.receipt_sha256!==receipt_sha256)))throw new Fault('WRITE_CALL_MISMATCH');
+  if(call.state==='finished'&&((call.tool_result?.outcome!==args.outcome&&!terminalBashEvidence(call,proof.execution_status))||(call.tool_result?.post_completion&&call.tool_result.post_completion.receipt_sha256!==receipt_sha256)))throw new Fault('WRITE_CALL_MISMATCH');
 }
 
 /** Создаёт durable учёт вызовов; prepare и Git inspection выполняются вне транзакции. */

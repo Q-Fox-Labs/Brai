@@ -31,3 +31,11 @@ test('typed not-started accepts the original input only when execution failed',(
  assert.throws(()=>validatePostCompletion(call,{...original,outcome:'success'},'codex'),{code:'WRITE_CALL_MISMATCH'});
  assert.throws(()=>validatePostCompletion(call,{...original,canonical_input_sha256:'e'.repeat(64)},'codex'),{code:'WRITE_CALL_MISMATCH'});
 });
+
+test('late generic Bash Post acknowledges a stronger terminal proof without weakening identity',()=>{
+  const {notice,call}=make();notice.tool_name='Bash';call.tool_name='Bash';call.state='finished';
+  call.tool_result={outcome:'error',executor_completion:{receipt_sha256:'c'.repeat(64)}};
+  assert.doesNotThrow(()=>validatePostCompletion(call,notice,'codex'));
+  for(const changed of [{tool_use_id:'foreign'},{canonical_input_sha256:'e'.repeat(64),input_sha256:'e'.repeat(64)}])assert.throws(()=>validatePostCompletion(call,{...notice,...changed},'codex'),{code:'WRITE_CALL_MISMATCH'});
+  assert.throws(()=>validatePostCompletion({...call,tool_name:'apply_patch'},{...notice,tool_name:'apply_patch'},'codex'),{code:'WRITE_CALL_MISMATCH'});
+});

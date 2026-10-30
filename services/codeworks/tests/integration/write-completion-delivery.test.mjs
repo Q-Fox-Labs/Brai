@@ -19,8 +19,25 @@ import {reconcileProjectLedger} from '../../src/reconciler.mjs';
 import {rawHash,canonicalHash,listNotices} from '../../src/write-notice.mjs';
 import {runHook} from '../../src/hook.mjs';
 import {importNativeCompletion,validateCompletionReceipt} from '../../src/write-completion.mjs';
+import {executorProof} from '../../src/executor-completion.mjs';
 
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+
+test('late generic Bash Post after a synthetic terminal API proof leaves no pending delivery',{timeout:120000},async t=>{
+ assert.ok(configured,'explicit disposable PostgreSQL required');const f=await setup();t.after(()=>f.close());const p=await f.project({codeIndexDisabled:true});
+ const prepared=await f.prepare({project_id:p.id,workspace_key:'late-bash',request_key:'late-prepare'});await f.worker(p,prepared.operation_id);
+ const w=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[prepared.workspace_id])).rows[0],input={command:'git add -A'};
+ const request={project_id:p.id,workspace_id:w.id,session_id:'late-session',turn_id:'late-turn',tool_use_id:'late-tool',tool_name:'Bash',payload_sha256:rawHash(input),targets:['.'],request_key:'late-write'};
+ const result=await f.h.call('write.begin',request,'codex');await f.h.call('write.admit',{project_id:p.id,write_call_id:result.write_call_id,rewritten_sha256:rawHash(input),completion_input_sha256:canonicalHash(input)},'codex');
+ const call=(await f.app.query('SELECT * FROM codeworks.write_calls WHERE id=$1',[result.write_call_id])).rows[0];
+ const proof=executorProof(call,{turnId:request.turn_id,item:{id:request.tool_use_id,type:'commandExecution',status:'failed',exitCode:1}});
+ await importNativeCompletion(f.app,null,{allowedRepositories:[p.repo_path],verifyReceipt:async()=>proof});
+ const notice={project_id:p.id,session_id:request.session_id,turn_id:request.turn_id,tool_use_id:request.tool_use_id,tool_name:'Bash',input_sha256:rawHash(input),canonical_input_sha256:canonicalHash(input),outcome:'success'};
+ assert.equal((await f.h.call('write.finish',notice,'codex')).state,'finished');
+ assert.equal((await f.app.query('SELECT tool_result FROM codeworks.write_calls WHERE id=$1',[call.id])).rows[0].tool_result.outcome,'error');
+ assert.equal((await f.app.query('SELECT count(*)::int AS n FROM codeworks.write_completions WHERE write_call_id=$1',[call.id])).rows[0].n,0);
+ await assert.rejects(f.h.call('write.finish',{...notice,canonical_input_sha256:'f'.repeat(64)},'codex'),{code:'WRITE_CALL_MISMATCH'});
+});
 async function until(fn,timeout=120000){const end=Date.now()+timeout;while(Date.now()<end){if(await fn())return;await sleep(100);}throw Error('COMPLETION_DELIVERY_TIMEOUT');}
 
 test('durable Post survives inspect outage and lost ack, then Temporal retries without another user turn',{timeout:240000},async t=>{

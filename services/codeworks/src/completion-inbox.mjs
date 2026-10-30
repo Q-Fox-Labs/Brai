@@ -3,7 +3,7 @@
 import {createHash} from 'node:crypto';
 import {canonical,validate} from './contracts.mjs';
 import {Fault} from './errors.mjs';
-import {createWriteAdmission} from './write-admission.mjs';
+import {createWriteAdmission,terminalBashEvidence} from './write-admission.mjs';
 import {createGit} from './git.mjs';
 import {scanNotices,ackNotice} from './write-notice.mjs';
 
@@ -19,7 +19,7 @@ export function validatePostCompletion(call,notice,executorId) {
   const inputMatches=rewrittenMatches||(notStarted&&!!call?.original_input_sha256&&call.original_input_sha256===notice.canonical_input_sha256);
   const states=notStarted?['preparing','denied_pending','in_flight','uncertain','finished']:['in_flight','uncertain','finished'];
   if(!same||call.executor_id!==executorId||(!notStarted&&!call.admitted_at)||!inputMatches||!states.includes(call.state)||(notice.execution_status==='not_started'&&!notStarted))throw new Fault('WRITE_CALL_MISMATCH');
-  if(call.state==='finished'&&call.tool_result?.outcome!==notice.outcome)throw new Fault('WRITE_CALL_MISMATCH');
+  if(call.state==='finished'&&call.tool_result?.outcome!==notice.outcome&&!terminalBashEvidence(call,notice.execution_status??'completed'))throw new Fault('WRITE_CALL_MISMATCH');
 }
 
 /** Commit подтверждения не зависит от доступности Git и не снимает учёт писателя. */
@@ -47,6 +47,10 @@ export function createCompletionInbox(pool) {
       await db.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1 FOR UPDATE',[initial.workspace_id]);
       const call=(await db.query('SELECT * FROM codeworks.write_calls WHERE id=$1 FOR UPDATE',[initial.id])).rows[0];
       validatePostCompletion(call,notification,executorId);
+      // AIDEV-NOTE: Generic Bash Post может не содержать exit code; подтверждённый API/owner исход сохраняем.
+      if(terminalBashEvidence(call,notification.execution_status)){
+        await db.query('COMMIT');return {write_call_id:call.id,state:'finished',changed:!!call.tool_result?.changed};
+      }
       const old=(await db.query('SELECT * FROM codeworks.write_completions WHERE write_call_id=$1 FOR UPDATE',[call.id])).rows[0];
       if(old&&(old.receipt_sha256!==receipt||canonical(old.notification)!==canonical(notification)))throw new Fault('WRITE_CALL_MISMATCH');
       if(!old)await db.query('INSERT INTO codeworks.write_completions(write_call_id,receipt_sha256,notification) VALUES($1,$2,$3::jsonb)',[call.id,receipt,JSON.stringify(notification)]);
