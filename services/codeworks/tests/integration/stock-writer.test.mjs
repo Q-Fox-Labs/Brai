@@ -13,6 +13,7 @@ import {stockCodex} from './stock-codex.mjs';
 import {runHook} from '../../src/hook.mjs';
 import {createActivities,deliverCommands} from '../../src/temporal.mjs';
 import {readExecutorItems} from '../../src/executor-completion.mjs';
+import {createGit} from '../../src/git.mjs';
 
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function until(fn,timeout=180000){const end=Date.now()+timeout;while(Date.now()<end){if(await fn())return;await sleep(100);}throw Error('STOCK_WRITER_TIMEOUT');}
@@ -51,7 +52,16 @@ test('stock nested tools write outside native roots; missing Post recovers and c
   assert.equal(await readFile(w.path+'/new.txt','utf8'),'actual stock write\n');assert.equal(await stat(p.repo_path+'/new.txt').catch(()=>null),null);
   assert.equal(call.state,'in_flight','no Post exists in this fixture');
   const observed=await readExecutorItems(socket,thread,written);assert.ok(observed.data.some(e=>e.item.id===call.tool_use_id&&e.item.status==='completed'));
-  const reconciler=`codeworks/stock-fixture/${p.id}/reconciler`;workflows.push(reconciler);await client.workflow.start('codeworksProjectReconciler',{workflowId:reconciler,taskQueue:queue,args:[{projectId:p.id}]});
+  await f.h.call('write.stop',{project_id:p.id,session_id:thread,turn_id:written,event:'Stop'},'codex');
+  assert.equal((await f.h.call('lifecycle.status',{project_id:p.id,workspace_id:w.id},'codex')).workflow.blocked_reason,'WRITER_OUTCOME_UNKNOWN');
+  const reconciler=`codeworks/stock-fixture/${p.id}/reconciler`;workflows.push(reconciler);
+  process.env.CODEWORKS_EXECUTOR_SOCKET=socket+'.unavailable';
+  const reconciliation=await client.workflow.start('codeworksProjectReconciler',{workflowId:reconciler,taskQueue:queue,args:[{projectId:p.id}]});
+  await until(async()=>(await reconciliation.fetchHistory()).events.some(e=>e.activityTaskCompletedEventAttributes));
+  assert.equal((await f.app.query('SELECT state FROM codeworks.write_calls WHERE id=$1',[call.id])).rows[0].state,'uncertain','unavailable API cannot finish a writer');
+  worker.shutdown();await running;
+  process.env.CODEWORKS_EXECUTOR_SOCKET=socket;
+  worker=await Worker.create({connection:native,namespace:process.env.CODEWORKS_TEMPORAL_NAMESPACE,taskQueue:queue,workflowBundle:bundle,activities:createActivities(f.app,{allowedRepositories:[p.repo_path],completionSpoolDirectory:spool})});running=worker.run();
   await until(async()=>(await f.app.query('SELECT state FROM codeworks.write_calls WHERE id=$1',[call.id])).rows[0].state==='finished');
   assert.equal((await f.app.query('SELECT activation_state FROM codeworks.workspaces WHERE id=$1',[w.id])).rows[0].activation_state,'active');
   // Тестовый файл явно отбрасывается обратным настоящим Git patch; полезные пользовательские изменения не затрагиваются.
@@ -60,6 +70,10 @@ test('stock nested tools write outside native roots; missing Post recovers and c
   await f.h.call('workspace.cancel',{project_id:p.id,workspace_id:w.id,request_key:'cancel-stock',reason:'Disposable fixture complete'},'codex');
   await until(async()=>(await f.h.call('lifecycle.status',{project_id:p.id,workspace_id:w.id},'codex')).workflow.status==='completed');
   const final=await f.h.call('lifecycle.status',{project_id:p.id,workspace_id:w.id},'codex');assert.equal(final.cleanup.state,'done');assert.equal(await stat(w.path).catch(()=>null),null);
+  await until(async()=>(await client.workflow.getHandle(workflows[0]).describe()).status.name==='COMPLETED');
+  const zero=await createGit().inspectResources(p,w);
+  for(const name of ['branch','ownership','tracking','remote'])assert.equal(zero[name].oid,null,name+' remains');
+  assert.equal(zero.worktree.registered,false);assert.equal(zero.worktree.pathExists,false);
   assert.equal((await f.app.query('SELECT removed_at FROM codeworks.workspaces WHERE id=$1',[protectedArea.workspace_id])).rows[0].removed_at,null);
   assert.ok(await stat(protectedArea.path));
 });

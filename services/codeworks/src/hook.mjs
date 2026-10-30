@@ -8,7 +8,7 @@ import {createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import {connectClient, loadClientConfig} from './client.mjs';
 import {validateSpool,saveNotice,ackNotice,rawHash,canonicalHash} from './write-notice.mjs';
-import {gitPatch} from './git-patch.mjs';
+import {gitPatch,gitApplyDirectory} from './git-patch.mjs';
 
 const MAX_TOOL_INPUT_BYTES=8*1024*1024;
 const inputFits=(event,input)=>Buffer.byteLength(JSON.stringify(input))<=MAX_TOOL_INPUT_BYTES && Buffer.byteLength(JSON.stringify({...event,tool_input:input}))<=MAX_TOOL_INPUT_BYTES;
@@ -356,6 +356,8 @@ export function writePaths(event, resolveTarget = resolved) {
     const command = input?.command ?? input?.cmd;
     const patch = gitPatch(command);
     if (patch) return patch.targets.map(p=>resolveTarget(p,cwd));
+    const patchDirectory=gitApplyDirectory(command,cwd);
+    if(patchDirectory)return [resolveTarget(patchDirectory,cwd)];
     return typeof command === 'string' ? shellPaths(command, cwd) : [];
   }
   return [];

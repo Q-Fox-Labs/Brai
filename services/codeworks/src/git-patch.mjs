@@ -2,8 +2,17 @@
 // ABOUTME: Не исполняет команды; разрешает только относительные цели без переименований и ссылок.
 import path from 'node:path';
 
+/** Узнаёт попытку git apply для отказа до записи, даже когда сам патч не поддержан. */
+export function gitApplyDirectory(command,cwd) {
+  if(typeof command!=='string')return null;
+  const match=/^(?:RTK_DISABLED=1 )?git(?: -C ('[^'\n]+'|\/[A-Za-z0-9_./-]+))? apply(?:\s|$)/.exec(command);
+  if(!match)return null;
+  const directory=match[1]?.startsWith("'")?match[1].slice(1,-1):match[1];
+  return directory??cwd;
+}
+
 /** Возвращает проверенные цели и замену только каталога; остальные байты сохраняются. */
-export function gitPatch(command, cwd) {
+export function gitPatch(command) {
   if (typeof command !== 'string') return null;
   const match = /^(?:RTK_DISABLED=1 )?git -C ('[^'\n]+'|\/[A-Za-z0-9_./-]+) apply --whitespace=nowarn <<'([A-Z][A-Z0-9_]{0,63})'\n([\s\S]*)\n\2\n?$/.exec(command);
   if (!match) return null;

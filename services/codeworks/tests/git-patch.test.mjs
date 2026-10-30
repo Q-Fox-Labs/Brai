@@ -29,3 +29,10 @@ test('unsupported native first edit creates no area and admits no unknown writer
   const result=await runHook({hook_event_name:'PreToolUse',tool_name:'apply_patch',session_id:'s',turn_id:'t',tool_use_id:'nested',cwd:'/test/source',tool_input:{command:'*** Begin Patch\n*** Add File: src/a\n+x\n*** End Patch'}},{config:{native_file_writes:false,projects:[{id:'p',repo_path:'/test/source',workspace_root:'/test/areas'}]},connect});
   assert.equal(result.hookSpecificOutput.permissionDecision,'deny');assert.match(result.hookSpecificOutput.additionalContext,/WORKSPACE_WRITE_TRANSPORT_REQUIRED/);
 });
+
+test('unsupported git apply cannot silently write to the source checkout',async()=>{
+  for(const cmd of [command('/test/source')+'touch /tmp/else',command('/test/source').replaceAll('src/a.txt','../escape'),'git apply --unsafe-paths /tmp/unknown.patch']){
+    const result=await runHook({hook_event_name:'PreToolUse',tool_name:'Bash',session_id:'s',turn_id:'t',tool_use_id:'u',cwd:'/test/source',tool_input:{command:cmd}},{config:{native_file_writes:false,projects:[{id:'p',repo_path:'/test/source',workspace_root:'/test/areas'}]},connect:()=>assert.fail('unsupported patch contacted backend')});
+    assert.equal(result.hookSpecificOutput.permissionDecision,'deny');
+  }
+});
