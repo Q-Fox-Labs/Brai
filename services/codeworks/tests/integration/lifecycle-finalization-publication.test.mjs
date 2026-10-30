@@ -18,6 +18,7 @@ import {createActivities,deliverCommands} from '../../src/temporal.mjs';
 import {reconcileProjectLedger} from '../../src/reconciler.mjs';
 import {acquireTarget,releaseTarget} from '../../src/lifecycle.mjs';
 import {createCodeIndex} from '../../src/code-index.mjs';
+import {processProjectCompletions} from '../../src/completion-inbox.mjs';
 
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function until(check,timeout=60000){const end=Date.now()+timeout;while(Date.now()<end){if(await check())return;await sleep(100);}throw Error('PUBLICATION_CLEANUP_TIMEOUT');}
@@ -37,7 +38,7 @@ test('explicit cleanup preserves failed A after a later verified B contains its 
   const w=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[prepared.workspace_id])).rows[0];
   const write={project_id:project.id,workspace_id:w.id,workspace_key:w.workspace_key,session_id:'publication-session',turn_id:'turn',tool_use_id:'write',tool_name:'apply_patch',payload_sha256:'a'.repeat(64),targets:['hello.txt'],request_key:'publication-write'};
   const call=await handlers.call('write.begin',write,'codex');await handlers.call('write.admit',{project_id:project.id,write_call_id:call.write_call_id,rewritten_sha256:'b'.repeat(64)},'codex');
-  await writeFile(w.path+'/hello.txt','published result\n');await handlers.call('write.finish',{project_id:project.id,session_id:write.session_id,turn_id:write.turn_id,tool_use_id:write.tool_use_id,outcome:'success'},'codex');
+  await writeFile(w.path+'/hello.txt','published result\n');await handlers.call('write.finish',{project_id:project.id,session_id:write.session_id,turn_id:write.turn_id,tool_use_id:write.tool_use_id,tool_name:'apply_patch',input_sha256:'b'.repeat(64),canonical_input_sha256:'b'.repeat(64),outcome:'success'},'codex');await processProjectCompletions(f.app,project.id,{allowedRepositories:[project.repo_path],git});
   const local=(...args)=>command('git',['-C',w.path,...args]),repo=(...args)=>command('git',['-C',project.repo_path,...args]);
   await local('add','hello.txt');await local('commit','-m','accepted result');const accepted=(await local('rev-parse','HEAD')).stdout;
   await repo('push','origin',w.branch);await repo('merge','--ff-only',w.branch);await repo('commit','--allow-empty','-m','later delivery');const installed=(await repo('rev-parse','HEAD')).stdout;await repo('push','origin','dev');
@@ -103,7 +104,7 @@ test('explicit cleanup preserves failed A after a later verified B contains its 
   const uncertain={...write,turn_id:'later',tool_use_id:'uncertain',request_key:'uncertain-writer'};
   const u=await handlers.call('write.begin',uncertain,'codex');await handlers.call('write.admit',{project_id:project.id,write_call_id:u.write_call_id,rewritten_sha256:'d'.repeat(64)},'codex');
   await handlers.call('write.stop',{project_id:project.id,session_id:uncertain.session_id,turn_id:uncertain.turn_id,event:'Stop'},'codex');await assert.rejects(cleanup('unknown-writer'),{code:'CONFLICT'});
-  await handlers.call('write.finish',{project_id:project.id,session_id:uncertain.session_id,turn_id:uncertain.turn_id,tool_use_id:uncertain.tool_use_id,outcome:'success'},'codex');
+  await handlers.call('write.finish',{project_id:project.id,session_id:uncertain.session_id,turn_id:uncertain.turn_id,tool_use_id:uncertain.tool_use_id,tool_name:'apply_patch',input_sha256:'d'.repeat(64),canonical_input_sha256:'d'.repeat(64),outcome:'success'},'codex');await processProjectCompletions(f.app,project.id,{allowedRepositories:[project.repo_path],git});
   const address=process.env.CODEWORKS_TEMPORAL_ADDRESS,namespace=process.env.CODEWORKS_TEMPORAL_NAMESPACE,taskQueue='codeworks-publication-'+randomUUID();
   const holder=randomUUID(),challenger=randomUUID();
   for(const id of [holder,challenger])await f.owner.query("INSERT INTO codeworks.operations(id,project_id,executor_id,kind,status,step,request,archived) VALUES($1,$2,'codeworks_owner','rollout','succeeded','fixture','{}',true)",[id,project.id]);

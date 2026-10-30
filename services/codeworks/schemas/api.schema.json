@@ -1462,6 +1462,14 @@
           "maxLength": 255,
           "pattern": "^[^\\u0000-\\u001f]+$"
         },
+        "original_input_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "executor_thread_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
         "payload_sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
@@ -1517,6 +1525,10 @@
         "rewritten_sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
+        },
+        "completion_input_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         }
       },
       "required": [
@@ -1553,6 +1565,23 @@
           "maxLength": 255,
           "pattern": "^[^\\u0000-\\u001f]+$"
         },
+        "tool_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f]+$"
+        },
+        "input_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "canonical_input_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "execution_status": {
+          "enum": ["completed", "not_started"]
+        },
         "outcome": {
           "enum": [
             "success",
@@ -1565,8 +1594,13 @@
         "session_id",
         "turn_id",
         "tool_use_id",
+        "tool_name",
+        "input_sha256",
+        "canonical_input_sha256",
         "outcome"
       ],
+      "if": {"required": ["execution_status"], "properties": {"execution_status": {"const": "not_started"}}},
+      "then": {"properties": {"outcome": {"const": "error"}}},
       "additionalProperties": false
     },
     "write.stop": {
@@ -1710,11 +1744,15 @@
       "type": "object",
       "properties": {
         "write_call_id": {
-          "type": "string",
+          "type": ["string", "null"],
           "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
         },
         "state": {
-          "const": "finished"
+          "enum": ["pending", "finished", "not_started"]
+        },
+        "receipt_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
         },
         "changed": {
           "type": "boolean"
@@ -1722,8 +1760,13 @@
       },
       "required": [
         "write_call_id",
-        "state",
-        "changed"
+        "state"
+      ],
+      "if": {"properties": {"state": {"const": "finished"}}},
+      "then": {"required": ["changed"]},
+      "else": {"not": {"required": ["changed"]}},
+      "allOf": [
+        {"if": {"properties": {"state": {"const": "not_started"}}}, "then": {"properties": {"write_call_id": {"type": "null"}}, "required": ["receipt_sha256"]}, "else": {"properties": {"write_call_id": {"type": "string"}}}}
       ],
       "additionalProperties": false
     },

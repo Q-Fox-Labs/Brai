@@ -5,6 +5,7 @@ import path from 'node:path';
 import { canonical, methods, internalMethods, validate, outputNames, schema } from './contracts.mjs';
 import { Fault, safeFault } from './errors.mjs';
 import {createWriteAdmission} from './write-admission.mjs';
+import {createCompletionInbox} from './completion-inbox.mjs';
 import {createFlowGit} from './git-flow.mjs';
 import {verifyPublication,recheckPublication} from './publication.mjs';
 const dto=value=>JSON.parse(JSON.stringify(value));
@@ -36,7 +37,7 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
           return {project:config,workspace:w};
         }),
       });
-      value=await admission[method.split('.')[1]](args,executorId);
+      value=method==='write.finish'?await createCompletionInbox(store.pool).receive(args,executorId):await admission[method.split('.')[1]](args,executorId);
     } else if(method==='project.register') {
       if(executorId!==adminExecutor||!allowedRepositories.includes(args.project.repo_path))throw new Fault('FORBIDDEN');
       await git.validateProject(args.project);
@@ -61,7 +62,8 @@ export function createHandlers(store,git,{adminExecutor='codeworks_admin',allowe
           const lifecycle=await db.lifecycle(w.id);
           const obligation=await db.cleanupObligation?.(w.id);
           const closing=obligation&&obligation.state!=='done';
-          return {workspace_id:w.id,task_status:closing?'closing':w.removed_at?'removed':lifecycle?.lifecycle??'historical',outcome:lifecycle?.outcome??null,workflow:lifecycle?{id:lifecycle.workflow_id,status:lifecycle.state,generation:Number(lifecycle.generation),executor_state:lifecycle.state!=='completed'&&Date.now()-Math.max(new Date(lifecycle.updated_at).getTime(),new Date(obligation?.updated_at??0).getTime())>120000?'unavailable':lifecycle.executor_state,last_confirmed_stage:closing?'cleanup:'+obligation.step:lifecycle.last_stage,blocked_reason:closing?obligation.blocker:lifecycle.blocked_reason}:null,cleanup:obligation?{id:obligation.id,state:obligation.state,step:obligation.step,outcome:obligation.outcome,owner_workflow_id:obligation.owner_workflow_id,epoch:Number(obligation.epoch),next_attempt_at:obligation.next_attempt_at,blocker:obligation.blocker}:null,blockers:await db.blockers(w.id)};
+          const writerBlocked=await db.uncertainWriter?.(w.id);
+          return {workspace_id:w.id,task_status:closing?'closing':w.removed_at?'removed':lifecycle?.lifecycle??'historical',outcome:lifecycle?.outcome??null,workflow:lifecycle?{id:lifecycle.workflow_id,status:lifecycle.state,generation:Number(lifecycle.generation),executor_state:lifecycle.state!=='completed'&&Date.now()-Math.max(new Date(lifecycle.updated_at).getTime(),new Date(obligation?.updated_at??0).getTime())>120000?'unavailable':lifecycle.executor_state,last_confirmed_stage:closing?'cleanup:'+obligation.step:lifecycle.last_stage,blocked_reason:closing?obligation.blocker:writerBlocked?'WRITER_OUTCOME_UNKNOWN':lifecycle.blocked_reason}:null,cleanup:obligation?{id:obligation.id,state:obligation.state,step:obligation.step,outcome:obligation.outcome,owner_workflow_id:obligation.owner_workflow_id,epoch:Number(obligation.epoch),next_attempt_at:obligation.next_attempt_at,blocker:obligation.blocker}:null,blockers:await db.blockers(w.id)};
         }
         if(!w){
           if(operation)return {operation:operationDTO(operation)};

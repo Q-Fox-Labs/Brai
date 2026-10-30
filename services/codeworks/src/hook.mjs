@@ -7,7 +7,90 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import {connectClient, loadClientConfig} from './client.mjs';
-import {readJSON} from './cli.mjs';
+import {validateSpool,saveNotice,ackNotice,rawHash,canonicalHash} from './write-notice.mjs';
+import {gitPatch,gitApplyDirectory} from './git-patch.mjs';
+
+const MAX_TOOL_INPUT_BYTES=8*1024*1024;
+const inputFits=(event,input)=>Buffer.byteLength(JSON.stringify(input))<=MAX_TOOL_INPUT_BYTES && Buffer.byteLength(JSON.stringify({...event,tool_input:input}))<=MAX_TOOL_INPUT_BYTES;
+// AIDEV-NOTE: Это только адрес для чтения; принадлежность дочернего потока проверяет API, а не имя файла.
+function executorThread(event){const id=/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(path.basename(event.transcript_path??''))?.[1];return id?{executor_thread_id:id}:{};}
+
+/** Читает потоковый hook JSON; большой tool_response проверяет и не сохраняет. */
+export async function readHookJSON(input) {
+  const decoder=new TextDecoder('utf-8',{fatal:true}), max=16*1024*1024, frames=[];
+  let output='', size=0, mode='idle', token='', capture=false, captureOverflow=false, captureKey=false, escape=false, unicode='', literal='', number='', root='value', skip=false, skipDepth=0, response=null, responseType=null;
+  function top(){return frames.at(-1);}
+  function expectingValue(){const f=top();return f?f.kind==='object'?f.state==='value':['value','valueOrEnd'].includes(f.state):root==='value';}
+  function append(c){if(skip)return;size+=Buffer.byteLength(c);if(size>max)throw Error('HOOK_INPUT_INVALID_OR_OVERSIZED');output+=c;}
+  function responseField(){const f=top();return skip && frames.length===skipDepth+1 && f?.kind==='object' && f.state==='value' ? f.key : null;}
+  function begin(){
+    if(!expectingValue())throw Error('INVALID_JSON');
+    const f=top();if(!skip && frames.length===1 && f?.kind==='object' && f.key==='tool_response'){
+      skip=true;skipDepth=frames.length;response=null;responseType=null;output+='null';size+=4;
+    }
+  }
+  function valueDone(value,primitive=true){
+    const f=top();
+    if(skip && frames.length===skipDepth+1 && f?.kind==='object' && f.state==='value' && ['isError','error','exit_code','status','session_id','sessionId','execution_status','terminal'].includes(f.key)) {
+      if(responseType==='object')response[f.key]=primitive?value:true;
+    }
+    if(f){if(f.kind==='object' && f.state==='value')f.state='commaOrEnd';else if(f.kind==='array'&&['value','valueOrEnd'].includes(f.state))f.state='commaOrEnd';else throw Error('INVALID_JSON');}
+    else {if(root!=='value')throw Error('INVALID_JSON');root='done';}
+    if(skip && frames.length===skipDepth){skip=false;}
+  }
+  function finishString(){
+    let value;
+    if(capture){if(captureOverflow)value='x';else try{value=JSON.parse(token);}catch{throw Error('INVALID_JSON');}}
+    const f=top();
+    if(f?.kind==='object' && ['key','keyOrEnd'].includes(f.state)){if(f.seen){if(f.seen.has(value))throw Error('INVALID_JSON');f.seen.add(value);}f.key=value;f.state='colon';}
+    else {if(skip&&frames.length===skipDepth&&responseType==='string')response='';valueDone(value);}
+    token='';capture=false;
+  }
+  function decoded(c){}
+  function emitScalar(value){if(skip&&frames.length===skipDepth&&responseType===null){responseType='scalar';response=value;}valueDone(value);}
+  function consume(c){
+    if(mode==='string'){
+      append(c);
+      if(capture&&!captureOverflow){token+=c;if(token.length>2048){if(captureKey&&!skip)throw Error('HOOK_INPUT_INVALID_OR_OVERSIZED');captureOverflow=true;token='';}}
+      if(unicode){if(!/[0-9a-fA-F]/.test(c))throw Error('INVALID_JSON');unicode+=c;if(unicode.length===5){decoded(String.fromCharCode(parseInt(unicode.slice(1),16)));unicode='';escape=false;}return;}
+      if(escape){if(c==='u'){unicode='u';return;}const map={'"':'"','\\':'\\','/':'/','b':'\b','f':'\f','n':'\n','r':'\r','t':'\t'};if(!Object.hasOwn(map,c))throw Error('INVALID_JSON');decoded(map[c]);escape=false;return;}
+      if(c==='\\'){escape=true;return;}if(c==='"'){mode='idle';finishString();return;}if(c.charCodeAt(0)<0x20)throw Error('INVALID_JSON');decoded(c);return;
+    }
+    if(mode==='number'){
+      if(/[0-9eE+.-]/.test(c)){append(c);number+=c;if(number.length>1024)throw Error('INVALID_JSON');return;}
+      if(!/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/.test(number))throw Error('INVALID_JSON');
+      mode='idle';emitScalar(Number(number));number='';consume(c);return;
+    }
+    if(mode==='literal'){
+      append(c);literal+=c;const candidates=['true','false','null'];if(!candidates.some(x=>x.startsWith(literal)))throw Error('INVALID_JSON');
+      if(candidates.includes(literal)){mode='idle';emitScalar(JSON.parse(literal));literal='';}return;
+    }
+    if(/[ \t\r\n]/.test(c)){append(c);return;}
+    if(c==='"') {const f=top();if(!(f?.kind==='object'&&['key','keyOrEnd'].includes(f.state)))begin();append(c);startStringNoBegin();return;}
+    if(c==='{' || c==='['){begin();append(c);if(skip&&frames.length===skipDepth&&responseType===null){responseType=c==='{'?'object':'array';response=c==='{'?{}:[];}if(frames.length>=64)throw Error('INVALID_JSON');frames.push({kind:c==='{'?'object':'array',state:c==='{'?'keyOrEnd':'valueOrEnd',key:null,seen:skip?null:new Set()});return;}
+    if(c==='}' || c===']'){
+      const f=top();if(!f || (c==='}'?f.kind!=='object'||!['keyOrEnd','commaOrEnd'].includes(f.state):f.kind!=='array'||!['valueOrEnd','commaOrEnd'].includes(f.state)))throw Error('INVALID_JSON');
+      append(c);frames.pop();const isResponse=skip&&frames.length===skipDepth;valueDone(isResponse?response:true,false);return;
+    }
+    if(c===':'){const f=top();if(f?.kind!=='object'||f.state!=='colon')throw Error('INVALID_JSON');append(c);f.state='value';return;}
+    if(c===','){const f=top();if(!f||f.state!=='commaOrEnd')throw Error('INVALID_JSON');append(c);f.state=f.kind==='object'?'key':'value';return;}
+    if(c==='-'||/[0-9]/.test(c)){begin();append(c);mode='number';number=c;return;}
+    if('tfn'.includes(c)){begin();append(c);mode='literal';literal=c;return;}
+    throw Error('INVALID_JSON');
+  }
+  function startStringNoBegin(){
+    const f=top(),isKey=f?.kind==='object'&&['key','keyOrEnd'].includes(f.state);
+    if(!isKey && skip&&frames.length===skipDepth&&responseType===null)responseType='string';
+    capture=!!isKey||!!responseField();captureKey=!!isKey;captureOverflow=false;token=capture?'"':'';mode='string';escape=false;unicode='';
+  }
+  try{
+    for await(const chunk of input){const bytes=Buffer.isBuffer(chunk)?chunk:Buffer.from(chunk);const text=decoder.decode(bytes,{stream:true});for(const c of text)consume(c);}
+    for(const c of decoder.decode())consume(c);
+    if(mode==='number'){if(!/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/.test(number))throw Error('INVALID_JSON');mode='idle';emitScalar(Number(number));}
+    if(mode!=='idle'||frames.length||root!=='done'||skip)throw Error('INVALID_JSON');
+    const result=JSON.parse(output);if(responseType!==null)result.tool_response=response;return result;
+  }catch{throw Error('HOOK_INPUT_INVALID_OR_OVERSIZED');}
+}
 
 function inside(root, candidate) { return candidate === root || candidate.startsWith(root + path.sep); }
 
@@ -107,8 +190,15 @@ function readOnlyShell(command) {
   const tokens = shellTokens(command);
   if (!tokens.length || tokens.some(t => t.operator || t.dynamic)) return false;
   const words = tokens.map(t=>t.word);
+  if(words[0]==='RTK_DISABLED=1') words.shift();
   if (words[0] === 'rtk' && words[1] === 'proxy') words.splice(0,2);
+  else if(words[0]==='rtk' && ['git','ls','rg','grep'].includes(words[1])) {words.shift();if(words[0]==='grep') words[0]='rg';}
+  else if(words[0]==='rtk' && words[1]==='read') return words.length>2 && words.slice(2).every(w=>!w.startsWith('-')&&w!=='-');
+  else if(words[0]==='rtk' && words[1]==='find') {
+    let hasPath=false;for(let i=2;i<words.length;i++){const w=words[i];if(w==='-name'||w==='-iname'){if(!words[++i]||words[i].startsWith('-'))return false;}else if(w==='-type'){if(!['f','d','l'].includes(words[++i]))return false;}else if(w==='-maxdepth'||w==='-mindepth'){if(!/^[0-9]+$/.test(words[++i]??''))return false;}else if(w==='-print'){}else if(w.startsWith('-')||w==='!')return false;else hasPath=true;}return hasPath;
+  }
   if (words[0] === 'git') {
+    if(words[1]==='-C' && path.isAbsolute(words[2]??''))words.splice(1,2);
     const action=words[1], args=words.slice(2);
     if (action==='status') return args.every(w=>['--short','-s','--porcelain','--porcelain=v1','--branch','-b','--untracked-files=no'].includes(w));
     if (action==='diff') return args.every(w=>['--stat','--check','--name-only','--no-ext-diff','--no-textconv'].includes(w));
@@ -130,8 +220,11 @@ function synchronousGit(command) {
   const tokens=shellTokens(command);
   if (!tokens.length || tokens.some(t=>t.operator || t.dynamic)) return false;
   const words=tokens.map(t=>t.word);
+  if(words[0]==='RTK_DISABLED=1') words.shift();
   if (words[0]==='rtk' && words[1]==='proxy') words.splice(0,2);
+  else if(words[0]==='rtk' && words[1]==='git')words.shift();
   if (words.shift()!=='git') return false;
+  if(words[0]==='-C' && path.isAbsolute(words[1]??''))words.splice(0,2);
   const action=words.shift();
   if (action==='add') return words.length>0 && words.every(w=>!w.startsWith('-') || ['-A','--all','-u','--update','--'].includes(w));
   if (action==='push') return words.length>0 && words.every(w=>!w.startsWith('-') || ['-u','--set-upstream','--'].includes(w));
@@ -150,6 +243,7 @@ function synchronousGit(command) {
 /** Распознаёт ограниченный набор foreground argv; неизвестные и фоновые команды возвращают false. */
 export function foregroundCommand(command) {
   if (typeof command !== 'string') return false;
+  if (gitPatch(command)) return true;
   const tokens=shellTokens(command);
   if (!tokens.length || tokens.some(t=>t.dynamic)) return false;
   let segment=[];
@@ -158,6 +252,8 @@ export function foregroundCommand(command) {
     const words=segment.map(t=>t.word);
     const literal=words.map(w=>"'"+w.replaceAll("'", "'\\''")+"'").join(' ');
     if (readOnlyShell(literal) || synchronousGit(literal)) return true;
+    if(words[0]==='cd')return words.length===2&&path.isAbsolute(words[1]);
+    if(words[0]==='RTK_DISABLED=1') words.shift();
     if (words[0]==='rm') {
       let options=true, operands=0;
       for (const word of words.slice(1)) {
@@ -179,7 +275,7 @@ export function foregroundCommand(command) {
     if (words[0]==='head' || words[0]==='tail') return words.slice(1).every(w=>!w.startsWith('-') || /^-(?:n)?[0-9]+$/.test(w) || w==='-n');
     if (words[0]==='sed') return words[1]==='-n' && /^\d+(?:,\d+)?p$/.test(words[2]??'') && words.slice(3).every(w=>!w.startsWith('-'));
     if (words[0]!=='node') return false;
-    if (words[1]==='--test') return words.slice(2).every(w=>!w.startsWith('-') || /^--test-(?:reporter|name-pattern|concurrency)=.+$/.test(w));
+    if (words[1]==='--test') return words.slice(2).every(w=>!w.startsWith('-') || (/^--test-(?:reporter|name-pattern|concurrency)=.+$/.test(w) || /^--test-isolation=(?:none|process)$/.test(w)));
     if (!/^(?:\.\/)?services\/codeworks\/components\/cli\.mjs$/.test(words[1]??'') || !['build','check','package','run','plan','validate'].includes(words[2])) return false;
     return words.slice(3).every(w=>!w.startsWith('-') || ['--base','--root','--no-deps'].includes(w));
   };
@@ -205,13 +301,13 @@ function completedShell(event) {
   const name=event.tool_name?.split('.').at(-1), input=event.tool_input, response=event.tool_response;
   if (input?.run_in_background || input?.background || input?.async) return false;
   if (response && typeof response==='object') return !response.session_id && !response.sessionId && !['running','pending'].includes(response.status) && (name==='Bash' || Number.isInteger(response.exit_code));
-  if (typeof response!=='string' || /(?:session[_ ]id|process running|still running)/i.test(response)) return false;
-  // AIDEV-NOTE: Native Bash PostToolUse подтверждает ответ инструмента; его stdout не является exit code.
-  return name==='Bash' || /^Process exited with code\s*:?\s*\d+\s*$/im.test(response.split(/\nOutput:\s*\n/)[0]);
+  // AIDEV-NOTE: Native Bash Post передаётся только после завершения процесса; текст stdout не является сигналом состояния.
+  return typeof response==='string' && name==='Bash';
 }
 
 function shellPaths(command, cwd) {
   const found = [];
+  let explicitCwd=false;
   let segment = [];
   const add = token => { if (token && !token.dynamic && token.word && token.word !== '-') found.push(resolved(token.word, cwd)); };
   const flush = () => {
@@ -227,7 +323,9 @@ function shellPaths(command, cwd) {
     const first = words.shift();
     if (!first || first.dynamic) return;
     const name = path.basename(first.word);
-    if (name === 'cd' && words.length === 1 && !words[0].dynamic) { cwd = resolved(words[0].word, cwd); return; }
+    if (name === 'cd' && words.length === 1 && !words[0].dynamic) { cwd = resolved(words[0].word, cwd); explicitCwd=true; return; }
+    if(name==='git' && words[0]?.word==='-C' && !words[1]?.dynamic && path.isAbsolute(words[1]?.word??'') && ['add','commit','push'].includes(words[2]?.word)){add(words[1]);return;}
+    if(explicitCwd&&((name==='git'&&['add','commit','push'].includes(words[0]?.word))||(name==='node'&&(words[0]?.word==='--test'||/^(?:\.\/)?services\/codeworks\/components\/cli\.mjs$/.test(words[0]?.word??''))))){found.push(resolved(cwd,'/'));return;}
     const operands = words.filter(token => !token.word.startsWith('-'));
     if (['touch', 'rm', 'rmdir', 'mkdir', 'tee'].includes(name)) operands.forEach(add);
     if (['mv'].includes(name)) operands.forEach(add);
@@ -264,6 +362,10 @@ export function writePaths(event, resolveTarget = resolved) {
   }
   if (name === 'Bash' || name === 'exec_command') {
     const command = input?.command ?? input?.cmd;
+    const patch = gitPatch(command);
+    if (patch) return patch.targets.map(p=>resolveTarget(p,cwd));
+    const patchDirectory=gitApplyDirectory(command,cwd);
+    if(patchDirectory)return [resolveTarget(patchDirectory,cwd)];
     return typeof command === 'string' ? shellPaths(command, cwd) : [];
   }
   return [];
@@ -271,7 +373,7 @@ export function writePaths(event, resolveTarget = resolved) {
 
 function denied(context, projects) {
   const scope = JSON.stringify(projects.map(({id, repo_path}) => ({id, repo_path})));
-  return {hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `Запись в основную копию требует рабочей области Codeworks. Защищённые проекты: ${scope}.`, additionalContext: context}};
+  return {hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `${context} Защищённые проекты: ${scope}.`, additionalContext: context}};
 }
 
 const safeHookCodes=new Set(['FORBIDDEN','CONFLICT','WRITE_CALL_MISMATCH','CLEANUP_ALREADY_STARTED','INVALID_ARGUMENT','INTERNAL','NOT_FOUND','WORKSPACE_WRITE_REQUIRED','WRITER_OUTCOME_UNKNOWN','PREPARE_PENDING','BUSY']);
@@ -283,7 +385,7 @@ function hookFailure(error) {
 /** Обрабатывает native write и завершения; не исполняет исходный инструмент. */
 export async function runHook(event, options = {}) {
   try { return await runHookInner(event, options); }
-  catch { return denied('Невозможно безопасно определить цель записи; проверьте доступ к пути.', []); }
+  catch { return event?.hook_event_name==='PostToolUse' ? {systemMessage:'POST_DELIVERY_UNAVAILABLE: завершение не сохранено; область удерживается для сверки.'} : denied('Невозможно безопасно определить цель записи; проверьте доступ к пути.', []); }
 }
 async function runHookInner(event, {env = process.env, config, connect = connectClient, wait = ms => new Promise(resolve => setTimeout(resolve, ms)), polls = 8, resolveTarget = resolved} = {}) {
   if (!config) {
@@ -293,28 +395,85 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   }
   const projects = config.projects ?? [];
   const eventName = event.hook_event_name ?? 'PreToolUse';
+  const shellName=['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1));
+  if(shellName && (event.tool_input?.cwd_unavailable===true || (event.tool_input?.cwd_unavailable===false && (typeof event.tool_input?.cwd!=='string' || !path.isAbsolute(event.tool_input.cwd))))) {
+    if(eventName==='PreToolUse') return denied('Рабочий каталог shell недоступен; запись отклонена.',projects);
+    if(eventName==='PostToolUse') return {systemMessage:'POST_DELIVERY_UNAVAILABLE: рабочий каталог shell недоступен.'};
+  }
   if (['PostToolUse', 'Stop', 'SubagentStop', 'Interrupt', 'SessionEnd'].includes(eventName)) {
-    if (!event.session_id || !event.turn_id || (eventName === 'PostToolUse' && !event.tool_use_id)) return {};
-    const shellPost = eventName === 'PostToolUse' && ['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1));
+    if (!event.session_id || !event.turn_id || (eventName==='PostToolUse' && !event.tool_use_id)) return eventName==='PostToolUse'?{systemMessage:'POST_DELIVERY_UNAVAILABLE: отсутствует идентификатор вызова.'}:{};
+    const shellPost = eventName==='PostToolUse' && ['Bash','exec_command','write_stdin'].includes(event.tool_name?.split('.').at(-1));
+    if (shellPost && (event.tool_input===undefined || event.tool_input===null)) return {systemMessage:'POST_DELIVERY_UNAVAILABLE: отсутствует вход вызова.'};
+    const response=event.tool_response;
+    if(eventName==='PostToolUse' && response?.execution_status!==undefined && (!['completed','not_started'].includes(response.execution_status) || (response.execution_status==='not_started' && (response.isError!==true || response.terminal!==true)))) return {systemMessage:'POST_DELIVERY_UNAVAILABLE: неподтверждённое состояние запуска.'};
+    const notStarted=response?.execution_status==='not_started' && response?.isError===true && response?.terminal===true;
     const finished = shellPost && completedShell(event);
-    // AIDEV-NOTE: Только распознанный завершённый foreground вызов снимает учёт; произвольный shell может оставить потомков.
-    if (shellPost && (!foregroundCommand(event.tool_input?.command ?? event.tool_input?.cmd) || !finished)) return {};
+    // AIDEV-NOTE: Доказанный not_started не запускал shell; остальные требуют foreground и terminal Post.
+    if (shellPost && !notStarted && (!foregroundCommand(event.tool_input?.command ?? event.tool_input?.cmd) || !finished)) return {};
+    if (eventName === 'PostToolUse') {
+      const name=event.tool_name?.split('.').at(-1);
+      if (!shellPost && !['apply_patch','Write','Edit','MultiEdit'].includes(name)) return {};
+      const input=event.tool_input;
+      const cwd=input?.workdir || input?.cwd || event.cwd || process.cwd();
+      if (input===undefined || input===null) {
+        const scoped=projects.some(p=>[p.repo_path,p.workspace_root].some(root=>typeof root==='string' && path.isAbsolute(root) && inside(resolved(root,'/'),resolved(cwd,'/'))));
+        return scoped?{systemMessage:'POST_DELIVERY_UNAVAILABLE: отсутствует вход вызова; область удерживается для сверки.'}:{};
+      }
+      if (shellPost && readOnlyShell(input?.command ?? input?.cmd)) return {};
+      const files=writePaths(event);
+      const paths=[...files,...(shellPost?[resolved(cwd,'/')]:[])];
+      const ids=[...new Set(projects.filter(project=>{
+        const workspaceRoot=typeof project.workspace_root==='string'&&path.isAbsolute(project.workspace_root)?resolved(project.workspace_root,'/'):null;
+        if(workspaceRoot && paths.some(file=>inside(workspaceRoot,file)))return true;
+        if(shellPost||typeof project.repo_path!=='string'||!path.isAbsolute(project.repo_path))return false;
+        const root=resolved(project.repo_path,'/');
+        const exceptions=[...(project.documentation_paths??[]),...(project.excluded_paths??[])].map(p=>resolved(p,root));
+        return paths.some(file=>inside(root,file)&&!exceptions.some(exception=>inside(exception,file)));
+      }).map(p=>p.id))];
+      if (!ids.length) return {};
+      let client,notices=[];
+      try {
+        validateSpool(config.completion_spool);
+        const clientConfig=await loadClientConfig(env);
+        const outcome=event.tool_response?.isError || event.tool_response?.error || (Number.isInteger(event.tool_response?.exit_code)&&event.tool_response.exit_code!==0) ? 'error' : 'success';
+        for(const project_id of ids){
+          const request={project_id,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,input_sha256:rawHash(input),canonical_input_sha256:canonicalHash(input),outcome,execution_status:notStarted?'not_started':'completed'};
+          const notice={version:2,executor_id:clientConfig.executorId,request};
+          notices.push({notice,...saveNotice(config.completion_spool,notice)});
+        }
+        client=await connect(clientConfig);
+        let deliveryIssue=null;
+        for(const item of notices){
+          try {
+            const result=await client.call('write.finish',item.notice.request);
+            const fenced=item.notice.request.execution_status==='not_started' && result?.state==='not_started' && result.write_call_id===null && /^[a-f0-9]{64}$/.test(result.receipt_sha256??'');
+            if(!['pending','finished'].includes(result?.state) && !fenced)throw Error('NOTICE_NOT_ACCEPTED');
+            ackNotice(config.completion_spool,item.id,item.notice);
+          } catch(error) {
+            if(error?.code==='WRITE_CALL_MISMATCH')deliveryIssue='POST_DELIVERY_CONFLICT';
+            else if(error?.code==='NOT_FOUND' && deliveryIssue!=='POST_DELIVERY_CONFLICT')deliveryIssue='POST_DELIVERY_UNMATCHED';
+            else if(!deliveryIssue)deliveryIssue='POST_DELIVERY_PENDING';
+          }
+        }
+        return deliveryIssue?{systemMessage:deliveryIssue+': завершение сохранено; требуется сверка доставки.'}:{};
+      } catch (error) {
+        const code=error?.message==='WRITE_CALL_MISMATCH'?'POST_DELIVERY_CONFLICT':notices.length===ids.length?'POST_DELIVERY_PENDING':'POST_DELIVERY_UNAVAILABLE';
+        return {systemMessage:code+': проверьте доставку завершения; область удерживается для сверки.'};
+      } finally {try{await client?.close();}catch{}}
+    }
     let client;
     try {
       client = await connect(await loadClientConfig(env));
-      for (const project of projects) {
-        const args = {project_id: project.id, session_id: event.session_id, turn_id: event.turn_id};
-        if (eventName === 'PostToolUse') {
-          args.tool_use_id = event.tool_use_id;
-          args.outcome = event.tool_response?.isError || event.tool_response?.error || (Number.isInteger(event.tool_response?.exit_code) && event.tool_response.exit_code !== 0) ? 'error' : 'success';
-        } else args.event = eventName;
-        try { await client.call(eventName === 'PostToolUse' ? 'write.finish' : 'write.stop', args); } catch { /* Другому проекту вызов не принадлежит. */ }
+      for (const id of new Set(projects.map(p=>p.id))) {
+        try { await client.call('write.stop',{project_id:id,session_id:event.session_id,turn_id:event.turn_id,event:eventName}); }
+        catch { /* Потеря Stop не доказывает завершение активного писателя. */ }
       }
-    } catch { /* Отсутствие Post оставляет write неопределённым. */ }
+    } catch { /* Stop не снимает неопределённость без подтверждения. */ }
     finally { try { await client?.close(); } catch {} }
     return {};
   }
   if (eventName !== 'PreToolUse') return {};
+  if(['Bash','exec_command'].includes(event.tool_name?.split('.').at(-1))&&readOnlyShell(event.tool_input?.command??event.tool_input?.cmd))return {};
   const files = writePaths(event, resolveTarget);
   const input = event.tool_input, cwd = input?.workdir || input?.cwd || event.cwd || process.cwd();
   const name = event.tool_name?.split('.').at(-1);
@@ -332,12 +491,17 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     }
   }
   if (areas.size > 1) return denied('Разделите запись между рабочими областями.',[...areas.values()].map(a=>a.project));
+  if (areas.size && !shell && config.native_file_writes!==true) return denied('WORKSPACE_WRITE_TRANSPORT_REQUIRED: используйте один git -C <дерево> apply --whitespace=nowarn с литеральным патчем через quoted heredoc и штатным запросом доступа командного инструмента. Файловый вызов не допущен.',[...areas.values()].map(a=>a.project));
   if (areas.size === 1 && shell && readOnlyShell(input?.command ?? input?.cmd)) return {};
   // AIDEV-NOTE: Не допускаем writer, для которого Post и owner verifier не могут подтвердить завершение.
   if (areas.size === 1 && shell && (input?.run_in_background || input?.background || input?.async || !foregroundCommand(input?.command ?? input?.cmd))) {
     return denied('WRITER_COMPLETION_UNSUPPORTED: используйте native файловые инструменты или поддерживаемую команду проверки компонента.', [...areas.values()].map(a=>a.project));
   }
-  if (areas.size === 1) return existingWrite(event,[...areas.values()][0],{env,connect,files,shell,cwd,input,name});
+  if (areas.size === 1) {
+    if(!inputFits(event,input)) return denied('HOOK_INPUT_TOO_LARGE: размер записи превышает допустимый предел.', [...areas.values()].map(a=>a.project));
+    try { validateSpool(config.completion_spool); } catch { return denied('POST_DELIVERY_UNAVAILABLE: журнал завершений недоступен.', [...areas.values()].map(a=>a.project)); }
+    return existingWrite(event,[...areas.values()][0],{env,connect,files,shell,cwd,input,name});
+  }
   if (!files.length) return {};
   const matching = projects.filter(project => {
     if (typeof project.repo_path !== 'string' || !path.isAbsolute(project.repo_path) || typeof project.id !== 'string') return false;
@@ -350,11 +514,17 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   const excluded = [...(project.documentation_paths ?? []), ...(project.excluded_paths ?? [])].map(p => resolved(p, root));
   if (matching.length !== 1 || files.some(file => !inside(root, file) || excluded.some(p => inside(p, file)))) return deny('Разделите запись по владельцам и исключениям.');
   // AIDEV-NOTE: Shell может содержать непрозрачный код; он не создаёт область и не переписывается.
-  if (!['apply_patch', 'Write', 'Edit'].includes(name)) return deny('Используйте native файловую запись для подготовки области.');
+  const patchCommand=shell?gitPatch(input?.command??input?.cmd):null;
+  if (!patchCommand && (!['apply_patch', 'Write', 'Edit'].includes(name) || config.native_file_writes!==true)) return deny('WORKSPACE_WRITE_TRANSPORT_REQUIRED: используйте git -C <репозиторий> apply --whitespace=nowarn с одним литеральным патчем через quoted heredoc и штатным запросом доступа командного инструмента. Область не создана.');
+  if(!inputFits(event,input)) return deny('HOOK_INPUT_TOO_LARGE: размер записи превышает допустимый предел.');
+  try { validateSpool(config.completion_spool); } catch { return deny('POST_DELIVERY_UNAVAILABLE: журнал завершений недоступен.'); }
   const key = env.CODEWORKS_WORKSPACE_KEY;
   if (!event.session_id || !event.turn_id || !event.tool_use_id) return deny('Для записи нужны идентификаторы сессии и вызова.');
   let rewrite;
-  if (name === 'apply_patch') {
+  if (patchCommand) {
+    const field=typeof input?.command==='string'?'command':'cmd';
+    rewrite=target=>({...input,[field]:patchCommand.rewrite(target)});
+  } else if (name === 'apply_patch') {
     const field = typeof input === 'string' ? null : typeof input?.command === 'string' ? 'command' : typeof input?.patch === 'string' ? 'patch' : null;
     const value = field ? input[field] : input;
     if (typeof value !== 'string' || !/^\*\*\* Begin Patch\r?\n/.test(value) || !/\*\*\* End Patch\r?\n?$/.test(value)) return deny('Не удалось однозначно разобрать patch.');
@@ -372,12 +542,12 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   }
   const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
   const kind = env.CODEWORKS_WORKSPACE_KIND;
-  const payload = hash({tool_name:event.tool_name, tool_input:input, cwd, project_id:project.id, workspace_key:key, kind});
-  const args = {project_id:project.id, ...(key ? {workspace_key:key} : {}), ...(kind ? {kind} : {}), session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, targets:[...new Set(files.map(f=>path.relative(root,f)))], request_key:'hook-'+hash([project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
+  const payload = hash({tool_name:event.tool_name, tool_input:input, cwd, project_id:project.id, workspace_key:key, kind,...executorThread(event)});
+  const args = {project_id:project.id, ...(key ? {workspace_key:key} : {}), ...(kind ? {kind} : {}), session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, original_input_sha256:canonicalHash(input), targets:[...new Set(files.map(f=>path.relative(root,f)))], request_key:'hook-'+hash([project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
   let client, result;
   try {
     client = await connect(await loadClientConfig(env));
-    result = await client.call('write.begin', args);
+    result = await client.call('write.begin', {...args,...executorThread(event)});
     let ready = false;
     for (let i=0; i<polls; i++) {
       const status = await client.call('status', {project_id:project.id, workspace_id:result.workspace_id, operation_id:result.operation_id});
@@ -392,7 +562,11 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     const targetRoot = resolved(result.path, '/');
     if (files.some(file => !inside(targetRoot, resolved(path.join(targetRoot, path.relative(root, file)), '/')))) return deny('Цель записи выходит за пределы рабочей области.');
     const updatedInput = rewrite(targetRoot);
-    await client.call('write.admit', {project_id:project.id, write_call_id:result.write_call_id, rewritten_sha256:hash(updatedInput)});
+    if(!inputFits(event,updatedInput)) {
+      await client.call('write.stop',{project_id:project.id,session_id:event.session_id,turn_id:event.turn_id,write_call_id:result.write_call_id,event:'Stop',reason:'prepare_pending'});
+      return deny('HOOK_INPUT_TOO_LARGE: размер перенаправленной записи превышает допустимый предел.');
+    }
+    await client.call('write.admit', {project_id:project.id, write_call_id:result.write_call_id, rewritten_sha256:hash(updatedInput), completion_input_sha256:canonicalHash(updatedInput)});
     return {hookSpecificOutput:{hookEventName:'PreToolUse', permissionDecision:'allow', updatedInput, additionalContext:`Запись перенаправлена в область Codeworks ${result.workspace_key}: ${result.path}; ветка ${result.branch}; workspace_id=${result.workspace_id}. Продолжайте работу в этом дереве.`}};
   } catch (error) {
     if (client) try { await client.call('write.stop', {project_id:project.id,session_id:event.session_id,turn_id:event.turn_id,event:'Stop',...(result?.write_call_id ? {write_call_id:result.write_call_id} : {tool_use_id:event.tool_use_id}),reason:'prepare_pending'}); } catch {}
@@ -414,10 +588,10 @@ async function existingWrite(event, area, {env,connect,files,shell,cwd,input,nam
     const w = status.workspace;
     if (!w || resolved(w.path,'/') !== area.root || w.preparation_state !== 'ready') return deny('Рабочая область недоступна.');
     const key=w.workspace_key,kind=w.kind;
-    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),targets:files.length ? [...new Set(files.map(f=>path.relative(area.root,f)))] : ['.'],request_key:'hook-'+hash([area.project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
-    result=await client.call('write.begin',args);
+    const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),original_input_sha256:canonicalHash(input),targets:files.length ? [...new Set(files.map(f=>path.relative(area.root,f)||'.'))] : ['.'],request_key:'hook-'+hash([area.project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
+    result=await client.call('write.begin',{...args,...executorThread(event)});
     if (result.workspace_id!==area.id || resolved(result.path,'/')!==area.root) throw Error('WORKSPACE_MISMATCH');
-    await client.call('write.admit',{project_id:area.project.id,write_call_id:result.write_call_id,rewritten_sha256:hash(input)});
+    await client.call('write.admit',{project_id:area.project.id,write_call_id:result.write_call_id,rewritten_sha256:hash(input),completion_input_sha256:canonicalHash(input)});
     return {hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'allow'}};
   } catch (error) {
     if (client) try { await client.call('write.stop',{project_id:area.project.id,session_id:event.session_id,turn_id:event.turn_id,event:'Stop',...(result?.write_call_id ? {write_call_id:result.write_call_id} : {tool_use_id:event.tool_use_id}),reason:'prepare_pending'}); } catch {}
@@ -426,6 +600,6 @@ async function existingWrite(event, area, {env,connect,files,shell,cwd,input,nam
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
-  try { process.stdout.write(JSON.stringify(await runHook(await readJSON(process.stdin))) + '\n'); }
-  catch { process.stderr.write('Codeworks hook: invalid hook input.\n'); process.exitCode = 1; }
+  try { process.stdout.write(JSON.stringify(await runHook(await readHookJSON(process.stdin))) + '\n'); }
+  catch { process.stderr.write('HOOK_INPUT_INVALID_OR_OVERSIZED: вызов не подтверждён; завершение Post не сохранено, требуется сверка.\n'); process.exitCode = 2; }
 }

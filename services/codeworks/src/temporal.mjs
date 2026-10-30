@@ -11,10 +11,12 @@ import {createActivityGit} from './git-steps.mjs';
 import {withExecutionContext} from './execution-context.mjs';
 import {createCodeIndex} from './code-index.mjs';
 import {reconcileProjectLedger} from './reconciler.mjs';
+import {processProjectCompletions} from './completion-inbox.mjs';
+import {recoverExecutorCompletions} from './executor-completion.mjs';
 import {verifyDisposition} from './disposition.mjs';
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 /** Создаёт Activities; identity берётся из SDK, а не из переданного пользователем payload. */
-export function createActivities(pool,{allowedRepositories,execute=runOperation,adapters=createActivityGit(),codeIndex=createCodeIndex(pool),verifyTransfer=verifyDisposition,identity=()=>{const info=Context.current().info;if(!['codeworksWorkspace','codeworksProjectReconciler'].includes(info.workflowType))throw Error('ADMITTED_WORKFLOW_TYPE_REQUIRED');return info.workflowExecution.workflowId;}}={}) {
+export function createActivities(pool,{allowedRepositories,execute=runOperation,adapters=createActivityGit(),codeIndex=createCodeIndex(pool),verifyTransfer=verifyDisposition,completionSpoolDirectory=process.env.CODEWORKS_COMPLETION_SPOOL,identity=()=>{const info=Context.current().info;if(!['codeworksWorkspace','codeworksProjectReconciler'].includes(info.workflowType))throw Error('ADMITTED_WORKFLOW_TYPE_REQUIRED');return info.workflowExecution.workflowId;}}={}) {
   const session=async work=>{const db=await pool.connect();try{return await work(db,identity());}finally{db.release();}};
   const registry=async(db,id,generation)=>{
     const r=(await db.query("SELECT * FROM codeworks.workflow_registry WHERE workflow_id=$1 AND generation=$2 AND owner='temporal'",[id,generation])).rows[0];
@@ -42,17 +44,22 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
       const id=identity();
       const control=(await pool.query("SELECT instance_id FROM codeworks.execution_control WHERE project_id=$1 AND owner='temporal'",[projectId])).rows[0];
       if(!control||id!==`codeworks/${control.instance_id}/${projectId}/reconciler`)throw Error('RECONCILER_OWNER_REQUIRED');
-      const item=await reconcileProjectLedger(pool,projectId,id,{cursor,historicalCursor});
-      const cursors={nextCursor:item.nextCursor,hasMore:item.hasMore,nextHistoricalCursor:item.nextHistoricalCursor,historicalHasMore:item.historicalHasMore};
-      if(!item.id)return cursors;
       let context;try{context=Context.current();}catch{}
-      const beat=setInterval(()=>context?.heartbeat({obligation_id:item.id}),2000);beat.unref();
-      try{const result=await withExecutionContext({signal:context?.cancellationSignal},()=>runCleanupObligation(pool,item.id,id,{git:adapters.git,flowGit:adapters.flowGit,codeIndex,allowedRepositories,verifyTransfer,checkpoint:async()=>context?.cancellationSignal.throwIfAborted()}));
-        const ready=!!result&&(await pool.query("SELECT 1 FROM codeworks.cleanup_obligations WHERE project_id=$1 AND owner_workflow_id=$2 AND state IN ('pending','running','retry') AND (next_attempt_at IS NULL OR next_attempt_at<=now()) LIMIT 1",[projectId,id])).rowCount>0;
-        return {...result,...cursors,ready};}
-      catch(error){
-        await pool.query("UPDATE codeworks.cleanup_obligations SET state='retry',attempts=attempts+1,next_attempt_at=now()+interval '60 seconds',blocker='TECHNICAL_RETRY',updated_at=now() WHERE id=$1 AND owner_workflow_id=$2 AND state IN ('pending','running','retry')",[item.id,id]);
-        throw error;
+      // AIDEV-NOTE: Доставка Post тоже сверяет Git и может занять больше heartbeat timeout.
+      const beat=setInterval(()=>context?.heartbeat({stage:'project-reconciliation'}),2000);beat.unref();
+      try{
+        await processProjectCompletions(pool,projectId,{allowedRepositories,git:adapters.git,spoolDirectory:completionSpoolDirectory});
+        await recoverExecutorCompletions(pool,projectId,{allowedRepositories,git:adapters.git,socketPath:process.env.CODEWORKS_EXECUTOR_SOCKET});
+        const item=await reconcileProjectLedger(pool,projectId,id,{cursor,historicalCursor});
+        const cursors={nextCursor:item.nextCursor,hasMore:item.hasMore,nextHistoricalCursor:item.nextHistoricalCursor,historicalHasMore:item.historicalHasMore};
+        if(!item.id)return cursors;
+        try{const result=await withExecutionContext({signal:context?.cancellationSignal},()=>runCleanupObligation(pool,item.id,id,{git:adapters.git,flowGit:adapters.flowGit,codeIndex,allowedRepositories,verifyTransfer,checkpoint:async()=>context?.cancellationSignal.throwIfAborted()}));
+          const ready=!!result&&(await pool.query("SELECT 1 FROM codeworks.cleanup_obligations WHERE project_id=$1 AND owner_workflow_id=$2 AND state IN ('pending','running','retry') AND (next_attempt_at IS NULL OR next_attempt_at<=now()) LIMIT 1",[projectId,id])).rowCount>0;
+          return {...result,...cursors,ready};}
+        catch(error){
+          await pool.query("UPDATE codeworks.cleanup_obligations SET state='retry',attempts=attempts+1,next_attempt_at=now()+interval '60 seconds',blocker='TECHNICAL_RETRY',updated_at=now() WHERE id=$1 AND owner_workflow_id=$2 AND state IN ('pending','running','retry')",[item.id,id]);
+          throw error;
+        }
       }finally{clearInterval(beat);}
     },
     /** Продвигает только обязанность, закреплённую за текущим root. */
