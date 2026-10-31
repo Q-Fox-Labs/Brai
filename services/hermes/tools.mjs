@@ -14,7 +14,9 @@ export async function serveTools(runtime, transport = new StdioServerTransport()
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: runtime.tools }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
-      const value = await runtime.call(request.params.name, request.params.arguments ?? {}, extra.signal);
+      const args = request.params.arguments ?? {};
+      const value = request.params.name === 'local_ai_invoke_synthesize'
+        ? await runtime.synthesizeVoice(args, extra.signal) : await runtime.call(request.params.name, args, extra.signal);
       return { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
     } catch (error) {
       const code = /^[A-Z][A-Z0-9_]{0,80}$/.test(error.code) ? error.code : 'UPSTREAM_UNAVAILABLE';
