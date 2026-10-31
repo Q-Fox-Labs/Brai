@@ -1,0 +1,48 @@
+{
+  "formatVersion": 1,
+  "id": "goals",
+  "type": "container",
+  "status": "active",
+  "environments": ["dev"],
+  "executableSources": [
+    "services/goals/src/health.ts",
+    "services/goals/src/main.ts",
+    "services/goals/src/migrate.ts",
+    "services/goals/src/stdio-proxy.ts"
+  ],
+  "inputs": {
+    "build": ["services/goals/tsconfig.json"],
+    "runtime": [
+      "services/goals/CONTRACT.md",
+      "services/goals/migrations/001.sql",
+      "services/goals/package.json",
+      "services/goals/schemas/asyncapi.yml",
+      "services/goals/schemas/messages.schema.json",
+      "services/goals/src/api.ts",
+      "services/goals/src/domain.ts",
+      "services/goals/src/health.ts",
+      "services/goals/src/main.ts",
+      "services/goals/src/mcp.ts",
+      "services/goals/src/migrate.ts",
+      "services/goals/src/nats.ts",
+      "services/goals/src/rates.ts",
+      "services/goals/src/stdio-proxy.ts"
+    ],
+    "checks": ["services/goals/tests/mcp.test.mjs", "services/goals/tests/rates.test.mjs", "services/goals/tests/postgres.integration.test.mjs"]
+  },
+  "dependencies": [],
+  "commands": {"build": "npm run build", "check": "node --test tests/*.test.mjs"},
+  "delivery": {
+    "kind": "oci-context",
+    "files": ["services/goals/CONTRACT.md", "services/goals/dist", "services/goals/migrations", "services/goals/package.json", "services/goals/schemas"],
+    "entrypoints": ["services/goals/dist/main.js", "services/goals/dist/migrate.js", "services/goals/dist/health.js", "services/goals/dist/stdio-proxy.js"],
+    "smokeImports": [],
+    "systemRequirements": ["Node.js 24.22.1"]
+  },
+  "deploy": {
+    "units": ["goals", "goals-migrate"],
+    "migrations": ["services/goals/migrations"],
+    "health": "node services/goals/dist/health.js"
+  },
+  "npm": {"workspaces": ["services/goals"]}
+}
