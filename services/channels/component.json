@@ -42,7 +42,9 @@
       "services/channels/tests/integration/service.test.mjs",
       "deploy/compose.intake-test.yml",
       "deploy/intake-test-database.sql",
-      "deploy/intake-test-nats.conf"
+      "deploy/intake-test-nats.conf",
+      "services/channels/tests/uuid.test.mjs",
+      "services/channels/tests/integration/uuid.test.mjs"
     ]
   },
   "dependencies": [

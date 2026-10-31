@@ -6,9 +6,11 @@ import {evaluate,checkRules} from './rules.js';
 import {encodeCursor,decodeCursor} from './cursor.js';
 import {Fault,type Data,type Entity,type Caller,type Store,type Repository,type Context} from './types.js';
 const permitted=(b:Caller,owner:string)=>b.ownerIds.includes(owner);
+const sameUuid=(left:string,right:string)=>left.toLowerCase()===right.toLowerCase();
 function scope(b:Caller,e:Entity|null,owner:string):Entity {
  if(!e||e.ownerId!==owner)throw new Fault('NOT_FOUND');
- if(b.connectionIds!==null&&!b.connectionIds.includes(e.connectionId??e.id))throw new Fault('FORBIDDEN');
+ // AIDEV-NOTE: Старые body/квитанции сохраняют регистр; сравнение UUID не переписывает историю.
+ if(b.connectionIds!==null&&!b.connectionIds.some(id=>sameUuid(id,e.connectionId??e.id)))throw new Fault('FORBIDDEN');
  return e;
 }
 const address=(r:Data)=>({botId:r.botId,chatId:r.chatId,threadId:r.threadId});
@@ -42,8 +44,9 @@ export function createService(store:Store,callers:Record<string,Caller>,cursorKe
    const connection=scope(b,await r.connection(id,'read'),q.ownerId);
    if(create){
     if(q.address.botId!==connection.botId||q.kind==='dialog'&&(q.address.threadId!==null||q.parentId!==null)||q.kind==='topic'&&q.address.threadId===null)throw new Fault('INVALID_ARGUMENT');
-    if(q.parentId){const parent=scope(b,await r.channel(q.parentId,'read'),q.ownerId);if(parent.kind!=='dialog'||parent.connectionId!==id||parent.address.chatId!==q.address.chatId)throw new Fault('INVALID_ARGUMENT');}
-    e={id:randomUUID(),ownerId:q.ownerId,connectionId:id,kind:q.kind,address:q.address,parentId:q.parentId,currentVersion:1};
+    let parentId:string|null=null;
+    if(q.parentId){const parent=scope(b,await r.channel(q.parentId,'read'),q.ownerId);if(parent.kind!=='dialog'||!sameUuid(parent.connectionId,connection.id)||parent.address.chatId!==q.address.chatId)throw new Fault('INVALID_ARGUMENT');parentId=parent.id;}
+    e={id:randomUUID(),ownerId:q.ownerId,connectionId:connection.id,kind:q.kind,address:q.address,parentId,currentVersion:1};
    }else{e=scope(b,await r.channel(q.channelId,'write'),q.ownerId);old=await current(r,kind,e);}
    checkRules(q.settings.rules);
   }
