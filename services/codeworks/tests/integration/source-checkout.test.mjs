@@ -75,7 +75,8 @@ test('Temporal release reconciles source conflict and lost FF receipt, then prep
   const op=async id=>(await f.h.call('status',{project_id:p.id,operation_id:id},'codex')).operation;
   const completed=async(id,workspaceId)=>until(async()=>{
     const state=await f.h.call('lifecycle.status',{project_id:p.id,workspace_id:workspaceId},'codex');
-    assert.notEqual(state.cleanup?.state,'waiting_decision',JSON.stringify(state));
+    // Отмена сначала сохраняет route_pending, затем worker сверяет маршрут.
+    if(state.cleanup?.blocker!=='ROUTE_RECONCILIATION_REQUIRED')assert.notEqual(state.cleanup?.state,'waiting_decision',JSON.stringify(state));
     return (await client.workflow.getHandle(id).describe()).status.name==='COMPLETED';
   });
   const prepared=await f.prepare({project_id:p.id,workspace_key:'source-change',request_key:'source-change'});
