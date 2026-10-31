@@ -86,6 +86,8 @@ Telegram Business обрабатывает отдельный установле
 
 `voice.mjs --input /absolute/text.txt --output /absolute/speech.ogg --voice eugene` подключает нативный tts Hermes к Local AI. Вход — UTF-8 файл с текстом до 900 Unicode code points; выбранная модель приходит из `tts.model`. Результат получает Artifacts ID и восстанавливается через publisher с проверкой owner/hash. Готовый OGG копируется в незанятый путь output. Timeout не вызывает автоматический новый синтез.
 
+Инструмент `local_ai_invoke_synthesize`, доступный модели через MCP, принимает только текст. Модель, голос, идентификаторы и срок выбирает мост. Подробности и обработка неизвестного исхода — в [контракте](CONTRACT.md#выполнение-и-неизвестный-исход).
+
 `transcribe.mjs --input /absolute/voice.ogg --output /absolute/transcript.txt` подключает нативный command STT к существующему Transcription/GigaAM без нового ключа. Входной обычный файл должен находиться в `allowedReadRoots` publisher; publisher автоматически распознаёт OGG/Opus или Vorbis, WAV и FLAC по байтам. MP3 пока не поддержан файловым мостом: publisher не распознаёт его аудиосигнатуру, а произвольный `application/octet-stream` мост не принимает. Мост публикует файл, один раз отправляет required local submit, читает состояние и эфемерный результат через MCP, затем создаёт новый UTF-8 output с правами `0600`. Полный фактический selector проверяется против `stt.model`. Общий срок публикации и расшифровки — 180 секунд. Неизвестный исход или утрата результата не запускают повтор; выходной файл не перезаписывается. Текст ASR не проходит отдельную LLM-нормализацию.
 
 Пример секции нативного `config.yaml` Hermes, отдельного от защищённого JSON мостов выше:

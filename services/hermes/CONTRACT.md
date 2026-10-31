@@ -15,6 +15,8 @@
 | `transcription_*` | [Transcription MCP](../transcription/CONTRACT.md) | Trusted bearer с фиксированным principal; обычные локальные расшифровки идут через coordinator. |
 | `local_ai_*` | [Local AI owner API](../local-ai/CONTRACT.md) | Каталог, install/state/configure/load/unload/remove, embed, synthesize, cancel/status. OwnerId добавляет мост. |
 
+MCP-инструмент `local_ai_invoke_synthesize` принимает только `text` по ограничениям Local AI. Мост выбирает `tts.model` из доверенной конфигурации и голос `eugene`, создаёт разные request ID и operation ID и задаёт срок 180 секунд от текущего времени. Дополнительные поля, включая переданный моделью срок, отклоняются до вызова Local AI. Внутренний файловый адаптер `voice.mjs` продолжает вызывать owner API с полным контрактом. Полученный audioArtifactId принадлежит текущему владельцу; неизвестный исход не запускает повтор. `local_ai_operations_get` относится к установке моделей и не подтверждает исход синтеза.
+
 Поток файла: Hermes working file → publisher snapshot → Artifacts prepare → HTTP bytes → подтверждение ready/hash → неизменяемая локальная копия → представление нужного канала. Общая модель описана в [контракте адаптера](files/CONTRACT.md). Входящий Telegram файл проходит тот же publish; последующие потребители получают Artifact ID. Модель не получает произвольный NATS/SQL инструмент, upload URL или право читать чужой артефакт.
 
 Запуск требует защищённого JSON и отдельного доверенного `BRAI_HERMES_OWNER_ID`. Они должны совпадать. NATS identity Hermes имеет только необходимые subjects и свой inbox; старые связи сервисов не меняются. Credentials не включаются в ошибки. Конфигурация экземпляра отвечает за owner binding GameCore endpoint и Transcription bearer. Подмена owner во входе отвергается.

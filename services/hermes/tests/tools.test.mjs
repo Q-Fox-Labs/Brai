@@ -358,6 +358,50 @@ test('Hermes MCP сохраняет диагностику только GameCore
   } finally {await client.close();await service.close();}
 });
 
+test('MCP синтез берёт модель и срок из доверенного моста, не принимает их от модели', async () => {
+  const model = { modelId: 'silero-tts-ru-v5_5', revision: '50081637b602126ee06cb3bc8a744d25651d2da1', profileId: 'silero_pytorch' };
+  const requests = [];
+  const { ports } = fixture({ request: async (subject, payload) => {
+    requests.push({ subject, payload });
+    return { requestId: payload.requestId, operationId: payload.operationId, model: payload.model, durationMs: 1, audioArtifactId: ids[4] };
+  } });
+  const runtime = await createBraiTools({ ...config, tts: { model } }, ports);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const service = await serveTools(runtime, serverTransport), client = new Client({ name: 'voice-test', version: '1.0.0' });
+  try {
+    await client.connect(clientTransport);
+    const tool = (await client.listTools()).tools.find(item => item.name === 'local_ai_invoke_synthesize');
+    assert.deepEqual(Object.keys(tool.inputSchema.properties), ['text']);
+    const before = Date.now();
+    const result = await client.callTool({ name: tool.name, arguments: { text: 'Проверка голоса' } });
+    const after = Date.now();
+    assert.equal(result.structuredContent.audioArtifactId, ids[4]);
+    assert.equal(requests.length, 1);
+    const { subject, payload } = requests[0];
+    assert.equal(subject, 'brai.local_ai.v1.invoke.synthesize');
+    assert.deepEqual(payload.model, model); assert.equal(payload.ownerId, owner);
+    assert.equal(payload.voice, 'eugene'); assert.notEqual(payload.requestId, payload.operationId);
+    assert.ok(Date.parse(payload.deadlineAt) >= before + 180_000 && Date.parse(payload.deadlineAt) <= after + 180_000);
+    const stale = await client.callTool({ name: tool.name, arguments: { text: 'Проверка', deadlineAt: '2026-10-30T23:59:59.000Z' } });
+    assert.equal(stale.isError, true); assert.equal(JSON.parse(stale.content[0].text).code, 'INVALID_ARGUMENT');
+    assert.equal(requests.length, 1);
+  } finally { await client.close(); await service.close(); }
+});
+
+test('MCP синтез при неизвестном результате не повторяет вычисление', async () => {
+  let requests = 0;
+  const { ports } = fixture({ request: async () => { requests++; throw fault('TIMEOUT'); } });
+  const runtime = await createBraiTools({ ...config, tts: { model: { modelId: 'silero-tts-ru-v5_5', revision: '50081637b602126ee06cb3bc8a744d25651d2da1', profileId: 'silero_pytorch' } } }, ports);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const service = await serveTools(runtime, serverTransport), client = new Client({ name: 'voice-timeout-test', version: '1.0.0' });
+  try {
+    await client.connect(clientTransport);
+    const result = await client.callTool({ name: 'local_ai_invoke_synthesize', arguments: { text: 'Проверка' } });
+    assert.equal(result.isError, true); assert.equal(JSON.parse(result.content[0].text).code, 'OUTCOME_UNKNOWN');
+    assert.equal(requests, 1);
+  } finally { await client.close(); await service.close(); }
+});
+
 test('LocalAI synthesize использует новый owner контракт и фиксированные ограничения голоса', () => {
   const tool = natsTools.find(tool => tool.name === 'local_ai_invoke_synthesize');
   const args = { requestId: ids[0], operationId: ids[1], model: { modelId: 'silero-tts-ru-v5_5', revision: '50081637b602126ee06cb3bc8a744d25651d2da1', profileId: 'silero_pytorch' }, deadlineAt: '2026-10-19T13:00:00Z', text: 'Тест', voice: 'eugene' };
