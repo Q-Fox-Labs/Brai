@@ -161,7 +161,8 @@
       "services/codeworks/tests/integration/*finalization*.mjs",
       "services/codeworks/scripts/accept-finalization.mjs",
       "services/codeworks/tests/source-checkout.test.mjs",
-      "services/codeworks/tests/integration/source-checkout.test.mjs"
+      "services/codeworks/tests/integration/source-checkout.test.mjs",
+      "services/codeworks/tests/integration/terminal-rollout-queue.test.mjs"
     ]
   },
   "dependencies": [],
