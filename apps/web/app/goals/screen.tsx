@@ -95,7 +95,7 @@ async function post(operation:string,input:Record<string,unknown>) {
  let body:Record<string,unknown>;
  try {body = await response.json();} catch {throw Object.assign(new Error("UNKNOWN_OUTCOME"),{outcome:"unknown"});}
  if (!body || typeof body !== "object" || Array.isArray(body)) throw Object.assign(new Error("UNKNOWN_OUTCOME"),{outcome:"unknown"});
- if (!response.ok) throw Object.assign(new Error(String(body.code || "UNAVAILABLE")),{status:response.status,outcome:body.outcome});
+ if (!response.ok) throw Object.assign(new Error(String(body.code || "UNAVAILABLE")),{status:response.status,outcome:body.outcome === "not-published" ? "not-published" : response.status >= 500 ? "unknown" : body.outcome});
  return body;
 }
 
