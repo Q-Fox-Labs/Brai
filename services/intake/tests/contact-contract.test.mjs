@@ -28,3 +28,20 @@ test('known transient and permanent service errors preserve safe policy',()=>{
  assert.equal(contactError({code:'INTERNAL',message:'safe',retryable:false},500).retryable,false);
  assert.equal(contactError({code:'INTERNAL',message:'safe',retryable:true},500).code,'INVALID_CONTACT_RESULT');
 });
+
+test('malformed Contact audit receipts never allow the Intake complete fact',async()=>{
+ const p=packet();p.original.data.author.name='Alice';p.contactRequest=contactInput(p).request;p.contact=contactResult(p.contactRequest);p.completedAt=p.receivedAt;
+ const fact={id:randomUUID(),type_id:101,occurred_at:p.receivedAt,actor_id:null,scope_type:'user',scope_id:p.ownerId,object_type:'contact',object_id:p.contact.contactId,data:{operationId:p.contactRequest.operationId,identityId:p.contact.identityId,changedFields:['name']}};
+ p.contact.historyEvents=[fact];
+ const valid={event:{...fact,source:'service_contacts',recorded_at:p.receivedAt}};
+ for(const bad of [{event:{...fact,source:'service_contacts'}},{...valid,stored:false},{event:{...valid.event,recorded_at:'invalid'}},{event:{...valid.event,extra:true}},{event:{...valid.event,data:{...fact.data,invalid:'\u0000'}}},{event:{...valid.event,data:{large:'x'.repeat(524289)}}}]){
+  const calls=[],nc={async request(subject){calls.push(subject);return {data:Buffer.from(JSON.stringify(subject.endsWith('service_contacts')?bad:{}))};}};
+  const ports=createPorts(nc,null,{});
+  await assert.rejects(ports.history(p,'complete'),{code:'INVALID_CONTACT_HISTORY_RESULT'});
+  assert.deepEqual(calls,['brai.history.v1.append.service_contacts']);
+ }
+ const oversizedCalls=[],oversized={async request(subject){oversizedCalls.push(subject);return {data:Buffer.from(' '.repeat(524289)+JSON.stringify(valid))};}};
+ await assert.rejects(createPorts(oversized,null,{}).history(p,'complete'),{code:'INVALID_CONTACT_HISTORY_RESULT'});assert.deepEqual(oversizedCalls,['brai.history.v1.append.service_contacts']);
+ const calls=[],nc={async request(subject){calls.push(subject);return {data:Buffer.from(JSON.stringify(subject.endsWith('service_contacts')?valid:{}))};}};
+ await createPorts(nc,null,{}).history(p,'complete');assert.deepEqual(calls,['brai.history.v1.append.service_contacts','brai.history.v1.append.service_intake']);
+});

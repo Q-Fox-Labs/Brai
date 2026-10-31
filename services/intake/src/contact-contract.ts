@@ -8,7 +8,9 @@ import {inputHash,representable} from './contracts.js';
 const ajv=new Ajv({strict:false});(formats as unknown as(a:Ajv)=>void)(ajv);
 const load=(p:string)=>JSON.parse(readFileSync(new URL(p,import.meta.url),'utf8'));
 const common=load('../../contacts/schemas/common.schema.json'),api=load('../../contacts/schemas/api.schema.json');
-for(const s of [load('../../history/schemas/common.schema.json'),load('../../history/schemas/messages.schema.json'),common,api])ajv.addSchema(s);
+const history=load('../../history/schemas/messages.schema.json');
+for(const s of [load('../../history/schemas/common.schema.json'),history,common,api])ajv.addSchema(s);
+const historyOutput=ajv.compile({$ref:history.$id+'#/definitions/appendResponse'});
 const request=ajv.compile({$ref:api.$id+'#/definitions/resolveRequest'}),result=ajv.compile({$ref:common.$id+'#/definitions/resolution'}),error=ajv.compile({$ref:common.$id+'#/definitions/error'});
 const fields=['name','username','photoArtifactId'];
 function instant(value:string):bigint {const ms=Date.parse(value);if(!Number.isFinite(ms))throw new Fault('INVALID_CONTACT_RESULT');const f=value.match(/\.(\d{1,6})(?:Z|[+-]\d\d:\d\d)$/)?.[1]??'';return BigInt(ms)*1000n+BigInt(f.padEnd(6,'0').slice(3));}
@@ -48,6 +50,7 @@ export function contactError(value:unknown,status:number):Fault {
 }
 /** Подтверждение append должно соответствовать сохранённому факту, а не любому JSON. */
 export function checkContactHistory(q:Data,value:Data):void {
- const e=value.event as Data;
+ if(!representable(value)||!historyOutput(value)||Buffer.byteLength(JSON.stringify(value))>524288)throw new Fault('INVALID_CONTACT_HISTORY_RESULT');
+ const e=(value as Data).event as Data;
  if(!e||e.source!=='service_contacts'||e.id!==q.id||e.type_id!==q.type_id||e.scope_type!==q.scope_type||e.scope_id!==q.scope_id||e.object_type!==q.object_type||e.object_id!==q.object_id||e.actor_id!==q.actor_id||instant(String(e.occurred_at))!==instant(String(q.occurred_at))||inputHash(e.data)!==inputHash(q.data))throw new Fault('INVALID_CONTACT_HISTORY_RESULT');
 }

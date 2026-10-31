@@ -17,6 +17,7 @@ export function createPorts(nc:NatsConnection,client:Client,cfg:Config):Ports {
   let reply;
   const bytes=Buffer.from(JSON.stringify(input));if(bytes.length>(isChannel||isContact?65536:1048576))throw new Fault('DEPENDENCY_REQUEST_TOO_LARGE');
   try { reply=await nc.request(subject,bytes,{timeout:deadline}); } catch {throw new Fault('DEPENDENCY_UNAVAILABLE',true);}
+  if(subject==='brai.history.v1.append.service_contacts'&&reply.data.length>524288)throw new Fault('INVALID_CONTACT_HISTORY_RESULT');
   if((isChannel||isContact)&&reply.data.length>131072)throw new Fault(isContact?'INVALID_CONTACT_RESULT':'INVALID_CHANNEL_RESULT');
   if(reply.headers?.get('Nats-Service-Error-Code')) {
    const status=Number(reply.headers.get('Nats-Service-Error-Code'));
