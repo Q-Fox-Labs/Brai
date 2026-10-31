@@ -1,0 +1,25 @@
+asyncapi: 2.6.0
+info:
+  title: Brai goals NATS Service
+  version: 0.1.0
+  description: >-
+    Только доверенный Web передаёт owner из сессии. Запрос обрабатывается
+    через NATS Service; ответ уходит в reply subject запроса. Пределы, ошибки
+    и условия повторов определены в CONTRACT.md.
+servers:
+  internal:
+    url: nats://broker:4222
+    protocol: nats
+channels:
+  brai.goals.v1.request:
+    publish:
+      operationId: goalsRequest
+      bindings:
+        nats:
+          queue: service_goals
+          bindingVersion: 0.1.0
+      message:
+        name: GoalsRequest
+        contentType: application/json
+        payload:
+          $ref: ./messages.schema.json
