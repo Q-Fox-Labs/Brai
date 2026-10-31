@@ -21,6 +21,27 @@ def _text(value):
     return value if isinstance(value, str) else ""
 
 
+def message_type(message):
+    """Классифицировать исходный payload без чтения или сохранения его содержимого."""
+    for field in ("photo", "document", "video", "audio", "voice", "sticker", "location", "venue"):
+        if getattr(message, field, None):
+            return field
+    if getattr(message, "text", None):
+        return "text"
+    for field in ("animation", "video_note", "contact", "poll", "dice", "game", "story", "paid_media"):
+        if getattr(message, field, None):
+            return "unsupported:" + field
+    service_fields = (
+        "new_chat_members", "left_chat_member", "new_chat_title", "new_chat_photo", "delete_chat_photo",
+        "group_chat_created", "supergroup_chat_created", "channel_chat_created", "message_auto_delete_timer_changed",
+        "migrate_to_chat_id", "migrate_from_chat_id", "pinned_message", "forum_topic_created", "forum_topic_closed",
+        "forum_topic_reopened", "forum_topic_edited", "general_forum_topic_hidden", "general_forum_topic_unhidden",
+        "write_access_allowed", "users_shared", "chat_shared", "video_chat_started", "video_chat_ended",
+        "video_chat_scheduled", "video_chat_participants_invited", "successful_payment", "refunded_payment",
+    )
+    return "service" if any(getattr(message, field, None) for field in service_fields) else "unknown"
+
+
 class TelegramJournal:
     """Хранить сообщения и последовательность изменений в отдельной SQLite с WAL."""
 
@@ -51,6 +72,10 @@ class TelegramJournal:
                 CREATE INDEX IF NOT EXISTS messages_chat ON messages(chat_id, thread_id, occurred_at, identity);
                 CREATE INDEX IF NOT EXISTS changes_identity ON changes(identity, seq);
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+            if "message_type" not in columns:
+                # AIDEV-NOTE: Старый журнал не хранит raw update; его пустым сообщениям нельзя угадывать тип.
+                db.execute("ALTER TABLE messages ADD COLUMN message_type TEXT NOT NULL DEFAULT 'unknown'")
         os.chmod(self.path, 0o600)
 
     def history_complete(self):
@@ -79,10 +104,11 @@ class TelegramJournal:
         """Сохранить единственное событие с устойчивой identity и вернуть номер изменения."""
         fields = ("identity", "chat_id", "thread_id", "chat_type", "chat_name", "author_id",
                   "author_name", "direction", "telegram_id", "session_id", "text", "occurred_at",
-                  "edited_at", "delivery", "attachment_state", "attachments", "group_id")
+                  "edited_at", "delivery", "attachment_state", "attachments", "group_id", "message_type")
         if not value.get("identity") or not value.get("chat_id"):
             raise ValueError("INVALID_MESSAGE")
         value = {name: value.get(name, "") for name in fields}
+        value["message_type"] = value["message_type"] or "unknown"
         value["attachments"] = json.dumps(value["attachments"] or [], ensure_ascii=False, separators=(",", ":"))
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -110,6 +136,8 @@ class TelegramJournal:
                     value["attachment_state"], value["attachments"] = old["attachment_state"], old["attachments"]
                 if not value["session_id"]:
                     value["session_id"] = old["session_id"]
+                if value["message_type"] == "unknown":
+                    value["message_type"] = old["message_type"]
                 if all(old[name] == value[name] for name in fields):
                     return old["changed_seq"]
                 columns = ", ".join(f"{name}=?" for name in fields[1:])
@@ -160,7 +188,7 @@ class TelegramJournal:
         if mid is None or chat_id is None:
             return
         media = any(getattr(message, field, None) for field in
-                    ("photo", "document", "video", "audio", "voice", "animation", "video_note"))
+                    ("photo", "document", "video", "audio", "voice", "sticker"))
         full_name = getattr(user, "full_name", None) or getattr(user, "username", None) or str(getattr(user, "id", ""))
         thread = str(getattr(message, "message_thread_id", None) or "")
         self.record({"identity": f"telegram:{chat_id}:{mid}", "chat_id": str(chat_id),
@@ -173,7 +201,8 @@ class TelegramJournal:
                      "occurred_at": _timestamp(getattr(message, "date", None)),
                      "edited_at": _timestamp(getattr(message, "edit_date", None)),
                      "delivery": "received", "attachment_state": "pending" if media else "none",
-                     "attachments": [], "group_id": str(getattr(message, "media_group_id", None) or "")})
+                     "attachments": [], "group_id": str(getattr(message, "media_group_id", None) or ""),
+                     "message_type": message_type(message)})
 
     def attachments(self, chat_id, message_id, attachments, state="ready"):
         """Привязать проверенные artifactId к уже сохранённому исходному сообщению."""

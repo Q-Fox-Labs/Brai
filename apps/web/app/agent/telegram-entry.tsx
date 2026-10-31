@@ -3,13 +3,13 @@
 // ABOUTME: Не отправляет сообщения, решения или команды агенту.
 import { useCallback, useEffect, useRef, useState } from "react";
 import Markdown from "./markdown";
-import { telegramText, updateTelegramMessage } from "./telegram-display";
+import { emptyTelegramMessage, telegramText, updateTelegramMessage } from "./telegram-display";
 import "./telegram-observer.css";
 
 type Chat = { chat_id: string; thread_id: string; chat_type: string; chat_name: string | null; last_text: string; last_at: string | null; last_row: number };
 type Attachment = { artifactId: string; filename: string; mimeType: string; sizeBytes?: number; width?: number; height?: number };
 type Message = { row_id: number; identity: string; chat_id: string; thread_id: string; telegram_id?: string | null; author_name: string; direction: "in" | "out";
-  text: string; occurred_at: string | null; edited_at: string | null; delivery: string; attachment_state: string; attachments: Attachment[] };
+  text: string; occurred_at: string | null; edited_at: string | null; delivery: string; attachment_state: string; attachments: Attachment[]; message_type?: string };
 type Page = { messages: Message[]; before: number | null };
 const keyOf = (chat: Pick<Chat, "chat_id" | "thread_id">) => `${chat.chat_id}:${chat.thread_id}`;
 const compareMessages = (a: Message, b: Message) => {
@@ -167,7 +167,7 @@ function TelegramObserver({ username, active }: { username: string | null; activ
       <div className="tg-chat-list">{sections.map(section => section.chats.length > 0 && <section key={section.label}>
         <h2>{section.label}</h2>{section.chats.map(chat => <button type="button" className="tg-chat" data-selected={selected && keyOf(chat) === keyOf(selected)} key={keyOf(chat)} onClick={() => select(chat)}>
           <span className="tg-avatar" aria-hidden="true">{chatName(chat).slice(0, 1).toUpperCase()}</span>
-          <span className="tg-chat-copy"><strong>{chatName(chat)}{chat.thread_id ? ` · тема ${chat.thread_id}` : ""}</strong><span>{chat.last_text || "Вложение"}</span></span>
+          <span className="tg-chat-copy"><strong>{chatName(chat)}{chat.thread_id ? ` · тема ${chat.thread_id}` : ""}</strong><span>{chat.last_text || "Сообщение"}</span></span>
         </button>)}</section>)}{!chats.length && !error && <p className="tg-empty-list">Чаты появятся здесь после первого сообщения.</p>}</div>
       {username && <footer className="tg-sidebar-foot">Бот @{username}</footer>}
     </aside>
@@ -184,6 +184,8 @@ function TelegramObserver({ username, active }: { username: string | null; activ
               <div className="tg-message-meta"><strong>{message.author_name || (message.direction === "out" ? "Brai" : selected && !selected.chat_id.startsWith("-") ? chatName(selected) : "Отправитель не указан")}</strong><time>{time(message.occurred_at)}</time>{message.edited_at && <span>изменено</span>}</div>
               {telegramText(message.text, message.attachments) && <Markdown text={telegramText(message.text, message.attachments)} />}
               {message.attachments.length > 0 && <div className="tg-attachments">{message.attachments.map(item => <TelegramAttachment key={item.artifactId} message={message} item={item} />)}</div>}
+              {!telegramText(message.text, message.attachments) && !message.attachments.length && message.attachment_state === "none" &&
+                <p className="tg-muted">{emptyTelegramMessage(message.message_type)}</p>}
               {message.attachment_state === "pending" && <p className="tg-muted">Сохраняем вложения…</p>}
               {message.attachment_state === "failed" && <p className="tg-muted">Сохранение вложений не подтверждено.</p>}
               {message.attachment_state === "unavailable" && <p className="tg-muted">Вложение из старой истории недоступно.</p>}

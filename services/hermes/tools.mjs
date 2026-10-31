@@ -10,8 +10,8 @@ import { startBraiTools, planningDiagnostic } from './runtime.mjs';
 
 /** Подключает MCP к собранным портам; stdout занят только MCP. */
 export async function serveTools(runtime, transport = new StdioServerTransport()) {
-  const server = new Server({ name: 'brai-hermes', version: '1.0.0' }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: runtime.tools }));
+  const server = new Server({ name: 'brai-hermes', version: '1.0.0' }, { capabilities: { tools: { listChanged: true } } });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: runtime.listTools ? await runtime.listTools() : runtime.tools }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
       const args = request.params.arguments ?? {};
@@ -24,8 +24,29 @@ export async function serveTools(runtime, transport = new StdioServerTransport()
       return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code, message: code, ...(diagnostic ? { diagnostic } : {}), ...(code === 'OUTCOME_UNKNOWN' ? { requestId: error.requestId } : {}) }) }] };
     }
   });
-  let closing;
-  const close = () => closing ??= (async () => { await runtime.close(); await server.close(); })();
+  let closing, recoveryTimer, recoveryDelay = 30_000, stopped = false;
+  // AIDEV-NOTE: Native Hermes обновляет registry по list_changed; stdio keepalive каталог не перечитывает.
+  function scheduleRecovery() {
+    if (stopped || recoveryTimer || !runtime.unavailableEndpoints?.().length) return;
+    recoveryTimer = setTimeout(async () => {
+      recoveryTimer = undefined;
+      if (stopped || !runtime.unavailableEndpoints?.().length) return;
+      const before = JSON.stringify(runtime.tools);
+      try {
+        await runtime.listTools();
+        if (!stopped && JSON.stringify(runtime.tools) !== before) await server.sendToolListChanged();
+      } catch { console.error('HERMES_DISCOVERY_REFRESH_FAILED'); }
+      recoveryDelay = Math.min(300_000, recoveryDelay * 2);
+      scheduleRecovery();
+    }, recoveryDelay);
+    recoveryTimer.unref?.();
+  }
+  server.oninitialized = scheduleRecovery;
+  const close = () => closing ??= (async () => {
+    stopped = true;
+    clearTimeout(recoveryTimer);
+    await runtime.close(); await server.close();
+  })();
   server.onclose = () => { void close(); };
   try { await server.connect(transport); } catch (error) { await close(); throw error; }
   return { server, close };

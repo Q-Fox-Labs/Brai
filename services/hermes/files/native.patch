@@ -427,7 +427,7 @@
          event = None
          try:
              await asyncio.sleep(delay)
-+            if where == "media-group":
++            if where in {"media-group", "photo"}:
 +                album_event = pending.get(key)
 +                app = self._app
 +                wait_for_chat = getattr(getattr(app, "update_processor", None), "wait_for_chat_idle", None)
@@ -444,7 +444,7 @@
                  return
 -            if self._should_drop_delayed_delivery():
 +            if self._should_drop_delayed_delivery() or (
-+                where == "media-group" and (app is None or app is not self._app)
++                where in {"media-group", "photo"} and (app is None or app is not self._app)
 +            ):
                  self._hold_inbound_event(event, where=f"{where}-flush")
                  event = None

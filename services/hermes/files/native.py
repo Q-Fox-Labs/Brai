@@ -190,12 +190,16 @@ async def accept_event(event, admit=True):
 
 
 def should_queue_inbound_set(event):
-    """Альбом или дополнение набора ждёт занятый ход без прерывания."""
+    """Фото Telegram, альбом или дополнение ждёт занятый ход без прерывания."""
     refs = (getattr(event, 'metadata', None) or {}).get('_brai_artifacts', [])
     if len(refs) > 1:
         return True
     if not refs:
         return False
+    platform = getattr(getattr(event, 'source', None), 'platform', None)
+    if (str(getattr(platform, 'value', platform)) == 'telegram'
+            and any(item.get('file', {}).get('mimeType', '').startswith('image/') for item in refs)):
+        return True
     if (getattr(event, 'metadata', None) or {}).get('recovered'):
         return True
     with store().db() as db:

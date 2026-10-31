@@ -64,6 +64,10 @@ class BridgeError(Exception):
     """Обозначает безопасную ошибку private порта без входных данных и stderr."""
 
 
+class TelegramNoticeNotSent(BridgeError):
+    """Подтвердить локальный отказ до вызова Telegram API; повтор разрешён."""
+
+
 @dataclass(frozen=True)
 class Config:
     """Содержит только переданные оператором параметры доверенного профиля."""
@@ -251,6 +255,16 @@ class Tokens:
             db.execute("""CREATE TABLE IF NOT EXISTS human_results (
                 owner TEXT NOT NULL, move_id TEXT NOT NULL, revision_id TEXT NOT NULL, attempt_id TEXT NOT NULL,
                 content TEXT NOT NULL, source_json TEXT NOT NULL, PRIMARY KEY(owner,move_id))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS input_notices (
+                chat_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(chat_id,message_id))""")
+            notice_columns = {row[1] for row in db.execute("PRAGMA table_info(input_notices)")}
+            for name, declaration in (
+                    ("state", "TEXT NOT NULL DEFAULT 'unknown'"), ("owner", "TEXT NOT NULL DEFAULT ''"),
+                    ("user_id", "TEXT NOT NULL DEFAULT ''"), ("chat_type", "TEXT NOT NULL DEFAULT ''"),
+                    ("thread_id", "TEXT NOT NULL DEFAULT ''"), ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+                    ("retry_at", "REAL NOT NULL DEFAULT 0"), ("created_at", "REAL NOT NULL DEFAULT 0")):
+                if name not in notice_columns:
+                    db.execute(f"ALTER TABLE input_notices ADD COLUMN {name} {declaration}")
         self.path.chmod(0o600)
 
     @contextmanager
@@ -262,6 +276,46 @@ class Tokens:
                 yield db
         finally:
             db.close()
+
+    def claim_input_notice(self, chat_id, message_id, route=None, now=None):
+        """Атомарно занять попытку; повторы ограничены маршрутом, сроком и пятью попытками."""
+        now = time.time() if now is None else now
+        identity = (str(chat_id), str(message_id))
+        route = {name: str((route or {}).get(name, "")) for name in ("owner", "user_id", "chat_type", "thread_id")}
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("""INSERT OR IGNORE INTO input_notices
+                    (chat_id,message_id,state,owner,user_id,chat_type,thread_id,attempts,retry_at,created_at)
+                    VALUES (?,?,'unknown',?,?,?,?,1,0,?)""", (*identity, *route.values(), now)).rowcount:
+                return True
+            row = db.execute("SELECT * FROM input_notices WHERE chat_id=? AND message_id=?", identity).fetchone()
+            if (any(row[name] != value for name, value in route.items()) or row["created_at"] < now - 3600
+                    or row["attempts"] >= 5 or row["retry_at"] > now):
+                return False
+            return db.execute("""UPDATE input_notices SET state='unknown',attempts=attempts+1
+                    WHERE chat_id=? AND message_id=? AND state='not_sent'""", identity).rowcount == 1
+
+    def finish_input_notice(self, chat_id, message_id, state, now=None):
+        """Сохранить исход; доказанный локальный отказ получает ограниченный backoff."""
+        if state not in {"sent", "not_sent", "unknown"}:
+            raise ValueError("INVALID_NOTICE_STATE")
+        now = time.time() if now is None else now
+        with self._connect() as db:
+            row = db.execute("SELECT attempts FROM input_notices WHERE chat_id=? AND message_id=?",
+                             (str(chat_id), str(message_id))).fetchone()
+            if row is None:
+                return
+            delay = (1, 5, 15, 30)[min(max(row["attempts"] - 1, 0), 3)]
+            db.execute("UPDATE input_notices SET state=?,retry_at=? WHERE chat_id=? AND message_id=? AND state='unknown'",
+                       (state, now + delay if state == "not_sent" else 0, str(chat_id), str(message_id)))
+
+    def pending_input_notices(self, now=None):
+        """Прочитать до ста известных неотправленных уведомлений в пределах срока и бюджета."""
+        now = time.time() if now is None else now
+        with self._connect() as db:
+            return [dict(row) for row in db.execute("""SELECT * FROM input_notices
+                    WHERE state='not_sent' AND owner<>'' AND attempts<5 AND created_at>=?
+                    ORDER BY retry_at,chat_id,message_id LIMIT 100""", (now - 3600,))]
 
     def create(self, owner, action, stage, chat_id=None, context=None):
         """Сохранить токен до отправки кнопок; не более 100 ожидающих подтверждений."""
@@ -478,6 +532,7 @@ class TelegramPlugin:
         self.inbound_events = {}
         self.feedback_results = {}
         self.feedback_inflight = set()
+        self.notice_wakeup = asyncio.Event()
         self.startup_attempt_recovery_initialized = False
         # AIDEV-NOTE: Наблюдение включается отдельно только в DEV; обычный gateway не требует журнала.
         try:
@@ -502,6 +557,7 @@ class TelegramPlugin:
         for task in self.tasks:
             task.cancel()
         self.loop, self.bot, self.adapter = asyncio.get_running_loop(), app.bot, adapter
+        self.notice_wakeup = asyncio.Event()
         guard = TypeHandler(Update, self.guard)
         app.add_handler(guard, group=-100)
         self.handlers.append((app, guard, -100))
@@ -541,6 +597,9 @@ class TelegramPlugin:
             self.tokens.mark_owner_attempts_orphaned(self.config.owner)
             self.startup_attempt_recovery_initialized = True
         task = self.loop.create_task(self.recover_durable_agent_attempts())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        task = self.loop.create_task(self._recover_input_notices())
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
@@ -704,17 +763,78 @@ class TelegramPlugin:
             except Exception:
                 # Ошибка наблюдения не меняет Telegram dispatch; диагностируется без содержимого.
                 logging.getLogger(__name__).warning("BRAI_TELEGRAM_OBSERVER_WRITE_FAILED")
+        if original is not None and not any(getattr(original, field, None) for field in
+                ("text", "photo", "document", "video", "audio", "voice", "sticker", "location", "venue")):
+            kind = next((field for field in ("animation", "video_note", "contact", "poll", "dice", "game", "story", "paid_media")
+                         if getattr(original, field, None)), None)
+            if kind is not None:
+                mid = getattr(original, "message_id", None)
+                if mid is not None:
+                    await self._send_input_notice({"chat_id": str(chat.id), "message_id": str(mid),
+                        "owner": self.config.owner, "user_id": str(user.id), "chat_type": str(chat.type),
+                        "thread_id": str(getattr(original, "message_thread_id", None) or "")})
+                raise ApplicationHandlerStop
+
+    async def _send_input_notice(self, row):
+        """Отправить только один доказанно допустимый fixed-text ответ в сохранённый маршрут."""
+        if (row["owner"] != self.config.owner
+                or not self._route_matches(row["chat_id"], row["chat_type"], row["user_id"])):
+            return
+        if not await asyncio.to_thread(self.tokens.claim_input_notice, row["chat_id"], row["message_id"], row):
+            return
+        try:
+            receipt = await self._notify("Этот тип вложения Telegram пока не поддерживается. "
+                                         "Пришлите его как обычный файл или опишите запрос текстом.",
+                                         row["chat_id"], row["thread_id"])
+        except TelegramNoticeNotSent:
+            await asyncio.to_thread(self.tokens.finish_input_notice, row["chat_id"], row["message_id"], "not_sent")
+            self.notice_wakeup.set()
+            logging.getLogger(__name__).warning("BRAI_TELEGRAM_UNSUPPORTED_NOTICE_FAILED state=not_sent")
+        except Exception:
+            logging.getLogger(__name__).warning("BRAI_TELEGRAM_UNSUPPORTED_NOTICE_FAILED state=unknown")
+        else:
+            await asyncio.to_thread(self.tokens.finish_input_notice, row["chat_id"], row["message_id"],
+                                    "sent" if receipt is not None else "unknown")
+
+    async def _recover_input_notices(self):
+        """Восстанавливать только known-not-sent; unknown и подтверждённые отправки не повторять."""
+        while not self.closed:
+            self.notice_wakeup.clear()
+            delay = 30
+            try:
+                rows = await asyncio.to_thread(self.tokens.pending_input_notices)
+                for row in rows:
+                    remaining = row["retry_at"] - time.time()
+                    if remaining > 0:
+                        delay = min(delay, remaining)
+                    elif self.bot is None:
+                        # AIDEV-NOTE: Ожидание локального бота не создаёт API-попытку и не расходует бюджет.
+                        delay = min(delay, 1)
+                    else:
+                        await self._send_input_notice(row)
+            except Exception:
+                logging.getLogger(__name__).warning("BRAI_TELEGRAM_INPUT_RECOVERY_UNAVAILABLE")
+            try:
+                await asyncio.wait_for(self.notice_wakeup.wait(), timeout=max(delay, 0.1))
+            except asyncio.TimeoutError:
+                pass
 
     async def _notify(self, text, chat_id=None, thread_id=""):
         # Telegram sendMessage rejects the canonical forum General thread ID 1.
-        if self.bot is None:
-            raise BridgeError("TELEGRAM_UNAVAILABLE")
-        route = {"message_thread_id": int(thread_id)} if thread_id and str(thread_id) != "1" else {}
-        sent = await self.bot.send_message(chat_id=int(chat_id or self.config.chat), text=text, **route,
+        bot = self.bot
+        if bot is None:
+            raise TelegramNoticeNotSent("TELEGRAM_UNAVAILABLE")
+        try:
+            target = int(chat_id or self.config.chat)
+            route = {"message_thread_id": int(thread_id)} if thread_id and str(thread_id) != "1" else {}
+        except (ValueError, TypeError):
+            raise TelegramNoticeNotSent("TELEGRAM_ROUTE_INVALID") from None
+        sent = await bot.send_message(chat_id=target, text=text, **route,
                                            connect_timeout=5, read_timeout=10, write_timeout=10, pool_timeout=5)
         from types import SimpleNamespace
         await self.observe_send(chat_id or self.config.chat, route, text,
                                 SimpleNamespace(success=True, message_id=getattr(sent, "message_id", None)))
+        return getattr(sent, "message_id", None)
 
     async def _report_unknown_resume(self, row):
         """Сообщить restart-неопределённость один раз, не повторяя работу."""

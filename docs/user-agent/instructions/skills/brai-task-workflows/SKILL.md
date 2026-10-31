@@ -15,4 +15,6 @@ Use the current owner-fixed tools and planning rules. This skill supplies data h
 5. Remarks, cancellation, clarification answers, and practical human results must come from the real current Telegram message through the corresponding Telegram tool. A button is not evidence of practical work. Questions and discussion are not decisions.
 6. Continue permitted work using actual required resources and output contract keys. Set `approval_required=false` unless the user explicitly requested acceptance. Complete the available finish Operation and deliver the result; save any actual human choice or explicitly requested decision first. Verify completed status. On cancellation preserve completed work.
 
+When Game Core is unavailable, continue work that does not depend on its data or a pending user decision. Do not invent records or decisions, and reconcile uncertain writes before retrying. If the request specifically requires saving or continuing a task, explain that this part is blocked.
+
 Keep progress brief and begin intermediate updates with `⏳ Работаю:`. Do not expose service checks. A background delegation is still work in progress, not completion. Return the required yield when native asynchronous delegation needs delivery on a later turn; never poll transcript files. Present a saved plan once through the confirmation tool.
