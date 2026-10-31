@@ -63,14 +63,18 @@ test('Temporal repairs terminal standalone lanes without reviving roots or losin
     if(mode==='missing-evidence')await f.owner.query('DELETE FROM codeworks.deployment_evidence WHERE project_id=$1',[project.id]);
     if(mode==='wrong-receipt')await verifier.query("UPDATE codeworks.deployments SET receipt=jsonb_set(receipt,'{commit_sha}',to_jsonb($2::text)) WHERE operation_id=$1",[item.op.id,'c'.repeat(40)]);
     if(mode==='failed')await f.owner.query("UPDATE codeworks.operations SET status='failed' WHERE id=$1",[item.op.id]);
-    if(mode==='release-owned')await f.app.query('UPDATE codeworks.deployments SET release_operation_id=$2 WHERE operation_id=$1',[item.op.id,randomUUID()]);
+    if(mode==='release-owned'){
+      const area=await f.prepare({project_id:project.id,workspace_key:'release-owner',request_key:'release-owner'}),parent=randomUUID();
+      await f.app.query("INSERT INTO codeworks.operations(id,project_id,workspace_id,executor_id,kind,status,step,request) VALUES($1,$2,$3,'codex','release','failed','fixture','{}')",[parent,project.id,area.workspace_id]);
+      await f.app.query('UPDATE codeworks.deployments SET release_operation_id=$2 WHERE operation_id=$1',[item.op.id,parent]);
+    }
     const guard=await f.app.connect();try{
       if(mode==='live-executor')await guard.query('SELECT pg_advisory_lock(hashtextextended($1,0))',['execution:rollout:'+item.op.id]);
       assert.equal((await reconcileSuccessfulRollouts(f.app,project.id)).released,0,mode);
       assert.equal((await state(item)).state,'held',mode);
     }finally{if(mode==='live-executor')await guard.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',['execution:rollout:'+item.op.id]);guard.release();}
-    await f.owner.query("UPDATE codeworks.commands SET state='done' WHERE operation_id=$1",[item.op.id]);
-    await f.owner.query("UPDATE codeworks.workflow_registry SET state='completed' WHERE operation_id=$1",[item.op.id]);
+    await f.owner.query("UPDATE codeworks.commands SET state='done' WHERE workflow_id IN (SELECT workflow_id FROM codeworks.workflow_registry WHERE project_id=$1)",[project.id]);
+    await f.owner.query("UPDATE codeworks.workflow_registry SET state='completed' WHERE project_id=$1",[project.id]);
   }
   const namespace=process.env.CODEWORKS_TEMPORAL_NAMESPACE,queue='terminal-queue-'+randomUUID();
   connection=await Connection.connect({address:process.env.CODEWORKS_TEMPORAL_ADDRESS});native=await NativeConnection.connect({address:process.env.CODEWORKS_TEMPORAL_ADDRESS});
