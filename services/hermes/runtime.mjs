@@ -1,5 +1,6 @@
 // ABOUTME: Подключает Hermes к готовым MCP и фиксированным NATS API Brai.
 // ABOUTME: Не повторяет операции автоматически и не выдаёт модели человеческие полномочия.
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -159,6 +160,10 @@ function hasOwner(value) { return ['ownerId', 'owner_id', 'userId', 'user_id', '
 /** Собирает owner-bound каталог; подставные порты позволяют проверить запреты без живых соседей. */
 export async function createBraiTools(config, ports) {
   const remote = new Map(), tools = [];
+  const voiceDefinition = natsTools.find(tool => tool.name === 'local_ai_invoke_synthesize');
+  const voiceInputSchema = { type: 'object', additionalProperties: false,
+    properties: { text: voiceDefinition.inputSchema.properties.text }, required: ['text'] };
+  const validateVoiceInput = compileInput(voiceInputSchema);
   for (const [endpoint, allow] of [['gameCore', gameCoreNames], ['history', historyNames], ['transcription', transcriptionNames], ['publisher', new Set(['publish_file', 'fetch_file'])]]) {
     for (const tool of await ports.list(endpoint)) {
       if (!allow.has(tool.name)) continue;
@@ -171,7 +176,9 @@ export async function createBraiTools(config, ports) {
       tools.push(visible);
     }
   }
-  for (const definition of natsTools) tools.push({ name: definition.name, description: definition.description, inputSchema: definition.inputSchema });
+  for (const definition of natsTools) tools.push(definition === voiceDefinition
+    ? { name: definition.name, description: 'Синтезировать текст настроенным локальным голосом. Срок и идентификаторы задаёт мост; при неизвестном исходе автоматического повтора нет.', inputSchema: voiceInputSchema }
+    : { name: definition.name, description: definition.description, inputSchema: definition.inputSchema });
   const metadata = new Map(fileMetadataTools.map(tool => [tool.name, compileInput(tool.inputSchema)]));
   tools.push(...fileMetadataTools);
   const humanRequest = { name: 'game_core_request_human_action', description: 'Прочитать Action и следующий допустимый шаг. Для старого результата сначала проверь, поручал ли пользователь отдельное принятие. Этот вызов не начинает человеческую попытку.',
@@ -191,6 +198,12 @@ export async function createBraiTools(config, ports) {
   return {
     tools, gameCoreCall, graph,
     filesConfiguration: () => fileConfiguration(config, fault),
+    /** Один вызов Local AI с доверенной моделью и сроком от часов моста. */
+    async synthesizeVoice(args, signal) {
+      if (!validateVoiceInput(args) || !config.tts?.model) throw fault('INVALID_ARGUMENT');
+      return this.call('local_ai_invoke_synthesize', { requestId: randomUUID(), operationId: randomUUID(),
+        model: config.tts.model, deadlineAt: new Date(Date.now() + 180_000).toISOString(), text: args.text, voice: 'eugene' }, signal);
+    },
     /** Вызывает только объявленный инструмент; максимум восемь текущих вызовов, очереди нет. */
     async call(name, args = {}, signal) {
       if (!object(args) || hasOwner(args)) throw fault('INVALID_ARGUMENT');
