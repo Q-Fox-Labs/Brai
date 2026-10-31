@@ -1,0 +1,165 @@
+# ABOUTME: Описывает шесть request/reply операций Контактов v1.
+# ABOUTME: Ответы идут в динамический NATS inbox, payload принадлежит owner-схемам.
+asyncapi: 3.0.0
+info:
+  title: Brai Contacts
+  version: 1.0.0
+defaultContentType: application/json
+channels:
+  resolve:
+    address: brai.contacts.v1.resolve.{callerId}
+    parameters:
+      callerId:
+        description: Protected NATS caller binding
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/resolveRequest'
+  profile_observe:
+    address: brai.contacts.v1.profile.observe.{callerId}
+    parameters:
+      callerId:
+        description: Protected NATS caller binding
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/profile.observeRequest'
+  contacts_get:
+    address: brai.contacts.v1.contacts.get.{callerId}
+    parameters:
+      callerId:
+        description: Protected NATS caller binding
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/contacts.getRequest'
+  contacts_list:
+    address: brai.contacts.v1.contacts.list.{callerId}
+    parameters:
+      callerId:
+        description: Protected NATS caller binding
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/contacts.listRequest'
+  operations_get:
+    address: brai.contacts.v1.operations.get.{callerId}
+    parameters:
+      callerId:
+        description: Protected NATS caller binding
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/operations.getRequest'
+  status:
+    address: brai.contacts.v1.status
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/statusRequest'
+  replies:
+    address: null
+    description: Dynamic NATS reply inbox; errors use NATS Services headers
+    messages:
+      resolve:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/resolveResponse'
+      profile_observe:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/profile.observeResponse'
+      contacts_get:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/contacts.getResponse'
+      contacts_list:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/contacts.listResponse'
+      operations_get:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/operations.getResponse'
+      status:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/statusResponse'
+      error:
+        headers:
+          type: object
+          required: [Nats-Service-Error, Nats-Service-Error-Code]
+          properties:
+            Nats-Service-Error:
+              type: string
+            Nats-Service-Error-Code:
+              type: string
+        payload:
+          $ref: './schemas/common.schema.json#/definitions/error'
+operations:
+  resolve:
+    action: receive
+    channel:
+      $ref: '#/channels/resolve'
+    messages:
+      - $ref: '#/channels/resolve/messages/request'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+      messages:
+        - $ref: '#/channels/replies/messages/resolve'
+        - $ref: '#/channels/replies/messages/error'
+  profile_observe:
+    action: receive
+    channel:
+      $ref: '#/channels/profile_observe'
+    messages:
+      - $ref: '#/channels/profile_observe/messages/request'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+      messages:
+        - $ref: '#/channels/replies/messages/profile_observe'
+        - $ref: '#/channels/replies/messages/error'
+  contacts_get:
+    action: receive
+    channel:
+      $ref: '#/channels/contacts_get'
+    messages:
+      - $ref: '#/channels/contacts_get/messages/request'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+      messages:
+        - $ref: '#/channels/replies/messages/contacts_get'
+        - $ref: '#/channels/replies/messages/error'
+  contacts_list:
+    action: receive
+    channel:
+      $ref: '#/channels/contacts_list'
+    messages:
+      - $ref: '#/channels/contacts_list/messages/request'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+      messages:
+        - $ref: '#/channels/replies/messages/contacts_list'
+        - $ref: '#/channels/replies/messages/error'
+  operations_get:
+    action: receive
+    channel:
+      $ref: '#/channels/operations_get'
+    messages:
+      - $ref: '#/channels/operations_get/messages/request'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+      messages:
+        - $ref: '#/channels/replies/messages/operations_get'
+        - $ref: '#/channels/replies/messages/error'
+  status:
+    action: receive
+    channel:
+      $ref: '#/channels/status'
+    messages:
+      - $ref: '#/channels/status/messages/request'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+      messages:
+        - $ref: '#/channels/replies/messages/status'
+        - $ref: '#/channels/replies/messages/error'

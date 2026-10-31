@@ -1,0 +1,120 @@
+// ABOUTME: Выполняет идемпотентные шаги сообщения через предметные порты.
+// ABOUTME: Сохраняет intent и успешные результаты до зависимых шагов.
+import { Context } from '@temporalio/activity';
+import { ApplicationFailure } from '@temporalio/common';
+import {checkContact,checkContactRequest} from './contact-contract.js';
+import {checkResolution} from './channel-contract.js';
+import { inputHash, isJobSuccess } from './contracts.js';
+import { Fault, type Data, type JobKind, type Message, type Packet, type Ports, type Store, type PortConfig } from './types.js';
+/** Связывает Activities с собственным хранилищем и внешними операциями. */
+export function createActivities(store: Store, ports: Ports, configs: Record<JobKind,PortConfig>) {
+ const read = async (id: string): Promise<Packet> => { const p=await store.get(id); if(!p) throw new Fault('NOT_FOUND'); return p; };
+ const guard = <A extends unknown[],R>(fn: (...args:A)=>Promise<R>) => async (...args:A):Promise<R> => {
+  let ctx:Context|undefined;try{ctx=Context.current();}catch{}
+  const pulse=ctx?setInterval(()=>ctx!.heartbeat(),5000):undefined;
+  pulse?.unref();
+  try { return await fn(...args); } catch(e) {
+   if(e instanceof Fault && !e.retryable) throw ApplicationFailure.nonRetryable(e.code,'Permanent');
+   throw ApplicationFailure.retryable('DEPENDENCY_UNAVAILABLE','Transient');
+  } finally {if(pulse)clearInterval(pulse);}
+ };
+ return {
+  prepare: guard(async(id:string) => {
+   let p=await read(id);
+   if(p.context&&!p.context.resolutionId)throw new Fault('CHANNEL_CONTEXT_VERSION_UNSUPPORTED');
+   if(p.original.type==='message.incoming'&&p.contact&&!p.contactRequest)throw new Fault('CONTACT_CONTEXT_VERSION_UNSUPPORTED');
+   let replyContext:Data|null=null;
+    if(p.original.type==='message.outgoing' && p.original.causationId) {
+     const parent=await store.get(p.original.causationId);
+     if(!parent || parent.ownerId!==p.ownerId) throw new Fault('INVALID_REPLY_LINK');
+     if(!parent.context || !parent.inboxRef) throw new Fault('REPLY_CONTEXT_NOT_READY',true);
+     if(p.original.data.replyToMessageId!==parent.inboxRef.messageId || p.original.data.conversationId!==parent.original.data.conversationId) throw new Fault('INVALID_REPLY_LINK');
+     if(!parent.context.resolutionId)throw new Fault('CHANNEL_CONTEXT_VERSION_UNSUPPORTED');
+     checkResolution(parent,parent.context,null);
+     replyContext=parent.context;
+    }
+   if(p.context)checkResolution(p,p.context,replyContext);
+   if(!p.context){
+    let context:Data;
+    try{context=await ports.call('channel',p,id+'/channel',{asOf:p.receivedAt,replyContext});checkResolution(p,context,replyContext);}
+    catch(e){
+     const failure=e instanceof Fault?e:new Fault('DEPENDENCY_UNAVAILABLE',true);
+     await store.update(id,v=>{v.dependencyFailure={stage:'channel.resolve',code:failure.code,retryable:failure.retryable};});
+     throw failure;
+    }
+    if(replyContext && inputHash(context.destination)!==inputHash(replyContext.destination)) throw new Fault('REPLY_ROUTE_CONFLICT');
+    p=await store.update(id,v=>{v.context??=context;delete v.dependencyFailure;});
+   }
+   if(p.original.type==='message.incoming'){
+    if(!p.contactRequest){
+     let signal:AbortSignal|undefined;try{signal=Context.current().cancellationSignal;}catch{}
+     const intent=await ports.prepareContact(p,signal);
+     p=await store.update(id,v=>{if(!v.contactRequest){v.contactRequest=intent.request;v.contactDiagnostics=intent.diagnostics;}});
+    }
+    checkContactRequest(p,p.contactRequest!);
+    if(p.contact)checkContact(p,p.contact);
+    else {
+     try{const contact=await ports.call('contact',p,id+'/contact');checkContact(p,contact);p=await store.update(id,v=>{v.contact??=contact;delete v.dependencyFailure;});}
+     catch(e){const f=e instanceof Fault?e:new Fault('DEPENDENCY_UNAVAILABLE',true);await store.update(id,v=>{v.dependencyFailure={stage:'contact.resolve',code:f.code,retryable:f.retryable};});throw f;}
+    }
+   }
+   if(!p.prepared) {
+    let signal:AbortSignal|undefined;try{signal=Context.current().cancellationSignal;}catch{}
+    const attachments=await ports.prepareFiles(p,signal);
+    const author=structuredClone(p.original.data.author) as Data;
+    if(p.original.type==='message.incoming'&&!Object.hasOwn((p.contactRequest?.profile??{}) as Data,'photoArtifactId'))delete author.photoArtifactId;
+    const prepared={...p.original.data,author,attachments,context:p.context,contact:p.contact??null,assignments:p.context?.assignments??{},fieldOrigins:p.context?.fieldOrigins??{}};
+    p=await store.update(id,v=>{v.prepared??=prepared;if(v.state!=='needs_attention')v.state='processing';});
+   }
+   return p.scenario;
+  }),
+  saveInbox: guard(async(id:string) => {
+   const p=await read(id);
+   if(!p.inboxRef) { const ref=await ports.call('inbox',p,id+'/inbox'); if(!ref.messageId) throw new Fault('INVALID_INBOX_RESULT'); await store.update(id,v=>{v.inboxRef??=ref;}); }
+  }),
+  startJob: guard(async(id:string,kind:JobKind) => {
+   let p=await read(id);
+   const attempt=p.attempts[kind]??0, operationId=id+'/'+kind+'/'+attempt;
+   if(!p.jobs[operationId]) p=await store.update(id,v=>{v.jobs[operationId]??={id:operationId,kind,attempt,expectedSource:configs[kind].resultSource!,state:'pending'};});
+   if(p.jobs[operationId].state==='pending') {
+    const reply=await ports.call(kind,p,operationId);
+    if(reply.operationId!==operationId || reply.accepted!==true) throw new Fault('INVALID_JOB_RECEIPT');
+   }
+   return operationId;
+  }),
+  jobState: guard(async(id:string,operationId:string) => (await read(id)).jobs[operationId]?.state ?? 'pending'),
+  attention: guard(async(id:string,reason:string,stage:string) => {
+   const p=await store.update(id,v=>{v.attention??={};v.attention[stage]??={reason,resumeVersion:v.resumeVersion};v.state='needs_attention';v.reason=reason;});
+   return p.attention![stage].resumeVersion;
+  }),
+  clearAttention: guard(async(id:string,stage:string,version:number) => {
+   await store.update(id,p=>{
+    if(p.attention?.[stage]?.resumeVersion===version)delete p.attention[stage];
+    const pending=Object.values(p.attention??{});
+    p.state=pending.length?'needs_attention':'processing';p.reason=pending[0]?.reason??null;
+   });
+  }),
+  resumeVersion: guard(async(id:string)=>(await read(id)).resumeVersion),
+  retryJob: guard(async(id:string,kind:JobKind,operationId:string) => {
+   await store.update(id,v=>{
+    const job=v.jobs[operationId];
+    if(!job || job.kind!==kind || job.state!=='failed') throw new Fault('UNSAFE_RETRY');
+    // AIDEV-NOTE: Повтор Activity после COMMIT восстанавливает тот же переход, не новую попытку.
+    v.attempts[kind]=Math.max(v.attempts[kind]??0,job.attempt+1);
+   });
+  }),
+  audit: guard(async(id:string,phase:'receive'|'complete') => {
+   let p=await read(id);
+   if(phase==='complete' && !p.completedAt) p=await store.update(id,v=>{v.completedAt??=new Date().toISOString();});
+   await ports.history(p,phase);
+  }),
+  complete: guard(async(id:string) => {
+   await store.update(id,p=>{
+    const required:JobKind[]=[p.scenario==='incoming.v1'?'hermes':'deliver','understand','memory'];
+    if(Object.keys(p.attention??{}).length || !p.inboxRef || required.some(k=>!Object.values(p.jobs).some(j=>j.kind===k && j.attempt===(p.attempts[k]??0) && j.state==='succeeded' && isJobSuccess(p,j,j.result??{})))) throw new Fault('INCOMPLETE_PROCESS');
+    p.state='completed';p.reason=null;
+   });
+  })
+ };
+}
+export type Activities=ReturnType<typeof createActivities>;
