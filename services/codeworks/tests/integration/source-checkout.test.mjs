@@ -11,7 +11,7 @@ import {NativeConnection,Worker,bundleWorkflowCode} from '@temporalio/worker';
 import {setup,configured} from './fixture.mjs';
 import {command,createGit,gitResourcesAbsent} from '../../src/git.mjs';
 import {createFlowGit} from '../../src/git-flow.mjs';
-import {createActivityGit} from '../../src/git-steps.mjs';
+import {createActivityGit,localGitStep} from '../../src/git-steps.mjs';
 import {createActivities,deliverCommands} from '../../src/temporal.mjs';
 import {runOperation} from '../../src/worker.mjs';
 import {runHook} from '../../src/hook.mjs';
@@ -37,7 +37,15 @@ test('Temporal release reconciles source conflict and lost FF receipt, then prep
   const protectedFile=await readFile(path.join(protectedArea.path,'hello.txt'),'utf8'),shared=await readFile(path.join(p.repo_path,'node_modules/shared-readonly/keep.js'),'utf8');
   await copyFile(process.env.CODEWORKS_TEST_SOURCE_HELPER,path.join(p.common_dir,'hooks/synchronize-brai-source'));await chmod(path.join(p.common_dir,'hooks/synchronize-brai-source'),0o755);
   await f.owner.query("INSERT INTO codeworks.execution_control(project_id,instance_id,owner) VALUES($1,'checkout-fixture','temporal')",[p.id]);
-  const adapters=createActivityGit({flowGit});
+  // Локальный origin допустим только в этом fixture-адаптере. Production URL guard не ослабляется.
+  const fixtureStep=async(method,project,workspace,args=[],options={})=>{
+    if(method!=='cleanupStep')return localGitStep(method,project,workspace,args,options);
+    const program="import{createGit}from "+JSON.stringify(new URL('../../src/git.mjs',import.meta.url).href)+";import{createFlowGit}from "+JSON.stringify(new URL('../../src/git-flow.mjs',import.meta.url).href)+";const p=JSON.parse(process.argv[1]);const result=await createGit({flowGit:createFlowGit({localRemote:true})}).cleanupStep(p.project,p.workspace,...p.args);process.stdout.write(JSON.stringify(result));";
+    const reply=await command('/bin/sh',['-c','exec 3>\"$1\" || exit 74; flock -n -E 75 3 || exit $?; export CODEWORKS_LOCK_HELD=1; exec \"$2\" --input-type=module -e \"$3\" \"$4\"','fixture-cleanup',path.join(project.common_dir,'codeworks.lock'),process.execPath,program,JSON.stringify({project,workspace,args})],{allowFailure:true});
+    if(reply.code!==0)throw Object.assign(Error('fixture cleanup failed'),{code:reply.code===75?'BUSY':'GIT_FAILED'});
+    return JSON.parse(reply.stdout);
+  };
+  const adapters=createActivityGit({flowGit,step:fixtureStep});
   let currentWorkspace,crashed=false;
   const prs=[],github={
     find:async(_,leg)=>prs.find(pr=>pr.head.ref===leg.branch&&pr.base.ref===leg.target)??null,
@@ -65,6 +73,11 @@ test('Temporal release reconciles source conflict and lost FF receipt, then prep
   await start();
   delivery=setInterval(()=>deliverCommands(f.app,client,{taskQueue:queue}).catch(()=>{}),100);
   const op=async id=>(await f.h.call('status',{project_id:p.id,operation_id:id},'codex')).operation;
+  const completed=async(id,workspaceId)=>until(async()=>{
+    const state=await f.h.call('lifecycle.status',{project_id:p.id,workspace_id:workspaceId},'codex');
+    assert.notEqual(state.cleanup?.state,'waiting_decision',JSON.stringify(state));
+    return (await client.workflow.getHandle(id).describe()).status.name==='COMPLETED';
+  });
   const prepared=await f.prepare({project_id:p.id,workspace_key:'source-change',request_key:'source-change'});
   currentWorkspace=prepared.workspace_id;
   await until(async()=>(await op(prepared.operation_id)).status==='succeeded');
@@ -92,7 +105,7 @@ test('Temporal release reconciles source conflict and lost FF receipt, then prep
   const interrupted=(await f.app.query('SELECT details FROM codeworks.releases WHERE operation_id=$1',[release.operation_id])).rows[0];
   assert.equal(interrupted.details.primary.local_checkout,undefined,'lost receipt was falsely persisted');
   await start();await client.workflow.getHandle(workflow).signal('commandsAvailable');
-  await until(async()=>(await client.workflow.getHandle(workflow).describe()).status.name==='COMPLETED');
+  await completed(workflow,w.id);
   assert.equal((await op(release.operation_id)).status,'succeeded');
   assert.equal((await op(release.operation_id)).result.details.primary.local_checkout.commit_sha,merged);
   assert.equal(gitResourcesAbsent(await createGit({flowGit}).inspectResources(p,w)),true);
@@ -108,7 +121,7 @@ test('Temporal release reconciles source conflict and lost FF receipt, then prep
   await command(p.preparer_path,['--check',next.path]);
   const nextWorkflow=(await f.app.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1',[next.workspace_id])).rows[0].workflow_id;workflows.push(nextWorkflow);
   await f.h.call('workspace.cancel',{project_id:p.id,workspace_id:next.workspace_id,request_key:'finish-after-release',reason:'Disposable verification completed'},'codex');
-  await until(async()=>(await client.workflow.getHandle(nextWorkflow).describe()).status.name==='COMPLETED');
+  await completed(nextWorkflow,next.workspace_id);
   assert.equal(gitResourcesAbsent(await createGit({flowGit}).inspectResources(p,nextArea)),true);
   assert.ok(await stat(protectedArea.path));
   // Моделируется установленный PROD в том же disposable origin; основной DEV не переключается.
@@ -142,7 +155,7 @@ test('Temporal release reconciles source conflict and lost FF receipt, then prep
     await rm(path.join(hotfix.path,'hotfix-check.txt'));
     const hotfixWorkflow=(await f.app.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1',[hotfix.id])).rows[0].workflow_id;workflows.push(hotfixWorkflow);
     await f.h.call('workspace.cancel',{project_id:p.id,workspace_id:hotfix.id,request_key:'finish-hotfix-'+explicit,reason:'Disposable hotfix route verification'},'codex');
-    await until(async()=>(await client.workflow.getHandle(hotfixWorkflow).describe()).status.name==='COMPLETED');
+    await completed(hotfixWorkflow,hotfix.id);
     assert.equal(gitResourcesAbsent(await createGit({flowGit}).inspectResources(p,hotfix)),true);
   }
   assert.ok(await stat(protectedArea.path));
