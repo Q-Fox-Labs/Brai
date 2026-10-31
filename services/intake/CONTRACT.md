@@ -197,3 +197,10 @@ CHANNEL_CONTEXT_VERSION_UNSUPPORTED; автоматического пересч
 Исполнитель доставки вызывает delivery.check непосредственно перед эффектом.
 Приём сам Telegram не отправляет. event.recorded сохраняет JetStream-путь
 без resolve; граф фиксированных message workflows не расширен.
+
+## Отдельное целевое дополнение: наблюдение
+
+[SHADOW_CONTRACT.md](SHADOW_CONTRACT.md) задаёт будущие message.observed,
+shadow.v1/observe.v1 и intakeObservationV1. Они ещё не реализованы и не входят
+в действующую схему выше. Этот профиль не вызывает отсутствующие сервисы
+и не использует intakeMessageV1. Семантика текущего v1 остаётся прежней.
