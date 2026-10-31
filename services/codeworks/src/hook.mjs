@@ -320,10 +320,20 @@ function shellPaths(command, cwd) {
     segment = [];
     while (words[0] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0].word)) words.shift();
     if (words[0]?.word === 'rtk' && words[1]?.word === 'proxy') words.splice(0, 2);
-    const first = words.shift();
+    let first = words.shift();
     if (!first || first.dynamic) return;
+    if(path.basename(first.word)==='env'){
+      while(words[0]&&/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[0].word))words.shift();
+      first=words.shift();if(!first||first.dynamic)return;
+    }
     const name = path.basename(first.word);
     if (name === 'cd' && words.length === 1 && !words[0].dynamic) { cwd = resolved(words[0].word, cwd); explicitCwd=true; return; }
+    // AIDEV-NOTE: Неподдержанный git apply всё равно является записью; env-prefix не разрешает писать в основную копию.
+    if(name==='git'&&words.some(token=>token.word==='apply')){
+      let target=cwd;
+      for(let i=0;i<words.length&&words[i].word!=='apply';i++)if(words[i].word==='-C'&&!words[i+1]?.dynamic){target=resolved(words[++i].word,target);}
+      found.push(resolved(target,'/'));return;
+    }
     if(name==='git' && words[0]?.word==='-C' && !words[1]?.dynamic && path.isAbsolute(words[1]?.word??'') && ['add','commit','push'].includes(words[2]?.word)){add(words[1]);return;}
     if(explicitCwd&&((name==='git'&&['add','commit','push'].includes(words[0]?.word))||(name==='node'&&(words[0]?.word==='--test'||/^(?:\.\/)?services\/codeworks\/components\/cli\.mjs$/.test(words[0]?.word??''))))){found.push(resolved(cwd,'/'));return;}
     const operands = words.filter(token => !token.word.startsWith('-'));
@@ -516,6 +526,9 @@ async function runHookInner(event, {env = process.env, config, connect = connect
   // AIDEV-NOTE: Shell может содержать непрозрачный код; он не создаёт область и не переписывается.
   const patchCommand=shell?gitPatch(input?.command??input?.cmd):null;
   if (!patchCommand && (!['apply_patch', 'Write', 'Edit'].includes(name) || config.native_file_writes!==true)) return deny('WORKSPACE_WRITE_TRANSPORT_REQUIRED: используйте git -C <репозиторий> apply --whitespace=nowarn с одним литеральным патчем через quoted heredoc и штатным запросом доступа командного инструмента. Область не создана.');
+  const kind = patchCommand?.kind ?? project.workspace_kind ?? env.CODEWORKS_WORKSPACE_KIND;
+  if(kind&&!['feature','hotfix'].includes(kind))return deny('WORKSPACE_KIND_CONFLICT: неизвестный тип области.');
+  if(project.workspace_kind&&kind!==project.workspace_kind)return deny('WORKSPACE_KIND_CONFLICT: тип записи не соответствует контуру репозитория.');
   if(!inputFits(event,input)) return deny('HOOK_INPUT_TOO_LARGE: размер записи превышает допустимый предел.');
   try { validateSpool(config.completion_spool); } catch { return deny('POST_DELIVERY_UNAVAILABLE: журнал завершений недоступен.'); }
   const key = env.CODEWORKS_WORKSPACE_KEY;
@@ -541,7 +554,6 @@ async function runHookInner(event, {env = process.env, config, connect = connect
     rewrite = target => ({...input, [field]: path.join(target, path.relative(root, files[0]))});
   }
   const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-  const kind = env.CODEWORKS_WORKSPACE_KIND;
   const payload = hash({tool_name:event.tool_name, tool_input:input, cwd, project_id:project.id, workspace_key:key, kind,...executorThread(event)});
   const args = {project_id:project.id, ...(key ? {workspace_key:key} : {}), ...(kind ? {kind} : {}), session_id:event.session_id, turn_id:event.turn_id, tool_use_id:event.tool_use_id, tool_name:event.tool_name, payload_sha256:payload, original_input_sha256:canonicalHash(input), targets:[...new Set(files.map(f=>path.relative(root,f)))], request_key:'hook-'+hash([project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
   let client, result;
@@ -587,6 +599,8 @@ async function existingWrite(event, area, {env,connect,files,shell,cwd,input,nam
     const status = await client.call('status',{project_id:area.project.id,workspace_id:area.id});
     const w = status.workspace;
     if (!w || resolved(w.path,'/') !== area.root || w.preparation_state !== 'ready') return deny('Рабочая область недоступна.');
+    const requestedKind=shell?gitPatch(input?.command??input?.cmd)?.kind:null;
+    if(requestedKind&&requestedKind!==w.kind)return deny('WORKSPACE_KIND_CONFLICT: продолжите область её исходного типа.');
     const key=w.workspace_key,kind=w.kind;
     const args={project_id:area.project.id,workspace_id:area.id,workspace_key:key,kind,session_id:event.session_id,turn_id:event.turn_id,tool_use_id:event.tool_use_id,tool_name:event.tool_name,payload_sha256:hash({tool_name:event.tool_name,tool_input:input,cwd,project_id:area.project.id,workspace_id:area.id}),original_input_sha256:canonicalHash(input),targets:files.length ? [...new Set(files.map(f=>path.relative(area.root,f)||'.'))] : ['.'],request_key:'hook-'+hash([area.project.id,key,kind,event.session_id,event.turn_id,event.tool_use_id]).slice(0,48)};
     result=await client.call('write.begin',{...args,...executorThread(event)});

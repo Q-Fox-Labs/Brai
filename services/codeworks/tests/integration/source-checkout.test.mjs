@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
-import {readFile,writeFile,copyFile,chmod,stat} from 'node:fs/promises';
+import {readFile,writeFile,copyFile,chmod,stat,rm} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {Connection,Client} from '@temporalio/client';
@@ -14,6 +14,7 @@ import {createFlowGit} from '../../src/git-flow.mjs';
 import {createActivityGit} from '../../src/git-steps.mjs';
 import {createActivities,deliverCommands} from '../../src/temporal.mjs';
 import {runOperation} from '../../src/worker.mjs';
+import {runHook} from '../../src/hook.mjs';
 import {recordDeployment} from '../../src/deployment-evidence.mjs';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(work,timeout=90000){const end=Date.now()+timeout;while(!await work()){assert.ok(Date.now()<end,'checkout fixture timed out');await sleep(100);}}
@@ -109,5 +110,40 @@ test('Temporal release reconciles source conflict and lost FF receipt, then prep
   await f.h.call('workspace.cancel',{project_id:p.id,workspace_id:next.workspace_id,request_key:'finish-after-release',reason:'Disposable verification completed'},'codex');
   await until(async()=>(await client.workflow.getHandle(nextWorkflow).describe()).status.name==='COMPLETED');
   assert.equal(gitResourcesAbsent(await createGit({flowGit}).inspectResources(p,nextArea)),true);
+  assert.ok(await stat(protectedArea.path));
+  // Моделируется установленный PROD в том же disposable origin; основной DEV не переключается.
+  const producer=path.join(p.repo_path,'..','prod-source');
+  await command('git',['clone','--branch','main',path.join(p.repo_path,'..','origin.git'),producer]);
+  const prod=(...args)=>command('git',['-C',producer,...args]);
+  await prod('config','user.name','Production fixture');await prod('config','user.email','fixture@example.invalid');
+  await writeFile(path.join(producer,'hello.txt'),'installed production fix\n');await prod('add','hello.txt');await prod('commit','-m','Installed production base');await prod('push','origin','main');
+  const installedProd=(await prod('rev-parse','HEAD')).stdout;
+  await recordDeployment(f.app,{project_id:p.id,target:'prod',commit_sha:installedProd,evidence_url:'https://fixture.invalid/production/'+installedProd},{allowedRepositories:[p.repo_path]});
+  const spool=path.join(p.repo_path,'..','hook-spool');await import('node:fs/promises').then(m=>m.mkdir(spool,{mode:0o700}));
+  for(const explicit of [true,false]){
+    const root=explicit?p.repo_path:producer;
+    const patch='diff --git a/hotfix-check.txt b/hotfix-check.txt\nnew file mode 100644\n--- /dev/null\n+++ b/hotfix-check.txt\n@@ -0,0 +1 @@\n+isolated hotfix verification\n';
+    const input={command:"git -C '"+root+"'"+(explicit?' -c codeworks.kind=hotfix':'')+" apply --whitespace=nowarn <<'PATCH'\n"+patch+"PATCH\n"};
+    const event={hook_event_name:'PreToolUse',tool_name:'Bash',session_id:'hotfix-'+explicit,turn_id:'first',tool_use_id:'write',cwd:p.repo_path,tool_input:input};
+    const config={native_file_writes:false,completion_spool:spool,projects:[{id:p.id,repo_path:p.repo_path,workspace_root:p.workspace_root},{id:p.id,repo_path:producer,workspace_kind:'hotfix'}]};
+    const options={config,env:{CODEWORKS_EXECUTOR_ID:'codex'},polls:300,wait:()=>sleep(50),connect:async()=>({call:(method,args)=>f.h.call(method,args,'codex'),close(){}})};
+    const reply=await runHook(event,options);
+    assert.equal(reply.hookSpecificOutput.permissionDecision,'allow',JSON.stringify(reply));
+    const rewritten=reply.hookSpecificOutput.updatedInput;
+    const outcome=await command('/bin/bash',['-lc',rewritten.command]);
+    await runHook({...event,hook_event_name:'PostToolUse',tool_input:rewritten,tool_response:{exit_code:outcome.code}},options);
+    const call=(await f.app.query('SELECT workspace_id FROM codeworks.write_calls WHERE project_id=$1 AND session_id=$2',[p.id,event.session_id])).rows[0];
+    const hotfix=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[call.workspace_id])).rows[0];
+    assert.equal(hotfix.kind,'hotfix');assert.equal(hotfix.base_sha,installedProd);assert.notEqual(hotfix.base_sha,merged);
+    assert.equal(await readFile(path.join(hotfix.path,'hello.txt'),'utf8'),'installed production fix\n');
+    assert.equal((await g('rev-parse','HEAD')).stdout,merged);assert.equal((await prod('rev-parse','HEAD')).stdout,installedProd);
+    assert.equal(await stat(path.join(root,'hotfix-check.txt')).catch(()=>null),null);
+    // Удаляется только созданный этим тестом материал; пользовательских правок в fixture нет.
+    await rm(path.join(hotfix.path,'hotfix-check.txt'));
+    const hotfixWorkflow=(await f.app.query('SELECT workflow_id FROM codeworks.workflow_registry WHERE workspace_id=$1',[hotfix.id])).rows[0].workflow_id;workflows.push(hotfixWorkflow);
+    await f.h.call('workspace.cancel',{project_id:p.id,workspace_id:hotfix.id,request_key:'finish-hotfix-'+explicit,reason:'Disposable hotfix route verification'},'codex');
+    await until(async()=>(await client.workflow.getHandle(hotfixWorkflow).describe()).status.name==='COMPLETED');
+    assert.equal(gitResourcesAbsent(await createGit({flowGit}).inspectResources(p,hotfix)),true);
+  }
   assert.ok(await stat(protectedArea.path));
 });

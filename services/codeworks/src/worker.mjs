@@ -248,7 +248,10 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
       await finish('succeeded','ready',{workspace_id:w.id});
     }catch(error){
       if(signal.aborted)throw error;
-      if(scoped&&error?.code==='BUSY')return;
+      if(scoped&&error?.code==='BUSY'){
+        const reason=/^LOCAL_[A-Z_]+$/.test(error.message)?error.message:'LOCAL_GIT_BUSY';
+        await finish('awaiting_execution',reason,op.result);return;
+      }
       if(error?.code==='TEST_INTERRUPTION'||(admission&&(!error?.code||['GIT_FAILED','GITHUB_UNAVAILABLE'].includes(error.code)||/^08|^57/.test(error.code))))throw error;
       if(admission&&op.kind==='release'){
         const r=(await db.query('SELECT details FROM codeworks.releases WHERE operation_id=$1',[op.id])).rows[0];
