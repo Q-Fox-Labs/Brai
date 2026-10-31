@@ -20,7 +20,7 @@ async function confirmPRHead(p,w,leg,pr,github,git) {
 /** Один проход; save фиксирует намерения до мутаций, evidence читает доверенную установку.
  * deploy(target,sha,proof,retryOf) возвращает {operation_id,status}; retryOf разрешает одну явную попытку.
  */
-export async function advanceRelease({project:p,workspace:w,operation:op,release}, {git,github,inspect,save,evidence,deploy,acquire,releaseLane=async()=>{},verifyEvidence=async()=>true,checkpoint=async()=>{}}) {
+export async function advanceRelease({project:p,workspace:w,operation:op,release}, {git,github,inspect,save,evidence,deploy,acquire,releaseLane=async()=>{},synchronizeCheckout=async()=>({state:'waiting',reason:'LOCAL_CHECKOUT_SYNC_REQUIRED'}),verifyEvidence=async()=>true,checkpoint=async()=>{}}) {
   if(!['feature','hotfix'].includes(w.kind))throw new Fault('INVALID_ARGUMENT');
   const queued=!!acquire;acquire??=async()=>true;
   const flow=release.details;
@@ -41,6 +41,18 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
   const mutation=async(leg,key,work)=>{
     leg[key]=true;await persist();await checkpoint('before-'+key);
     await work();await checkpoint('after-'+key);
+  };
+  const finishLeg=async(leg,lane)=>{
+    if(leg.target==='dev'){
+      if(!await acquire(lane))return waiting('awaiting_execution','TARGET_QUEUE');
+      const receipt=await synchronizeCheckout(leg.merge_sha);
+      if(receipt?.state!=='ready')return waiting('awaiting_reconciliation',receipt?.reason??'LOCAL_CHECKOUT_SYNC_REQUIRED');
+      if(receipt.commit_sha!==leg.merge_sha)throw new Fault('CONFLICT','Local checkout differs from the installed merge.');
+      await checkpoint('after-local-checkout');
+      leg.local_checkout={commit_sha:receipt.commit_sha,lock_sha256:receipt.lock_sha256,dependency_graph_sha256:receipt.dependency_graph_sha256};
+      await persist();
+    }
+    await releaseLane(lane);return null;
   };
   if(!p.github)return waiting('awaiting_execution','GIT_FLOW_NOT_CONFIGURED');
   const current=await inspect(p,w);
@@ -71,7 +83,7 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
     const leg=flow[name],lane=leg.target==='main'?'prod':'dev';
     if(leg.deployment_evidence_id){
       if(!await verifyEvidence(leg.deployment_evidence_id,lane,leg.merge_sha))throw new Fault('CONFLICT','Confirmed installation evidence is missing.');
-      await releaseLane(lane);continue;
+      const source=await finishLeg(leg,lane);if(source)return source;continue;
     }
     const queuedGate=queued?await checkGate(leg,leg.head,'head','HEAD_CHECKS_REQUIRED'):null;if(queuedGate)return queuedGate;
     if(!await acquire(lane))return waiting('awaiting_execution','TARGET_QUEUE');
@@ -132,7 +144,7 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
       }
       return waiting('awaiting_deployment','EXACT_MERGE_DEPLOYMENT_REQUIRED');
     }
-    leg.deployment_evidence_id=installed.id;await persist();await releaseLane(target);
+    leg.deployment_evidence_id=installed.id;await persist();const source=await finishLeg(leg,target);if(source)return source;
   }
   return waiting('succeeded','VERIFIED_RELEASE_COMPLETED');
 }

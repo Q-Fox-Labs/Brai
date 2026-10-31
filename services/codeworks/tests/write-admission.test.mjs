@@ -118,3 +118,16 @@ test('one session reuses one key for multiple targets and gets a new key after r
  await assert.rejects(api.begin(input('one',['services/auth/index.mjs']),'e'),{code:'CONFLICT'});
  const explicit=await api.begin({...input('four',['apps/web/form.ts']),workspace_id:third.workspace_id},'e');assert.equal(explicit.workspace_key,third.workspace_key);assert.equal(explicit.workspace_id,third.workspace_id);
 });
+
+test('an explicit hotfix never silently reuses an active feature from the same session',async()=>{
+  let preparations=0,inserts=0;
+  const query=async sql=>{
+    if(sql.includes('SELECT c.workspace_key,c.kind,c.workspace_id'))return {rows:[{workspace_key:'live-feature',kind:'feature',workspace_id:'active',removed_at:null,lifecycle:'active',workflow_state:'open'}]};
+    if(sql.startsWith('INSERT INTO codeworks.write_calls'))inserts++;
+    return {rows:[],rowCount:0};
+  };
+  const pool={connect:async()=>({query,release(){}})};
+  const api=createWriteAdmission(pool,{prepare:()=>{preparations++;},inspect:()=>{},workspace:()=>{}});
+  await assert.rejects(api.begin({project_id:'p',session_id:'same',turn_id:'new-turn',tool_use_id:'write',tool_name:'Bash',kind:'hotfix',targets:['fix.js'],payload_sha256:'a'.repeat(64)},'codex'),{code:'WORKSPACE_KIND_CONFLICT'});
+  assert.equal(preparations,0);assert.equal(inserts,0);
+});

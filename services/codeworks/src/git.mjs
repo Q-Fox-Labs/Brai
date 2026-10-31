@@ -161,15 +161,27 @@ export function createGit({flowGit}={}) {
       if(!path.isAbsolute(project.preparer_path)||!(await lstat(project.preparer_path)).isFile())throw new Fault('INVALID_ARGUMENT');
       if(project.node_version!==process.version.slice(1)||project.platform!==process.platform+'-'+process.arch)throw new Fault('DEPENDENCIES_INCOMPATIBLE','Node version or platform differs from the registered project.');
     },
-    /** Закрепляет существующий remote ref; не выполняет fetch и не переходит на другую базу. */
+    /** Закрепляет актуальный upstream; обновляет только Git objects и CAS tracking ref, не checkout. */
     async readBase(project,kind) {
       await topology(project);
       const ref=project.git_flow[kind+'_base'];
-      const base=(await git(project,['rev-parse','--verify',ref+'^{commit}'])).stdout;
+      const before=await git(project,['rev-parse','--verify','--quiet',ref+'^{commit}'],{allowFailure:true});
+      let base=before.code===0?before.stdout:null;
       if(project.github){
         const {createFlowGit}=await import('./git-flow.mjs');
-        if(await (flowGit??createFlowGit()).remote(project,kind==='hotfix'?'main':'dev')!==base)throw new Fault('TARGET_CHANGED','Refresh origin refs before preparing a workspace.');
+        const flow=flowGit??createFlowGit(),branch=kind==='hotfix'?'main':'dev';
+        const upstream=await flow.remote(project,branch);
+        if(!upstream)throw new Fault('TARGET_CHANGED','Upstream base is absent.');
+        if(upstream!==base){
+          if(ref!=='refs/remotes/origin/'+branch)throw new Fault('TARGET_CHANGED','Custom base ref differs from upstream.');
+          await git(project,['fetch','--no-tags','--no-write-fetch-head','--no-auto-maintenance','--refmap=','origin',upstream]);
+          if(await flow.remote(project,branch)!==upstream)throw new Fault('TARGET_CHANGED','Upstream changed during base refresh.');
+          const updated=await git(project,['update-ref',ref,upstream,base??'0'.repeat(40)],{allowFailure:true});
+          if(updated.code!==0)throw new Fault('TARGET_CHANGED','Base ref changed concurrently.');
+          base=upstream;
+        }
       }
+      if(!base)throw new Fault('TARGET_CHANGED','Base is unavailable.');
       return base;
     },
     /** Проверяет ветку, worktree registration и ownership; никогда не принимает стороннюю область. */
@@ -241,8 +253,10 @@ export function createGit({flowGit}={}) {
       if(process.version.slice(1)!==project.node_version||process.platform+'-'+process.arch!==project.platform)throw new Fault('DEPENDENCIES_INCOMPATIBLE','Node/platform mismatch; no installation was attempted.');
       await Promise.all([readFile(path.join(project.repo_path,'package-lock.json')),readFile(path.join(w.path,'package-lock.json'))]).catch(()=>{throw new Fault('DEPENDENCIES_INCOMPATIBLE','MISSING_LOCKFILE; no installation was attempted.');});
       for(const args of [[w.path],['--check',w.path]]) {
-        const result=await command(project.preparer_path,args,{allowFailure:true});
+        const result=await command(project.preparer_path,args,{allowFailure:true,timeout:args[0]==='--check'?120000:1800000});
         if(result.code!==0) {
+          const pending=result.stderr.match(/\b(LOCAL_(?:GIT|CHECKOUT|DEPENDENCIES)_[A-Z_]+)\b/);
+          if(pending)throw new Fault('BUSY',pending[1]);
           const reason=result.stderr.match(/(?:UNPREPARED_WORKSPACE_DEPENDENCY|LOCKFILE_MISMATCH|NODE_VERSION_MISMATCH|NPM_VERSION_MISMATCH|MANIFEST_MISMATCH|PACKAGE_VERSION_MISMATCH|MISSING_PACKAGE|WORKSPACE_OUTSIDE_WORKTREE|UNMANAGED_[A-Z_]+|MISSING_OR_UNLOADABLE_NEXT_NATIVE_PACKAGE|MISSING_[A-Z_]+)/)?.[0]??'PREPARER_REJECTED';
           throw new Fault('DEPENDENCIES_INCOMPATIBLE',reason+'; dependencies were not installed.');
         }

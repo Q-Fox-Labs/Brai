@@ -98,7 +98,10 @@ export function createWriteAdmission(pool, {prepare, inspect, workspace}) {
           const workspaceIds=new Set(entries.map(e=>e.workspace_id).filter(Boolean));
           if (choices.size>1 || workspaceIds.size>1) throw new Fault('CONFLICT','Session has multiple live workspaces.');
           const previous=[...choices.values()][0];
-          if (previous) {key=previous.workspace_key;kind=previous.kind;}
+          if (previous) {
+            if(args.kind&&args.kind!==previous.kind)throw new Fault('WORKSPACE_KIND_CONFLICT','Session already owns another workspace kind; continue it by its exact path.');
+            key=previous.workspace_key;kind=previous.kind;
+          }
           else {
             const parts=(args.targets[0] ?? 'write').split('/').filter(Boolean).slice(-2).join('-').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,38).replace(/-+$/,'') || 'write';
             const suffix=createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0,10);

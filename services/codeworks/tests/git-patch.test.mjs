@@ -51,3 +51,29 @@ test('chat directory cannot classify an unlocated Admin Git command as Brai',asy
   const config={projects:[{id:'p',repo_path:'/test/source',workspace_root:'/test/areas'}]};
   for(const command of ['git add docs/guide.md',"git commit -m 'Admin change'",'git push origin main'])assert.deepEqual(await runHook({tool_name:'Bash',cwd:'/test/source',tool_input:{command}},{config,connect:()=>assert.fail('ambiguous cwd contacted Codeworks')}),{});
 });
+
+for(const explicit of [true,false])test('hotfix route is selected without hook environment; explicit='+explicit,async t=>{
+  const root=mkdtempSync('/tmp/cw-hotfix-writer-');t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const source=root+'/source',tree=root+'/tree',spool=root+'/spool';for(const dir of [source,tree,spool]){mkdirSync(dir,{mode:0o700});if(dir!==spool)assert.equal(spawnSync('git',['init',dir]).status,0);}
+  const cmd=explicit?command(source).replace(' apply ',' -c codeworks.kind=hotfix apply '):command(source);
+  if(explicit)assert.equal(gitPatch(cmd).kind,'hotfix');
+  const calls=[],options={config:{native_file_writes:false,completion_spool:spool,projects:[{id:'p',repo_path:source,workspace_root:root+'/areas',...(!explicit?{workspace_kind:'hotfix'}:{})}]},env:{CODEWORKS_EXECUTOR_ID:'codex'},connect:async()=>({call:async(method,args)=>{calls.push({method,args});if(method==='write.begin')return {workspace_id:'w',operation_id:'o',write_call_id:'c',path:tree};if(method==='status')return {workspace:{preparation_state:'ready'}};return {};},close(){}})};
+  const result=await runHook({hook_event_name:'PreToolUse',tool_name:'Bash',session_id:'s',turn_id:'t',tool_use_id:'u',cwd:source,tool_input:{command:cmd}},options);
+  assert.equal(result.hookSpecificOutput.permissionDecision,'allow');assert.equal(calls[0].args.kind,'hotfix');
+  const actual=result.hookSpecificOutput.updatedInput.command;assert.equal(actual,cmd.replace(source,tree));
+  assert.equal(spawnSync('/bin/bash',['-lc',actual]).status,0);
+  assert.equal(readFileSync(tree+'/src/a.txt','utf8'),'hello\n');assert.throws(()=>readFileSync(source+'/src/a.txt'));
+});
+test('a feature selector cannot downgrade a protected PROD source route',async()=>{
+  const cmd=command('/test/prod').replace(' apply ',' -c codeworks.kind=feature apply ');
+  const result=await runHook({tool_name:'Bash',session_id:'s',turn_id:'t',tool_use_id:'u',cwd:'/test/dev',tool_input:{command:cmd}},{config:{projects:[{id:'p',repo_path:'/test/prod',workspace_kind:'hotfix'}]},connect:()=>assert.fail('conflict created a workspace')});
+  assert.equal(result.hookSpecificOutput.permissionDecision,'deny');assert.match(result.hookSpecificOutput.additionalContext,/WORKSPACE_KIND_CONFLICT/);
+});
+test('inline environment and unsupported Git options cannot write a patch into the main checkout',async()=>{
+  for(const cmd of ['CODEWORKS_WORKSPACE_KIND=hotfix '+command('/test/source'),'env CODEWORKS_WORKSPACE_KIND=hotfix '+command('/test/source'),command('/test/source').replace(' apply ',' -c codeworks.kind=unknown apply ')]){
+    assert.equal(gitPatch(cmd),null);
+    const paths=writePaths({tool_name:'Bash',cwd:'/test/source',tool_input:{command:cmd}});assert.deepEqual(paths,['/test/source']);
+    const result=await runHook({tool_name:'Bash',session_id:'s',turn_id:'t',tool_use_id:'u',cwd:'/test/source',tool_input:{command:cmd}},{config:{projects:[{id:'p',repo_path:'/test/source'}]},connect:()=>assert.fail('unsupported input created a workspace')});
+    assert.equal(result.hookSpecificOutput.permissionDecision,'deny');
+  }
+});

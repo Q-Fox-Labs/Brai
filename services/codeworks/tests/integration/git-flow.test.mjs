@@ -69,7 +69,8 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
       },
       checks:async(_,sha)=>checks.get(sha)??[],
     };
-    const run=own.guard(extra=>runOperation(f.app,accepted.operation_id,git,{allowedRepositories:[p.repo_path],flowGit,github,...extra}));
+    const sourceGit={...git,synchronizeCheckout:async(p,w,sha)=>{await command('git',['-C',p.repo_path,'merge','--ff-only','--no-edit',sha]);return {state:'ready',commit_sha:sha,lock_sha256:'a'.repeat(64),dependency_graph_sha256:'b'.repeat(64)};}};
+    const run=own.guard(extra=>runOperation(f.app,accepted.operation_id,sourceGit,{sourceStep:true,allowedRepositories:[p.repo_path],flowGit,github,...extra}));
     // Потерянный ответ create после реального сохранения intent в PostgreSQL.
     let crashed=false;
     await assert.rejects(run({checkpoint:async point=>{if(point==='after-pr_attempted'&&!crashed){crashed=true;throw Object.assign(new Error('crash'),{code:'TEST_INTERRUPTION'});}}}),{code:'TEST_INTERRUPTION'});

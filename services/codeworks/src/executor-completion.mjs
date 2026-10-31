@@ -62,7 +62,7 @@ export async function recoverExecutorCompletions(pool,projectId,{socketPath,allo
   const calls=(await pool.query(`SELECT c.* FROM codeworks.write_calls c JOIN codeworks.workspaces w ON w.id=c.workspace_id
     WHERE c.project_id=$1 AND c.executor_id='codex' AND c.state IN ('in_flight','uncertain')
     AND c.admitted_at IS NOT NULL AND w.removed_at IS NULL
-    AND ((w.activation_state='awaiting_first_write' AND c.tool_name='Bash') OR EXISTS(SELECT 1 FROM codeworks.cleanup_obligations o WHERE o.workspace_id=w.id AND o.state<>'done'))
+    AND ((w.activation_state='awaiting_first_write' AND c.tool_name='Bash') OR EXISTS(SELECT 1 FROM codeworks.cleanup_obligations o WHERE o.workspace_id=w.id AND o.state<>'done') OR EXISTS(SELECT 1 FROM codeworks.operations r WHERE r.workspace_id=w.id AND r.kind='release' AND NOT r.archived AND r.status IN ('running','awaiting_reconciliation','awaiting_execution') AND r.step IN ('LOCAL_CHECKOUT_SYNC_REQUIRED','WRITER_OUTCOME_UNKNOWN')))
     ORDER BY c.updated_at,c.id LIMIT 8`,[projectId])).rows;
   let recovered=0;
   for(const call of calls){

@@ -41,7 +41,7 @@ async function fixture(t,kind='feature') {
     async get(_,number){const pr=prs.find(p=>p.number===number);const leg=Object.values(release.details).find(l=>l.pr_number===number);if(leg?.merge_sha&&await git.verifyMerge(project,leg)){pr.merged=true;pr.state='closed';pr.merge_commit_sha=leg.merge_sha;}return pr;},
     async checks(_,sha){return checks.get(sha)??[];},
   };
-  const deps={git,github:gh,inspect:async()=>({head,dirty:false}),save:async details=>{saved.push(structuredClone(details));release.details=structuredClone(details);},evidence:async(target,sha)=>{const p=proofs.get(target);return p&&(!sha||p.commit_sha===sha)?p:null;}};
+  const deps={synchronizeCheckout:async sha=>({state:'ready',commit_sha:sha,lock_sha256:'a'.repeat(64),dependency_graph_sha256:'b'.repeat(64)}),git,github:gh,inspect:async()=>({head,dirty:false}),save:async details=>{saved.push(structuredClone(details));release.details=structuredClone(details);},evidence:async(target,sha)=>{const p=proofs.get(target);return p&&(!sha||p.commit_sha===sha)?p:null;}};
   async function advance(extra={}){
     // Новый объект имитирует чтение durable JSON после рестарта процесса.
     release=structuredClone(release);
@@ -348,4 +348,18 @@ test('confirmed PROD remains successful while DEV waits even when a newer PROD r
   const back=f.release.details.backport;f.proofs.set('prod',{id:randomUUID(),commit_sha:'f'.repeat(40)});
   assert.equal((await f.advance({...ports,deploy:()=>assert.fail('confirmed PROD must not be installed again')})).reason,'MERGE_CHECKS_REQUIRED');
   assert.equal(f.release.details.primary.deployment_evidence_id,confirmed);assert.equal(back.target,'dev');
+});
+
+test('verified installation keeps DEV lane until local checkout and dependencies are ready',async t=>{
+  const f=await fixture(t);f.good(f.head);await f.advance();
+  const merged=f.release.details.primary.merge_sha;f.good(merged);f.installed('dev',merged);
+  let releases=0,attempts=0;
+  const releaseLane=async()=>{releases++;};
+  const synchronizeCheckout=async sha=>{attempts++;assert.equal(sha,merged);return {state:'waiting',reason:'LOCAL_CHECKOUT_DIRTY'};};
+  assert.deepEqual(await f.advance({releaseLane,synchronizeCheckout}),{status:'awaiting_reconciliation',reason:'LOCAL_CHECKOUT_DIRTY'});
+  assert.equal(releases,0);assert.ok(f.release.details.primary.deployment_evidence_id);
+  assert.deepEqual(await f.advance({releaseLane,synchronizeCheckout}),{status:'awaiting_reconciliation',reason:'LOCAL_CHECKOUT_DIRTY'});
+  assert.equal(attempts,2);assert.equal(f.creations,1);
+  assert.equal((await f.advance({releaseLane})).status,'succeeded');
+  assert.equal(releases,1);assert.equal(f.release.details.primary.local_checkout.commit_sha,merged);
 });

@@ -37,3 +37,7 @@ release.close закрывает только попытку выпуска. П�
 - [CONTRACT.md](CONTRACT.md).
 - [ci/README.md](ci/README.md).
 - [components/README.md](components/README.md).
+
+### Обновление основной копии
+
+Успех DEV release включает подтверждённое обновление основной локальной копии и зависимостей до установленного merge commit. Состояние `LOCAL_CHECKOUT_SYNC_REQUIRED` передаёт работу длинной Activity существующего workflow Temporal; `LOCAL_CHECKOUT_DIRTY`, `LOCAL_DEPENDENCIES_IN_USE` и `WRITER_OUTCOME_UNKNOWN` сохраняют причину ожидания без очистки задачи. `releaseLeg.local_checkout` содержит SHA и digests проверенной подготовки. После выпуска проверяется создание новой области от этой базы. Оператор устанавливает соседний с зарегистрированным preparer инструмент `synchronize-brai-source`; инструмент не входит в пользовательские команды агента.
