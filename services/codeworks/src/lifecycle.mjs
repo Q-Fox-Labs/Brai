@@ -41,6 +41,55 @@ export async function releaseTarget(db,operationId,target,state='released') {
   if(!['released','closed'].includes(state))throw Error('INVALID_LANE_STATE');
   await db.query("UPDATE codeworks.release_queue SET state=$3,updated_at=now() WHERE operation_id=$1 AND target=$2 AND state IN ('held','queued')",[operationId,target,state]);
 }
+/** Освобождает только доказанные успешные standalone rollout; старые roots не запускает. */
+export async function reconcileSuccessfulRollouts(pool,projectId,{limit=32}={}) {
+  const candidates=(await pool.query(`SELECT q.ticket,q.operation_id,q.target FROM codeworks.release_queue q
+    JOIN codeworks.operations o ON o.id=q.operation_id
+    JOIN codeworks.deployments d ON d.operation_id=o.id
+    JOIN codeworks.workflow_registry r ON r.operation_id=o.id
+    WHERE q.project_id=$1 AND q.state IN ('held','queued') AND o.kind='rollout' AND o.status='succeeded'
+      AND NOT o.archived AND NOT d.archived AND d.release_operation_id IS NULL AND r.owner='temporal'
+      AND (q.state='held' OR NOT EXISTS(SELECT 1 FROM codeworks.release_queue ahead
+        WHERE ahead.project_id=q.project_id AND ahead.target=q.target AND ahead.state='queued' AND ahead.ticket<q.ticket))
+      AND NOT EXISTS(SELECT 1 FROM codeworks.releases parent WHERE
+        parent.details->'primary'->>'deployment_operation_id'=o.id::text OR
+        parent.details->'backport'->>'deployment_operation_id'=o.id::text)
+    ORDER BY q.ticket LIMIT $2`,[projectId,limit])).rows;
+  let released=0;
+  for(const candidate of candidates){
+    const db=await pool.connect();
+    try{
+      await db.query('BEGIN');
+      // AIDEV-NOTE: Живой исполнитель и смена владельца контура исключаются до чтения proof.
+      const guard=(await db.query('SELECT pg_try_advisory_xact_lock(hashtextextended($1,0)) AS acquired',['execution:rollout:'+candidate.operation_id])).rows[0].acquired;
+      if(!guard){await db.query('COMMIT');continue;}
+      await db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',['lane:'+projectId+':'+candidate.target]);
+      const row=(await db.query(`SELECT q.state,o.status,o.kind,o.archived AS operation_archived,o.request,d.*
+        FROM codeworks.release_queue q JOIN codeworks.operations o ON o.id=q.operation_id
+        JOIN codeworks.deployments d ON d.operation_id=o.id
+        JOIN codeworks.workflow_registry r ON r.operation_id=o.id
+        WHERE q.ticket=$1 AND q.project_id=$2 AND q.operation_id=$3 AND q.target=$4
+          AND o.project_id=q.project_id AND d.project_id=q.project_id AND d.target=q.target
+          AND r.project_id=q.project_id AND r.owner='temporal'
+          AND NOT EXISTS(SELECT 1 FROM codeworks.releases parent WHERE
+            parent.details->'primary'->>'deployment_operation_id'=o.id::text OR
+            parent.details->'backport'->>'deployment_operation_id'=o.id::text)
+        FOR UPDATE OF q,o FOR SHARE OF d`,[candidate.ticket,projectId,candidate.operation_id,candidate.target])).rows[0];
+      const receipt=row?.receipt;
+      const proof=row&&['held','queued'].includes(row.state)&&row.status==='succeeded'&&row.kind==='rollout'&&!row.operation_archived&&!row.archived&&!row.release_operation_id
+        &&row.request.target===row.target&&row.request.commit_sha===row.commit_sha
+        &&receipt?.verified===true&&receipt.operation_id===candidate.operation_id&&receipt.project_id===projectId
+        &&receipt.target===row.target&&receipt.commit_sha===row.commit_sha&&receipt.composition_digest===row.composition_digest
+        &&JSON.stringify(sort(receipt.composition))===JSON.stringify(sort(row.composition));
+      const evidence=proof&&(await db.query('SELECT 1 FROM codeworks.deployment_evidence WHERE project_id=$1 AND target=$2 AND commit_sha=$3 AND evidence_url=$4',[projectId,row.target,row.commit_sha,receipt.evidence_url])).rowCount===1;
+      if(evidence){
+        released+=(await db.query("UPDATE codeworks.release_queue SET state='released',updated_at=now() WHERE ticket=$1 AND state IN ('held','queued')",[candidate.ticket])).rowCount;
+      }
+      await db.query('COMMIT');
+    }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}finally{db.release();}
+  }
+  return {released,hasMore:released>0};
+}
 /** Закрывает попытку только после сверки возможных Git и Ansible эффектов; задача остаётся активной. */
 export async function closeRelease(db,op,project,workspace,{flowGit,github,reconcileDeployment}) {
   const r=(await db.query('SELECT * FROM codeworks.releases WHERE operation_id=$1 AND workspace_id=$2',[op.request.release_operation_id,workspace.id])).rows[0];

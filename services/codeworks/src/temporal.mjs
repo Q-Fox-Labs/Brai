@@ -5,7 +5,7 @@ import {NativeConnection,Worker} from '@temporalio/worker';
 import {Pool} from 'pg';
 import {Context} from '@temporalio/activity';
 import {fileURLToPath} from 'node:url';
-import {authorizeCommand} from './lifecycle.mjs';
+import {authorizeCommand,reconcileSuccessfulRollouts} from './lifecycle.mjs';
 import {runOperation,runCleanupObligation} from './worker.mjs';
 import {createActivityGit} from './git-steps.mjs';
 import {withExecutionContext} from './execution-context.mjs';
@@ -50,8 +50,9 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
       try{
         await processProjectCompletions(pool,projectId,{allowedRepositories,git:adapters.git,spoolDirectory:completionSpoolDirectory});
         await recoverExecutorCompletions(pool,projectId,{allowedRepositories,git:adapters.git,socketPath:process.env.CODEWORKS_EXECUTOR_SOCKET});
+        const queue=await reconcileSuccessfulRollouts(pool,projectId);
         const item=await reconcileProjectLedger(pool,projectId,id,{cursor,historicalCursor});
-        const cursors={nextCursor:item.nextCursor,hasMore:item.hasMore,nextHistoricalCursor:item.nextHistoricalCursor,historicalHasMore:item.historicalHasMore};
+        const cursors={ready:queue.hasMore,nextCursor:item.nextCursor,hasMore:item.hasMore,nextHistoricalCursor:item.nextHistoricalCursor,historicalHasMore:item.historicalHasMore};
         if(!item.id)return cursors;
         try{const result=await withExecutionContext({signal:context?.cancellationSignal},()=>runCleanupObligation(pool,item.id,id,{git:adapters.git,flowGit:adapters.flowGit,codeIndex,allowedRepositories,verifyTransfer,checkpoint:async()=>context?.cancellationSignal.throwIfAborted()}));
           const ready=!!result&&(await pool.query("SELECT 1 FROM codeworks.cleanup_obligations WHERE project_id=$1 AND owner_workflow_id=$2 AND state IN ('pending','running','retry') AND (next_attempt_at IS NULL OR next_attempt_at<=now()) LIMIT 1",[projectId,id])).rowCount>0;
@@ -140,7 +141,9 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
         if(!pending){
           const removed=r.workspace_id&&(await db.query('SELECT removed_at FROM codeworks.workspaces WHERE id=$1',[r.workspace_id])).rows[0]?.removed_at;
           const obligation=r.workspace_id&&(await db.query("SELECT 1 FROM codeworks.cleanup_obligations WHERE workspace_id=$1 AND state<>'done' LIMIT 1",[r.workspace_id])).rowCount;
-          if(!obligation&&(removed||r.operation_id)){
+          const heldSuccess=r.operation_id&&(await db.query(`SELECT 1 FROM codeworks.release_queue q JOIN codeworks.operations o ON o.id=q.operation_id
+            WHERE q.operation_id=$1 AND q.state IN ('held','queued') AND o.kind='rollout' AND o.status='succeeded' LIMIT 1`,[r.operation_id])).rowCount;
+          if(!obligation&&!heldSuccess&&(removed||r.operation_id)){
             await db.query("UPDATE codeworks.workflow_registry SET state='completed',lifecycle=CASE WHEN $2 THEN 'removed' ELSE lifecycle END,completed_at=COALESCE(completed_at,now()),executor_state='completed',position=next_sequence,updated_at=now() WHERE workflow_id=$1",[id,!!removed]);
             await db.query('COMMIT');return true;
           }

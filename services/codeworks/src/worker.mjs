@@ -163,8 +163,15 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
           if(admission||error.code!=='GIT_FAILED')throw error;
           outcome={status:'awaiting_deployment',reason:'ANSIBLE_ROLLOUT_RECONCILIATION_REQUIRED'};
         }
-        if(admission&&!d.release_operation_id&&outcome.status==='succeeded')await releaseTarget(db,op.id,d.target);
-        await finish(outcome.status,outcome.reason,outcome);return;
+        // AIDEV-NOTE: Успех операции и освобождение собственного контура не разделяются сбоем.
+        await db.query('BEGIN');
+        try{
+          if(admission&&!d.release_operation_id&&outcome.status==='succeeded')await releaseTarget(db,op.id,d.target);
+          await checkpoint('before-rollout-finish');
+          await finish(outcome.status,outcome.reason,outcome);
+          await db.query('COMMIT');
+        }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}
+        return;
       }
       if(op.kind==='cleanup'){
         if(admission){
