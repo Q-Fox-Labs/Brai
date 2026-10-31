@@ -8,6 +8,8 @@ import {Client,Connection} from '@temporalio/client';
 import {Worker,NativeConnection,Runtime,DefaultLogger} from '@temporalio/worker';
 import {createStore} from '../../dist/storage.js';
 import {migrate} from '../../dist/migrate.js';
+import {channelRequest} from '../../dist/channel-contract.js';
+import {channelResult} from '../channel-fixture.mjs';
 import {createActivities} from '../../dist/activities.js';
 import {ingest} from '../../dist/domain.js';
 import {consumeOne} from '../../dist/nats.js';
@@ -19,9 +21,12 @@ const store=app?createStore(app):null;
 const source='recovery',binding={ownerId:'fixture',types:['message.outgoing','event.recorded','operation.result','processing.resume'],recipients:['constructor'],read:true,resume:true},sources={[source]:binding},delivery={source,stream:'RECOVERY',sequence:1};
 const configs=Object.fromEntries(['channel','contact','inbox','hermes','understand','memory','deliver'].map(k=>[k,{subject:'brai.fixture.'+k,resultSource:source}]));
 const event=(type,data)=>({version:1,eventId:randomUUID(),source,type,occurredAt:new Date().toISOString(),correlationId:randomUUID(),causationId:null,data});
-const basePorts={async history(){},async prepareFiles(){return [];},async startWorkflow(){},async signalWorkflow(){},async publish(){},async call(kind,p,id){return kind==='channel'?{channelId:'channel',rulesVersion:'v1',locationRef:'project',destination:{chatId:'test'}}:kind==='inbox'?{messageId:p.id}:{accepted:true,operationId:id};}};
+const basePorts={async history(){},async prepareFiles(){return [];},async startWorkflow(){},async signalWorkflow(){},async publish(){},async call(kind,p,id,extra={}){return kind==='channel'?channelResult(channelRequest(p,extra.replyContext??null),extra.replyContext??null):kind==='inbox'?{messageId:p.id}:{accepted:true,operationId:id};}};
 async function packet(){
- const e=event('message.outgoing',{materialId:randomUUID(),revision:1,conversationId:'test',replyToMessageId:null,author:{kind:'agent',id:'test'},sourceRef:{},text:'synthetic',attachments:[]});
+ const data={materialId:randomUUID(),revision:1,conversationId:'test',replyToMessageId:null,author:{kind:'human',id:'456'},sourceRef:{botId:'123',chatId:'456',threadId:null},text:'synthetic',attachments:[]};
+ const original=event('message.incoming',data),parent=await store.register(original,binding,inputHash(original));
+ await store.update(parent.id,v=>{v.context=channelResult(channelRequest(parent));v.inboxRef={messageId:parent.id};});
+ const e={...event('message.outgoing',{...data,materialId:randomUUID(),replyToMessageId:parent.id,author:{kind:'agent',id:'test'}}),causationId:parent.id};
  return store.register(e,binding,inputHash(e));
 }
 const provenance=p=>({packetId:p.id,materialId:p.original.data.materialId,revision:p.original.data.revision,inputHash:p.inputHash});

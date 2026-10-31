@@ -49,8 +49,8 @@ owner/channel IDs отправитель не задаёт:
     "revision": 1,
     "conversationId": "chat-7/topic-1",
     "replyToMessageId": null,
-    "author": {"kind": "human", "id": "external-user", "name": "Имя"},
-    "sourceRef": {"botId": "bot-example", "chatId": "chat-7", "threadId": "1"},
+    "author": {"kind": "human", "id": "654321", "name": "Имя"},
+    "sourceRef": {"botId": "123456", "chatId": "654321", "threadId": "1"},
     "text": "Сохранить сообщение",
     "attachments": []
   }
@@ -61,7 +61,8 @@ owner/channel IDs отправитель не задаёт:
 
 Штатные build/check выполняются через component CLI с ID intake. Интеграционный
 стенд подключает настоящие PostgreSQL, JetStream, Temporal, Artifacts и History.
-Недостающие Каналы, Контакты, Входящие, понимание, память и протокол работы Hermes
+Общая приёмка подключает настоящие Каналы. Недостающие Контакты,
+Входящие, понимание, память и протокол работы Hermes
 предоставляет только тестовый стенд. Его исходники не входят в runtime payload.
 
 Реальный Telegram и работающий Hermes автоматически не переключаются.

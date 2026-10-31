@@ -2,6 +2,7 @@
 // ABOUTME: Сохраняет intent и успешные результаты до зависимых шагов.
 import { Context } from '@temporalio/activity';
 import { ApplicationFailure } from '@temporalio/common';
+import {checkResolution} from './channel-contract.js';
 import { inputHash, isJobSuccess } from './contracts.js';
 import { Fault, type Data, type JobKind, type Message, type Packet, type Ports, type Store, type PortConfig } from './types.js';
 /** Связывает Activities с собственным хранилищем и внешними операциями. */
@@ -19,25 +20,34 @@ export function createActivities(store: Store, ports: Ports, configs: Record<Job
  return {
   prepare: guard(async(id:string) => {
    let p=await read(id);
-   if(!p.context) {
-    let replyContext:Data|null=null;
+   if(p.context&&!p.context.resolutionId)throw new Fault('CHANNEL_CONTEXT_VERSION_UNSUPPORTED');
+   let replyContext:Data|null=null;
     if(p.original.type==='message.outgoing' && p.original.causationId) {
      const parent=await store.get(p.original.causationId);
      if(!parent || parent.ownerId!==p.ownerId) throw new Fault('INVALID_REPLY_LINK');
      if(!parent.context || !parent.inboxRef) throw new Fault('REPLY_CONTEXT_NOT_READY',true);
      if(p.original.data.replyToMessageId!==parent.inboxRef.messageId || p.original.data.conversationId!==parent.original.data.conversationId) throw new Fault('INVALID_REPLY_LINK');
+     if(!parent.context.resolutionId)throw new Fault('CHANNEL_CONTEXT_VERSION_UNSUPPORTED');
+     checkResolution(parent,parent.context,null);
      replyContext=parent.context;
     }
-    const context=await ports.call('channel',p,id+'/channel',{asOf:p.receivedAt,replyContext});
-    if(!context.channelId || !context.rulesVersion || !context.locationRef || !context.destination) throw new Fault('INVALID_CHANNEL_RESULT');
+   if(p.context)checkResolution(p,p.context,replyContext);
+   if(!p.context){
+    let context:Data;
+    try{context=await ports.call('channel',p,id+'/channel',{asOf:p.receivedAt,replyContext});checkResolution(p,context,replyContext);}
+    catch(e){
+     const failure=e instanceof Fault?e:new Fault('DEPENDENCY_UNAVAILABLE',true);
+     await store.update(id,v=>{v.dependencyFailure={stage:'channel.resolve',code:failure.code,retryable:failure.retryable};});
+     throw failure;
+    }
     if(replyContext && inputHash(context.destination)!==inputHash(replyContext.destination)) throw new Fault('REPLY_ROUTE_CONFLICT');
-    p=await store.update(id,v=>{v.context??=context;});
+    p=await store.update(id,v=>{v.context??=context;delete v.dependencyFailure;});
    }
    if(!p.contact && p.original.type==='message.incoming') { const contact=await ports.call('contact',p,id+'/contact'); if(!contact.contactId) throw new Fault('INVALID_CONTACT_RESULT'); p=await store.update(id,v=>{v.contact??=contact;}); }
    if(!p.prepared) {
     let signal:AbortSignal|undefined;try{signal=Context.current().cancellationSignal;}catch{}
     const attachments=await ports.prepareFiles(p,signal);
-    const prepared={...p.original.data,attachments,context:p.context,contact:p.contact??null};
+    const prepared={...p.original.data,attachments,context:p.context,contact:p.contact??null,assignments:p.context?.assignments??{},fieldOrigins:p.context?.fieldOrigins??{}};
     p=await store.update(id,v=>{v.prepared??=prepared;if(v.state!=='needs_attention')v.state='processing';});
    }
    return p.scenario;

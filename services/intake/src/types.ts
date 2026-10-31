@@ -14,6 +14,7 @@ export interface Packet {
  id: string; ownerId: string; source: string; eventId: string; inputHash: string; original: Event; receiptId: string | null; receivedAt: string;
  mode: 'temporal' | 'jetstream'; scenario: 'incoming.v1' | 'outgoing.v1' | 'forward.v1';
  state: 'registered' | 'processing' | 'forwarded' | 'completed' | 'needs_attention';
+ dependencyFailure?: {stage:string;code:string;retryable:boolean};
  workflowId: string | null; context?: Data; contact?: Data; prepared?: Data; inboxRef?: Data;
  jobs: Record<string, Job>; attempts: Partial<Record<JobKind, number>>; dispatch: Record<string, boolean>;
  attention?: Record<string,{reason:string;resumeVersion:number}>; resumeVersion: number; resumeNotifiedVersion?: number; reason: string | null; completedAt?: string;

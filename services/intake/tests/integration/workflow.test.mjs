@@ -36,7 +36,7 @@ test('messages have independent durable workflows; worker restart and delayed me
  const makeWorker=async()=>{worker=await Worker.create({connection:native,namespace:'intake_test',taskQueue:runtimeConfig.taskQueue,workflowsPath:fileURLToPath(new URL('../../dist/workflows.js',import.meta.url)),activities,maxConcurrentActivityTaskExecutions:4,maxConcurrentWorkflowTaskExecutions:8,maxCachedWorkflows:32,shutdownGraceTime:'1 second'});workerRun=worker.run();};
  try{
   peers=await startPeers(nc,owner,{holdMemory:true});
-  const incoming={version:1,eventId:randomUUID(),source:'telegram',type:'message.incoming',occurredAt:new Date().toISOString(),correlationId:randomUUID(),causationId:null,data:{materialId:randomUUID(),revision:1,conversationId:'conversation',replyToMessageId:null,author:{kind:'human',id:'user'},sourceRef:{botId:'bot',chatId:'chat',threadId:7},text:'Сообщение пользователя',attachments:[]}};
+  const incoming={version:1,eventId:randomUUID(),source:'telegram',type:'message.incoming',occurredAt:new Date().toISOString(),correlationId:randomUUID(),causationId:null,data:{materialId:randomUUID(),revision:1,conversationId:'conversation',replyToMessageId:null,author:{kind:'human',id:'456'},sourceRef:{botId:'123',chatId:'456',threadId:'7'},text:'Сообщение пользователя',attachments:[]}};
   parseEvent(Buffer.from(JSON.stringify(incoming)));
   await nc.jetstream().publish('brai.intake.v1.ingress.telegram',Buffer.from(JSON.stringify(incoming)));
   // Намеренно задерживаем consumer: snapshot должен использовать время брокера, а не обработки.

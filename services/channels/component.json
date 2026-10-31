@@ -1,0 +1,107 @@
+{
+  "formatVersion": 1,
+  "id": "channels",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [
+    "services/channels/src/main.ts",
+    "services/channels/src/migrate.ts"
+  ],
+  "inputs": {
+    "build": [
+      "services/channels/tsconfig.json"
+    ],
+    "runtime": [
+      "services/channels/schemas/common.schema.json",
+      "services/channels/schemas/api.schema.json",
+      "services/channels/profiles/telegram.v1.json",
+      "services/channels/src/types.ts",
+      "services/channels/src/contracts.ts",
+      "services/channels/src/rules.ts",
+      "services/channels/src/cursor.ts",
+      "services/channels/migrations/001.sql",
+      "services/channels/src/storage.ts",
+      "services/channels/src/domain.ts",
+      "services/channels/src/config.ts",
+      "services/channels/src/nats.ts",
+      "services/channels/src/main.ts",
+      "services/channels/src/migrate.ts",
+      "services/channels/package.json",
+      "services/channels/asyncapi.yaml",
+      "services/channels/compose.yml",
+      "services/channels/README.md",
+      "services/channels/CONTRACT.md",
+      "services/channels/DEPLOYMENT.md"
+    ],
+    "checks": [
+      "services/channels/tests/contracts.test.mjs",
+      "services/channels/tests/integration/fixture.mjs",
+      "services/channels/tests/integration/service.test.mjs",
+      "deploy/compose.intake-test.yml",
+      "deploy/intake-test-database.sql",
+      "deploy/intake-test-nats.conf"
+    ]
+  },
+  "dependencies": [
+    {
+      "id": "history",
+      "inputs": [
+        "services/history/schemas/common.schema.json",
+        "services/history/schemas/messages.schema.json"
+      ],
+      "delivery": [
+        "services/history/schemas/common.schema.json",
+        "services/history/schemas/messages.schema.json"
+      ]
+    }
+  ],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/channels/dist",
+      "services/channels/package.json",
+      "services/channels/schemas",
+      "services/channels/profiles",
+      "services/channels/migrations",
+      "services/channels/README.md",
+      "services/channels/CONTRACT.md",
+      "services/channels/asyncapi.yaml",
+      "services/channels/compose.yml",
+      "services/channels/DEPLOYMENT.md"
+    ],
+    "entrypoints": [
+      "services/channels/dist/main.js",
+      "services/channels/dist/migrate.js"
+    ],
+    "smokeImports": [
+      "services/channels/dist/domain.js",
+      "services/channels/dist/config.js"
+    ],
+    "systemRequirements": [
+      "Node.js 24.22.1",
+      "Prepared dedicated PostgreSQL database and NATS identity; operator lifecycle"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "channels",
+      "channels-migrate"
+    ],
+    "migrations": [
+      "services/channels/migrations"
+    ],
+    "health": "NATS brai.channels.v1.status"
+  },
+  "npm": {
+    "workspaces": [
+      "services/channels"
+    ]
+  }
+}

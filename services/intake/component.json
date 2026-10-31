@@ -39,7 +39,8 @@
       "services/intake/compose.yml",
       "services/intake/deploy/provision.mjs",
       "services/intake/deploy/broker.json",
-      "services/intake/migrations/002.sql"
+      "services/intake/migrations/002.sql",
+      "services/intake/src/channel-contract.ts"
     ],
     "checks": [
       "deploy/compose.intake-test.yml",
@@ -55,10 +56,23 @@
       "services/intake/tests/integration/peers.mjs",
       "services/intake/tests/integration/workflow.test.mjs",
       "services/intake/tests/files.test.mjs",
-      "services/intake/tests/integration/recovery.test.mjs"
+      "services/intake/tests/integration/recovery.test.mjs",
+      "services/intake/tests/channel-fixture.mjs",
+      "services/intake/tests/channel-contract.test.mjs",
+      "services/intake/tests/integration/channels.test.mjs"
     ]
   },
-  "dependencies": [],
+  "dependencies": [
+    {
+      "id": "channels",
+      "inputs": [
+        "services/channels/schemas/common.schema.json"
+      ],
+      "delivery": [
+        "services/channels/schemas/common.schema.json"
+      ]
+    }
+  ],
   "commands": {
     "build": "npm run build",
     "check": "node --test tests/*.test.mjs"
@@ -83,7 +97,9 @@
       "services/intake/dist/migrate.js",
       "services/intake/deploy/provision.mjs"
     ],
-    "smokeImports": [],
+    "smokeImports": [
+      "services/intake/dist/channel-contract.js"
+    ],
     "systemRequirements": [
       "Node.js 24.22.1",
       "PostgreSQL, NATS JetStream, Temporal Server; prepared by operator"

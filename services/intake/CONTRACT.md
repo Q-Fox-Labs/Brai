@@ -156,3 +156,22 @@ temporalAddress, temporalNamespace, taskQueue, artifactBaseUrl, sources, ports.
 Порты: channel, contact, inbox, hermes, understand, memory, deliver; каждому subject,
 долгим также resultSource. Отсутствующий исполнитель остаётся ошибкой/ожиданием,
 а не синтетическим успехом. Секреты держатся в защищённом файле вне Git.
+
+## Порт Каналов v1
+
+Порт channel использует ResolveRequest по [owner-схеме Каналов](../channels/schemas/common.schema.json).
+Он передаёт trusted source/owner, receivedAt, строковые Telegram IDs, author,
+признаки текста/подписей и модальности вложений без содержимого и файлов.
+initialFields пока пусты. Ответ Hermes ссылается на исходные packetId/resolutionId;
+его source остаётся отдельным источником Hermes.
+
+Полный Resolution проверяется по схеме и привязке к пакету/назначению и сохраняется
+неизменяемо. assignments и fieldOrigins входят в prepared отдельно от original.
+Безопасный отказ сохраняется в dependencyFailure: stage=channel.resolve, code,
+retryable. Технические ошибки повторяет прежний Temporal workflow.
+Старые context без resolutionId останавливаются с
+CHANNEL_CONTEXT_VERSION_UNSUPPORTED; автоматического пересчёта нет.
+
+Исполнитель доставки вызывает delivery.check непосредственно перед эффектом.
+Приём сам Telegram не отправляет. event.recorded сохраняет JetStream-путь
+без resolve; граф фиксированных message workflows не расширен.

@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import { headers, type NatsConnection } from 'nats';
 import { Client } from '@temporalio/client';
+import {channelRequest,checkResolution,channelError} from './channel-contract.js';
 import type { Config } from './config.js';
 import { Fault, type Attachment, type Data, type Message, type Packet, type Ports } from './types.js';
 const timeout=15000;
@@ -11,14 +12,16 @@ function uuid(key:string):string {const h=createHash('sha256').update(key).diges
 /** Создаёт реальные адаптеры; недоступность никогда не заменяется синтетикой. */
 export function createPorts(nc:NatsConnection,client:Client,cfg:Config):Ports {
  let activeUploads=0;
- async function rpc(subject:string,input:unknown):Promise<Data> {
+ async function rpc(subject:string,input:unknown,isChannel=false):Promise<Data> {
   let reply;
-  const bytes=Buffer.from(JSON.stringify(input));if(bytes.length>1048576)throw new Fault('DEPENDENCY_REQUEST_TOO_LARGE');
+  const bytes=Buffer.from(JSON.stringify(input));if(bytes.length>(isChannel?65536:1048576))throw new Fault('DEPENDENCY_REQUEST_TOO_LARGE');
   try { reply=await nc.request(subject,bytes,{timeout}); } catch {throw new Fault('DEPENDENCY_UNAVAILABLE',true);}
   if(reply.headers?.get('Nats-Service-Error-Code')) {
    const status=Number(reply.headers.get('Nats-Service-Error-Code'));
+   if(isChannel){let value;try{value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(reply.data));}catch{throw new Fault('INVALID_CHANNEL_RESULT');}throw channelError(value,status);}
    throw new Fault(status>=500?'DEPENDENCY_UNAVAILABLE':'DEPENDENCY_REJECTED',status>=500);
   }
+  if(isChannel&&reply.data.length>131072)throw new Fault('INVALID_CHANNEL_RESULT');
   try {const value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(reply.data));if(!value || typeof value!=='object' || Array.isArray(value)) throw Error();return value;} catch {throw new Fault('INVALID_DEPENDENCY_RESULT');}
  }
  async function artifact(id:string,owner:string):Promise<Data> {
@@ -28,6 +31,10 @@ export function createPorts(nc:NatsConnection,client:Client,cfg:Config):Ports {
  }
  return {
   async call(name,p,operationId,extra={}) {
+   if(name==='channel'){
+    const reply=(extra.replyContext??null) as Data|null;
+    const result=await rpc(cfg.ports.channel.subject,channelRequest(p,reply),true);checkResolution(p,result,reply);return result;
+   }
    return rpc(cfg.ports[name].subject,{packetId:p.id,operationId,ownerId:p.ownerId,scenario:p.scenario,event:p.original,prepared:p.prepared??null,context:p.context??null,inboxRef:p.inboxRef??null,priorResults:Object.values(p.jobs).filter(j=>name==='memory' && j.kind==='understand' && j.state==='succeeded').map(j=>({kind:j.kind,result:j.result})),...extra});
   },
   async prepareFiles(p,signal) {
