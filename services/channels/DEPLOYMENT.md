@@ -45,7 +45,7 @@ Compose запускает одну программу без внешних п�
 3. playbooks/operations/test_brai_intake.yml — прежние 9 интеграционных проверок.
 4. playbooks/operations/test_brai_channels.yml — фактические Каналы и общая цепочка.
 5. Повторный verify; remove_brai_channels_test.yml.
-6. Отдельный verify.yml с recovery_verify_scope=brai_intake_removed.
+6. Отдельный verify.yml с recovery_verify_scope=brai_intake_test_removed.
 
 Стенд принадлежит project brai-intake-test, использует loopback порты 25643/24343,
 свои пустые БД и namespace intake_test. Рабочие службы и Telegram не меняются.
