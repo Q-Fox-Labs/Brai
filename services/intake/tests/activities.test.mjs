@@ -2,6 +2,8 @@
 // ABOUTME: Не обращается к Temporal серверу; проверяет границу Activities через собственные порты.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {contactInput} from '../dist/contact-contract.js';
+import {contactResult} from './contact-fixture.mjs';
 import {channelRequest} from '../dist/channel-contract.js';
 import {channelResult} from './channel-fixture.mjs';
 import {inputHash} from '../dist/contracts.js';
@@ -10,7 +12,7 @@ function fixture(){
  const p={id:'11111111-1111-4111-8111-111111111111',ownerId:'owner',source:'telegram',receivedAt:'2026-10-30T00:00:00Z',scenario:'incoming.v1',state:'registered',original:{type:'message.incoming',causationId:null,data:{conversationId:'conversation',sourceRef:{botId:'123',chatId:'456',threadId:null},author:{kind:'human',id:'456'},text:'text',attachments:[]}},jobs:{},attempts:{},resumeVersion:0};
  const rows=new Map([['packet',p]]),calls=[];
  const store={async get(id){return rows.has(id)?structuredClone(rows.get(id)):null;},async update(id,fn){const v=structuredClone(rows.get(id));fn(v);rows.set(id,v);return structuredClone(v);}};
- const ports={async call(name,packet,id){calls.push({name,id});if(name==='channel')return channelResult(channelRequest(packet));if(name==='contact')return {contactId:'person'};if(name==='inbox')return {messageId:'saved'};return {accepted:true,operationId:id};},async prepareFiles(){return [];},async history(){}};
+ const ports={async call(name,packet,id){calls.push({name,id});if(name==='channel')return channelResult(channelRequest(packet));if(name==='contact')return contactResult(packet.contactRequest);if(name==='inbox')return {messageId:'saved'};return {accepted:true,operationId:id};},async prepareContact(p){return contactInput(p);},async prepareFiles(){return [];},async history(){}};
  const configs=Object.fromEntries(['hermes','understand','memory','deliver'].map(k=>[k,{subject:'subject',resultSource:'source'}]));
  return {store,ports,rows,calls,a:createActivities(store,ports,configs)};
 }
@@ -86,4 +88,18 @@ test('malformed channel result stops before persistence with a permanent diagnos
  const p=await f.store.get('packet');assert.equal(p.context,undefined);
  assert.deepEqual(p.dependencyFailure,{stage:'channel.resolve',code:'INVALID_CHANNEL_RESULT',retryable:false});
  assert.equal(f.calls.length,1);
+});
+
+test('contact intent is frozen before a lost reply; retry never prepares a different observation',async()=>{
+ const f=fixture();let prepared=0,failed=false;const real=f.ports.call;
+ f.ports.prepareContact=async p=>{prepared++;return contactInput(p);};
+ f.ports.call=async(name,p,id)=>{if(name==='contact'&&!failed){failed=true;throw Error('lost reply');}return real(name,p,id);};
+ await assert.rejects(f.a.prepare('packet'));
+ const intent=structuredClone((await f.store.get('packet')).contactRequest);
+ await f.a.prepare('packet');assert.equal(prepared,1);assert.deepEqual((await f.store.get('packet')).contactRequest,intent);assert.ok((await f.store.get('packet')).contact.contactResolutionId);
+});
+test('legacy contact stops before any new dependency without refreshing its profile',async()=>{
+ const f=fixture();await f.store.update('packet',p=>{p.contact={contactId:'legacy'};});
+ await assert.rejects(f.a.prepare('packet'),{message:'CONTACT_CONTEXT_VERSION_UNSUPPORTED'});
+ assert.deepEqual((await f.store.get('packet')).contact,{contactId:'legacy'});assert.equal(f.calls.length,0);
 });

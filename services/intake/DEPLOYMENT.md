@@ -62,3 +62,17 @@ identities. prepare/test/remove_brai_channels_test.yml и scope brai_channels_te
 Поставка Приёма содержит только common.schema.json владельца Каналов.
 Runtime Каналов в образ Приёма не входит. Развёртывать Приём отдельно от
 согласованного полного Telegram-комплекта по-прежнему запрещено.
+
+## Контакты v1
+
+prepare/test/remove_brai_contacts_test.yml и scope brai_contacts_test дополняют
+тот же disposable стенд своей БД/ролями и ограниченными NATS identities.
+По умолчанию test повторяет прежние Intake/Channels проверки; для адресного
+ретеста новых сценариев есть contacts_test_only=true.
+
+Приём получает только common/api схемы Контактов и необходимые схемы Истории.
+Runtime Контактов не включается в образ Приёма. Для contact.resolve настраивается
+brai.contacts.v1.resolve.<callerId>, а worker получает отдельное ограниченное
+право append.service_contacts для сохранённых фактов audit/complete.
+Старые неполные contact-контексты автоматически не переписываются.
+Рабочий Telegram сохраняет прежний путь до приёмки полного комплекта.

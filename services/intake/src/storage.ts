@@ -53,9 +53,9 @@ export function createStore(pool: Pool): Store {
     const p = (await c.query('SELECT body FROM intake.intake_packets WHERE id=$1 FOR UPDATE',[id])).rows[0]?.body as Packet | undefined;
     if (!p || (control && p.ownerId!==control.ownerId)) throw new Fault('NOT_FOUND');
     if(replay) return p;
-    const original = JSON.stringify(p.original), prepared = p.prepared && JSON.stringify(p.prepared), context=p.context && JSON.stringify(p.context);
+    const original = JSON.stringify(p.original), prepared = p.prepared && JSON.stringify(p.prepared), context=p.context && JSON.stringify(p.context),contactRequest=p.contactRequest&&JSON.stringify(p.contactRequest),contact=p.contact&&JSON.stringify(p.contact),contactDiagnostics=p.contactDiagnostics&&JSON.stringify(p.contactDiagnostics);
     change(p);
-    if (JSON.stringify(p.original) !== original || (prepared && JSON.stringify(p.prepared) !== prepared) || (context && JSON.stringify(p.context)!==context)) throw new Fault('IMMUTABLE_INPUT');
+    if (JSON.stringify(p.original) !== original || (prepared && JSON.stringify(p.prepared) !== prepared) || (context && JSON.stringify(p.context)!==context) || (contactRequest && JSON.stringify(p.contactRequest)!==contactRequest) || (contact && JSON.stringify(p.contact)!==contact) || (contactDiagnostics && JSON.stringify(p.contactDiagnostics)!==contactDiagnostics)) throw new Fault('IMMUTABLE_INPUT');
     await c.query('UPDATE intake.intake_packets SET body=$2 WHERE id=$1',[id,p]);
     if(control) await c.query('INSERT INTO intake.intake_control_events(source,event_id,owner_id,input_hash,packet_id) VALUES($1,$2,$3,$4,$5)',[control.source,control.eventId,control.ownerId,control.inputHash,id]);
     return p;

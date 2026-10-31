@@ -2,6 +2,7 @@
 // ABOUTME: Сохраняет intent и успешные результаты до зависимых шагов.
 import { Context } from '@temporalio/activity';
 import { ApplicationFailure } from '@temporalio/common';
+import {checkContact,checkContactRequest} from './contact-contract.js';
 import {checkResolution} from './channel-contract.js';
 import { inputHash, isJobSuccess } from './contracts.js';
 import { Fault, type Data, type JobKind, type Message, type Packet, type Ports, type Store, type PortConfig } from './types.js';
@@ -21,6 +22,7 @@ export function createActivities(store: Store, ports: Ports, configs: Record<Job
   prepare: guard(async(id:string) => {
    let p=await read(id);
    if(p.context&&!p.context.resolutionId)throw new Fault('CHANNEL_CONTEXT_VERSION_UNSUPPORTED');
+   if(p.original.type==='message.incoming'&&p.contact&&!p.contactRequest)throw new Fault('CONTACT_CONTEXT_VERSION_UNSUPPORTED');
    let replyContext:Data|null=null;
     if(p.original.type==='message.outgoing' && p.original.causationId) {
      const parent=await store.get(p.original.causationId);
@@ -43,11 +45,25 @@ export function createActivities(store: Store, ports: Ports, configs: Record<Job
     if(replyContext && inputHash(context.destination)!==inputHash(replyContext.destination)) throw new Fault('REPLY_ROUTE_CONFLICT');
     p=await store.update(id,v=>{v.context??=context;delete v.dependencyFailure;});
    }
-   if(!p.contact && p.original.type==='message.incoming') { const contact=await ports.call('contact',p,id+'/contact'); if(!contact.contactId) throw new Fault('INVALID_CONTACT_RESULT'); p=await store.update(id,v=>{v.contact??=contact;}); }
+   if(p.original.type==='message.incoming'){
+    if(!p.contactRequest){
+     let signal:AbortSignal|undefined;try{signal=Context.current().cancellationSignal;}catch{}
+     const intent=await ports.prepareContact(p,signal);
+     p=await store.update(id,v=>{if(!v.contactRequest){v.contactRequest=intent.request;v.contactDiagnostics=intent.diagnostics;}});
+    }
+    checkContactRequest(p,p.contactRequest!);
+    if(p.contact)checkContact(p,p.contact);
+    else {
+     try{const contact=await ports.call('contact',p,id+'/contact');checkContact(p,contact);p=await store.update(id,v=>{v.contact??=contact;delete v.dependencyFailure;});}
+     catch(e){const f=e instanceof Fault?e:new Fault('DEPENDENCY_UNAVAILABLE',true);await store.update(id,v=>{v.dependencyFailure={stage:'contact.resolve',code:f.code,retryable:f.retryable};});throw f;}
+    }
+   }
    if(!p.prepared) {
     let signal:AbortSignal|undefined;try{signal=Context.current().cancellationSignal;}catch{}
     const attachments=await ports.prepareFiles(p,signal);
-    const prepared={...p.original.data,attachments,context:p.context,contact:p.contact??null,assignments:p.context?.assignments??{},fieldOrigins:p.context?.fieldOrigins??{}};
+    const author=structuredClone(p.original.data.author) as Data;
+    if(p.original.type==='message.incoming'&&!Object.hasOwn((p.contactRequest?.profile??{}) as Data,'photoArtifactId'))delete author.photoArtifactId;
+    const prepared={...p.original.data,author,attachments,context:p.context,contact:p.contact??null,assignments:p.context?.assignments??{},fieldOrigins:p.context?.fieldOrigins??{}};
     p=await store.update(id,v=>{v.prepared??=prepared;if(v.state!=='needs_attention')v.state='processing';});
    }
    return p.scenario;

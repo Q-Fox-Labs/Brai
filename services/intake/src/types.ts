@@ -15,7 +15,7 @@ export interface Packet {
  mode: 'temporal' | 'jetstream'; scenario: 'incoming.v1' | 'outgoing.v1' | 'forward.v1';
  state: 'registered' | 'processing' | 'forwarded' | 'completed' | 'needs_attention';
  dependencyFailure?: {stage:string;code:string;retryable:boolean};
- workflowId: string | null; context?: Data; contact?: Data; prepared?: Data; inboxRef?: Data;
+ workflowId: string | null; context?: Data; contactRequest?: Data; contactDiagnostics?: Data[]; contact?: Data; prepared?: Data; inboxRef?: Data;
  jobs: Record<string, Job>; attempts: Partial<Record<JobKind, number>>; dispatch: Record<string, boolean>;
  attention?: Record<string,{reason:string;resumeVersion:number}>; resumeVersion: number; resumeNotifiedVersion?: number; reason: string | null; completedAt?: string;
 }
@@ -29,6 +29,7 @@ export interface Store {
 }
 export interface Ports {
  call(name: PortName, packet: Packet, operationId: string, extra?: Data): Promise<Data>;
+ prepareContact(packet: Packet, signal?: AbortSignal): Promise<{request:Data;diagnostics:Data[]}>;
  prepareFiles(packet: Packet, signal?: AbortSignal): Promise<Data[]>; publish(subject: string, event: Event, id: string, ownerId: string): Promise<void>;
  startWorkflow(packet: Packet): Promise<void>; signalWorkflow(packet: Packet): Promise<void>;
  history(packet: Packet, phase: 'receive' | 'complete'): Promise<void>;

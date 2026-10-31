@@ -17,3 +17,8 @@ CREATE ROLE channels_test LOGIN PASSWORD 'intake-test' NOSUPERUSER NOCREATEDB NO
 CREATE DATABASE brai_channels_test OWNER channels_test_owner;
 REVOKE ALL ON DATABASE brai_channels_test FROM PUBLIC;
 GRANT CONNECT ON DATABASE brai_channels_test TO channels_test;
+CREATE ROLE contacts_test_owner LOGIN PASSWORD 'intake-test' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+CREATE ROLE contacts_test LOGIN PASSWORD 'intake-test' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+CREATE DATABASE brai_contacts_test OWNER contacts_test_owner;
+REVOKE ALL ON DATABASE brai_contacts_test FROM PUBLIC;
+GRANT CONNECT ON DATABASE brai_contacts_test TO contacts_test;

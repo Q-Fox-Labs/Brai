@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 import { headers, type NatsConnection } from 'nats';
 import { Client } from '@temporalio/client';
+import {contactInput,checkContact,checkContactHistory,contactError} from './contact-contract.js';
 import {channelRequest,checkResolution,channelError} from './channel-contract.js';
 import type { Config } from './config.js';
 import { Fault, type Attachment, type Data, type Message, type Packet, type Ports } from './types.js';
@@ -12,17 +13,18 @@ function uuid(key:string):string {const h=createHash('sha256').update(key).diges
 /** Создаёт реальные адаптеры; недоступность никогда не заменяется синтетикой. */
 export function createPorts(nc:NatsConnection,client:Client,cfg:Config):Ports {
  let activeUploads=0;
- async function rpc(subject:string,input:unknown,isChannel=false):Promise<Data> {
+ async function rpc(subject:string,input:unknown,isChannel=false,isContact=false,deadline=timeout):Promise<Data> {
   let reply;
-  const bytes=Buffer.from(JSON.stringify(input));if(bytes.length>(isChannel?65536:1048576))throw new Fault('DEPENDENCY_REQUEST_TOO_LARGE');
-  try { reply=await nc.request(subject,bytes,{timeout}); } catch {throw new Fault('DEPENDENCY_UNAVAILABLE',true);}
-  if(isChannel&&reply.data.length>131072)throw new Fault('INVALID_CHANNEL_RESULT');
+  const bytes=Buffer.from(JSON.stringify(input));if(bytes.length>(isChannel||isContact?65536:1048576))throw new Fault('DEPENDENCY_REQUEST_TOO_LARGE');
+  try { reply=await nc.request(subject,bytes,{timeout:deadline}); } catch {throw new Fault('DEPENDENCY_UNAVAILABLE',true);}
+  if((isChannel||isContact)&&reply.data.length>131072)throw new Fault(isContact?'INVALID_CONTACT_RESULT':'INVALID_CHANNEL_RESULT');
   if(reply.headers?.get('Nats-Service-Error-Code')) {
    const status=Number(reply.headers.get('Nats-Service-Error-Code'));
    if(isChannel){let value;try{value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(reply.data));}catch{throw new Fault('INVALID_CHANNEL_RESULT');}throw channelError(value,status);}
+   if(isContact){let value;try{value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(reply.data));}catch{throw new Fault('INVALID_CONTACT_RESULT');}throw contactError(value,status);}
    throw new Fault(status>=500?'DEPENDENCY_UNAVAILABLE':'DEPENDENCY_REJECTED',status>=500);
   }
-  try {const value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(reply.data));if(!value || typeof value!=='object' || Array.isArray(value)) throw Error();return value;} catch {throw new Fault(isChannel?'INVALID_CHANNEL_RESULT':'INVALID_DEPENDENCY_RESULT');}
+  try {const value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(reply.data));if(!value || typeof value!=='object' || Array.isArray(value)) throw Error();return value;} catch {throw new Fault(isContact?'INVALID_CONTACT_RESULT':isChannel?'INVALID_CHANNEL_RESULT':'INVALID_DEPENDENCY_RESULT');}
  }
  async function artifact(id:string,owner:string):Promise<Data> {
   const a=await rpc('brai.artifacts.v1.get',{artifactId:id});
@@ -35,14 +37,23 @@ export function createPorts(nc:NatsConnection,client:Client,cfg:Config):Ports {
     const reply=(extra.replyContext??null) as Data|null;
     const result=await rpc(cfg.ports.channel.subject,channelRequest(p,reply),true);checkResolution(p,result,reply);return result;
    }
+   if(name==='contact'){if(!p.contactRequest)throw new Fault('CONTACT_CONTEXT_VERSION_UNSUPPORTED');const result=await rpc(cfg.ports.contact.subject,p.contactRequest,false,true);checkContact(p,result);return result;}
    return rpc(cfg.ports[name].subject,{packetId:p.id,operationId,ownerId:p.ownerId,scenario:p.scenario,event:p.original,prepared:p.prepared??null,context:p.context??null,inboxRef:p.inboxRef??null,priorResults:Object.values(p.jobs).filter(j=>name==='memory' && j.kind==='understand' && j.state==='succeeded').map(j=>({kind:j.kind,result:j.result})),...extra});
+  },
+  async prepareContact(p,signal){
+   signal?.throwIfAborted();
+   const candidate=(p.original.data as Message).author.photoArtifactId;
+   let ready=false,diagnostic:Data|undefined;
+   if(typeof candidate==='string'){
+    try{const a=await rpc('brai.artifacts.v1.get',{artifactId:candidate},false,false,1000);ready=a.ownerId===p.ownerId&&a.status==='ready'&&String(a.artifactId).toLowerCase()===candidate.toLowerCase();if(!ready)diagnostic={code:'PHOTO_UNAVAILABLE'};}
+    catch{signal?.throwIfAborted();diagnostic={code:'PHOTO_UNAVAILABLE'};}
+   }
+   signal?.throwIfAborted();const value=contactInput(p,ready);if(diagnostic)value.diagnostics.push(diagnostic);return value;
   },
   async prepareFiles(p,signal) {
    if(activeUploads>=2) throw new Fault('UPLOAD_BUSY',true);
    activeUploads++;
    try {
-   const photo=(p.original.data as Message).author?.photoArtifactId;
-   if(photo){const value=await artifact(photo,p.ownerId);if(value.status!=='ready')throw new Fault('ARTIFACT_NOT_READY',true);}
    const items=(p.original.data as Message).attachments, result:Data[]=[];
    for(let position=0;position<items.length;position++) {
     const item:Attachment=items[position];let a:Data;
@@ -89,6 +100,7 @@ export function createPorts(nc:NatsConnection,client:Client,cfg:Config):Ports {
   },
   async signalWorkflow(p) {await client.workflow.getHandle(p.workflowId!).signal('changed');},
   async history(p,phase) {
+   if(phase==='complete'&&p.original.type==='message.incoming'&&p.contact){checkContact(p,p.contact);for(const event of p.contact.historyEvents as Data[]){const saved=await rpc('brai.history.v1.append.service_contacts',event);checkContactHistory(event,saved);}}
    await rpc('brai.history.v1.append.service_intake',{id:uuid(p.id+'/'+phase),type_id:phase==='receive'?1105:1106,occurred_at:phase==='receive'?p.receivedAt:p.completedAt,actor_id:null,scope_type:'user',scope_id:p.ownerId,object_type:'intake_packet',object_id:p.id,data:{phase:phase==='receive'?'registered':'completed',scenario:p.scenario}});
   }
  };

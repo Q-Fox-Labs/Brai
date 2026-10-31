@@ -1,9 +1,10 @@
 // ABOUTME: Предоставляет отсутствующих соседей только disposable тестовому окружению.
 // ABOUTME: Intent, результат и ответ агента сохраняются в собственных fixture таблицах.
 import {randomUUID} from 'node:crypto';
+import {contactResult} from '../contact-fixture.mjs';
 import {channelResult} from '../channel-fixture.mjs';
 import {inputHash} from '../../dist/contracts.js';
-export async function startPeers(nc,pool,{holdMemory=false,realChannels=false,beforeDeliver}={}){
+export async function startPeers(nc,pool,{holdMemory=false,realChannels=false,realContacts=false,realHistory=false,beforeDeliver}={}){
  await pool.query('CREATE SCHEMA IF NOT EXISTS intake_fixture');
  await pool.query('CREATE TABLE IF NOT EXISTS intake_fixture.jobs(id text PRIMARY KEY, hash text NOT NULL, body jsonb NOT NULL, published boolean NOT NULL DEFAULT false)');
  await pool.query('CREATE TABLE IF NOT EXISTS intake_fixture.inbox(id text PRIMARY KEY, hash text NOT NULL, body jsonb NOT NULL)');
@@ -35,7 +36,10 @@ export async function startPeers(nc,pool,{holdMemory=false,realChannels=false,be
   const row=(await pool.query('INSERT INTO intake_fixture.channel_cache(id,hash,body) VALUES($1,$2,$3) ON CONFLICT(id) DO UPDATE SET id=EXCLUDED.id RETURNING *',[q.operationId,inputHash(q),value])).rows[0];
   if(row.hash!==inputHash(q))throw Error('CHANNEL_INPUT_CONFLICT');return row.body;
  });
- endpoint('contact',async()=>({contactId:'contact'}));
+ if(!realContacts)endpoint('contact',async q=>{
+  const row=(await pool.query('INSERT INTO intake_fixture.channel_cache(id,hash,body) VALUES($1,$2,$3) ON CONFLICT(id) DO UPDATE SET id=EXCLUDED.id RETURNING *',['contact/'+q.operationId,inputHash(q),contactResult(q)])).rows[0];
+  if(row.hash!==inputHash(q))throw Error('CONTACT_INPUT_CONFLICT');return row.body;
+ });
  endpoint('inbox',async p=>{
   const result=await pool.query('INSERT INTO intake_fixture.inbox(id,hash,body) VALUES($1,$2,$3) ON CONFLICT(id) DO UPDATE SET id=EXCLUDED.id RETURNING hash',[p.packetId,inputHash(p.prepared),p.prepared]);
   if(result.rows[0].hash!==inputHash(p.prepared))throw Error('FIXTURE_CONFLICT');
@@ -49,7 +53,7 @@ export async function startPeers(nc,pool,{holdMemory=false,realChannels=false,be
   if(row.hash!==inputHash(p))throw Error('FIXTURE_CONFLICT');
   launch(row);return {accepted:true,operationId:p.operationId};
  });
- service.addEndpoint('history',{subject:'brai.history.v1.append.service_intake',handler:async(_err,msg)=>{
+ if(!realHistory)service.addEndpoint('history',{subject:'brai.history.v1.append.service_intake',handler:async(_err,msg)=>{
   try{const e=JSON.parse(new TextDecoder().decode(msg.data));if(!e.id||e.source||![1105,1106].includes(e.type_id)||e.data.text)throw Error();await pool.query('INSERT INTO intake_fixture.effects(id,kind) VALUES($1,$2) ON CONFLICT DO NOTHING',[e.id,'history']);msg.respond(Buffer.from(JSON.stringify({event:{...e,source:'service_intake'}})));}catch{msg.respondError(400,'INVALID_HISTORY');}
  }});
  for(const row of (await pool.query('SELECT * FROM intake_fixture.jobs WHERE NOT published')).rows)launch(row);

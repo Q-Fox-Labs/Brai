@@ -40,7 +40,8 @@
       "services/intake/deploy/provision.mjs",
       "services/intake/deploy/broker.json",
       "services/intake/migrations/002.sql",
-      "services/intake/src/channel-contract.ts"
+      "services/intake/src/channel-contract.ts",
+      "services/intake/src/contact-contract.ts"
     ],
     "checks": [
       "deploy/compose.intake-test.yml",
@@ -59,7 +60,10 @@
       "services/intake/tests/integration/recovery.test.mjs",
       "services/intake/tests/channel-fixture.mjs",
       "services/intake/tests/channel-contract.test.mjs",
-      "services/intake/tests/integration/channels.test.mjs"
+      "services/intake/tests/integration/channels.test.mjs",
+      "services/intake/tests/contact-fixture.mjs",
+      "services/intake/tests/contact-contract.test.mjs",
+      "services/intake/tests/integration/contacts.test.mjs"
     ]
   },
   "dependencies": [
@@ -70,6 +74,28 @@
       ],
       "delivery": [
         "services/channels/schemas/common.schema.json"
+      ]
+    },
+    {
+      "id": "contacts",
+      "inputs": [
+        "services/contacts/schemas/common.schema.json",
+        "services/contacts/schemas/api.schema.json"
+      ],
+      "delivery": [
+        "services/contacts/schemas/common.schema.json",
+        "services/contacts/schemas/api.schema.json"
+      ]
+    },
+    {
+      "id": "history",
+      "inputs": [
+        "services/history/schemas/common.schema.json",
+        "services/history/schemas/messages.schema.json"
+      ],
+      "delivery": [
+        "services/history/schemas/common.schema.json",
+        "services/history/schemas/messages.schema.json"
       ]
     }
   ],
@@ -98,7 +124,8 @@
       "services/intake/deploy/provision.mjs"
     ],
     "smokeImports": [
-      "services/intake/dist/channel-contract.js"
+      "services/intake/dist/channel-contract.js",
+      "services/intake/dist/contact-contract.js"
     ],
     "systemRequirements": [
       "Node.js 24.22.1",
