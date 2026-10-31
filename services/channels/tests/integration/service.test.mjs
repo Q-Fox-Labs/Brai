@@ -109,7 +109,7 @@ test('standalone: fourteen operations, immutable receipts, historical routing an
    const m=await f.admin.request('brai.channels.v1.resolve.admin_test',Buffer.alloc(65537,32),{timeout:1000});
    assert.equal(JSON.parse(new TextDecoder().decode(m.data)).code,'REQUEST_TOO_LARGE');
   });
-  await t.test('database failure is explicit; semantic profile collision stops migration',async()=>{
+  await t.test('unavailable schema and profile semantic collision fail explicitly',async()=>{
    await f.owner.query("UPDATE channels.sys_channel_types SET descriptor=jsonb_set(descriptor,'{capabilities}', '[]')");
    const m=f.migrate();assert.notEqual(await m.done,0);assert.match(m.output(),/PROFILE_SEMANTICS_CONFLICT/);
    await f.owner.query("UPDATE channels.sys_channel_types SET descriptor=$1",[JSON.parse(await readFile(new URL('../../profiles/telegram.v1.json',import.meta.url),'utf8'))]);
@@ -119,6 +119,35 @@ test('standalone: fourteen operations, immutable receipts, historical routing an
     assert.equal((await f.rpc('status')).ready,false);
    }finally{await f.owner.query('GRANT USAGE ON SCHEMA channels TO channels_test');}
    await eventually(async()=>(await f.rpc('status')).ready);
+  });
+  await t.test('active SQL connection loss does not kill the process; closed endpoint recovers',async()=>{
+   lock=await f.owner.connect();await lock.query('BEGIN');await lock.query('SELECT 1 FROM channels.channel_connections WHERE id=$1 FOR UPDATE',[cid]);
+   const pending=f.rpc('resolve',incoming()).then(()=>null,e=>e.code);
+   const pid=await eventually(async()=>(await f.app.query("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND usename=current_user AND application_name='service_channels' AND wait_event_type='Lock'")).rows[0]?.pid);
+   assert.equal((await f.app.query('SELECT pg_terminate_backend($1) killed',[pid])).rows[0].killed,true);
+   assert.equal(await pending,'NOT_READY');
+   await lock.query('ROLLBACK');lock.release();lock=null;
+   assert.equal((await f.rpc('status')).ready,true);
+   assert.ok(process.kill(f.pid(),0));
+   await f.restart('postgresql://channels_test:intake-test@127.0.0.1:1/brai_channels_test');
+   assert.equal((await f.rpc('status')).ready,false);
+   await assert.rejects(f.rpc('resolve',incoming()),{code:'NOT_READY'});
+   await f.restart();assert.equal((await f.rpc('status')).ready,true);
+  });
+  await t.test('publish and first resolve serialize to a complete historical version',async()=>{
+   for(let n=0;n<5;n++){
+    const old=await f.rpc('channels.get',{ownerId:'fixture',channelId:hid});
+    const q=incoming();
+    const [published,resolved]=await Promise.all([
+     f.rpc('channels.publish',{...metadata(),channelId:hid,expectedVersion:old.version,settings:{...channelSettings,name:'race'+n,rules:[rule('race'+n)]}}),
+     f.rpc('resolve',q)
+    ]);
+    const expected=resolved.asOf<published.result.effectiveFrom?old:published.result;
+    assert.equal(resolved.channelVersion,expected.version);
+    assert.equal(resolved.rulesVersion,expected.rulesVersion);
+    assert.deepEqual(resolved.snapshot.rules,expected.settings.rules);
+    assert.deepEqual(await f.rpc('resolve',q),resolved);
+   }
   });
   await t.test('restart keeps resolution and benchmark records RPC latency and RSS',async()=>{
    await f.restart();assert.deepEqual(await f.rpc('resolve',q),first);

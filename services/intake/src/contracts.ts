@@ -22,7 +22,7 @@ export function canonical(value: unknown): string {
 /** Возвращает SHA-256 нормализованного исходного события. */
 export function inputHash(value: unknown): string { return createHash('sha256').update(canonical(value)).digest('hex'); }
 /** Отвергает NUL и непарные суррогаты во всех ключах и значениях JSON. */
-function representable(value: unknown, depth = 0): boolean {
+export function representable(value: unknown, depth = 0): boolean {
  if(depth>64)return false;
  if (typeof value === 'number' && !Number.isFinite(value)) return false;
  if (typeof value === 'string') {

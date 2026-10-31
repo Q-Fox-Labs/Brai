@@ -16,13 +16,13 @@ export function createPorts(nc:NatsConnection,client:Client,cfg:Config):Ports {
   let reply;
   const bytes=Buffer.from(JSON.stringify(input));if(bytes.length>(isChannel?65536:1048576))throw new Fault('DEPENDENCY_REQUEST_TOO_LARGE');
   try { reply=await nc.request(subject,bytes,{timeout}); } catch {throw new Fault('DEPENDENCY_UNAVAILABLE',true);}
+  if(isChannel&&reply.data.length>131072)throw new Fault('INVALID_CHANNEL_RESULT');
   if(reply.headers?.get('Nats-Service-Error-Code')) {
    const status=Number(reply.headers.get('Nats-Service-Error-Code'));
    if(isChannel){let value;try{value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(reply.data));}catch{throw new Fault('INVALID_CHANNEL_RESULT');}throw channelError(value,status);}
    throw new Fault(status>=500?'DEPENDENCY_UNAVAILABLE':'DEPENDENCY_REJECTED',status>=500);
   }
-  if(isChannel&&reply.data.length>131072)throw new Fault('INVALID_CHANNEL_RESULT');
-  try {const value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(reply.data));if(!value || typeof value!=='object' || Array.isArray(value)) throw Error();return value;} catch {throw new Fault('INVALID_DEPENDENCY_RESULT');}
+  try {const value=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(reply.data));if(!value || typeof value!=='object' || Array.isArray(value)) throw Error();return value;} catch {throw new Fault(isChannel?'INVALID_CHANNEL_RESULT':'INVALID_DEPENDENCY_RESULT');}
  }
  async function artifact(id:string,owner:string):Promise<Data> {
   const a=await rpc('brai.artifacts.v1.get',{artifactId:id});

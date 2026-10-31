@@ -9,7 +9,7 @@ import {createService} from './domain.js';
 import {serve} from './nats.js';
 async function main(){
  const cfg=loadConfig(),key=readFileSync(cfg.cursorKeyFile);if(key.length<32)throw Error('INVALID_CURSOR_KEY');
- const pool=new Pool({connectionString:cfg.databaseUrl,max:4,connectionTimeoutMillis:1000,statement_timeout:5000,idle_in_transaction_session_timeout:5000});
+ const pool=new Pool({application_name:'service_channels',connectionString:cfg.databaseUrl,max:4,connectionTimeoutMillis:1000,statement_timeout:5000,idle_in_transaction_session_timeout:5000});
  pool.on('error',()=>{});
  let nc,server;let closing=false;
  try{

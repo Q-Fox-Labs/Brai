@@ -25,3 +25,18 @@ test('only safe declared errors retain domain code and retryability',()=>{
  assert.equal(channelError({code:'DISABLED',message:'secret',retryable:true},503).code,'INVALID_CHANNEL_RESULT');
  assert.equal(channelError({code:'SQL_SECRET',message:'secret',retryable:true},503).code,'INVALID_CHANNEL_RESULT');
 });
+
+test('hostile Unicode, depth, extension bytes and false input provenance are rejected',()=>{
+ const p=packet(),base=channelResult(channelRequest(p));
+ let nested={};for(let n=0;n<70;n++)nested={next:nested};
+ let extension={};for(let n=0;n<9;n++)extension={next:extension};
+ const values=[
+  {...base,snapshot:{...base.snapshot,channel:{...base.snapshot.channel,name:'bad'+String.fromCharCode(0)}}},
+  {...base,snapshot:{...base.snapshot,channel:{...base.snapshot.channel,name:'bad'+String.fromCharCode(0xd800)}}},
+  {...base,snapshot:{...base.snapshot,channel:{...base.snapshot.channel,extensions:{'test.deep':nested}}}},
+  {...base,snapshot:{...base.snapshot,channel:{...base.snapshot.channel,extensions:{'test.deep':extension}}}},
+  {...base,snapshot:{...base.snapshot,channel:{...base.snapshot.channel,extensions:{'test.large':'a'.repeat(8193)}}}},
+  {...base,assignments:{title:'forged'},fieldOrigins:{title:{source:'input',ruleId:null,rulesVersion:null,mode:null}}}
+ ];
+ for(const value of values)assert.throws(()=>checkResolution(p,value),{code:'INVALID_CHANNEL_RESULT'});
+});

@@ -78,3 +78,12 @@ test('legacy context stops explicitly without rewriting snapshot or starting nei
  assert.deepEqual((await f.store.get('packet')).context,{channelId:'old',rulesVersion:'old'});
  assert.equal(f.calls.length,0);
 });
+
+test('malformed channel result stops before persistence with a permanent diagnostic',async()=>{
+ const f=fixture(),call=f.ports.call;
+ f.ports.call=async(name,p,id)=>{const result=await call(name,p,id);if(name==='channel')result.snapshot.channel.name='bad'+String.fromCharCode(0);return result;};
+ await assert.rejects(f.a.prepare('packet'),{message:'INVALID_CHANNEL_RESULT'});
+ const p=await f.store.get('packet');assert.equal(p.context,undefined);
+ assert.deepEqual(p.dependencyFailure,{stage:'channel.resolve',code:'INVALID_CHANNEL_RESULT',retryable:false});
+ assert.equal(f.calls.length,1);
+});

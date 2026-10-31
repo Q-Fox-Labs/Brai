@@ -6,9 +6,10 @@ import { Fault, type Binding, type Event, type Packet, type Reject, type Store }
 /** Создаёт PostgreSQL адаптер; пул принадлежит вызывающей программе. */
 export function createStore(pool: Pool): Store {
  async function transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
-  const c = await pool.connect();
+  const c = await pool.connect(),clientError=()=>{};
+  c.on('error',clientError);
   try { await c.query('BEGIN'); const result = await work(c); await c.query('COMMIT'); return result; }
-  catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.release(); }
+  catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { c.removeListener('error',clientError);c.release(); }
  }
  const get = async (id: string): Promise<Packet | null> => (await pool.query('SELECT body FROM intake.intake_packets WHERE id=$1',[id])).rows[0]?.body ?? null;
  const find = async (source: string, eventId: string): Promise<Packet | null> => (await pool.query('SELECT body FROM intake.intake_packets WHERE source=$1 AND event_id=$2',[source,eventId])).rows[0]?.body ?? null;

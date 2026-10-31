@@ -1,7 +1,7 @@
 // ABOUTME: Запускает настоящий процесс Каналов на ресурсах disposable стенда.
 // ABOUTME: Удаляет только собственные временные файлы и дочерние процессы.
 import {spawn} from 'node:child_process';
-import {mkdtemp,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,writeFile,readFile,rm} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
 import {connect} from 'nats';
@@ -46,7 +46,7 @@ export async function startChannels(){
  let process=run('services/channels/dist/main.js',{CHANNELS_CONFIG:temp+'/runtime.json'});
  await eventually(async()=>(await rpc('status')).ready);
  return {temp,owner,app,admin,reader,delivery,rpc,migrate,hash,
-  async restart(){await process.stop();process=run('services/channels/dist/main.js',{CHANNELS_CONFIG:temp+'/runtime.json'});await eventually(async()=>(await rpc('status')).ready);},
+  async restart(databaseUrl=url('channels_test')){await process.stop();const config=JSON.parse(await readFile(temp+'/runtime.json','utf8'));config.databaseUrl=databaseUrl;await writeFile(temp+'/runtime.json',JSON.stringify(config),{mode:0o600});process=run('services/channels/dist/main.js',{CHANNELS_CONFIG:temp+'/runtime.json'});await eventually(async()=>{await rpc('status');return true;});},
   pid:()=>process.child.pid,
   async close(){await process.stop();await Promise.all(clients.map(c=>c.close()));await app.end();await owner.end();await rm(temp,{recursive:true,force:true});}
  };

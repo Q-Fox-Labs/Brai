@@ -56,3 +56,12 @@ test('all AsyncAPI request, reply and error references compile and caller operat
  const b={ownerIds:['owner'],operations:['resolve','resolve'],sourceIds:['telegram'],replySourceIds:[],connectionIds:null};
  assert.throws(()=>validateConfig({databaseUrl:'postgresql://test',natsUrl:'nats://test',natsOptionsFile:'/protected/nats',cursorKeyFile:'/protected/key',callers:{test:b}}),/INVALID_CALLER_BINDING/);
 });
+
+test('invalid binding IDs and duplicates fail before ready; valid UUID casing is normalized',()=>{
+ const binding={ownerIds:['owner'],operations:['resolve'],sourceIds:['telegram'],replySourceIds:['fixture_hermes'],connectionIds:null};
+ const cfg={databaseUrl:'postgresql://localhost/test',natsUrl:'nats://localhost:4222',natsOptionsFile:'/protected/nats',cursorKeyFile:'/protected/key',callers:{test:binding}};
+ for(const bad of [{connectionIds:['not-a-uuid']},{sourceIds:['INVALID SOURCE']},{replySourceIds:['bad-source!']},{sourceIds:['telegram','telegram']},{ownerIds:[' ']},{extra:true}])assert.throws(()=>validateConfig({...cfg,callers:{test:{...binding,...bad}}}),/INVALID_CALLER_BINDING/);
+ assert.throws(()=>validateConfig({...cfg,natsUrl:'https://localhost'}),/INVALID_CHANNELS_CONFIG/);
+ const uuid='ABCDEFAB-1111-4111-8111-111111111111';
+ assert.deepEqual(validateConfig({...cfg,callers:{test:{...binding,connectionIds:[uuid]}}}).callers.test.connectionIds,[uuid.toLowerCase()]);
+});

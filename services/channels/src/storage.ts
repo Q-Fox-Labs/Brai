@@ -58,8 +58,9 @@ function repository(c:PoolClient,context:Context):Repository {
 export function createStore(pool:Pool):Store {
  return {async transaction<T>(context:Context,work:(r:Repository)=>Promise<T>):Promise<T>{
   let c:PoolClient|undefined,begun=false;
+  const clientError=()=>{};
   try{
-   c=await pool.connect();if(performance.now()>=context.deadline)throw new Fault('NOT_READY');
+   c=await pool.connect();c.on('error',clientError);if(performance.now()>=context.deadline)throw new Fault('NOT_READY');
    await c.query('BEGIN');begun=true;
    const value=await work(repository(c,context));
    if(performance.now()>=context.deadline)throw new Fault('NOT_READY');
@@ -71,6 +72,6 @@ export function createStore(pool:Pool):Store {
    if(code==='23505')throw new Fault('VERSION_CONFLICT');
    if(['23503','23514','22P02'].includes(code??''))throw new Fault('INVALID_ARGUMENT');
    throw new Fault('NOT_READY');
-  }finally{c?.release();}
+  }finally{if(c){c.removeListener('error',clientError);c.release();}}
  }};
 }
