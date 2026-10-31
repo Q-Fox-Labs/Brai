@@ -32,7 +32,11 @@ async function codeworksWorkspace(state={generation:1,position:0}) {
             }
           }else{
             const names={sync:'synchronizeBranch',release:'advanceRelease',rollout:'reconcileRollout',cleanup:'cleanupWorkspace','release.close':'closeRelease','workspace.cancel':'cancelWorkspace','workspace.transfer':'transferWorkspace'};
-            await execution[names[command.kind]](command.operation_id,state.generation);
+            const result=await execution[names[command.kind]](command.operation_id,state.generation);
+            if(patched('codeworks-local-checkout-v1')&&command.kind==='release'&&result?.step==='LOCAL_CHECKOUT_SYNC_REQUIRED'){
+              await stopIndex();
+              await finalization.synchronizeCheckout(command.operation_id,state.generation);
+            }
           }
         }else await execution.executeCommand(command.operation_id,state.generation);
       }

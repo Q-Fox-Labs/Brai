@@ -63,7 +63,7 @@ async function executionSession(pool,work){
   finally{db.removeListener('error',disconnect);db.release(lost.signal.aborted?new Error('EXECUTION_CONNECTION_LOST'):undefined);}
 }
 /** Продолжает одну операцию; прерванные шаги сверяет по фактическому Git/GitHub. */
-export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[],flowGit=createFlowGit(),github,deploymentAdapter=createDeploymentAdapter(),workflowId=process.env.CODEWORKS_WORKFLOW_ID,generation=process.env.CODEWORKS_WORKFLOW_GENERATION,scoped=false,expectedKind,prepareStep,codeIndex,verifyTransfer=verifyDisposition}={}) {
+export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},allowedRepositories=[],flowGit=createFlowGit(),github,deploymentAdapter=createDeploymentAdapter(),workflowId=process.env.CODEWORKS_WORKFLOW_ID,generation=process.env.CODEWORKS_WORKFLOW_GENERATION,scoped=false,expectedKind,prepareStep,sourceStep=false,codeIndex,verifyTransfer=verifyDisposition}={}) {
   return executionSession(pool,async(db,signal)=>{
   const originalSignalCheckpoint=checkpoint;
   checkpoint=async step=>{signal.throwIfAborted();await originalSignalCheckpoint(step);};
@@ -201,7 +201,11 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
         };
         let outcome;
         try {
-          outcome=await advanceRelease({project,workspace:w,operation:op,release},{git:flowGit,github,inspect:(...a)=>git.inspect(...a),save,evidence,checkpoint,...(admission?{acquire:target=>acquireTarget(db,project.id,target,op.id,release.retry_of),releaseLane:target=>releaseTarget(db,op.id,target),verifyEvidence:async(id,target,sha)=>(await db.query('SELECT 1 FROM codeworks.deployment_evidence WHERE id=$1 AND project_id=$2 AND target=$3 AND commit_sha=$4',[id,project.id,target,sha])).rowCount===1}:{}),deploy:deploymentAdapter?async(target,sha,proof,retryOf)=>{
+          outcome=await advanceRelease({project,workspace:w,operation:op,release},{git:flowGit,github,inspect:(...a)=>git.inspect(...a),save,evidence,checkpoint,synchronizeCheckout:sourceStep?async sha=>{
+            const writers=(await db.query("SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain') LIMIT 1",[w.id])).rowCount;
+            if(writers)return {state:'waiting',reason:'WRITER_OUTCOME_UNKNOWN'};
+            return git.synchronizeCheckout(project,w,sha);
+          }:undefined,...(admission?{acquire:target=>acquireTarget(db,project.id,target,op.id,release.retry_of),releaseLane:target=>releaseTarget(db,op.id,target),verifyEvidence:async(id,target,sha)=>(await db.query('SELECT 1 FROM codeworks.deployment_evidence WHERE id=$1 AND project_id=$2 AND target=$3 AND commit_sha=$4',[id,project.id,target,sha])).rowCount===1}:{}),deploy:deploymentAdapter?async(target,sha,proof,retryOf)=>{
             const operation_id=await enqueueDeployment(db,project,target,sha,proof,verifier,{retryOf,releaseOperationId:admission?op.id:null});
             const deployment=(await db.query('SELECT status FROM codeworks.operations WHERE id=$1',[operation_id])).rows[0];
             return {operation_id,status:deployment.status};

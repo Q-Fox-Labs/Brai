@@ -22,19 +22,19 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
     const r=(await db.query("SELECT * FROM codeworks.workflow_registry WHERE workflow_id=$1 AND generation=$2 AND owner='temporal'",[id,generation])).rows[0];
     if(!r)throw Error('WORKFLOW_OWNER_REQUIRED');return r;
   };
-  const executeCommand=(expectedKind,prepareStep)=>async(operationId,generation)=>{
+  const executeCommand=(expectedKind,prepareStep,sourceStep=false)=>async(operationId,generation)=>{
     const id=identity();let heartbeat;
     let context;try{context=Context.current();}catch{/* Только явный тестовый identity работает без SDK context. */}
     const checkpoint=async()=>{context?.cancellationSignal.throwIfAborted();};
     try{
       try{const context=Context.current();context.heartbeat({operation_id:operationId});heartbeat=setInterval(()=>context.heartbeat({operation_id:operationId}),2000);heartbeat.unref();}catch{/* Явный identity доступен из изолированных тестов. */}
-      await withExecutionContext({signal:context?.cancellationSignal},()=>execute(pool,operationId,adapters.git,{...adapters,codeIndex,allowedRepositories,verifyTransfer,workflowId:id,generation,scoped:true,expectedKind,prepareStep,checkpoint}));
+      await withExecutionContext({signal:context?.cancellationSignal},()=>execute(pool,operationId,adapters.git,{...adapters,codeIndex,allowedRepositories,verifyTransfer,workflowId:id,generation,scoped:true,expectedKind,prepareStep,sourceStep,checkpoint}));
       return await session(async db=>{
         await authorizeCommand(db,operationId,id,generation);
         const o=(await db.query('SELECT o.status,o.step,o.error,w.preparation_state FROM codeworks.operations o LEFT JOIN codeworks.workspaces w ON w.id=o.workspace_id WHERE o.id=$1',[operationId])).rows[0];
         await db.query("UPDATE codeworks.commands SET state=CASE WHEN $2 IN ('succeeded','failed') THEN 'done' ELSE state END,technical_attempts=0,retry_at=NULL,updated_at=now() WHERE operation_id=$1",[operationId,o.status]);
         await db.query("UPDATE codeworks.workflow_registry SET last_stage=$2,blocked_reason=$3,executor_state='waiting',updated_at=now() WHERE workflow_id=$1",[id,o.step,o.status==='succeeded'?null:o.error?.code??o.step]);
-        return {status:o.status,preparation_state:o.preparation_state};
+        return {status:o.status,...(expectedKind==='release'?{step:o.step}:{}),preparation_state:o.preparation_state};
       });
     }finally{if(heartbeat)clearInterval(heartbeat);}
   };
@@ -116,6 +116,7 @@ export function createActivities(pool,{allowedRepositories,execute=runOperation,
     confirmWorkspace:executeCommand('prepare','ready'),
     synchronizeBranch:executeCommand('sync'),
     advanceRelease:executeCommand('release'),
+    synchronizeCheckout:executeCommand('release',undefined,true),
     reconcileRollout:executeCommand('rollout'),
     cleanupWorkspace:executeCommand('cleanup'),
     closeRelease:executeCommand('release.close'),

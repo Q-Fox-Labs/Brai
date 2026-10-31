@@ -94,7 +94,8 @@
       "services/codeworks/src/branch-coordinator.mjs",
       "services/codeworks/src/reconciler.mjs",
       "services/codeworks/src/operator.mjs",
-      "services/codeworks/src/disposition.mjs"
+      "services/codeworks/src/disposition.mjs",
+      "services/codeworks/src/source-checkout.mjs"
     ],
     "checks": [
       "services/codeworks/components/cli.mjs",
@@ -158,7 +159,9 @@
       "services/codeworks/tests/publication.test.mjs",
       "services/codeworks/tests/integration/publication-restore-acl.mjs",
       "services/codeworks/tests/integration/*finalization*.mjs",
-      "services/codeworks/scripts/accept-finalization.mjs"
+      "services/codeworks/scripts/accept-finalization.mjs",
+      "services/codeworks/tests/source-checkout.test.mjs",
+      "services/codeworks/tests/integration/source-checkout.test.mjs"
     ]
   },
   "dependencies": [],
@@ -223,7 +226,8 @@
       "services/codeworks/src/branch-coordinator.mjs",
       "services/codeworks/src/reconciler.mjs",
       "services/codeworks/src/operator.mjs",
-      "services/codeworks/src/disposition.mjs"
+      "services/codeworks/src/disposition.mjs",
+      "services/codeworks/src/source-checkout.mjs"
     ],
     "entrypoints": [
       "services/codeworks/src/main.mjs",
