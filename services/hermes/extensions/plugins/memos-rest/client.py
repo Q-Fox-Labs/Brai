@@ -3,9 +3,11 @@
 """MemOS product API; all reads and writes explicitly select one configured cube."""
 
 import hashlib
+import http.client
 import json
 import re
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -136,11 +138,22 @@ class Client:
             raise ValueError("MemOS REST URL must be HTTP on loopback (this service has no authentication)")
         self.user_id = str(config["user_id"])
         self.cube_id = str(config["cube_id"])
+        self._stream_version = None
         self.timeout = float(config.get("request_timeout", 30))
         # A proxy configured for other providers must never see local memory traffic.
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def request(self, path, body=None, *, timeout=None):
+        """Выполнить scoped API без повтора записи при потере ответа."""
+        if (path == '/product/get_memory' and isinstance(body, dict)
+                and not set(body) - {'mem_cube_id', 'user_id', 'filter', 'include_preference',
+                                     'include_tool_memory', 'include_skill_memory'}
+                and all(body.get(flag) is False for flag in
+                        ('include_preference', 'include_tool_memory', 'include_skill_memory'))):
+            return self._memory_read(body, timeout)
+        return self._request_json(path, body, timeout=timeout)
+
+    def _request_json(self, path, body=None, *, timeout=None, allow_missing=False):
         request = urllib.request.Request(
             self.base_url + path,
             data=None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -150,8 +163,11 @@ class Client:
             with self.opener.open(request, timeout=timeout or self.timeout) as response:
                 result = json.load(response)
         except urllib.error.HTTPError as exc:
+            exc.close()
+            if allow_missing and exc.code == 404:
+                return None
             raise MemOSError(f"MemOS {path}: HTTP {exc.code}") from None
-        except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, socket.timeout, OSError, http.client.HTTPException) as exc:
             raise MemOSError(f"MemOS {path}: connection failed ({type(exc).__name__})") from None
         except (ValueError, UnicodeError):
             raise MemOSError(f"MemOS {path}: invalid JSON response") from None
@@ -160,16 +176,104 @@ class Client:
             raise MemOSError(f"MemOS {path}: API error {code}")
         return result
 
+    def _memory_read(self, body, timeout):
+        """Выбрать поток по явной версии; старый API сохраняет полную выдачу."""
+        deadline = time.monotonic() + (timeout or self.timeout)
+        if self._stream_version is None:
+            capabilities = self._request_json('/product/memory_capabilities', allow_missing=True, timeout=timeout)
+            data = (capabilities or {}).get('data', {})
+            if not isinstance(data, dict):
+                raise MemOSError('MemOS memory capabilities are invalid')
+            version = data.get('memory_stream')
+            if version is not None and (type(version) is not int or version != 1):
+                raise MemOSError('MemOS memory stream version is incompatible')
+            self._stream_version = version or False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MemOSError('MemOS memory read timed out')
+        if self._stream_version is False:
+            return self._request_json('/product/get_memory', body, timeout=remaining)
+        request = urllib.request.Request(
+            self.base_url + '/product/get_memory_stream',
+            data=json.dumps({key: body[key] for key in ('mem_cube_id', 'user_id', 'filter') if key in body},
+                            ensure_ascii=False).encode('utf-8'),
+            headers={'Content-Type': 'application/json', 'Accept': 'application/x-ndjson'},
+        )
+        rows, ids = [], set()
+        header = ended = False
+        try:
+            with self.opener.open(request, timeout=remaining) as response:
+                if response.headers.get_content_type() != 'application/x-ndjson':
+                    raise MemOSError('MemOS memory stream has invalid content type')
+                for raw in self._stream_lines(response, deadline):
+                    if ended:
+                        raise MemOSError('MemOS memory stream is incomplete or invalid')
+                    item = json.loads(raw)
+                    if not isinstance(item, dict):
+                        raise MemOSError('MemOS memory stream has invalid record')
+                    if not header:
+                        if item != {'type': 'header', 'version': 1,
+                                    'cube_id': body['mem_cube_id'], 'user_id': body['user_id']}:
+                            raise MemOSError('MemOS memory stream scope mismatch')
+                        header = True
+                    elif item.get('type') == 'memory' and set(item) == {'type', 'memory'}:
+                        row = item['memory']
+                        if (not isinstance(row, dict) or not isinstance(row.get('id'), str)
+                                or row['id'] in ids or not isinstance(row.get('metadata'), dict)
+                                or row['metadata'].get('user_id') != body['user_id']):
+                            raise MemOSError('MemOS memory stream has invalid or foreign memory')
+                        ids.add(row['id'])
+                        rows.append({**row, '_cube_id': body['mem_cube_id']})
+                    elif item.get('type') == 'end' and set(item) == {'type', 'count'}:
+                        if type(item['count']) is not int or item['count'] != len(rows):
+                            raise MemOSError('MemOS memory stream count mismatch')
+                        ended = True
+                    else:
+                        raise MemOSError('MemOS memory stream has invalid record')
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            raise MemOSError(f'MemOS memory stream: HTTP {exc.code}') from None
+        except (urllib.error.URLError, TimeoutError, socket.timeout, OSError, http.client.HTTPException) as exc:
+            raise MemOSError(f'MemOS memory stream: connection failed ({type(exc).__name__})') from None
+        except (ValueError, UnicodeError):
+            raise MemOSError('MemOS memory stream has invalid JSON') from None
+        if not header or not ended:
+            raise MemOSError('MemOS memory stream ended without complete trailer')
+        return {'code': 200, 'data': {'text_mem': [{'cube_id': body['mem_cube_id'], 'memories': rows}]}}
+
+    @staticmethod
+    def _stream_lines(response, deadline):
+        """Читать ограниченные строки; проверять бюджет даже при медленной передаче."""
+        pending = bytearray()
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError()
+            chunk = response.read1(65536)
+            if not chunk:
+                if pending:
+                    raise MemOSError('MemOS memory stream has an unfinished record')
+                return
+            pending.extend(chunk)
+            while b'\n' in pending:
+                end = pending.index(b'\n') + 1
+                if end > 8388608:
+                    raise MemOSError('MemOS memory stream record is too large')
+                yield bytes(pending[:end])
+                del pending[:end]
+            if len(pending) > 8388608:
+                raise MemOSError('MemOS memory stream record is too large')
+
     def health(self):
         return self.request("/health", timeout=3)
 
-    def get(self, filter_):
+    def get(self, filter_, *, timeout=None):
+        """Прочитать всю область фильтра; при обрыве не возвращать частичную выдачу."""
         server_filter = {("info." + key if key.startswith("hermes_") else key): value
                          for key, value in filter_.items()}
         rows = memory_rows(self.request("/product/get_memory", {
             "mem_cube_id": self.cube_id, "user_id": self.user_id, "filter": server_filter,
             "include_preference": False, "include_tool_memory": False, "include_skill_memory": False,
-        }))
+        }, timeout=timeout))
         # The installed PostgreSQL export_graph ignores REST filter/user_id kwargs.
         # Never trust those as a selection boundary, especially for recovery/deletion.
         def matches(row):

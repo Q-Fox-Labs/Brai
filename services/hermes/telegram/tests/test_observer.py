@@ -35,6 +35,29 @@ class JournalTest(unittest.TestCase):
     def message(self, text="Привет", edited=None):
         return SimpleNamespace(message_id=44, text=text, date=datetime(2026, 1, 1, tzinfo=timezone.utc), edit_date=edited, photo=[1])
 
+    def test_payload_types_preserve_empty_text_and_distinguish_service_and_unsupported(self):
+        """Нетекстовый input хранит тип, не подменяя текст машинной подписью."""
+        cases = [('photo', [1], 'photo', 'pending'), ('sticker', object(), 'sticker', 'pending'),
+                 ('video_note', object(), 'unsupported:video_note', 'none'),
+                 ('forum_topic_closed', object(), 'service', 'none'), ('unused', None, 'unknown', 'none')]
+        for index, (field, value, kind, state) in enumerate(cases):
+            message = SimpleNamespace(message_id=100+index, text=None, **{field:value})
+            self.journal.incoming(message,self.chat,self.user)
+        with self.journal.db() as db:
+            rows=db.execute('SELECT text,message_type,attachment_state FROM messages ORDER BY rowid').fetchall()
+        self.assertEqual([tuple(row) for row in rows],[('',kind,state) for _,_,kind,state in cases])
+
+    def test_old_database_migrates_empty_input_as_unknown_without_guessing(self):
+        """Старая БД сохраняет содержимое и число событий при добавлении типа."""
+        self.journal.incoming(SimpleNamespace(message_id=103,text=None),self.chat,self.user)
+        with self.journal.db() as db:
+            db.execute('ALTER TABLE messages DROP COLUMN message_type')
+        reopened=journal_module.TelegramJournal(self.journal.directory)
+        with reopened.db() as db:
+            row=db.execute('SELECT text,message_type FROM messages').fetchone()
+            self.assertEqual(tuple(row),('','unknown'))
+            self.assertEqual(db.execute('SELECT count(*) FROM changes').fetchone()[0],1)
+
     def test_duplicate_edit_and_attachment_do_not_erase_each_other(self):
         self.journal.incoming(self.message(), self.chat, self.user)
         self.journal.incoming(self.message(), self.chat, self.user)

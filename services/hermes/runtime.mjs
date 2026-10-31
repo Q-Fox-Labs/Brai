@@ -1,5 +1,5 @@
 // ABOUTME: Подключает Hermes к готовым MCP и фиксированным NATS API Brai.
-// ABOUTME: Не повторяет операции автоматически и не выдаёт модели человеческие полномочия.
+// ABOUTME: Восстанавливает безопасные чтения; записи не повторяет и human полномочий модели не выдаёт.
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -50,20 +50,27 @@ export function unwrap(result, { planning = false } = {}) {
   throw fault('INVALID_UPSTREAM_RESPONSE');
 }
 
-/** Reconnect only for the next explicit call; never replay a request with unknown effects. */
-export async function connectMcpEndpoint(endpoint, { timeout = 12_000, callTimeout = 300_000 } = {}) {
+// AIDEV-NOTE: Только явный список чтений; новое имя инструмента никогда не получает повтор автоматически.
+const repeatableMcpTools = new Set(['game_core_graph_get', 'game_core_timeline_get', 'game_core_moves_available',
+  'game_core_planning_packet', 'history_categories_list', 'history_types_list', 'history_type_get',
+  'transcription_request_get', 'transcription_models_list', 'transcription_settings_get', 'transcription_result_get', 'fetch_file']);
+
+/** Лениво подключает один MCP. После транспортного отказа чтение повторяется максимум раз; запись никогда. */
+export async function connectMcpEndpoint(endpoint, { timeout = 12_000, callTimeout = 300_000, createTransport, endpointName = 'mcp' } = {}) {
   let current, opening, closed = false;
-  const clients = new Set();
-  async function client() {
+  const clients = new Set(), disconnectedClients = new WeakSet();
+  const transport = createTransport ?? (() => new StreamableHTTPClientTransport(new URL(endpoint.url), {
+    requestInit: { headers: endpoint.token ? { Authorization: `Bearer ${endpoint.token}` } : {} },
+  }));
+  async function client(deadline) {
     if (closed) throw fault('CANCELLED');
     if (current) return current;
     if (!opening) opening = (async () => {
       const next = new Client({ name: 'brai-hermes-owner', version: '1.0.0' });
+      next.onclose = () => { disconnectedClients.add(next); clients.delete(next); if (current === next) current = undefined; };
       clients.add(next);
       try {
-        await next.connect(new StreamableHTTPClientTransport(new URL(endpoint.url), {
-          requestInit: { headers: endpoint.token ? { Authorization: `Bearer ${endpoint.token}` } : {} },
-        }), { timeout });
+        await next.connect(transport(), { timeout: Math.max(1, Math.min(timeout, deadline - Date.now())) });
         if (closed) throw fault('CANCELLED');
         current = next;
         return next;
@@ -73,62 +80,87 @@ export async function connectMcpEndpoint(endpoint, { timeout = 12_000, callTimeo
     })();
     return opening;
   }
-  async function invoke(method, ...args) {
-    const selected = await client();
-    try { return await selected[method](...args); }
-    catch (error) {
-      // Owner business failures are unwrapped later. Only broken protocol/transport invalidates this generation.
-      if ((typeof error.code === 'number' && error.code >= 400 && error.code <= 599)
-          || typeof error.code !== 'string' || uncertain(error)) {
-        if (current === selected) current = undefined;
-        // A delayed failure from an older generation cannot close the replacement client.
-        await selected.close().catch(() => {}); clients.delete(selected);
+  async function invoke(method, args, signal, limit, repeatable) {
+    const deadline = Date.now() + limit;
+    for (let attempt = 0; ; attempt++) {
+      signal?.throwIfAborted();
+      let selected;
+      try {
+        selected = await client(deadline);
+        signal?.throwIfAborted();
+        if (Date.now() >= deadline) throw fault('DEADLINE_EXCEEDED');
+        const options = { signal, timeout: Math.max(1, deadline - Date.now()) };
+        return method === 'listTools' ? await selected.listTools({}, options)
+          : await selected.callTool(args, undefined, options);
+      } catch (error) {
+        const disconnected = selected && disconnectedClients.has(selected);
+        if (selected && (typeof error.code !== 'string' || uncertain(error))) {
+          if (current === selected) current = undefined;
+          // AIDEV-NOTE: Поздняя ошибка старого поколения не закрывает новое подключение.
+          await selected.close().catch(() => {}); clients.delete(selected);
+        }
+        // Ответы владельца isError распаковываются снаружи и не повторяются.
+        const recoverable = error.code === 400 || error.code === 404 || error.code >= 500 && error.code <= 599
+          || error.code === undefined && error.name !== 'AbortError' || disconnected;
+        const retry = repeatable && !attempt && recoverable && !signal?.aborted && !closed && Date.now() < deadline;
+        const httpStatus = Number.isInteger(error.code) && error.code >= 400 && error.code <= 599 ? error.code : undefined;
+        if (httpStatus || recoverable) console.error(JSON.stringify({ event: 'hermes_mcp_transport_failure', endpoint: endpointName,
+          phase: selected ? 'request' : 'connect', ...(httpStatus ? { httpStatus } : {}), retry: Boolean(retry) }));
+        if (!retry) throw error;
       }
-      throw error;
     }
   }
-  await client();
   return {
-    list: () => invoke('listTools', {}, { timeout }),
-    call: (name, args, signal) => invoke('callTool', { name, arguments: args }, undefined, { signal, timeout: callTimeout }),
+    list: () => invoke('listTools', {}, undefined, timeout, true),
+    call: (name, args, signal) => invoke('callTool', { name, arguments: args }, signal, callTimeout, repeatableMcpTools.has(name)),
     async close() { closed = true; await opening?.catch(() => {}); await Promise.allSettled([...clients].map(value => value.close())); clients.clear(); current = undefined; },
   };
 }
 
-/** Подключает реальные клиенты; publisher запускается независимо от основного Agent. */
+/** Создаёт независимые ленивые порты: отказ одного соседа не препятствует запуску остальных. */
 export async function connectPorts(config) {
   const clients = [], timeout = config.requestTimeoutMs ?? 12_000;
-  let nc;
+  let nc, natsOpening, closed = false;
+  async function natsConnection() {
+    if (closed) throw fault('CANCELLED');
+    if (nc && !nc.isClosed()) return nc;
+    if (!natsOpening) natsOpening = (async () => {
+      try {
+        const next = await connect({ servers: config.nats.servers, user: config.nats.user, pass: config.nats.password,
+          inboxPrefix: config.nats.inboxPrefix ?? '_INBOX.brai_hermes', name: 'brai-hermes-tools', timeout: 5000 });
+        if (closed) { await next.close(); throw fault('CANCELLED'); }
+        return nc = next;
+      } finally { natsOpening = undefined; }
+    })();
+    return natsOpening;
+  }
   try {
     const endpoints = {};
     for (const name of ['gameCore', 'history', 'transcription']) {
       const endpoint = config[name];
-      const endpointClient = await connectMcpEndpoint(endpoint, { timeout, callTimeout: config.longRequestTimeoutMs ?? 300_000 });
+      const endpointClient = await connectMcpEndpoint(endpoint, { timeout, callTimeout: config.longRequestTimeoutMs ?? 300_000, endpointName: name });
       clients.push(endpointClient);
       endpoints[name] = endpointClient;
     }
-    const publisher = new Client({ name: 'brai-hermes-files', version: '1.0.0' });
+    const publisher = await connectMcpEndpoint({}, { timeout, callTimeout: 1_800_000, endpointName: 'publisher',
+      createTransport: () => new StdioClientTransport({ command: process.execPath,
+        args: [config.publisher.entrypoint ?? fileURLToPath(new URL('../agent/dist/publisher-mcp.js', import.meta.url))],
+        env: { PATH: process.env.PATH ?? '', BRAI_AGENT_PUBLISHER_CONFIG: config.publisher.configPath, BRAI_AGENT_OWNER_ID: config.ownerId }, stderr: 'inherit',
+      }) });
     clients.push(publisher);
-    await publisher.connect(new StdioClientTransport({ command: process.execPath,
-      args: [config.publisher.entrypoint ?? fileURLToPath(new URL('../agent/dist/publisher-mcp.js', import.meta.url))],
-      env: { PATH: process.env.PATH ?? '', BRAI_AGENT_PUBLISHER_CONFIG: config.publisher.configPath, BRAI_AGENT_OWNER_ID: config.ownerId }, stderr: 'inherit',
-    }), { timeout });
     endpoints.publisher = publisher;
-    nc = await connect({ servers: config.nats.servers, user: config.nats.user, pass: config.nats.password,
-      inboxPrefix: config.nats.inboxPrefix ?? '_INBOX.brai_hermes', name: 'brai-hermes-tools', timeout: 5000 });
-    const js = nc.jetstream();
     return {
-      async list(name) { return (await (name === 'publisher' ? endpoints[name].listTools({}, { timeout }) : endpoints[name].list())).tools; },
+      async list(name) { return (await endpoints[name].list()).tools; },
       async mcp(name, tool, args, signal) {
-        return unwrap(await (name === 'publisher'
-          ? endpoints[name].callTool({ name: tool, arguments: args }, undefined, { signal, timeout: 1_800_000 })
-          : endpoints[name].call(tool, args, signal)), { planning: name === 'gameCore' && tool.startsWith('game_core_planning_') });
+        return unwrap(await endpoints[name].call(tool, args, signal), { planning: name === 'gameCore' && tool.startsWith('game_core_planning_') });
       },
       async request(subject, payload, signal, requestTimeout = timeout) {
         signal?.throwIfAborted();
         const data = Buffer.from(JSON.stringify(payload));
         if (data.length > MAX_REQUEST_BYTES) throw fault('REQUEST_TOO_LARGE');
-        const reply = await nc.request(subject, data, { timeout: requestTimeout });
+        const connection = await natsConnection();
+        signal?.throwIfAborted();
+        const reply = await connection.request(subject, data, { timeout: requestTimeout });
         signal?.throwIfAborted();
         const code = reply.headers?.get(ServiceErrorHeader), status = reply.headers?.get(ServiceErrorCodeHeader);
         if (Boolean(code) !== Boolean(status) || status && !/^[45][0-9]{2}$/.test(status)) throw fault('INVALID_UPSTREAM_RESPONSE');
@@ -142,10 +174,12 @@ export async function connectPorts(config) {
         const data = Buffer.from(JSON.stringify(payload));
         if (data.length > MAX_REQUEST_BYTES) throw fault('REQUEST_TOO_LARGE');
         // AIDEV-NOTE: Msg-Id не ставится: изменённый payload с прежним commandId обязан дойти до owner ledger.
-        await js.publish(subject, data, { timeout });
+        const connection = await natsConnection();
+        signal?.throwIfAborted();
+        await connection.jetstream().publish(subject, data, { timeout });
         signal?.throwIfAborted();
       },
-      async close() { await Promise.allSettled(clients.map(client => client.close())); await nc.close(); },
+      async close() { closed = true; await Promise.allSettled(clients.map(client => client.close())); await natsOpening?.catch(() => {}); await nc?.close(); },
     };
   } catch (error) {
     await Promise.allSettled(clients.map(client => client.close())); await nc?.close(); throw error;
@@ -164,18 +198,8 @@ export async function createBraiTools(config, ports) {
   const voiceInputSchema = { type: 'object', additionalProperties: false,
     properties: { text: voiceDefinition.inputSchema.properties.text }, required: ['text'] };
   const validateVoiceInput = compileInput(voiceInputSchema);
-  for (const [endpoint, allow] of [['gameCore', gameCoreNames], ['history', historyNames], ['transcription', transcriptionNames], ['publisher', new Set(['publish_file', 'fetch_file'])]]) {
-    for (const tool of await ports.list(endpoint)) {
-      if (!allow.has(tool.name)) continue;
-      const visible = structuredClone(tool);
-      if (visible.name === 'game_core_move_claim') {
-        visible.inputSchema.properties.executor_kind = { const: 'agent' };
-        delete visible.inputSchema.properties.executor_id;
-      }
-      remote.set(tool.name, { endpoint, tool: visible, validate: compileInput(visible.inputSchema) });
-      tools.push(visible);
-    }
-  }
+  const endpointTools = new Map([['gameCore', gameCoreNames], ['history', historyNames], ['transcription', transcriptionNames], ['publisher', new Set(['publish_file', 'fetch_file'])]]);
+  const discovered = new Set(), discovering = new Map(), unavailable = new Set();
   for (const definition of natsTools) tools.push(definition === voiceDefinition
     ? { name: definition.name, description: 'Синтезировать текст настроенным локальным голосом. Срок и идентификаторы задаёт мост; при неизвестном исходе автоматического повтора нет.', inputSchema: voiceInputSchema }
     : { name: definition.name, description: definition.description, inputSchema: definition.inputSchema });
@@ -186,7 +210,35 @@ export async function createBraiTools(config, ports) {
   const validateHumanRequest = compileInput(humanRequest.inputSchema);
   tools.push(humanRequest);
   const validatePlanningRead = compileInput(planningReadTool.inputSchema);
-  if (remote.has('game_core_planning_packet')) tools.push(planningReadTool);
+  async function discoverEndpoint(endpoint) {
+    if (discovered.has(endpoint)) return;
+    if (!discovering.has(endpoint)) discovering.set(endpoint, (async () => {
+      let listed;
+      try { listed = await ports.list(endpoint); }
+      catch {
+        if (!unavailable.has(endpoint)) console.error(JSON.stringify({ event: 'hermes_endpoint_discovery_unavailable', endpoint }));
+        unavailable.add(endpoint); return;
+      }
+      for (const tool of listed) {
+        if (!endpointTools.get(endpoint).has(tool.name)) continue;
+        const visible = structuredClone(tool);
+        if (visible.name === 'game_core_move_claim') {
+          visible.inputSchema.properties.executor_kind = { const: 'agent' };
+          delete visible.inputSchema.properties.executor_id;
+        }
+        remote.set(tool.name, { endpoint, tool: visible, validate: compileInput(visible.inputSchema) });
+        tools.push(visible);
+      }
+      if (endpoint === 'gameCore' && remote.has('game_core_planning_packet')) tools.push(planningReadTool);
+      discovered.add(endpoint); unavailable.delete(endpoint);
+    })().finally(() => discovering.delete(endpoint)));
+    await discovering.get(endpoint);
+  }
+  async function listTools() {
+    await Promise.all([...endpointTools.keys()].map(discoverEndpoint));
+    return tools;
+  }
+  await listTools();
   let active = 0;
   async function gameCoreCall(name, args, signal) { return ports.mcp('gameCore', name, args, signal); }
   async function graph(signal) {
@@ -196,7 +248,7 @@ export async function createBraiTools(config, ports) {
     return value;
   }
   return {
-    tools, gameCoreCall, graph,
+    tools, listTools, unavailableEndpoints: () => [...unavailable], gameCoreCall, graph,
     filesConfiguration: () => fileConfiguration(config, fault),
     /** Один вызов Local AI с доверенной моделью и сроком от часов моста. */
     async synthesizeVoice(args, signal) {
@@ -213,6 +265,14 @@ export async function createBraiTools(config, ports) {
       let mutation = false;
       try {
         signal?.throwIfAborted();
+        // Точный запрос ранее известного инструмента может восстановить только его endpoint; остальные вызовы его не ждут.
+        if (!remote.has(name)) {
+          const endpoint = name === planningReadTool.name ? 'gameCore' : [...endpointTools].find(([, names]) => names.has(name))?.[0];
+          if (endpoint && !discovered.has(endpoint)) {
+            await discoverEndpoint(endpoint);
+            if (!discovered.has(endpoint)) throw fault('UPSTREAM_UNAVAILABLE');
+          }
+        }
         if (name === planningReadTool.name && remote.has('game_core_planning_packet')) {
           if (!validatePlanningRead(args)) throw fault('INVALID_ARGUMENT');
           const packet = await gameCoreCall('game_core_planning_packet', { attempt_id: args.attempt_id }, signal);

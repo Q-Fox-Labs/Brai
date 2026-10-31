@@ -4,15 +4,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { createServer } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { compileInput, natsTools } from '../catalog.mjs';
 import { validateConfig } from '../config.mjs';
-import { createBraiTools, connectMcpEndpoint, unwrap, fault } from '../runtime.mjs';
+import { createBraiTools, connectMcpEndpoint, connectPorts, startBraiTools, unwrap, fault } from '../runtime.mjs';
 import { createHumanActions } from '../human-actions.mjs';
 import { createTrustedDispatcher, serveTrusted } from '../trusted.mjs';
 import { serveTools } from '../tools.mjs';
@@ -578,11 +580,11 @@ test('draft acceptance keeps current revision meaning without lifecycle Move tit
 });
 
 
-// A real HTTP peer reproduces owner restart/session loss without touching business data.
+// Настоящий HTTP peer воспроизводит потерю сессии и отказы без пользовательских данных.
 async function restartedOwner(t, invalidStatus = 404) {
   let generation = 1, initializes = 0, effects = 0, drop = false;
   const calls = [], waiting = [];
-  let hold = false;
+  let hold = false, failure, requests = 0;
   const http = createServer(async (req, res) => {
     if (req.method === 'GET') { res.writeHead(405).end(); return; }
     if (req.method === 'DELETE') { res.writeHead(200).end(); return; }
@@ -590,26 +592,37 @@ async function restartedOwner(t, invalidStatus = 404) {
     const body = JSON.parse(bytes);
     if (!body.id && body.id !== 0) { res.writeHead(202).end(); return; }
     const reply = result => { res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': String(generation) }); res.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result })); };
+    if (body.method === 'tools/call') requests++;
     if (body.method === 'initialize') { initializes++; reply({ protocolVersion: body.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'synthetic-owner', version: '1' } }); return; }
     if (req.headers['mcp-session-id'] !== String(generation)) { res.writeHead(invalidStatus).end('Bad Request: Server not initialized'); return; }
     if (body.method === 'tools/list') { reply({ tools: [
       { name: 'game_core_planning_build', inputSchema: schema({ attempt_id: { type: 'string' }, candidate: { type: 'object' } }) },
       { name: 'game_core_timeline_get', inputSchema: schema({}) },
+      { name: 'game_core_graph_get', inputSchema: schema({}) },
     ] }); return; }
     calls.push(body.params.name);
+    if (failure?.remaining) {
+      failure.remaining--;
+      if (failure.delayMs) await new Promise(resolve => setTimeout(resolve, failure.delayMs));
+      if (failure.drop) { req.socket.destroy(); return; }
+      if (failure.rpcCode) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, error: { code: failure.rpcCode, message: 'synthetic owner refusal' } })); return; }
+      if (failure.status) { res.writeHead(failure.status).end('synthetic failure'); return; }
+      reply({ isError: true, content: [{ type: 'text', text: JSON.stringify({ code: failure.code }) }] }); return;
+    }
     if (hold) { waiting.push(() => { res.writeHead(500).end('synthetic transport failure'); }); return; }
     if (body.params.name === 'game_core_planning_build') {
       effects++;
       if (drop) { drop = false; req.socket.destroy(); return; }
     }
-    reply({ content: [], structuredContent: { effects } });
+    reply({ content: [], structuredContent: body.params.name === 'game_core_graph_get' ? { elements: [], moves: [], attempts: [], revisions: [] } : { effects } });
   });
   await new Promise(resolve => http.listen(0, '127.0.0.1', resolve));
-  const endpoint = await connectMcpEndpoint({ url: `http://127.0.0.1:${http.address().port}/mcp` }, { timeout: 1000, callTimeout: 1000 });
+  const url = `http://127.0.0.1:${http.address().port}/mcp`;
+  const endpoint = await connectMcpEndpoint({ url }, { timeout: 1000, callTimeout: 1000 });
   t.after(async () => { await endpoint.close(); http.closeAllConnections(); await new Promise(resolve => http.close(resolve)); });
   const runtime = await createBraiTools(config, { list: async name => name === 'gameCore' ? (await endpoint.list()).tools : [],
     mcp: async (_, name, args, signal) => unwrap(await endpoint.call(name, args, signal)), close: async () => {} });
-  return { runtime, endpoint, calls, waiting, restart: () => { generation++; }, dropReply: () => { drop = true; }, hold: () => { hold = true; },
+  return { runtime, endpoint, url, calls, waiting, fail: value => { failure = value; }, requests: () => requests, restart: () => { generation++; }, dropReply: () => { drop = true; }, hold: () => { hold = true; },
     release: () => { hold = false; }, counts: () => ({ initializes, effects }) };
 }
 
@@ -633,8 +646,8 @@ test('lost mutation reply stays unknown; explicit reconciliation sees one persis
 
 test('late old-generation failure preserves a replacement client during concurrent calls', async t => {
   const owner = await restartedOwner(t); owner.hold();
-  const first = owner.endpoint.call('game_core_timeline_get', {}).catch(error => error);
-  const second = owner.endpoint.call('game_core_timeline_get', {}).catch(error => error);
+  const first = owner.endpoint.call('game_core_planning_build', {}).catch(error => error);
+  const second = owner.endpoint.call('game_core_planning_build', {}).catch(error => error);
   while (owner.waiting.length !== 2) await new Promise(resolve => setTimeout(resolve, 1));
   owner.waiting[0](); await first;
   owner.release();
@@ -642,4 +655,204 @@ test('late old-generation failure preserves a replacement client during concurre
   owner.waiting[1](); await second;
   assert.deepEqual(unwrap(await owner.endpoint.call('game_core_timeline_get', {})), { effects: 0 });
   assert.equal(owner.counts().initializes, 2);
+});
+
+
+for (const status of [400, 404]) test(`expired HTTP ${status} read reconnects once inside the same call`, async t => {
+  const owner = await restartedOwner(t, status); owner.restart();
+  assert.deepEqual(await owner.runtime.call('game_core_graph_get', {}), { elements: [], moves: [], attempts: [], revisions: [] });
+  assert.equal(owner.requests(), 2);
+  assert.deepEqual(owner.counts(), { initializes: 2, effects: 0 });
+});
+
+test('persistent transport read failure is bounded to one retry and later explicit call recovers', async t => {
+  const owner = await restartedOwner(t); owner.fail({ status: 503, remaining: 2 });
+  await assert.rejects(owner.runtime.call('game_core_graph_get', {}), /UPSTREAM_UNAVAILABLE/);
+  assert.equal(owner.requests(), 2);
+  assert.equal(owner.counts().effects, 0);
+  assert.deepEqual(await owner.runtime.call('game_core_timeline_get', {}), { effects: 0 });
+  assert.equal(owner.requests(), 3);
+});
+
+for (const status of [401, 403]) test(`HTTP ${status} permission failure is never retried`, async t => {
+  const owner = await restartedOwner(t); owner.fail({ status, remaining: 1 });
+  await assert.rejects(owner.runtime.call('game_core_graph_get', {}), /UPSTREAM_UNAVAILABLE/);
+  assert.equal(owner.requests(), 1);
+  assert.equal(owner.counts().initializes, 1);
+});
+
+test('owner business errors keep their code and never reconnect or retry a read', async t => {
+  const owner = await restartedOwner(t); owner.fail({ code: 'DATABASE_UNAVAILABLE', remaining: 1 });
+  await assert.rejects(owner.runtime.call('game_core_graph_get', {}), /DATABASE_UNAVAILABLE/);
+  assert.equal(owner.requests(), 1);
+  assert.equal(owner.counts().initializes, 1);
+});
+
+test('cancelled read sends no request and never reconnects', async t => {
+  const owner = await restartedOwner(t); owner.restart();
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(owner.runtime.call('game_core_graph_get', {}, controller.signal), /CANCELLED/);
+  assert.equal(owner.requests(), 0);
+  assert.equal(owner.counts().initializes, 1);
+});
+
+test('failed endpoint discovery leaves other tools usable and tools/list restores the exact owner catalogue', async t => {
+  let available = false;
+  const discoveries = [];
+  const { ports, calls } = fixture({ list: async endpoint => {
+    discoveries.push(endpoint);
+    if (endpoint === 'gameCore' && !available) throw new Error('private endpoint failure');
+    return tools[endpoint];
+  } });
+  const runtime = await createBraiTools(config, ports);
+  assert.deepEqual(runtime.unavailableEndpoints(), ['gameCore']);
+  assert.equal(runtime.tools.some(tool => tool.name === 'game_core_graph_get'), false);
+  assert.equal(runtime.tools.some(tool => tool.name === 'fetch_file'), true);
+  const initialDiscoveries = discoveries.length;
+  await runtime.call('fetch_file', { artifactId: ids[4] });
+  assert.equal(discoveries.length, initialDiscoveries);
+  assert.equal(calls.length, 1);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const service = await serveTools(runtime, serverTransport), client = new Client({ name: 'discovery-recovery', version: '1' });
+  t.after(async () => { await client.close(); await service.close(); });
+  await client.connect(clientTransport);
+  available = true;
+  const listed = await client.listTools();
+  assert.deepEqual(runtime.unavailableEndpoints(), []);
+  assert.equal(listed.tools.some(tool => tool.name === 'game_core_graph_get'), true);
+  const claim = listed.tools.find(tool => tool.name === 'game_core_move_claim');
+  assert.deepEqual(claim.inputSchema.properties.executor_kind, { const: 'agent' });
+  assert.equal(Object.hasOwn(claim.inputSchema.properties, 'executor_id'), false);
+  await assert.rejects(runtime.call('game_core_graph_get', { owner_id: 'other' }), /INVALID_ARGUMENT/);
+  const second = await client.listTools();
+  assert.equal(second.tools.length, listed.tools.length);
+  assert.equal(discoveries.length, initialDiscoveries + 1);
+});
+
+test('real startup survives missing auxiliary MCP, publisher and NATS while GameCore remains usable', async t => {
+  const owner = await restartedOwner(t);
+  const folder = await mkdtemp('/tmp/hermes-endpoint-isolation-');
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  const publisher = join(folder, 'unavailable-publisher.mjs');
+  await writeFile(publisher, 'process.exit(0);');
+  const runtime = await startBraiTools({ ...config, requestTimeoutMs: 250, longRequestTimeoutMs: 1000,
+    gameCore: { ...config.gameCore, url: owner.url }, history: { url: 'http://127.0.0.1:1/mcp' },
+    transcription: { url: 'http://127.0.0.1:1/mcp' }, nats: { servers: ['nats://127.0.0.1:1'] },
+    publisher: { ...config.publisher, entrypoint: publisher } });
+  t.after(() => runtime.close());
+  assert.deepEqual(new Set(runtime.unavailableEndpoints()), new Set(['history', 'transcription', 'publisher']));
+  assert.deepEqual(await runtime.call('game_core_timeline_get', {}), { effects: 0 });
+  assert.equal(runtime.tools.some(tool => tool.name === 'timer_snapshot_get'), true);
+});
+
+
+test('unknown tool names never inherit read retries from their suffix', async t => {
+  const owner = await restartedOwner(t); owner.restart();
+  await assert.rejects(owner.endpoint.call('game_core_future_get', {}));
+  assert.equal(owner.requests(), 1);
+  assert.equal(owner.counts().initializes, 1);
+});
+
+
+test('lost read response reconnects once without a business effect', async t => {
+  const owner = await restartedOwner(t); owner.fail({ drop: true, remaining: 1 });
+  assert.deepEqual(await owner.runtime.call('game_core_timeline_get', {}), { effects: 0 });
+  assert.equal(owner.requests(), 2);
+  assert.deepEqual(owner.counts(), { initializes: 2, effects: 0 });
+});
+
+test('numeric JSON-RPC owner refusals are never repeated', async t => {
+  const owner = await restartedOwner(t); owner.fail({ rpcCode: -32602, remaining: 1 });
+  await assert.rejects(owner.runtime.call('game_core_graph_get', {}), /UPSTREAM_UNAVAILABLE/);
+  assert.equal(owner.requests(), 1);
+});
+
+test('read timeout uses one original deadline and cannot start a fresh retry budget', async t => {
+  const owner = await restartedOwner(t); owner.fail({ status: 503, delayMs: 900, remaining: 2 });
+  const endpoint = await connectMcpEndpoint({ url: owner.url }, { timeout: 1000, callTimeout: 1000 });
+  t.after(() => endpoint.close());
+  await endpoint.list();
+  const started = Date.now();
+  await assert.rejects(endpoint.call('game_core_graph_get', {}));
+  assert.ok(Date.now() - started < 1400);
+  assert.ok(owner.requests() >= 1 && owner.requests() <= 2);
+});
+
+
+for (const method of ['request', 'publish']) test(`cancelled NATS ${method} sends nothing after a delayed handshake`, async t => {
+  let accepted;
+  const connected = new Promise(resolve => { accepted = resolve; });
+  const sockets = new Set(), publications = [];
+  const server = createTcpServer(socket => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    socket.on('data', bytes => {
+      const text = bytes.toString();
+      publications.push(...(text.match(/(?:^|\r\n)(?:PUB|HPUB) [^\r\n]*/g) ?? []));
+      if (text.includes('PING\r\n')) socket.write('PONG\r\n');
+    });
+    accepted(socket);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const ports = await connectPorts({ ...config, requestTimeoutMs: 300, nats: { servers: [`nats://127.0.0.1:${server.address().port}`] } });
+  t.after(async () => { await ports.close(); for (const socket of sockets) socket.destroy(); await new Promise(resolve => server.close(resolve)); });
+  const controller = new AbortController();
+  const pending = ports[method]('synthetic.subject', {}, controller.signal);
+  const socket = await connected;
+  controller.abort();
+  socket.write('INFO ' + JSON.stringify({ server_id: 'synthetic', server_name: 'test', version: '2.10.0', proto: 1, headers: true, max_payload: 1048576 }) + '\r\n');
+  await assert.rejects(pending, error => error.name === 'AbortError');
+  assert.deepEqual(publications, []);
+});
+
+
+test('missing endpoint recovery backs off and notifies the same MCP client exactly once', async t => {
+  let available = false, discoveries = 0, notifications = 0;
+  const { ports } = fixture({ list: async endpoint => {
+    if (endpoint === 'gameCore') { discoveries++; if (!available) throw new Error('synthetic outage'); }
+    return tools[endpoint];
+  } });
+  const runtime = await createBraiTools(config, ports);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const service = await serveTools(runtime, serverTransport), client = new Client({ name: 'automatic-discovery', version: '1' });
+  client.setNotificationHandler(ToolListChangedNotificationSchema, () => { notifications++; });
+  t.after(async () => { await client.close(); await service.close(); });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await client.connect(clientTransport);
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  await flush();
+  assert.equal(client.getServerCapabilities().tools.listChanged, true);
+  await runtime.call('fetch_file', { artifactId: ids[4] });
+  assert.equal(discoveries, 1);
+  t.mock.timers.tick(29_999); await flush(); assert.equal(discoveries, 1);
+  t.mock.timers.tick(1); await flush(); assert.equal(discoveries, 2); assert.equal(notifications, 0);
+  t.mock.timers.tick(59_999); await flush(); assert.equal(discoveries, 2);
+  available = true;
+  t.mock.timers.tick(1); await flush(); await flush();
+  assert.equal(discoveries, 3); assert.equal(notifications, 1);
+  const listed = await client.listTools();
+  const claim = listed.tools.find(tool => tool.name === 'game_core_move_claim');
+  assert.deepEqual(claim.inputSchema.properties.executor_kind, { const: 'agent' });
+  assert.equal(Object.hasOwn(claim.inputSchema.properties, 'executor_id'), false);
+  t.mock.timers.tick(600_000); await flush();
+  assert.equal(discoveries, 3); assert.equal(notifications, 1);
+});
+
+test('closing the MCP server cancels missing endpoint rediscovery', async t => {
+  let discoveries = 0;
+  const { ports } = fixture({ list: async endpoint => {
+    if (endpoint === 'gameCore') { discoveries++; throw new Error('synthetic outage'); }
+    return tools[endpoint];
+  } });
+  const runtime = await createBraiTools(config, ports);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const service = await serveTools(runtime, serverTransport), client = new Client({ name: 'closed-discovery', version: '1' });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await client.connect(clientTransport);
+  await new Promise(resolve => setImmediate(resolve));
+  await service.close();
+  t.mock.timers.tick(600_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(discoveries, 1);
+  await client.close();
 });
