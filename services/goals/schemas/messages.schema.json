@@ -1,0 +1,954 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Brai Goals NATS request",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "user_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "goals_overview",
+        "goals_list",
+        "goals_get",
+        "goals_history",
+        "goals_restore",
+        "goals_goal_put",
+        "goals_focus_put",
+        "goals_entry_put",
+        "goals_resource_put",
+        "goals_need_put",
+        "goals_allocation_put",
+        "goals_delete"
+      ]
+    },
+    "input": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "user_id",
+    "operation",
+    "input"
+  ],
+  "oneOf": [
+    {
+      "properties": {
+        "operation": {
+          "const": "goals_overview"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {},
+          "required": []
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "goals_list"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "entity": {
+              "type": "string",
+              "enum": [
+                "goals",
+                "focus",
+                "entries",
+                "resources",
+                "needs",
+                "allocations"
+              ]
+            }
+          },
+          "required": [
+            "entity"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "goals_get"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "entity": {
+              "type": "string",
+              "enum": [
+                "goals",
+                "focus",
+                "entries",
+                "resources",
+                "needs",
+                "allocations"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "entity",
+            "id"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "goals_history"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "entity": {
+              "type": "string",
+              "enum": [
+                "goals",
+                "focus",
+                "entries",
+                "resources",
+                "needs",
+                "allocations"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "required": [
+            "entity",
+            "id"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "goals_restore"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "entity": {
+              "type": "string",
+              "enum": [
+                "goals",
+                "focus",
+                "entries",
+                "resources",
+                "needs",
+                "allocations"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "request_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "expected_version": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "target_version": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16000,
+              "pattern": "\\S"
+            }
+          },
+          "required": [
+            "entity",
+            "id",
+            "request_id",
+            "expected_version",
+            "target_version",
+            "source"
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "goals_goal_put"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "request_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "expected_version": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16000,
+              "pattern": "\\S"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16000,
+                  "pattern": "\\S"
+                },
+                "meaning": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16000,
+                  "pattern": "\\S"
+                },
+                "achievement": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16000,
+                  "pattern": "\\S"
+                },
+                "due_on": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "discussing",
+                    "active",
+                    "waiting",
+                    "paused",
+                    "achieved",
+                    "cancelled"
+                  ]
+                },
+                "next_step": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 16000
+                },
+                "executor": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 16000
+                },
+                "archived": {
+                  "type": "boolean"
+                },
+                "deleted": {
+                  "type": "boolean"
+                }
+              },
+              "required": [],
+              "minProperties": 1
+            }
+          },
+          "required": [
+            "id",
+            "request_id",
+            "expected_version",
+            "source",
+            "data"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "expected_version": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "expected_version"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "data": {
+                    "required": [
+                      "title",
+                      "meaning",
+                      "achievement",
+                      "status"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "goals_focus_put"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "request_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "expected_version": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16000,
+              "pattern": "\\S"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "goal_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 16000
+                }
+              },
+              "required": [],
+              "minProperties": 1
+            }
+          },
+          "required": [
+            "id",
+            "request_id",
+            "expected_version",
+            "source",
+            "data"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "expected_version": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "expected_version"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "data": {
+                    "required": [
+                      "goal_id",
+                      "reason"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "goals_entry_put"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "request_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "expected_version": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16000,
+              "pattern": "\\S"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "goal_id": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "result",
+                    "thought"
+                  ]
+                },
+                "content": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16000,
+                  "pattern": "\\S"
+                },
+                "occurred_on": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                },
+                "pinned": {
+                  "type": "boolean"
+                },
+                "deleted": {
+                  "type": "boolean"
+                }
+              },
+              "required": [],
+              "minProperties": 1
+            }
+          },
+          "required": [
+            "id",
+            "request_id",
+            "expected_version",
+            "source",
+            "data"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "expected_version": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "expected_version"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "data": {
+                    "required": [
+                      "kind",
+                      "content",
+                      "occurred_on"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "goals_resource_put"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "request_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "expected_version": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16000,
+              "pattern": "\\S"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16000,
+                  "pattern": "\\S"
+                },
+                "purpose": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 16000
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "money",
+                    "quantity",
+                    "qualitative",
+                    "liability"
+                  ]
+                },
+                "category": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 16000
+                },
+                "state": {
+                  "type": "string",
+                  "maxLength": 16000
+                },
+                "amount": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,12})?$"
+                },
+                "unit": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 16000
+                },
+                "currency": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^[A-Z0-9]{3,12}$"
+                },
+                "expires_on": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                },
+                "deleted": {
+                  "type": "boolean"
+                }
+              },
+              "required": [],
+              "minProperties": 1
+            }
+          },
+          "required": [
+            "id",
+            "request_id",
+            "expected_version",
+            "source",
+            "data"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "expected_version": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "expected_version"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "data": {
+                    "required": [
+                      "title",
+                      "kind",
+                      "state"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "goals_need_put"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "request_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "expected_version": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16000,
+              "pattern": "\\S"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "goal_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16000,
+                  "pattern": "\\S"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "money",
+                    "quantity",
+                    "qualitative"
+                  ]
+                },
+                "amount": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,12})?$"
+                },
+                "unit": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 16000
+                },
+                "currency": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^[A-Z0-9]{3,12}$"
+                },
+                "state": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "maxLength": 16000
+                },
+                "deleted": {
+                  "type": "boolean"
+                }
+              },
+              "required": [],
+              "minProperties": 1
+            }
+          },
+          "required": [
+            "id",
+            "request_id",
+            "expected_version",
+            "source",
+            "data"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "expected_version": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "expected_version"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "data": {
+                    "required": [
+                      "goal_id",
+                      "title",
+                      "kind"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "goals_allocation_put"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "request_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "expected_version": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16000,
+              "pattern": "\\S"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "need_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "resource_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "amount": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,12})?$"
+                },
+                "active": {
+                  "type": "boolean"
+                },
+                "deleted": {
+                  "type": "boolean"
+                }
+              },
+              "required": [],
+              "minProperties": 1
+            }
+          },
+          "required": [
+            "id",
+            "request_id",
+            "expected_version",
+            "source",
+            "data"
+          ],
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "expected_version": {
+                    "type": "null"
+                  }
+                },
+                "required": [
+                  "expected_version"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "data": {
+                    "required": [
+                      "need_id",
+                      "resource_id"
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "goals_delete"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "entity": {
+              "type": "string",
+              "enum": [
+                "goals",
+                "entries",
+                "resources",
+                "needs",
+                "allocations"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "request_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "expected_version": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "source": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16000,
+              "pattern": "\\S"
+            }
+          },
+          "required": [
+            "entity",
+            "id",
+            "request_id",
+            "expected_version",
+            "source"
+          ]
+        }
+      }
+    }
+  ]
+}
