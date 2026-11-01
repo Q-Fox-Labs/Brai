@@ -22,7 +22,7 @@ function validateNativeCompletion(call,args,executorId,proof) {
     return;
   }
   if(proof.version===2){
-    if(proof.workspace_id!==call.workspace_id||proof.provenance!=='operator_reviewed_nested_patch'||proof.tool_name!=='apply_patch'||proof.outcome!=='error'||args.outcome!=='error'||proof.reviewer!=='owner'||!Number.isFinite(Date.parse(proof.reviewed_at))||Date.parse(proof.reviewed_at)<Date.parse(call.admitted_at)||Object.hasOwn(proof,'exit_code')||Object.hasOwn(proof,'native_event_sha256')||!/^([a-f0-9]{64})$/.test(proof.review_manifest_sha256??''))throw new Fault('WRITE_CALL_MISMATCH');
+    if(proof.workspace_id!==call.workspace_id||!((proof.provenance==='operator_reviewed_nested_patch'&&proof.tool_name==='apply_patch')||(proof.provenance==='operator_reviewed_process_start_failure'&&proof.tool_name==='Bash'))||proof.outcome!=='error'||args.outcome!=='error'||proof.reviewer!=='owner'||!Number.isFinite(Date.parse(proof.reviewed_at))||Date.parse(proof.reviewed_at)<Date.parse(call.admitted_at)||Object.hasOwn(proof,'exit_code')||Object.hasOwn(proof,'native_event_sha256')||!/^([a-f0-9]{64})$/.test(proof.review_manifest_sha256??''))throw new Fault('WRITE_CALL_MISMATCH');
     if(call.state==='finished'&&(call.tool_result?.outcome!=='error'||!call.tool_result.operator_completion||canonical(call.tool_result.operator_completion)!==canonical(ownerCompletionMetadata(proof))))throw new Fault('WRITE_CALL_MISMATCH');
     return;
   }
@@ -39,7 +39,7 @@ function ownerCompletionMetadata(proof){
 
 /** Подтверждённый API/owner исход команды сильнее generic успешного возврата Bash-инструмента. */
 export function terminalBashEvidence(call,executionStatus='completed') {
-  const evidence=call.tool_result?.executor_completion??call.tool_result?.native_completion;
+  const evidence=call.tool_result?.executor_completion??call.tool_result?.native_completion??(call.tool_result?.operator_completion?.provenance==='operator_reviewed_process_start_failure'?call.tool_result.operator_completion:null);
   return call.state==='finished'&&call.tool_name==='Bash'&&executionStatus==='completed'&&/^[a-f0-9]{64}$/.test(evidence?.receipt_sha256??'');
 }
 

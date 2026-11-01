@@ -14,6 +14,9 @@ const hash=x=>createHash('sha256').update(x).digest('hex');
 test('operator receipt is a separate failed file-call decision, never a native event or exit code',()=>{
  const receipt={version:2,provenance:'operator_reviewed_nested_patch',outcome:'error',reviewer:'owner',reviewed_at:'2026-01-01T00:02:00Z',write_call_id:'call-id',project_id:'fixture',workspace_id:'workspace-id',executor_id:'codex',session_id:'session-id',turn_id:'turn-id',tool_use_id:'exec-id',tool_name:'apply_patch',payload_sha256:'a'.repeat(64),rewritten_sha256:'b'.repeat(64),outer_tool_use_id:'outer-id',review_manifest_sha256:'c'.repeat(64),source_prefix_sha256:'d'.repeat(64),source_prefix_bytes:1234,input_line_sha256:'e'.repeat(64),output_line_sha256:'f'.repeat(64)};
  assert.equal(validateCompletionReceipt(receipt),receipt);
+ const startup={...receipt,provenance:'operator_reviewed_process_start_failure',tool_name:'Bash'};
+ assert.equal(validateCompletionReceipt(startup),startup);
+ for(const change of [{tool_name:'apply_patch'},{provenance:'operator_reviewed_nested_patch'},{exit_code:1},{outcome:'success'}])assert.throws(()=>validateCompletionReceipt({...startup,...change}),/NATIVE_COMPLETION_UNVERIFIED/);
  for(const change of [{exit_code:1},{native_event_sha256:'a'.repeat(64)},{outcome:'success'},{tool_name:'Bash'},{reviewer:'agent'},{reviewed_at:'never'},{provenance:'native'},{source_prefix_bytes:0},{source_prefix_bytes:65*1024*1024},{output_line_sha256:'unknown'}])assert.throws(()=>validateCompletionReceipt({...receipt,...change}),/NATIVE_COMPLETION_UNVERIFIED/);
  const missing={...receipt};delete missing.review_manifest_sha256;assert.throws(()=>validateCompletionReceipt(missing),/NATIVE_COMPLETION_UNVERIFIED/);
 });

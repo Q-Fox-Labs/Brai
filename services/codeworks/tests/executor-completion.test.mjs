@@ -25,3 +25,29 @@ test('read-only socket alias verifies both child lineage fields before reading i
   await assert.rejects(readExecutorItems(root+'/alias/api.sock','child','turn',null,'foreign'),/EXECUTOR_LINEAGE_INVALID/);
   assert.deepEqual(methods.slice(3),['initialize','thread/read']);
 });
+
+
+test('nested executor verifies every ancestor and rejects inconsistent, cyclic or excessive lineage',async t=>{
+  const root=await mkdtemp('/tmp/cw-nested-api-'),socket=root+'/api.sock';
+  const server=createServer(),sockets=new WebSocketServer({server}),methods=[];
+  t.after(async()=>{for(const client of sockets.clients)client.terminate();await new Promise(r=>sockets.close(r));await new Promise(r=>server.close(r));await rm(root,{recursive:true,force:true});});
+  await new Promise(r=>server.listen(socket,r));await chmod(socket,0o600);
+  const info=(id,parent,depth)=>({id,parentThreadId:parent,source:{subAgent:{thread_spawn:{parent_thread_id:parent,depth}}}});
+  let lineage={grandchild:info('grandchild','child',2),child:info('child','parent',1)};
+  sockets.on('connection',ws=>ws.on('message',bytes=>{const m=JSON.parse(String(bytes));if(m.id===undefined)return;methods.push(m.method);let result={};if(m.method==='thread/read')result={thread:lineage[m.params.threadId]};if(m.method==='thread/turns/list')result={data:[{id:'turn',items:[{id:'inner',type:'commandExecution',status:'completed',exitCode:0}]}],nextCursor:null};ws.send(JSON.stringify({id:m.id,result}));}));
+  assert.equal((await readExecutorItems(socket,'grandchild','turn',null,'parent')).data[0].item.id,'inner');
+  assert.deepEqual(methods,['initialize','thread/read','thread/read','thread/turns/list']);
+  const valid=structuredClone(lineage);
+  for(const broken of [
+    {...valid,child:info('child','foreign',1)},
+    {...valid,child:info('child','grandchild',1)},
+    {...valid,child:info('child','parent',2)},
+    {...valid,grandchild:info('grandchild','parent',2)},
+    {...valid,grandchild:info('grandchild','child',33)},
+    {...valid,child:{...info('child','parent',1),parentThreadId:'foreign'}},
+  ]){
+    lineage=broken;methods.length=0;
+    await assert.rejects(readExecutorItems(socket,'grandchild','turn',null,'parent'),/EXECUTOR_LINEAGE_INVALID/);
+    assert.ok(!methods.includes('thread/turns/list'),'unverified descendant items must not be read');
+  }
+});
