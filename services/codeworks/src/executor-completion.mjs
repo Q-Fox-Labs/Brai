@@ -31,8 +31,16 @@ export async function readExecutorItems(socketPath,threadId,turnId,cursor=null,l
     await call('initialize',{clientInfo:{name:'codeworks_completion_reader',version:'1'}});
     ws.send(JSON.stringify({method:'initialized',params:{}}));
     if(threadId!==logicalThreadId){
-      const info=(await call('thread/read',{threadId})).thread,spawn=info?.source?.subAgent?.thread_spawn;
-      if(info?.id!==threadId||info.parentThreadId!==logicalThreadId||spawn?.parent_thread_id!==logicalThreadId||spawn.depth!==1)throw Error('EXECUTOR_LINEAGE_INVALID');
+      let current=threadId,depth=null;const seen=new Set([logicalThreadId]);
+      // AIDEV-NOTE: Проверяем каждое ребро вложенного субагента, а не только непосредственного родителя.
+      for(let hops=0;current!==logicalThreadId;hops++){
+        if(hops>=32||seen.has(current))throw Error('EXECUTOR_LINEAGE_INVALID');
+        seen.add(current);
+        const info=(await call('thread/read',{threadId:current})).thread,spawn=info?.source?.subAgent?.thread_spawn;
+        if(info?.id!==current||typeof info.parentThreadId!=='string'||!info.parentThreadId||spawn?.parent_thread_id!==info.parentThreadId||!Number.isSafeInteger(spawn.depth)||spawn.depth<1||spawn.depth>32||(spawn.depth===1&&info.parentThreadId!==logicalThreadId)||(depth!==null&&spawn.depth!==depth-1))throw Error('EXECUTOR_LINEAGE_INVALID');
+        depth=spawn.depth;current=info.parentThreadId;
+      }
+      if(depth!==1)throw Error('EXECUTOR_LINEAGE_INVALID');
     }
     // AIDEV-NOTE: turns/list поддерживает также старые legacy histories; items/list может их отвергать.
     const response=await call('thread/turns/list',{threadId,limit:1,itemsView:'full',sortDirection:'desc',...(cursor?{cursor}: {})});
@@ -62,7 +70,6 @@ export async function recoverExecutorCompletions(pool,projectId,{socketPath,allo
   const calls=(await pool.query(`SELECT c.* FROM codeworks.write_calls c JOIN codeworks.workspaces w ON w.id=c.workspace_id
     WHERE c.project_id=$1 AND c.executor_id='codex' AND c.state IN ('in_flight','uncertain')
     AND c.admitted_at IS NOT NULL AND w.removed_at IS NULL
-    AND ((w.activation_state='awaiting_first_write' AND c.tool_name='Bash') OR EXISTS(SELECT 1 FROM codeworks.cleanup_obligations o WHERE o.workspace_id=w.id AND o.state<>'done') OR EXISTS(SELECT 1 FROM codeworks.operations r WHERE r.workspace_id=w.id AND r.kind='release' AND NOT r.archived AND r.status IN ('running','awaiting_reconciliation','awaiting_execution') AND r.step IN ('LOCAL_CHECKOUT_SYNC_REQUIRED','WRITER_OUTCOME_UNKNOWN')))
     ORDER BY c.updated_at,c.id LIMIT 8`,[projectId])).rows;
   let recovered=0;
   for(const call of calls){
@@ -72,10 +79,11 @@ export async function recoverExecutorCompletions(pool,projectId,{socketPath,allo
       if(entries.length>1)throw Error('EXECUTOR_ITEM_CONFLICT');
       const proof=entries.length===1?executorProof(call,entries[0]):null;
       if(proof){await importNativeCompletion(pool,null,{allowedRepositories,git,verifyReceipt:async()=>proof});recovered++;}
-      else await pool.query(`UPDATE codeworks.write_calls SET tool_result=COALESCE(tool_result,'{}') || jsonb_build_object('executor_scan_cursor',$2::text),updated_at=now() WHERE id=$1 AND state IN ('in_flight','uncertain')`,[call.id,page.nextCursor]);
-    }catch{
+      else await pool.query(`UPDATE codeworks.write_calls SET tool_result=COALESCE(tool_result,'{}') || jsonb_build_object('executor_scan_cursor',$2::text,'executor_recovery_error',$3::text),updated_at=now() WHERE id=$1 AND state IN ('in_flight','uncertain')`,[call.id,page.nextCursor,page.data.length&&!entries.length?'EXECUTOR_ITEM_MISSING':null]);
+    }catch(error){
       // AIDEV-NOTE: Ни ошибка API, ни отсутствие item не разрешают освобождать ресурсы.
-      await pool.query("UPDATE codeworks.write_calls SET updated_at=now() WHERE id=$1 AND state IN ('in_flight','uncertain')",[call.id]);
+      const reason=['EXECUTOR_LINEAGE_INVALID','EXECUTOR_SOCKET_INVALID','EXECUTOR_READ_TIMEOUT','EXECUTOR_UNAVAILABLE','EXECUTOR_DISCONNECTED','EXECUTOR_READ_INVALID','EXECUTOR_READ_FAILED','EXECUTOR_ITEM_CONFLICT','CLEANUP_BUSY'].includes(error.message)?error.message:'EXECUTOR_RECOVERY_FAILED';
+      await pool.query("UPDATE codeworks.write_calls SET tool_result=COALESCE(tool_result,'{}') || jsonb_build_object('executor_recovery_error',$2::text),updated_at=now() WHERE id=$1 AND state IN ('in_flight','uncertain')",[call.id,reason]);
     }
   }
   return {recovered};

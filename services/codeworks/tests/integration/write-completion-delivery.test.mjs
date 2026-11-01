@@ -3,7 +3,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
-import {mkdir,writeFile} from 'node:fs/promises';
+import {mkdir,writeFile,chmod,mkdtemp,rm} from 'node:fs/promises';
+import {createServer} from 'node:http';
+import {WebSocketServer} from 'ws';
 import {fileURLToPath} from 'node:url';
 import {Connection,Client} from '@temporalio/client';
 import {NativeConnection,Worker,bundleWorkflowCode} from '@temporalio/worker';
@@ -149,7 +151,8 @@ test('synthetic owner-reviewed receipt v2 uses the guarded PG importer without f
   const r={project_id:p.id,workspace_id:w.id,workspace_key:w.workspace_key,session_id:'review-session',turn_id:'turn',tool_use_id:tool,tool_name:'apply_patch',payload_sha256:rawHash('payload-'+tool),targets:['hello.txt'],request_key:'review-'+tool};
   const call=await f.h.call('write.begin',r,'codex');const rewritten=rawHash('updated-'+tool);await f.h.call('write.admit',{project_id:p.id,write_call_id:call.write_call_id,rewritten_sha256:rewritten},'codex');return {...r,id:call.write_call_id,rewritten};
  };
- const reviewed=await create('reviewed'),other=await create('still-running');
+ const reviewed=await create('reviewed'),other=await create('still-running'),startup=await create('startup-failure');
+ await f.owner.query("UPDATE codeworks.write_calls SET tool_name='Bash' WHERE id=$1",[startup.id]);
  await writeFile(w.path+'/hello.txt','partial fixture change\n');
  await f.owner.query("UPDATE codeworks.workflow_registry SET state='draining',lifecycle='closing' WHERE workspace_id=$1",[w.id]);
  const obligation=randomUUID();await f.owner.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,state,blocker,owner_workflow_id,epoch) VALUES($1,$2,$3,$4,'cancelled','waiting_decision','WRITER_OUTCOME_UNKNOWN',$5,1)",[obligation,p.id,w.id,'workspace:'+w.id,owner]);
@@ -158,6 +161,10 @@ test('synthetic owner-reviewed receipt v2 uses the guarded PG importer without f
  // Подмена verifier ограничена синтетической фикстурой; production проверяет root-владение файла.
  const verified=value=>async()=>({...validateCompletionReceipt(value),receipt_sha256:rawHash(value)}),opts={allowedRepositories:[p.repo_path],git:createGit()};
  await assert.rejects(importNativeCompletion(f.app,'fixture',{...opts,verifyReceipt:verified({...receipt,payload_sha256:'f'.repeat(64)})}),/WRITE_CALL_MISMATCH/);
+ const startupReceipt={...receipt,provenance:'operator_reviewed_process_start_failure',tool_name:'Bash',write_call_id:startup.id,tool_use_id:startup.tool_use_id,payload_sha256:startup.payload_sha256,rewritten_sha256:startup.rewritten};
+ assert.equal((await importNativeCompletion(f.app,'fixture',{...opts,verifyReceipt:verified(startupReceipt)})).state,'finished');
+ assert.equal((await f.app.query('SELECT tool_result FROM codeworks.write_calls WHERE id=$1',[startup.id])).rows[0].tool_result.operator_completion.provenance,'operator_reviewed_process_start_failure');
+ assert.equal((await f.h.call('write.finish',{project_id:p.id,session_id:startup.session_id,turn_id:startup.turn_id,tool_use_id:startup.tool_use_id,tool_name:'Bash',input_sha256:startup.rewritten,canonical_input_sha256:startup.rewritten,outcome:'success'},'codex')).state,'finished','late generic Post cannot override reviewed startup failure');
  const first=await importNativeCompletion(f.app,'fixture',{...opts,verifyReceipt:verified(receipt)});assert.equal(first.state,'finished');assert.equal(first.changed,true);
  assert.deepEqual(await importNativeCompletion(f.app,'fixture',{...opts,verifyReceipt:verified(receipt)}),first);
  const reviewedRow=(await f.app.query('SELECT state,tool_result FROM codeworks.write_calls WHERE id=$1',[reviewed.id])).rows[0];assert.equal(reviewedRow.state,'finished');assert.equal(reviewedRow.tool_result.outcome,'error');assert.equal(reviewedRow.tool_result.operator_completion.provenance,'operator_reviewed_nested_patch');assert.equal('exit_code' in reviewedRow.tool_result.operator_completion,false);
@@ -165,4 +172,47 @@ test('synthetic owner-reviewed receipt v2 uses the guarded PG importer without f
  const finish={project_id:p.id,session_id:other.session_id,turn_id:other.turn_id,tool_use_id:other.tool_use_id,tool_name:other.tool_name,input_sha256:other.rewritten,canonical_input_sha256:other.rewritten,outcome:'success'};
  await f.h.call('write.finish',finish,'codex');await processProjectCompletions(f.app,p.id,{allowedRepositories:[p.repo_path]});
  assert.deepEqual((await f.app.query('SELECT state,blocker FROM codeworks.cleanup_obligations WHERE id=$1',[obligation])).rows[0],{state:'pending',blocker:null});
+});
+
+
+test('Temporal recovers active synchronized nested writers across pages and batches, preserving a live writer',{timeout:180000},async t=>{
+ assert.ok(configured&&process.env.CODEWORKS_TEMPORAL_ADDRESS&&process.env.CODEWORKS_TEMPORAL_NAMESPACE,'disposable PostgreSQL and Temporal required');
+ const f=await setup();let connection,native,client,handle;const previousSocket=process.env.CODEWORKS_EXECUTOR_SOCKET;
+ const server=createServer(),sockets=new WebSocketServer({server});
+ t.after(async()=>{if(previousSocket===undefined)delete process.env.CODEWORKS_EXECUTOR_SOCKET;else process.env.CODEWORKS_EXECUTOR_SOCKET=previousSocket;if(handle)await client.workflow.getHandle(handle.workflowId).terminate('fixture finished').catch(()=>{});for(const ws of sockets.clients)ws.terminate();await new Promise(r=>sockets.close(r));await new Promise(r=>server.close(r));await native?.close();await connection?.close();await f.close();});
+ const p=await f.project({codeIndexDisabled:true}),prepared=await f.prepare({project_id:p.id,workspace_key:'active-nested',request_key:'active-nested'});await f.worker(p,prepared.operation_id);
+ const w=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[prepared.workspace_id])).rows[0];
+ const calls=[];
+ for(let n=0;n<10;n++){
+  const request={project_id:p.id,workspace_id:w.id,session_id:'root-session',executor_thread_id:'00000000-0000-4000-8000-000000000002',turn_id:'lost-turn',tool_use_id:'writer-'+n,tool_name:'Bash',payload_sha256:rawHash('payload-'+n),targets:['hello.txt'],request_key:'nested-'+n};
+  const result=await f.h.call('write.begin',request,'codex');await f.h.call('write.admit',{project_id:p.id,write_call_id:result.write_call_id,rewritten_sha256:rawHash('input-'+n)},'codex');calls.push(result.write_call_id);
+ }
+ await writeFile(w.path+'/hello.txt','committed fixture work\n');await command('git',['-C',w.path,'add','hello.txt']);await command('git',['-C',w.path,'commit','-m','Synthetic active work']);
+ const head=(await command('git',['-C',w.path,'rev-parse','HEAD'])).stdout;
+ await f.owner.query("UPDATE codeworks.workspaces SET activation_state='active' WHERE id=$1",[w.id]);
+ const root='fixture/'+randomUUID();await f.owner.query("INSERT INTO codeworks.workflow_registry(workflow_id,project_id,workspace_id,owner,last_stage) VALUES($1,$2,$3,'temporal','SYNCHRONIZED')",[root,p.id,w.id]);
+ await f.h.call('write.stop',{project_id:p.id,session_id:'root-session',turn_id:'lost-turn',event:'SubagentStop'},'codex');
+ await f.owner.query("INSERT INTO codeworks.execution_control(project_id,instance_id,owner) VALUES($1,'nested-fixture','temporal')",[p.id]);
+ // AIDEV-NOTE: AF_UNIX требует короткий путь; fixture удаляет только собственный временный socket.
+ const directory=await mkdtemp('/tmp/cw-nested-');t.after(()=>rm(directory,{recursive:true,force:true}));const socket=directory+'/api.sock';await new Promise(r=>server.listen(socket,r));await chmod(socket,0o600);process.env.CODEWORKS_EXECUTOR_SOCKET=socket;
+ let pageCount=0;
+ sockets.on('connection',ws=>ws.on('message',bytes=>{
+  const m=JSON.parse(String(bytes));if(m.id===undefined)return;let result={};
+  if(m.method==='thread/read'){const child=m.params.threadId==='00000000-0000-4000-8000-000000000002';result={thread:{id:m.params.threadId,parentThreadId:child?'child':'root-session',source:{subAgent:{thread_spawn:{parent_thread_id:child?'child':'root-session',depth:child?2:1}}}}};}
+  if(m.method==='thread/turns/list'){pageCount++;result=m.params.cursor?{data:[{id:'lost-turn',items:calls.map((_,n)=>({id:'writer-'+n,type:'commandExecution',status:n===9?'inProgress':'completed',exitCode:n===9?null:0}))}],nextCursor:null}:{data:[{id:'new-turn',items:[]}],nextCursor:'old-page'};}
+  ws.send(JSON.stringify({id:m.id,result}));
+ }));
+ const id=`codeworks/nested-fixture/${p.id}/reconciler`,queue='nested-writers-'+randomUUID();
+ connection=await Connection.connect({address:process.env.CODEWORKS_TEMPORAL_ADDRESS,connectTimeout:'5 seconds'});client=new Client({connection,namespace:process.env.CODEWORKS_TEMPORAL_NAMESPACE});native=await NativeConnection.connect({address:process.env.CODEWORKS_TEMPORAL_ADDRESS});
+ const bundle=await bundleWorkflowCode({workflowsPath:fileURLToPath(new URL('../../src/workflows.cjs',import.meta.url))});
+ const worker=await Worker.create({connection:native,namespace:process.env.CODEWORKS_TEMPORAL_NAMESPACE,taskQueue:queue,workflowBundle:bundle,activities:createActivities(f.app,{allowedRepositories:[p.repo_path],completionSpoolDirectory:null})});
+ await worker.runUntil(async()=>{
+  handle=await client.workflow.start('codeworksProjectReconciler',{workflowId:id,taskQueue:queue,args:[{projectId:p.id}]});
+  await until(async()=>(await f.app.query("SELECT count(*)::int AS n FROM codeworks.write_calls WHERE id=ANY($1::uuid[]) AND state='finished'",[calls])).rows[0].n===9,150000);
+ });
+ assert.ok(pageCount>=20,'cursor and bounded batches must progress automatically');
+ assert.equal((await f.app.query('SELECT state FROM codeworks.write_calls WHERE id=$1',[calls[9]])).rows[0].state,'uncertain');
+ const status=await f.h.call('lifecycle.status',{project_id:p.id,workspace_id:w.id},'codex');assert.equal(status.workflow.blocked_reason,'WRITER_OUTCOME_UNKNOWN');assert.equal(status.task_status,'active');assert.equal(status.cleanup,null);
+ assert.equal((await command('git',['-C',w.path,'rev-parse','HEAD'])).stdout,head);assert.equal((await command('git',['-C',w.path,'status','--porcelain'])).stdout,'');
+ assert.ok((await handle.fetchHistory()).events.some(e=>e.activityTaskScheduledEventAttributes?.activityType?.name==='reconcileProject'));
 });
