@@ -6,7 +6,7 @@ import Link, { navigateWorkspace } from "./workspace-link";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent as ReactTouchEvent } from "react";
 import { motion, useMotionValue, useSpring, useTransform, type MotionValue } from "motion/react";
-import { ChevronDown, ChevronUp, Ellipsis, Network, SquareTerminal, Timer, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Ellipsis, Network, SquareTerminal, Target, ListChecks, Timer, X } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { BraiBrandIcon } from "@/components/ui/brai-brand-icon";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -16,13 +16,15 @@ import { useMobileSheetDrag } from "./use-mobile-sheet-drag";
 import { useSoftwareKeyboardOpen } from "./use-software-keyboard-open";
 import { sectionSwipePageStyle, useLeftEdgeMenuSwipe, useSectionSwipeNavigation } from "./use-section-swipe-navigation";
 
-type Route = { href: "/" | "/agent" | "/do" | "/alerts" | "/game-core"; label: string; icon: "agent" | "timer" | "do" | "game-core" };
+type Route = { href: "/" | "/agent" | "/do" | "/alerts" | "/game-core" | "/focus" | "/goals"; label: string; icon: "agent" | "timer" | "do" | "game-core" | "focus" | "goals" };
 type MobilePanel = "profile" | "shortcuts";
 const routes: Route[] = [
   { href: "/agent", label: "Агент", icon: "agent" },
   { href: "/", label: "Таймер", icon: "timer" },
   { href: "/do", label: "Дела", icon: "do" },
   { href: "/game-core", label: "Элементы", icon: "game-core" },
+  { href: "/focus", label: "Фокус", icon: "focus" },
+  { href: "/goals", label: "Цели", icon: "goals" },
 ];
 const mobileQuery = "(max-width: 860px)";
 const historyMarker = "__braiNavigationPanel";
@@ -43,7 +45,7 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
   const keyboardOpen = useSoftwareKeyboardOpen(isMobile);
   const activeSection = pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : "timer";
   const selectSection = useCallback((section: "agent" | "timer" | "do") => navigateWorkspace(section === "timer" ? "/" : `/${section}`), []);
-  const dockSwipe = useSectionSwipeNavigation(activeSection, selectSection, isMobile && panel === null && pathname !== "/alerts" && pathname !== "/game-core");
+  const dockSwipe = useSectionSwipeNavigation(activeSection, selectSection, isMobile && panel === null && pathname !== "/alerts" && pathname !== "/game-core" && pathname !== "/focus" && pathname !== "/goals");
   const currentSwipeStyle = sectionSwipePageStyle(dockSwipe.visual, "current");
   const openPanel = useCallback((next: MobilePanel, source: HTMLElement) => {
     opener.current = source;
@@ -128,7 +130,7 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
         onTouchStart={dockSwipe.handlers.onTouchStart} onTouchMove={dockSwipe.handlers.onTouchMove}
         onTouchEnd={dockSwipe.handlers.onTouchEnd} onTouchCancel={dockSwipe.handlers.onTouchCancel}>
         <button className="brai-mobile-dock-action" type="button" aria-label="Профиль и разделы" aria-expanded={panel === "profile"} onClick={event => openPanel("profile", event.currentTarget)}><Ellipsis /></button>
-        {routes.map(route => <MobileDockLink key={route.href} route={route} current={pathname === route.href} timerElapsed={timerElapsed} />)}
+        {routes.filter(route => route.href !== "/goals").map(route => <MobileDockLink key={route.href} route={route} current={pathname === route.href || route.href === "/focus" && pathname === "/goals"} timerElapsed={timerElapsed} />)}
         <button className="brai-mobile-dock-action" type="button" aria-label={panel === "shortcuts" ? "Закрыть быстрые настройки" : "Быстрые настройки"} aria-expanded={panel === "shortcuts"}
           onClick={event => panel === "shortcuts" ? setPanel(null) : openPanel("shortcuts", event.currentTarget)}>{panel === "shortcuts" ? <ChevronDown /> : <ChevronUp />}</button>
       </motion.nav>
@@ -325,6 +327,8 @@ function RouteLink({ route, current, compact = false, mobile = false, timerElaps
 function RouteIcon({ name }: { name: Route["icon"] }) {
   if (name === "agent") return <BraiBrandIcon />;
   if (name === "game-core") return <Network aria-hidden="true" />;
+  if (name === "focus") return <Target aria-hidden="true" />;
+  if (name === "goals") return <ListChecks aria-hidden="true" />;
   if (name === "timer") return <Timer aria-hidden="true" />;
   return <SquareTerminal aria-hidden="true" />;
 }
