@@ -885,10 +885,11 @@ async def recover(adapter):
     try:
         await asyncio.to_thread(files.resume_publications)
         with files.db() as db:
-            groups = db.execute('SELECT g.identity,g.admitted,r.route FROM groups g LEFT JOIN routes r ON r.group_key=g.identity').fetchall()
+            groups = db.execute('SELECT g.identity,g.admitted,r.route FROM groups g LEFT JOIN routes r ON r.group_key=g.identity ORDER BY (SELECT MIN(position) FROM items WHERE group_key=g.identity)').fetchall()
         for group in groups:
             with files.db() as db:
                 rows = db.execute('SELECT * FROM items WHERE group_key=? ORDER BY position,identity', (group['identity'],)).fetchall()
+                rows = [row for row in rows if files.recoverable_inbound(db, row)]
             previous = json.loads(group['admitted']) if group['admitted'] else []
             if not rows or all(row['identity'] in previous for row in rows) or any(not row['artifact'] for row in rows):
                 continue

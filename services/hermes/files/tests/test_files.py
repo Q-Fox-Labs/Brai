@@ -175,6 +175,82 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             groups.append(self.store.ingest({**self.source, **changes}, '1', self.file(1), 1, '', 'same')['groupId'])
         self.assertEqual(len(set(groups)), len(groups))
 
+    async def test_later_text_supersedes_older_pending_files_after_restart(self):
+        old = self.event('86', group=None)
+        await native.accept_event(old, admit=False)
+        native.commit_inbound(old.source, '105')
+        native.release_event(old)
+        native.configure(self.config, self.backend)
+        old_again = self.event('86', group=None)
+        self.assertFalse(await native.accept_event(old_again))
+        native.release_event(old_again)
+
+    async def test_recovery_skips_old_inputs_but_keeps_new_and_other_topic(self):
+        old = self.event('86', group=None)
+        new = self.event('106', group=None)
+        other = self.event('80', group=None, source={'thread_id': 'other'})
+        for event in (old, new, other):
+            await native.accept_event(event, admit=False)
+        native.commit_inbound(old.source, '105')
+        for event in (old, new, other):
+            native.release_event(event)
+        native.configure(self.config, self.backend)
+        seen = []
+        class Adapter:
+            platform = 'telegram'
+            async def handle_message(self, event):
+                seen.append((event.source.thread_id, event.message_id))
+        config = ModuleType('gateway.config'); config.Platform = lambda value: value
+        session = ModuleType('gateway.session'); session.SessionSource = lambda **kwargs: SimpleNamespace(**kwargs)
+        event = ModuleType('gateway.platforms.event')
+        event.MessageType = SimpleNamespace(DOCUMENT='document')
+        event.MessageEvent = lambda **kwargs: SimpleNamespace(**kwargs)
+        with patch.dict(sys.modules, {'gateway.config': config, 'gateway.session': session, 'gateway.platforms.event': event}):
+            await native.recover(Adapter())
+        self.assertCountEqual(seen, [(None, '106'), ('other', '80')])
+
+    async def test_mixed_pending_batch_keeps_newer_attachment(self):
+        old = self.event('86', group=None)
+        new = self.event('106', group=None)
+        await native.accept_event(old, admit=False)
+        await native.accept_event(new, admit=False)
+        native.merge_events(old, new)
+        native.commit_inbound(old.source, '105')
+        self.assertTrue(await native.accept_event(old))
+        items = [item for group in old.metadata['fileSets'] for item in group['items']]
+        self.assertEqual([item['source']['messageId'] for item in items], ['106'])
+        self.assertTrue(native.commit_inbound(old.source, '86'))
+        native.release_event(old)
+        native.release_event(new)
+
+    async def test_pending_legacy_inputs_are_quarantined_without_losing_artifacts(self):
+        old = self.event('86', group=None)
+        await native.accept_event(old, admit=False)
+        ref = old.metadata['_brai_artifacts'][0]['file']
+        native.release_event(old)
+        with self.store.db() as db:
+            db.execute('DROP TABLE inbound_legacy_quarantine')
+            db.execute('DROP TABLE inbound_watermarks')
+        with self.assertLogs('files.store', level='WARNING') as logs:
+            native.configure(self.config, self.backend)
+        self.assertIn('BRAI_FILES_LEGACY_INPUT_QUARANTINED count=1', logs.output[0])
+        duplicate = self.event('86', group=None)
+        self.assertFalse(await native.accept_event(duplicate))
+        self.assertEqual(Path(self.store.fetch(ref['artifactId'])['localPath']).read_bytes(), b'fixture-86')
+        native.release_event(duplicate)
+        fresh = self.event('87', group=None)
+        self.assertTrue(await native.accept_event(fresh))
+        native.release_event(fresh)
+
+    async def test_prepared_old_input_cannot_commit_after_later_turn(self):
+        old = self.event('86', group=None)
+        await native.accept_event(old)
+        ticket = native._prepared_inbound.get()[2]
+        native.commit_inbound(old.source, '105')
+        with self.assertRaisesRegex(FileError, 'FILE_SET_SUPERSEDED'):
+            native.commit_inbound(old.source, '86', ticket)
+        native.release_event(old)
+
     async def test_inbound_failure_and_restart_before_handoff_do_not_lose_set(self):
         event = self.event('91')
         await native.accept_event(event, admit=False)

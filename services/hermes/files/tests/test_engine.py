@@ -434,6 +434,20 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(native._event_cleanup.get())
                 with self.store.db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM leases').fetchone()[0],0)
 
+    async def test_actual_loop_text_turn_prevents_old_attachment_replay(self):
+        source = SimpleNamespace(platform='telegram', chat_id='1', thread_id='2', user_id='2', profile=None)
+        old = SimpleNamespace(source=source, message_id='86', text='',
+            raw_message=SimpleNamespace(media_group_id=None), media_urls=[str(self.input_file())],
+            media_types=['text/plain'], metadata={})
+        await native.accept_event(old, admit=False)
+        run, ports = self.loop(lambda *a, **kw: {'final_response': 'ok'})
+        with patch.dict(sys.modules, ports), native.inbound_handoff(source, '105'):
+            run(SimpleNamespace(session_id='later-text', platform='telegram'), 'newer request')
+        native.release_event(old)
+        old.metadata = {}
+        self.assertFalse(await native.accept_event(old))
+        native.release_event(old)
+
     def test_actual_loop_commits_inbound_only_after_input_preparation(self):
         source = SimpleNamespace(platform='telegram', chat_id='1', thread_id=None, user_id='2', profile=None)
         calls = []
