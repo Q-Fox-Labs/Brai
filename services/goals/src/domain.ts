@@ -65,8 +65,9 @@ async function verifyReservations(client: PoolClient, owner: string): Promise<vo
     SELECT 1 FROM goals.allocations a
     JOIN goals.resources r ON r.owner_id=a.owner_id AND r.id=a.resource_id
     JOIN goals.needs n ON n.owner_id=a.owner_id AND n.id=a.need_id
+    JOIN goals.goals g ON g.owner_id=n.owner_id AND g.id=n.goal_id
     WHERE a.owner_id=$1 AND a.active AND
-      (a.deleted OR r.deleted OR n.deleted OR r.kind='liability' OR r.kind<>n.kind OR
+      (a.deleted OR r.deleted OR n.deleted OR g.deleted OR r.kind='liability' OR r.kind<>n.kind OR
        (r.kind='money' AND r.currency<>n.currency) OR
        (r.kind='quantity' AND r.unit<>n.unit) OR
        (r.kind='qualitative' AND (a.amount IS NOT NULL OR r.state<>'available')) OR

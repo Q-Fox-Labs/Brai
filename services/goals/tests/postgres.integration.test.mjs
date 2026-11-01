@@ -59,6 +59,16 @@ test("PostgreSQL: изоляция, версии, резервы и восста
   await assert.rejects(update(domain,alice,"resources",resource,"1",{amount:"1"}),rejected("CONFLICT"));
   assert.equal((await domain.list(alice,"resources")).find(item => item.id === resource).amount,"10.000000000001");
 
+  const unfocused = randomUUID(), unfocusedNeed = randomUUID(), unfocusedAllocation = randomUUID();
+  await update(domain,alice,"goals",unfocused,null,goalData);
+  await update(domain,alice,"needs",unfocusedNeed,null,{goal_id:unfocused,title:"Synthetic unfocused need",kind:"money",amount:"2",currency:"RUB"});
+  await update(domain,alice,"allocations",unfocusedAllocation,null,{need_id:unfocusedNeed,resource_id:resource,amount:"2",active:true});
+  await assert.rejects(update(domain,alice,"goals",unfocused,"1",{deleted:true}),rejected("CONFLICT"));
+  assert.equal((await domain.history(alice,"goals",unfocused)).length,1);
+  await update(domain,alice,"allocations",unfocusedAllocation,"1",{active:false});
+  assert.equal((await update(domain,alice,"goals",unfocused,"1",{deleted:true})).deleted,true);
+  await assert.rejects(update(domain,alice,"allocations",unfocusedAllocation,"2",{active:true}),rejected("CONFLICT"));
+
   const debt = randomUUID();
   await update(domain,alice,"resources",debt,null,{title:"Synthetic obligation",kind:"liability",category:"obligation",state:"unknown",amount:"5.25",currency:"RUB"});
   await assert.rejects(update(domain,alice,"allocations",randomUUID(),null,{need_id:needA,resource_id:debt,amount:"1",active:true}),rejected("CONFLICT"));
