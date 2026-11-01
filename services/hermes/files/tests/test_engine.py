@@ -192,6 +192,9 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(asyncio.gather(*active),3)
                 await asyncio.wait_for(asyncio.gather(*list(tasks.values())),3)
                 self.assertEqual(dispatched,[(['10','11','12','13'],['album caption','second caption','','fourth caption'])])
+                with self.store.db() as db:
+                    persisted = db.execute('SELECT DISTINCT group_key FROM items').fetchall()
+                self.assertEqual(len(persisted), 1)
                 self.assertTrue(previous_flush.cancelled())
                 self.assertEqual(processor._tails,{})
                 self.assertEqual(held,[])
@@ -210,6 +213,102 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             for task in list(tasks.values()):task.cancel()
             await asyncio.gather(*list(tasks.values()),return_exceptions=True)
             for ev in inputs:native.release_event(ev)
+
+    async def test_actual_photo_batch_recovers_once_after_restart_before_flush(self):
+        """Настоящая сборка Telegram сохраняет серию как единый набор до запуска агента."""
+        scope = {'asyncio': asyncio, 'logger': SimpleNamespace(info=lambda *a:None)}
+        function('plugins/platforms/telegram/adapter.py',
+                 ['_route_photo_event', '_enqueue_photo_event', '_flush_photo_batch', '_flush_buffered', '_merge_into_pending'], scope)
+        adapter = SimpleNamespace(_pending_photo_batches={}, _pending_photo_batch_tasks={},
+            _media_batch_delay_seconds=60, _drop_unresolved=lambda event:False,
+            _photo_batch_key=lambda event, msg:'same-topic', _should_drop_delayed_delivery=lambda:False,
+            _accept_update=lambda:None, _merge_caption=lambda a,b:(a+'\n'+b if a else b),
+            gateway_runner=SimpleNamespace(_is_user_authorized_for_source=lambda source:True))
+        for name in ['_route_photo_event', '_enqueue_photo_event', '_flush_photo_batch', '_flush_buffered', '_merge_into_pending']:
+            setattr(adapter, name, MethodType(scope[name], adapter))
+        source = SimpleNamespace(platform='telegram',chat_id='1',thread_id=None,user_id='2',profile=None)
+        events=[]
+        try:
+            with patch.dict(sys.modules, {'brai_files':native}):
+                for number in (86,87,88):
+                    path=self.input/(str(number)+'.jpg'); path.write_bytes(str(number).encode())
+                    event=SimpleNamespace(source=source,message_id=str(number),text='подпись '+str(number),
+                        raw_message=SimpleNamespace(media_group_id=None),media_urls=[str(path)],
+                        media_types=['image/jpeg'],metadata={})
+                    events.append(event)
+                    await adapter._route_photo_event(event.raw_message,event)
+            for task in adapter._pending_photo_batch_tasks.values(): task.cancel()
+            await asyncio.gather(*adapter._pending_photo_batch_tasks.values(),return_exceptions=True)
+            for event in events: native.release_event(event)
+            native.configure({'ownerId':'owner','account':'test','stateRoot':str(self.root/'state'),
+                'resultRoot':str(self.root/'cache'),'readRoots':[str(self.input)]},self.backend)
+            observed=[]
+            class RecoveredAdapter:
+                platform='telegram'
+                async def handle_message(self, event):
+                    if await native.accept_event(event):
+                        observed.append([(item['source']['messageId'],item['caption'])
+                            for group in event.metadata['fileSets'] for item in group['items']])
+                        native.commit_inbound(event.source,event.message_id)
+                        native.release_event(event)
+            ports={'gateway.config':module(Platform=lambda value:value),
+                'gateway.session':module(SessionSource=lambda **kw:SimpleNamespace(**kw)),
+                'gateway.platforms.event':module(MessageType=SimpleNamespace(DOCUMENT='document'),
+                    MessageEvent=lambda **kw:SimpleNamespace(**kw))}
+            with patch.dict(sys.modules,ports):
+                await native.recover(RecoveredAdapter())
+                await native.recover(RecoveredAdapter())
+            self.assertEqual(observed,[[('86','подпись 86'),('87','подпись 87'),('88','подпись 88')]])
+        finally:
+            for task in adapter._pending_photo_batch_tasks.values():task.cancel()
+            await asyncio.gather(*adapter._pending_photo_batch_tasks.values(),return_exceptions=True)
+            for event in events:native.release_event(event)
+
+    async def test_later_text_waits_for_earlier_telegram_photo_batch(self):
+        """Текст не должен обгонять ожидающие фотографии того же маршрута."""
+        scope={'asyncio':asyncio}
+        function('plugins/platforms/telegram/adapter.py',['_flush_buffered'],scope)
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id=None,user_id='2',profile=None)
+        photo=SimpleNamespace(source=source,message_id='86')
+        text_event=SimpleNamespace(source=source,message_id='89')
+        received=[]
+        async def wait_for_chat_idle(chat):pass
+        async def handle(event):received.append(event.message_id)
+        adapter=SimpleNamespace(_app=SimpleNamespace(update_processor=SimpleNamespace(wait_for_chat_idle=wait_for_chat_idle)),
+            _should_drop_delayed_delivery=lambda:False, _hold_inbound_event=lambda *a,**kw:None,
+            _pending_photo_batches={'photo':photo},_pending_photo_batch_tasks={},
+            _media_group_events={},_media_group_tasks={}, handle_message=handle)
+        photo_task=asyncio.create_task(scope['_flush_buffered'](adapter,adapter._pending_photo_batches,
+            adapter._pending_photo_batch_tasks,'photo',0.05,'photo'))
+        adapter._pending_photo_batch_tasks['photo']=photo_task
+        text_pending={'text':text_event};text_tasks={}
+        text_task=asyncio.create_task(scope['_flush_buffered'](adapter,text_pending,text_tasks,'text',0,'text'))
+        text_tasks['text']=text_task
+        with patch.dict(sys.modules,{'brai_files':native}):
+            await asyncio.wait_for(asyncio.gather(photo_task,text_task),2)
+        self.assertEqual(received,['86','89'])
+
+    async def test_text_is_held_if_prior_media_dispatch_fails(self):
+        """Ошибка предыдущего набора сохраняет текст вместо нарушения порядка."""
+        scope={'asyncio':asyncio}
+        function('plugins/platforms/telegram/adapter.py',['_flush_buffered'],scope)
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id=None,user_id='2',profile=None)
+        photo=SimpleNamespace(source=source,message_id='86')
+        text_event=SimpleNamespace(source=source,message_id='89')
+        failed=asyncio.get_running_loop().create_future(); failed.set_exception(RuntimeError('synthetic failure'))
+        held=[];received=[]
+        async def idle(chat):pass
+        async def handle(event):received.append(event)
+        adapter=SimpleNamespace(_app=SimpleNamespace(update_processor=SimpleNamespace(wait_for_chat_idle=idle)),
+            _should_drop_delayed_delivery=lambda:False, _hold_inbound_event=lambda event,**kw:held.append(event),
+            _pending_photo_batches={'photo':photo},_pending_photo_batch_tasks={'photo':failed},
+            _media_group_events={},_media_group_tasks={},handle_message=handle)
+        pending={'text':text_event};tasks={}
+        task=asyncio.create_task(scope['_flush_buffered'](adapter,pending,tasks,'text',0,'text'));tasks['text']=task
+        with patch.dict(sys.modules,{'brai_files':native}):await asyncio.wait_for(task,2)
+        self.assertEqual(held,[text_event])
+        self.assertEqual(received,[])
+        self.assertEqual(pending,{})
 
     async def test_actual_album_flush_holds_once_when_app_is_missing_or_dispatch_cancelled(self):
         """Teardown и отмена после pop сохраняют событие без отправки или двойного hold."""
@@ -433,20 +532,6 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(event._brai_file_lease)
                 self.assertIsNone(native._event_cleanup.get())
                 with self.store.db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM leases').fetchone()[0],0)
-
-    async def test_actual_loop_text_turn_prevents_old_attachment_replay(self):
-        source = SimpleNamespace(platform='telegram', chat_id='1', thread_id='2', user_id='2', profile=None)
-        old = SimpleNamespace(source=source, message_id='86', text='',
-            raw_message=SimpleNamespace(media_group_id=None), media_urls=[str(self.input_file())],
-            media_types=['text/plain'], metadata={})
-        await native.accept_event(old, admit=False)
-        run, ports = self.loop(lambda *a, **kw: {'final_response': 'ok'})
-        with patch.dict(sys.modules, ports), native.inbound_handoff(source, '105'):
-            run(SimpleNamespace(session_id='later-text', platform='telegram'), 'newer request')
-        native.release_event(old)
-        old.metadata = {}
-        self.assertFalse(await native.accept_event(old))
-        native.release_event(old)
 
     def test_actual_loop_commits_inbound_only_after_input_preparation(self):
         source = SimpleNamespace(platform='telegram', chat_id='1', thread_id=None, user_id='2', profile=None)

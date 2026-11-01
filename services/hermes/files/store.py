@@ -61,19 +61,23 @@ class FileStore:
         self.temporary_roots = (self.work, self.cache)
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            initialized = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='inbound_watermarks'").fetchone()
-            if not initialized:
-                db.execute("CREATE TABLE inbound_watermarks (route TEXT PRIMARY KEY, message_id TEXT NOT NULL)")
-                db.execute("CREATE TABLE inbound_legacy_quarantine (identity TEXT PRIMARY KEY)")
-                existing = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='items'").fetchone()
-                if existing:
+            has_settings = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").fetchone()
+            if has_settings:
+                owners = [row[0] for row in db.execute("SELECT owner FROM settings")]
+                if owners and owners != [owner]:
+                    raise FileError("OWNER_MISMATCH")
+            has_hold = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_recovery_review'").fetchone()
+            if not has_hold:
+                db.execute("CREATE TABLE legacy_recovery_review (identity TEXT PRIMARY KEY)")
+                has_items = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='items'").fetchone()
+                if has_items:
                     for row in db.execute("SELECT i.identity, i.source, g.admitted FROM items i JOIN groups g ON g.identity=i.group_key"):
                         if (json.loads(row['source']).get('platform') == 'telegram'
                                 and row['identity'] not in json.loads(row['admitted'] or '[]')):
-                            db.execute("INSERT INTO inbound_legacy_quarantine VALUES (?)", (row['identity'],))
-                    count = db.execute("SELECT count(*) FROM inbound_legacy_quarantine").fetchone()[0]
+                            db.execute("INSERT INTO legacy_recovery_review VALUES (?)", (row['identity'],))
+                    count = db.execute("SELECT count(*) FROM legacy_recovery_review").fetchone()[0]
                     if count:
-                        logging.getLogger(__name__).warning('BRAI_FILES_LEGACY_INPUT_QUARANTINED count=%d', count)
+                        logging.getLogger(__name__).warning('BRAI_FILES_LEGACY_REVIEW_REQUIRED count=%d', count)
             db.commit()
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings (owner TEXT PRIMARY KEY);
@@ -221,46 +225,22 @@ class FileStore:
                 db.execute("UPDATE items SET artifact=?,ref=? WHERE identity=?", (ref["artifactId"], canonical(ref), identity))
             return {"groupId": group, "itemId": identity, "file": ref, "localPath": result["localPath"]}
 
-    def stale_inbound(self, db, source, message_id):
-        """Определить устаревший Telegram input только в его полном маршруте."""
-        message_id = str(message_id or '')
-        if source.get('platform') != 'telegram' or not message_id.isascii() or not message_id.isdecimal():
-            return False
-        route = {name: source.get(name, '') for name in ('platform', 'account', 'chat', 'thread', 'sender')}
-        row = db.execute("SELECT message_id FROM inbound_watermarks WHERE route=?", (key([self.owner, route]),)).fetchone()
-        return bool(row and int(message_id) < int(row[0]))
-
-    def recoverable_inbound(self, db, row):
-        """Не запускать устаревшие и неоднозначные записи до введения учёта."""
-        if db.execute("SELECT 1 FROM inbound_legacy_quarantine WHERE identity=?", (row['identity'],)).fetchone():
-            return False
-        source = json.loads(row['source'])
-        return not self.stale_inbound(db, source, source.get('messageId'))
-
-    def advance_inbound(self, db, source, message_id):
-        """Запомнить последний переданный агенту Telegram input в той же транзакции."""
-        message_id = str(message_id or '')
-        if source.get('platform') != 'telegram' or not message_id.isascii() or not message_id.isdecimal():
-            return
-        route = {name: source.get(name, '') for name in ('platform', 'account', 'chat', 'thread', 'sender')}
-        if not self.stale_inbound(db, route, message_id):
-            db.execute("INSERT OR REPLACE INTO inbound_watermarks VALUES (?,?)", (key([self.owner, route]), message_id))
-
     def admit(self, group, *, defer=False):
         """Вернуть только новую готовую версию набора; прежнюю работу не запускать снова."""
         with self.lock(group):
             with self.db() as db:
                 rows = db.execute("SELECT * FROM items WHERE group_key=? ORDER BY position, identity", (group,)).fetchall()
-                state = db.execute("SELECT admitted FROM groups WHERE identity=?", (group,)).fetchone()
-                if not state or not rows:
+                if not rows:
                     raise FileError("INCOMPLETE_FILE_SET")
-                previous = json.loads(state[0]) if state[0] else []
-                rows = [row for row in rows if row['identity'] in previous or self.recoverable_inbound(db, row)]
+                rows = [row for row in rows if not db.execute(
+                    "SELECT 1 FROM legacy_recovery_review WHERE identity=?", (row['identity'],)).fetchone()]
                 if not rows:
                     return {"groupId": group, "duplicate": True, "items": []}
                 if any(not row["artifact"] for row in rows):
                     raise FileError("INCOMPLETE_FILE_SET")
+                state = db.execute("SELECT admitted FROM groups WHERE identity=?", (group,)).fetchone()
                 version = key([row["identity"] for row in rows])
+                previous = json.loads(state[0]) if state[0] else []
                 current = [row["identity"] for row in rows]
                 added = [row for row in rows if row["identity"] not in previous]
                 if not added:
@@ -307,20 +287,9 @@ class FileStore:
             if not rows:
                 if db.execute("SELECT 1 FROM admissions WHERE route=? AND state='committed'", (route,)).fetchone():
                     raise FileError("FILE_SET_ALREADY_ADMITTED")
-                self.advance_inbound(db, source, message_id)
                 return False
             row = rows[0]
             groups = json.loads(row["groups"])
-            newest = str(message_id)
-            if source.get('platform') == 'telegram':
-                for item in groups:
-                    for identity in set(item['current']) - set(item['previous']):
-                        stored = db.execute("SELECT source FROM items WHERE identity=?", (identity,)).fetchone()
-                        candidate = str(json.loads(stored[0]).get('messageId') or '') if stored else ''
-                        if candidate.isascii() and candidate.isdecimal() and (not newest.isdecimal() or int(candidate) > int(newest)):
-                            newest = candidate
-            if self.stale_inbound(db, source, newest):
-                raise FileError("FILE_SET_SUPERSEDED")
             for item in groups:
                 current = db.execute("SELECT admitted FROM groups WHERE identity=?", (item["id"],)).fetchone()
                 if current is None or (json.loads(current[0]) if current[0] else []) != item["previous"]:
@@ -328,7 +297,6 @@ class FileStore:
             for item in groups:
                 db.execute("UPDATE groups SET admitted=? WHERE identity=?", (canonical(item["current"]), item["id"]))
             db.execute("UPDATE admissions SET state='committed' WHERE identity=?", (row["identity"],))
-            self.advance_inbound(db, source, newest)
             # Старые подготовки больше не должны блокировать восстановление набора.
             pending = db.execute("SELECT identity,groups FROM admissions WHERE route=? AND state='pending'", (route,)).fetchall()
             completed = {item["id"]: set(item["current"]) for item in groups}

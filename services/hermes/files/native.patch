@@ -423,11 +423,11 @@
          placeholders: dict = {}
          counter = [0]
  
-@@ -6591,6 +6558,14 @@
+@@ -6591,6 +6558,24 @@
          event = None
          try:
              await asyncio.sleep(delay)
-+            if where in {"media-group", "photo"}:
++            if where in {"media-group", "photo", "text"}:
 +                album_event = pending.get(key)
 +                app = self._app
 +                wait_for_chat = getattr(getattr(app, "update_processor", None), "wait_for_chat_idle", None)
@@ -435,6 +435,16 @@
 +                    app = None
 +                elif album_event is not None:
 +                    await wait_for_chat(int(album_event.source.chat_id))
++                    if where == "text":
++                        import brai_files
++                        try:
++                            await brai_files.wait_prior_media(self, album_event)
++                        except Exception:
++                            event = pending.pop(key, None)
++                            if event is not None:
++                                self._hold_inbound_event(event, where="text-prior-media")
++                            event = None
++                            return
              # Superseded flush (a newer chunk re-armed the timer while our sleep was already done):
              # CancelledError only lands at the next await, so check synchronously before the pop.
              owner = tasks.get(key)
@@ -444,7 +454,7 @@
                  return
 -            if self._should_drop_delayed_delivery():
 +            if self._should_drop_delayed_delivery() or (
-+                where in {"media-group", "photo"} and (app is None or app is not self._app)
++                where in {"media-group", "photo", "text"} and (app is None or app is not self._app)
 +            ):
                  self._hold_inbound_event(event, where=f"{where}-flush")
                  event = None
@@ -458,13 +468,15 @@
          existing.media_urls.extend(event.media_urls)
          existing.media_types.extend(event.media_types)
          if event.text:
-@@ -6678,6 +6657,8 @@
+@@ -6678,6 +6657,10 @@
          """Album items debounce on media_group_id; singles go through the photo burst batcher."""
          if self._drop_unresolved(event):  # identity FIRST: the batch lane is derived from it
              return
 +        import brai_files
-+        await brai_files.capture(self, event)
          media_group_id = getattr(msg, "media_group_id", None)
++        if not media_group_id:
++            brai_files.prepare_photo_batch(self, event, msg)
++        await brai_files.capture(self, event)
          if media_group_id:
              await self._queue_media_group_event(str(media_group_id), event)
 @@ -6714,6 +6695,8 @@
