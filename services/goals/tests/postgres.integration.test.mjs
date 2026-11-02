@@ -101,9 +101,11 @@ test("PostgreSQL: изоляция, версии, резервы и восста
   const parent = roots.find(item => item.id === parentA);
   await update(domain,alice,"goals",parentA,parent.version,{deleted:true});
   assert.equal((await update(domain,alice,"goals",child,"5",{next_step:"Still accessible"})).parent_goal_id,parentA);
-  await assert.rejects(update(domain,alice,"goals",child,"6",{parent_goal_id:parentA}),rejected("NOT_FOUND"));
-  const cleared = await update(domain,alice,"goals",child,"6",{parent_goal_id:null});
+  const restoredChild = await domain.restore(alice,"test","restore unchanged deleted parent",randomUUID(),"goals",child,"6","2");
+  assert.equal(restoredChild.parent_goal_id,parentA);
+  const cleared = await update(domain,alice,"goals",child,"7",{parent_goal_id:null});
   assert.equal(cleared.parent_goal_id,null);
+  await assert.rejects(update(domain,alice,"goals",child,"8",{parent_goal_id:parentA}),rejected("NOT_FOUND"));
 
   const resource = randomUUID(), needA = randomUUID(), needB = randomUUID();
   await update(domain,alice,"resources",resource,null,{title:"Synthetic funds",kind:"money",category:"own",state:"available",amount:"10.000000000001",currency:"RUB"});

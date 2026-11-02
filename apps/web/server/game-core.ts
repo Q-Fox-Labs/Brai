@@ -1,5 +1,6 @@
 // ABOUTME: Читает каноническую карту GameCore через NATS Services.
 // ABOUTME: Браузер не задаёт владельца и получает только BoardData владельца сессии.
+import { gunzipSync } from "node:zlib";
 import { GatewayError, natsConnection } from "./gateway";
 import type { BoardData } from "../app/game-core/model";
 
@@ -56,6 +57,26 @@ async function requestValue(subject: string, request: unknown): Promise<unknown>
  return value;
 }
 
+/** Читает полный граф в ограниченном сжатом формате без потери содержимого. */
+async function requestGraph(userId: string): Promise<unknown> {
+ let value:unknown;
+ try {
+  value = await requestValue("brai.game-core.v1.query.graph", {user_id:userId,response_encoding:"gzip-base64"});
+ } catch (error) {
+  // Прежний сервис может отвергать новый транспортный параметр при поэтапном выпуске.
+  if (!(error instanceof GatewayError) || error.code !== "INVALID_ARGUMENT") throw error;
+  value = await requestValue("brai.game-core.v1.query.graph", {user_id:userId});
+ }
+ // Некоторые прежние версии игнорируют неизвестный параметр и отвечают без сжатия.
+ if (boardData(value)) return value;
+ if (!object(value) || value.encoding !== "gzip-base64" || !Number.isSafeInteger(value.size) || (value.size as number) < 0 || (value.size as number) > 8_388_608 || typeof value.data !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.data)) throw new GatewayError(502,"BAD_REPLY");
+ try {
+  const raw = gunzipSync(Buffer.from(value.data,"base64"),{maxOutputLength:8_388_608});
+  if (raw.length !== value.size) throw new Error("INVALID_SIZE");
+  return JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(raw));
+ } catch { throw new GatewayError(502,"BAD_REPLY"); }
+}
+
 /** Включает ручные команды только в явно настроенном DEV контуре. */
 export function manualStatusEnabled(): boolean {
  return process.env.BRAI_ENVIRONMENT === "dev" && process.env.GAME_CORE_DEV_STATUS_ENABLED === "true";
@@ -71,7 +92,7 @@ async function artifactForOwner(userId: string, id: string): Promise<FileArtifac
 
 /** Загружает только граф владельца; имена файлов разрешает через контракт Artifacts. */
 export async function loadGameCoreBoard(userId: string): Promise<BoardData> {
- const value = await requestValue("brai.game-core.v1.query.graph", { user_id: userId });
+ const value = await requestGraph(userId);
  if (!boardData(value)) throw new GatewayError(502, "BAD_REPLY");
  const resources = value.resources as (BoardData["resources"][number] & {artifactIds?: string[]; artifacts?: {id:string;name:string;available:boolean}[]})[];
  for (const resource of resources) {
@@ -101,7 +122,7 @@ export async function changeElementStatus(userId: string, value: unknown): Promi
 
 /** Выдаёт байты лишь файла, связанного с ресурсом текущего владельца; URL Artifacts остаётся на сервере. */
 export async function readElementArtifact(userId: string, id: string, signal: AbortSignal): Promise<Response> {
- const graph = await requestValue("brai.game-core.v1.query.graph", { user_id: userId });
+ const graph = await requestGraph(userId);
  if (!boardData(graph)) throw new GatewayError(502,"BAD_REPLY");
  if (!graph.resources.some(resource => (resource as {artifactIds?:string[]}).artifactIds?.includes(id))) throw new GatewayError(404,"NOT_FOUND");
  const artifact = await artifactForOwner(userId,id);

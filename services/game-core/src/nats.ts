@@ -2,6 +2,7 @@
 // ABOUTME: ACK outbox выполняется только после PubAck; runtime проверяет готовую конфигурацию брокера.
 import { AckPolicy, DeliverPolicy, DiscardPolicy, nanos, RetentionPolicy, ReplayPolicy, StorageType, connect, type NatsConnection, type Service, type ServiceMsg } from "nats";
 import { randomUUID } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { errorStatus, limits, subjects, type ErrorCode } from "./contracts.js";
 import { GameCoreFault, type GameCoreHandlers } from "./domain.js";
 import type { Config } from "./config.js";
@@ -26,8 +27,25 @@ export async function setupJetStream(nc: NatsConnection, cfg: Config): Promise<v
 function fault(error: unknown): GameCoreFault { return error instanceof GameCoreFault ? error : new GameCoreFault("INTERNAL"); }
 function body(error: GameCoreFault): Buffer { return Buffer.from(JSON.stringify({ code: error.code, message: error.code, retryable: error.retryable })); }
 function parse(data: Uint8Array): unknown { if (data.length > limits.maxRequestBytes) throw new GameCoreFault("INVALID_ARGUMENT"); try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(data)); } catch { throw new GameCoreFault("INVALID_ARGUMENT"); } }
-async function respond(operation: string, msg: ServiceMsg, handlers: GameCoreHandlers, gate: LoadGate): Promise<void> {
-  const started = performance.now(); try { const value = await gate.run(context => { const table: Record<string, (value: unknown, context: any) => Promise<unknown>> = { graph: handlers.graphGet, timeline: handlers.timelineGet, element: handlers.elementGet, moves: handlers.movesAvailable, create: handlers.structureCreate, revise: handlers.elementRevise, claim: handlers.moveClaim, complete: handlers.moveComplete, activate: handlers.elementActivate, fail: handlers.moveFail, link: handlers.moveLink, planningPacket: handlers.planningPacket ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }), planningBind: handlers.planningBind ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }), planningBuild: handlers.planningBuild ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }), planningApply: handlers.planningApply ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }), elementReclassify: handlers.elementReclassify ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }), planningExpandRepeat: handlers.planningExpandRepeat ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }), devStatus: handlers.devStatus ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }) }; const fn = table[operation]; if (!fn) throw new GameCoreFault("INVALID_ARGUMENT"); return fn(parse(msg.data), context); }); const data = Buffer.from(JSON.stringify(value)); if (data.length > limits.maxResponseBytes) throw new GameCoreFault("INTERNAL"); msg.respond(data); console.log(JSON.stringify({ service: "service_game_core", request_id: randomUUID(), operation, duration_ms: Math.round(performance.now() - started), result: "OK" })); } catch (error) { const failure = fault(error); msg.respondError(errorStatus[failure.code as ErrorCode], failure.code, body(failure)); console.log(JSON.stringify({ service: "service_game_core", operation, duration_ms: Math.round(performance.now() - started), result: failure.code })); }
+/** Упаковывает полный граф только по явному запросу, ограничивая оба размера. */
+export function graphReply(value: unknown, compressed: boolean): Buffer {
+  const raw = Buffer.from(JSON.stringify(value));
+  if (compressed && raw.length > limits.maxGraphUncompressedBytes) throw new GameCoreFault("INTERNAL");
+  const data = compressed ? Buffer.from(JSON.stringify({encoding:"gzip-base64",size:raw.length,data:gzipSync(raw).toString("base64")})) : raw;
+  if (data.length > limits.maxResponseBytes) throw new GameCoreFault("INTERNAL");
+  return data;
+}
+/** Применяет транспортный формат только к явно запрошенному графу. */
+export async function respond(operation: string, msg: ServiceMsg, handlers: GameCoreHandlers, gate: LoadGate): Promise<void> {
+  const started = performance.now(); try {
+    const request = parse(msg.data);
+    let compressed = false, args = request;
+    if (operation === "graph" && request && typeof request === "object" && !Array.isArray(request) && Object.hasOwn(request,"response_encoding")) {
+      const {response_encoding, ...rest} = request as Record<string, unknown>;
+      if (response_encoding !== "gzip-base64") throw new GameCoreFault("INVALID_ARGUMENT");
+      compressed = true; args = rest;
+    }
+    const value = await gate.run(context => { const table: Record<string, (value: unknown, context: any) => Promise<unknown>> = { graph: handlers.graphGet, timeline: handlers.timelineGet, element: handlers.elementGet, moves: handlers.movesAvailable, create: handlers.structureCreate, revise: handlers.elementRevise, claim: handlers.moveClaim, complete: handlers.moveComplete, activate: handlers.elementActivate, fail: handlers.moveFail, link: handlers.moveLink, planningPacket: handlers.planningPacket ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }), planningBind: handlers.planningBind ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }), planningBuild: handlers.planningBuild ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }), planningApply: handlers.planningApply ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }), elementReclassify: handlers.elementReclassify ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }), planningExpandRepeat: handlers.planningExpandRepeat ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }), devStatus: handlers.devStatus ?? (async () => { throw new GameCoreFault("FORBIDDEN"); }) }; const fn = table[operation]; if (!fn) throw new GameCoreFault("INVALID_ARGUMENT"); return fn(args, context); }); const data = graphReply(value, compressed); msg.respond(data); console.log(JSON.stringify({ service: "service_game_core", request_id: randomUUID(), operation, duration_ms: Math.round(performance.now() - started), result: "OK" })); } catch (error) { const failure = fault(error); msg.respondError(errorStatus[failure.code as ErrorCode], failure.code, body(failure)); console.log(JSON.stringify({ service: "service_game_core", operation, duration_ms: Math.round(performance.now() - started), result: failure.code })); }
 }
 async function publishOutbox(nc: NatsConnection, store: GameCoreStore, cfg: Config, stop: () => boolean): Promise<void> {
   const js = nc.jetstream();

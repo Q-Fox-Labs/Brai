@@ -9,5 +9,5 @@ type Props = { active: boolean; userId: string; email: string; onLogout: () => v
 /** Показывает задачи и сохраняет их локальное состояние при переходах. */
 export default function DoScreen({ active, userId }: Props) {
  const controller = useTasksController(active);
- return <TasksContext.Provider value={controller}><TasksView userId={userId} /></TasksContext.Provider>;
+ return <TasksContext.Provider value={controller}><div className="do-shell h-full min-h-0 min-w-0"><TasksView userId={userId} /></div></TasksContext.Provider>;
 }

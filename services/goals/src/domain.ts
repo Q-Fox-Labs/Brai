@@ -175,7 +175,7 @@ export function createDomain(pool: Pool, baseCurrency = "RUB") {
         }
         current = normalize(current);
         // Блокировка владельца выше сериализует проверку и изменение всех родительских связей.
-        if (entity === "goals" && Object.hasOwn(data, "parent_goal_id") && current.parent_goal_id !== null) {
+        if (entity === "goals" && Object.hasOwn(data, "parent_goal_id") && current.parent_goal_id !== null && old?.parent_goal_id !== current.parent_goal_id) {
           if (current.parent_goal_id === id) throw new GoalsFault("INVALID_ARGUMENT");
           const parent = await client.query("SELECT 1 FROM goals.goals WHERE owner_id=$1 AND id=$2 AND NOT deleted", [owner,current.parent_goal_id]);
           if (!parent.rowCount) throw new GoalsFault("NOT_FOUND");
