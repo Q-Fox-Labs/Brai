@@ -21,7 +21,8 @@ export async function serveTools(runtime, transport = new StdioServerTransport()
     } catch (error) {
       const code = /^[A-Z][A-Z0-9_]{0,80}$/.test(error.code) ? error.code : 'UPSTREAM_UNAVAILABLE';
       const diagnostic = code === 'INVALID_ARGUMENT' && request.params.name.startsWith('game_core_planning_') ? planningDiagnostic(error.diagnostic) : undefined;
-      return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code, message: code, ...(diagnostic ? { diagnostic } : {}), ...(code === 'OUTCOME_UNKNOWN' ? { requestId: error.requestId } : {}) }) }] };
+      const message = code === 'VOICE_TEXT_REQUIRES_CYRILLIC' ? 'Запишите английские слова и числа кириллицей, раскройте символы словами и повторите синтез.' : code;
+      return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code, message, ...(diagnostic ? { diagnostic } : {}), ...(code === 'OUTCOME_UNKNOWN' ? { requestId: error.requestId } : {}) }) }] };
     }
   });
   let closing, recoveryTimer, recoveryDelay = 30_000, stopped = false;
