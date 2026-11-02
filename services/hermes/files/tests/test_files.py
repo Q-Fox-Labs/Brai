@@ -175,6 +175,124 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             groups.append(self.store.ingest({**self.source, **changes}, '1', self.file(1), 1, '', 'same')['groupId'])
         self.assertEqual(len(set(groups)), len(groups))
 
+    async def test_photo_burst_recovers_as_one_complete_set_after_restart(self):
+        pending = {}
+        adapter = SimpleNamespace(_photo_batch_key=lambda event, message: 'topic', _pending_photo_batches=pending)
+        originals = [self.event(str(number), group=None) for number in (86, 87, 88)]
+        for event in originals:
+            batch = native.prepare_photo_batch(adapter, event, event.raw_message)
+            await native.accept_event(event, admit=False)
+            pending.setdefault(batch, event)
+        with self.store.db() as db:
+            groups = db.execute('SELECT group_key FROM items ORDER BY position').fetchall()
+        self.assertEqual(len({row[0] for row in groups}), 1)
+        for event in originals:
+            native.release_event(event)
+        native.configure(self.config, self.backend)
+        seen = []
+        class Adapter:
+            platform = 'telegram'
+            async def handle_message(self, event):
+                if await native.accept_event(event):
+                    seen.append([item['source']['messageId'] for group in event.metadata['fileSets'] for item in group['items']])
+                    native.commit_inbound(event.source, event.message_id)
+                    native.release_event(event)
+        config = ModuleType('gateway.config'); config.Platform = lambda value: value
+        session = ModuleType('gateway.session'); session.SessionSource = lambda **kwargs: SimpleNamespace(**kwargs)
+        event = ModuleType('gateway.platforms.event')
+        event.MessageType = SimpleNamespace(DOCUMENT='document')
+        event.MessageEvent = lambda **kwargs: SimpleNamespace(**kwargs)
+        ports = {'gateway.config': config, 'gateway.session': session, 'gateway.platforms.event': event}
+        with patch.dict(sys.modules, ports):
+            await native.recover(Adapter())
+            await native.recover(Adapter())
+        self.assertEqual(seen, [['86', '87', '88']])
+        pending.clear()
+        duplicate = self.event('87', group=None)
+        native.prepare_photo_batch(adapter, duplicate, duplicate.raw_message)
+        self.assertFalse(await native.accept_event(duplicate))
+        native.release_event(duplicate)
+
+    async def test_repeated_photo_keeps_original_group_for_new_followup(self):
+        pending = {}
+        adapter = SimpleNamespace(_photo_batch_key=lambda event, message:'topic', _pending_photo_batches=pending)
+        first, second = self.event('86', group=None), self.event('87', group=None)
+        for event in (first, second):
+            batch = native.prepare_photo_batch(adapter, event, event.raw_message)
+            await native.accept_event(event, admit=False)
+            pending.setdefault(batch, event)
+        for event in (first, second): native.release_event(event)
+        pending.clear()
+        repeated = self.event('87', group=None)
+        batch = native.prepare_photo_batch(adapter, repeated, repeated.raw_message)
+        await native.accept_event(repeated, admit=False)
+        pending[batch] = repeated
+        fresh = self.event('88', group=None)
+        native.prepare_photo_batch(adapter, fresh, fresh.raw_message)
+        await native.accept_event(fresh, admit=False)
+        with self.store.db() as db:
+            groups = db.execute('SELECT DISTINCT group_key FROM items').fetchall()
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(fresh.metadata['_brai_photo_group'], '86')
+        native.release_event(repeated)
+        native.release_event(fresh)
+
+    async def test_legacy_pending_files_remain_available_for_review_without_replay(self):
+        legacy = self.event('651', group='old-album')
+        await native.accept_event(legacy, admit=False)
+        ref = legacy.metadata['_brai_artifacts'][0]['file']
+        native.release_event(legacy)
+        with self.store.db() as db:
+            db.execute('DROP TABLE legacy_recovery_review')
+        with self.assertLogs('files.store', level='WARNING') as logs:
+            native.configure(self.config, self.backend)
+        self.assertIn('BRAI_FILES_LEGACY_REVIEW_REQUIRED count=1', logs.output[0])
+        duplicate = self.event('651', group='old-album')
+        self.assertFalse(await native.accept_event(duplicate))
+        self.assertEqual(Path(self.store.fetch(ref['artifactId'])['localPath']).read_bytes(), b'fixture-651')
+        native.release_event(duplicate)
+        fresh = self.event('652', group='old-album')
+        self.assertTrue(await native.accept_event(fresh))
+        self.assertEqual([item['source']['messageId'] for group in fresh.metadata['fileSets']
+                          for item in group['items']], ['652'])
+        native.release_event(fresh)
+
+    async def test_legacy_review_does_not_modify_another_owners_store(self):
+        with self.store.db() as db:
+            db.execute('DROP TABLE legacy_recovery_review')
+        with self.assertRaisesRegex(FileError, 'OWNER_MISMATCH'):
+            FileStore(self.store.root, self.cache, 'other-owner', self.backend, [self.input])
+        with self.store.db() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='legacy_recovery_review'").fetchone())
+
+    async def test_text_does_not_wait_for_other_topic_or_newer_photo(self):
+        text = self.event('90', group=None)
+        other = self.event('80', group=None, source={'thread_id':'other'})
+        newer = self.event('91', group=None)
+        blocked = asyncio.get_running_loop().create_future()
+        adapter = SimpleNamespace(_pending_photo_batches={'other':other,'newer':newer},
+            _pending_photo_batch_tasks={'other':blocked,'newer':blocked},_media_group_events={},_media_group_tasks={})
+        await asyncio.wait_for(native.wait_prior_media(adapter,text),0.2)
+        blocked.cancel()
+
+    async def test_text_follows_rearmed_photo_timer_without_cancelling_it(self):
+        text = self.event('90', group=None)
+        photo = self.event('86', group=None)
+        first = asyncio.get_running_loop().create_future()
+        replacement = asyncio.get_running_loop().create_future()
+        adapter = SimpleNamespace(_pending_photo_batches={'photo':photo},
+            _pending_photo_batch_tasks={'photo':first},_media_group_events={},_media_group_tasks={})
+        waiting = asyncio.create_task(native.wait_prior_media(adapter,text))
+        await asyncio.sleep(0)
+        adapter._pending_photo_batch_tasks['photo'] = replacement
+        first.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(waiting.done())
+        self.assertFalse(replacement.cancelled())
+        adapter._pending_photo_batches.clear()
+        replacement.set_result(None)
+        await asyncio.wait_for(waiting,1)
+
     async def test_inbound_failure_and_restart_before_handoff_do_not_lose_set(self):
         event = self.event('91')
         await native.accept_event(event, admit=False)

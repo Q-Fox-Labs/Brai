@@ -60,6 +60,25 @@ class FileStore:
         self.service_roots = tuple(Path(p).resolve() for p in service_roots)
         self.temporary_roots = (self.work, self.cache)
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            has_settings = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").fetchone()
+            if has_settings:
+                owners = [row[0] for row in db.execute("SELECT owner FROM settings")]
+                if owners and owners != [owner]:
+                    raise FileError("OWNER_MISMATCH")
+            has_hold = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_recovery_review'").fetchone()
+            if not has_hold:
+                db.execute("CREATE TABLE legacy_recovery_review (identity TEXT PRIMARY KEY)")
+                has_items = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='items'").fetchone()
+                if has_items:
+                    for row in db.execute("SELECT i.identity, i.source, g.admitted FROM items i JOIN groups g ON g.identity=i.group_key"):
+                        if (json.loads(row['source']).get('platform') == 'telegram'
+                                and row['identity'] not in json.loads(row['admitted'] or '[]')):
+                            db.execute("INSERT INTO legacy_recovery_review VALUES (?)", (row['identity'],))
+                    count = db.execute("SELECT count(*) FROM legacy_recovery_review").fetchone()[0]
+                    if count:
+                        logging.getLogger(__name__).warning('BRAI_FILES_LEGACY_REVIEW_REQUIRED count=%d', count)
+            db.commit()
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS settings (owner TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS items (
@@ -211,7 +230,13 @@ class FileStore:
         with self.lock(group):
             with self.db() as db:
                 rows = db.execute("SELECT * FROM items WHERE group_key=? ORDER BY position, identity", (group,)).fetchall()
-                if not rows or any(not row["artifact"] for row in rows):
+                if not rows:
+                    raise FileError("INCOMPLETE_FILE_SET")
+                rows = [row for row in rows if not db.execute(
+                    "SELECT 1 FROM legacy_recovery_review WHERE identity=?", (row['identity'],)).fetchone()]
+                if not rows:
+                    return {"groupId": group, "duplicate": True, "items": []}
+                if any(not row["artifact"] for row in rows):
                     raise FileError("INCOMPLETE_FILE_SET")
                 state = db.execute("SELECT admitted FROM groups WHERE identity=?", (group,)).fetchone()
                 version = key([row["identity"] for row in rows])
