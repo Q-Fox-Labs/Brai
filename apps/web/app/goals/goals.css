@@ -123,6 +123,8 @@
  .goals-dialog { padding:24px 20px 100px; }
 }
 @media (max-width:600px) {
+ .goals-focus > .goals-section-heading { flex-wrap:wrap; }
+ .goals-focus > .goals-section-heading h2 { flex-basis:100%; }
  .goals-screen .goals-focus-step { grid-template-columns:1fr; gap:16px; }
  .goals-item > summary { flex-wrap:wrap; font-size:16px; }
  .goals-item-title { flex-basis:calc(100% - 40px); }
