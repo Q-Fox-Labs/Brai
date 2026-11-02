@@ -13,6 +13,7 @@ import ExistingAgentScreen from "./agent/screen";
 import TelegramAgentEntry from "./agent/telegram-entry";
 import DoScreen from "./do/screen";
 import Navigation from "./navigation";
+import WorkspaceFrame from "./shell/workspace-frame";
 import GameCoreScreen from "./game-core/screen";
 import GoalsScreen from "./goals/screen";
 import { AlertsProvider } from "./alerts/provider";
@@ -125,13 +126,13 @@ function AccountScreens({ view, user, agentMode, telegramBotUsername, telegramOb
  const props = { userId: user.id, email: user.email, onLogout, onUnauthorized, accountMessage };
  // AIDEV-NOTE: Базовые состояния Agent и Timer подключены после входа; hidden сохраняет клиентов.
  return <>
-  <div className="workspace-screen" hidden={view !== "focus" && view !== "goals"}>{(visitedGoals || view === "focus" || view === "goals") && <GoalsScreen mode={view === "focus" ? "focus" : "goals"} active={view === "focus" || view === "goals"} onUnauthorized={onUnauthorized} />}</div>
-  <div className="workspace-screen" hidden={view !== "game-core"}>{view === "game-core" && <GameCoreScreen userId={user.id} />}</div>
-  <div className="workspace-screen" hidden={view !== "alerts"}><AlertsScreen active={view === "alerts"} /></div>
+  <div className="workspace-screen" hidden={view !== "focus" && view !== "goals"}>{(visitedGoals || view === "focus" || view === "goals") && <GoalsScreen userId={user.id} mode={view === "focus" ? "focus" : "goals"} active={view === "focus" || view === "goals"} onUnauthorized={onUnauthorized} />}</div>
+  <div className="workspace-screen" hidden={view !== "game-core"}>{view === "game-core" && <WorkspaceFrame section="game-core" userId={user.id} title="Элементы"><GameCoreScreen userId={user.id} /></WorkspaceFrame>}</div>
+  <div className="workspace-screen" hidden={view !== "alerts"}><WorkspaceFrame section="alerts" userId={user.id} title="Уведомления"><AlertsScreen active={view === "alerts"} /></WorkspaceFrame></div>
   <div className="workspace-screen" hidden={view !== "agent"}>
    {/* AIDEV-NOTE: Прежнее подключение сохранено до возвращения чатов Codex. */}
-   {/* {agentMode === "hermes_telegram" ? <TelegramAgentEntry username={telegramBotUsername} /> : <AgentScreen {...props} active={view === "agent"} />} */}
-   {agentMode === "hermes_telegram" ? <TelegramAgentEntry username={telegramBotUsername} active={view === "agent"} enabled={telegramObserverEnabled} /> : <ExistingAgentScreen {...props} active={view === "agent"} />}
+   {/* {agentMode === "hermes_telegram" ? <TelegramAgentEntry userId={user.id} username={telegramBotUsername} /> : <AgentScreen {...props} active={view === "agent"} />} */}
+   {agentMode === "hermes_telegram" ? <TelegramAgentEntry userId={user.id} username={telegramBotUsername} active={view === "agent"} enabled={telegramObserverEnabled} /> : <ExistingAgentScreen {...props} active={view === "agent"} />}
   </div>
   <div className="workspace-screen workspace-timer" hidden={view !== "timer"}><Timer userId={user.id} onUnauthorized={onUnauthorized} accountMessage={accountMessage} onElapsed={onTimerElapsed} /></div>
   <div className="workspace-screen" hidden={view !== "do"}>{(visitedDo || view === "do") && <DoScreen {...props} active={view === "do"} />}</div>

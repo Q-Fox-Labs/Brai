@@ -72,3 +72,10 @@
 @media (prefers-reduced-motion: reduce) {
   .do-shell *, .do-shell *::before, .do-shell *::after { transition: none !important; }
 }
+
+/* Управление рейлом вынесено в общую верхнюю полосу. */
+.do-projects-close { display:none; }
+.workspace-frame-custom-tabs { min-width:0; flex:1; height:100%; overflow:hidden; }
+.workspace-frame-custom-tabs nav { height:100%; padding:0; border:0; }
+.workspace-frame-custom-tabs nav > div { height:100%; }
+.workspace-frame-center > [data-slot="card"] { height:100%; }
