@@ -374,6 +374,14 @@ test('MCP синтез берёт модель и срок из доверенн
     await client.connect(clientTransport);
     const tool = (await client.listTools()).tools.find(item => item.name === 'local_ai_invoke_synthesize');
     assert.deepEqual(Object.keys(tool.inputSchema.properties), ['text']);
+    for (const text of ['Стиль casual', 'Уровень 12', 'тест Ａ', 'тест 😊']) {
+      const rejected = await client.callTool({ name: tool.name, arguments: { text } });
+      assert.equal(JSON.parse(rejected.content[0].text).code, 'VOICE_TEXT_REQUIRES_CYRILLIC');
+      await assert.rejects(runtime.call('local_ai_invoke_synthesize', { text }), { code: 'VOICE_TEXT_REQUIRES_CYRILLIC' });
+    }
+    assert.equal(requests.length, 0);
+    const prepared = await client.callTool({ name: tool.name, arguments: { text: 'Стиль кэжуал, уровень твэлв.' } });
+    assert.equal(prepared.isError, undefined); assert.equal(requests.pop().payload.text, 'Стиль кэжуал, уровень твэлв.');
     const before = Date.now();
     const result = await client.callTool({ name: tool.name, arguments: { text: 'Проверка голоса' } });
     const after = Date.now();

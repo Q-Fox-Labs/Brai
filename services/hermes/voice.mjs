@@ -47,6 +47,8 @@ if (isMain) {
     const config = await loadConfig(); runtime = await startBraiTools(config);
     await synthesizeFile(config, runtime, args);
   } catch (error) {
-    console.error(/^[A-Z][A-Z0-9_]{0,80}$/.test(error.code) ? error.code : 'HERMES_VOICE_FAILED'); process.exitCode = 1;
+    console.error(error.code === 'VOICE_TEXT_REQUIRES_CYRILLIC'
+      ? 'VOICE_TEXT_REQUIRES_CYRILLIC: запишите английские слова и числа кириллицей, раскройте символы словами и повторите синтез.'
+      : /^[A-Z][A-Z0-9_]{0,80}$/.test(error.code) ? error.code : 'HERMES_VOICE_FAILED'); process.exitCode = 1;
   } finally { await runtime?.close(); }
 }

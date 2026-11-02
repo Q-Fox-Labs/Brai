@@ -201,7 +201,7 @@ export async function createBraiTools(config, ports) {
   const endpointTools = new Map([['gameCore', gameCoreNames], ['history', historyNames], ['transcription', transcriptionNames], ['publisher', new Set(['publish_file', 'fetch_file'])]]);
   const discovered = new Set(), discovering = new Map(), unavailable = new Set();
   for (const definition of natsTools) tools.push(definition === voiceDefinition
-    ? { name: definition.name, description: 'Синтезировать текст настроенным локальным голосом. Срок и идентификаторы задаёт мост; при неизвестном исходе автоматического повтора нет.', inputSchema: voiceInputSchema }
+    ? { name: definition.name, description: 'Синтезировать текст локальным голосом. Запиши английские слова и числа кириллицей, раскрой символы словами. При VOICE_TEXT_REQUIRES_CYRILLIC исправь текст и повтори. При неизвестном исходе автоматического повтора нет.', inputSchema: voiceInputSchema }
     : { name: definition.name, description: definition.description, inputSchema: definition.inputSchema });
   const metadata = new Map(fileMetadataTools.map(tool => [tool.name, compileInput(tool.inputSchema)]));
   tools.push(...fileMetadataTools);
@@ -259,6 +259,7 @@ export async function createBraiTools(config, ports) {
     /** Вызывает только объявленный инструмент; максимум восемь текущих вызовов, очереди нет. */
     async call(name, args = {}, signal) {
       if (!object(args) || hasOwner(args)) throw fault('INVALID_ARGUMENT');
+      if (name === 'local_ai_invoke_synthesize' && typeof args.text === 'string' && /[^А-Яа-яЁё\s.,!?;:—–\-…«»"'()]/u.test(args.text)) throw fault('VOICE_TEXT_REQUIRES_CYRILLIC');
       if (Buffer.byteLength(JSON.stringify(args)) > MAX_REQUEST_BYTES) throw fault('REQUEST_TOO_LARGE');
       if (active >= 8) throw fault('OVERLOADED');
       active++;
