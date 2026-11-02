@@ -65,6 +65,21 @@ test("PostgreSQL: архив, запись, 50 пар, версии, курсо�
       assert.ok(messages(r).every(x=>x.representation==="original"));
       for(const page of r.results)for(const group of page.dialogues)for(const turn of group.turns)for(const m of turn.messages)assert.equal(m.dialogue_id,group.id);
     });
+    await t.test("delta сохраняет промежуточные ответы и версии их саммари",async()=>{
+      const checkpoint=(await pages()).cursor;
+      await api.append("owner-a",{request_id:rid(),dialogue:d("delta"),messages:[msg("delta-c","delta-t","assistant","commentary")]});
+      const delta=await pages(checkpoint);
+      assert.ok(messages(delta).some(m=>m.id==="delta-c"&&m.kind==="commentary"));
+      await api.summary("owner-a",{request_id:rid(),dialogue_id:"delta",target:"message",message_id:"delta-c",expected_version:null,text:"Саммари промежуточного ответа"});
+      const newer=await pages(delta.cursor);
+      assert.ok(messages(newer).some(m=>m.id==="delta-c"&&m.summary_version==="1"));
+    });
+    await t.test("delta возвращает новую версию саммари прежнего final",async()=>{
+      await api.append("owner-a",{request_id:rid(),dialogue:d("superseded"),messages:[msg("old-u","old-t"),msg("old-f1","old-t","assistant","final"),msg("old-f2","old-t","assistant","final")]});
+      const checkpoint=(await pages()).cursor;
+      await api.summary("owner-a",{request_id:rid(),dialogue_id:"superseded",target:"message",message_id:"old-f1",expected_version:null,text:"Саммари предыдущего итога"});
+      assert.ok(messages(await pages(checkpoint)).some(m=>m.id==="old-f1"&&m.summary_version==="1"));
+    });
     await t.test("полная история ограничена беседой, содержит промежуточные ответы",async()=>{
       const history=await pages(undefined,"a");
       assert.ok(messages(history).some(m=>m.kind==="commentary"));
@@ -81,6 +96,12 @@ test("PostgreSQL: архив, запись, 50 пар, версии, курсо�
       await assert.rejects(api.summary("owner-a",{request_id:rid(),dialogue_id:"a",target:"message",message_id:"a-u-0",expected_version:null,text:"неверная версия"}),{code:"VERSION_CONFLICT"});
       await api.summary("owner-a",{request_id:rid(),dialogue_id:"a",target:"dialogue",through_message_id:"a-f-65",expected_version:null,text:"Свёртка A"});
       await assert.rejects(api.summary("owner-a",{request_id:rid(),dialogue_id:"a",target:"dialogue",through_message_id:"a-u-0",expected_version:"1",text:"неверный откат покрытия"}),{code:"COVERAGE_CONFLICT"});
+    });
+    await t.test("поздняя вставка под покрытый префикс запрещена",async()=>{
+      await api.append("owner-a",{request_id:rid(),dialogue:d("prefix"),messages:[{...msg("prefix-0","prefix-t"),message_order:0},{...msg("prefix-2","prefix-t"),message_order:2}]});
+      await api.summary("owner-a",{request_id:rid(),dialogue_id:"prefix",target:"dialogue",through_message_id:"prefix-2",expected_version:null,text:"Только два существовавших сообщения"});
+      await assert.rejects(api.append("owner-a",{request_id:rid(),dialogue:d("prefix"),messages:[{...msg("prefix-1","prefix-t"),message_order:1}]}),{code:"ORDER_CONFLICT"});
+      await assert.rejects(api.message("owner-a",{dialogue_id:"prefix",message_id:"prefix-1"}),{code:"NOT_FOUND"});
     });
     await t.test("Unicode, предел ответа и дочитывание оригинала",async()=>{
       const original="😀Я".repeat(15000);

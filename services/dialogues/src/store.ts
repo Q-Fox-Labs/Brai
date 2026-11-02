@@ -56,7 +56,9 @@ export function createStore(pool:DB,key:string) {
         const turnOrder=m.turn_order??(turn?Number(turn.turn_order):Number((await db.query("SELECT COALESCE(MAX(turn_order),-1)+1 AS n FROM dialogues_live.turns WHERE owner_id=$1 AND dialogue_id=$2",[owner,d.id])).rows[0].n));
         integer(turnOrder);
         await db.query("INSERT INTO dialogues_live.turns(owner_id,dialogue_id,id,turn_order,status,change_seq) VALUES($1,$2,$3,$4,'in_progress',$5) ON CONFLICT(owner_id,dialogue_id,id) DO NOTHING",[owner,d.id,m.turn_id,turnOrder,seq]);
-        const order=m.message_order??Number((await db.query("SELECT COALESCE(MAX(message_order),-1)+1 AS n FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2",[owner,d.id])).rows[0].n);
+        const tail=(await db.query("SELECT COALESCE(MAX(message_order),-1)::text AS n FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2",[owner,d.id])).rows[0].n;
+        const order=m.message_order??Number(BigInt(tail)+1n);
+        if(BigInt(order)<=BigInt(tail))fail("ORDER_CONFLICT");
         const item=m.item_order??Number((await db.query("SELECT COALESCE(MAX(item_order),-1)+1 AS n FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3",[owner,d.id,m.turn_id])).rows[0].n);
         integer(order);integer(item);
         const hash=sha(m.text);
@@ -135,7 +137,7 @@ export function createStore(pool:DB,key:string) {
         FROM dialogues_live.dialogue_summaries WHERE owner_id=$1 AND change_seq<=$2
         ORDER BY dialogue_id,version DESC
       ), candidates AS (`;
-      const latestFinal=c.scope?"":` AND (m.kind<>'final' OR m.message_order=(
+      const latestFinal=c.mode!=="bootstrap"?"":` AND (m.kind<>'final' OR m.message_order=(
         SELECT MAX(f.message_order) FROM dialogues_live.messages f
         WHERE f.owner_id=m.owner_id AND f.dialogue_id=m.dialogue_id AND f.turn_id=m.turn_id
           AND f.kind='final' AND f.change_seq<=$2))`;
@@ -144,7 +146,7 @@ export function createStore(pool:DB,key:string) {
         FROM dialogues_live.messages m
         JOIN dialogues_live.turns t ON t.owner_id=m.owner_id AND t.dialogue_id=m.dialogue_id AND t.id=m.turn_id
         WHERE m.owner_id=$1 AND m.change_seq<=$2 AND ($5::text IS NULL OR m.dialogue_id=$5)`
-        +(c.scope?"":" AND m.kind<>'commentary'")+" AND "+conditions+latestFinal+`
+        +(c.mode==="bootstrap"?" AND m.kind<>'commentary'":"")+" AND "+conditions+latestFinal+`
         UNION ALL
         SELECT 'dialogue_summary',ds.dialogue_id,'','',-1::bigint,-1::bigint,ds.version
         FROM ds WHERE ($5::text IS NULL OR ds.dialogue_id=$5) AND `+(c.mode!=="delta"?"true":"ds.change_seq>$3")+`
