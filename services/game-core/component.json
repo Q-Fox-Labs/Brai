@@ -53,6 +53,7 @@
     ],
     "checks": [
       "services/game-core/tests/domain.test.mjs",
+      "services/game-core/tests/graph-compression.test.mjs",
       "services/game-core/tests/game.integration.test.mjs",
       "services/game-core/tests/hierarchy.integration.test.mjs",
       "services/game-core/tests/mcp.test.mjs",

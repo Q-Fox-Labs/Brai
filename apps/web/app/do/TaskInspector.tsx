@@ -204,7 +204,7 @@ export default function TaskInspector() {
                   }
                 }}
               />
-              <div className="mt-2.5 flex min-w-0 items-center justify-between gap-3 text-[13px] text-brai-muted">
+              <div className="mt-2.5 flex min-w-0 flex-wrap items-center justify-between gap-3 text-[13px] text-brai-muted">
                 <div className="flex items-center gap-2">
                   <span className={`inline-flex min-h-7 shrink-0 items-center rounded-md border px-2.5 py-1 text-xs font-bold uppercase ${kindClassName}`}>
                     {kind.label}

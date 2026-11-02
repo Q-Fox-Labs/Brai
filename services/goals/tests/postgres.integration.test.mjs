@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import pg from "pg";
 import { migrate } from "../dist/migrate.js";
 import { createDomain } from "../dist/domain.js";
@@ -16,6 +17,31 @@ const persistentId = "00000000-0000-4000-8000-000000000031";
 const rejected = code => error => error?.code === code;
 const update = (domain, owner, entity, id, expected, data, requestId = randomUUID()) =>
   domain.change(owner,"test","synthetic test",requestId,entity,id,expected,data);
+
+test("PostgreSQL: обновление старой схемы сохраняет цели и версии", {skip:!ownerUrl || !appUrl || restartOnly}, async () => {
+ const ownerPool = new Pool({connectionString:ownerUrl});
+ const oldId = randomUUID();
+ try {
+  await ownerPool.query("CREATE SCHEMA goals");
+  await ownerPool.query("CREATE TABLE goals.migrations(version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
+  await ownerPool.query(readFileSync(new URL("../migrations/001.sql",import.meta.url),"utf8"));
+  await ownerPool.query("INSERT INTO goals.migrations(version) VALUES(1)");
+  await ownerPool.query("INSERT INTO goals.goals(owner_id,id,title,meaning,achievement,status,version) VALUES($1,$2,'Old goal','Reason','Result','active',7)",["legacy-owner",oldId]);
+  await ownerPool.query("INSERT INTO goals.history(owner_id,id,entity_type,entity_id,version,actor,source,current) SELECT owner_id,$3,'goals',id,version,'test','old snapshot',to_jsonb(g) FROM goals.goals g WHERE owner_id=$1 AND id=$2",["legacy-owner",oldId,randomUUID()]);
+  await migrate(ownerPool,"goals_test_owner","goals_test_app");
+  await migrate(ownerPool,"goals_test_owner","goals_test_app");
+  const row = (await ownerPool.query("SELECT title,version::text,parent_goal_id FROM goals.goals WHERE owner_id=$1 AND id=$2",["legacy-owner",oldId])).rows[0];
+  assert.deepEqual(row,{title:"Old goal",version:"7",parent_goal_id:null});
+  const appPool = new Pool({connectionString:appUrl});
+  try {
+   const domain = createDomain(appPool), parent = randomUUID();
+   await update(domain,"legacy-owner","goals",parent,null,{title:"Parent",meaning:"Reason",achievement:"Result",status:"active"});
+   await update(domain,"legacy-owner","goals",oldId,"7",{parent_goal_id:parent});
+   const restored = await domain.restore("legacy-owner","test","old snapshot",randomUUID(),"goals",oldId,"8","7");
+   assert.equal(restored.parent_goal_id,null);
+  } finally {await appPool.end();}
+ } finally {await ownerPool.end();}
+});
 
 test("PostgreSQL: изоляция, версии, резервы и восстановление", {skip:!ownerUrl || !appUrl || restartOnly}, async () => {
  const ownerPool = new Pool({connectionString:ownerUrl}), pool = new Pool({connectionString:appUrl,max:8});
@@ -47,6 +73,39 @@ test("PostgreSQL: изоляция, версии, резервы и восста
   const sameRequest = await Promise.all([update(domain,alice,"entries",entryId,null,entry,entryRequest),update(domain,alice,"entries",entryId,null,entry,entryRequest)]);
   assert.deepEqual(sameRequest[0],sameRequest[1]);
   assert.equal((await domain.history(alice,"entries",entryId)).length,1);
+
+  // Дерево проверяется тем же owner lock, что и другие операции владельца.
+  const parentA = randomUUID(), parentB = randomUUID(), child = randomUUID(), foreign = randomUUID();
+  for (const id of [parentA,parentB,child]) await update(domain,alice,"goals",id,null,goalData);
+  await update(domain,bob,"goals",foreign,null,goalData);
+  await assert.rejects(update(domain,alice,"goals",child,"1",{parent_goal_id:foreign}),rejected("NOT_FOUND"));
+  await assert.rejects(update(domain,alice,"goals",child,"1",{parent_goal_id:child}),rejected("INVALID_ARGUMENT"));
+  const linked = await update(domain,alice,"goals",child,"1",{parent_goal_id:parentA});
+  assert.equal(linked.parent_goal_id,parentA);
+  const renamed = await update(domain,alice,"goals",child,"2",{title:"Child"});
+  assert.equal(renamed.parent_goal_id,parentA);
+  assert.equal((await domain.history(alice,"goals",child))[0].current.parent_goal_id,parentA);
+  const rootVersion = await domain.restore(alice,"test","restore synthetic",randomUUID(),"goals",child,"3","1");
+  assert.equal(rootVersion.parent_goal_id,null);
+  const restoredLink = await domain.restore(alice,"test","restore synthetic",randomUUID(),"goals",child,"4","2");
+  assert.equal(restoredLink.parent_goal_id,parentA);
+  await assert.rejects(update(domain,alice,"goals",parentA,"1",{parent_goal_id:child}),rejected("CONFLICT"));
+  const race = await Promise.allSettled([
+    update(domain,alice,"goals",parentA,"1",{parent_goal_id:parentB}),
+    update(domain,alice,"goals",parentB,"1",{parent_goal_id:parentA}),
+  ]);
+  assert.equal(race.filter(item => item.status === "fulfilled").length,1);
+  assert.equal(race.find(item => item.status === "rejected").reason.code,"CONFLICT");
+  const roots = (await domain.overview(alice)).goals;
+  assert.equal(roots.find(item => item.id === child).parent_goal_id,parentA);
+  const parent = roots.find(item => item.id === parentA);
+  await update(domain,alice,"goals",parentA,parent.version,{deleted:true});
+  assert.equal((await update(domain,alice,"goals",child,"5",{next_step:"Still accessible"})).parent_goal_id,parentA);
+  const restoredChild = await domain.restore(alice,"test","restore unchanged deleted parent",randomUUID(),"goals",child,"6","2");
+  assert.equal(restoredChild.parent_goal_id,parentA);
+  const cleared = await update(domain,alice,"goals",child,"7",{parent_goal_id:null});
+  assert.equal(cleared.parent_goal_id,null);
+  await assert.rejects(update(domain,alice,"goals",child,"8",{parent_goal_id:parentA}),rejected("NOT_FOUND"));
 
   const resource = randomUUID(), needA = randomUUID(), needB = randomUUID();
   await update(domain,alice,"resources",resource,null,{title:"Synthetic funds",kind:"money",category:"own",state:"available",amount:"10.000000000001",currency:"RUB"});

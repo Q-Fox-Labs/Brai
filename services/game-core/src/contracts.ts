@@ -6,7 +6,7 @@ import addFormatsImport from "ajv-formats";
 const Ajv = AjvImport as unknown as typeof AjvImport.default;
 const addFormats = addFormatsImport as unknown as typeof addFormatsImport.default;
 
-export const limits = Object.freeze({ maxRequestBytes: 65_536, maxResponseBytes: 524_288, active: 8, queue: 64, deadlineMs: 10_000, maxPageSize: 100 });
+export const limits = Object.freeze({ maxRequestBytes: 65_536, maxResponseBytes: 524_288, maxGraphUncompressedBytes: 8_388_608, active: 8, queue: 64, deadlineMs: 10_000, maxPageSize: 100 });
 export const subjects = Object.freeze({ graph: "brai.game-core.v1.query.graph", timeline: "brai.game-core.v1.query.timeline", element: "brai.game-core.v1.query.element", moves: "brai.game-core.v1.query.moves", create: "brai.game-core.v1.command.create", revise: "brai.game-core.v1.command.revise", claim: "brai.game-core.v1.command.claim", complete: "brai.game-core.v1.command.complete", activate: "brai.game-core.v1.command.activate", events: "brai.game-core.v1.events.>" });
 export const errorStatus: Record<ErrorCode, number> = { INVALID_ARGUMENT: 400, NOT_FOUND: 404, CONFLICT: 409, INVALID_STATE: 409, RESULT_INVALID: 422, FORBIDDEN: 403, BUSY: 503, DATABASE_UNAVAILABLE: 503, DEADLINE_EXCEEDED: 504, INTERNAL: 500 };
 

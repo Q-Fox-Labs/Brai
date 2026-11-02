@@ -6,7 +6,7 @@ import type { Pool, PoolClient } from "pg";
 type Entity = "goals" | "focus" | "entries" | "resources" | "needs" | "allocations";
 type Row = Record<string, unknown>;
 const fields: Record<Entity, readonly string[]> = {
-  goals: ["title", "meaning", "achievement", "due_on", "status", "next_step", "executor", "archived", "deleted"],
+  goals: ["parent_goal_id", "title", "meaning", "achievement", "due_on", "status", "next_step", "executor", "archived", "deleted"],
   focus: ["goal_id", "reason"],
   entries: ["goal_id", "kind", "content", "occurred_on", "pinned", "deleted"],
   resources: ["title", "purpose", "kind", "category", "state", "amount", "unit", "currency", "expires_on", "deleted"],
@@ -46,7 +46,7 @@ function validateData(entity: Entity, value: Row): void {
     if (typeof item === "string" && item.length > 16_000) throw new GoalsFault("INVALID_ARGUMENT");
     if (!["archived", "pinned", "active", "deleted"].includes(key) && item !== null && typeof item !== "string") throw new GoalsFault("INVALID_ARGUMENT");
     if (["amount"].includes(key) && item !== null && (typeof item !== "string" || !decimals.test(item))) throw new GoalsFault("INVALID_ARGUMENT");
-    if (["goal_id", "need_id", "resource_id"].includes(key) && item !== null && (typeof item !== "string" || !uuid.test(item))) throw new GoalsFault("INVALID_ARGUMENT");
+    if (["parent_goal_id", "goal_id", "need_id", "resource_id"].includes(key) && item !== null && (typeof item !== "string" || !uuid.test(item))) throw new GoalsFault("INVALID_ARGUMENT");
     if (["archived", "pinned", "active", "deleted"].includes(key) && typeof item !== "boolean") throw new GoalsFault("INVALID_ARGUMENT");
     if (["occurred_on", "due_on", "expires_on"].includes(key) && item !== null && (typeof item !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(item))) throw new GoalsFault("INVALID_ARGUMENT");
     if (key === "currency" && item !== null && (typeof item !== "string" || !/^[A-Z0-9]{3,12}$/.test(item))) throw new GoalsFault("INVALID_ARGUMENT");
@@ -174,6 +174,19 @@ export function createDomain(pool: Pool, baseCurrency = "RUB") {
           current = (await client.query(`UPDATE goals.${entity} SET ${assignments.join(",")}, version=version+1 WHERE owner_id=$1 AND id=$2 RETURNING *`, [owner,id,...values])).rows[0];
         }
         current = normalize(current);
+        // Блокировка владельца выше сериализует проверку и изменение всех родительских связей.
+        if (entity === "goals" && Object.hasOwn(data, "parent_goal_id") && current.parent_goal_id !== null && old?.parent_goal_id !== current.parent_goal_id) {
+          if (current.parent_goal_id === id) throw new GoalsFault("INVALID_ARGUMENT");
+          const parent = await client.query("SELECT 1 FROM goals.goals WHERE owner_id=$1 AND id=$2 AND NOT deleted", [owner,current.parent_goal_id]);
+          if (!parent.rowCount) throw new GoalsFault("NOT_FOUND");
+          const cycle = await client.query(`
+            WITH RECURSIVE ancestors(id,parent_goal_id) AS (
+              SELECT id,parent_goal_id FROM goals.goals WHERE owner_id=$1 AND id=$2
+              UNION
+              SELECT g.id,g.parent_goal_id FROM goals.goals g JOIN ancestors a ON g.id=a.parent_goal_id WHERE g.owner_id=$1
+            ) SELECT 1 FROM ancestors WHERE id=$3 LIMIT 1`, [owner,current.parent_goal_id,id]);
+          if (cycle.rowCount) throw new GoalsFault("CONFLICT");
+        }
         await verifyReservations(client, owner);
         await client.query("INSERT INTO goals.history(owner_id,id,entity_type,entity_id,version,actor,source,previous,current) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", [owner,randomUUID(),entity,id,current.version,actor,source,old ? JSON.stringify(old) : null,JSON.stringify(current)]);
         await client.query("INSERT INTO goals.requests(owner_id,request_id,request_hash,response) VALUES($1,$2,$3,$4)", [owner,requestId,hash,JSON.stringify(current)]);
@@ -193,6 +206,8 @@ export function createDomain(pool: Pool, baseCurrency = "RUB") {
       if (!record) throw new GoalsFault("NOT_FOUND");
       const data: Row = {};
       for (const field of fields[entity]) if (Object.hasOwn(record.current, field)) data[field] = record.current[field];
+      // До миграции все цели были корнями; восстановление старой версии возвращает эту связь.
+      if (entity === "goals" && !Object.hasOwn(record.current, "parent_goal_id")) data.parent_goal_id = null;
       return this.change(owner, actor, source, requestId, entity, id, expectedVersion, data, `restore:${targetVersion}`);
     },
   };
