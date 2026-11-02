@@ -1,0 +1,82 @@
+{
+  "formatVersion": 1,
+  "id": "dialogues",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [
+    "services/dialogues/src/main.ts",
+    "services/dialogues/src/migrate.ts",
+    "services/dialogues/src/health.ts",
+    "services/dialogues/src/stdio-proxy.ts",
+    "services/dialogues/src/import.ts"
+  ],
+  "inputs": {
+    "build": [
+      "services/dialogues/tsconfig.json"
+    ],
+    "runtime": [
+      "services/dialogues/package.json",
+      "services/dialogues/CONTRACT.md",
+      "services/dialogues/migrations/001.sql",
+      "services/dialogues/migrations/002_live.sql",
+      "services/dialogues/src/api.ts",
+      "services/dialogues/src/domain.ts",
+      "services/dialogues/src/store.ts",
+      "services/dialogues/src/mcp.ts",
+      "services/dialogues/src/main.ts",
+      "services/dialogues/src/migrate.ts",
+      "services/dialogues/src/health.ts",
+      "services/dialogues/src/stdio-proxy.ts",
+      "services/dialogues/src/import.ts"
+    ],
+    "checks": [
+      "services/dialogues/tests/domain.test.mjs",
+      "services/dialogues/tests/mcp.test.mjs",
+      "services/dialogues/tests/postgres.integration.test.mjs",
+      "services/dialogues/tests/import.test.mjs"
+    ]
+  },
+  "dependencies": [],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/dialogues/CONTRACT.md",
+      "services/dialogues/dist",
+      "services/dialogues/migrations",
+      "services/dialogues/package.json"
+    ],
+    "entrypoints": [
+      "services/dialogues/dist/main.js",
+      "services/dialogues/dist/migrate.js",
+      "services/dialogues/dist/health.js",
+      "services/dialogues/dist/stdio-proxy.js",
+      "services/dialogues/dist/import.js"
+    ],
+    "smokeImports": [],
+    "systemRequirements": [
+      "Node.js 24.22.1"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "dialogues",
+      "dialogues-migrate"
+    ],
+    "migrations": [
+      "services/dialogues/migrations/002_live.sql"
+    ],
+    "health": "node services/dialogues/dist/health.js"
+  },
+  "npm": {
+    "workspaces": [
+      "services/dialogues"
+    ]
+  }
+}

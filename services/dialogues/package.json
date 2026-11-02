@@ -1,0 +1,15 @@
+{
+  "name": "@brai/dialogues",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/main.js",
+    "migrate": "node dist/migrate.js",
+    "health": "node dist/health.js",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "dependencies": {"@modelcontextprotocol/sdk":"1.30.0","pg":"8.16.3"}
+}
