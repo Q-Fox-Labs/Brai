@@ -126,6 +126,33 @@ test("PostgreSQL: архив, запись, 50 пар, версии, курсо�
       assert.deepEqual(new Set(messages(r).filter(x=>x.id.startsWith("concurrent-")).map(x=>x.id)),expected);
       await assert.rejects(api.context("owner-b",{cursor}),{code:"INVALID_CURSOR"});
     });
+    await t.test("checkpoint между конкурентными commits не пропускает задержанную запись",async()=>{
+      let releaseGate,signalStarted;
+      const gate=new Promise(resolve=>{releaseGate=resolve;});
+      const started=new Promise(resolve=>{signalStarted=resolve;});
+      const slow=createStore({async connect(){
+        const c=await app.connect();
+        return {async query(sql,...args){
+          const result=await c.query(sql,...args);
+          if(sql.includes("nextval('dialogues_live.change_seq')")){signalStarted();await gate;}
+          return result;
+        },release(){c.release();}};
+      }},"synthetic-cursor-key");
+      const first=slow.append("owner-a",{request_id:rid(),dialogue:d("race"),messages:[msg("race-slow","race-slow-t")]});
+      await started;
+      let fastDone=false;
+      const second=api.append("owner-a",{request_id:rid(),dialogue:d("race"),messages:[msg("race-fast","race-fast-t")]}).then(r=>{fastDone=true;return r;});
+      let middle;
+      try {
+        await new Promise(resolve=>setTimeout(resolve,30));
+        assert.equal(fastDone,false,"вторая запись должна ждать commit первой под owner lock");
+        middle=await pages();
+      } finally{releaseGate();}
+      await Promise.all([first,second]);
+      const delta=messages(await pages(middle.cursor));
+      assert.ok(delta.some(m=>m.id==="race-slow"));
+      assert.ok(delta.some(m=>m.id==="race-fast"));
+    });
     await t.test("неполное покрытие каждой беседы выдаётся с пагинацией",async()=>{
       for(let i=0;i<80;i++)await api.append("owner-a",{request_id:rid(),dialogue:d("gap-"+i),messages:[msg("gap-u-"+i,"gap-t-"+i)]});
       const r=await pages();
