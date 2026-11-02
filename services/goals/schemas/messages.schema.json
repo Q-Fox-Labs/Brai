@@ -286,6 +286,13 @@
                 },
                 "deleted": {
                   "type": "boolean"
+                },
+                "parent_goal_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
                 }
               },
               "required": [],

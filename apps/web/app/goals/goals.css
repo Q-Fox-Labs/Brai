@@ -117,3 +117,12 @@
 .goals-frame-main .goals-results {margin-top:44px;}
 .goals-frame-side .goals-secondary {margin-top:32px;}
 @media(max-width:650px) {.goals-frame-main,.goals-frame-side {padding:24px 20px 64px;}.goals-frame-rail {padding:16px 12px 32px;}}
+
+.goals-tree {list-style:none;margin:0;padding:0;}
+.goals-tree-item {display:flex;align-items:flex-start;min-width:0;}
+.goals-tree-toggle,.goals-tree-spacer {width:28px;flex:none;}
+.goals-screen .goals-tree-toggle {min-width:28px;min-height:44px;padding:0;border:0;background:transparent;color:var(--muted-foreground);}
+.goals-tree-item .goals-row {flex:1;min-width:0;}
+.goals-tree-deleted {display:block;min-width:0;padding:12px 8px;color:var(--muted-foreground);overflow-wrap:anywhere;}
+.goals-tree-deleted small {display:block;}
+.goals-path {margin:0 0 20px;color:var(--muted-foreground);font-size:13px;line-height:1.5;overflow-wrap:anywhere;}

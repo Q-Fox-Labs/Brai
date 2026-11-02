@@ -30,7 +30,9 @@ test("MCP перечисляет инструменты, не принимает
     assert.equal(unauthorized.status,401);
     await client.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers:{Authorization:"Bearer " + cfg.token}}}),{timeout:1000});
     assert.match(client.getInstructions(),/только по явным словам пользователя/);
-    const tools = (await client.listTools()).tools.map(item => item.name);
+    const definitions = (await client.listTools()).tools;
+    const tools = definitions.map(item => item.name);
+    assert.ok(definitions.find(item => item.name === "goals_goal_put").inputSchema.properties.data.properties.parent_goal_id);
     for (const name of ["goals_overview","goals_goal_put","goals_resource_put","goals_focus_put","goals_history","goals_restore","goals_delete"]) assert.ok(tools.includes(name));
     const overview = await client.callTool({name:"goals_overview",arguments:{}});
     assert.deepEqual(overview.structuredContent,{focus:null});
@@ -54,6 +56,13 @@ test("MCP перечисляет инструменты, не принимает
     assert.equal(calls[3].args[0],"synthetic-owner");
     assert.deepEqual(calls[3].args[7],{deleted:true});
     assert.equal(calls[3].args[8],"delete");
+    const parentId = "00000000-0000-4000-8000-000000000003";
+    const linked = await client.callTool({name:"goals_goal_put",arguments:{id,request_id,expected_version:"1",source:"synthetic",data:{parent_goal_id:parentId}}});
+    assert.equal(linked.isError,undefined);
+    assert.deepEqual(calls[4].args[7],{parent_goal_id:parentId});
+    const invalid = await client.callTool({name:"goals_goal_put",arguments:{id,request_id,expected_version:"1",source:"synthetic",data:{parent_goal_id:"bad"}}});
+    assert.equal(invalid.isError,true);
+    assert.equal(calls.length,5);
   } finally {await proxy.close();await client.close();await server.close();await rm(directory,{recursive:true,force:true});}
 });
 

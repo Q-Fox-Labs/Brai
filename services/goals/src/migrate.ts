@@ -26,6 +26,11 @@ export async function migrate(pool: Pool, ownerRole: string, appRole: string): P
       await client.query(readFileSync(new URL("../migrations/001.sql", import.meta.url), "utf8"));
       await client.query("INSERT INTO goals.migrations(version) VALUES(1)");
     }
+    const hierarchyApplied = await client.query("SELECT 1 FROM goals.migrations WHERE version=2");
+    if (!hierarchyApplied.rowCount) {
+      await client.query(readFileSync(new URL("../migrations/002.sql", import.meta.url), "utf8"));
+      await client.query("INSERT INTO goals.migrations(version) VALUES(2)");
+    }
     await client.query(`REVOKE ALL ON DATABASE ${quote(identity.db)} FROM PUBLIC,${quote(appRole)}`);
     await client.query("REVOKE CREATE ON SCHEMA public FROM PUBLIC");
     await client.query(`REVOKE ALL ON SCHEMA goals FROM PUBLIC,${quote(appRole)}`);

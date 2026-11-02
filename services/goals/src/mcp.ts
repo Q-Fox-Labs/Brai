@@ -14,7 +14,7 @@ const entity = { type: "string", enum: ["goals", "focus", "entries", "resources"
 const str = { type: ["string", "null"] };
 const bool = { type: "boolean" };
 const shape: Record<string, Record<string, unknown>> = {
- goals_goal_put: {title:str,meaning:str,achievement:str,due_on:str,status:str,next_step:str,executor:str,archived:bool},
+ goals_goal_put: {parent_goal_id:{type:["string","null"],format:"uuid"},title:str,meaning:str,achievement:str,due_on:str,status:str,next_step:str,executor:str,archived:bool},
  goals_focus_put: {goal_id:str,reason:str},
  goals_entry_put: {goal_id:str,kind:str,content:str,occurred_on:str,pinned:bool},
  goals_resource_put: {title:str,purpose:str,kind:str,category:str,state:str,amount:str,unit:str,currency:str,expires_on:str},
