@@ -56,3 +56,30 @@ test("MCP перечисляет инструменты, не принимает
     assert.equal(calls[3].args[8],"delete");
   } finally {await proxy.close();await client.close();await server.close();await rm(directory,{recursive:true,force:true});}
 });
+
+
+test("proxy восстанавливает чтение после потери сессии и не повторяет изменение", async () => {
+  let changes=0, reads=0;
+  const domain={async overview() {reads++;return {focus:null};},async change() {changes++;return {version:"1"};}};
+  const cfg={host:"127.0.0.1",port:0,owner:"synthetic-owner",hosts:["initial"],origins:["http://initial"],token:"synthetic-only-token-0123456789abcdef"};
+  let server=await startMcp(domain,cfg);
+  const url=new URL(server.url);cfg.port=Number(url.port);cfg.hosts.push(url.host);cfg.origins.push(url.origin);
+  const directory=await mkdtemp(join(tmpdir(),"brai-goals-reconnect-"));
+  const tokenFile=join(directory,"token");await writeFile(tokenFile,cfg.token,{mode:0o600});
+  const proxy=new Client({name:"goals-reconnect-test",version:"1"});
+  const restart=async () => {await server.close();server=await startMcp(domain,cfg);};
+  try {
+    const proxyPath=fileURLToPath(new URL("../dist/stdio-proxy.js",import.meta.url));
+    await proxy.connect(new StdioClientTransport({command:process.execPath,args:[proxyPath],env:{PATH:process.env.PATH ?? "",GOALS_MCP_URL:url.href,GOALS_MCP_TOKEN_FILE:tokenFile}}),{timeout:5_000});
+    assert.deepEqual((await proxy.callTool({name:"goals_overview",arguments:{}})).structuredContent,{focus:null});
+    await restart();
+    const recovered=await Promise.all([1,2,3].map(() => proxy.callTool({name:"goals_overview",arguments:{}})));
+    for (const result of recovered) assert.deepEqual(result.structuredContent,{focus:null});
+    assert.equal(reads,4);
+    await restart();
+    const result=await proxy.callTool({name:"goals_goal_put",arguments:{id:"00000000-0000-4000-8000-000000000001",request_id:"00000000-0000-4000-8000-000000000002",expected_version:null,source:"synthetic",data:{title:"Synthetic",meaning:"Purpose",achievement:"Result",status:"discussing"}}});
+    assert.equal(result.isError,true);assert.match(result.content[0].text,/не повторялось/);assert.equal(changes,0);
+    assert.deepEqual((await proxy.callTool({name:"goals_overview",arguments:{}})).structuredContent,{focus:null});
+    assert.equal(reads,5);assert.equal(changes,0);
+  } finally {await proxy.close();await server.close();await rm(directory,{recursive:true,force:true});}
+});
