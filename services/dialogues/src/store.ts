@@ -99,7 +99,7 @@ export function createStore(pool:DB,key:string) {
     if(limit<1||limit>8192)fail("INVALID_ARGUMENT");
     const db=await pool.connect();
     try {
-      const row=(await db.query("SELECT id,dialogue_id,turn_id,role,kind,message_order,item_order,source,occurred_at,recorded_at,content_hash AS sha256,substring(text FROM $4 FOR $5) AS text,char_length(text) AS total_chars FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND id=$3",[owner,a.dialogue_id,a.message_id,offset+1,limit])).rows[0];
+      const row=(await db.query("SELECT id,dialogue_id,turn_id,role,kind,message_order,item_order,source,occurred_at,recorded_at,content_hash AS sha256,substring(text FROM $4::integer FOR $5::integer) AS text,char_length(text) AS total_chars FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND id=$3",[owner,a.dialogue_id,a.message_id,offset+1,limit])).rows[0];
       if(!row)fail("NOT_FOUND");
       if(offset>row.total_chars)fail("INVALID_OFFSET");
       return {...row,offset,next_offset:offset+Array.from(row.text).length<row.total_chars?offset+Array.from(row.text).length:null};

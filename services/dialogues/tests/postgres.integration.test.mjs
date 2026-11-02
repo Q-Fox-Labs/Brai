@@ -35,7 +35,7 @@ test("PostgreSQL: архив, запись, 50 пар, версии, курсо�
       assert.equal((await owner.query("SELECT count(*) AS n FROM information_schema.tables WHERE table_schema='dialogues'")).rows[0].n,"6");
       return;
     }
-    const legacy=readFileSync(new URL("../migrations/001.sql",import.meta.url),"utf8").replace(":'dialogues_app_role'","'dialogues_test_app'");
+    const legacy=readFileSync(new URL("../migrations/001.sql",import.meta.url),"utf8").replace(":'dialogues_app_role'","'dialogues_test_app'").replaceAll(':"dialogues_app_role"','"dialogues_test_app"');
     await owner.query(legacy);
     const legacyBefore=(await owner.query("SELECT table_name,column_name,data_type FROM information_schema.columns WHERE table_schema='dialogues' ORDER BY table_name,ordinal_position")).rows;
     await migrate(owner,"dialogues_test_owner","dialogues_test_app");
