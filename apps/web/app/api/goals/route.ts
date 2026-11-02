@@ -1,5 +1,5 @@
 // ABOUTME: Обслуживает запросы целей только для проверенной web-сессии.
-// ABOUTME: Мутации требуют Origin и не принимают владельца из браузера.
+// ABOUTME: Из браузера разрешает только чтение обзора и истории.
 import { checkOrigin, requireSession } from "@/server/auth";
 import { goalsRequest } from "@/server/goals";
 import { GatewayError } from "@/server/gateway";
@@ -16,7 +16,7 @@ export async function GET(request: Request) {
     return Response.json(await goalsRequest(session.user.id,"goals_overview",{}),{headers:{"Cache-Control":"no-store"}});
   } catch (error) {return failure(error);}
 }
-/** Передаёт разрешённую операцию после проверки Origin и сессии. */
+/** Читает историю после проверки Origin и сессии; изменения доступны только через MCP. */
 export async function POST(request: Request) {
   try {
     checkOrigin(request);
@@ -26,6 +26,7 @@ export async function POST(request: Request) {
     if (!data || typeof data !== "object" || Array.isArray(data)) throw new GatewayError(400,"INVALID_ARGUMENT","not-published");
     const record = data as Record<string,unknown>;
     if (Object.keys(record).some(key => !["operation","input"].includes(key)) || typeof record.operation !== "string" || !record.input || typeof record.input !== "object" || Array.isArray(record.input)) throw new GatewayError(400,"INVALID_ARGUMENT","not-published");
+    if (record.operation !== "goals_history") throw new GatewayError(403,"FORBIDDEN","not-published");
     return Response.json(await goalsRequest(session.user.id,record.operation,record.input),{headers:{"Cache-Control":"no-store"}});
   } catch (error) {return failure(error instanceof RequestBodyFailure ? new GatewayError(error.status,error.code,"not-published") : error);}
 }

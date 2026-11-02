@@ -24,7 +24,7 @@ NATS Service `service_goals` обслуживает `brai.goals.v1.request`: JSO
 
 MCP `brai-goals` предоставляет `goals_overview`, `goals_list`, `goals_get`, `goals_history`, `goals_restore`, `goals_delete`, `goals_goal_put`, `goals_focus_put`, `goals_entry_put`, `goals_resource_put`, `goals_need_put`, `goals_allocation_put`. Типы в запросах: `goals`, `focus`, `entries`, `resources`, `needs`, `allocations`. Обзор возвращает согласованный снимок, остатки, источники курсов и отдельные оценки своих средств, заёмных средств и обязательств.
 
-Основные ошибки: `INVALID_ARGUMENT`, `NOT_FOUND`, `CONFLICT`, `FORBIDDEN`, `INTERNAL`. Web использует `GET /api/goals` для обзора и `POST /api/goals` для известных операций. Мутация требует корректного Origin; владелец и актор устанавливаются сервером. Ответы не кешируются.
+Основные ошибки: `INVALID_ARGUMENT`, `NOT_FOUND`, `CONFLICT`, `FORBIDDEN`, `INTERNAL`. Web использует `GET /api/goals` для обзора и `POST /api/goals` только для чтения истории; другие операции через web недоступны. Оба маршрута требуют проверенную сессию, POST дополнительно проверяет Origin. Создание и изменение данных выполняются через MCP. Ответы web не кешируются.
 
 ## Курсы и ограничения
 
