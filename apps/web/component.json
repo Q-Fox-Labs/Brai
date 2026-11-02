@@ -284,6 +284,7 @@
       "apps/web/tests/do-model.test.ts",
       "apps/web/tests/game-core-board.test.ts",
       "apps/web/tests/game-core-presentation.test.ts",
+      "apps/web/tests/goals-readonly.test.ts",
       "apps/web/tests/history.test.ts",
       "apps/web/tests/hub.test.ts",
       "apps/web/tests/markdown.test.ts",
