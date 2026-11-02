@@ -1,5 +1,5 @@
 /* ABOUTME: Оформляет фокус, цели и встроенный реестр ресурсов в теме Brai. */
-/* ABOUTME: Сохраняет читаемость форм и таблицы на узком экране. */
+/* ABOUTME: Сохраняет читаемость целей, ресурсов и форм на узком экране. */
 .goals-screen { color:var(--foreground); background:var(--background); height:100%; overflow:auto; padding:clamp(24px,4vw,56px); }
 .goals-screen > * { max-width:1120px; margin-left:auto; margin-right:auto; }
 .goals-screen h1 { margin:0; font-size:clamp(30px,4vw,46px); line-height:1.1; letter-spacing:-.035em; }
@@ -66,4 +66,74 @@
  .goals-item > summary { font-size:17px; }
  .goals-detail { padding-left:0; }
  .goals-dialog { padding:22px 18px 100px; }
+}
+
+/* Рабочая иерархия целей: важное видно до открытия деталей. */
+.goals-screen { font-family:var(--font-app-sans); padding:40px clamp(24px,4vw,56px) 80px; }
+.goals-screen > * { max-width:1080px; }
+.goals-screen h1 { font-size:clamp(28px,3vw,36px); line-height:1.2; letter-spacing:0; font-weight:600; }
+.goals-screen h2 { font-size:19px; font-weight:600; }
+.goals-screen h3 { font-size:17px; font-weight:600; }
+.goals-screen p,.goals-screen dd { overflow-wrap:anywhere; }
+.goals-header { padding-bottom:0; }
+.goals-view-nav { gap:28px; margin-top:24px; }
+.goals-view-nav a { display:flex; align-items:center; min-height:44px; margin-bottom:-1px; border-bottom:2px solid transparent; text-decoration:none; opacity:.75; }
+.goals-view-nav a[aria-current=page] { border-color:var(--primary); font-weight:600; opacity:1; }
+.goals-screen button { min-height:44px; padding:8px 16px; background:var(--card); font:inherit; }
+.goals-screen .goals-primary,.goals-dialog form > .goals-actions button[type=submit] { background:var(--primary); color:var(--primary-foreground); border-color:var(--primary); font-weight:600; }
+.goals-screen .goals-primary:hover,.goals-dialog form > .goals-actions button[type=submit]:hover { background:var(--primary); filter:brightness(.92); }
+.goals-screen .goals-quiet { min-height:44px; padding:8px; text-underline-offset:4px; }
+.goals-screen select,.goals-screen input:not([type=checkbox]),.goals-screen textarea { min-height:44px; font:inherit; }
+.goals-focus { margin-top:32px; padding:28px 32px; background:var(--card); border:1px solid var(--border); border-radius:12px; }
+.goals-focus > h3 { max-width:32ch; margin:28px 0 8px; font-size:clamp(24px,3vw,32px); font-weight:500; overflow-wrap:anywhere; }
+.goals-focus-reason { margin:8px 0 0; }
+.goals-screen .goals-focus-step { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:24px; margin:24px 0 0; padding:20px; background:var(--secondary); border-left:3px solid var(--primary); border-radius:4px 8px 8px 4px; }
+.goals-focus-step dd { font-size:17px; line-height:1.45; font-weight:500; }
+.goals-columns { gap:32px; margin-top:40px; }
+.goals-columns section { min-width:0; }
+.goals-columns h2 { font-size:16px; }
+.goals-columns time { display:block; font-size:13px; }
+.goals-columns p { font-size:14px; }
+.goals-toolbar { margin-top:24px; margin-bottom:8px; }
+.goals-item > summary { gap:16px; padding:20px 4px; font-size:18px; font-weight:600; }
+.goals-item > summary::before { width:24px; color:var(--primary); text-align:center; }
+.goals-item-title { min-width:0; overflow-wrap:anywhere; }
+.goals-item-title small { display:block; margin-top:4px; }
+.goals-item-status { flex:none; text-align:right; }
+.goals-detail { padding-left:44px; }
+.goals-screen table { font-variant-numeric:tabular-nums; }
+.goals-resources { margin-top:48px; padding-top:24px; }
+.goals-resource { display:grid; grid-template-columns:minmax(0,1fr) minmax(160px,auto) auto; gap:24px; align-items:start; padding:20px 0; }
+.goals-resource-main,.goals-resource-values { min-width:0; overflow-wrap:anywhere; }
+.goals-resource-values { font-variant-numeric:tabular-nums; }
+.goals-resource p,.goals-history p { font-size:14px; line-height:1.5; }
+.goals-screen > .goals-dialog-layer { max-width:none; margin:0; }
+.goals-dialog { padding:32px; }
+.goals-dialog form { gap:20px; }
+.goals-field { gap:8px; font-weight:500; }
+.goals-field:has(input[type=checkbox]) { min-height:44px; }
+@media (max-width:860px) {
+ .goals-screen { padding:24px 20px 112px; }
+ .goals-header > .goals-primary { margin-bottom:16px; }
+ .goals-columns { gap:24px; margin-top:32px; }
+ .goals-focus { margin-top:24px; padding:20px; }
+ .goals-resource { grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px 20px; }
+ .goals-resource > .goals-actions { grid-column:1 / -1; }
+ .goals-detail { padding-left:0; }
+ .goals-dialog { padding:24px 20px 100px; }
+}
+@media (max-width:600px) {
+ .goals-screen .goals-focus-step { grid-template-columns:1fr; gap:16px; }
+ .goals-item > summary { flex-wrap:wrap; font-size:16px; }
+ .goals-item-title { flex-basis:calc(100% - 40px); }
+ .goals-item-status { margin-left:40px; }
+ .goals-screen table,.goals-screen tbody,.goals-screen tr,.goals-screen td { display:block; width:100%; min-width:0; }
+ .goals-screen thead { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); }
+ .goals-screen tr { padding:16px 0; border-bottom:1px solid var(--border); }
+ .goals-screen td { display:grid; grid-template-columns:minmax(100px,1fr) minmax(0,2fr); gap:12px; padding:4px 0; border:0; }
+ .goals-screen td:first-child,.goals-screen td:last-child { display:block; padding:8px 0; }
+ .goals-screen td:nth-child(2)::before { content:"Нужно"; }
+ .goals-screen td:nth-child(3)::before { content:"Выделено"; }
+ .goals-screen td:nth-child(4)::before { content:"Не хватает"; }
+ .goals-screen td::before { color:var(--muted-foreground); opacity:.8; }
 }
