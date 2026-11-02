@@ -104,3 +104,16 @@
 .goals-sr {position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;}
 @media(max-width:860px) {.goals-focus-layout {grid-template-columns:1fr;gap:28px;}.goals-date {grid-template-columns:100px minmax(0,1fr);}.goals-browser {gap:16px;grid-template-columns:minmax(240px,.9fr) minmax(0,1.1fr);}.goals-detail-panel {padding:20px;}}
 @media(max-width:650px) {.goals-screen {padding:24px 18px 110px;}.goals-header {align-items:flex-start;flex-direction:column;gap:16px;}.goals-view-nav {margin-left:-14px;}.goals-focus-layout {margin-top:24px;}.goals-mission {padding:22px;}.goals-next {grid-template-columns:1fr;gap:18px;}.goals-toolbar {align-items:stretch;flex-direction:column;}.goals-toolbar select {width:100%;}.goals-browser {display:block;}.goals-detail-panel {display:none;position:static;max-height:none;overflow:visible;}.goals-browser-detail .goals-list {display:none;}.goals-browser-detail .goals-detail-panel {display:block;}.goals-screen .goals-back {display:block;margin:-4px 0 20px;padding:6px 0;border:0;background:transparent;color:var(--primary);}.goals-entry summary {grid-template-columns:80px minmax(0,1fr);gap:10px;}.goals-entry > p {padding-left:0;}.goals-entry > button {margin-left:0;}.goals-dialog {padding:22px 18px 100px;}.goals-screen table,.goals-screen tbody,.goals-screen tr,.goals-screen td {display:block;width:100%;min-width:0;}.goals-screen thead {position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);}.goals-screen tr {padding:12px 0;border-bottom:1px solid var(--border);}.goals-screen td {display:grid;grid-template-columns:minmax(90px,1fr) minmax(0,2fr);gap:12px;padding:4px 0;border:0;}.goals-screen td:first-child,.goals-screen td:last-child {display:block;padding:8px 0;}.goals-screen td:nth-child(2)::before {content:'Нужно';}.goals-screen td:nth-child(3)::before {content:'Выделено';}.goals-screen td:nth-child(4)::before {content:'Не хватает';}}
+/* Содержимое целей занимает зоны общего каркаса без вложенных панелей. */
+.goals-frame-rail,.goals-frame-main,.goals-frame-side {height:auto;min-height:100%;overflow:visible;background:transparent;color:inherit;}
+.goals-frame-rail {padding:20px 12px 32px;}
+.goals-frame-main,.goals-frame-side {padding:36px 40px 80px;}
+.goals-frame-rail .goals-toolbar {display:grid;gap:12px;}
+.goals-frame-rail .goals-toolbar select {width:100%;min-width:0;}
+.goals-frame-rail .goals-list {margin-top:24px;}
+.goals-frame-rail .goals-row-date,.goals-frame-rail .goals-row-main > span {display:none;}
+.goals-frame-main .goals-mission,.goals-frame-main .goals-detail-panel {position:static;display:block;max-height:none;overflow:visible;padding:0;border:0;border-radius:0;background:transparent;}
+.goals-frame-main .goals-mission h2 {margin-top:24px;}
+.goals-frame-main .goals-results {margin-top:44px;}
+.goals-frame-side .goals-secondary {margin-top:32px;}
+@media(max-width:650px) {.goals-frame-main,.goals-frame-side {padding:24px 20px 64px;}.goals-frame-rail {padding:16px 12px 32px;}}

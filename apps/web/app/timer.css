@@ -74,3 +74,5 @@
 
 /* Source ScrollArea in desktop and mobile owns content scrolling. */
 .timer-mobile-context-sheet .timer-goals { height: auto; overflow: visible; }
+.workspace-frame-center .timer-shell { padding:0; }
+.workspace-frame-right .timer-history-content,.workspace-frame-right .timer-goals { padding:20px; }

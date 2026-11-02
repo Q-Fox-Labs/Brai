@@ -3,6 +3,7 @@
 // ABOUTME: Не отправляет сообщения, решения или команды агенту.
 import { useCallback, useEffect, useRef, useState } from "react";
 import Markdown from "./markdown";
+import WorkspaceFrame from "../shell/workspace-frame";
 import { emptyTelegramMessage, telegramText, updateTelegramMessage } from "./telegram-display";
 import "./telegram-observer.css";
 
@@ -49,24 +50,23 @@ function TelegramAttachment({ message, item }: { message: Message; item: Attachm
 }
 
 /** Сохраняет прежнюю плашку там, где журнал наблюдения ещё не включён. */
-export default function TelegramAgentEntry({ username, active = true, enabled = false }: { username: string | null; active?: boolean; enabled?: boolean }) {
-  if (!enabled) return <main className="mx-auto flex h-full w-full max-w-3xl items-center justify-center p-6 sm:p-10">
+export default function TelegramAgentEntry({ username, active = true, enabled = false, userId }: { username: string | null; active?: boolean; enabled?: boolean; userId: string }) {
+  if (!enabled) return <WorkspaceFrame section="agent" userId={userId} title="Агент"><main className="mx-auto flex h-full w-full max-w-3xl items-center justify-center p-6 sm:p-10">
     <section className="w-full rounded-2xl border bg-card p-8 text-card-foreground shadow-sm sm:p-10">
       <p className="text-sm font-medium text-muted-foreground">Brai Agent</p>
       <h1 className="mt-2 text-2xl font-semibold tracking-tight">Продолжайте в Telegram</h1>
       <p className="mt-3 max-w-xl text-sm leading-6 text-muted-foreground">Откройте рабочий чат Brai в Telegram и отправьте сообщение боту{username ? ` @${username}` : ""}. Hermes продолжит разговор в этом чате.</p>
     </section>
-  </main>;
-  return <TelegramObserver username={username} active={active} />;
+  </main></WorkspaceFrame>;
+  return <TelegramObserver userId={userId} username={username} active={active} />;
 }
 
 /** Показывает список бесед и актуальную переписку без возможности отправки. */
-function TelegramObserver({ username, active }: { username: string | null; active: boolean }) {
+function TelegramObserver({ username, active, userId }: { username: string | null; active: boolean; userId: string }) {
   const [chats, setChats] = useState<Chat[]>([]), [selected, setSelected] = useState<Chat | null>(null);
   const [messages, setMessages] = useState<Message[]>([]), [before, setBefore] = useState<number | null>(null);
   const [connection, setConnection] = useState<"loading" | "live" | "reconnecting">("loading");
   const [error, setError] = useState(""), [loading, setLoading] = useState(false), [newCount, setNewCount] = useState(0);
-  const [showList, setShowList] = useState(true);
   const selectedRef = useRef<Chat | null>(null), scroll = useRef<HTMLDivElement>(null), nearBottom = useRef(true);
   const started = useRef(0), eventSource = useRef<EventSource | null>(null);
 
@@ -157,22 +157,21 @@ function TelegramObserver({ username, active }: { username: string | null; activ
     } catch { setError("Не удалось загрузить более ранние сообщения."); }
     finally { setLoading(false); }
   };
-  const select = (chat: Chat) => { setSelected(chat); setShowList(false); };
+  const select = (chat: Chat) => { setSelected(chat); };
   const sections = [{ label: "Личные чаты", chats: chats.filter(chat => !chat.chat_id.startsWith("-")) },
     { label: "Группы и темы", chats: chats.filter(chat => chat.chat_id.startsWith("-")) }];
-  return <main className="tg-observer" aria-label="Telegram-чаты Brai">
-    <aside className="tg-sidebar" data-visible={showList} aria-label="Список чатов">
+  return <WorkspaceFrame section="agent" userId={userId} title={selected ? chatName(selected) : "Агент"} railTitle="Telegram" rail={<aside className="tg-sidebar" aria-label="Список чатов">
       <header className="tg-sidebar-head"><div><span className="tg-eyebrow">Brai Agent</span><h1>Telegram</h1></div><span className="tg-live" data-state={connection}><i />{connection === "live" ? "В эфире" : connection === "loading" ? "Подключение" : "Нет связи"}</span></header>
       <p className="tg-subtitle">Переписки с агентом · только просмотр</p>
       <div className="tg-chat-list">{sections.map(section => section.chats.length > 0 && <section key={section.label}>
-        <h2>{section.label}</h2>{section.chats.map(chat => <button type="button" className="tg-chat" data-selected={selected && keyOf(chat) === keyOf(selected)} key={keyOf(chat)} onClick={() => select(chat)}>
+        <h2>{section.label}</h2>{section.chats.map(chat => <button type="button" data-frame-close-rail className="tg-chat" data-selected={selected && keyOf(chat) === keyOf(selected)} key={keyOf(chat)} onClick={() => select(chat)}>
           <span className="tg-avatar" aria-hidden="true">{chatName(chat).slice(0, 1).toUpperCase()}</span>
           <span className="tg-chat-copy"><strong>{chatName(chat)}{chat.thread_id ? ` · тема ${chat.thread_id}` : ""}</strong><span>{chat.last_text || "Сообщение"}</span></span>
         </button>)}</section>)}{!chats.length && !error && <p className="tg-empty-list">Чаты появятся здесь после первого сообщения.</p>}</div>
       {username && <footer className="tg-sidebar-foot">Бот @{username}</footer>}
-    </aside>
-    <section className="tg-main" data-list-visible={showList} aria-label="Переписка">
-      <header className="tg-header"><button type="button" className="tg-back" onClick={() => setShowList(true)} aria-label="Показать список чатов">←</button>
+    </aside>}>
+    <section className="tg-main" aria-label="Переписка">
+      <header className="tg-header">
         <div><strong>{selected ? chatName(selected) : "Переписка"}</strong><span>{selected?.thread_id ? `Тема ${selected.thread_id} · ` : ""}Только просмотр</span></div>
       </header>
       {error && <p className="tg-error" role="status">{error}</p>}
@@ -195,5 +194,5 @@ function TelegramObserver({ username, active }: { username: string | null; activ
       </div>
       {newCount > 0 && <button type="button" className="tg-new" onClick={() => { nearBottom.current = true; setNewCount(0); if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }}>Новые сообщения: {newCount} ↓</button>}
     </section>
-  </main>;
+  </WorkspaceFrame>;
 }

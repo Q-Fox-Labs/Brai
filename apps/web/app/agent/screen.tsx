@@ -1,6 +1,7 @@
 "use client";
 // ABOUTME: Собирает Agent workspace на shared controls и текущем native клиенте.
 // ABOUTME: История, команды, черновики и исполнение остаются у прежних владельцев.
+import WorkspaceFrame from "../shell/workspace-frame";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DisplayItem, NativeSnapshot, ModelCatalog, PermissionMode, ThreadMetadata, AgentMode } from "@brai/agent/contracts";
 import type { AgentLimits } from "@brai/agent/contracts";
@@ -61,7 +62,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
   const conversation = useRef<HTMLDivElement>(null), followBottom = useRef(true);
   const scrollAnchor = useRef<{ height: number; top: number } | null>(null);
   const [historyGeneration, setHistoryGeneration] = useState(""), [history, setHistory] = useState<DisplayItem[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null), [sidebarOpen, setSidebarOpen] = useState(false);
+  const [cursor, setCursor] = useState<string | null>(null);
   const [composer, setComposer] = useState<ComposerDraft>(emptyDraft), [message, setMessage] = useState(""), [busy, setBusy] = useState(false), [uploading, setUploading] = useState(false);
   const [archiveError, setArchiveError] = useState("");
   const [corrections, setCorrections] = useState<PendingCorrection[]>([]);
@@ -209,7 +210,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
 
   function selectChat(id: string, chatId = "") {
     setArchiveError("");
-    if (id === projectId && chatId === threadId) { setSidebarOpen(false); return; }
+    if (id === projectId && chatId === threadId) { return; }
     ++selection.current;
     attachmentUpload.current?.abort(); attachmentUpload.current = null;
     cancelPreparation();
@@ -235,7 +236,7 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     // AIDEV-NOTE: Новый чат имеет один черновик на аккаунт, независимо от выбранного проекта.
     changeDraft(chatId ? saved?.draft ?? emptyDraft() : newDraft.current, false, false); setModel(saved?.model ?? ""); setEffort(saved?.effort ?? ""); setPermissionMode(saved?.permissionMode ?? "auto"); setAgentMode(saved?.agentMode ?? "default"); setMaterialView(saved?.materials ?? emptyMaterialView()); setConnected(!!live);
     followBottom.current = true; scrollAnchor.current = null;
-    setProjectId(id); setThreadId(chatId); setMessage(""); setSidebarOpen(false);
+    setProjectId(id); setThreadId(chatId); setMessage("");
   }
 
   const selectChatRef = useRef(selectChat);
@@ -876,14 +877,12 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
     requestAnimationFrame(() => composerInput.current?.focus());
   }
 
-  return <main className="agent-shell bg-background text-foreground">
-    <Sidebar key={userId} readMessages={readMessages} projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={sidebarOpen} email={email} busy={busy || uncertain.current} accountLimits={accountLimits}
+  return <WorkspaceFrame section="agent" userId={userId} title={title || "Агент"} railTitle="Проекты" rail={<Sidebar key={userId} readMessages={readMessages} projects={projects} pages={pages} projectId={projectId} threadId={threadId} open={true} email={email} busy={busy || uncertain.current} accountLimits={accountLimits}
       select={selectChat} create={id => { selectChat(id); requestAnimationFrame(() => composerInput.current?.focus()); }} more={id => { const next = pages[id]?.nextCursor; if (next) void loadThreads(id, next); }}
-      archive={(id, chatId) => { void archiveChat(id, chatId); }} refresh={id => { void loadThreads(id); }} close={() => setSidebarOpen(false)} logout={onLogout} />
+      archive={(id, chatId) => { void archiveChat(id, chatId); }} refresh={id => { void loadThreads(id); }} close={() => {}} logout={onLogout} />} tabs={materials.length ? [{id:"materials",label:"Материалы",content:materialView.open && visible ? <Materials focus={materialView.focus} materials={materials} selected={materialView.selected} choose={chooseMaterial} close={() => setMaterialView(previous => ({ ...previous, open: false }))} disabled={disabled || !catalogFresh || awaitingTurn.some(value => value.chat === currentChat.current)} active={!!active || goalUnfinished} connected={connected} execute={item => { void executePlan(item); }} revise={revisePlan} goal={action => { if (action === "stop") queueController.current?.pause(); void mutate(action === "stop" ? "goalClear" : "goalSet", action === "stop" ? {} : { status: action === "pause" ? "paused" : "active" }); }} /> : null}] : []} openRightSignal={materialView.open ? materialView.selected || "open" : null} onRightOpen={() => setMaterialView(previous => ({ ...previous, open: true }))} onRightClose={() => setMaterialView(previous => ({ ...previous, open: false }))}>
     <section className="agent-workspace" aria-labelledby="agent-chat-title">
       {readError && <p role="status" className="agent-read-error">{readError}</p>}
       <header className="agent-toolbar border-b border-border bg-background">
-        <Button type="button" variant="ghost" className="agent-mobile-toggle" aria-controls="agent-sidebar" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(value => !value)}>☰ <span>Чаты</span></Button>
         <div className="agent-heading"><p>{project?.name ?? "Агент"}</p><h1 id="agent-chat-title" title={title}>{title}</h1></div>
         {materials.length > 0 && <Button type="button" variant={materialView.open ? "secondary" : "outline"} size="sm" className="agent-materials-toggle" aria-expanded={materialView.open} onClick={() => chooseMaterial(materialView.selected || materials.at(-1)!.id)}>Материалы{materialView.updated.length > 0 ? " · обновлено" : ""}</Button>}
         <Badge variant="outline" className="agent-chat-status" role="status">{view && connected ? view.goal?.state === "ready" && view.goal.value?.status === "active" ? "Достигает цели" : stateLabels[view.state] ?? "Состояние обновляется" : view ? "Переподключение…" : threadId ? "Подключаемся…" : creating ? "Новый чат" : "Готов к выбору"}</Badge>
@@ -948,8 +947,8 @@ export default function AgentScreen({ active: visible, userId, email, onLogout, 
         </form></Card>}
       </footer>}
     </section>
-    {materialView.open && <Materials focus={materialView.focus} materials={materials} selected={materialView.selected} choose={chooseMaterial} close={() => setMaterialView(previous => ({ ...previous, open: false }))} disabled={disabled || !catalogFresh || awaitingTurn.some(value => value.chat === currentChat.current)} active={!!active || goalUnfinished} connected={connected} execute={item => { void executePlan(item); }} revise={revisePlan} goal={action => { if (action === "stop") queueController.current?.pause(); void mutate(action === "stop" ? "goalClear" : "goalSet", action === "stop" ? {} : { status: action === "pause" ? "paused" : "active" }); }} />}
-  </main>;
+
+  </WorkspaceFrame>;
 }
 
 /** Сообщения используют безопасный Markdown; тела действий принадлежат отдельному ленивому списку. */

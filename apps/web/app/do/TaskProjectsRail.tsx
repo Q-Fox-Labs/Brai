@@ -61,7 +61,7 @@ export default function TaskProjectsRail({
     <div className="grid gap-0.5">
       <div className="flex min-h-9 items-center px-2.5">
         <Button
-          className="mr-1 size-8 shrink-0 p-0 text-brai-muted hover:bg-brai-surface-soft hover:text-brai-ink [&_svg]:size-[18px] [&_svg]:fill-none [&_svg]:stroke-current [&_svg]:stroke-[1.7] [&_svg]:[stroke-linecap:round] [&_svg]:[stroke-linejoin:round]"
+          className="do-projects-close mr-1 size-8 shrink-0 p-0 text-brai-muted hover:bg-brai-surface-soft hover:text-brai-ink [&_svg]:size-[18px] [&_svg]:fill-none [&_svg]:stroke-current [&_svg]:stroke-[1.7] [&_svg]:[stroke-linecap:round] [&_svg]:[stroke-linejoin:round]"
           variant="ghost"
           size="icon-sm"
           type="button"
@@ -125,6 +125,7 @@ export default function TaskProjectsRail({
       <button
         className={itemClassName}
         type="button"
+        data-frame-close-rail
         aria-current={selectedProjectFilter === "all" ? "page" : undefined}
         aria-pressed={selectedProjectFilter === "all"}
         onClick={() => {
@@ -138,6 +139,7 @@ export default function TaskProjectsRail({
       <button
         className={`${itemClassName} ${noProjectTarget ? "bg-brai-accent/15 shadow-[inset_0_0_0_2px_var(--do-accent)]" : ""}`}
         type="button"
+        data-frame-close-rail
         aria-current={selectedProjectFilter === "none" ? "page" : undefined}
         aria-pressed={selectedProjectFilter === "none"}
         onClick={() => {
@@ -209,7 +211,8 @@ export default function TaskProjectsRail({
             <button
               className={`${itemClassName} cursor-grab ${isTaskTarget ? "bg-brai-accent/15 shadow-[inset_0_0_0_2px_var(--accent)]" : ""}`}
               type="button"
-              aria-current={selectedProjectFilter === project.id ? "page" : undefined}
+              data-frame-close-rail
+        aria-current={selectedProjectFilter === project.id ? "page" : undefined}
               aria-pressed={selectedProjectFilter === project.id}
               onClick={() => {
                 setSelectedProjectFilter(project.id);

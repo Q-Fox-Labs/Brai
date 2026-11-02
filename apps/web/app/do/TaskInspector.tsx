@@ -1,6 +1,8 @@
 // ABOUTME: Восстанавливает исходный компонент TaskInspector.tsx из Brai September.
 // ABOUTME: Использует локальный TasksContext; серверные операции задач отсутствуют.
 import { useState } from "react";
+import { createPortal } from "react-dom";
+import { useWorkspaceRightHeader } from "../shell/workspace-frame";
 import { formatShortDateTime } from "./format";
 import { isContainer, isCountedStatus, taskKind } from "./model";
 import TaskAgentButton from "./TaskAgentButton";
@@ -78,6 +80,7 @@ function TaskConnections({
 
 /** Сохраняет разметку и взаимодействия исходного компонента September на локальных данных. */
 export default function TaskInspector() {
+  const rightHeader = useWorkspaceRightHeader();
   const [activeTab, setActiveTab] = useState<InspectorTab>("details");
   const [commentCount, setCommentCount] = useState(0);
   const {
@@ -141,7 +144,7 @@ export default function TaskInspector() {
   return (
     <Card
       render={<section aria-labelledby="selected-task-heading" aria-live="polite" />}
-      className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border-brai-line bg-brai-card shadow-sm max-[861px]:rounded-b-none max-[861px]:rounded-t-2xl"
+      className="flex h-full min-h-0 flex-col overflow-hidden rounded-none border-0 bg-transparent shadow-none"
     >
       <header className={`shrink-0 border-b border-brai-line px-4 py-3 transition-colors ${isCompleted ? "do-completed-header" : ""}`} data-task-completed-header={isCompleted || undefined}>
         <div className="flex items-start justify-between gap-4">
@@ -242,7 +245,7 @@ export default function TaskInspector() {
         </div>
       </header>
 
-      <nav className="shrink-0 border-b border-brai-line px-4" aria-label="Разделы элемента">
+      {rightHeader && createPortal(<nav className="shrink-0 border-b border-brai-line px-4" aria-label="Разделы элемента">
         <div className="flex min-w-0 gap-4 overflow-x-auto" role="tablist" aria-label="Разделы элемента">
           {inspectorTabs.map((tab, index) => {
             const isActive = activeTab === tab.id;
@@ -287,7 +290,7 @@ export default function TaskInspector() {
             );
           })}
         </div>
-      </nav>
+      </nav>, rightHeader)}
 
       <div
         className="grid min-h-0 flex-1 content-start gap-3 overscroll-contain overflow-y-auto px-4 py-3"
