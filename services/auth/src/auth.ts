@@ -10,7 +10,7 @@ import { otpEmail } from "./email.js";
 /** Собирает auth; callback ожидает принятия письма Resend и не журналирует данные. */
 export function createAuth(cfg:Config,pool:Pool,send?:(email:string,otp:string)=>Promise<void>) {
 
- return betterAuth({database:pool,baseURL:cfg.origin,basePath:"/api/auth",secret:cfg.secret,trustedOrigins:[cfg.origin],
+ return betterAuth({database:pool,baseURL:cfg.origin,basePath:"/api/auth",secret:cfg.secret,trustedOrigins:cfg.trustedOrigins,
   session:{expiresIn:15_552_000,disableSessionRefresh:true,cookieCache:{enabled:false}},
   rateLimit:{enabled:true,storage:"database",customRules:{"/get-session":false}},
   advanced:{useSecureCookies:cfg.origin.startsWith("https://"),defaultCookieAttributes:{httpOnly:true,sameSite:"lax"}},

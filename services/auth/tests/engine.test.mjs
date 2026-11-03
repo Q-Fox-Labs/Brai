@@ -8,7 +8,7 @@ import {memoryAdapter} from 'better-auth/adapters/memory';
 import {createAuth} from '../dist/auth.js';
 import {bridge} from '../dist/bridge.js';
 
-const cfg={origin:'https://test.example',secret:'fixture-secret-32-chars-long-enough',resendKey:'',emailFrom:'fixture@example.com'};
+const cfg={origin:'https://test.example',trustedOrigins:['https://test.example','https://preview.example'],secret:'fixture-secret-32-chars-long-enough',resendKey:'',emailFrom:'fixture@example.com'};
 function check(condition,label){assert.equal(Boolean(condition),true,label);}
 function fixture(ip){
  let code='';const pool=new Pool();const configured=createAuth(cfg,pool,async(_,otp)=>{code=otp});
@@ -54,4 +54,15 @@ test('official engine rejects wrong-origin sign-out and honors revocation and ex
  const expiredCookie=await f.signIn('b@example.com');
  f.db.session.find(s=>s.userId===f.db.user.find(u=>u.email==='b@example.com').id).expiresAt=new Date(Date.now()-1000);
  const expired=await f.call('session',{},expiredCookie);check(expired.status===200&&expired.body===null,'expired session is absent');
+});
+
+test('second trusted origin can complete OTP sign-in while an untrusted origin is rejected',async(t)=>{
+ const f=fixture('192.0.2.12');t.after(f.close);
+ const email='preview@example.com';
+ check((await f.call('send-code',{email},'','https://attacker.example')).status===403,'untrusted origin rejected');
+ check((await f.call('send-code',{email},'','https://preview.example')).status===200,'preview OTP sent');
+ const signed=await f.call('verify-code',{email,otp:f.getCode()},'','https://preview.example');
+ check(signed.status===200,'preview sign-in accepted');
+ const cookie=signed.setCookies.map(c=>c.split(';')[0]).join('; ');
+ check((await f.call('session',{},cookie,'https://preview.example')).body?.user?.email===email,'preview session valid');
 });

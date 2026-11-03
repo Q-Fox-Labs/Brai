@@ -2,6 +2,7 @@
 // ABOUTME: Секреты используются только в серверном процессе; HTTP 202 требует PubAck.
 import { connect, AckPolicy, DeliverPolicy, ReplayPolicy, nanos, type NatsConnection, type Consumer } from "nats";
 import { valid } from "./contracts";
+import { eventsConsumerName } from "./preview.ts";
 import type { Snapshot, History, CommandResult, Statistics, TimerEvent } from "../lib/types";
 /** Ошибка границы HTTP; unknown означает возможное сохранение команды. */
 export class GatewayError extends Error {
@@ -67,13 +68,14 @@ export async function publish(type: "start" | "stop" | "edit" | "delete", body: 
   throw new GatewayError(api ? 503 : 502, api ? "PUBLISH_REJECTED" : "PUBLISH_UNKNOWN", api ? "not-published" : "unknown");
  }
 }
-/** Создаёт только разрешённый web_events durable с ограниченным числом unacked событий. */
+/** Создаёт durable с ограниченным числом unacked событий. */
 export async function eventConsumer(nc: NatsConnection): Promise<Consumer> {
+ const name = eventsConsumerName();
  const manager = await nc.jetstreamManager();
- await manager.consumers.add("BRAI_TIMER_EVENTS_V2", { durable_name: "web_events", filter_subject: "brai.timer.v2.event.*",
+ await manager.consumers.add("BRAI_TIMER_EVENTS_V2", { durable_name: name, filter_subject: "brai.timer.v2.event.*",
   ack_policy: AckPolicy.Explicit, ack_wait: nanos(30000), max_ack_pending: 64, max_deliver: -1,
   deliver_policy: DeliverPolicy.All, replay_policy: ReplayPolicy.Instant });
- return nc.jetstream().consumers.get("BRAI_TIMER_EVENTS_V2", "web_events");
+ return nc.jetstream().consumers.get("BRAI_TIMER_EVENTS_V2", name);
 }
 /** Валидирует одно событие по варианту owner schema. */
 export function parseEvent(data: Uint8Array): TimerEvent {

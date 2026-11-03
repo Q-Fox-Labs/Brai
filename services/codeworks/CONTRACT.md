@@ -31,6 +31,8 @@ Codeworks не распознаёт текст сообщений и не про
 
 ## API v2
 
+Необязательная политика проекта `web_preview` включает автоматическую публикацию веба рабочих веток в двух слотах до слияния. Операции `sync` и `release` сохраняют прежний смысл; успешный `sync` сам по себе не означает готовность сайта. Результат `status` для выбранной области дополнительно содержит безопасный `preview`. Условия публикации, аренды и сверки определены в [PREVIEW.md](PREVIEW.md), формат — в owner JSON Schema; операторский адаптер использует [OpenRPC](preview.openrpc.json).
+
 NATS Services: `service_codeworks`, queue `service_codeworks`,
 subjects `brai.codeworks.v2.<executor>.<method>`.
 Executor задают broker ACL; он не идентифицирует writer и не ограничивает инструменты агента.

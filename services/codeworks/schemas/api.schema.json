@@ -194,7 +194,28 @@
           "uniqueItems": true,
           "maxItems": 128
         },
-        "code_index_policy": {
+      "web_preview": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "ttl_seconds": { "type": "integer", "minimum": 60, "maximum": 604800, "default": 172800 },
+          "slots": {
+            "type": "array", "minItems": 2, "maxItems": 2,
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
+                "url": { "type": "string", "minLength": 9, "maxLength": 2048, "pattern": "^https://[^\\s/]+$" }
+              },
+              "required": ["id", "url"], "additionalProperties": false
+            }
+          }
+        },
+        "required": ["enabled"], "additionalProperties": false,
+        "if": { "properties": { "enabled": { "const": true } } },
+        "then": { "required": ["slots"] }
+      },
+      "code_index_policy": {
           "type": "object",
           "properties": {
             "enabled": {
@@ -681,10 +702,28 @@
       ],
       "additionalProperties": false
     },
-    "statusResponse": {
+  "webPreviewStatus": {
+    "type": "object",
+    "properties": {
+      "state": { "enum": ["waiting_ci", "queued", "publishing", "ready", "failed", "expired", "unsupported", "removing"] },
+      "desired_sha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+      "deployed_sha": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+      "url": { "type": ["string", "null"], "pattern": "^https://[^\\s/]+$" },
+      "queue_position": { "type": ["integer", "null"], "minimum": 1 },
+      "published_at": { "type": ["string", "null"] },
+      "expires_at": { "type": ["string", "null"] },
+      "backend_changed": { "type": "boolean" },
+      "shared_backend": { "const": true },
+      "error": { "type": ["string", "null"], "pattern": "^[A-Z][A-Z0-9_]{0,95}$" }
+    },
+    "required": ["state", "desired_sha", "deployed_sha", "url", "queue_position", "published_at", "expires_at", "backend_changed", "shared_backend", "error"],
+    "additionalProperties": false
+  },
+  "statusResponse": {
       "type": "object",
       "properties": {
-        "workspace": {
+      "preview": { "anyOf": [{ "$ref": "#/definitions/webPreviewStatus" }, { "type": "null" }] },
+      "workspace": {
           "$ref": "#/definitions/workspace"
         },
         "operation": {

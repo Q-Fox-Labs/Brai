@@ -31,6 +31,7 @@
     ],
     "checks": [
       "services/auth/tests/bridge.test.mjs",
+      "services/auth/tests/config.test.mjs",
       "services/auth/tests/engine.test.mjs",
       "services/auth/tests/integration/auth.test.mjs",
       "services/auth/tests/integration/compose.yml",

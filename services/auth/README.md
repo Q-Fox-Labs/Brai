@@ -23,7 +23,7 @@
 
 ## Запуск и обновление
 
-Входы: AUTH_DATABASE_URL, AUTH_SECRET (не менее 32 символов), AUTH_ORIGIN (публичный origin без path), AUTH_EMAIL_FROM, RESEND_API_KEY; NATS_SERVERS (через запятую) либо NATS_URL, NATS_USER/NATS_PASSWORD либо NATS_CREDS_FILE, при TLS NATS_CA_FILE. Нет встроенных адресов экземпляра.
+Входы: AUTH_DATABASE_URL, AUTH_SECRET (не менее 32 символов), AUTH_ORIGIN (публичный origin без path), AUTH_EMAIL_FROM, RESEND_API_KEY; NATS_SERVERS (через запятую) либо NATS_URL, NATS_USER/NATS_PASSWORD либо NATS_CREDS_FILE, при TLS NATS_CA_FILE. AUTH_TRUSTED_ORIGINS необязателен и добавляет доверенные origin через запятую к AUTH_ORIGIN. Каждый адрес должен быть полным http/https origin без пути, учётных данных и wildcard. Origin и CSRF по-прежнему проверяет Better Auth. Нет встроенных адресов экземпляра.
 
 БД и роли создаёт администратор. `npm run migrate --workspace=@brai/auth` использует owner URL и штатный `getMigrations(auth.options)`; AUTH_OWNER_ROLE обязан совпасть с владельцем БД и current_user; отдельная непривилегированная AUTH_APP_ROLE без членства в других ролях получает DML-права только в собственной БД. Runtime получает app URL без DDL-прав. Миграция запускается отдельно; старт не меняет схему. При обновлении официального пакета закрепить версию, пересоздать план миграций и повторить проверки на изолированном стенде, затем применить миграцию. Патчи и форк запрещены.
 
