@@ -27,7 +27,8 @@
       "services/auth/src/main.ts",
       "services/auth/src/migrate.ts",
       "services/auth/src/nats.ts",
-      "services/auth/src/schema.ts"
+      "services/auth/src/schema.ts",
+      "services/auth/src/sso.ts"
     ],
     "checks": [
       "services/auth/tests/bridge.test.mjs",
@@ -36,7 +37,9 @@
       "services/auth/tests/integration/auth.test.mjs",
       "services/auth/tests/integration/compose.yml",
       "services/auth/tests/integration/init.sql",
-      "services/auth/tests/integration/migration.test.mjs"
+      "services/auth/tests/integration/migration.test.mjs",
+      "services/auth/tests/integration/sso.test.mjs",
+      "services/auth/tests/sso.test.mjs"
     ]
   },
   "dependencies": [],
