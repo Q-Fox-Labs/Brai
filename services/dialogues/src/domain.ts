@@ -2,7 +2,7 @@
 // ABOUTME: Не обращается к PostgreSQL, сети, моделям или другим сервисам.
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
-export const limits = { messageBytes:1_048_576, requestBytes:2_097_152, responseBytes:65_024, summaryBytes:8_192, metadataBytes:8_192 };
+export const limits = { messageBytes:1_048_576, requestBytes:2_097_152, responseBytes:65_024, metadataBytes:8_192 };
 export class DialoguesFault extends Error {
   constructor(public code:string) {super(code);}
 }
@@ -28,6 +28,11 @@ export function id(value:unknown):string {
 }
 export function text(value:unknown, maximum:number, empty=false):string {
   if(typeof value!=="string" || (!empty&&!value.trim()) || bytes(value)>maximum || value.includes("\u0000"))fail("INVALID_ARGUMENT");
+  return value;
+}
+/** Саммари не имеет собственного лимита размера; транспорт ограничен отдельно. */
+export function summaryText(value:unknown):string {
+  if(typeof value!=="string"||!value.trim()||value.includes("\u0000"))fail("INVALID_ARGUMENT");
   return value;
 }
 export function integer(value:unknown, defaultValue?:number):number {
@@ -66,7 +71,7 @@ export function appendInput(raw:unknown):Append {
     if(m.turn_status!==undefined&&!["in_progress","completed","interrupted","failed"].includes(m.turn_status))fail("INVALID_ARGUMENT");
     const source=m.source??{kind:"agent"};
     if(!source||typeof source!=="object"||Array.isArray(source)||bytes(source)>limits.metadataBytes)fail("INVALID_ARGUMENT");
-    if(m.summary!==undefined)text(m.summary,limits.summaryBytes);
+    if(m.summary!==undefined)summaryText(m.summary);
     return {...m,occurred_at:timestamp(m.occurred_at),source} as MessageInput;
   });
   return {request_id:arg.request_id,dialogue:dialogue as Append["dialogue"],messages};
@@ -75,7 +80,7 @@ export type SummaryInput={request_id:string;dialogue_id:string;target:"message"|
 /** Саммари имеет явный источник и optimistic version, включая первоначальную запись. */
 export function summaryInput(raw:unknown):SummaryInput {
   const a=object(raw,["request_id","dialogue_id","target","message_id","through_message_id","expected_version","text"]);
-  id(a.request_id);id(a.dialogue_id);text(a.text,limits.summaryBytes);
+  id(a.request_id);id(a.dialogue_id);summaryText(a.text);
   if(!["message","dialogue"].includes(a.target))fail("INVALID_ARGUMENT");
   if(a.expected_version!==null && (typeof a.expected_version!=="string"||!/^[1-9]\d*$/.test(a.expected_version)))fail("INVALID_ARGUMENT");
   if(a.target==="message"){id(a.message_id);if(a.through_message_id!==undefined)fail("INVALID_ARGUMENT");}

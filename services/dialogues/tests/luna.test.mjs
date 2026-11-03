@@ -28,7 +28,7 @@ async function fixture(mode='completed'){
    turnStarts++;
    if(mode==='reject'&&turnStarts===1){reject();return;}
    const id='turn-'+turnStarts;
-   const items=[{id:'native-user-item',clientId:p.params.clientUserMessageId,type:'userMessage',content:[{type:'text',text:'synthetic'}]},{id:'answer',type:'agentMessage',phase:'final_answer',text:mode==='oversize-always'||mode.startsWith('oversize')&&turnStarts===1?'ф'.repeat(5000):'Бюджет 37 рублей, поручение не завершено.'}];
+   const items=[{id:'native-user-item',clientId:p.params.clientUserMessageId,type:'userMessage',content:[{type:'text',text:'synthetic'}]},{id:'answer',type:'agentMessage',phase:'final_answer',text:(()=>{const answer=mode==='huge'?'Ж😀'.repeat(40000):mode==='oversize-chars'&&p.params.outputSchema?'A'.repeat(3501):mode==='oversize-always'||mode.startsWith('oversize')&&turnStarts===1?'ф'.repeat(5000):'Бюджет 37 рублей, поручение не завершено.';return p.params.outputSchema?JSON.stringify({summary:answer}):answer;})()}];
    const turn={id,status:mode==='failed'&&turnStarts===1?'failed':'completed',items};
    if(mode==='tool')items.push({id:'forbidden',type:'mcpToolCall'});
    threads.get(p.params.threadId).push(turn);
@@ -95,21 +95,31 @@ test('Luna: отклоняет свои tool requests и не отвечает �
  }finally{await f.close();}
 });
 
-test('Luna: oversized completed сохраняется и compression unknown не запускается повторно',async()=>{
- const f=await fixture('oversize-unknown');let state={};
+test('Luna: summary >8KiB принимается целиком без повторной компрессии',async()=>{
+ const f=await fixture('oversize');let state={};
  try{
-  await assert.rejects(f.luna.run('synthetic',state,async x=>{state=x;}),{code:'NATIVE_OUTCOME_UNKNOWN'});
-  assert.equal(state.execution_state,'completed');assert.equal(Buffer.byteLength(state.result),10000);
-  assert.equal(state.compressions[0].execution_state,'launching');assert.equal(f.starts,2);
-  assert.match(await f.luna.run('synthetic',state,async x=>{state=x;}),/37/);
-  assert.equal(f.starts,2);assert.equal(state.compressions[0].execution_state,'completed');
+  const result=await f.luna.run('synthetic',state,async x=>{state=x;});
+  assert.equal(result,'ф'.repeat(5000));assert.equal(Buffer.byteLength(result),10000);assert.equal(f.starts,1);
+  assert.equal(state.result,result);assert.equal(state.execution_state,'completed');
+  assert.equal(f.calls.find(x=>x.method==='turn/start').params.outputSchema,undefined);
+  assert.ok(!f.calls.find(x=>x.method==='thread/start').params.baseInstructions.includes('8192'));
  }finally{await f.close();}
 });
-test('Luna: повторное превышение явно failed после двух durable compression без новых запусков',async()=>{
- const f=await fixture('oversize-always');let state={};
+test('Luna: summary >64KiB и Unicode проходят native read без усечения',async()=>{
+ const f=await fixture('huge');let state={};
  try{
-  for(let retry=0;retry<3;retry++)await assert.rejects(f.luna.run('synthetic',state,async x=>{state=x;}),{code:'SUMMARY_TOO_LARGE'});
-  assert.equal(f.starts,3);assert.equal(state.compressions.length,2);
-  assert.ok(state.compressions.every(x=>x.execution_state==='completed'));
+  const result=await f.luna.run('synthetic',state,async x=>{state=x;});
+  assert.equal(result,'Ж😀'.repeat(40000));assert.equal(f.starts,1);
+  assert.ok(Buffer.byteLength(result)>65536);assert.equal(state.result,result);
+ }finally{await f.close();}
+});
+test('Luna: старый completed root используется полностью, size-compression caches игнорируются',async()=>{
+ const f=await fixture();const raw='Полный текст 😀 '.repeat(10000);
+ const state={native_thread_id:'original-root',native_turn_id:'original-turn',execution_state:'completed',result:raw,
+  compressions:[{execution_state:'completed',result:'Неудачный короткий cache'}],compression_v2:{prompt_version:'rejected',executions:[{result:'Неполный'}]}};
+ const snapshot=structuredClone(state);
+ try{
+  assert.equal(await f.luna.run('synthetic',state,async()=>assert.fail('cached source must not be relaunched')),raw);
+  assert.equal(f.starts,0);assert.deepEqual(state,snapshot);
  }finally{await f.close();}
 });

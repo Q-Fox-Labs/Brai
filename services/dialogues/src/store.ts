@@ -96,12 +96,25 @@ export function createStore(pool:DB,key:string) {
     });
   }
   async function message(owner:string,raw:unknown) {
-    const a=object(raw,["dialogue_id","message_id","offset","limit"]);
-    id(a.dialogue_id);id(a.message_id);
+    const a=object(raw,["dialogue_id","message_id","offset","limit","target","summary_version"]);
+    id(a.dialogue_id);const target=a.target??'original';
+    if(!['original','message_summary','dialogue_summary'].includes(target))fail('INVALID_ARGUMENT');
+    if(target!=='dialogue_summary')id(a.message_id);else if(a.message_id!==undefined)fail('INVALID_ARGUMENT');
+    if(a.summary_version!==undefined&&(typeof a.summary_version!=='string'||!/^[1-9][0-9]*$/.test(a.summary_version)||target==='original'))fail('INVALID_ARGUMENT');
     const offset=integer(a.offset,0),limit=integer(a.limit,4096);
     if(limit<1||limit>8192)fail("INVALID_ARGUMENT");
     const db=await pool.connect();
     try {
+      if(target!=='original'){
+        const row=(await db.query(target==='message_summary'
+         ?"SELECT dialogue_id,message_id,version,source_hash,text FROM dialogues_live.message_summaries WHERE owner_id=$1 AND dialogue_id=$2 AND message_id=$3 AND ($4::bigint IS NULL OR version=$4) ORDER BY version DESC LIMIT 1"
+         :"SELECT dialogue_id,version,through_message_id,through_order,text FROM dialogues_live.dialogue_summaries WHERE owner_id=$1 AND dialogue_id=$2 AND ($3::bigint IS NULL OR version=$3) ORDER BY version DESC LIMIT 1",
+         target==='message_summary'?[owner,a.dialogue_id,a.message_id,a.summary_version??null]:[owner,a.dialogue_id,a.summary_version??null])).rows[0];
+        if(!row)fail('NOT_FOUND');
+        const chars=Array.from(row.text),total=chars.length;if(offset>total)fail('INVALID_OFFSET');
+        const body={...row,target,representation:'summary_fragment',offset,text:chars.slice(offset,offset+limit).join(''),next_offset:offset+limit<total?offset+limit:null,total_chars:total,total_bytes:Buffer.byteLength(row.text),text_sha256:sha(row.text),offset_unit:'unicode_codepoints',text_complete:offset===0&&offset+limit>=total};
+        return body;
+      }
       const row=(await db.query("SELECT id,dialogue_id,turn_id,role,kind,message_order,item_order,source,occurred_at,recorded_at,content_hash AS sha256,substring(text FROM $4::integer FOR $5::integer) AS text,char_length(text) AS total_chars FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND id=$3",[owner,a.dialogue_id,a.message_id,offset+1,limit])).rows[0];
       if(!row)fail("NOT_FOUND");
       if(offset>row.total_chars)fail("INVALID_OFFSET");
@@ -190,7 +203,7 @@ export function createStore(pool:DB,key:string) {
         result.continuation_cursor=encodeCursor({...c,offset:c.offset+taken+1},key);
         if(Buffer.byteLength(JSON.stringify(result))>limits.responseBytes-256) {
           Object.assign(result,previous);
-          if(!taken)fail("RESPONSE_ITEM_TOO_LARGE");
+          if(!taken)fail(item.type==="dialogue_summary"||entry?.summary_version?"LARGE_SUMMARY_REQUIRES_CONTEXT_PULL":"RESPONSE_ITEM_TOO_LARGE");
           break;
         }
         taken++;

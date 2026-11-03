@@ -42,7 +42,8 @@
       "services/dialogues/tests/postgres.integration.test.mjs",
       "services/dialogues/tests/import.test.mjs",
       "services/dialogues/tests/v02-fixture.mjs",
-      "services/dialogues/tests/luna.test.mjs"
+      "services/dialogues/tests/luna.test.mjs",
+      "services/dialogues/tests/context-pages.test.mjs"
     ]
   },
   "dependencies": [],

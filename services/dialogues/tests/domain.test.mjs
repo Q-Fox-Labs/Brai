@@ -26,3 +26,11 @@ test("курсор проверяет подпись, владельца и по
   assert.throws(()=>decodeCursor(encoded,"synthetic-key","two"),{code:"INVALID_CURSOR"});
   assert.throws(()=>decodeCursor(encoded+"x","synthetic-key","one"),{code:"INVALID_CURSOR"});
 });
+
+test("саммари не ограничены 8KiB, metadata и transport остаются отдельными",()=>{
+  const value='Ж😀\\n"'.repeat(20000);
+  const input={request_id:"large-summary",dialogue_id:"d",target:"message",message_id:"m",expected_version:null,text:value};
+  assert.ok(Buffer.byteLength(value)>65536);assert.equal(summaryInput(input).text,value);
+  assert.equal(appendInput({...packet,messages:[{...packet.messages[0],summary:value}]}).messages[0].summary,value);
+  assert.throws(()=>appendInput({...packet,messages:[{...packet.messages[0],source:{detail:'x'.repeat(8192)}}]}),{code:"INVALID_ARGUMENT"});
+});
