@@ -23,19 +23,19 @@ import { Button } from "@/components/ui/button";
 import { AuthRequestError, AuthScreen, type OtpSendResult } from "./auth/screen";
 type User = { id: string; email: string };
 /** Собирает общую оболочку; таймер явно передаёт отсчёт в навигацию текущего аккаунта. */
-export default function Account({ initialSession, agentMode = "dev_agent", telegramBotUsername = null, telegramObserverEnabled = false }: { initialSession: InitialSession; agentMode?: WebAgentMode; telegramBotUsername?: string | null; telegramObserverEnabled?: boolean }) {
+export default function Account({ initialSession, agentMode = "dev_agent", telegramBotUsername = null, telegramObserverEnabled = false, authContinuation = null, ssoPreview = false }: { ssoPreview?: boolean; authContinuation?: string | null; initialSession: InitialSession; agentMode?: WebAgentMode; telegramBotUsername?: string | null; telegramObserverEnabled?: boolean }) {
  const [timerElapsed, setTimerElapsed] = useState<string | null>(null);
- return <AccountSession initialSession={initialSession} agentMode={agentMode} telegramBotUsername={telegramBotUsername} telegramObserverEnabled={telegramObserverEnabled} timerElapsed={timerElapsed} onTimerElapsed={setTimerElapsed} />;
+ return <AccountSession ssoPreview={ssoPreview} authContinuation={authContinuation} initialSession={initialSession} agentMode={agentMode} telegramBotUsername={telegramBotUsername} telegramObserverEnabled={telegramObserverEnabled} timerElapsed={timerElapsed} onTimerElapsed={setTimerElapsed} />;
 }
 /** Управляет подтверждённой сервером сессией без хранения токена в браузере. */
-function AccountSession({ initialSession, agentMode, telegramBotUsername, telegramObserverEnabled, timerElapsed, onTimerElapsed }: { initialSession: InitialSession; agentMode: WebAgentMode; telegramBotUsername: string | null; telegramObserverEnabled: boolean; timerElapsed: string | null; onTimerElapsed: (elapsed: string | null) => void }) {
+function AccountSession({ ssoPreview, authContinuation, initialSession, agentMode, telegramBotUsername, telegramObserverEnabled, timerElapsed, onTimerElapsed }: { ssoPreview: boolean; authContinuation: string | null; initialSession: InitialSession; agentMode: WebAgentMode; telegramBotUsername: string | null; telegramObserverEnabled: boolean; timerElapsed: string | null; onTimerElapsed: (elapsed: string | null) => void }) {
  const pathname = usePathname();
  const view = pathname === "/focus" ? "focus" : pathname === "/goals" ? "goals" : pathname === "/game-core" ? "game-core" : pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : pathname === "/alerts" ? "alerts" : "timer";
  const [user, setUser] = useState<User | null>(() => initialSession.status === "authenticated" ? initialSession.user : null), [ready, setReady] = useState(initialSession.status !== "unavailable"), [exiting, setExiting] = useState(false);
  const [busy, setBusy] = useState(false), [message, setMessage] = useState("");
  const locked = useRef(false);
  const verificationPending = useRef<{ email: string; accepted: boolean } | null>(null);
- useEffect(() => { if (pathname === "/auth" && user) window.location.replace("/"); else if (pathname !== "/auth" && ready && !user && !exiting) window.location.replace("/auth"); }, [pathname, user, ready, exiting]);
+ useEffect(() => { if (pathname === "/auth" && user) window.location.replace(authContinuation ?? "/"); else if (pathname === "/auth" && ssoPreview && ready && !user) window.location.replace("/api/auth/sso/start"); else if (pathname !== "/auth" && ready && !user && !exiting) window.location.replace("/auth"); }, [pathname, user, ready, exiting, authContinuation, ssoPreview]);
  const generation = useRef(0);
  const refreshRequest = useRef<AbortController | null>(null);
  const refresh = useCallback(async (expectedEmail?: string) => {

@@ -1,5 +1,8 @@
 # Веб-интерфейс Brai
 
+
+В DEV web может передавать подтверждённый вход с основного адреса на разрешённые preview. Для этого `BRAI_ENVIRONMENT=dev`, `WEB_ORIGIN`, `WEB_SSO_HUB_ORIGIN` и `WEB_SSO_PREVIEW_ORIGINS` должны задавать точные HTTPS origin; preview перечисляются через запятую. При неполной или неверной настройке и вне DEV SSO выключен. Передача использует одноразовый ticket и отдельную host-only cookie, не общий домен cookie. При ошибке переход можно начать заново. Контракт выдачи и погашения принадлежит [auth](../../services/auth/README.md).
+
 Next.js показывает вход по почте и шестизначному коду, личный таймер и страницу агента `/agent`. Сервер обращается к auth, timer, agent и history через NATS. Общая история доступна только через серверный API. Браузер использует HTTP/SSE; веб-приложение не читает БД или внутренний код сервисов. Схемы принадлежат [auth](../../services/auth/README.md), [timer](../../services/timer/README.md), [agent](../../services/agent/README.md) и [history](../../services/history/README.md).
 
 ## Навигация и тема

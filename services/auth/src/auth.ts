@@ -1,7 +1,7 @@
 // ABOUTME: Настраивает неизменённый Better Auth и штатный Email OTP.
 // ABOUTME: Владение OTP, аккаунтами и сессиями остаётся у официальной библиотеки.
 import { betterAuth } from "better-auth";
-import { emailOTP } from "better-auth/plugins";
+import { emailOTP, oneTimeToken } from "better-auth/plugins";
 import { randomInt } from "node:crypto";
 import { Resend } from "resend";
 import type { Pool } from "pg";
@@ -15,7 +15,7 @@ export function createAuth(cfg:Config,pool:Pool,send?:(email:string,otp:string)=
   rateLimit:{enabled:true,storage:"database",customRules:{"/get-session":false}},
   advanced:{useSecureCookies:cfg.origin.startsWith("https://"),defaultCookieAttributes:{httpOnly:true,sameSite:"lax"}},
   logger:{disabled:true},
-  plugins:[emailOTP({otpLength:6,expiresIn:300,allowedAttempts:3,storeOTP:"hashed",disableSignUp:false,
+  plugins:[oneTimeToken({expiresIn:1,storeToken:"hashed"}),emailOTP({otpLength:6,expiresIn:300,allowedAttempts:3,storeOTP:"hashed",disableSignUp:false,
    // AIDEV-NOTE: Штатное расширение генерирует цифровой код с ведущими нулями.
    generateOTP:()=>randomInt(0,1_000_000).toString().padStart(6,"0"),
    async sendVerificationOTP({email,otp,type}) {

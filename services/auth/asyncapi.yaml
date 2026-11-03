@@ -10,7 +10,7 @@ info:
     encoded in Response; transport errors use Nats-Service-Error and
     Nats-Service-Error-Code (400 INVALID_ARGUMENT; 503 AUTH_BUSY/AUTH_UNAVAILABLE).
     Timeout 10s. Never automatically retry sendCode/verifyCode; after uncertain
-    verification inspect session, then request a fresh code. Session/signOut may retry.
+    verification inspect session, then request a fresh code. Session/signOut may retry. Never automatically retry ssoIssue/ssoRedeem.
     All Set-Cookie values are separate array entries. Origin/CSRF checks remain enabled.
 servers:
   privateNats:
@@ -56,6 +56,22 @@ channels:
     messages:
       request:
         $ref: "#/components/messages/SignOutRequest"
+  ssoIssue:
+    address: brai.auth.v1.sso-issue
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        $ref: "#/components/messages/SsoIssueRequest"
+  ssoRedeem:
+    address: brai.auth.v1.sso-redeem
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        $ref: "#/components/messages/SsoRedeemRequest"
   replies:
     address: null
     description: Transient replyTo inbox supplied by each NATS requester.
@@ -115,6 +131,32 @@ operations:
         $ref: "#/channels/replies"
       messages:
         - $ref: "#/channels/replies/messages/response"
+  ssoIssue:
+    action: receive
+    channel:
+      $ref: "#/channels/ssoIssue"
+    messages:
+      - $ref: "#/channels/ssoIssue/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/response"
+  ssoRedeem:
+    action: receive
+    channel:
+      $ref: "#/channels/ssoRedeem"
+    messages:
+      - $ref: "#/channels/ssoRedeem/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/response"
 components:
   messages:
     SendCodeRequest:
@@ -133,6 +175,14 @@ components:
       name: SignOutRequest
       payload:
         $ref: "./schemas/messages.schema.json#/definitions/SignOutRequest"
+    SsoIssueRequest:
+      name: SsoIssueRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/SsoIssueRequest"
+    SsoRedeemRequest:
+      name: SsoRedeemRequest
+      payload:
+        $ref: "./schemas/messages.schema.json#/definitions/SsoRedeemRequest"
     Response:
       name: Response
       payload:

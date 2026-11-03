@@ -1,4 +1,4 @@
-// ABOUTME: Объявляет четыре NATS Services endpoints сервиса авторизации.
+// ABOUTME: Объявляет шесть NATS Services endpoints сервиса авторизации.
 // ABOUTME: Ограничивает параллелизм и не хранит сообщения в JetStream.
 import { connect,credsAuthenticator,type NatsConnection } from "nats";
 import { readFileSync } from "node:fs";
@@ -15,7 +15,7 @@ export async function runNats(nc:NatsConnection,cfg:Config,handler:(request:Requ
   if(pending.size>=16){msg.respondError(503,"AUTH_BUSY");return;}
   const work=(async()=>{let request:unknown;
    try{if(msg.data.length>32768)throw new Error();request=JSON.parse(new TextDecoder().decode(msg.data));}catch{msg.respondError(400,"INVALID_ARGUMENT");return;}
-   try{const response=await bridge(name as Operation,request,cfg.origin,handler);msg.respond(Buffer.from(JSON.stringify(response)));}
+   try{const response=await bridge(name as Operation,request,cfg.origin,handler,cfg);msg.respond(Buffer.from(JSON.stringify(response)));}
    catch(error){const invalid=error instanceof Error&&/^(Invalid|Origin required)/.test(error.message);msg.respondError(invalid?400:503,invalid?"INVALID_ARGUMENT":"AUTH_UNAVAILABLE");}
   })();pending.add(work);void work.finally(()=>pending.delete(work));
  }});

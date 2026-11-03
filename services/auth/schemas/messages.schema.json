@@ -145,6 +145,73 @@
           }
         }
       }
+    },
+    "SsoIssueRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "body"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "body": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "targetOrigin",
+            "challenge"
+          ],
+          "properties": {
+            "targetOrigin": {
+              "type": "string",
+              "maxLength": 2048
+            },
+            "challenge": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{43}$"
+            }
+          }
+        }
+      }
+    },
+    "SsoRedeemRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "body"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "body": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ticket",
+            "verifier",
+            "targetOrigin"
+          ],
+          "properties": {
+            "ticket": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,4096}$"
+            },
+            "verifier": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{43}$"
+            },
+            "targetOrigin": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          }
+        }
+      }
     }
   }
 }
