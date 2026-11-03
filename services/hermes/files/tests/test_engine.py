@@ -110,8 +110,16 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.backend.calls, [])
 
     async def test_actual_telegram_album_waits_for_fifo_publication_before_dispatch(self):
-        """Три update одного альбома: медленный второй не создаёт отдельного хода."""
-        scope = {'asyncio': asyncio}
+        """Альбом ждёт медленную публикацию без отдельного хода."""
+        await self._assert_telegram_fifo_publication(photo_burst=False)
+
+    async def test_actual_telegram_photo_burst_waits_for_fifo_publication_before_dispatch(self):
+        """Фото без media_group_id ждут медленный update и передаются целиком."""
+        await self._assert_telegram_fifo_publication(photo_burst=True)
+
+    async def _assert_telegram_fifo_publication(self, photo_burst):
+        """Проверить живые границы FIFO, debounce и Artifacts на синтетическом потоке."""
+        scope = {'asyncio': asyncio, 'logger': SimpleNamespace(info=lambda *a:None)}
         function('plugins/platforms/telegram/update_admission.py',
                  ['do_process_update', 'wait_for_chat_idle'], scope)
         processor = SimpleNamespace(_tails={})
@@ -123,30 +131,34 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             await real_wait(chat_id)
         processor.wait_for_chat_idle = wait
         function('plugins/platforms/telegram/adapter.py',
-                 ['_queue_media_group_event', '_flush_media_group_event', '_flush_buffered', '_merge_into_pending'], scope)
+                 ['_queue_media_group_event', '_flush_media_group_event', '_flush_buffered', '_merge_into_pending',
+                  '_route_photo_event', '_enqueue_photo_event', '_flush_photo_batch'], scope)
         dispatched, held, active = [], [], []
         async def handle(event):
             try:
                 if not await native.accept_event(event):
                     return
-                data = event.metadata['fileSets'][0]['items']
+                data = [item for group in event.metadata['fileSets'] for item in group['items']]
                 native.commit_inbound(event.source, event.message_id)
                 dispatched.append(([i['source']['messageId'] for i in data], [i['caption'] for i in data]))
             finally:
                 native.release_event(event)
         adapter = SimpleNamespace(_media_group_events={}, _media_group_tasks={},
             _app=SimpleNamespace(update_processor=processor), MEDIA_GROUP_WAIT_SECONDS=0.02,
+            _pending_photo_batches={}, _pending_photo_batch_tasks={}, _media_batch_delay_seconds=0.02,
+            _drop_unresolved=lambda event:False, _photo_batch_key=lambda event,msg:'photo-burst',
             _should_drop_delayed_delivery=lambda:False, _accept_update=lambda:None,
             _hold_inbound_event=lambda event, **kw:held.append(event), handle_message=handle,
             _merge_caption=lambda a,b:(a+'\n'+b if a else b),
             gateway_runner=SimpleNamespace(_is_user_authorized_for_source=lambda source:True))
-        for name in ['_queue_media_group_event','_flush_media_group_event','_flush_buffered','_merge_into_pending']:
+        for name in ['_queue_media_group_event','_flush_media_group_event','_flush_buffered','_merge_into_pending',
+                     '_route_photo_event','_enqueue_photo_event','_flush_photo_batch']:
             setattr(adapter,name,MethodType(scope[name],adapter))
         source = SimpleNamespace(platform='telegram',chat_id='1',thread_id=None,user_id='2',profile=None)
         def event(index):
             path=self.input/('delayed-'+str(index)+'.jpg');path.write_bytes(('image-'+str(index)).encode())
-            return SimpleNamespace(source=source,message_id=str(10+index),text=['album caption','second caption','','late caption'][index],
-                raw_message=SimpleNamespace(media_group_id='one-album'),media_urls=[str(path)],media_types=['image/jpeg'],metadata={})
+            return SimpleNamespace(source=source,message_id=str(10+index),text=['album caption','second caption','','fourth caption','late caption'][index],
+                raw_message=SimpleNamespace(media_group_id=None if photo_burst else 'one-album'),media_urls=[str(path)],media_types=['image/jpeg'],metadata={})
         entered, release = threading.Event(), threading.Event()
         original = self.backend.call
         def backend(method,args,**kw):
@@ -155,50 +167,155 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                 if not release.wait(5):raise RuntimeError('synthetic publication timeout')
             return original(method,args,**kw)
         self.backend.call=backend
+        tasks = adapter._pending_photo_batch_tasks if photo_burst else adapter._media_group_tasks
         async def route(ev):
-            await adapter._queue_media_group_event('one-album',ev)
+            if photo_burst:
+                await adapter._route_photo_event(ev.raw_message,ev)
+            else:
+                await adapter._queue_media_group_event('one-album',ev)
         update = SimpleNamespace(effective_chat=SimpleNamespace(id=1))
         try:
             with patch.dict(sys.modules,{'brai_files':native}):
-                active=[asyncio.create_task(processor.do_process_update(update,route(event(i)))) for i in range(3)]
+                inputs=[event(i) for i in range(4)]
+                active=[asyncio.create_task(processor.do_process_update(update,route(ev))) for ev in inputs]
                 self.assertTrue(await asyncio.to_thread(entered.wait,2))
                 await asyncio.wait_for(waiting.wait(),2)
                 self.assertEqual(dispatched,[])
                 with self.store.db() as db:
                     self.assertIsNone(db.execute('SELECT admitted FROM groups').fetchone()[0])
-                previous_flush=next(iter(adapter._media_group_tasks.values()))
+                previous_flush=next(iter(tasks.values()))
                 other=[]
                 async def independent():other.append(True)
                 await asyncio.wait_for(processor.do_process_update(SimpleNamespace(effective_chat=SimpleNamespace(id=9)),independent()),2)
                 self.assertEqual(other,[True])
                 release.set()
                 await asyncio.wait_for(asyncio.gather(*active),3)
-                await asyncio.wait_for(asyncio.gather(*list(adapter._media_group_tasks.values())),3)
-                self.assertEqual(dispatched,[(['10','11','12'],['album caption','second caption',''])])
+                await asyncio.wait_for(asyncio.gather(*list(tasks.values())),3)
+                self.assertEqual(dispatched,[(['10','11','12','13'],['album caption','second caption','','fourth caption'])])
+                with self.store.db() as db:
+                    persisted = db.execute('SELECT DISTINCT group_key FROM items').fetchall()
+                self.assertEqual(len(persisted), 1)
                 self.assertTrue(previous_flush.cancelled())
                 self.assertEqual(processor._tails,{})
                 self.assertEqual(held,[])
                 # Настоящее позднее дополнение получает только новый элемент.
-                await processor.do_process_update(update,route(event(3)))
-                await asyncio.wait_for(asyncio.gather(*list(adapter._media_group_tasks.values())),3)
-                self.assertEqual(dispatched[-1],(['13'],['late caption']))
+                await processor.do_process_update(update,route(event(4)))
+                await asyncio.wait_for(asyncio.gather(*list(tasks.values())),3)
+                self.assertEqual(dispatched[-1],(['14'],['late caption']))
                 # Другой update того же исходного message не создаёт публикацию/ход повторно.
-                await processor.do_process_update(update,route(event(3)))
-                await asyncio.wait_for(asyncio.gather(*list(adapter._media_group_tasks.values())),3)
+                await processor.do_process_update(update,route(event(4)))
+                await asyncio.wait_for(asyncio.gather(*list(tasks.values())),3)
                 self.assertEqual(len(dispatched),2)
-                self.assertEqual(sum(name=='files.publish' for name,_ in self.backend.calls),4)
+                self.assertEqual(sum(name=='files.publish' for name,_ in self.backend.calls),5)
         finally:
             release.set()
             if active:await asyncio.gather(*active,return_exceptions=True)
-            for task in list(adapter._media_group_tasks.values()):task.cancel()
-            await asyncio.gather(*list(adapter._media_group_tasks.values()),return_exceptions=True)
+            for task in list(tasks.values()):task.cancel()
+            await asyncio.gather(*list(tasks.values()),return_exceptions=True)
+            for ev in inputs:native.release_event(ev)
+
+    async def test_actual_photo_batch_recovers_once_after_restart_before_flush(self):
+        """Настоящая сборка Telegram сохраняет серию как единый набор до запуска агента."""
+        scope = {'asyncio': asyncio, 'logger': SimpleNamespace(info=lambda *a:None)}
+        function('plugins/platforms/telegram/adapter.py',
+                 ['_route_photo_event', '_enqueue_photo_event', '_flush_photo_batch', '_flush_buffered', '_merge_into_pending'], scope)
+        adapter = SimpleNamespace(_pending_photo_batches={}, _pending_photo_batch_tasks={},
+            _media_batch_delay_seconds=60, _drop_unresolved=lambda event:False,
+            _photo_batch_key=lambda event, msg:'same-topic', _should_drop_delayed_delivery=lambda:False,
+            _accept_update=lambda:None, _merge_caption=lambda a,b:(a+'\n'+b if a else b),
+            gateway_runner=SimpleNamespace(_is_user_authorized_for_source=lambda source:True))
+        for name in ['_route_photo_event', '_enqueue_photo_event', '_flush_photo_batch', '_flush_buffered', '_merge_into_pending']:
+            setattr(adapter, name, MethodType(scope[name], adapter))
+        source = SimpleNamespace(platform='telegram',chat_id='1',thread_id=None,user_id='2',profile=None)
+        events=[]
+        try:
+            with patch.dict(sys.modules, {'brai_files':native}):
+                for number in (86,87,88):
+                    path=self.input/(str(number)+'.jpg'); path.write_bytes(str(number).encode())
+                    event=SimpleNamespace(source=source,message_id=str(number),text='подпись '+str(number),
+                        raw_message=SimpleNamespace(media_group_id=None),media_urls=[str(path)],
+                        media_types=['image/jpeg'],metadata={})
+                    events.append(event)
+                    await adapter._route_photo_event(event.raw_message,event)
+            for task in adapter._pending_photo_batch_tasks.values(): task.cancel()
+            await asyncio.gather(*adapter._pending_photo_batch_tasks.values(),return_exceptions=True)
+            for event in events: native.release_event(event)
+            native.configure({'ownerId':'owner','account':'test','stateRoot':str(self.root/'state'),
+                'resultRoot':str(self.root/'cache'),'readRoots':[str(self.input)]},self.backend)
+            observed=[]
+            class RecoveredAdapter:
+                platform='telegram'
+                async def handle_message(self, event):
+                    if await native.accept_event(event):
+                        observed.append([(item['source']['messageId'],item['caption'])
+                            for group in event.metadata['fileSets'] for item in group['items']])
+                        native.commit_inbound(event.source,event.message_id)
+                        native.release_event(event)
+            ports={'gateway.config':module(Platform=lambda value:value),
+                'gateway.session':module(SessionSource=lambda **kw:SimpleNamespace(**kw)),
+                'gateway.platforms.event':module(MessageType=SimpleNamespace(DOCUMENT='document'),
+                    MessageEvent=lambda **kw:SimpleNamespace(**kw))}
+            with patch.dict(sys.modules,ports):
+                await native.recover(RecoveredAdapter())
+                await native.recover(RecoveredAdapter())
+            self.assertEqual(observed,[[('86','подпись 86'),('87','подпись 87'),('88','подпись 88')]])
+        finally:
+            for task in adapter._pending_photo_batch_tasks.values():task.cancel()
+            await asyncio.gather(*adapter._pending_photo_batch_tasks.values(),return_exceptions=True)
+            for event in events:native.release_event(event)
+
+    async def test_later_text_waits_for_earlier_telegram_photo_batch(self):
+        """Текст не должен обгонять ожидающие фотографии того же маршрута."""
+        scope={'asyncio':asyncio}
+        function('plugins/platforms/telegram/adapter.py',['_flush_buffered'],scope)
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id=None,user_id='2',profile=None)
+        photo=SimpleNamespace(source=source,message_id='86')
+        text_event=SimpleNamespace(source=source,message_id='89')
+        received=[]
+        async def wait_for_chat_idle(chat):pass
+        async def handle(event):received.append(event.message_id)
+        adapter=SimpleNamespace(_app=SimpleNamespace(update_processor=SimpleNamespace(wait_for_chat_idle=wait_for_chat_idle)),
+            _should_drop_delayed_delivery=lambda:False, _hold_inbound_event=lambda *a,**kw:None,
+            _pending_photo_batches={'photo':photo},_pending_photo_batch_tasks={},
+            _media_group_events={},_media_group_tasks={}, handle_message=handle)
+        photo_task=asyncio.create_task(scope['_flush_buffered'](adapter,adapter._pending_photo_batches,
+            adapter._pending_photo_batch_tasks,'photo',0.05,'photo'))
+        adapter._pending_photo_batch_tasks['photo']=photo_task
+        text_pending={'text':text_event};text_tasks={}
+        text_task=asyncio.create_task(scope['_flush_buffered'](adapter,text_pending,text_tasks,'text',0,'text'))
+        text_tasks['text']=text_task
+        with patch.dict(sys.modules,{'brai_files':native}):
+            await asyncio.wait_for(asyncio.gather(photo_task,text_task),2)
+        self.assertEqual(received,['86','89'])
+
+    async def test_text_is_held_if_prior_media_dispatch_fails(self):
+        """Ошибка предыдущего набора сохраняет текст вместо нарушения порядка."""
+        scope={'asyncio':asyncio}
+        function('plugins/platforms/telegram/adapter.py',['_flush_buffered'],scope)
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id=None,user_id='2',profile=None)
+        photo=SimpleNamespace(source=source,message_id='86')
+        text_event=SimpleNamespace(source=source,message_id='89')
+        failed=asyncio.get_running_loop().create_future(); failed.set_exception(RuntimeError('synthetic failure'))
+        held=[];received=[]
+        async def idle(chat):pass
+        async def handle(event):received.append(event)
+        adapter=SimpleNamespace(_app=SimpleNamespace(update_processor=SimpleNamespace(wait_for_chat_idle=idle)),
+            _should_drop_delayed_delivery=lambda:False, _hold_inbound_event=lambda event,**kw:held.append(event),
+            _pending_photo_batches={'photo':photo},_pending_photo_batch_tasks={'photo':failed},
+            _media_group_events={},_media_group_tasks={},handle_message=handle)
+        pending={'text':text_event};tasks={}
+        task=asyncio.create_task(scope['_flush_buffered'](adapter,pending,tasks,'text',0,'text'));tasks['text']=task
+        with patch.dict(sys.modules,{'brai_files':native}):await asyncio.wait_for(task,2)
+        self.assertEqual(held,[text_event])
+        self.assertEqual(received,[])
+        self.assertEqual(pending,{})
 
     async def test_actual_album_flush_holds_once_when_app_is_missing_or_dispatch_cancelled(self):
         """Teardown и отмена после pop сохраняют событие без отправки или двойного hold."""
         scope={'asyncio':asyncio}
         function('plugins/platforms/telegram/adapter.py',['_flush_buffered'],scope)
-        for cancel in (False,True):
-            with self.subTest(cancel_after_pop=cancel):
+        for where,cancel in [('media-group',False),('media-group',True),('photo',False),('photo',True)]:
+            with self.subTest(where=where,cancel_after_pop=cancel):
                 entered=asyncio.Event();held=[]
                 event=SimpleNamespace(source=SimpleNamespace(chat_id='1'))
                 pending={'album':event};tasks={}
@@ -288,9 +405,23 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                 for kind in ['photo','video','document']:
                     event.message_type=kind
                     self.assertTrue(await scope['_handle_active_session_busy_message'](runner,event,'session'))
-                self.assertEqual(queued,[('session',event)]*3)
+                image=self.input/'fresh.jpg'
+                image.write_bytes(b'synthetic image')
+                fresh=SimpleNamespace(source=event.source,message_id='fresh-photo',text='',
+                    raw_message=SimpleNamespace(media_group_id=None),media_urls=[str(image)],
+                    media_types=['image/jpeg'],metadata={},internal=False,allow_gateway_control=True,message_type='photo')
+                try:
+                    await native.accept_event(fresh,admit=False)
+                    self.assertTrue(await scope['_handle_active_session_busy_message'](runner,fresh,'session'))
+                    original_source=fresh.source
+                    fresh.source=SimpleNamespace(**{**vars(original_source),'platform':'discord'})
+                    self.assertFalse(native.should_queue_inbound_set(fresh))
+                    fresh.source=original_source
+                finally:
+                    native.release_event(fresh)
+                self.assertEqual(queued,[('session',event)]*3+[('session',fresh)])
                 self.assertEqual((steered,interrupted,acknowledged),([],[],[]))
-                # Одиночный новый файл сохраняет обычную политику занятой сессии.
+                # Вход без условия очереди сохраняет обычную политику занятой сессии.
                 with patch.object(native,'should_queue_inbound_set',return_value=False):
                     await scope['_handle_active_session_busy_message'](runner,event,'session')
                 self.assertEqual(len(interrupted),1)

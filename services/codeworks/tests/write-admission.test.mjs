@@ -54,12 +54,30 @@ test('owner receipt подтверждает только тот же native в�
  };
  const api=createWriteAdmission({query,connect:async()=>({query,release(){}})},{workspace:async()=>({project:{},workspace:w}),inspect:async()=>({dirty:false,head:'base'})});
  const args={project_id:'p',session_id:'s',turn_id:'t',tool_use_id:'u',outcome:'success'};
- const proof={write_call_id:'c',project_id:'p',executor_id:'e',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'Bash',payload_sha256:input,rewritten_sha256:rewritten,exit_code:0,receipt_sha256:hash,native_event_sha256:event};
+ const proof={version:1,write_call_id:'c',project_id:'p',executor_id:'e',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'Bash',payload_sha256:input,rewritten_sha256:rewritten,exit_code:0,receipt_sha256:hash,native_event_sha256:event};
  await assert.rejects(api.finish(args,'e',{completionProof:{...proof,rewritten_sha256:hash}}),{code:'WRITE_CALL_MISMATCH'});assert.equal(updates,0);
  assert.equal((await api.finish(args,'e',{completionProof:proof})).state,'finished');assert.equal(updates,1);
  assert.deepEqual(row.tool_result.native_completion,{receipt_sha256:hash,native_event_sha256:event,exit_code:0});
  assert.equal((await api.finish(args,'e',{completionProof:proof})).state,'finished');
  await assert.rejects(api.finish(args,'e',{completionProof:{...proof,native_event_sha256:hash}}),{code:'WRITE_CALL_MISMATCH'});assert.equal(updates,1);
+});
+test('operator file completion preserves actual changes and remains distinct from native proof',async()=>{
+ let row={id:'c',workspace_id:'w',project_id:'p',executor_id:'e',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'apply_patch',payload_sha256:'a'.repeat(64),rewritten_sha256:'b'.repeat(64),admitted_at:'2026-01-01T00:00:00Z',state:'uncertain'},updates=0;
+ const query=async(sql,args=[])=>{
+  if(sql.startsWith('SELECT * FROM codeworks.write_calls'))return {rows:[row]};
+  if(sql.startsWith('SELECT * FROM codeworks.workspaces'))return {rows:[w]};
+  if(sql.startsWith("UPDATE codeworks.write_calls SET state='finished'")){updates++;row={...row,state:'finished',tool_result:JSON.parse(args[1])};return {rowCount:1};}
+  return {rows:[],rowCount:0};
+ };
+ const api=createWriteAdmission({query,connect:async()=>({query,release(){}})},{workspace:async()=>({project:{},workspace:w}),inspect:async()=>({dirty:true,head:'base'})});
+ const args={project_id:'p',session_id:'s',turn_id:'t',tool_use_id:'u',outcome:'error'};
+ const proof={version:2,provenance:'operator_reviewed_nested_patch',outcome:'error',reviewer:'owner',reviewed_at:'2026-01-01T00:01:00Z',write_call_id:'c',project_id:'p',workspace_id:'w',executor_id:'e',session_id:'s',turn_id:'t',tool_use_id:'u',tool_name:'apply_patch',payload_sha256:row.payload_sha256,rewritten_sha256:row.rewritten_sha256,receipt_sha256:'c'.repeat(64),outer_tool_use_id:'outer',review_manifest_sha256:'d'.repeat(64),source_prefix_sha256:'e'.repeat(64),source_prefix_bytes:123,input_line_sha256:'f'.repeat(64),output_line_sha256:'1'.repeat(64)};
+ for(const change of [{workspace_id:'foreign'},{rewritten_sha256:'0'.repeat(64)},{outcome:'success'},{exit_code:1},{reviewed_at:'2025-01-01'}])await assert.rejects(api.finish(args,'e',{completionProof:{...proof,...change}}),{code:'WRITE_CALL_MISMATCH'});
+ assert.equal(updates,0);
+ assert.deepEqual(await api.finish(args,'e',{completionProof:proof}),{write_call_id:'c',state:'finished',changed:true});
+ assert.equal(row.tool_result.native_completion,undefined);assert.equal(row.tool_result.post_completion,undefined);assert.equal(row.tool_result.operator_completion.provenance,proof.provenance);
+ assert.equal((await api.finish(args,'e',{completionProof:proof})).state,'finished');assert.equal(updates,1);
+ await assert.rejects(api.finish(args,'e',{completionProof:{...proof,review_manifest_sha256:'0'.repeat(64)}}),{code:'WRITE_CALL_MISMATCH'});
 });
 test('stopped call never starts a new preparation',async()=>{
  let called=false;const existing={id:'c',workspace_id:null,state:'denied_pending',tool_name:'apply_patch',payload_sha256:'a',targets:['src/a'],workspace_key:'task',kind:'feature',request_key:'r'};
@@ -99,4 +117,17 @@ test('one session reuses one key for multiple targets and gets a new key after r
  assert.notEqual(third.workspace_key,first.workspace_key);assert.notEqual(third.workspace_id,first.workspace_id);
  await assert.rejects(api.begin(input('one',['services/auth/index.mjs']),'e'),{code:'CONFLICT'});
  const explicit=await api.begin({...input('four',['apps/web/form.ts']),workspace_id:third.workspace_id},'e');assert.equal(explicit.workspace_key,third.workspace_key);assert.equal(explicit.workspace_id,third.workspace_id);
+});
+
+test('an explicit hotfix never silently reuses an active feature from the same session',async()=>{
+  let preparations=0,inserts=0;
+  const query=async sql=>{
+    if(sql.includes('SELECT c.workspace_key,c.kind,c.workspace_id'))return {rows:[{workspace_key:'live-feature',kind:'feature',workspace_id:'active',removed_at:null,lifecycle:'active',workflow_state:'open'}]};
+    if(sql.startsWith('INSERT INTO codeworks.write_calls'))inserts++;
+    return {rows:[],rowCount:0};
+  };
+  const pool={connect:async()=>({query,release(){}})};
+  const api=createWriteAdmission(pool,{prepare:()=>{preparations++;},inspect:()=>{},workspace:()=>{}});
+  await assert.rejects(api.begin({project_id:'p',session_id:'same',turn_id:'new-turn',tool_use_id:'write',tool_name:'Bash',kind:'hotfix',targets:['fix.js'],payload_sha256:'a'.repeat(64)},'codex'),{code:'WORKSPACE_KIND_CONFLICT'});
+  assert.equal(preparations,0);assert.equal(inserts,0);
 });

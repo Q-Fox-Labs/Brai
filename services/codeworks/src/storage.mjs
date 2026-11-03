@@ -7,6 +7,7 @@ function session(db) {
     query:(sql,args)=>db.query(sql,args),
     executionControl:id=>one('SELECT * FROM codeworks.execution_control WHERE project_id=$1',[id]),
     lifecycle:id=>one('SELECT * FROM codeworks.workflow_registry WHERE workspace_id=$1',[id]),
+    uncertainWriter:id=>one("SELECT EXISTS(SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state='uncertain') AS present",[id]).then(r=>r.present),
     cleanupObligation:id=>one("SELECT * FROM codeworks.cleanup_obligations WHERE workspace_id=$1 ORDER BY (state<>'done') DESC,created_at DESC,id DESC LIMIT 1",[id]),
     releaseOperation:(id,w)=>one('SELECT * FROM codeworks.releases WHERE operation_id=$1 AND workspace_id=$2',[id,w]),
     blockers:id=>db.query("SELECT target,operation_id,state FROM codeworks.release_queue WHERE operation_id IN(SELECT id FROM codeworks.operations WHERE workspace_id=$1) AND state IN ('queued','held') ORDER BY ticket",[id]).then(r=>r.rows),

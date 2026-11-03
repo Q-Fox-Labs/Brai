@@ -7,6 +7,7 @@ import {setup,configured} from './fixture.mjs';
 import {createGit} from '../../src/git.mjs';
 import {createCodeIndex} from '../../src/code-index.mjs';
 import {advanceCleanup} from '../../src/cleanup-coordinator.mjs';
+import {processProjectCompletions} from '../../src/completion-inbox.mjs';
 
 async function fixture(f,key,count){
   const project=await f.project({codeIndexDisabled:true});
@@ -20,7 +21,7 @@ async function fixture(f,key,count){
   }
   await f.owner.query("UPDATE codeworks.workflow_registry SET state='draining',lifecycle='closing' WHERE workspace_id=$1",[w.id]);
   const obligation=(await f.owner.query("INSERT INTO codeworks.cleanup_obligations(id,project_id,workspace_id,subject_key,outcome,owner_workflow_id,epoch) VALUES($1,$2,$3,$4,'cancelled',$5,7) RETURNING *",[randomUUID(),project.id,w.id,'workspace:'+w.id,owner])).rows[0];
-  const finish=request=>f.h.call('write.finish',{project_id:project.id,session_id:request.session_id,turn_id:request.turn_id,tool_use_id:request.tool_use_id,outcome:'success'},'codex');
+  const finish=async request=>{await f.h.call('write.finish',{project_id:project.id,session_id:request.session_id,turn_id:request.turn_id,tool_use_id:request.tool_use_id,tool_name:'apply_patch',input_sha256:'b'.repeat(64),canonical_input_sha256:'b'.repeat(64),outcome:'success'},'codex');await processProjectCompletions(f.app,project.id,{allowedRepositories:[project.repo_path]});};
   const advance=async checkpoint=>{const db=await f.app.connect();try{return await advanceCleanup(db,obligation,project,w,{git:createGit(),codeIndex:createCodeIndex(f.app),checkpoint});}finally{db.release();}};
   return {project,w,owner,obligation,calls,finish,advance};
 }

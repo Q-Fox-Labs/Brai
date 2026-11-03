@@ -314,7 +314,8 @@ class ProviderTests(unittest.TestCase):
         self.provider.sync_turn("Russian question Север", "reply " * 4000)
         self.send()
         text = self.provider.prefetch("Север")
-        self.assertLessEqual(len(text), 6000)
+        from agent.model_metadata import estimate_messages_tokens_rough
+        self.assertLessEqual(estimate_messages_tokens_rough([{'role':'user','content':text}]),4096)
         self.assertEqual(self.provider.recall_status().count, 1)
         self.backend.offline = True
         with self.assertRaises(import_module(self.provider.client.__class__.__module__).MemOSError):

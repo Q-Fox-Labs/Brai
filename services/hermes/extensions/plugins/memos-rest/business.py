@@ -57,57 +57,50 @@ class BusinessMemory:
         deadline = time.monotonic() + 4.0
         for cube in runtime.catalog.cubes:
             client = runtime.client(cube)
-            # Explicit pagination bounds the backend scan and response sizes.
-            for page in range(1, 4):
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                response = client.request('/product/get_memory', {
-                    'mem_cube_id': cube, 'user_id': config['user_id'],
-                    'filter': {'info.hermes_business_scope_id': scope_id, 'session_id': sid},
-                    'page': page, 'page_size': 100, 'include_preference': False,
-                    'include_tool_memory': False, 'include_skill_memory': False,
-                }, timeout=min(float(config.get('request_timeout', 30)), 3, remaining))
-                rows = memory_rows(response)
-                for row in rows:
-                    meta = row.get('metadata') or {}
-                    info = meta.get('info') or {}
-                    actor = info.get('hermes_business_actor')
-                    origin = info.get('hermes_business_origin')
-                    if (row.get('_cube_id') != cube or meta.get('user_id') != config['user_id']
-                            or meta.get('session_id') != sid or info.get('hermes_cube') != cube
-                            or cube not in info.get('hermes_memberships', [])
-                            or info.get('hermes_home_scope') != runtime.home_scope
-                            or info.get('hermes_memory_epoch') != config['memory_epoch']
-                            or info.get('hermes_visibility') != 'business_private'
-                            or info.get('hermes_business_scope') != scope
-                            or info.get('hermes_business_scope_id') != scope_id
-                            or info.get('hermes_subject_id') != scope['recipient']
-                            or info.get('hermes_kind') not in ('business_message', 'fact')
-                            or actor not in ('customer', 'owner', 'approved_ai')
-                            or origin not in ('telegram_incoming','telegram_edited','telegram_owner','approved_send','owner_edit_send','telegram_bot_echo')
-                            or info.get('hermes_business_status') != ('observed' if actor == 'customer' else 'sent')):
-                        continue
-                    if info.get('hermes_kind') == 'fact' and (not info.get('hermes_source_ids') or not info.get('hermes_source')):
-                        continue
-                    # Draft from source evidence, not an unverified backend paraphrase.
-                    source = info.get('hermes_source') or {}
-                    evidence = (source.get('quote') if info.get('hermes_kind') == 'fact' else
-                                '\n'.join(m.get('content','') for m in info.get('hermes_messages',[]) if isinstance(m,dict)))
-                    if not isinstance(evidence,str) or not evidence or not validate_source(
-                            info.get('hermes_business_message_id'), info.get('hermes_business_revision'),
-                            info.get('hermes_author_id'), actor, evidence):
-                        continue
-                    text = scrub(evidence)[:1000]
-                    key = info.get('hermes_logical_id') or row.get('id')
-                    if text and key:
-                        candidates[key] = {'id':row.get('id'), 'text':text, 'scope':scope,
-                            'subject':scope['recipient'], 'author':info.get('hermes_author_id'), 'actor':actor,
-                            'origin':origin, 'status':info.get('hermes_status') or info['hermes_business_status'],
-                            'date':info.get('hermes_business_date'), 'source_ids':info.get('hermes_source_ids') or [row.get('id')],
-                            'source':info.get('hermes_source'), 'message_id':info['hermes_business_message_id']}
-                if len({r.get('id') for r in rows}) < 100:
-                    break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            # AIDEV-NOTE: Legacy PostgreSQL игнорирует HTTP pagination; scoped get
+            # использует negotiated stream и не повторяет полную выгрузку трижды.
+            rows = client.get({'info.hermes_business_scope_id': scope_id, 'session_id': sid},
+                              timeout=min(float(config.get('request_timeout', 30)), 3, remaining))
+            for row in rows:
+                meta = row.get('metadata') or {}
+                info = meta.get('info') or {}
+                actor = info.get('hermes_business_actor')
+                origin = info.get('hermes_business_origin')
+                if (row.get('_cube_id') != cube or meta.get('user_id') != config['user_id']
+                        or meta.get('session_id') != sid or info.get('hermes_cube') != cube
+                        or cube not in info.get('hermes_memberships', [])
+                        or info.get('hermes_home_scope') != runtime.home_scope
+                        or info.get('hermes_memory_epoch') != config['memory_epoch']
+                        or info.get('hermes_visibility') != 'business_private'
+                        or info.get('hermes_business_scope') != scope
+                        or info.get('hermes_business_scope_id') != scope_id
+                        or info.get('hermes_subject_id') != scope['recipient']
+                        or info.get('hermes_kind') not in ('business_message', 'fact')
+                        or actor not in ('customer', 'owner', 'approved_ai')
+                        or origin not in ('telegram_incoming','telegram_edited','telegram_owner','approved_send','owner_edit_send','telegram_bot_echo')
+                        or info.get('hermes_business_status') != ('observed' if actor == 'customer' else 'sent')):
+                    continue
+                if info.get('hermes_kind') == 'fact' and (not info.get('hermes_source_ids') or not info.get('hermes_source')):
+                    continue
+                # Draft from source evidence, not an unverified backend paraphrase.
+                source = info.get('hermes_source') or {}
+                evidence = (source.get('quote') if info.get('hermes_kind') == 'fact' else
+                            '\n'.join(m.get('content','') for m in info.get('hermes_messages',[]) if isinstance(m,dict)))
+                if not isinstance(evidence,str) or not evidence or not validate_source(
+                        info.get('hermes_business_message_id'), info.get('hermes_business_revision'),
+                        info.get('hermes_author_id'), actor, evidence):
+                    continue
+                text = scrub(evidence)[:1000]
+                key = info.get('hermes_logical_id') or row.get('id')
+                if text and key:
+                    candidates[key] = {'id':row.get('id'), 'text':text, 'scope':scope,
+                        'subject':scope['recipient'], 'author':info.get('hermes_author_id'), 'actor':actor,
+                        'origin':origin, 'status':info.get('hermes_status') or info['hermes_business_status'],
+                        'date':info.get('hermes_business_date'), 'source_ids':info.get('hermes_source_ids') or [row.get('id')],
+                        'source':info.get('hermes_source'), 'message_id':info['hermes_business_message_id']}
         words = set(re.findall(r'[\w-]{3,}', query.casefold()))
         def score(row):
             return (len(words & set(re.findall(r'[\w-]{3,}', row['text'].casefold()))), str(row['date']))

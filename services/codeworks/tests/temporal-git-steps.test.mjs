@@ -8,7 +8,7 @@ import {once} from 'node:events';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
-import {command} from '../src/git.mjs';
+import {command,createGit} from '../src/git.mjs';
 import {createFlowGit} from '../src/git-flow.mjs';
 import {createActivityGit} from '../src/git-steps.mjs';
 import {createServer} from 'node:http';
@@ -71,4 +71,31 @@ test('Activity cancellation stops only its command and HTTP request; independent
     await started;controller.abort(Error('fixture interruption'));
     await Promise.all([http,child]);assert.equal((await independent).stdout,'independent');
   }finally{release();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+});
+
+test('fresh hotfix base updates only its tracking ref and keeps the DEV checkout and FETCH_HEAD',async t=>{
+  const tmp=fileURLToPath(new URL('../../../tmp/',import.meta.url));await mkdir(tmp,{recursive:true});
+  const root=await mkdtemp(path.join(tmp,'codeworks-base-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const repo=root+'/repo',bare=root+'/origin.git',producer=root+'/producer',areas=root+'/areas';await mkdir(areas);
+  await command('git',['init','--bare',bare]);await command('git',['init','-b','dev',repo]);
+  const g=(...args)=>command('git',['-C',repo,...args]);
+  await g('config','user.name','Fixture');await g('config','user.email','fixture@example.invalid');
+  await writeFile(repo+'/base','base');await g('add','.');await g('commit','-m','base');
+  const base=(await g('rev-parse','HEAD')).stdout;await g('remote','add','origin',bare);await g('push','origin','dev',base+':refs/heads/main');
+  await g('update-ref','refs/remotes/origin/main',base);
+  await command('git',['clone','--branch','main',bare,producer]);
+  const other=(...args)=>command('git',['-C',producer,...args]);
+  await other('config','user.name','Fixture');await other('config','user.email','fixture@example.invalid');
+  await writeFile(producer+'/prod-fix','accepted PROD');await other('add','.');await other('commit','-m','production fix');await other('push','origin','main');
+  const head=(await other('rev-parse','HEAD')).stdout,sentinel='preserve FETCH_HEAD\n';await writeFile(repo+'/.git/FETCH_HEAD',sentinel);
+  const p={repo_path:repo,common_dir:repo+'/.git',workspace_root:areas,git_flow:{hotfix_base:'refs/remotes/origin/main'},github:{repository:'fixture/repository'}};
+  const git=createGit({flowGit:createFlowGit({localRemote:true,requireLock:()=>{}})});
+  assert.equal(await git.readBase(p,'hotfix'),head);
+  assert.equal((await g('rev-parse','refs/remotes/origin/main')).stdout,head);
+  assert.equal((await g('rev-parse','HEAD')).stdout,base);
+  assert.equal(await readFile(repo+'/.git/FETCH_HEAD','utf8'),sentinel);await assert.rejects(access(repo+'/prod-fix'));
+  await g('update-ref','refs/remotes/origin/main',base);
+  let reads=0;const racing=createGit({flowGit:{remote:async()=>++reads===1?head:'f'.repeat(40)}});
+  await assert.rejects(racing.readBase(p,'hotfix'),{code:'TARGET_CHANGED'});
+  assert.equal((await g('rev-parse','refs/remotes/origin/main')).stdout,base);
 });

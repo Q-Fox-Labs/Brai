@@ -29,6 +29,13 @@ const historicalRemovedEligibility=`w.removed_at IS NOT NULL
 
 /** Создаёт обязательство только для заведомо отклонённой записи или terminal legacy root. */
 export async function reconcileProjectLedger(pool,projectId,owner,{cursor=null,historicalCursor=null}={}) {
+  // AIDEV-NOTE: Commit prepare может пережить потерю ответа begin; связь восстанавливается без нового запроса агента.
+  await pool.query(`UPDATE codeworks.write_calls c SET workspace_id=o.workspace_id,operation_id=o.id,updated_at=now()
+    FROM codeworks.requests r JOIN codeworks.operations o ON o.id=r.operation_id
+    WHERE c.project_id=$1 AND c.workspace_id IS NULL AND r.project_id=c.project_id
+      AND r.executor_id=c.executor_id AND r.idempotency_key=c.request_key
+      AND o.project_id=c.project_id AND o.kind='prepare' AND o.workspace_id IS NOT NULL
+      AND o.request->>'workspace_key'=c.workspace_key AND COALESCE(o.request->>'kind','feature')=c.kind`,[projectId]);
   const candidates=(await pool.query(`SELECT w.id FROM codeworks.workspaces w JOIN codeworks.workflow_registry r ON r.workspace_id=w.id
     WHERE w.project_id=$1 AND ((r.state='completed' AND r.lifecycle IN ('cancelled','removed')) OR
       (r.state='open' AND r.lifecycle='active' AND ${unusedEligibility}

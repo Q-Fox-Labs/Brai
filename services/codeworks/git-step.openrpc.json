@@ -22,7 +22,8 @@
               "dependencies",
               "cleanupLocal",
               "cleanupStep",
-              "cleanupBranchLocal"
+              "cleanupBranchLocal",
+              "synchronizeCheckout"
             ]
           }
         },

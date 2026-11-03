@@ -2,7 +2,7 @@
 // ABOUTME: Проверяет сохранение пользовательских подписей и посторонних ссылок.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { telegramText, updateTelegramMessage } from "../app/agent/telegram-display.ts";
+import { emptyTelegramMessage, telegramText, updateTelegramMessage } from "../app/agent/telegram-display.ts";
 
 const first = "11111111-1111-4111-8111-111111111111";
 const second = "22222222-2222-4222-8222-222222222222";
@@ -17,6 +17,13 @@ test("заменяет только связанный дескриптор го
   assert.equal(telegramText(text, [{ artifactId: audio, mimeType: "audio/ogg" }]), "Распознанный текст");
   assert.equal(telegramText(text, []), text);
   assert.equal(telegramText("[screenshot]", []), "[screenshot]");
+});
+
+test("объясняет пустое сообщение без предположений о старых данных", () => {
+  assert.match(emptyTelegramMessage(), /тип неизвестен/);
+  assert.match(emptyTelegramMessage("unknown"), /тип неизвестен/);
+  assert.match(emptyTelegramMessage("service"), /Служебное/);
+  assert.match(emptyTelegramMessage("unsupported:contact"), /не поддерживается/);
 });
 
 test("объединяет квитанцию и прямое наблюдение одной отправки", () => {

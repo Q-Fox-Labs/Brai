@@ -4,45 +4,12 @@ import { type FormEvent, useLayoutEffect, useRef, useState } from "react";
 import ErrorToast from "./ErrorToast";
 import { useTasks } from "./TasksContext";
 import TaskInspector from "./TaskInspector";
+import TaskProjectsRail from "./TaskProjectsRail";
+import WorkspaceFrame from "../shell/workspace-frame";
 import TaskRow from "./TaskRow";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
-
-type TasksViewProps = {
-  isProjectsDrawerOpen: boolean;
-  isProjectsExpanded: boolean;
-  onExpandProjects: () => void;
-  onOpenProjectsDrawer: () => void;
-};
-
-function ProjectsButton({
-  className,
-  isExpanded,
-  onClick,
-}: {
-  className: string;
-  isExpanded: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <Button
-      className={`${className} size-10 shrink-0 rounded-lg border-brai-line bg-brai-surface-subtle p-0 text-brai-muted hover:bg-brai-surface-soft hover:text-brai-ink [&_svg]:size-5 [&_svg]:fill-none [&_svg]:stroke-current [&_svg]:stroke-[1.7] [&_svg]:[stroke-linecap:round] [&_svg]:[stroke-linejoin:round]`}
-      variant="outline"
-      size="icon-lg"
-      type="button"
-      aria-label="Открыть меню проектов"
-      aria-controls="task-projects-panel"
-      aria-expanded={isExpanded}
-      onClick={onClick}
-    >
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <rect x="3" y="4" width="18" height="16" rx="2" />
-        <path d="M9 4v16M5.5 8h1" />
-      </svg>
-    </Button>
-  );
-}
 
 function DetachZone({ position }: { position: "top" | "bottom" }) {
   const { dragArea, dropOutsideGoal, dropTarget, isDraggingChild, setDropTarget } = useTasks();
@@ -68,12 +35,7 @@ function DetachZone({ position }: { position: "top" | "bottom" }) {
 }
 
 /** Воспроизводит исходные две панели, формы и мобильную панель September. */
-export default function TasksView({
-  isProjectsDrawerOpen,
-  isProjectsExpanded,
-  onExpandProjects,
-  onOpenProjectsDrawer,
-}: TasksViewProps) {
+export default function TasksView({ userId }: { userId: string }) {
   const {
     addTask,
     tasks,
@@ -121,27 +83,15 @@ export default function TasksView({
 
   return (
     <>
-      <div className="relative grid h-full min-h-0 min-w-0 grid-cols-2 items-stretch gap-3 overflow-hidden max-[861px]:grid-cols-1">
+      <WorkspaceFrame section="do" userId={userId} title="Дела" railTitle="Проекты" rail={<TaskProjectsRail onClose={() => {}} onSelectProject={() => {}} />} tabs={[{id:"inspector",label:"Подробности",content:<TaskInspector />}]} externalRightHeader openRightSignal={selectedTask?.id ?? null} onRightClose={() => setSelectedTaskId(null)}>
         <Card
           render={<section aria-labelledby="tasks-heading" />}
-          className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-xl border-brai-line bg-brai-card shadow-sm"
+          className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden rounded-none border-0 bg-transparent shadow-none"
         >
         <h1 className="sr-only" id="tasks-heading">Дела</h1>
         <div className="flex min-w-0 gap-2 border-b border-brai-line p-3 max-[480px]:flex-wrap">
         <form className="min-w-0 flex-1" onSubmit={(event) => void addTask(event)}>
           <div className="flex min-w-0 items-center gap-2.5">
-            {!isProjectsExpanded && (
-              <ProjectsButton
-                className="grid max-[861px]:hidden"
-                isExpanded={isProjectsExpanded}
-                onClick={onExpandProjects}
-              />
-            )}
-            <ProjectsButton
-              className="hidden max-[861px]:grid"
-              isExpanded={isProjectsDrawerOpen}
-              onClick={onOpenProjectsDrawer}
-            />
             <input
               ref={inputRef}
               className="h-10 min-w-0 flex-1 rounded-lg border border-brai-line bg-brai-surface-subtle px-3 text-sm text-brai-ink placeholder:text-brai-muted focus-visible:border-brai-accent/65 focus-visible:ring-2 focus-visible:ring-brai-accent/20"
@@ -220,22 +170,7 @@ export default function TasksView({
           )}
         </div>
         </Card>
-        <button
-          className={`absolute inset-0 z-20 hidden border-0 bg-foreground/20 p-0 transition-opacity duration-200 max-[861px]:block ${selectedTask ? "visible opacity-100 pointer-events-auto" : "invisible opacity-0 pointer-events-none"}`}
-          type="button"
-          aria-label="Закрыть подробности"
-          tabIndex={selectedTask ? 0 : -1}
-          onClick={() => setSelectedTaskId(null)}
-        />
-        <aside
-          id="task-inspector-sheet"
-          data-task-inspector-sheet
-          className={`h-full min-h-0 min-w-0 transition-[transform,visibility] duration-200 ease-out max-[861px]:absolute max-[861px]:inset-x-0 max-[861px]:bottom-0 max-[861px]:z-30 max-[861px]:h-[82%] max-[861px]:max-h-[680px] max-[861px]:overflow-hidden max-[861px]:rounded-t-2xl max-[861px]:shadow-xl ${selectedTask ? "max-[861px]:visible max-[861px]:translate-y-0" : "max-[861px]:invisible max-[861px]:translate-y-[calc(100%+16px)]"}`}
-          aria-label="Подробности выбранного элемента"
-        >
-          <TaskInspector />
-        </aside>
-      </div>
+      </WorkspaceFrame>
       <ErrorToast message={error} onClose={() => setError("")} />
     </>
   );

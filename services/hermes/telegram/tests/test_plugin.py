@@ -404,6 +404,250 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 mod.Config.from_env()
 
+    async def test_unsupported_user_payload_notifies_once_without_starting_agent(self):
+        """Явный неподдерживаемый input получает один ответ даже после перезапуска."""
+        stop=sys.modules['telegram.ext'].ApplicationHandlerStop
+        message=NS(message_id=103,text=None,video_note=NS(file_id='synthetic'),message_thread_id=77)
+        update=NS(message=message,effective_message=message,effective_chat=NS(id=123,type='private'),
+                  effective_user=NS(id=123,is_bot=False))
+        for _ in range(2):
+            with self.assertRaises(stop):
+                await self.plugin.guard(update,None)
+        self.plugin.tokens=mod.Tokens(self.config.state_dir)
+        with self.assertRaises(stop):
+            await self.plugin.guard(update,None)
+        self.assertEqual(len(self.bot.sent),1)
+        self.assertIn('не поддерживается',self.bot.sent[0]['text'])
+        self.assertEqual(self.bot.sent[0]['message_thread_id'],77)
+        self.assertEqual(self.bridge.calls,[])
+        with self.plugin.tokens._connect() as db:
+            self.assertEqual(db.execute("SELECT state FROM input_notices WHERE message_id='103'").fetchone()[0],'sent')
+
+    async def test_unsupported_notice_unknown_delivery_is_not_retried(self):
+        """Таймаут уведомления не создаёт повтор отправки или вход модели."""
+        stop=sys.modules['telegram.ext'].ApplicationHandlerStop
+        message=NS(message_id=105,text=None,contact=NS(phone_number='synthetic'))
+        update=NS(message=message,effective_message=message,effective_chat=NS(id=123,type='private'),
+                  effective_user=NS(id=123,is_bot=False))
+        calls=[]
+        async def lost_reply(*args,**kwargs):
+            calls.append(args)
+            raise TimeoutError('synthetic unknown delivery')
+        with patch.object(self.plugin,'_notify',side_effect=lost_reply):
+            with self.assertLogs(mod.__name__,level='WARNING'):
+                with self.assertRaises(stop):
+                    await self.plugin.guard(update,None)
+            self.plugin.tokens=mod.Tokens(self.config.state_dir)
+            with self.assertRaises(stop):
+                await self.plugin.guard(update,None)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(self.bridge.calls,[])
+        with self.plugin.tokens._connect() as db:
+            self.assertEqual(db.execute("SELECT state FROM input_notices WHERE message_id='105'").fetchone()[0],'unknown')
+
+    async def test_unsupported_notice_local_failures_can_retry_after_restart(self):
+        """Нет бота и неверный маршрут до API сохраняют not_sent, не теряя повтор."""
+        stop=sys.modules['telegram.ext'].ApplicationHandlerStop
+        recovery=[task for task in self.plugin.tasks if task.get_coro().__name__=='_recover_input_notices']
+        for task in recovery:task.cancel()
+        await asyncio.gather(*recovery,return_exceptions=True)
+        message=NS(message_id=106,text=None,video_note=NS(file_id='synthetic'),message_thread_id=77)
+        update=NS(message=message,effective_message=message,effective_chat=NS(id=123,type='private'),
+                  effective_user=NS(id=123,is_bot=False))
+        self.plugin.bot=None
+        with self.assertLogs(mod.__name__,level='WARNING'):
+            with self.assertRaises(stop):
+                await self.plugin.guard(update,None)
+        with self.plugin.tokens._connect() as db:
+            self.assertEqual(db.execute("SELECT state FROM input_notices WHERE message_id='106'").fetchone()[0],'not_sent')
+        self.plugin.tokens=mod.Tokens(self.config.state_dir)
+        self.plugin.bot=self.bot
+        with self.plugin.tokens._connect() as db:
+            db.execute("UPDATE input_notices SET retry_at=0 WHERE message_id='106'")
+        # Неверный thread отклоняется локально до API; сохранённый маршрут очереди не меняется.
+        with self.assertRaises(mod.TelegramNoticeNotSent):
+            await self.plugin._notify('test','123','bad')
+        self.assertEqual(self.bot.sent,[])
+        message.message_thread_id=77
+        with self.plugin.tokens._connect() as db:
+            db.execute("UPDATE input_notices SET retry_at=0 WHERE message_id='106'")
+        with self.assertRaises(stop):
+            await self.plugin.guard(update,None)
+        self.assertEqual(len(self.bot.sent),1)
+        with self.plugin.tokens._connect() as db:
+            self.assertEqual(db.execute("SELECT state FROM input_notices WHERE message_id='106'").fetchone()[0],'sent')
+
+    async def test_unsupported_notice_concurrent_duplicates_and_reopen_send_once(self):
+        """Пока API отвечает, параллельные дубликаты и новый Tokens видят unknown."""
+        stop=sys.modules['telegram.ext'].ApplicationHandlerStop
+        message=NS(message_id=107,text=None,contact=NS(phone_number='synthetic'))
+        update=NS(message=message,effective_message=message,effective_chat=NS(id=123,type='private'),
+                  effective_user=NS(id=123,is_bot=False))
+        entered,release=asyncio.Event(),asyncio.Event()
+        calls=[]
+        async def slow_send(*args,**kwargs):
+            calls.append(args)
+            entered.set()
+            await release.wait()
+            return 501
+        with patch.object(self.plugin,'_notify',side_effect=slow_send):
+            first=asyncio.create_task(self.plugin.guard(update,None))
+            try:
+                await asyncio.wait_for(entered.wait(),2)
+                self.plugin.tokens=mod.Tokens(self.config.state_dir)
+                duplicates=await asyncio.gather(*(self.plugin.guard(update,None) for _ in range(8)),return_exceptions=True)
+                self.assertTrue(all(isinstance(result,stop) for result in duplicates))
+                self.assertEqual(len(calls),1)
+                with self.plugin.tokens._connect() as db:
+                    self.assertEqual(db.execute("SELECT state FROM input_notices WHERE message_id='107'").fetchone()[0],'unknown')
+            finally:
+                release.set()
+                await asyncio.gather(first,return_exceptions=True)
+        with self.plugin.tokens._connect() as db:
+            self.assertEqual(db.execute("SELECT state FROM input_notices WHERE message_id='107'").fetchone()[0],'sent')
+        with self.assertRaises(stop):
+            await self.plugin.guard(update,None)
+        self.assertEqual(self.bot.sent,[])
+
+    async def test_legacy_input_notice_migrates_as_unknown_without_retry(self):
+        """Старую reservation нельзя объявить неотправленной без доказательств."""
+        self.assertTrue(self.plugin.tokens.claim_input_notice(123,108))
+        with self.plugin.tokens._connect() as db:
+            db.execute('ALTER TABLE input_notices DROP COLUMN state')
+        self.plugin.tokens=mod.Tokens(self.config.state_dir)
+        self.assertFalse(self.plugin.tokens.claim_input_notice(123,108))
+        with self.plugin.tokens._connect() as db:
+            self.assertEqual(db.execute("SELECT state FROM input_notices WHERE message_id='108'").fetchone()[0],'unknown')
+
+    async def test_unsupported_notice_recovers_after_restart_without_another_update(self):
+        """Сохранённый not_sent сам отправляется после factory; повтор update не нужен."""
+        stop=sys.modules['telegram.ext'].ApplicationHandlerStop
+        self.plugin.bot=None
+        message=NS(message_id=109,text=None,video_note=NS(file_id='synthetic'),message_thread_id=77)
+        update=NS(message=message,effective_message=message,effective_chat=NS(id=123,type='private'),
+                  effective_user=NS(id=123,is_bot=False))
+        with self.assertLogs(mod.__name__,level='WARNING'):
+            with self.assertRaises(stop):
+                await self.plugin.guard(update,None)
+        self.plugin.close()
+        await asyncio.gather(*tuple(self.plugin.tasks),return_exceptions=True)
+        with self.plugin.tokens._connect() as db:
+            db.execute("UPDATE input_notices SET retry_at=0 WHERE message_id='109'")
+        self.plugin=mod.TelegramPlugin(self.config,self.bridge,self.inject)
+        delivered=asyncio.Event()
+        original=self.plugin._notify
+        async def observed(*args,**kwargs):
+            result=await original(*args,**kwargs)
+            delivered.set()
+            return result
+        with patch.object(self.plugin,'_notify',side_effect=observed):
+            self.plugin.factory(self.app,self.adapter)
+            self.plugin.bot=None
+            self.assertEqual(len(self.plugin.tokens.pending_input_notices()),1)
+            await asyncio.sleep(0.02)
+            self.assertEqual(self.bot.sent,[])
+            self.plugin.bot=self.bot
+            self.plugin.notice_wakeup.set()
+            await asyncio.wait_for(delivered.wait(),2)
+        self.assertEqual(len(self.bot.sent),1)
+        self.assertEqual(self.bot.sent[0]['chat_id'],123)
+        self.assertEqual(self.bot.sent[0]['message_thread_id'],77)
+        self.assertEqual(self.plugin.tokens.pending_input_notices(),[])
+
+    async def test_unsupported_notice_cancellation_stays_unknown_and_never_recovers(self):
+        """Отмена внутри API оставляет unknown вне безопасной очереди восстановления."""
+        message=NS(message_id=110,text=None,video_note=NS(file_id='synthetic'))
+        update=NS(message=message,effective_message=message,effective_chat=NS(id=123,type='private'),
+                  effective_user=NS(id=123,is_bot=False))
+        entered=asyncio.Event()
+        async def blocked(*args,**kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+        with patch.object(self.plugin,'_notify',side_effect=blocked):
+            task=asyncio.create_task(self.plugin.guard(update,None))
+            await asyncio.wait_for(entered.wait(),2)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):await task
+        self.plugin.tokens=mod.Tokens(self.config.state_dir)
+        self.assertEqual(self.plugin.tokens.pending_input_notices(),[])
+        stop=sys.modules['telegram.ext'].ApplicationHandlerStop
+        with self.assertRaises(stop):await self.plugin.guard(update,None)
+        self.assertEqual(self.bot.sent,[])
+
+    async def test_input_notice_recovery_bounds_and_route_identity(self):
+        """Backoff, пять попыток, час и неизменный маршрут ограничивают recovery."""
+        route={'owner':self.config.owner,'user_id':'123','chat_type':'private','thread_id':'77'}
+        now=1000
+        for attempt,delay in enumerate((1,5,15,30,30),1):
+            self.assertTrue(self.plugin.tokens.claim_input_notice(123,111,route,now=now))
+            self.plugin.tokens.finish_input_notice(123,111,'not_sent',now=now)
+            self.assertFalse(self.plugin.tokens.claim_input_notice(123,111,route,now=now))
+            rows=self.plugin.tokens.pending_input_notices(now=now)
+            if attempt<5:
+                self.assertEqual(rows[0]['retry_at'],now+delay)
+                self.assertEqual(rows[0]['attempts'],attempt)
+            else:self.assertEqual(rows,[])
+            now+=delay
+        self.assertFalse(self.plugin.tokens.claim_input_notice(123,111,route,now=now+100))
+        self.assertTrue(self.plugin.tokens.claim_input_notice(123,112,route,now=1000))
+        self.plugin.tokens.finish_input_notice(123,112,'not_sent',now=1000)
+        self.assertFalse(self.plugin.tokens.claim_input_notice(123,112,{**route,'thread_id':'78'},now=1002))
+        self.assertEqual(self.plugin.tokens.pending_input_notices(now=5000),[])
+        self.assertFalse(self.plugin.tokens.claim_input_notice(123,112,route,now=5000))
+
+    async def test_input_notice_recovery_rechecks_access_before_send(self):
+        """Отозванный sender или сменённый owner не получают отложенный ответ."""
+        row={'chat_id':'123','message_id':'113','owner':self.config.owner,'user_id':'123','chat_type':'private','thread_id':'77'}
+        for changes in ({'owner':'other'},{'user_id':'456'},{'chat_id':'456'}):
+            await self.plugin._send_input_notice({**row,**changes})
+        self.assertEqual(self.bot.sent,[])
+
+    async def test_input_notice_worker_reload_and_close_leave_no_active_tasks(self):
+        """Reload отменяет занятую отправку как unknown; close завершает все свои задачи."""
+        route={'owner':self.config.owner,'user_id':'123','chat_type':'private','thread_id':'77'}
+        now=time.time()-100
+        self.assertTrue(self.plugin.tokens.claim_input_notice(123,114,route,now=now))
+        self.plugin.tokens.finish_input_notice(123,114,'not_sent',now=now)
+        entered=asyncio.Event()
+        calls=[]
+        async def blocked(*args,**kwargs):
+            calls.append(args)
+            entered.set()
+            await asyncio.Event().wait()
+        try:
+            with patch.object(self.plugin,'_notify',side_effect=blocked):
+                self.plugin.notice_wakeup.set()
+                await asyncio.wait_for(entered.wait(),2)
+                old_workers=[task for task in self.plugin.tasks
+                             if task.get_coro().__name__=='_recover_input_notices']
+                self.assertEqual(len(old_workers),1)
+                self.plugin.factory(self.app,self.adapter)
+                await asyncio.wait_for(asyncio.gather(*old_workers,return_exceptions=True),2)
+                self.assertTrue(all(task.cancelled() for task in old_workers))
+                self.assertEqual(self.plugin.tokens.pending_input_notices(),[])
+                active=[task for task in self.plugin.tasks if not task.done()
+                        and task.get_coro().__name__=='_recover_input_notices']
+                self.assertEqual(len(active),1)
+                self.assertEqual(len(calls),1)
+                with self.plugin.tokens._connect() as db:
+                    self.assertEqual(db.execute("SELECT state FROM input_notices WHERE message_id='114'").fetchone()[0],'unknown')
+        finally:
+            tasks=tuple(self.plugin.tasks)
+            self.plugin.close()
+            await asyncio.wait_for(asyncio.gather(*tasks,return_exceptions=True),2)
+            self.assertTrue(all(task.done() for task in tasks))
+            self.assertEqual(self.plugin.tasks,set())
+
+    async def test_service_unknown_and_supported_inputs_do_not_get_unsupported_reply(self):
+        """Служебные и неизвестные события не создают ответ; штатный файл проходит дальше."""
+        for fields in ({'forum_topic_closed':NS()}, {}, {'photo':[NS()]}, {'document':NS(), 'animation':NS()}):
+            message=NS(message_id=104,text=None,**fields)
+            update=NS(message=message,effective_message=message,effective_chat=NS(id=123,type='private'),
+                      effective_user=NS(id=123,is_bot=False))
+            await self.plugin.guard(update,None)
+        self.assertEqual(self.bot.sent,[])
+        self.assertEqual(self.bridge.calls,[])
+
     async def test_group_owner_guard_precedes_native_command_media_callback_and_inline(self):
         await self.set_group_route()
         reached = []
@@ -1335,12 +1579,19 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         plugin = mod.TelegramPlugin(startup_config, self.bridge, self.inject)
         plugin.tokens.track_agent_attempt("123", "terminal-session", MOVE, ATTEMPT)
         plugin.factory(self.app, self.adapter)
-        tasks = tuple(plugin.tasks)
-        if tasks:
-            await asyncio.gather(*tasks)
-        self.assertIn(("actions.fail_agent", {"moveId": MOVE, "attemptId": ATTEMPT}), self.bridge.calls)
-        self.assertEqual(plugin.tokens.agent_attempts("123"), [])
-        plugin.close()
+        try:
+            recovery = [task for task in plugin.tasks
+                        if task.get_coro().__name__ == 'recover_durable_agent_attempts']
+            self.assertEqual(len(recovery), 1)
+            await asyncio.wait_for(asyncio.gather(*recovery), 2)
+            self.assertIn(("actions.fail_agent", {"moveId": MOVE, "attemptId": ATTEMPT}), self.bridge.calls)
+            self.assertEqual(plugin.tokens.agent_attempts("123"), [])
+        finally:
+            tasks = tuple(plugin.tasks)
+            plugin.close()
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 2)
+            self.assertTrue(all(task.done() for task in tasks))
+            self.assertEqual(plugin.tasks, set())
 
     async def test_terminal_cleanup_preserves_claims_from_other_session_or_owner(self):
         self.plugin.observe_agent_move(tool_name="game_core_move_claim", args={"move_id": MOVE},

@@ -17,6 +17,7 @@ import {runCleanupObligation} from '../../src/worker.mjs';
 import {attestNativeCompletion,importNativeCompletion,verifyCompletionReceipt} from '../../src/write-completion.mjs';
 import {runHook} from '../../src/hook.mjs';
 import {createActivities} from '../../src/temporal.mjs';
+import {processProjectCompletions} from '../../src/completion-inbox.mjs';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 async function execute(command,cwd){
@@ -44,8 +45,10 @@ test('foreground rm Post and root receipt recover completed calls and Temporal c
   const postRequest={project_id:p.id,workspace_id:w.id,workspace_key:w.workspace_key,session_id:session,turn_id:turn,tool_use_id:'normal-post',tool_name:'Bash',payload_sha256:hash(JSON.stringify(postPayload)),targets:['.'],request_key:'normal-post'};
   const postCall=await f.h.call('write.begin',postRequest,'codex');await f.h.call('write.admit',{project_id:p.id,write_call_id:postCall.write_call_id,rewritten_sha256:hash(JSON.stringify({command:postCommand}))},'codex');
   await execute(postCommand,w.path);await assert.rejects(access(postDir),{code:'ENOENT'});
-  const invoked=[];await runHook({hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:postCommand},tool_response:'',session_id:session,turn_id:turn,tool_use_id:'normal-post'},{config:{projects:[{id:p.id}]},env:{},connect:async()=>({call:async(method,args)=>{invoked.push(method);return f.h.call(method,args,'codex');},close:async()=>{}})});
-  assert.deepEqual(invoked,['write.finish']);assert.equal((await f.app.query('SELECT state FROM codeworks.write_calls WHERE id=$1',[postCall.write_call_id])).rows[0].state,'finished');
+  const spool=receiptRoot+'/spool';await mkdir(spool,{mode:0o700});
+  const invoked=[];await runHook({hook_event_name:'PostToolUse',tool_name:'Bash',tool_input:{command:postCommand},cwd:w.path,tool_response:'',session_id:session,turn_id:turn,tool_use_id:'normal-post'},{config:{projects:[p],completion_spool:spool},env:{CODEWORKS_EXECUTOR_ID:'codex'},connect:async()=>({call:async(method,args)=>{invoked.push(method);return f.h.call(method,args,'codex');},close:async()=>{}})});
+  assert.deepEqual(invoked,['write.finish']);assert.equal((await f.app.query('SELECT state FROM codeworks.write_calls WHERE id=$1',[postCall.write_call_id])).rows[0].state,'in_flight');
+  await processProjectCompletions(f.app,p.id,{allowedRepositories:[p.repo_path]});assert.equal((await f.app.query('SELECT state FROM codeworks.write_calls WHERE id=$1',[postCall.write_call_id])).rows[0].state,'finished');
   for(const [tool,name] of [['native-one','lost-one'],['native-two','lost-two']]){
     const dir=w.path+'/'+name;await mkdir(dir);await writeFile(dir+'/data','temporary');const cmd='rm -rf -- '+dir;
     const payload={tool_name:'Bash',tool_input:{command:cmd},cwd:p.repo_path,project_id:p.id,workspace_id:w.id};

@@ -28,7 +28,7 @@
     "runtime": [
       "services/codeworks/asyncapi.json",
       "services/codeworks/preview.openrpc.json",
-      "services/codeworks/migrations/013.sql",
+      "services/codeworks/migrations/014.sql",
       "services/codeworks/src/web-preview-status.mjs",
       "services/codeworks/src/preview-domain.mjs",
       "services/codeworks/src/preview.mjs",
@@ -87,6 +87,11 @@
       "services/codeworks/migrations/010.sql",
       "services/codeworks/migrations/011.sql",
       "services/codeworks/migrations/012.sql",
+      "services/codeworks/migrations/013.sql",
+      "services/codeworks/src/completion-inbox.mjs",
+      "services/codeworks/src/write-notice.mjs",
+      "services/codeworks/src/git-patch.mjs",
+      "services/codeworks/src/executor-completion.mjs",
       "services/codeworks/src/write-admission.mjs",
       "services/codeworks/src/write-completion.mjs",
       "services/codeworks/src/filesystem-preservation.mjs",
@@ -96,7 +101,8 @@
       "services/codeworks/src/branch-coordinator.mjs",
       "services/codeworks/src/reconciler.mjs",
       "services/codeworks/src/operator.mjs",
-      "services/codeworks/src/disposition.mjs"
+      "services/codeworks/src/disposition.mjs",
+      "services/codeworks/src/source-checkout.mjs"
     ],
     "checks": [
       "services/codeworks/components/cli.mjs",
@@ -130,6 +136,11 @@
       "services/codeworks/tests/cleanup.test.mjs",
       "services/codeworks/tests/cli.test.mjs",
       "services/codeworks/tests/hook.test.mjs",
+      "services/codeworks/tests/git-patch.test.mjs",
+      "services/codeworks/tests/executor-completion.test.mjs",
+      "services/codeworks/tests/integration/stock-codex.mjs",
+      "services/codeworks/tests/integration/stock-hook.mjs",
+      "services/codeworks/tests/integration/stock-writer.test.mjs",
       "services/codeworks/components/documentation.test.mjs",
       "AGENTS.md",
       "docs/README.md",
@@ -144,6 +155,9 @@
       "services/codeworks/tests/integration/code-index*.mjs",
       "services/codeworks/tests/write-admission.test.mjs",
       "services/codeworks/tests/write-completion.test.mjs",
+      "services/codeworks/tests/write-completion-inbox.test.mjs",
+      "services/codeworks/tests/write-notice.test.mjs",
+      "services/codeworks/tests/integration/write-completion-delivery.test.mjs",
       "services/codeworks/tests/filesystem-preservation.test.mjs",
       "services/codeworks/tests/integration/filesystem-preservation.test.mjs",
       "services/codeworks/tests/integration/write-completion-recovery.test.mjs",
@@ -155,7 +169,10 @@
       "services/codeworks/tests/publication.test.mjs",
       "services/codeworks/tests/integration/publication-restore-acl.mjs",
       "services/codeworks/tests/integration/*finalization*.mjs",
-      "services/codeworks/scripts/accept-finalization.mjs"
+      "services/codeworks/scripts/accept-finalization.mjs",
+      "services/codeworks/tests/source-checkout.test.mjs",
+      "services/codeworks/tests/integration/source-checkout.test.mjs",
+      "services/codeworks/tests/integration/terminal-rollout-queue.test.mjs"
     ]
   },
   "dependencies": [],
@@ -215,6 +232,10 @@
       "services/codeworks/src/code-index-engine.mjs",
       "services/codeworks/src/write-admission.mjs",
       "services/codeworks/src/write-completion.mjs",
+      "services/codeworks/src/completion-inbox.mjs",
+      "services/codeworks/src/write-notice.mjs",
+      "services/codeworks/src/git-patch.mjs",
+      "services/codeworks/src/executor-completion.mjs",
       "services/codeworks/src/filesystem-preservation.mjs",
       "services/codeworks/src/cleanup-coordinator.mjs",
       "services/codeworks/src/cleanup-archive.mjs",
@@ -222,7 +243,8 @@
       "services/codeworks/src/branch-coordinator.mjs",
       "services/codeworks/src/reconciler.mjs",
       "services/codeworks/src/operator.mjs",
-      "services/codeworks/src/disposition.mjs"
+      "services/codeworks/src/disposition.mjs",
+      "services/codeworks/src/source-checkout.mjs"
     ],
     "entrypoints": [
       "services/codeworks/src/main.mjs",
@@ -252,7 +274,7 @@
       "Git with merge-tree --write-tree; flock (util-linux)",
       "GitHub CLI (gh), operator authentication; origin HTTPS matches registered repository",
       "Existing GitHub OAuth operator identity with repo, workflow, read:packages/write:packages; Ed25519 identity in a protected file; durable Codeworks PG evidence backup; first owner catalog-v1 publication links the repository and inherits its Actions read access",
-      "Temporal server compatible with SDK 1.24.0; configured namespace and task queue; Codeworks migration 013"
+      "Temporal server compatible with SDK 1.24.0; configured namespace and task queue; Codeworks migration 014; private completion spool shared by native hooks and Codeworks worker"
     ]
   },
   "deploy": {

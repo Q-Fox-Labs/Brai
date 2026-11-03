@@ -80,7 +80,7 @@ components:
           required: [cursor]
           properties:
             cursor: {type: integer, minimum: 0}
-            changes: {type: array, items: {type: object}}
+            changes: {type: array, items: {$ref: '#/components/schemas/Message'}}
         - type: object
           required: [chats, before]
           properties:
@@ -89,7 +89,7 @@ components:
         - type: object
           required: [messages, before]
           properties:
-            messages: {type: array, items: {type: object}}
+            messages: {type: array, items: {$ref: '#/components/schemas/Message'}}
             before: {type: [integer, 'null']}
         - type: object
           required: [allowed]
@@ -100,3 +100,14 @@ components:
           required: [code]
           properties:
             code: {enum: [INVALID_ARGUMENT, PAYLOAD_TOO_LARGE, UNAVAILABLE]}
+
+    Message:
+      type: object
+      properties:
+        text: {type: string}
+        message_type:
+          type: string
+          description: Наблюдаемый тип; отсутствует в старой БД до миграции, неизвестен для прежних пустых записей.
+          enum: [text, photo, document, video, audio, voice, sticker, location, venue, service, unknown,
+                 'unsupported:animation', 'unsupported:video_note', 'unsupported:contact', 'unsupported:poll',
+                 'unsupported:dice', 'unsupported:game', 'unsupported:story', 'unsupported:paid_media']

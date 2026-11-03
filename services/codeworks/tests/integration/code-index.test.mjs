@@ -12,6 +12,7 @@ import {command} from '../../src/git.mjs';
 import {indexIdentity} from '../../src/code-index.mjs';
 import {setup,configured} from './fixture.mjs';
 import {createActivities,deliverCommands} from '../../src/temporal.mjs';
+import {processProjectCompletions} from '../../src/completion-inbox.mjs';
 import {Connection,Client as TemporalClient} from '@temporalio/client';
 import {Worker,bundleWorkflowCode} from '@temporalio/worker';
 import {Context} from '@temporalio/activity';
@@ -157,7 +158,7 @@ test('real Temporal background index does not block commands or cancellation',{s
     const write={project_id:p.id,workspace_id:first.workspace_id,workspace_key:'index-one',session_id:'index-session',turn_id:'turn',tool_use_id:'write',tool_name:'apply_patch',payload_sha256:'a'.repeat(64),targets:['hello.txt'],request_key:'index-actual-write'};
     const admitted=await f.h.call('write.begin',write,'codex');await f.h.call('write.admit',{project_id:p.id,write_call_id:admitted.write_call_id,rewritten_sha256:'b'.repeat(64)},'codex');
     const workspace=(await f.app.query('SELECT path FROM codeworks.workspaces WHERE id=$1',[first.workspace_id])).rows[0];await writeFile(workspace.path+'/hello.txt','first actual write\n');
-    await f.h.call('write.finish',{project_id:p.id,session_id:write.session_id,turn_id:write.turn_id,tool_use_id:write.tool_use_id,outcome:'success'},'codex');
+    await f.h.call('write.finish',{project_id:p.id,session_id:write.session_id,turn_id:write.turn_id,tool_use_id:write.tool_use_id,tool_name:'apply_patch',input_sha256:'b'.repeat(64),canonical_input_sha256:'b'.repeat(64),outcome:'success'},'codex');await processProjectCompletions(f.app,p.id,{allowedRepositories:[p.repo_path]});
     await command('git',['-C',workspace.path,'checkout','--','hello.txt']);await until(()=>entered);
     const second=await f.prepare({project_id:p.id,workspace_key:'index-two',request_key:'index-two'},'codex');await register(second);
     await deliverCommands(f.app,client,{taskQueue});await until(async()=>(await f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[second.operation_id])).rows[0].status==='succeeded');

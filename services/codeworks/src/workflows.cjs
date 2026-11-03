@@ -27,12 +27,17 @@ async function codeworksWorkspace(state={generation:1,position:0}) {
           if(command.kind==='prepare'){
             const steps=[['prepareBranch','branch'],['prepareCheckout','checkout'],['prepareDependencies','dependencies'],['confirmWorkspace','ready']];
             for(const [name,stage] of steps){
-              const result=await execution[name](command.operation_id,state.generation);
+              const port=name==='prepareDependencies'&&patched('codeworks-source-dependencies-v1')?finalization:execution;
+              const result=await port[name](command.operation_id,state.generation);
               if(result.status==='failed'||['branch','checkout','dependencies','ready'].indexOf(result.preparation_state)<['branch','checkout','dependencies','ready'].indexOf(stage))break;
             }
           }else{
             const names={sync:'synchronizeBranch',release:'advanceRelease',rollout:'reconcileRollout',cleanup:'cleanupWorkspace','release.close':'closeRelease','workspace.cancel':'cancelWorkspace','workspace.transfer':'transferWorkspace'};
-            await execution[names[command.kind]](command.operation_id,state.generation);
+            const result=await execution[names[command.kind]](command.operation_id,state.generation);
+            if(patched('codeworks-local-checkout-v1')&&command.kind==='release'&&result?.step==='LOCAL_CHECKOUT_SYNC_REQUIRED'){
+              await stopIndex();
+              await finalization.synchronizeCheckout(command.operation_id,state.generation);
+            }
           }
         }else await execution.executeCommand(command.operation_id,state.generation);
       }

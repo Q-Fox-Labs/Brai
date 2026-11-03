@@ -9,9 +9,8 @@ def schema(name, description, properties=None, required=()):
 
 
 TOOLS = [
-    schema("memos_search", "Search the existing MemOS memory across sessions. Returns ranked fragments with IDs and provenance.", {
+    schema("memos_search", "Find all relevant authorized memories across sessions. Returns complete ranked results with IDs and provenance; no result-count quota. Do not invent top_k or other limits. Read a found document reference before repeating searches for its contents.", {
         "query": {"type": "string", "description": "Question or information to recall."},
-        "top_k": {"type": "integer", "minimum": 1, "description": "Optional maximum number of results, never a target to fill. Omitted returns relevant matches in the searched scope. No fixed upper cap."},
     }, ("query",)),
     schema("memos_remember", "Explicitly store a fact, preference or decision in MemOS. Reports verified only after reading the saved record back; pending means delivery is still queued.", {
         "content": {"type": "string", "description": "Text to remember. Never intentionally include credentials or other secrets."},
@@ -34,7 +33,7 @@ for tool in ROUTED_TOOLS:
         tool['parameters']['properties']['project'] = {'type': 'string', 'description': 'Explicit approved project catalog ID; overrides session binding.'}
     if tool['name'] == 'memos_search':
         tool['parameters']['properties']['all_cubes'] = {'type': 'boolean', 'description': 'Search every authorized managed cube, overriding an explicit cubes selection. Without cubes the full authorized scope is already searched.'}
-        tool['parameters']['properties']['include_archive'] = {'type': 'boolean', 'description': 'Also search original dialogue, including pending or rejected material. Default false: only useful extracted facts.'}
+        tool['parameters']['properties']['include_archive'] = {'type': 'boolean', 'description': 'Search original dialogue too. Set true on the FIRST search for a previous report, file or conversation. Default false searches only extracted facts.'}
         tool['parameters']['properties']['cubes'] = {'type': 'array', 'items': {'type': 'string'}, 'description': 'Optional explicit approved cube scope. Omit to search the full authorized scope.'}
     if tool['name'] == 'memos_remember':
         tool['parameters']['properties']['operation_id'] = {'type': 'string', 'description': 'Optional stable request ID for repeat/recovery.'}

@@ -128,19 +128,24 @@ async def accept_event(event, admit=True):
         source, msg = source_of(event), str(event.message_id or '')
         if not msg:
             raise FileError('SOURCE_MESSAGE_REQUIRED')
-        group = str(getattr(getattr(event, 'raw_message', None), 'media_group_id', None) or msg)
+        group = str(getattr(getattr(event, 'raw_message', None), 'media_group_id', None) or event.metadata.get('_brai_photo_group') or msg)
         position = int(msg) if msg.isdecimal() else 0
-        refs, failures = [], []
+        refs, failures, item_groups = [], [], []
         with files.db() as db:
             for index, path in enumerate(paths):
                 identity = key([files.owner, source, msg + ':' + str(index)])
-                gid = key([files.owner, source, group])
+                known = db.execute('SELECT source FROM items WHERE identity=?', (identity,)).fetchone()
+                item_group = str(json.loads(known['source']).get('sourceGroupId') or group) if known else group
+                item_groups.append(item_group)
+                gid = key([files.owner, source, item_group])
                 db.execute('INSERT OR IGNORE INTO groups(identity) VALUES (?)', (gid,))
                 db.execute('INSERT OR IGNORE INTO items VALUES (?,?,?,?,?,?,NULL,NULL)',
                            (identity, gid, canonical({**source, 'itemId': msg + ':' + str(index), 'messageId': msg,
-                                      'attachmentId': str(index), 'sourceGroupId': group,
+                                      'attachmentId': str(index), 'sourceGroupId': item_group,
                                       'mediaGroupId': str(getattr(event.raw_message, 'media_group_id')) if getattr(getattr(event, 'raw_message', None), 'media_group_id', None) is not None else None}),
                             position * 1000 + index, event.text or '', path))
+        if '_brai_photo_group' in event.metadata and len(set(item_groups)) == 1:
+            event.metadata['_brai_photo_group'] = item_groups[0]
         for index, path in enumerate(paths):
             try:
                 if str(path).startswith(('http://', 'https://')):
@@ -153,7 +158,7 @@ async def accept_event(event, admit=True):
                         with files.db() as db:
                             db.execute('UPDATE items SET path=? WHERE identity=? AND artifact IS NULL', (str(path), item_key))
                 refs.append(await asyncio.to_thread(files.ingest, source, msg + ':' + str(index), path,
-                            position * 1000 + index, event.text or '', group))
+                            position * 1000 + index, event.text or '', item_groups[index]))
             except Exception as error:
                 failures.append(error)
         if failures:
@@ -190,12 +195,16 @@ async def accept_event(event, admit=True):
 
 
 def should_queue_inbound_set(event):
-    """Альбом или дополнение набора ждёт занятый ход без прерывания."""
+    """Фото Telegram, альбом или дополнение ждёт занятый ход без прерывания."""
     refs = (getattr(event, 'metadata', None) or {}).get('_brai_artifacts', [])
     if len(refs) > 1:
         return True
     if not refs:
         return False
+    platform = getattr(getattr(event, 'source', None), 'platform', None)
+    if (str(getattr(platform, 'value', platform)) == 'telegram'
+            and any(item.get('file', {}).get('mimeType', '').startswith('image/') for item in refs)):
+        return True
     if (getattr(event, 'metadata', None) or {}).get('recovered'):
         return True
     with store().db() as db:
@@ -253,6 +262,47 @@ def inbound_handoff(source, message_id, *, inline_images=()):
     finally:
         _inline_images.reset(images_token)
         _inbound.reset(token)
+
+
+async def wait_prior_media(adapter, event):
+    """Дождаться более ранних файлов того же Telegram-маршрута перед текстом."""
+    message_id = str(getattr(event, 'message_id', '') or '')
+    if not message_id.isascii() or not message_id.isdecimal():
+        return
+    route = source_of(event)
+    while True:
+        prior = []
+        for pending_name, task_name in (('_pending_photo_batches', '_pending_photo_batch_tasks'),
+                                        ('_media_group_events', '_media_group_tasks')):
+            pending = getattr(adapter, pending_name, {})
+            tasks = getattr(adapter, task_name, {})
+            for name, item in list(pending.items()):
+                item_id = str(getattr(item, 'message_id', '') or '')
+                if (item_id.isascii() and item_id.isdecimal() and int(item_id) < int(message_id)
+                        and source_of(item) == route):
+                    task = tasks.get(name)
+                    if task is None:
+                        raise FileError('PRIOR_MEDIA_UNAVAILABLE')
+                    prior.append(task)
+        if not prior:
+            return
+        try:
+            await asyncio.shield(prior[0])
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise
+            await asyncio.sleep(0)
+        except Exception:
+            raise FileError('PRIOR_MEDIA_UNAVAILABLE') from None
+
+
+def prepare_photo_batch(adapter, event, message):
+    """Связать одиночную фотографию с ещё открытым набором до сохранения файла."""
+    batch = adapter._photo_batch_key(event, message)
+    previous = adapter._pending_photo_batches.get(batch)
+    event.metadata = dict(getattr(event, 'metadata', None) or {})
+    event.metadata['_brai_photo_group'] = str((previous.metadata or {}).get('_brai_photo_group') or previous.message_id) if previous is not None else str(event.message_id)
+    return batch
 
 
 def merge_events(existing, event):
@@ -885,6 +935,7 @@ async def recover(adapter):
         for group in groups:
             with files.db() as db:
                 rows = db.execute('SELECT * FROM items WHERE group_key=? ORDER BY position,identity', (group['identity'],)).fetchall()
+                rows = [row for row in rows if not db.execute('SELECT 1 FROM legacy_recovery_review WHERE identity=?', (row['identity'],)).fetchone()]
             previous = json.loads(group['admitted']) if group['admitted'] else []
             if not rows or all(row['identity'] in previous for row in rows) or any(not row['artifact'] for row in rows):
                 continue
@@ -934,6 +985,29 @@ def known_alias(path):
     """Старый путь миграции остаётся разрешимым после удаления локальных байтов."""
     with store().db() as db:
         return db.execute('SELECT 1 FROM aliases WHERE path=?', (str(path),)).fetchone() is not None
+
+
+def reference_metadata(reference):
+    """Прочитать сохранённое проверенное имя; текущий доступ проверит fetch/read."""
+    value = str(reference)
+    identifier = value.split(':', 1)[1].lstrip('/') if value.startswith('artifact:') else value
+    if re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', identifier):
+        identifier = str(uuid.UUID(identifier))
+        with store().db() as db:
+            row = db.execute('SELECT artifact,ref FROM aliases WHERE artifact=? LIMIT 1', (identifier,)).fetchone()
+    elif Path(value).is_absolute():
+        with store().db() as db:
+            row = db.execute('SELECT artifact,ref FROM aliases WHERE path=?', (value,)).fetchone()
+    else:
+        return None
+    if row is None:
+        return None
+    result = json.loads(row['ref'])
+    if (result.get('artifactId') != row['artifact']
+            or not isinstance(result.get('filename'), str)
+            or not result['filename'] or Path(result['filename']).name != result['filename']):
+        raise FileError('INVALID_FILE_RESULT')
+    return {key: result[key] for key in ('artifactId', 'filename', 'mimeType') if key in result}
 
 
 def guard_write(path, task_id):

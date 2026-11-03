@@ -15,6 +15,14 @@ export function telegramText(text: string, attachments: { artifactId: string; mi
   }).join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/** Объясняет отсутствие содержимого, если журнал не сохранил текст или вложение. */
+export function emptyTelegramMessage(type?: string): string {
+  if (type === "service") return "Служебное событие Telegram.";
+  if (type?.startsWith("unsupported:")) return "Это вложение пока не поддерживается.";
+  if (type && type !== "unknown") return "Содержимое сообщения не сохранено.";
+  return "Сообщение без сохранённого текста и вложений; тип неизвестен.";
+}
+
 /** Объединяет повторное подтверждение одной отправки, сохраняя другие сообщения. */
 export function updateTelegramMessage<T extends { identity: string; telegram_id?: string | null; direction: string }>(previous: T[], value: T): T[] | null {
   let index = previous.findIndex(item => item.identity === value.identity);

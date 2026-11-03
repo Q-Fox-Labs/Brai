@@ -1,0 +1,141 @@
+diff --git a/src/memos/graph_dbs/postgres.py b/src/memos/graph_dbs/postgres.py
+--- a/src/memos/graph_dbs/postgres.py
++++ b/src/memos/graph_dbs/postgres.py
+@@ -1106,6 +1106,78 @@
+         finally:
+             self._put_conn(conn)
+ 
++    memory_stream_version = 1
++
++    def stream_memory(self, *, cube_id, user_id, filter=None):
++        """Читать все подходящие записи одним snapshot без выгрузки графа в RAM.
++
++        Только новый opt-in endpoint. Старый export_graph сохраняет свой контракт.
++        Закрытие итератора отменяет чтение и возвращает соединение в pool.
++        """
++        import uuid
++
++        if not isinstance(cube_id, str) or not cube_id or not isinstance(user_id, str) or not user_id:
++            raise ValueError("Memory stream requires cube and owner")
++        if filter is not None and not isinstance(filter, dict):
++            raise ValueError("Memory stream filter must be an object")
++        clauses = ["user_name = %s", "properties->'user_id' = %s::jsonb"]
++        params = [cube_id, json.dumps(user_id)]
++        date_filters = {}
++        for key, value in (filter or {}).items():
++            if not isinstance(key, str) or not key or any(not part for part in key.split('.')):
++                raise ValueError("Invalid memory stream filter")
++            if key in ('created_at', 'updated_at'):
++                # AIDEV-NOTE: _parse_row заменяет metadata датой SQL-колонки.
++                # Сравниваем тот же Python isoformat, включая NULL и timezone;
++                # строковое приведение PostgreSQL имело бы другую семантику.
++                date_filters[key] = value
++                continue
++            if key == 'id':
++                clauses.append("id::text = %s")
++                params.append(str(value))
++            else:
++                path = key.split('.')
++                if value is None:
++                    clauses.append("(properties #> %s::text[] IS NULL OR properties #> %s::text[] = 'null'::jsonb)")
++                    params.extend([path, path])
++                else:
++                    clauses.append("properties #> %s::text[] = %s::jsonb")
++                    params.extend([path, json.dumps(value)])
++        conn = self._get_conn()
++        old_autocommit = conn.autocommit
++        try:
++            # AIDEV-NOTE: Один snapshot исключает пропуски между HTTP-страницами.
++            conn.autocommit = False
++            with conn.cursor() as setup:
++                setup.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
++                setup.execute("SET LOCAL statement_timeout = '30s'")
++                setup.execute("SET LOCAL idle_in_transaction_session_timeout = '30s'")
++            with conn.cursor(name='brai_memory_' + uuid.uuid4().hex) as cursor:
++                # AIDEV-NOTE: До передачи в Python отказываем чрезмерной записи;
++                # исключение не завершает поток trailer и не выдаёт частичную память.
++                cursor.execute(
++                    f"SELECT id, CASE WHEN octet_length(memory) + octet_length(properties::text) <= 8384512 THEN memory END, "
++                    f"CASE WHEN octet_length(memory) + octet_length(properties::text) <= 8384512 THEN properties END, "
++                    f"created_at, updated_at FROM {self.schema}.memories WHERE "
++                    + " AND ".join(clauses) + " ORDER BY created_at DESC, id DESC",
++                    params,
++                )
++                while True:
++                    batch = cursor.fetchmany(1)
++                    if not batch:
++                        break
++                    if batch[0][2] is None:
++                        raise ValueError("Memory record exceeds stream limit")
++                    row = self._parse_row(batch[0], False)
++                    if all(row['metadata'].get(key) == value for key, value in date_filters.items()):
++                        yield row
++        finally:
++            try:
++                conn.rollback()
++                conn.autocommit = old_autocommit
++            finally:
++                self._put_conn(conn)
++
+     def export_graph(self, include_embedding: bool = False, **kwargs) -> dict[str, Any]:
+         """Export all data."""
+         user_name = kwargs.get("user_name") or self.user_name
+diff --git a/src/memos/api/routers/server_router.py b/src/memos/api/routers/server_router.py
+--- a/src/memos/api/routers/server_router.py
++++ b/src/memos/api/routers/server_router.py
+@@ -368,6 +368,55 @@
+         )
+ 
+ 
++@router.get("/memory_capabilities")
++def memory_capabilities():
++    """Объявить opt-in поток только для поддерживающего его backend."""
++    supported = getattr(naive_mem_cube.text_mem.graph_store, 'memory_stream_version', None) == 1
++    return {"code": 200, "data": {"memory_stream": 1 if supported else None}}
++
++
++@router.post("/get_memory_stream")
++async def get_memory_stream(body: dict):
++    """Передать все записи области без полной сериализации графа в памяти API."""
++    import json
++    import anyio
++    from fastapi.responses import StreamingResponse
++
++    store = naive_mem_cube.text_mem.graph_store
++    if getattr(store, 'memory_stream_version', None) != 1:
++        raise HTTPException(501, 'Memory stream unavailable')
++    if (set(body) - {'mem_cube_id', 'user_id', 'filter'}
++            or not isinstance(body.get('mem_cube_id'), str) or not body['mem_cube_id']
++            or not isinstance(body.get('user_id'), str) or not body['user_id']
++            or not isinstance(body.get('filter', {}), dict)):
++        raise HTTPException(422, 'Invalid memory stream request')
++    iterator = store.stream_memory(cube_id=body['mem_cube_id'], user_id=body['user_id'], filter=body.get('filter'))
++
++    async def records():
++        count = 0
++        def encode(value):
++            raw = json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode('utf-8') + b'\n'
++            if len(raw) > 8388608:
++                raise ValueError('Memory record exceeds stream limit')
++            return raw
++        try:
++            yield encode({'type': 'header', 'version': 1, 'cube_id': body['mem_cube_id'], 'user_id': body['user_id']})
++            while True:
++                row = await anyio.to_thread.run_sync(lambda: next(iterator, None))
++                if row is None:
++                    break
++                yield encode({'type': 'memory', 'memory': row})
++                count += 1
++            yield encode({'type': 'end', 'count': count})
++        finally:
++            # AIDEV-NOTE: Disconnect/cancel тоже закрывает snapshot; cancellation
++            # не должна прервать rollback или оставить соединение занятым.
++            with anyio.CancelScope(shield=True):
++                await anyio.to_thread.run_sync(iterator.close)
++
++    return StreamingResponse(records(), media_type='application/x-ndjson')
++
++
+ @router.post("/get_memory", summary="Get memories for user", response_model=GetMemoryResponse)
+ def get_memories(memory_req: GetMemoryRequest):
+     return handlers.memory_handler.handle_get_memories(

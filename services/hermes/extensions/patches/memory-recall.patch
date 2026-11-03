@@ -108,7 +108,7 @@ diff --git a/agent/memory_manager.py b/agent/memory_manager.py
              if status is None:
 +                continue
 +            if getattr(status, "summary", ""):
-+                segments.append(f"{status.glyph} {status.provider_label} — {status.summary}")
++                segments.append(status.summary)
                  continue
              # count <= 0: content injected but no discrete count (reflect)
              detail = ("recalled 1 memory" if status.count == 1 else f"recalled {status.count} memories"
@@ -129,7 +129,7 @@ diff --git a/agent/turn_context.py b/agent/turn_context.py
  ) -> str:
      """Notify memory providers of the new turn, then prefetch external memory once
      before the tool loop (skipped on trivial prompts with no semantic signal).
-@@ -903,11 +906,18 @@
+@@ -903,11 +906,19 @@
      _query = _memory_query_text(original_user_message)
      # The author rides along so a provider can attribute THIS turn, not whoever opened the session.
      _author = turn_author if isinstance(turn_author, dict) else {}
@@ -145,10 +145,11 @@ diff --git a/agent/turn_context.py b/agent/turn_context.py
              author_id=_author.get("id") or None, author_name=_author.get("name") or None,
              author_is_bot=bool(_author.get("is_bot")),
 +            context_length=window, context_available_tokens=available,
++            memory_dialogue=memory_messages or [],
          )
      ext_prefetch_cache = ""
      with suppress(Exception):
-@@ -1172,7 +1182,10 @@
+@@ -1172,7 +1183,10 @@
      )
  
      _bind_interrupt_scope(agent, ra)

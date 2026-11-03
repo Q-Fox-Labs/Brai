@@ -1,38 +1,35 @@
--- ABOUTME: Хранит ограниченные слоты веб-превью и намерения их публикации.
--- ABOUTME: Очередь и поколения переживают перезапуск; proof остаётся собственностью CI verifier.
-CREATE SEQUENCE codeworks.web_preview_ticket;
-CREATE TABLE codeworks.web_previews (
-  id uuid PRIMARY KEY,
-  project_id text NOT NULL REFERENCES codeworks.projects(id),
-  workspace_id uuid NOT NULL UNIQUE,
-  desired_sha text,
-  pending_sha text,
-  pending_cancel boolean NOT NULL DEFAULT false,
-  deployed_sha text,
-  image_reference text,
-  deployed_image_reference text,
-  ci_proof jsonb,
-  generation bigint NOT NULL DEFAULT 0 CHECK (generation >= 0),
-  deployed_generation bigint CHECK (deployed_generation > 0),
-  slot_id text,
-  state text NOT NULL CHECK (state IN ('waiting_ci','queued','publishing','ready','failed','expired','unsupported','removing')),
-  queue_ticket bigint,
-  published_at timestamptz,
-  expires_at timestamptz,
-  last_sync_operation_id uuid REFERENCES codeworks.operations(id),
-  action text CHECK (action IN ('publish','remove')),
-  action_generation bigint,
-  backend_changed boolean NOT NULL DEFAULT false,
+-- ABOUTME: Сохраняет подтверждения завершения записи до проверки дерева.
+-- ABOUTME: Не снимает блокировку писателя по таймеру или состоянию выпуска.
+ALTER TABLE codeworks.write_calls ADD COLUMN completion_input_sha256 text
+  CHECK (completion_input_sha256 IS NULL OR completion_input_sha256 ~ '^[a-f0-9]{64}$');
+ALTER TABLE codeworks.write_calls ADD COLUMN original_input_sha256 text
+  CHECK (original_input_sha256 IS NULL OR original_input_sha256 ~ '^[a-f0-9]{64}$');
+ALTER TABLE codeworks.execution_control ADD COLUMN completion_spool_cursor text
+  CHECK (completion_spool_cursor IS NULL OR completion_spool_cursor ~ '^[a-f0-9]{64}$');
+CREATE TABLE codeworks.write_completions (
+  write_call_id uuid PRIMARY KEY REFERENCES codeworks.write_calls(id),
+  receipt_sha256 text NOT NULL CHECK (receipt_sha256 ~ '^[a-f0-9]{64}$'),
+  notification jsonb NOT NULL,
+  state text NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','done','waiting_decision')),
+  attempts integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  next_attempt_at timestamptz,
   error text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
-  FOREIGN KEY (workspace_id, project_id) REFERENCES codeworks.workspaces(id, project_id),
-  CHECK ((action IS NULL) = (action_generation IS NULL)),
-  CHECK (desired_sha IS NULL OR desired_sha ~ '^[0-9a-f]{40}$'),
-  CHECK (pending_sha IS NULL OR pending_sha ~ '^[0-9a-f]{40}$'),
-  CHECK (deployed_sha IS NULL OR deployed_sha ~ '^[0-9a-f]{40}$')
+  finished_at timestamptz
 );
-CREATE UNIQUE INDEX web_preview_slot_owner ON codeworks.web_previews(project_id,slot_id) WHERE slot_id IS NOT NULL;
-CREATE INDEX web_preview_queue ON codeworks.web_previews(project_id,queue_ticket) WHERE state='queued';
-COMMENT ON TABLE codeworks.web_previews IS 'Слоты и durable намерения публикации веба отдельных рабочих областей.';
-COMMENT ON SEQUENCE codeworks.web_preview_ticket IS 'FIFO порядок готовых к публикации превью.';
+CREATE INDEX write_completions_pending ON codeworks.write_completions(next_attempt_at,write_call_id) WHERE state='pending';
+COMMENT ON TABLE codeworks.write_completions IS 'Неизменные метаданные native Post и состояние их повторяемой обработки; содержимое файлов и вывод не сохраняются.';
+CREATE TABLE codeworks.write_call_fences (
+  project_id text NOT NULL REFERENCES codeworks.projects(id),
+  executor_id text NOT NULL,
+  session_id text NOT NULL,
+  turn_id text NOT NULL,
+  tool_use_id text NOT NULL,
+  tool_name text NOT NULL,
+  original_input_sha256 text NOT NULL CHECK (original_input_sha256 ~ '^[a-f0-9]{64}$'),
+  receipt_sha256 text NOT NULL CHECK (receipt_sha256 ~ '^[a-f0-9]{64}$'),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id,executor_id,session_id,turn_id,tool_use_id)
+);
+COMMENT ON TABLE codeworks.write_call_fences IS 'Подтверждённый native отказ до запуска: запрещает позднему запросу begin создавать область после not_started.';

@@ -10,20 +10,44 @@ import { startBraiTools, planningDiagnostic } from './runtime.mjs';
 
 /** Подключает MCP к собранным портам; stdout занят только MCP. */
 export async function serveTools(runtime, transport = new StdioServerTransport()) {
-  const server = new Server({ name: 'brai-hermes', version: '1.0.0' }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: runtime.tools }));
+  const server = new Server({ name: 'brai-hermes', version: '1.0.0' }, { capabilities: { tools: { listChanged: true } } });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: runtime.listTools ? await runtime.listTools() : runtime.tools }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
-      const value = await runtime.call(request.params.name, request.params.arguments ?? {}, extra.signal);
+      const args = request.params.arguments ?? {};
+      const value = request.params.name === 'local_ai_invoke_synthesize'
+        ? await runtime.synthesizeVoice(args, extra.signal) : await runtime.call(request.params.name, args, extra.signal);
       return { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
     } catch (error) {
       const code = /^[A-Z][A-Z0-9_]{0,80}$/.test(error.code) ? error.code : 'UPSTREAM_UNAVAILABLE';
       const diagnostic = code === 'INVALID_ARGUMENT' && request.params.name.startsWith('game_core_planning_') ? planningDiagnostic(error.diagnostic) : undefined;
-      return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code, message: code, ...(diagnostic ? { diagnostic } : {}), ...(code === 'OUTCOME_UNKNOWN' ? { requestId: error.requestId } : {}) }) }] };
+      const message = code === 'VOICE_TEXT_REQUIRES_CYRILLIC' ? 'Запишите английские слова и числа кириллицей, раскройте символы словами и повторите синтез.' : code;
+      return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code, message, ...(diagnostic ? { diagnostic } : {}), ...(code === 'OUTCOME_UNKNOWN' ? { requestId: error.requestId } : {}) }) }] };
     }
   });
-  let closing;
-  const close = () => closing ??= (async () => { await runtime.close(); await server.close(); })();
+  let closing, recoveryTimer, recoveryDelay = 30_000, stopped = false;
+  // AIDEV-NOTE: Native Hermes обновляет registry по list_changed; stdio keepalive каталог не перечитывает.
+  function scheduleRecovery() {
+    if (stopped || recoveryTimer || !runtime.unavailableEndpoints?.().length) return;
+    recoveryTimer = setTimeout(async () => {
+      recoveryTimer = undefined;
+      if (stopped || !runtime.unavailableEndpoints?.().length) return;
+      const before = JSON.stringify(runtime.tools);
+      try {
+        await runtime.listTools();
+        if (!stopped && JSON.stringify(runtime.tools) !== before) await server.sendToolListChanged();
+      } catch { console.error('HERMES_DISCOVERY_REFRESH_FAILED'); }
+      recoveryDelay = Math.min(300_000, recoveryDelay * 2);
+      scheduleRecovery();
+    }, recoveryDelay);
+    recoveryTimer.unref?.();
+  }
+  server.oninitialized = scheduleRecovery;
+  const close = () => closing ??= (async () => {
+    stopped = true;
+    clearTimeout(recoveryTimer);
+    await runtime.close(); await server.close();
+  })();
   server.onclose = () => { void close(); };
   try { await server.connect(transport); } catch (error) { await close(); throw error; }
   return { server, close };
