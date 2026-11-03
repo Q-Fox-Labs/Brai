@@ -7,6 +7,7 @@ import {createHash} from "node:crypto";
 import {Pool} from "pg";
 import {migrate} from "../dist/migrate.js";
 import {createStore} from "../dist/store.js";
+import {v02Checks} from "./v02-fixture.mjs";
 const ownerUrl=process.env.DIALOGUES_TEST_OWNER_DATABASE_URL;
 const appUrl=process.env.DIALOGUES_TEST_DATABASE_URL;
 test("PostgreSQL: архив, запись, 50 пар, версии, курсоры и concurrency",{skip:!ownerUrl||!appUrl},async t=>{
@@ -161,5 +162,6 @@ test("PostgreSQL: архив, запись, 50 пар, версии, курсо�
       const a=(await pages(undefined,"a")).results.flatMap(p=>p.dialogues).find(d=>d.coverage_gap);
       assert.equal(a,undefined);
     });
+    await v02Checks(t,owner,app);
   } finally {await app.end();await owner.end();}
 });

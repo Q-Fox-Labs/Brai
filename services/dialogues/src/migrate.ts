@@ -17,6 +17,7 @@ export async function migrate(pool:Pool,owner:string,app:string) {
     const ns=(await db.query("SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname='dialogues_live'")).rows[0];
     if(ns&&ns.owner!==owner)throw new Error("SCHEMA_OWNER_CONFLICT");
     await db.query(readFileSync(new URL("../migrations/002_live.sql",import.meta.url),"utf8"));
+    await db.query(readFileSync(new URL("../migrations/003_context_jobs.sql",import.meta.url),"utf8"));
     await db.query("REVOKE ALL ON SCHEMA dialogues_live FROM PUBLIC,"+quote(app));
     await db.query("REVOKE ALL ON ALL TABLES IN SCHEMA dialogues_live FROM PUBLIC,"+quote(app));
     await db.query("REVOKE ALL ON ALL SEQUENCES IN SCHEMA dialogues_live FROM PUBLIC,"+quote(app));
@@ -24,6 +25,7 @@ export async function migrate(pool:Pool,owner:string,app:string) {
     await db.query("GRANT SELECT ON dialogues_live.migrations TO "+quote(app));
     await db.query("GRANT SELECT,INSERT,UPDATE ON dialogues_live.dialogues,dialogues_live.turns TO "+quote(app));
     await db.query("GRANT SELECT,INSERT ON dialogues_live.messages,dialogues_live.message_summaries,dialogues_live.dialogue_summaries,dialogues_live.requests TO "+quote(app));
+    await db.query("GRANT SELECT,INSERT,UPDATE ON dialogues_live.context_consumers,dialogues_live.context_deliveries,dialogues_live.summary_jobs TO "+quote(app));
     await db.query("GRANT USAGE,SELECT ON SEQUENCE dialogues_live.change_seq TO "+quote(app));
     await db.query("COMMIT");
   } catch(e){await db.query("ROLLBACK").catch(()=>{});throw e;}

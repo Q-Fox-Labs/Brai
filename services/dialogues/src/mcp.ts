@@ -15,7 +15,7 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
   if(!["127.0.0.1","::1","0.0.0.0"].includes(cfg.host)||!cfg.owner||!cfg.hosts.length||!cfg.origins.length||!/^[A-Za-z0-9_-]{32,128}$/.test(cfg.token))throw new Error("INVALID_MCP_CONFIG");
   const sessions=new Map<string,Session>(),pending=new Set<Session>();
   async function make():Promise<Session> {
-    const server=new Server({name:"brai-dialogues",version:"0.1.0"},{capabilities:{tools:{listChanged:false}},instructions:agentInstructions});
+    const server=new Server({name:"brai-dialogues",version:"0.2.0"},{capabilities:{tools:{listChanged:false}},instructions:agentInstructions});
     const transport=new StreamableHTTPServerTransport({sessionIdGenerator:randomUUID,enableJsonResponse:true,enableDnsRebindingProtection:true,allowedHosts:cfg.hosts,allowedOrigins:cfg.origins});
     const s={server,transport,touched:Date.now()};pending.add(s);
     transport.onclose=()=>{if(transport.sessionId)sessions.delete(transport.sessionId);pending.delete(s);};
