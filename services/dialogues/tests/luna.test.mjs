@@ -28,11 +28,11 @@ async function fixture(mode='completed'){
    turnStarts++;
    if(mode==='reject'&&turnStarts===1){reject();return;}
    const id='turn-'+turnStarts;
-   const items=[{id:'native-user-item',clientId:p.params.clientUserMessageId,type:'userMessage',content:[{type:'text',text:'synthetic'}]},{id:'answer',type:'agentMessage',phase:'final_answer',text:'Бюджет 37 рублей, поручение не завершено.'}];
+   const items=[{id:'native-user-item',clientId:p.params.clientUserMessageId,type:'userMessage',content:[{type:'text',text:'synthetic'}]},{id:'answer',type:'agentMessage',phase:'final_answer',text:mode==='oversize-always'||mode.startsWith('oversize')&&turnStarts===1?'ф'.repeat(5000):'Бюджет 37 рублей, поручение не завершено.'}];
    const turn={id,status:mode==='failed'&&turnStarts===1?'failed':'completed',items};
    if(mode==='tool')items.push({id:'forbidden',type:'mcpToolCall'});
    threads.get(p.params.threadId).push(turn);
-   if(mode==='unknown'&&turnStarts===1){socket.close();return;}
+   if(mode==='unknown'&&turnStarts===1||mode==='oversize-unknown'&&turnStarts===2){socket.close();return;}
    send({turn:{id,status:'inProgress',items:[]}});
    if(mode==='tool'){
     socket.send(JSON.stringify({id:777,method:'item/tool/call',params:{threadId:p.params.threadId,name:'forbidden'}}));
@@ -92,5 +92,24 @@ test('Luna: отклоняет свои tool requests и не отвечает �
   await new Promise(r=>setTimeout(r,20));
   assert.equal(f.replies.find(x=>x.id===777)?.error?.message,'DIALOGUES_TOOLS_DISABLED');
   assert.equal(f.replies.some(x=>x.id===778),false);
+ }finally{await f.close();}
+});
+
+test('Luna: oversized completed сохраняется и compression unknown не запускается повторно',async()=>{
+ const f=await fixture('oversize-unknown');let state={};
+ try{
+  await assert.rejects(f.luna.run('synthetic',state,async x=>{state=x;}),{code:'NATIVE_OUTCOME_UNKNOWN'});
+  assert.equal(state.execution_state,'completed');assert.equal(Buffer.byteLength(state.result),10000);
+  assert.equal(state.compressions[0].execution_state,'launching');assert.equal(f.starts,2);
+  assert.match(await f.luna.run('synthetic',state,async x=>{state=x;}),/37/);
+  assert.equal(f.starts,2);assert.equal(state.compressions[0].execution_state,'completed');
+ }finally{await f.close();}
+});
+test('Luna: повторное превышение явно failed после двух durable compression без новых запусков',async()=>{
+ const f=await fixture('oversize-always');let state={};
+ try{
+  for(let retry=0;retry<3;retry++)await assert.rejects(f.luna.run('synthetic',state,async x=>{state=x;}),{code:'SUMMARY_TOO_LARGE'});
+  assert.equal(f.starts,3);assert.equal(state.compressions.length,2);
+  assert.ok(state.compressions.every(x=>x.execution_state==='completed'));
  }finally{await f.close();}
 });
