@@ -3,6 +3,8 @@
 import assert from 'node:assert/strict';
 import {createStore} from '../dist/store.js';
 import {createJobs} from '../dist/jobs.js';
+import {createHash} from 'node:crypto';
+import {attachQualifiedCompression,compressionPromptVersion,compressionInstructions,compressionOutputSchema} from '../dist/luna.js';
 import {DialoguesFault} from '../dist/domain.js';
 /** Дополняет legacy приемку теми же реальными миграциями и app permissions. */
 export async function v02Checks(t,owner,app){
@@ -103,6 +105,47 @@ export async function v02Checks(t,owner,app){
   await big.tick();
   for(let i=0;i<10;i++)assert.equal(pieces.filter(x=>x.id==='m'+i).map(x=>x.original_fragment).join(''),long);
   assert.equal((await app.query("SELECT through_message_id FROM dialogues_live.dialogue_summaries WHERE owner_id='large-queue'")).rows[0].through_message_id,'m9');
+ });
+ await t.test('v0.2: qualified intermediate cache preserves source position and remaining prefix',async()=>{
+  const who='qualified-chunks',long='α😀'.repeat(10000),raw='φ'.repeat(5000),summary='Квалифицированная первая часть; остальное ещё не обработано.';
+  const sha=value=>createHash('sha256').update(value).digest('hex');
+  await api.append(who,packet('x',5));await api.summary(who,{request_id:rid(),dialogue_id:'x',target:'dialogue',through_message_id:'m4',expected_version:null,text:'Прежняя версия 1'});
+  await api.append(who,packet('x',10,5,{text:long}));
+  let failed=false,reused=0,firstInput;const paid=[];
+  const fake={async probe(){},async run(input,state,save){
+   const value=JSON.parse(input);
+   if(!failed){failed=true;firstInput=input;paid.push(...value.originals);
+    await save({native_thread_id:'original-root',native_turn_id:'original-turn',execution_state:'completed',result:raw,compressions:[{execution_state:'completed',result:'legacy cache'}]});
+    throw new DialoguesFault('SUMMARY_TOO_LARGE');
+   }
+   const version=(await app.query("SELECT max(version)::text AS version FROM dialogues_live.dialogue_summaries WHERE owner_id=$1",[who])).rows[0].version;
+   assert.equal(version,'1','no coverage before remaining source fragments');
+   if(state.compression_v2){assert.equal(input,firstInput);assert.equal(state.native_thread_id,'original-root');reused++;return JSON.parse(state.compression_v2.executions[0].result).summary;}
+   paid.push(...value.originals);return 'Следующая часть обработана';
+  }};
+  const jobs=createJobs(app,who,fake);await jobs.tick();
+  const before=(await app.query("SELECT * FROM dialogues_live.summary_jobs WHERE owner_id=$1",[who])).rows[0];
+  assert.equal(before.previous_version,'1');assert.equal(before.through_order,'14');assert.equal(before.progress.last_order,'4');assert.equal(before.progress.offset,0);
+  const qualification={model:'gpt-6-luna',semantic_validation:{accepted:true},prompt_version:compressionPromptVersion,
+   prompt_sha256:sha(compressionInstructions+JSON.stringify(compressionOutputSchema)),source_sha256:sha(raw),source_bytes:Buffer.byteLength(raw),
+   source_native:{native_thread_id:'original-root',native_turn_id:'original-turn'},
+   execution:{native_thread_id:'qualified-child',native_turn_id:'qualified-turn',execution_state:'completed',result:JSON.stringify({summary})},
+   result:{summary,codepoints:Array.from(summary).length,bytes:Buffer.byteLength(summary),valid:true}};
+  const progress=attachQualifiedCompression(before.progress,qualification);
+  for(const key of ['last_order','offset','working_summary'])assert.deepEqual(progress[key],before.progress[key]);
+  assert.deepEqual(progress.execution.compressions,before.progress.execution.compressions);
+  const wrong=structuredClone(qualification);wrong.source_native.native_turn_id='foreign';
+  assert.throws(()=>attachQualifiedCompression(before.progress,wrong),{code:'QUALIFICATION_SOURCE_CONFLICT'});
+  wrong.source_native.native_turn_id='original-turn';wrong.semantic_validation.accepted=false;
+  assert.throws(()=>attachQualifiedCompression(before.progress,wrong),{code:'QUALIFICATION_NOT_ACCEPTED'});
+  await owner.query("UPDATE dialogues_live.summary_jobs SET progress=$2,available_at=now(),attempts=0 WHERE owner_id=$1",[who,progress]);
+  await api.append(who,packet('x',1,15));
+  await jobs.tick();assert.equal(reused,1);assert.ok(paid.length>1);
+  for(let i=5;i<=14;i++)assert.equal(paid.filter(x=>x.id==='m'+i).map(x=>x.original_fragment).join(''),long);
+  assert.ok(!paid.some(x=>x.id==='m15'));
+  const latest=(await app.query("SELECT version,through_order FROM dialogues_live.dialogue_summaries WHERE owner_id=$1 ORDER BY version DESC LIMIT 1",[who])).rows[0];
+  assert.deepEqual(latest,{version:'2',through_order:'14'});
+  assert.equal((await app.query("SELECT count(*) AS n FROM dialogues_live.messages WHERE owner_id=$1 AND message_order>14",[who])).rows[0].n,'1');
  });
  await t.test('v0.2: lease recovery и stale CAS не публикуют второй результат',async()=>{
   const fake={async probe(){},async run(){return 'Свёртка';}},jobs=createJobs(app,'lease',fake);
