@@ -30,11 +30,11 @@ test("MCP привязан к оператору; stdio восстанавлив
   try {
     assert.equal((await fetch(listener.url,{method:"POST"})).status,401);
     await client.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers:{Authorization:"Bearer "+cfg.token}}}));
-    assert.deepEqual((await client.listTools()).tools.map(t=>t.name).sort(),["dialogues_context_get","dialogues_message_get","dialogues_messages_append","dialogues_summary_put"]);
+    assert.deepEqual((await client.listTools()).tools.map(t=>t.name).sort(),["dialogues_context_ack","dialogues_context_get","dialogues_context_pull","dialogues_message_get","dialogues_messages_append","dialogues_summary_put"]);
     await client.callTool({name:"dialogues_context_get",arguments:{}});
     assert.equal(calls.at(-1).owner,"test-owner");
     await proxy.connect(new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL("../dist/stdio-proxy.js",import.meta.url))],env:{...process.env,DIALOGUES_MCP_URL:listener.url,DIALOGUES_MCP_TOKEN_FILE:token}}));
-    assert.equal((await proxy.listTools()).tools.length,4);
+    assert.equal((await proxy.listTools()).tools.length,6);
     await client.close();await listener.close();
     cfg.port=Number(url.port);listener=await startMcp(store,cfg);
     assert.equal((await proxy.callTool({name:"dialogues_context_get",arguments:{}})).isError,undefined);

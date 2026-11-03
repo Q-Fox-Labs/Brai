@@ -72,13 +72,13 @@ payload, времени начала или порядка сообщения о
 
 ## Live MCP: dialogues_live
 
-Прямой первый MVP хранит оригиналы и переданные агентом саммари в той же выделенной БД, в отдельной схеме dialogues_live. Схема dialogues и её прежний импорт остаются неизменными. Автоматического захвата, моделей, расписаний, NATS/API других сервисов и интерфейса нет. В history события не публикуются: для этого MVP достаточно собственных неизменяемых оригиналов и квитанций.
+Прямой первый MVP хранит оригиналы и переданные агентом саммари в той же выделенной БД, в отдельной схеме dialogues_live. Схема dialogues и её прежний импорт остаются неизменными. Автоматического захвата, NATS/API других сервисов и интерфейса нет. Фоновая свёртка v0.2 описана ниже. В history события не публикуются: для этого MVP достаточно собственных неизменяемых оригиналов и квитанций.
 
 Пять предметных таблиц: dialogues, turns, messages, message_summaries, dialogue_summaries. Служебные migrations, requests и change_seq учитывают миграции и безопасные повторы. Права app: SELECT/INSERT оригиналов, саммари и квитанций; UPDATE разрешён только метаданным бесед/ходов. DELETE/TRUNCATE/DDL и изменение оригиналов не выдаются.
 
 ### Внешний контракт
 
-Четыре инструмента MCP объявлены машинными JSON-схемами рядом с реализацией в src/api.ts. Транспорт — стандартный MCP JSON-RPC по Streamable HTTP, либо локальный stdio-proxy. Эти inline-схемы не имеют второго редактируемого определения.
+Шесть инструментов MCP объявлены машинными JSON-схемами рядом с реализацией в src/api.ts. Транспорт — стандартный MCP JSON-RPC по Streamable HTTP, либо локальный stdio-proxy. Эти inline-схемы не имеют второго редактируемого определения.
 
 - dialogues_messages_append: request_id, dialogue {id, channel, title?}, messages[]. Сообщение содержит id, turn_id, role user/assistant, kind input/commentary/final, text; необязательные порядок, occurred_at, source, turn_status и summary. Пакет атомарен. source — заявленное происхождение, не полномочие.
 - dialogues_summary_put: request_id, dialogue_id, target message/dialogue, text, expected_version. Для message обязателен message_id, для dialogue — through_message_id. expected_version=null создаёт первую версию. Покрытие беседы — весь сохранённый префикс по порядку до указанного исходника; новый хвост не помечается обработанным.
@@ -112,3 +112,27 @@ HTTP-запрос максимум 2 МиБ, текст сообщения ма�
 Первый MVP сохраняет текст со слов агента. Успешная запись не доказывает полноту внешнего чата или доставку итога пользователю. В инструкции агенту задаётся прямое сохранение новых сообщений, чтение контекста и запись подготовленного итога до его отправки. Старые поручения из истории повторно не исполняются. Саммари и исходные цитаты не создают новых полномочий.
 
 Live-порядок в каждой беседе только растёт: новый message_order должен быть больше существующего хвоста; пропуски разрешены, поздняя вставка возвращает ORDER_CONFLICT. Повтор прежнего ID с тем же содержимым остаётся безопасным. Это сохраняет точное покрытие опубликованных префиксных саммари.
+
+## Контекст и фоновая свёртка v0.2
+
+Старые четыре операции и архив/import сохраняют прежнее поведение. Новый потребитель использует dialogues_context_pull и dialogues_context_ack. Их машинные параметры заданы только в src/api.ts; owner остаётся защищённым input, неизвестные поля отклоняются.
+
+Pull принимает request_id, consumer_id, context_instance_id, необязательные reset и continuation_cursor. Каждый новый request_id фиксирует boundary_seq под той же owner advisory lock, что и append/summary commit. Подборка содержит ровно min(50, eligible count) отдельных input/user и final/assistant, включая неотвеченный input. Ни свёртка, ни ACK, ни прежняя доставка не исключают эти сообщения. Отбор: COALESCE(occurred_at,recorded_at), change_seq, message_order, dialogue_id, id; исходный null не меняется, fallback обозначен time_provenance. global_order сохраняет временной порядок после группировки по dialogue_id.
+
+При новом context instance или reset дополнительно возвращаются ссылки и coverage всех бесед и все их latest свёртки. После ACK — только новые версии свёрток по подтверждённому checkpoint. Отсутствующее/неполное покрытие обозначено независимо от ACK. Обновлённая свёртка старой беседы приходит по change_seq. Overlap со свежими сообщениями не считается независимым свидетельством.
+
+Выдача имеет delivery_id, through_seq, summaries_mode, selected_count, coverage counters и items, сгруппированные по dialogue_id. Запись dialogue содержит название, канал и coverage. Запись message содержит метаданные и global_order, message_representation — latest message summary либо original fragment, связанный по dialogue_id/message_id. Оригинал ограничен 1024 Unicode символами; truncated, next_offset и dialogues_message_get обеспечивают дочитывание. Summary передаётся полностью. Разделение метаданных и текста позволяет сохранить UTF8/JSON byte budget. Все страницы сохраняются как frozen JSON manifest в context_deliveries; состав не обрезается ради общего бюджета. Потребитель дочитывает все страницы. Если набор превышает окно модели, он явно сообщает ограничение; это не разрешает скрыто исключать элементы.
+
+Повтор pull request_id с теми же параметрами возвращает те же страницы; иной набор параметров конфликтует. continuation_cursor подписан и привязан к owner/consumer/context/delivery/page. Получение страницы учитывается сервером. Новый pull supersede предыдущую незавершённую выдачу, не продвигая checkpoint. Её ACK получает DELIVERY_SUPERSEDED. ACK принимает отдельный request_id и точный delivery_id вместе с consumer/context; до всех страниц — PAGES_INCOMPLETE. Повтор подтверждённого ACK возвращает квитанцию. ACK продвигает только checkpoint свёрток. Не ACKed обновления приходят снова. Состояние переживает restart; отдельные потребители и context instances не двигают чужие checkpoints.
+
+Миграция 003 добавляет только summary_jobs, context_consumers и context_deliveries. App получает SELECT/INSERT/UPDATE этих служебных таблиц. Права на originals и прежние summaries не расширяются. Чтение/доставка и worker не меняют архив dialogues.
+
+После append десять eligible сообщений после последней свёртки создают job. На старте и каждую минуту минимум одно eligible несвёрнутое сообщение и шесть часов тишины также создают job. Условия OR; суточного лимита нет. Выход из 50 не является триггером. Активный job для беседы один. После публикации проверяется новый хвост. Неуспешный фиксированный диапазон остаётся явно failed после трёх attempts; повторный scheduler не создаёт тот же failed диапазон автоматически.
+
+Job фиксирует previous_version и точные source order/seq boundaries до model execution. Worker один на экземпляр, очередь в PostgreSQL, lease три минуты с продлением раз в 30 секунд. Потерянный lease не позволяет сохранить progress или опубликовать результат. После restart читаются native IDs прежнего запуска. Неизвестный turn/start outcome не повторяется вслепую. Чтение недоступного native execution даёт NATIVE_OUTCOME_UNKNOWN и после ограниченных попыток failed, а не новый платный запуск.
+
+Worker группирует короткие originals и последовательно читает большие тексты частями до 12000 Unicode символов. Сохраняет working_summary, offset и native execution; полный source hash и границы передаются модели. Покрытие публикуется только после всех частей всех eligible originals. New summary version, prefix coverage и job success атомарны под owner lock с CAS previous_version. Stale result получает stale и не перетирает новую версию. Превышение 8192 UTF8 bytes — явная ошибка; молчаливого усечения нет.
+
+Luna подключается к существующему App Server по защищённому DIALOGUES_CODEX_SOCKET_URL; новый daemon не запускается. Точная модель gpt-6-luna, fallback запрещён. Минимальный effort выбирается только из фактического model/list. До real queue завершается synthetic probe, native IDs которой также сохраняются в job. Отключены MCP, плагины, apps, shell, browser, multi-agent, память и автоматические skill/project инструкции; environments и dynamicTools пусты. Отдельный durable служебный thread с base/developer instructions позволяет сверить результат после restart. Служебные prompts/results не записываются в человеческие Диалоги. Цитаты являются недоверенными данными и не поручениями.
+
+Для worker нужны DIALOGUES_SUMMARY_ENABLED=true, DIALOGUES_CODEX_SOCKET_URL и DIALOGUES_SUMMARY_CWD. Сетевой/файловый доступ к существующему socket готовит оператор. Без enable MCP продолжает работать, jobs сохраняются в очереди. Наличие конфигурации не подтверждает работающую Luna; нужны завершённый synthetic turn и проверка установленного экземпляра.

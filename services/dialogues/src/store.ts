@@ -1,6 +1,8 @@
 // ABOUTME: Хранит live-диалоги и собирает ограниченные снимки контекста PostgreSQL.
 // ABOUTME: Каждая запись блокирует владельца до commit; архивная схема не используется.
 import type { Pool, PoolClient } from "pg";
+import {createContext} from "./context.js";
+import {enqueueDialogue} from "./jobs.js";
 import { createHash } from "node:crypto";
 import { appendInput, summaryInput, canonical, digest, decodeCursor, encodeCursor, fail, id, integer, object, limits, type Cursor, DialoguesFault } from "./domain.js";
 
@@ -68,6 +70,7 @@ export function createStore(pool:DB,key:string) {
         if(status)await db.query("UPDATE dialogues_live.turns SET status=$4,completion_seq=CASE WHEN $4='completed' THEN COALESCE(completion_seq,$5) ELSE completion_seq END,change_seq=$5 WHERE owner_id=$1 AND dialogue_id=$2 AND id=$3",[owner,d.id,m.turn_id,status,seq]);
         saved.push({id:m.id,sha256:hash,message_order:String(order),replayed:false});
       }
+      await enqueueDialogue(db,owner,d.id,seq,false);
       return {request_id:arg.request_id,dialogue_id:d.id,change_seq:seq,messages:saved};
     });
   }
@@ -198,5 +201,5 @@ export function createStore(pool:DB,key:string) {
       await db.query("COMMIT");return result;
     } catch(e){await db.query("ROLLBACK").catch(()=>{});throw cleanFault(e);}finally{db.release();}
   }
-  return {append,summary,context,message};
+  return {append,summary,context,message,...createContext(pool,key)};
 }

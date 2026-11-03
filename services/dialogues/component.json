@@ -30,13 +30,19 @@
       "services/dialogues/src/migrate.ts",
       "services/dialogues/src/health.ts",
       "services/dialogues/src/stdio-proxy.ts",
-      "services/dialogues/src/import.ts"
+      "services/dialogues/src/import.ts",
+      "services/dialogues/migrations/003_context_jobs.sql",
+      "services/dialogues/src/context.ts",
+      "services/dialogues/src/jobs.ts",
+      "services/dialogues/src/luna.ts"
     ],
     "checks": [
       "services/dialogues/tests/domain.test.mjs",
       "services/dialogues/tests/mcp.test.mjs",
       "services/dialogues/tests/postgres.integration.test.mjs",
-      "services/dialogues/tests/import.test.mjs"
+      "services/dialogues/tests/import.test.mjs",
+      "services/dialogues/tests/v02-fixture.mjs",
+      "services/dialogues/tests/luna.test.mjs"
     ]
   },
   "dependencies": [],
@@ -70,7 +76,8 @@
       "dialogues-migrate"
     ],
     "migrations": [
-      "services/dialogues/migrations/002_live.sql"
+      "services/dialogues/migrations/002_live.sql",
+      "services/dialogues/migrations/003_context_jobs.sql"
     ],
     "health": "node services/dialogues/dist/health.js"
   },

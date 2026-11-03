@@ -13,7 +13,7 @@ try {
   const token=readFileSync(process.env.DIALOGUES_MCP_TOKEN_FILE??"","utf8").trim();
   if(!/^[A-Za-z0-9_-]{32,128}$/.test(token))throw new Error("INVALID_TOKEN");
   async function connect(){
-    const c=new Client({name:"brai-dialogues-proxy",version:"0.1.0"});
+    const c=new Client({name:"brai-dialogues-proxy",version:"0.2.0"});
     try {await c.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers:{Authorization:"Bearer "+token}}}),{timeout:5000});return c;}
     catch(e){await c.close().catch(()=>{});throw e;}
   }
@@ -24,7 +24,7 @@ try {
     if(!reconnecting)reconnecting=(async()=>{const next=await connect();client=next;await previous.close().catch(()=>{});})().finally(()=>{reconnecting=null;});
     await reconnecting;
   }
-  const server=new Server({name:"brai-dialogues",version:"0.1.0"},{capabilities:{tools:{listChanged:false}},instructions:agentInstructions});
+  const server=new Server({name:"brai-dialogues",version:"0.2.0"},{capabilities:{tools:{listChanged:false}},instructions:agentInstructions});
   server.setRequestHandler(ListToolsRequestSchema,async()=>{
     const c=client;
     try{return await c.listTools();}catch(e){if(!stale(e))throw e;await reconnect(c);return client.listTools();}
