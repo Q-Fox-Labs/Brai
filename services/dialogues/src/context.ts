@@ -1,7 +1,7 @@
 // ABOUTME: Формирует неизменные выдачи 50 сообщений и свёрток.
 // ABOUTME: ACK продвигает только checkpoint свёрток.
 import type {Pool,PoolClient} from 'pg';
-import {randomUUID,createHmac,timingSafeEqual} from 'node:crypto';
+import {randomUUID,createHmac,timingSafeEqual,createHash} from 'node:crypto';
 import {object,id,digest,fail,limits,DialoguesFault} from './domain.js';
 type DB=Pick<Pool,'connect'>;
 /** Сериализует снимок с commit записей владельца. */
@@ -20,10 +20,38 @@ function parseCursor(key:string,raw:unknown,owner:string,consumer:string,instanc
 }
 /** Сохраняет полный состав, разделяя его только границами страниц. */
 export function contextPages(metadata:Record<string,any>,items:any[],makeCursor:(index:number)=>string){
- const pages:any[]=[];let page:any={...metadata,page_index:0,items:[],continuation_cursor:null};
- for(const item of items){page.items.push(item);page.continuation_cursor=makeCursor(pages.length+1);
- if(Buffer.byteLength(JSON.stringify(page))>limits.responseBytes-256){page.items.pop();if(!page.items.length)fail('RESPONSE_ITEM_TOO_LARGE');pages.push(page);page={...metadata,page_index:pages.length,items:[item],continuation_cursor:makeCursor(pages.length+1)};if(Buffer.byteLength(JSON.stringify(page))>limits.responseBytes-256)fail('RESPONSE_ITEM_TOO_LARGE');}}
- page.continuation_cursor=null;pages.push(page);return pages;
+ const common={...metadata,summary_size_policy:'no_per_summary_limit',
+  summary_utf8_bytes:items.filter(i=>i.type==='dialogue_summary'||i.type==='message_representation'&&i.summary_version).reduce((n,i)=>n+Buffer.byteLength(i.text??''),0),
+  manifest_text_utf8_bytes:items.reduce((n,i)=>n+Buffer.byteLength(i.text??''),0)};
+ const envelope=(item:any)=>({...common,page_count:Number.MAX_SAFE_INTEGER,page_index:Number.MAX_SAFE_INTEGER,items:[item],continuation_cursor:makeCursor(Number.MAX_SAFE_INTEGER)});
+ const budget=limits.responseBytes-256;
+ const expanded:any[]=[];
+ for(const item of items){
+  if(Buffer.byteLength(JSON.stringify(envelope(item)))<=budget){expanded.push(item);continue;}
+  if(typeof item.text!=='string'||!(item.type==='dialogue_summary'||item.type==='message_representation'&&item.summary_version))fail('RESPONSE_ITEM_TOO_LARGE');
+  const {text,truncated,next_offset,read_tool,...identity}=item;
+  let total=0;for(const ch of text)total++;
+  const info={total_chars:total,total_bytes:Buffer.byteLength(text),text_sha256:createHash('sha256').update(text,'utf8').digest('hex'),offset_unit:'unicode_codepoints',
+   coverage:item.type==='dialogue_summary'?{through_message_id:item.through_message_id,through_order:item.through_order}:{message_id:item.message_id}};
+  const kind=item.type==='dialogue_summary'?'dialogue_summary_fragment':'message_summary_fragment';
+  const fragment=(part:string,offset:number,next:number|null)=>({...identity,...info,type:kind,representation:'summary_fragment',text:part,offset,next_offset:next,is_last_fragment:next===null,text_complete:offset===0&&next===null});
+  const available=budget-Buffer.byteLength(JSON.stringify(envelope(fragment('',Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER))));
+  if(available<6)fail('RESPONSE_ITEM_TOO_LARGE');
+  const pieces:any[]=[];let part='',cost=0,offset=0,end=0;
+  for(const ch of text){
+   const extra=Buffer.byteLength(JSON.stringify(ch))-2;
+   if(part&&cost+extra>available){pieces.push(fragment(part,offset,end));part='';cost=0;offset=end;}
+   part+=ch;cost+=extra;end++;
+  }
+  if(part)pieces.push(fragment(part,offset,null));
+  expanded.push({...identity,...info,type:item.type,representation:'summary_fragments',text_format:'fragments',text_complete:false,fragment_count:pieces.length},...pieces);
+ }
+ const pages:any[]=[];let page:any={...common,page_count:Number.MAX_SAFE_INTEGER,page_index:0,items:[],continuation_cursor:null};
+ for(const item of expanded){page.items.push(item);page.continuation_cursor=makeCursor(pages.length+1);
+  if(Buffer.byteLength(JSON.stringify(page))>budget){page.items.pop();if(!page.items.length)fail('RESPONSE_ITEM_TOO_LARGE');pages.push(page);page={...common,page_count:Number.MAX_SAFE_INTEGER,page_index:pages.length,items:[item],continuation_cursor:makeCursor(pages.length+1)};
+   if(Buffer.byteLength(JSON.stringify(page))>budget)fail('RESPONSE_ITEM_TOO_LARGE');}
+ }
+ page.continuation_cursor=null;pages.push(page);for(const p of pages)p.page_count=pages.length;return pages;
 }
 /** Создаёт owner-bound pull/ack отдельно от прежнего context_get. */
 export function createContext(pool:DB,key:string){

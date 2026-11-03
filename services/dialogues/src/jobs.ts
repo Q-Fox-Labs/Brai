@@ -3,7 +3,7 @@
 import type {Pool,PoolClient} from 'pg';
 import {randomUUID} from 'node:crypto';
 import {ownerTransaction} from './context.js';
-import {digest,fail,limits,text,DialoguesFault} from './domain.js';
+import {digest,fail,summaryText,DialoguesFault} from './domain.js';
 import type {Execution,createLuna} from './luna.js';
 /** Под owner lock фиксирует точный префикс, не дублируя активное задание. */
 export async function enqueueDialogue(db:PoolClient,owner:string,dialogue:string,boundary:string,idle:boolean){
@@ -46,7 +46,7 @@ export function createJobs(pool:Pool,owner:string,luna:Pick<ReturnType<typeof cr
   if(r.rowCount!==1)fail('LEASE_LOST');
  }
  async function publish(job:any,value:string){
-  text(value,limits.summaryBytes);
+  summaryText(value);
   return ownerTransaction(pool,owner,async db=>{
    const held=(await db.query("SELECT lease_id,state FROM dialogues_live.summary_jobs WHERE owner_id=$1 AND id=$2 FOR UPDATE",[owner,job.id])).rows[0];
    if(held?.state!=='running'||held.lease_id!==job.lease_id)fail('LEASE_LOST');
@@ -88,8 +88,8 @@ export function createJobs(pool:Pool,owner:string,luna:Pick<ReturnType<typeof cr
     }
     const input=JSON.stringify({previous_summary:progress.working_summary,originals});
     const result=await luna.run(input,progress.execution??{},async execution=>{progress={...progress,execution};await save(job,progress);});
-    text(result,limits.summaryBytes);
-    progress={...progress,working_summary:result,last_order:nextOrder,offset:nextOffset,execution:{}};
+    summaryText(result);
+    progress={...progress,completed_chunks:[...(progress.completed_chunks??[]),{from_order:progress.last_order,from_offset:progress.offset,through_order:nextOrder,through_offset:nextOffset,execution:progress.execution}],working_summary:result,last_order:nextOrder,offset:nextOffset,execution:{}};
     await save(job,progress);
    }
    await publish(job,progress.working_summary);

@@ -3,8 +3,6 @@
 import assert from 'node:assert/strict';
 import {createStore} from '../dist/store.js';
 import {createJobs} from '../dist/jobs.js';
-import {createHash} from 'node:crypto';
-import {attachQualifiedCompression,compressionPromptVersion,compressionInstructions,compressionOutputSchema} from '../dist/luna.js';
 import {DialoguesFault} from '../dist/domain.js';
 /** Дополняет legacy приемку теми же реальными миграциями и app permissions. */
 export async function v02Checks(t,owner,app){
@@ -80,6 +78,36 @@ export async function v02Checks(t,owner,app){
   assert.ok(items.some(x=>x.type==='message_representation'&&x.truncated&&x.next_offset===1024));
   await api.ack('pages',{request_id:rid(),consumer_id:'page-reader',context_instance_id:'ctx',delivery_id:first.delivery_id});
  });
+ await t.test('v0.2: summaries >64KiB persisted, frozen fragments reassemble exactly, legacy fallback',async()=>{
+  const who='large-summaries',large='\u0001"\\\\😀Ж\\n'.repeat(18000),messageLarge=large+' Сообщение',dialogueLarge=large+' Беседа';
+  await api.append(who,packet('a',52));
+  await api.summary(who,{request_id:rid(),dialogue_id:'a',target:'message',message_id:'m0',expected_version:null,text:messageLarge});
+  await api.append(who,{request_id:rid(),dialogue:{id:'a',channel:'synthetic',title:'Same title'},messages:[{...packet('a',1,51).messages[0],summary:messageLarge}]});
+  await api.summary(who,{request_id:rid(),dialogue_id:'a',target:'dialogue',through_message_id:'m0',expected_version:null,text:dialogueLarge});
+  const args={request_id:rid(),consumer_id:'large-reader',context_instance_id:'ctx'};
+  const first=await api.pull(who,args);assert.equal(first.selected_count,50);assert.ok(first.continuation_cursor);
+  await assert.rejects(api.ack(who,{request_id:rid(),consumer_id:args.consumer_id,context_instance_id:args.context_instance_id,delivery_id:first.delivery_id}),{code:'PAGES_INCOMPLETE'});
+  assert.deepEqual(await api.pull(who,args),first);
+  const items=[];let page=first;
+  do{assert.ok(Buffer.byteLength(JSON.stringify({jsonrpc:'2.0',id:1,result:{content:[],structuredContent:page}}))<=65536);items.push(...page.items);if(!page.continuation_cursor)break;page=await api.pull(who,{...args,continuation_cursor:page.continuation_cursor});}while(true);
+  assert.equal(items.filter(x=>x.type==='message').length,50);
+  assert.equal(items.filter(x=>x.type==='dialogue_summary').length,1);
+  const assemble=type=>items.filter(x=>x.type===type).sort((a,b)=>a.offset-b.offset).map(x=>x.text).join('');
+  assert.equal(assemble('dialogue_summary_fragment'),dialogueLarge);assert.equal(assemble('message_summary_fragment'),messageLarge);
+  const p={args,first};await ack(who,p);
+  const delta=await pull(who,'large-reader','ctx');assert.equal(selected(delta).length,50);assert.ok(!delta.items.some(x=>x.type==='dialogue_summary'));
+  await ack(who,delta);
+  await api.summary(who,{request_id:rid(),dialogue_id:'a',target:'dialogue',through_message_id:'m0',expected_version:'1',text:dialogueLarge+' updated'});
+  const update=await pull(who,'large-reader','ctx');assert.equal(selected(update).length,50);assert.ok(update.items.some(x=>x.type==='dialogue_summary'&&x.version==='2'));
+  for(const [target,expected,id]of [['message_summary',messageLarge,'m0'],['dialogue_summary',dialogueLarge,undefined]]){
+   let offset=0,actual='';
+   do{const r=await api.message(who,{dialogue_id:'a',...(id?{message_id:id}:{}),target,summary_version:'1',offset,limit:8192});assert.ok(Buffer.byteLength(JSON.stringify(r))<=65024);actual+=r.text;if(r.next_offset===null)break;offset=r.next_offset;}while(true);
+   assert.equal(actual,expected);
+  }
+  assert.equal((await api.message(who,{dialogue_id:'a',message_id:'m51'})).text,'Синтетический текст 51');
+  await assert.rejects(api.message('other',{dialogue_id:'a',message_id:'m0',target:'message_summary'}),{code:'NOT_FOUND'});
+  await assert.rejects(async()=>{let legacy=await api.context(who,{dialogue_id:'a'});while(legacy.continuation_cursor)legacy=await api.context(who,{dialogue_id:'a',cursor:legacy.continuation_cursor});},{code:'LARGE_SUMMARY_REQUIRES_CONTEXT_PULL'});
+ });
  await t.test('v0.2: concurrent committed writes и summary update не теряются за ACK',async()=>{
   const p=await pull('concurrent-v2');
   await Promise.all(Array.from({length:24},(_,i)=>api.append('concurrent-v2',packet('c'+i,1,i))));
@@ -106,45 +134,34 @@ export async function v02Checks(t,owner,app){
   for(let i=0;i<10;i++)assert.equal(pieces.filter(x=>x.id==='m'+i).map(x=>x.original_fragment).join(''),long);
   assert.equal((await app.query("SELECT through_message_id FROM dialogues_live.dialogue_summaries WHERE owner_id='large-queue'")).rows[0].through_message_id,'m9');
  });
- await t.test('v0.2: qualified intermediate cache preserves source position and remaining prefix',async()=>{
-  const who='qualified-chunks',long='α😀'.repeat(10000),raw='φ'.repeat(5000),summary='Квалифицированная первая часть; остальное ещё не обработано.';
-  const sha=value=>createHash('sha256').update(value).digest('hex');
+ await t.test('v0.2: full large intermediate cache preserves source position and remaining prefix',async()=>{
+  const who='full-chunks',long='α😀'.repeat(10000),raw='φ'.repeat(5000);
   await api.append(who,packet('x',5));await api.summary(who,{request_id:rid(),dialogue_id:'x',target:'dialogue',through_message_id:'m4',expected_version:null,text:'Прежняя версия 1'});
   await api.append(who,packet('x',10,5,{text:long}));
   let failed=false,reused=0,firstInput;const paid=[];
   const fake={async probe(){},async run(input,state,save){
    const value=JSON.parse(input);
    if(!failed){failed=true;firstInput=input;paid.push(...value.originals);
-    await save({native_thread_id:'original-root',native_turn_id:'original-turn',execution_state:'completed',result:raw,compressions:[{execution_state:'completed',result:'legacy cache'}]});
-    throw new DialoguesFault('SUMMARY_TOO_LARGE');
+    await save({native_thread_id:'original-root',native_turn_id:'original-turn',execution_state:'completed',result:raw,compressions:[{execution_state:'completed',result:'legacy rejected cache'}]});
+    throw new DialoguesFault('SIMULATED_OLD_SIZE_FAILURE');
    }
-   const version=(await app.query("SELECT max(version)::text AS version FROM dialogues_live.dialogue_summaries WHERE owner_id=$1",[who])).rows[0].version;
-   assert.equal(version,'1','no coverage before remaining source fragments');
-   if(state.compression_v2){assert.equal(input,firstInput);assert.equal(state.native_thread_id,'original-root');reused++;return JSON.parse(state.compression_v2.executions[0].result).summary;}
-   paid.push(...value.originals);return 'Следующая часть обработана';
+   assert.equal((await app.query("SELECT max(version)::text AS version FROM dialogues_live.dialogue_summaries WHERE owner_id=$1",[who])).rows[0].version,'1','no coverage before remaining source');
+   if(state.execution_state==='completed'){assert.equal(input,firstInput);assert.equal(state.native_thread_id,'original-root');reused++;return state.result;}
+   assert.ok(Buffer.byteLength(value.previous_summary)>8192);
+   paid.push(...value.originals);return raw+' Следующая часть обработана';
   }};
   const jobs=createJobs(app,who,fake);await jobs.tick();
   const before=(await app.query("SELECT * FROM dialogues_live.summary_jobs WHERE owner_id=$1",[who])).rows[0];
   assert.equal(before.previous_version,'1');assert.equal(before.through_order,'14');assert.equal(before.progress.last_order,'4');assert.equal(before.progress.offset,0);
-  const qualification={model:'gpt-6-luna',semantic_validation:{accepted:true},prompt_version:compressionPromptVersion,
-   prompt_sha256:sha(compressionInstructions+JSON.stringify(compressionOutputSchema)),source_sha256:sha(raw),source_bytes:Buffer.byteLength(raw),
-   source_native:{native_thread_id:'original-root',native_turn_id:'original-turn'},
-   execution:{native_thread_id:'qualified-child',native_turn_id:'qualified-turn',execution_state:'completed',result:JSON.stringify({summary})},
-   result:{summary,codepoints:Array.from(summary).length,bytes:Buffer.byteLength(summary),valid:true}};
-  const progress=attachQualifiedCompression(before.progress,qualification);
-  for(const key of ['last_order','offset','working_summary'])assert.deepEqual(progress[key],before.progress[key]);
-  assert.deepEqual(progress.execution.compressions,before.progress.execution.compressions);
-  const wrong=structuredClone(qualification);wrong.source_native.native_turn_id='foreign';
-  assert.throws(()=>attachQualifiedCompression(before.progress,wrong),{code:'QUALIFICATION_SOURCE_CONFLICT'});
-  wrong.source_native.native_turn_id='original-turn';wrong.semantic_validation.accepted=false;
-  assert.throws(()=>attachQualifiedCompression(before.progress,wrong),{code:'QUALIFICATION_NOT_ACCEPTED'});
-  await owner.query("UPDATE dialogues_live.summary_jobs SET progress=$2,available_at=now(),attempts=0 WHERE owner_id=$1",[who,progress]);
-  await api.append(who,packet('x',1,15));
-  await jobs.tick();assert.equal(reused,1);assert.ok(paid.length>1);
+  await owner.query("UPDATE dialogues_live.summary_jobs SET available_at=now(),attempts=0 WHERE owner_id=$1",[who]);
+  await api.append(who,packet('x',1,15));await jobs.tick();assert.equal(reused,1);
   for(let i=5;i<=14;i++)assert.equal(paid.filter(x=>x.id==='m'+i).map(x=>x.original_fragment).join(''),long);
   assert.ok(!paid.some(x=>x.id==='m15'));
-  const latest=(await app.query("SELECT version,through_order FROM dialogues_live.dialogue_summaries WHERE owner_id=$1 ORDER BY version DESC LIMIT 1",[who])).rows[0];
-  assert.deepEqual(latest,{version:'2',through_order:'14'});
+  const latest=(await app.query("SELECT version,through_order,text FROM dialogues_live.dialogue_summaries WHERE owner_id=$1 ORDER BY version DESC LIMIT 1",[who])).rows[0];
+  assert.equal(latest.version,'2');assert.equal(latest.through_order,'14');assert.ok(Buffer.byteLength(latest.text)>8192);
+  const job=(await app.query("SELECT progress FROM dialogues_live.summary_jobs WHERE owner_id=$1",[who])).rows[0];
+  assert.equal(job.progress.completed_chunks[0].execution.result,raw);
+  assert.equal(job.progress.completed_chunks[0].execution.compressions[0].result,'legacy rejected cache');
   assert.equal((await app.query("SELECT count(*) AS n FROM dialogues_live.messages WHERE owner_id=$1 AND message_order>14",[who])).rows[0].n,'1');
  });
  await t.test('v0.2: lease recovery и stale CAS не публикуют второй результат',async()=>{
