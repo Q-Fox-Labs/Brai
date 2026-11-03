@@ -28,7 +28,8 @@ export async function recheckPublication(db,project,workspace,proof,{ignoreOpera
     JOIN codeworks.operations bo ON bo.id=b.operation_id AND NOT bo.archived
     WHERE a.operation_id=$2 AND a.workspace_id=$4 AND NOT ao.archived
       AND NOT EXISTS(SELECT 1 FROM codeworks.releases later JOIN codeworks.operations lo ON lo.id=later.operation_id
-        WHERE later.workspace_id=a.workspace_id AND NOT lo.archived AND (later.created_at,later.operation_id)>(a.created_at,a.operation_id))
+        WHERE later.workspace_id=a.workspace_id AND NOT lo.archived AND (later.created_at,later.operation_id)>(a.created_at,a.operation_id)
+          AND (later.requested_sha IS DISTINCT FROM a.requested_sha OR later.state IS DISTINCT FROM 'failed' OR lo.status IS DISTINCT FROM 'failed' OR later.closed_at IS NULL))
       AND NOT EXISTS(SELECT 1 FROM codeworks.deployments newer JOIN codeworks.operations n ON n.id=newer.operation_id
         WHERE newer.project_id=d.project_id AND newer.target='dev' AND NOT n.archived
           AND newer.created_at>d.created_at AND (newer.receipt->>'verified') IS DISTINCT FROM 'true')
@@ -46,7 +47,7 @@ export async function recheckPublication(db,project,workspace,proof,{ignoreOpera
 /** Проверяет exact HEAD, все Git OID и актуальный подтверждённый DEV; возвращает proof либо null. */
 export async function verifyPublication(db,project,workspace,{git,flowGit,ignoreOperationId=null}={}) {
   if(workspace.kind!=='feature'||!git||!flowGit)return null;
-  const attempt=(await db.query("SELECT r.operation_id,r.requested_sha FROM codeworks.releases r JOIN codeworks.operations o ON o.id=r.operation_id WHERE r.workspace_id=$1 AND NOT o.archived AND r.state='failed' AND o.status='failed' AND r.closed_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM codeworks.releases later JOIN codeworks.operations lo ON lo.id=later.operation_id WHERE later.workspace_id=r.workspace_id AND NOT lo.archived AND (later.created_at,later.operation_id)>(r.created_at,r.operation_id)) ORDER BY r.created_at DESC,r.operation_id DESC LIMIT 1",[workspace.id])).rows[0];
+  const attempt=(await db.query("SELECT r.operation_id,r.requested_sha FROM codeworks.releases r JOIN codeworks.operations o ON o.id=r.operation_id WHERE r.workspace_id=$1 AND NOT o.archived AND r.state='failed' AND o.status='failed' AND r.closed_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM codeworks.releases later JOIN codeworks.operations lo ON lo.id=later.operation_id WHERE later.workspace_id=r.workspace_id AND NOT lo.archived AND (later.created_at,later.operation_id)>(r.created_at,r.operation_id) AND (later.requested_sha IS DISTINCT FROM r.requested_sha OR later.state IS DISTINCT FROM 'failed' OR lo.status IS DISTINCT FROM 'failed' OR later.closed_at IS NULL)) ORDER BY r.created_at ASC,r.operation_id ASC LIMIT 1",[workspace.id])).rows[0];
   if(!attempt)return null;
   const installed=(await db.query(`SELECT d.operation_id,d.release_operation_id,d.commit_sha,de.id AS evidence_id FROM codeworks.installed i
     JOIN codeworks.deployments d ON d.operation_id=i.operation_id

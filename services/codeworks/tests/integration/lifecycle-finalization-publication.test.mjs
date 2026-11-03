@@ -93,6 +93,18 @@ test('explicit cleanup preserves failed A after a later verified B contains its 
   await reconcileProjectLedger(f.app,project.id,'fixture-reconciler');
   assert.equal((await f.app.query('SELECT count(*)::int AS n FROM codeworks.cleanup_obligations WHERE workspace_id=$1',[w.id])).rows[0].n,0,'no explicit cleanup means no automatic closure');
   const cleanup=key=>handlers.call('cleanup',{project_id:project.id,workspace_id:w.id,request_key:key},'codex');
+  // Повтор с тем же SHA закрыт после доставки: он не отменяет доказательство первой попытки.
+  const retry=randomUUID();
+  await f.owner.query("INSERT INTO codeworks.operations(id,project_id,workspace_id,executor_id,kind,status,step,request) VALUES($1,$2,$3,'codex','release','running','fixture','{}')",[retry,project.id,w.id]);
+  await f.owner.query("INSERT INTO codeworks.releases(id,workspace_id,operation_id,target,requested_sha,state,created_at) VALUES($1,$2,$3,'dev',$4,'running',now()+interval '1 second')",[randomUUID(),w.id,retry,accepted]);
+  await assert.rejects(cleanup('retry-running'),{code:'CONFLICT'});
+  await f.owner.query("UPDATE codeworks.operations SET status='failed' WHERE id=$1",[retry]);
+  await f.owner.query("UPDATE codeworks.releases SET state='failed' WHERE operation_id=$1",[retry]);
+  await assert.rejects(cleanup('retry-not-closed'),{code:'CONFLICT'});
+  await f.owner.query("UPDATE codeworks.releases SET state='failed',closed_at=now()+interval '2 seconds',requested_sha=$2 WHERE operation_id=$1",[retry,'f'.repeat(40)]);
+  await assert.rejects(cleanup('retry-different-sha'),{code:'CONFLICT'});
+  await f.owner.query('UPDATE codeworks.releases SET requested_sha=$2 WHERE operation_id=$1',[retry,accepted]);
+  // Дальнейшая успешная очистка должна опираться на первую закрытую попытку.
   await f.owner.query("UPDATE codeworks.deployments SET receipt=jsonb_set(receipt,'{verified}','false') WHERE operation_id=$1",[rollout]);
   await assert.rejects(cleanup('unverified'),{code:'CONFLICT'});await f.owner.query('UPDATE codeworks.deployments SET receipt=$2 WHERE operation_id=$1',[rollout,receipt]);
   await f.owner.query("UPDATE codeworks.releases SET details='{}' WHERE operation_id=$1",[delivery]);await assert.rejects(cleanup('mismatched-delivery'),{code:'CONFLICT'});await f.owner.query('UPDATE codeworks.releases SET details=$2 WHERE operation_id=$1',[delivery,details]);
