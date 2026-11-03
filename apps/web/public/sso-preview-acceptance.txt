@@ -1,0 +1,2 @@
+DEV and preview single sign-on acceptance.
+Temporary web-only branch; do not merge into DEV.
