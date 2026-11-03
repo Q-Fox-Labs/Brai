@@ -1,0 +1,621 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.invalid/contracts/channels/v1/api.schema.json",
+  "definitions": {
+    "types.listRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "pattern": "\\S"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": []
+    },
+    "types.getRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/type"
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "connections.createRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "actorId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "\\S"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "\\S"
+        },
+        "type": {
+          "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/type"
+        },
+        "sourceId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "botId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$",
+          "maxLength": 255
+        },
+        "settings": {
+          "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/connectionSettings"
+        }
+      },
+      "required": [
+        "requestId",
+        "ownerId",
+        "actorId",
+        "reason",
+        "type",
+        "sourceId",
+        "botId",
+        "settings"
+      ]
+    },
+    "connections.publishRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "actorId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "\\S"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "\\S"
+        },
+        "connectionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "expectedVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "settings": {
+          "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/connectionSettings"
+        }
+      },
+      "required": [
+        "requestId",
+        "ownerId",
+        "actorId",
+        "reason",
+        "connectionId",
+        "expectedVersion",
+        "settings"
+      ]
+    },
+    "connections.getRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "connectionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        }
+      },
+      "required": [
+        "ownerId",
+        "connectionId"
+      ]
+    },
+    "connections.listRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "pattern": "\\S"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "ownerId"
+      ]
+    },
+    "channels.createRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "actorId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "\\S"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "\\S"
+        },
+        "connectionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "enum": [
+            "dialog",
+            "topic"
+          ]
+        },
+        "address": {
+          "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/address"
+        },
+        "parentId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "settings": {
+          "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/channelSettings"
+        }
+      },
+      "required": [
+        "requestId",
+        "ownerId",
+        "actorId",
+        "reason",
+        "connectionId",
+        "kind",
+        "address",
+        "parentId",
+        "settings"
+      ]
+    },
+    "channels.publishRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "actorId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "\\S"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "\\S"
+        },
+        "channelId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "expectedVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "settings": {
+          "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/channelSettings"
+        }
+      },
+      "required": [
+        "requestId",
+        "ownerId",
+        "actorId",
+        "reason",
+        "channelId",
+        "expectedVersion",
+        "settings"
+      ]
+    },
+    "channels.getRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "channelId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        }
+      },
+      "required": [
+        "ownerId",
+        "channelId"
+      ]
+    },
+    "channels.listRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "connectionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "pattern": "\\S"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "ownerId"
+      ]
+    },
+    "resolveRequest": {
+      "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/resolveRequest"
+    },
+    "delivery.checkRequest": {
+      "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/deliveryRequest"
+    },
+    "operations.getRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "requestId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "ownerId",
+        "requestId"
+      ]
+    },
+    "statusRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {},
+      "required": []
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "operation": {
+          "enum": [
+            "connections.create",
+            "connections.publish",
+            "channels.create",
+            "channels.publish"
+          ]
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "inputHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "committedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d{1,6})?(?:Z|[+-]\\d\\d:\\d\\d)$"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/connection"
+            },
+            {
+              "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/channel"
+            }
+          ]
+        },
+        "historyEvent": {
+          "$ref": "https://brai.invalid/contracts/history/v1/messages.schema.json#/definitions/appendRequest"
+        }
+      },
+      "required": [
+        "requestId",
+        "operation",
+        "ownerId",
+        "inputHash",
+        "committedAt",
+        "result",
+        "historyEvent"
+      ]
+    },
+    "types.listResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/profile"
+          },
+          "maxItems": 100,
+          "minItems": 0
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "pattern": "\\S"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "nextCursor"
+      ]
+    },
+    "types.getResponse": {
+      "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/profile"
+    },
+    "connections.createResponse": {
+      "$ref": "#/definitions/receipt"
+    },
+    "connections.publishResponse": {
+      "$ref": "#/definitions/receipt"
+    },
+    "connections.getResponse": {
+      "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/connection"
+    },
+    "connections.listResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/connection"
+          },
+          "maxItems": 100,
+          "minItems": 0
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "pattern": "\\S"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "nextCursor"
+      ]
+    },
+    "channels.createResponse": {
+      "$ref": "#/definitions/receipt"
+    },
+    "channels.publishResponse": {
+      "$ref": "#/definitions/receipt"
+    },
+    "channels.getResponse": {
+      "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/channel"
+    },
+    "channels.listResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/channel"
+          },
+          "maxItems": 100,
+          "minItems": 0
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "pattern": "\\S"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "nextCursor"
+      ]
+    },
+    "resolveResponse": {
+      "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/resolution"
+    },
+    "delivery.checkResponse": {
+      "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/delivery"
+    },
+    "operations.getResponse": {
+      "$ref": "#/definitions/receipt"
+    },
+    "statusResponse": {
+      "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/status"
+    }
+  }
+}

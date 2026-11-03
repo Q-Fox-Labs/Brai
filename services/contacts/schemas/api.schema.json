@@ -1,0 +1,261 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.invalid/contracts/contacts/v1/api.schema.json",
+  "title": "Contacts v1 operations",
+  "definitions": {
+    "resolveRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "ownerId",
+        "sourceId",
+        "identity",
+        "observedAt",
+        "profile",
+        "packetId"
+      ],
+      "properties": {
+        "operationId": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/id"
+        },
+        "ownerId": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/id"
+        },
+        "sourceId": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/source"
+        },
+        "identity": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/identity"
+        },
+        "observedAt": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/timestamp"
+        },
+        "profile": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/profile"
+        },
+        "packetId": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/uuid"
+        }
+      }
+    },
+    "resolveResponse": {
+      "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/resolution"
+    },
+    "profile.observeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operationId",
+        "ownerId",
+        "sourceId",
+        "identity",
+        "observedAt",
+        "profile"
+      ],
+      "properties": {
+        "operationId": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/id"
+        },
+        "ownerId": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/id"
+        },
+        "sourceId": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/source"
+        },
+        "identity": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/identity"
+        },
+        "observedAt": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/timestamp"
+        },
+        "profile": {
+          "allOf": [
+            {
+              "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/profile"
+            },
+            {
+              "minProperties": 1
+            }
+          ]
+        }
+      }
+    },
+    "profile.observeResponse": {
+      "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/observationReceipt"
+    },
+    "contacts.getRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId",
+        "contactId"
+      ],
+      "properties": {
+        "ownerId": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/id"
+        },
+        "contactId": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/uuid"
+        }
+      }
+    },
+    "contacts.getResponse": {
+      "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/contact"
+    },
+    "contacts.listRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId"
+      ],
+      "properties": {
+        "ownerId": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/id"
+        },
+        "namespace": {
+          "const": "telegram"
+        },
+        "externalId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[1-9][0-9]*$"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "dependencies": {
+        "externalId": [
+          "namespace"
+        ]
+      }
+    },
+    "contacts.listResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "nextCursor"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/contact"
+          }
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "operations.getRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId",
+        "operationId"
+      ],
+      "properties": {
+        "ownerId": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/id"
+        },
+        "operationId": {
+          "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/id"
+        }
+      }
+    },
+    "operations.getResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "result"
+          ],
+          "properties": {
+            "operation": {
+              "const": "resolve"
+            },
+            "result": {
+              "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/resolution"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "operation",
+            "result"
+          ],
+          "properties": {
+            "operation": {
+              "const": "profile.observe"
+            },
+            "result": {
+              "$ref": "https://brai.invalid/contracts/contacts/v1/common.schema.json#/definitions/observationReceipt"
+            }
+          }
+        }
+      ]
+    },
+    "statusRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {}
+    },
+    "statusResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ready",
+        "database",
+        "configuration",
+        "contractVersion"
+      ],
+      "properties": {
+        "ready": {
+          "type": "boolean"
+        },
+        "database": {
+          "type": "boolean"
+        },
+        "configuration": {
+          "type": "boolean"
+        },
+        "contractVersion": {
+          "const": "1"
+        }
+      }
+    }
+  }
+}

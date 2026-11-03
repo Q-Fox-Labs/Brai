@@ -1,0 +1,25 @@
+{
+  "type": {
+    "code": "telegram",
+    "version": 1
+  },
+  "name": "Telegram",
+  "capabilities": {
+    "messageIncoming": true,
+    "messageReply": true,
+    "genericEvents": false,
+    "channelKinds": [
+      "dialog",
+      "topic"
+    ]
+  },
+  "connectionSettingsSchema": {
+    "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/connectionSettings"
+  },
+  "channelSettingsSchema": {
+    "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/channelSettings"
+  },
+  "sourceRefSchema": {
+    "$ref": "https://brai.invalid/contracts/channels/v1/common.schema.json#/definitions/address"
+  }
+}

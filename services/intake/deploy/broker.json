@@ -1,0 +1,42 @@
+{
+  "streams": [
+    {
+      "name": "BRAI_INTAKE_INGRESS_V1",
+      "subjects": [
+        "brai.intake.v1.ingress.*"
+      ],
+      "retention": "workqueue",
+      "storage": "file",
+      "discard": "new",
+      "max_age": 0,
+      "max_bytes": 268435456,
+      "max_msg_size": 131072,
+      "max_msgs": -1,
+      "max_msgs_per_subject": -1
+    },
+    {
+      "name": "BRAI_INTAKE_DISPATCH_V1",
+      "subjects": [
+        "brai.intake.v1.dispatch.*"
+      ],
+      "retention": "workqueue",
+      "storage": "file",
+      "discard": "new",
+      "max_age": 0,
+      "max_bytes": 268435456,
+      "max_msg_size": 131072,
+      "max_msgs": -1,
+      "max_msgs_per_subject": -1
+    }
+  ],
+  "consumer": {
+    "durable_name": "intake_ingress",
+    "ack_policy": "explicit",
+    "ack_wait": 30000000000,
+    "max_ack_pending": 8,
+    "max_deliver": -1,
+    "filter_subject": "brai.intake.v1.ingress.*",
+    "deliver_policy": "all",
+    "replay_policy": "instant"
+  }
+}

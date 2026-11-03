@@ -1,0 +1,1670 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.invalid/contracts/channels/v1/common.schema.json",
+  "definitions": {
+    "type": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "telegram"
+        },
+        "version": {
+          "const": 1
+        }
+      },
+      "required": [
+        "code",
+        "version"
+      ]
+    },
+    "address": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "botId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$",
+          "maxLength": 255
+        },
+        "chatId": {
+          "type": "string",
+          "pattern": "^-?[1-9][0-9]*$",
+          "maxLength": 255
+        },
+        "threadId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "maxLength": 255
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "botId",
+        "chatId",
+        "threadId"
+      ]
+    },
+    "extensions": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]{0,31}\\.[a-z][a-z0-9_]{0,31}$"
+      },
+      "additionalProperties": true
+    },
+    "fieldValues": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "categoryRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "pattern": "\\S"
+          },
+          "maxItems": 100,
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "creatorRef": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "person",
+                    "contact",
+                    "agent",
+                    "external"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 255,
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "\\S"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": []
+    },
+    "condition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "eventType"
+            },
+            "op": {
+              "const": "equals"
+            },
+            "value": {
+              "enum": [
+                "message.incoming",
+                "message.outgoing"
+              ]
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "eventType"
+            },
+            "op": {
+              "const": "in"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "message.incoming",
+                  "message.outgoing"
+                ]
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "eventType"
+            },
+            "op": {
+              "const": "exists"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "direction"
+            },
+            "op": {
+              "const": "equals"
+            },
+            "value": {
+              "enum": [
+                "incoming",
+                "outgoing"
+              ]
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "direction"
+            },
+            "op": {
+              "const": "in"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "incoming",
+                  "outgoing"
+                ]
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "direction"
+            },
+            "op": {
+              "const": "exists"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "author.kind"
+            },
+            "op": {
+              "const": "equals"
+            },
+            "value": {
+              "enum": [
+                "human",
+                "agent"
+              ]
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "author.kind"
+            },
+            "op": {
+              "const": "in"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "human",
+                  "agent"
+                ]
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "author.kind"
+            },
+            "op": {
+              "const": "exists"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "author.id"
+            },
+            "op": {
+              "const": "equals"
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "\\S"
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "author.id"
+            },
+            "op": {
+              "const": "in"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "\\S"
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "author.id"
+            },
+            "op": {
+              "const": "exists"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "facts.hasText"
+            },
+            "op": {
+              "const": "equals"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "facts.hasText"
+            },
+            "op": {
+              "const": "in"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "boolean"
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "facts.hasText"
+            },
+            "op": {
+              "const": "exists"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "facts.contentKinds"
+            },
+            "op": {
+              "const": "in"
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "text",
+                  "image",
+                  "audio",
+                  "video",
+                  "document"
+                ]
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "facts.contentKinds"
+            },
+            "op": {
+              "const": "exists"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "field",
+            "op",
+            "value"
+          ]
+        }
+      ]
+    },
+    "assignment": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "categoryRefs"
+            },
+            "mode": {
+              "enum": [
+                "fill_missing",
+                "override"
+              ]
+            },
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255,
+                "pattern": "\\S"
+              },
+              "maxItems": 100,
+              "minItems": 0,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "field",
+            "mode",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "creatorRef"
+            },
+            "mode": {
+              "enum": [
+                "fill_missing",
+                "override"
+              ]
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "person",
+                        "contact",
+                        "agent",
+                        "external"
+                      ]
+                    },
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 255,
+                      "pattern": "\\S"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "id"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "field",
+            "mode",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "const": "title"
+            },
+            "mode": {
+              "enum": [
+                "fill_missing",
+                "override"
+              ]
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512,
+                  "pattern": "\\S"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "field",
+            "mode",
+            "value"
+          ]
+        }
+      ]
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "\\S"
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": -100000,
+          "maximum": 100000
+        },
+        "when": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/condition"
+          },
+          "maxItems": 16,
+          "minItems": 0
+        },
+        "assign": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/assignment"
+          },
+          "maxItems": 32,
+          "minItems": 1
+        }
+      },
+      "required": [
+        "id",
+        "priority",
+        "when",
+        "assign"
+      ]
+    },
+    "rules": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/rule"
+      },
+      "maxItems": 100,
+      "minItems": 0
+    },
+    "connectionSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "credentialsRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_.-]{0,254}$"
+        },
+        "allowedActorIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$",
+            "maxLength": 255
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "extensions": {
+          "$ref": "#/definitions/extensions"
+        }
+      },
+      "required": [
+        "name",
+        "enabled",
+        "credentialsRef",
+        "allowedActorIds",
+        "extensions"
+      ]
+    },
+    "channelSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "locationRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "allowedActorIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]*$",
+            "maxLength": 255
+          },
+          "maxItems": 1000,
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "rules": {
+          "$ref": "#/definitions/rules"
+        },
+        "extensions": {
+          "$ref": "#/definitions/extensions"
+        }
+      },
+      "required": [
+        "name",
+        "enabled",
+        "locationRef",
+        "allowedActorIds",
+        "rules",
+        "extensions"
+      ]
+    },
+    "connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "type": {
+          "$ref": "#/definitions/type"
+        },
+        "sourceId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "botId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "effectiveFrom": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d{1,6})?(?:Z|[+-]\\d\\d:\\d\\d)$"
+        },
+        "recordedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d{1,6})?(?:Z|[+-]\\d\\d:\\d\\d)$"
+        },
+        "settings": {
+          "$ref": "#/definitions/connectionSettings"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "type",
+        "sourceId",
+        "botId",
+        "version",
+        "effectiveFrom",
+        "recordedAt",
+        "settings"
+      ]
+    },
+    "channel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "connectionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "enum": [
+            "dialog",
+            "topic"
+          ]
+        },
+        "address": {
+          "$ref": "#/definitions/address"
+        },
+        "parentId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "rulesVersion": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "effectiveFrom": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d{1,6})?(?:Z|[+-]\\d\\d:\\d\\d)$"
+        },
+        "recordedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d{1,6})?(?:Z|[+-]\\d\\d:\\d\\d)$"
+        },
+        "settings": {
+          "$ref": "#/definitions/channelSettings"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "connectionId",
+        "kind",
+        "address",
+        "parentId",
+        "version",
+        "rulesVersion",
+        "effectiveFrom",
+        "recordedAt",
+        "settings"
+      ]
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "$ref": "#/definitions/type"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "messageIncoming": {
+              "const": true
+            },
+            "messageReply": {
+              "const": true
+            },
+            "genericEvents": {
+              "const": false
+            },
+            "channelKinds": {
+              "const": [
+                "dialog",
+                "topic"
+              ]
+            }
+          },
+          "required": [
+            "messageIncoming",
+            "messageReply",
+            "genericEvents",
+            "channelKinds"
+          ]
+        },
+        "connectionSettingsSchema": {
+          "type": "object"
+        },
+        "channelSettingsSchema": {
+          "type": "object"
+        },
+        "sourceRefSchema": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "type",
+        "name",
+        "capabilities",
+        "connectionSettingsSchema",
+        "channelSettingsSchema",
+        "sourceRefSchema"
+      ]
+    },
+    "resolveRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "operationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "packetId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "sourceId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "asOf": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d{1,6})?(?:Z|[+-]\\d\\d:\\d\\d)$"
+        },
+        "eventType": {
+          "enum": [
+            "message.incoming",
+            "message.outgoing"
+          ]
+        },
+        "direction": {
+          "enum": [
+            "incoming",
+            "outgoing"
+          ]
+        },
+        "sourceRef": {
+          "$ref": "#/definitions/address"
+        },
+        "author": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "human",
+                "agent"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "\\S"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ]
+        },
+        "facts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "hasText": {
+              "type": "boolean"
+            },
+            "contentKinds": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "text",
+                  "image",
+                  "audio",
+                  "video",
+                  "document"
+                ]
+              },
+              "maxItems": 5,
+              "minItems": 0,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "hasText",
+            "contentKinds"
+          ]
+        },
+        "initialFields": {
+          "$ref": "#/definitions/fieldValues"
+        },
+        "replyTo": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "packetId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "resolutionId": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "required": [
+                "packetId",
+                "resolutionId"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operationId",
+        "packetId",
+        "ownerId",
+        "sourceId",
+        "asOf",
+        "eventType",
+        "direction",
+        "sourceRef",
+        "author",
+        "facts",
+        "replyTo"
+      ]
+    },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "transport": {
+          "const": "telegram"
+        },
+        "connectionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "botId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$",
+          "maxLength": 255
+        },
+        "chatId": {
+          "type": "string",
+          "pattern": "^-?[1-9][0-9]*$",
+          "maxLength": 255
+        },
+        "threadId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$",
+              "maxLength": 255
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "transport",
+        "connectionId",
+        "botId",
+        "chatId",
+        "threadId"
+      ]
+    },
+    "resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "resolutionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "packetId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "sourceId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "asOf": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d{1,6})?(?:Z|[+-]\\d\\d:\\d\\d)$"
+        },
+        "policyAsOf": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d{1,6})?(?:Z|[+-]\\d\\d:\\d\\d)$"
+        },
+        "type": {
+          "$ref": "#/definitions/type"
+        },
+        "connectionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "connectionVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "channelId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "channelVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "rulesVersion": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "locationRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "destination": {
+          "$ref": "#/definitions/destination"
+        },
+        "processing": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "temporal"
+            },
+            "scenario": {
+              "enum": [
+                "incoming.v1",
+                "outgoing.v1"
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "scenario"
+          ]
+        },
+        "assignments": {
+          "$ref": "#/definitions/fieldValues"
+        },
+        "fieldOrigins": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "categoryRefs": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source": {
+                      "const": "input"
+                    },
+                    "ruleId": {
+                      "type": "null"
+                    },
+                    "rulesVersion": {
+                      "type": "null"
+                    },
+                    "mode": {
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "source",
+                    "ruleId",
+                    "rulesVersion",
+                    "mode"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source": {
+                      "const": "rule"
+                    },
+                    "ruleId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64,
+                      "pattern": "\\S"
+                    },
+                    "rulesVersion": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "mode": {
+                      "enum": [
+                        "fill_missing",
+                        "override"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "source",
+                    "ruleId",
+                    "rulesVersion",
+                    "mode"
+                  ]
+                }
+              ]
+            },
+            "creatorRef": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source": {
+                      "const": "input"
+                    },
+                    "ruleId": {
+                      "type": "null"
+                    },
+                    "rulesVersion": {
+                      "type": "null"
+                    },
+                    "mode": {
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "source",
+                    "ruleId",
+                    "rulesVersion",
+                    "mode"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source": {
+                      "const": "rule"
+                    },
+                    "ruleId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64,
+                      "pattern": "\\S"
+                    },
+                    "rulesVersion": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "mode": {
+                      "enum": [
+                        "fill_missing",
+                        "override"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "source",
+                    "ruleId",
+                    "rulesVersion",
+                    "mode"
+                  ]
+                }
+              ]
+            },
+            "title": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source": {
+                      "const": "input"
+                    },
+                    "ruleId": {
+                      "type": "null"
+                    },
+                    "rulesVersion": {
+                      "type": "null"
+                    },
+                    "mode": {
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "source",
+                    "ruleId",
+                    "rulesVersion",
+                    "mode"
+                  ]
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source": {
+                      "const": "rule"
+                    },
+                    "ruleId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64,
+                      "pattern": "\\S"
+                    },
+                    "rulesVersion": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "mode": {
+                      "enum": [
+                        "fill_missing",
+                        "override"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "source",
+                    "ruleId",
+                    "rulesVersion",
+                    "mode"
+                  ]
+                }
+              ]
+            }
+          },
+          "required": []
+        },
+        "appliedRules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "ruleId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "\\S"
+              },
+              "priority": {
+                "type": "integer"
+              },
+              "rulesVersion": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "required": [
+              "ruleId",
+              "priority",
+              "rulesVersion"
+            ]
+          },
+          "maxItems": 100,
+          "minItems": 0
+        },
+        "basedOnResolutionId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connection": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "\\S"
+                },
+                "type": {
+                  "$ref": "#/definitions/type"
+                }
+              },
+              "required": [
+                "name",
+                "type"
+              ]
+            },
+            "channel": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "\\S"
+                },
+                "extensions": {
+                  "$ref": "#/definitions/extensions"
+                }
+              },
+              "required": [
+                "name",
+                "extensions"
+              ]
+            },
+            "rules": {
+              "$ref": "#/definitions/rules"
+            }
+          },
+          "required": [
+            "connection",
+            "channel",
+            "rules"
+          ]
+        }
+      },
+      "required": [
+        "resolutionId",
+        "packetId",
+        "ownerId",
+        "sourceId",
+        "asOf",
+        "policyAsOf",
+        "type",
+        "connectionId",
+        "connectionVersion",
+        "channelId",
+        "channelVersion",
+        "rulesVersion",
+        "locationRef",
+        "destination",
+        "processing",
+        "assignments",
+        "fieldOrigins",
+        "appliedRules",
+        "basedOnResolutionId",
+        "snapshot"
+      ]
+    },
+    "deliveryRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "\\S"
+        },
+        "resolutionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "destinationHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "ownerId",
+        "resolutionId",
+        "destinationHash"
+      ]
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "const": true
+        },
+        "resolutionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "destinationHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "checkedAt": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d{1,6})?(?:Z|[+-]\\d\\d:\\d\\d)$"
+        },
+        "connectionVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "channelVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "credentialsRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_.-]{0,254}$"
+        }
+      },
+      "required": [
+        "allowed",
+        "resolutionId",
+        "destinationHash",
+        "checkedAt",
+        "connectionVersion",
+        "channelVersion",
+        "credentialsRef"
+      ]
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "\\S"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ready": {
+          "type": "boolean"
+        },
+        "database": {
+          "type": "boolean"
+        },
+        "configuration": {
+          "type": "boolean"
+        },
+        "contractVersion": {
+          "const": "1"
+        }
+      },
+      "required": [
+        "ready",
+        "database",
+        "configuration",
+        "contractVersion"
+      ]
+    }
+  }
+}

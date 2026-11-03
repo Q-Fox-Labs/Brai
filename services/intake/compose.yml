@@ -1,0 +1,64 @@
+# ABOUTME: Описывает самостоятельные программы Приёма из принятого immutable OCI образа.
+# ABOUTME: API не получает owner/admin credentials; ресурсы брокера готовит отдельный профиль.
+services:
+  intake:
+    image: ${INTAKE_IMAGE:?}
+    pull_policy: never
+    command: [node, dist/main.js]
+    user: "${INTAKE_UID:?}:${INTAKE_GID:?}"
+    environment:
+      INTAKE_CONFIG: /run/intake-secrets/config.json
+    volumes:
+      - ${INTAKE_RUNTIME_INPUTS:?}:/run/intake-secrets:ro
+    read_only: true
+    tmpfs: [/tmp:size=64m]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: ${INTAKE_API_MEMORY:-256m}
+    cpus: ${INTAKE_API_CPUS:-1}
+    restart: unless-stopped
+    networks: [private]
+  worker:
+    image: ${INTAKE_IMAGE:?}
+    pull_policy: never
+    command: [node, dist/worker.js]
+    user: "${INTAKE_UID:?}:${INTAKE_GID:?}"
+    environment:
+      INTAKE_CONFIG: /run/intake-secrets/config.json
+    volumes:
+      - ${INTAKE_RUNTIME_INPUTS:?}:/run/intake-secrets:ro
+    read_only: true
+    tmpfs: [/tmp:size=64m]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: ${INTAKE_WORKER_MEMORY:-512m}
+    cpus: ${INTAKE_WORKER_CPUS:-1}
+    restart: unless-stopped
+    networks: [private]
+  migrate:
+    image: ${INTAKE_IMAGE:?}
+    pull_policy: never
+    command: [node, dist/migrate.js]
+    profiles: [setup]
+    env_file: ["${INTAKE_OWNER_ENV:?}"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [private]
+  provision:
+    image: ${INTAKE_IMAGE:?}
+    pull_policy: never
+    command: [node, deploy/provision.mjs]
+    profiles: [setup]
+    environment:
+      INTAKE_NATS_ADMIN_OPTIONS_FILE: /run/intake-admin/nats.json
+    volumes:
+      - ${INTAKE_ADMIN_NATS_FILE:?}:/run/intake-admin/nats.json:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [private]
+networks:
+  private:
+    external: true
+    name: ${INTAKE_NETWORK:?}

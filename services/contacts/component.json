@@ -1,0 +1,105 @@
+{
+  "formatVersion": 1,
+  "id": "contacts",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [
+    "services/contacts/src/main.ts",
+    "services/contacts/src/migrate.ts"
+  ],
+  "inputs": {
+    "build": [
+      "services/contacts/tsconfig.json"
+    ],
+    "runtime": [
+      "services/contacts/schemas/common.schema.json",
+      "services/contacts/schemas/api.schema.json",
+      "services/contacts/src/types.ts",
+      "services/contacts/src/contracts.ts",
+      "services/contacts/src/domain.ts",
+      "services/contacts/migrations/001.sql",
+      "services/contacts/src/storage.ts",
+      "services/contacts/src/migrate.ts",
+      "services/contacts/src/config.ts",
+      "services/contacts/src/main.ts",
+      "services/contacts/src/nats.ts",
+      "services/contacts/package.json",
+      "services/contacts/compose.yml",
+      "services/contacts/asyncapi.yaml",
+      "services/contacts/README.md",
+      "services/contacts/DEPLOYMENT.md",
+      "services/contacts/CONTRACT.md"
+    ],
+    "checks": [
+      "services/contacts/tests/contracts.test.mjs",
+      "services/contacts/tests/domain.test.mjs",
+      "services/contacts/tests/integration/fixture.mjs",
+      "services/contacts/tests/integration/service.test.mjs",
+      "services/intake/tests/integration/contacts.test.mjs",
+      "deploy/compose.intake-test.yml",
+      "deploy/intake-test-database.sql",
+      "deploy/intake-test-nats.conf"
+    ]
+  },
+  "dependencies": [
+    {
+      "id": "history",
+      "inputs": [
+        "services/history/schemas/common.schema.json",
+        "services/history/schemas/messages.schema.json"
+      ],
+      "delivery": [
+        "services/history/schemas/common.schema.json",
+        "services/history/schemas/messages.schema.json"
+      ]
+    }
+  ],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/contacts/dist",
+      "services/contacts/package.json",
+      "services/contacts/schemas",
+      "services/contacts/migrations",
+      "services/contacts/README.md",
+      "services/contacts/CONTRACT.md",
+      "services/contacts/asyncapi.yaml",
+      "services/contacts/compose.yml",
+      "services/contacts/DEPLOYMENT.md"
+    ],
+    "entrypoints": [
+      "services/contacts/dist/main.js",
+      "services/contacts/dist/migrate.js"
+    ],
+    "smokeImports": [
+      "services/contacts/dist/domain.js",
+      "services/contacts/dist/config.js"
+    ],
+    "systemRequirements": [
+      "Node.js 24.22.1",
+      "Prepared dedicated PostgreSQL database and NATS identity; operator lifecycle"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "contacts",
+      "contacts-migrate"
+    ],
+    "migrations": [
+      "services/contacts/migrations"
+    ],
+    "health": "NATS brai.contacts.v1.status"
+  },
+  "npm": {
+    "workspaces": [
+      "services/contacts"
+    ]
+  }
+}

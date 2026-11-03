@@ -1,0 +1,279 @@
+# ABOUTME: Описывает фактические request/reply операции Каналов v1.
+# ABOUTME: Полезные нагрузки принадлежат owner JSON Schema; JSON-RPC envelope не используется.
+asyncapi: 3.0.0
+info:
+  title: Brai Channels
+  version: 1.0.0
+defaultContentType: application/json
+channels:
+  types_list:
+    address: brai.channels.v1.types.list.{callerId}
+    parameters:
+      callerId:
+        description: Identity from protected caller binding and NATS ACL
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/types.listRequest'
+  types_get:
+    address: brai.channels.v1.types.get.{callerId}
+    parameters:
+      callerId:
+        description: Identity from protected caller binding and NATS ACL
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/types.getRequest'
+  connections_create:
+    address: brai.channels.v1.connections.create.{callerId}
+    parameters:
+      callerId:
+        description: Identity from protected caller binding and NATS ACL
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/connections.createRequest'
+  connections_publish:
+    address: brai.channels.v1.connections.publish.{callerId}
+    parameters:
+      callerId:
+        description: Identity from protected caller binding and NATS ACL
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/connections.publishRequest'
+  connections_get:
+    address: brai.channels.v1.connections.get.{callerId}
+    parameters:
+      callerId:
+        description: Identity from protected caller binding and NATS ACL
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/connections.getRequest'
+  connections_list:
+    address: brai.channels.v1.connections.list.{callerId}
+    parameters:
+      callerId:
+        description: Identity from protected caller binding and NATS ACL
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/connections.listRequest'
+  channels_create:
+    address: brai.channels.v1.channels.create.{callerId}
+    parameters:
+      callerId:
+        description: Identity from protected caller binding and NATS ACL
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/channels.createRequest'
+  channels_publish:
+    address: brai.channels.v1.channels.publish.{callerId}
+    parameters:
+      callerId:
+        description: Identity from protected caller binding and NATS ACL
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/channels.publishRequest'
+  channels_get:
+    address: brai.channels.v1.channels.get.{callerId}
+    parameters:
+      callerId:
+        description: Identity from protected caller binding and NATS ACL
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/channels.getRequest'
+  channels_list:
+    address: brai.channels.v1.channels.list.{callerId}
+    parameters:
+      callerId:
+        description: Identity from protected caller binding and NATS ACL
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/channels.listRequest'
+  resolve:
+    address: brai.channels.v1.resolve.{callerId}
+    parameters:
+      callerId:
+        description: Identity from protected caller binding and NATS ACL
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/resolveRequest'
+  delivery_check:
+    address: brai.channels.v1.delivery.check.{callerId}
+    parameters:
+      callerId:
+        description: Identity from protected caller binding and NATS ACL
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/delivery.checkRequest'
+  operations_get:
+    address: brai.channels.v1.operations.get.{callerId}
+    parameters:
+      callerId:
+        description: Identity from protected caller binding and NATS ACL
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/operations.getRequest'
+  status:
+    address: brai.channels.v1.status
+    messages:
+      request:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/statusRequest'
+  replies:
+    address: null
+    description: NATS inbox; errors carry Nats-Service-Error and Nats-Service-Error-Code
+    messages:
+      types_list:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/types.listResponse'
+      types_get:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/types.getResponse'
+      connections_create:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/connections.createResponse'
+      connections_publish:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/connections.publishResponse'
+      connections_get:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/connections.getResponse'
+      connections_list:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/connections.listResponse'
+      channels_create:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/channels.createResponse'
+      channels_publish:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/channels.publishResponse'
+      channels_get:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/channels.getResponse'
+      channels_list:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/channels.listResponse'
+      resolve:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/resolveResponse'
+      delivery_check:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/delivery.checkResponse'
+      operations_get:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/operations.getResponse'
+      status:
+        payload:
+          $ref: './schemas/api.schema.json#/definitions/statusResponse'
+      error:
+        payload:
+          $ref: './schemas/common.schema.json#/definitions/error'
+operations:
+  types_list:
+    action: receive
+    channel:
+      $ref: '#/channels/types_list'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+  types_get:
+    action: receive
+    channel:
+      $ref: '#/channels/types_get'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+  connections_create:
+    action: receive
+    channel:
+      $ref: '#/channels/connections_create'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+  connections_publish:
+    action: receive
+    channel:
+      $ref: '#/channels/connections_publish'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+  connections_get:
+    action: receive
+    channel:
+      $ref: '#/channels/connections_get'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+  connections_list:
+    action: receive
+    channel:
+      $ref: '#/channels/connections_list'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+  channels_create:
+    action: receive
+    channel:
+      $ref: '#/channels/channels_create'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+  channels_publish:
+    action: receive
+    channel:
+      $ref: '#/channels/channels_publish'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+  channels_get:
+    action: receive
+    channel:
+      $ref: '#/channels/channels_get'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+  channels_list:
+    action: receive
+    channel:
+      $ref: '#/channels/channels_list'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+  resolve:
+    action: receive
+    channel:
+      $ref: '#/channels/resolve'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+  delivery_check:
+    action: receive
+    channel:
+      $ref: '#/channels/delivery_check'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+  operations_get:
+    action: receive
+    channel:
+      $ref: '#/channels/operations_get'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
+  status:
+    action: receive
+    channel:
+      $ref: '#/channels/status'
+    reply:
+      channel:
+        $ref: '#/channels/replies'
