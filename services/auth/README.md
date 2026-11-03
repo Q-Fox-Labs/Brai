@@ -12,6 +12,8 @@
 | `brai.auth.v1.verify-code` | VerifyCodeRequest | Проверка кода; регистрация или вход |
 | `brai.auth.v1.session` | SessionRequest | GET текущей сессии; `body: null` при отсутствии |
 | `brai.auth.v1.sign-out` | SignOutRequest | Отзыв сессии и удаление cookie |
+| `brai.auth.v1.sso-issue` | SsoIssueRequest | Одноразовый билет для разрешённого превью |
+| `brai.auth.v1.sso-redeem` | SsoRedeemRequest | Погашение билета и установка существующей сессии |
 
 Запрос `{headers, body}` не принимает URL или дополнительные поля. Заголовки: cookie, origin, user-agent, x-forwarded-for, sec-fetch-site. Для мутаций Origin обязателен; исходное значение и Sec-Fetch-Site сохраняются, штатные Origin/CSRF проверки действуют. X-Forwarded-For допускается только от доверенного reverse proxy; web не копирует его из произвольного клиентского ввода. Размер пакета не более 32768 байт; одновременно не более 16 операций на экземпляр.
 
@@ -28,3 +30,7 @@
 БД и роли создаёт администратор. `npm run migrate --workspace=@brai/auth` использует owner URL и штатный `getMigrations(auth.options)`; AUTH_OWNER_ROLE обязан совпасть с владельцем БД и current_user; отдельная непривилегированная AUTH_APP_ROLE без членства в других ролях получает DML-права только в собственной БД. Runtime получает app URL без DDL-прав. Миграция запускается отдельно; старт не меняет схему. При обновлении официального пакета закрепить версию, пересоздать план миграций и повторить проверки на изолированном стенде, затем применить миграцию. Патчи и форк запрещены.
 
 `npm test --workspace=@brai/auth` проверяет transport и письмо. `tests/integration/compose.yml` создаёт tmpfs PostgreSQL на 15459; `npm run test:integration --workspace=@brai/auth` проверяет официальный движок, cookie, сроки, Origin, отзыв, OTP, лимиты и SQL-права. Все данные синтетические. Resend callback ожидает ответ провайдера; положительный результат означает принятие письма, доставка в ящик не обещается. Проверка домена и реальной доставки выполняется при развёртывании.
+
+## Одноразовый вход в превью
+
+SSO выключен без пары AUTH_SSO_HUB_ORIGIN и AUTH_SSO_PREVIEW_ORIGINS. Hub равен AUTH_ORIGIN; оба значения и каждый origin превью — точные HTTPS origin без пути и wildcard. Превью также входят в AUTH_TRUSTED_ORIGINS. Issue принимает cookie активной сессии hub и `{targetOrigin,challenge}`; ответ содержит `{ticket}`. Redeem принимает `{ticket,verifier,targetOrigin}` от соответствующего origin и возвращает `{success:true}` и host-only cookie той же сессии. Challenge — base64url без padding от SHA-256 UTF-8 строки verifier; verifier — base64url без padding от 32 случайных байт. Оба имеют 43 символа. Билет зашифрован, действует не более 60 секунд и используется один раз. Ошибки не возвращают секреты или cookie. Автоматически не повторять issue и redeem; после неопределённого redeem проверить session. Отзыв исходной сессии действует также для превью.

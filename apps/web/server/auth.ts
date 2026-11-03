@@ -11,7 +11,7 @@ export function checkOrigin(request: Request): void {
  if (request.headers.get("origin") !== expected) throw new GatewayError(403, "ORIGIN", "not-published");
 }
 /** Один request-reply без автоматического повтора отправки письма или входа. */
-export async function authRequest(request: Request, operation: "send-code" | "verify-code" | "session" | "sign-out", body: object = {}): Promise<AuthReply> {
+export async function authRequest(request: Request, operation: "send-code" | "verify-code" | "session" | "sign-out" | "sso-issue" | "sso-redeem", body: object = {}): Promise<AuthReply> {
  const headers: Record<string, string> = {};
  for (const name of ["cookie", "origin", "user-agent", "sec-fetch-site"]) {
   const value = request.headers.get(name); if (value) headers[name] = value;
@@ -22,7 +22,7 @@ export async function authRequest(request: Request, operation: "send-code" | "ve
   if (address && isIP(address)) headers["x-forwarded-for"] = address;
  }
  const payload = { headers, body };
- const dto = { "send-code": "SendCodeRequest", "verify-code": "VerifyCodeRequest", session: "SessionRequest", "sign-out": "SignOutRequest" }[operation];
+ const dto = { "send-code": "SendCodeRequest", "verify-code": "VerifyCodeRequest", session: "SessionRequest", "sign-out": "SignOutRequest", "sso-issue": "SsoIssueRequest", "sso-redeem": "SsoRedeemRequest" }[operation];
  if (!valid(`auth-messages.schema.json#/definitions/${dto}`, payload)) throw new GatewayError(400, "INVALID_ARGUMENT", "not-published");
  try {
   const nc = await natsConnection();
