@@ -540,6 +540,12 @@ class SemanticRouter:
             'This is searchable, not needs_topic. Use latest_topic for the most recent conversation '
             'ABOUT a specified subject or during a specified period, including a supplementary search '
             'for the latest discussion with topic/date hints. Preserve those restrictions in query. '
+            'For latest_topic, the CURRENT question must explicitly request the latest, last or newest '
+            'discussion about the subject. Mere references to an earlier/previous discussion, '
+            '"we discussed", "continue that conversation", or a deleted chat do NOT request latest_topic. '
+            'When the user names a subject and asks for its previous recommendations, information or '
+            'conversation, use evidence and preserve useful sources irrespective of date. '
+            'This does not change latest_conversation for where we last stopped overall. '
             'Do not replace a restricted latest conversation with the newest unrelated topic. '
             'Use locate_document when explicitly asked to find or read the actual earlier document, '
             'including its numbered sections, and ALL requested information belongs to that document. '
@@ -553,7 +559,10 @@ class SemanticRouter:
         if (not isinstance(result, dict) or result.get('goal') not in ('locate_document', 'evidence', 'needs_topic', 'latest_conversation', 'latest_topic')
                 or not isinstance(result.get('query', query), str) or not result.get('query', query).strip()):
             raise MemOSError('Semantic recall goal is invalid')
-        return {'goal': result['goal'], 'query': result.get('query', query).strip()}
+        # Without recent context there is no trusted source for resolving references.
+        # Preserve the complete question rather than a model-generated restriction.
+        planned_query = result.get('query', query).strip() if context else query
+        return {'goal': result['goal'], 'query': planned_query}
 
     def rank(self, query, candidates, *, goal=None):
         """Отобрать по смыслу только полезные свидетельства; пустая выдача допустима.
