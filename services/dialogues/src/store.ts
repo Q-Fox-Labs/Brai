@@ -221,5 +221,6 @@ export function createStore(pool:DB,key:string) {
       await db.query("COMMIT");return result;
     } catch(e){await db.query("ROLLBACK").catch(()=>{});throw cleanFault(e);}finally{db.release();}
   }
-  return {append,summary,context,message,...createContext(pool,key),...createTurns(pool,key,mutation)};
+  const contextApi=createContext(pool,key);
+  return {append,summary,context,message,...contextApi,...createTurns(pool,key,mutation,contextApi)};
 }

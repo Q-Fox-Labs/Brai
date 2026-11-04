@@ -41,7 +41,7 @@ function changeObject(value: unknown, keys: string[], path: string) {
         throw new DialoguesFault('INVALID_ARGUMENT', {field:path, expected:'объект', allowed:keys});
     const row = value as Record<string, any>;
     const unknown = Object.keys(row).find(key => !keys.includes(key));
-    if (unknown) throw new DialoguesFault('INVALID_ARGUMENT', {field:path+'.'+unknown, expected:'известное поле', allowed:keys});
+    if (unknown) throw new DialoguesFault('INVALID_ARGUMENT', {field:path+'.'+unknown.slice(0,128), field_truncated:unknown.length>128, expected:'известное поле', allowed:keys});
     return row;
 }
 function changeText(value: unknown, path: string, required=false) {
@@ -51,11 +51,11 @@ function changeText(value: unknown, path: string, required=false) {
 }
 /** Проверяет пакет изменений результатов без обращения к хранилищу. */
 export function validateChanges(raw: unknown) {
-    const a = changeObject(raw ?? {}, ['purpose','constraints','add','update'], 'changes');
+    const a = changeObject(raw === undefined ? {} : raw, ['purpose','constraints','add','update'], 'changes');
     changeText(a.purpose,'changes.purpose'); changeText(a.constraints,'changes.constraints');
     const seen = new Set<string>();
     for (const kind of ['add','update']) {
-        const rows = a[kind] ?? [];
+        const rows = a[kind] === undefined ? [] : a[kind];
         if (!Array.isArray(rows)) throw new DialoguesFault('INVALID_ARGUMENT', {field:'changes.'+kind,expected:'массив результатов'});
         for (let i=0;i<rows.length;i++) {
             const path=`changes.${kind}[${i}]`;

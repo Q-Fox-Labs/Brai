@@ -17,11 +17,57 @@ export async function turnChecks(t,app){
  const inp=(id,text='вход')=>({request_id:req(),dialogue,messages:[{id,text}]});
  const get=async args=>{let page=await api.turnGet(owner,args),body=page.text;const first=page;while(page.next_cursor){page=await api.turnGet(owner,{dialogue_id:args.dialogue_id,cursor:page.next_cursor});body+=page.text;}assert.equal(createHash('sha256').update(body).digest('hex'),first.sha256);return JSON.parse(body);};
  await t.test('короткий ввод, повтор, один открытый ход и стир',async()=>{
-  const packet=inp('one');const one=await api.turnInput(owner,packet);assert.deepEqual(await api.turnInput(owner,packet),one);
+  const packet=inp('one');const one=await api.turnInput(owner,packet);assert.equal(one.created,true);assert.deepEqual(await api.turnInput(owner,packet),one);
   const snapshot=await get({dialogue_id:dialogue.id});assert.equal(snapshot.results.length,1);assert.equal(snapshot.results[0].kind,'final');assert.equal(snapshot.results[0].status,'pending');
   const repeat=await api.turnInput(owner,{...packet,request_id:req()});assert.equal(repeat.turn_id,one.turn_id);assert.equal(repeat.version,one.version);
-  const next=await api.turnInput(owner,inp('steer','сначала другое'));assert.equal(next.turn_id,one.turn_id);assert.notEqual(next.version,one.version);
+  const next=await api.turnInput(owner,inp('steer','сначала другое'));assert.equal(next.turn_id,one.turn_id);assert.equal(next.created,false);assert.notEqual(next.version,one.version);
   assert.equal((await get({dialogue_id:dialogue.id})).messages.length,2);
+ });
+ await t.test('короткий ответ: input с контекстом и finish с явным ACK',async()=>{
+  const dialogue={id:'combined-short',channel:'synthetic'},context={consumer_id:'combined-short',context_instance_id:'ctx'};
+  const packet={request_id:req(),dialogue,messages:[{id:'short-in',text:'Сколько будет 2+2?'}],context};
+  const first=await api.turnInput(owner,packet);assert.equal(first.created,true);assert.ok(first.context);assert.equal(first.context.continuation_cursor,null);assert.deepEqual(await api.turnInput(owner,packet),first);
+  const ack={request_id:req(),...context,delivery_id:first.context.delivery_id};
+  const done=await api.turnFinish(owner,{request_id:req(),dialogue_id:dialogue.id,turn_id:first.turn_id,expected_version:first.version,final:{id:'short-final',text:'4'},ack});assert.equal(done.status,'completed');assert.equal(done.ack.acknowledged,true);
+ });
+ await t.test('ошибка контекста не скрывает сохранённый ввод и квитанцию',async()=>{
+  const dialogue={id:'combined-failure',channel:'synthetic'};let injected=false;
+  const wrapped={async connect(){const c=await app.connect();return {async query(sql,...args){if(!injected&&sql.startsWith('INSERT INTO dialogues_live.context_consumers')){injected=true;throw new Error('synthetic context failure');}return c.query(sql,...args);},release(){c.release();}};}};
+  const packet={request_id:req(),dialogue,messages:[{id:'failure-input',text:'сохранён'}],context:{consumer_id:'failure-reader',context_instance_id:'ctx'}};
+  const result=await createStore(wrapped,'synthetic-turn-key').turnInput(owner,packet);assert.ok(result.turn_id);assert.equal(result.messages[0].id,'failure-input');assert.equal(result.input_saved,true);assert.ok(result.context_error);assert.ok(result.context_request_id);
+  assert.equal((await api.message(owner,{dialogue_id:dialogue.id,message_id:'failure-input'})).text,'сохранён');
+  const page=await api.pull(owner,{request_id:result.context_request_id,dialogue_id:dialogue.id,...packet.context});assert.ok(page.delivery_id);
+ });
+ await t.test('receipt плюс большая страница укладывается в transport budget',async()=>{
+  const dialogue={id:'combined-budget',channel:'synthetic'};const text='\\"'.repeat(15000);
+  const packet={request_id:req(),dialogue,messages:[{id:'budget-input',text}],context:{consumer_id:'budget-reader',context_instance_id:'ctx'}};
+  const result=await api.turnInput(owner,packet);assert.ok(Buffer.byteLength(JSON.stringify({jsonrpc:'2.0',id:1,result:{content:[],structuredContent:result}}))<=65536);
+  assert.ok(result.context||result.context_error);assert.equal((await api.message(owner,{dialogue_id:dialogue.id,message_id:'budget-input',limit:1})).text,Array.from(text)[0]);
+  if(result.context_error)assert.equal(result.context_error.code,'CONTEXT_DEFERRED');
+ });
+ await t.test('крупная квитанция вместе с контекстом не превышает предел ответа',async()=>{
+  const dialogue={id:'combined-large-receipt',channel:'synthetic'};
+  const messages=Array.from({length:100},(_,i)=>({id:'item-'+i+'x'.repeat(200),text:'\\"'.repeat(150)}));
+  const result=await api.turnInput(owner,{request_id:req(),dialogue,messages,context:{consumer_id:'large-receipt-reader',context_instance_id:'ctx'}});
+  assert.equal(result.messages.length,100);assert.ok(Buffer.byteLength(JSON.stringify({jsonrpc:'2.0',id:1,result:{content:[],structuredContent:result}}))<=65536);assert.equal(result.context_error?.code,'CONTEXT_DEFERRED');assert.equal(result.input_saved,true);
+  const page=await api.pull(owner,result.context_error.arguments);assert.ok(page.delivery_id);
+ });
+ await t.test('небольшой оригинал приходит целиком, большой — всеми фрагментами',async()=>{
+  const dialogue={id:'full-originals',channel:'synthetic'},small='Я'.repeat(1500),large='😀\\"'.repeat(30000);
+  await api.turnInput(owner,{request_id:req(),dialogue,messages:[{id:'small-original',text:small},{id:'large-original',text:large}]});
+  const args={request_id:req(),consumer_id:'original-reader',context_instance_id:'ctx'};let page=await api.pull(owner,args),items=[...page.items];
+  while(page.continuation_cursor){page=await api.pull(owner,{...args,continuation_cursor:page.continuation_cursor});items.push(...page.items);}
+  const first=items.find(x=>x.type==='message_representation'&&x.message_id==='small-original');assert.equal(first.text,small);assert.equal(first.truncated,false);
+  const fragments=items.filter(x=>x.type==='original_fragment'&&x.message_id==='large-original');assert.ok(fragments.length>1);assert.equal(fragments.map(x=>x.text).join(''),large);assert.equal(fragments[0].text_sha256,createHash('sha256').update(large).digest('hex'));
+ });
+ await t.test('неполный ACK не применяет update; полный ACK сохраняется вместе с ним',async()=>{
+  const dialogue={id:'combined-ack',channel:'synthetic'};const start=await api.turnInput(owner,{request_id:req(),dialogue,messages:[{id:'ack-in',text:'😀'.repeat(20000)}],context:{consumer_id:'ack-reader',context_instance_id:'ctx'}});
+  let page=start.context;if(!page){page=await api.pull(owner,{request_id:start.context_request_id,dialogue_id:dialogue.id,consumer_id:'ack-reader',context_instance_id:'ctx'});}assert.ok(page.continuation_cursor);
+  const ack={request_id:req(),consumer_id:'ack-reader',context_instance_id:'ctx',delivery_id:page.delivery_id};
+  const update={request_id:req(),dialogue_id:dialogue.id,turn_id:start.turn_id,expected_version:start.version,changes:{add:[{id:'ack-work',formulation:'Проверка'}]},ack};
+  await assert.rejects(api.turnUpdate(owner,update),{code:'PAGES_INCOMPLETE'});assert.equal((await get({dialogue_id:dialogue.id})).results.length,1);
+  while(page.continuation_cursor)page=await api.pull(owner,{request_id:start.context_request_id,consumer_id:'ack-reader',context_instance_id:'ctx',continuation_cursor:page.continuation_cursor});
+  const saved=await api.turnUpdate(owner,{...update,request_id:req()});assert.equal(saved.ack.acknowledged,true);assert.equal((await get({dialogue_id:dialogue.id})).results.length,2);
  });
  await t.test('результаты, блокировка финала и версии',async()=>{
   let s=await get({dialogue_id:dialogue.id});let u=await api.turnUpdate(owner,{request_id:req(),dialogue_id:dialogue.id,turn_id:s.turn_id,expected_version:s.version,changes:{purpose:'Две задачи',add:[{id:'first',formulation:'Первая',source_refs:['one']},{id:'second',formulation:'Вторая',source_refs:['steer']}]}});
@@ -151,21 +197,31 @@ export async function turnChecks(t,app){
   await assert.rejects(createStore(wrapped,'synthetic-turn-key').turnFinish(owner,packet),{code:'INTERNAL'});const after=await get({dialogue_id:dialogue.id,turn_id:start.turn_id});assert.equal(after.status,'completed');
   const receipt=await api.turnFinish(owner,packet);assert.equal(receipt.status,'completed');assert.equal(after.messages.filter(m=>m.kind==='final').length,1);
  });
+ await t.test('потеря квитанции finish с ACK не повторяет ни финал, ни подтверждение',async()=>{
+  const who='lost-ack-owner',dialogue={id:'lost-ack',channel:'synthetic'},context={consumer_id:'lost-ack-reader',context_instance_id:'ctx'};
+  const start=await api.turnInput(who,{request_id:req(),dialogue,messages:[{id:'lost-ack-input',text:'вход'}],context});assert.equal(start.context.continuation_cursor,null);let lost=true;
+  const wrapped={async connect(){const c=await app.connect();return {async query(sql,...args){const r=await c.query(sql,...args);if(lost&&sql==='COMMIT'){lost=false;throw new Error('lost receipt');}return r;},release(){c.release();}};}};
+  const packet={request_id:req(),dialogue_id:dialogue.id,turn_id:start.turn_id,expected_version:start.version,final:{id:'lost-ack-final',text:'готово'},ack:{request_id:req(),...context,delivery_id:start.context.delivery_id}};
+  await assert.rejects(createStore(wrapped,'synthetic-turn-key').turnFinish(who,packet),{code:'INTERNAL'});
+  const state=JSON.parse((await api.turnGet(who,{dialogue_id:dialogue.id,turn_id:start.turn_id})).text);assert.equal(state.status,'completed');assert.equal(state.messages.filter(m=>m.kind==='final').length,1);
+  const receipt=await api.turnFinish(who,packet);assert.equal(receipt.ack.acknowledged,true);assert.equal((await app.query("SELECT count(*)::int AS n FROM dialogues_live.requests WHERE owner_id=$1 AND operation='context_ack'",[who])).rows[0].n,1);
+ });
  await t.test('реальные операции через MCP и proxy после restart',async()=>{
-  const cfg={host:'127.0.0.1',port:0,owner,hosts:['initial'],origins:['http://initial'],token:'synthetic-token-012345678901234567890123456789'};
+  const cfg={host:'127.0.0.1',port:0,owner:'mcp-fixture-owner',hosts:['initial'],origins:['http://initial'],token:'synthetic-token-012345678901234567890123456789'};
   let listener=await startMcp(api,cfg);const url=new URL(listener.url);cfg.hosts.push(url.host);cfg.origins.push(url.origin);
   const tmp=fileURLToPath(new URL('../../../tmp/',import.meta.url));await mkdir(tmp,{recursive:true});const dir=await mkdtemp(join(tmp,'dialogues-managed-mcp-')),token=join(dir,'token');await writeFile(token,cfg.token,{mode:0o600});
   const proxy=new Client({name:'managed-fixture',version:'1'});
   try{
    await proxy.connect(new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../dist/stdio-proxy.js',import.meta.url))],env:{...process.env,DIALOGUES_MCP_URL:listener.url,DIALOGUES_MCP_TOKEN_FILE:token}}));
    const invalid=await proxy.callTool({name:'dialogues_turn_input',arguments:{request_id:'ok',dialogue:{id:'mcp',channel:'synthetic'},messages:[]}});const issue=JSON.parse(invalid.content[0].text);assert.equal(issue.code,'INVALID_ARGUMENT');assert.equal(issue.field,'messages');assert.equal(issue.applied,false);
-   const first=await proxy.callTool({name:'dialogues_turn_input',arguments:{request_id:req(),dialogue:{id:'mcp',channel:'synthetic'},messages:[{id:'mcp-in',text:'тест'}]}});assert.ok(first.structuredContent.turn_id);
+   const first=await proxy.callTool({name:'dialogues_turn_input',arguments:{request_id:req(),dialogue:{id:'mcp',channel:'synthetic'},messages:[{id:'mcp-in',text:'тест'}],context:{consumer_id:'mcp-initial',context_instance_id:'ctx'}}});assert.ok(first.structuredContent.turn_id);assert.ok(first.structuredContent.context);assert.equal(first.structuredContent.context.continuation_cursor,null);
    const invalidUpdate=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{add:[{id:'bad',formulation:'Задача',status:'finished'}]}}});const nested=JSON.parse(invalidUpdate.content[0].text);assert.equal(nested.field,'changes.add[0].status');assert.ok(nested.allowed.includes('done'));assert.equal(nested.applied,false);
    const invalidRefs=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{add:[{id:'bad',formulation:'Задача',source_refs:'x'}]}}});assert.equal(JSON.parse(invalidRefs.content[0].text).field,'changes.add[0].source_refs');
    const foreignRef=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{add:[{id:'bad',formulation:'Задача',source_refs:['unknown']}]}}});const badRef=JSON.parse(foreignRef.content[0].text);assert.equal(badRef.code,'INVALID_SOURCE_REFS');assert.equal(badRef.field,'changes.add[0].source_refs');assert.ok(badRef.expected);
    const noResult=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{add:[{id:'bad',formulation:'Задача',status:'done'}]}}});const resultError=JSON.parse(noResult.content[0].text);assert.equal(resultError.code,'RESULT_REQUIRED');assert.equal(resultError.field,'changes.add[0].result');
    const unknownField=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{add:[{id:'bad',formulation:'Задача',nonsense:true}]}}});assert.equal(JSON.parse(unknownField.content[0].text).field,'changes.add[0].nonsense');
-   const added=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{add:[{id:'long',formulation:'х'.repeat(100000)}]}}});
+   const longField=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{['x'.repeat(100000)]:true}}});assert.equal(JSON.parse(longField.content[0].text).field_truncated,true);assert.ok(Buffer.byteLength(JSON.stringify(longField))<65024);
+   const added=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{add:[{id:'long',formulation:'х'.repeat(100000)}]},ack:{request_id:req(),consumer_id:'mcp-initial',context_instance_id:'ctx',delivery_id:first.structuredContent.context.delivery_id}}});assert.equal(added.structuredContent.ack.acknowledged,true);
    const blocked=await proxy.callTool({name:'dialogues_turn_finish',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:added.structuredContent.version,final:{id:'mcp-final',text:'готово'}}});assert.equal(JSON.parse(blocked.content[0].text).pending[0].id,'long');assert.ok(Buffer.byteLength(JSON.stringify(blocked))<65024);
    const done=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:added.structuredContent.version,changes:{update:[{id:'long',status:'done',result:'готово'}]}}});
    const pullArgs={request_id:req(),consumer_id:'mcp-reset',context_instance_id:'ctx',reset:true,dialogue_id:'mcp'};

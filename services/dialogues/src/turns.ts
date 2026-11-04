@@ -5,6 +5,7 @@ import { randomUUID, createHash, createHmac, timingSafeEqual } from 'node:crypto
 import { bytes, canonical, fail, id, integer, limits, object, text, DialoguesFault } from './domain.js';
 import { fieldId, message, mergeResult, requireCompletion, validateChanges, version } from './turn-domain.js';
 import { enqueueDialogue } from './jobs.js';
+import type { createContext } from './context.js';
 type DB = Pick<Pool, 'connect'>;
 type Mutation = (owner: string, request: string, op: string, input: unknown, fn: (db: PoolClient, seq: string) => Promise<any>) => Promise<any>;
 const hash = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
@@ -93,9 +94,16 @@ catch {
     return fail('INVALID_CURSOR');
 } }
 /** Создаёт операции хода; запись выполняется в сериализованной транзакции владельца. */
-export function createTurns(pool: DB, key: string, mutation: Mutation) {
+export function createTurns(pool: DB, key: string, mutation: Mutation, contextApi: ReturnType<typeof createContext>) {
+    function optionalAck(raw: unknown, requestId: string) {
+        if (raw === undefined) return undefined;
+        const a = object(raw,['request_id','consumer_id','context_instance_id','delivery_id']);
+        for (const field of ['request_id','consumer_id','context_instance_id','delivery_id']) fieldId(a[field],`ack.${field}`);
+        if (a.request_id === requestId) throw new DialoguesFault('INVALID_ARGUMENT',{field:'ack.request_id',expected:'ID, отличный от ID основной операции'});
+        return a;
+    }
     async function input(owner: string, raw: unknown) {
-        const a = object(raw, ['request_id', 'dialogue', 'messages', 'reconciled_no_final']);
+        const a = object(raw, ['request_id', 'dialogue', 'messages', 'reconciled_no_final', 'context', 'ack']);
         if (a.reconciled_no_final !== undefined && typeof a.reconciled_no_final !== 'boolean')
             fail('INVALID_ARGUMENT');
         fieldId(a.request_id, 'request_id');
@@ -108,10 +116,19 @@ export function createTurns(pool: DB, key: string, mutation: Mutation) {
             throw new DialoguesFault('INVALID_ARGUMENT', { field: 'messages', expected: 'массив из 1–100 входов' });
         if (bytes(raw) > limits.requestBytes)
             fail('REQUEST_TOO_LARGE');
+        const ack = optionalAck(a.ack, a.request_id);
+        let context: Record<string, any> | undefined;
+        if (a.context !== undefined) {
+            context=object(a.context,['consumer_id','context_instance_id','reset']);
+            fieldId(context.consumer_id,'context.consumer_id');fieldId(context.context_instance_id,'context.context_instance_id');
+            if (context.reset !== undefined && typeof context.reset !== 'boolean')
+                throw new DialoguesFault('INVALID_ARGUMENT',{field:'context.reset',expected:'логическое значение'});
+        }
         const messages = a.messages.map((m: unknown) => message(m, 'input'));
         if (new Set(messages.map((m: any) => m.id)).size !== messages.length)
             fail('DUPLICATE_MESSAGE_ID');
-        return mutation(owner, a.request_id, 'turn_input', a, async (db, seq) => {
+        const receipt = await mutation(owner, a.request_id, 'turn_input', a, async (db, seq) => {
+            const ackReceipt = ack ? await contextApi.ackInTransaction(db,owner,ack) : undefined;
             const existing = (await db.query('SELECT channel FROM dialogues_live.dialogues WHERE owner_id=$1 AND id=$2', [owner, d.id])).rows[0];
             if (existing && existing.channel !== d.channel)
                 fail('DIALOGUE_CONFLICT');
@@ -126,7 +143,7 @@ export function createTurns(pool: DB, key: string, mutation: Mutation) {
                     const saved = [];
                     for (const m of messages)
                         saved.push(await insertMessage(db, owner, d.id, tid, m, 'input', seq));
-                    return { request_id: a.request_id, dialogue_id: d.id, turn_id: tid, version: String(previous.version), messages: saved };
+                    return { request_id: a.request_id, dialogue_id: d.id, turn_id: tid, version: String(previous.version), created: false, messages: saved, ...(ackReceipt?{ack:ackReceipt}:{}) };
                 }
             }
             if (prior.length) {
@@ -147,6 +164,7 @@ export function createTurns(pool: DB, key: string, mutation: Mutation) {
             }
             else if (a.reconciled_no_final === true)
                 fail('NO_FINAL_TO_RECONCILE');
+            const created = !t;
             if (!t) {
                 const legacy = (await db.query('SELECT managed,status FROM dialogues_live.turns WHERE owner_id=$1 AND dialogue_id=$2 ORDER BY turn_order DESC LIMIT 1', [owner, d.id])).rows[0];
                 if (legacy && !legacy.managed && legacy.status !== 'completed')
@@ -164,19 +182,36 @@ export function createTurns(pool: DB, key: string, mutation: Mutation) {
             const v = changed ? await bump(db, owner, d.id, t.id, seq) : String(t.version);
             if (changed)
                 await enqueueDialogue(db, owner, d.id, seq, false);
-            return { request_id: a.request_id, dialogue_id: d.id, turn_id: t.id, version: v, messages: saved };
+            return { request_id: a.request_id, dialogue_id: d.id, turn_id: t.id, version: v, created, messages: saved, ...(ackReceipt?{ack:ackReceipt}:{}) };
         });
+        if (!context) return receipt;
+        const contextRequestId = 'turn-context-' + hash(a.request_id);
+        const contextRequest = {request_id:contextRequestId,dialogue_id:d.id,...context};
+        try {
+            const page = await contextApi.pull(owner,contextRequest);
+            const combined = {...receipt,context_request_id:contextRequestId,context:page};
+            if (bytes(combined) <= limits.responseBytes - 256) return combined;
+            return {...receipt,input_saved:true,context_request_id:contextRequestId,context_error:{code:'CONTEXT_DEFERRED',next_action:'Получите страницы через dialogues_context_pull с указанными аргументами',arguments:contextRequest}};
+        } catch(error) {
+            return {...receipt,input_saved:true,context_request_id:contextRequestId,context_error:{code:error instanceof DialoguesFault?error.code:'CONTEXT_UNAVAILABLE',next_action:'Ввод сохранён; получите контекст отдельно с указанными аргументами',arguments:contextRequest}};
+        }
     }
     async function update(owner: string, raw: unknown) {
-        const a = object(raw, ['request_id', 'dialogue_id', 'turn_id', 'expected_version', 'changes']);
+        const a = object(raw, ['request_id', 'dialogue_id', 'turn_id', 'expected_version', 'changes', 'ack']);
         fieldId(a.request_id, 'request_id');
         fieldId(a.dialogue_id, 'dialogue_id');
         fieldId(a.turn_id, 'turn_id');
         version(a.expected_version);
         const changes = validateChanges(a.changes);
-        return mutation(owner, a.request_id, 'turn_update', a, async (db, seq) => { const t = await lookup(db, owner, a.dialogue_id, a.turn_id); if (t.status === 'completed')
-            fail('TURN_CLOSED'); if (String(t.version) !== a.expected_version)
-            fail('VERSION_CONFLICT'); const changed = await applyChanges(db, owner, a.dialogue_id, a.turn_id, changes); return { request_id: a.request_id, dialogue_id: a.dialogue_id, turn_id: a.turn_id, version: changed ? await bump(db, owner, a.dialogue_id, a.turn_id, seq) : String(t.version), changed }; });
+        const ack=optionalAck(a.ack,a.request_id);
+        return mutation(owner, a.request_id, 'turn_update', a, async (db, seq) => {
+            const ackReceipt=ack?await contextApi.ackInTransaction(db,owner,ack):undefined;
+            const t=await lookup(db,owner,a.dialogue_id,a.turn_id);
+            if(t.status==='completed')fail('TURN_CLOSED');
+            if(String(t.version)!==a.expected_version)fail('VERSION_CONFLICT');
+            const changed=await applyChanges(db,owner,a.dialogue_id,a.turn_id,changes);
+            return {request_id:a.request_id,dialogue_id:a.dialogue_id,turn_id:a.turn_id,version:changed?await bump(db,owner,a.dialogue_id,a.turn_id,seq):String(t.version),changed,...(ackReceipt?{ack:ackReceipt}:{})};
+        });
     }
     async function get(owner: string, raw: unknown) {
         const a = object(raw, ['dialogue_id', 'turn_id', 'cursor']);
@@ -223,13 +258,15 @@ export function createTurns(pool: DB, key: string, mutation: Mutation) {
         }
     }
     async function finish(owner: string, raw: unknown) {
-        const a = object(raw, ['request_id', 'dialogue_id', 'turn_id', 'expected_version', 'final', 'changes']);
+        const a = object(raw, ['request_id', 'dialogue_id', 'turn_id', 'expected_version', 'final', 'changes', 'ack']);
         fieldId(a.request_id, 'request_id');
         fieldId(a.dialogue_id, 'dialogue_id');
         fieldId(a.turn_id, 'turn_id');
         version(a.expected_version);
         const final = message(a.final, 'final'), changes = validateChanges(a.changes);
+        const ack=optionalAck(a.ack,a.request_id);
         return mutation(owner, a.request_id, 'turn_finish', a, async (db, seq) => {
+            const ackReceipt=ack?await contextApi.ackInTransaction(db,owner,ack):undefined;
             const t = await lookup(db, owner, a.dialogue_id, a.turn_id);
             if (t.status === 'completed')
                 fail('TURN_CLOSED');
@@ -246,7 +283,7 @@ export function createTurns(pool: DB, key: string, mutation: Mutation) {
             await db.query("UPDATE dialogues_live.turns SET status='completed',completion_seq=$4,final_message_id=$5 WHERE owner_id=$1 AND dialogue_id=$2 AND id=$3", [owner, a.dialogue_id, a.turn_id, seq, final.id]);
             const v = await bump(db, owner, a.dialogue_id, a.turn_id, seq);
             await enqueueDialogue(db, owner, a.dialogue_id, seq, false);
-            return { request_id: a.request_id, dialogue_id: a.dialogue_id, turn_id: a.turn_id, version: v, final: saved, status: 'completed' };
+            return { request_id: a.request_id, dialogue_id: a.dialogue_id, turn_id: a.turn_id, version: v, final: saved, status: 'completed', ...(ackReceipt?{ack:ackReceipt}:{}) };
         });
     }
     async function repair(owner: string, raw: unknown) {

@@ -12,6 +12,9 @@ test('пакет сохраняет формулировки и проверяе
  const changes=validateChanges({add:[{id:'one',formulation:'Первая',source_refs:['input']} ]});assert.equal(changes.add[0].formulation,'Первая');
  assert.throws(()=>validateChanges({add:[{id:'one',formulation:'Текст',source_refs:['x','x']}]}),{code:'INVALID_ARGUMENT'});
  assert.throws(()=>validateChanges({add:[{id:'one',formulation:'Текст'}],update:[{id:'one',status:'done'}]}),{code:'DUPLICATE_RESULT_ID'});
+ for(const field of ['add','update'])assert.throws(()=>validateChanges({[field]:null}),e=>e.code==='INVALID_ARGUMENT'&&e.details.field==='changes.'+field);
+ assert.throws(()=>validateChanges(null),e=>e.code==='INVALID_ARGUMENT'&&e.details.field==='changes');
+ assert.throws(()=>validateChanges({['x'.repeat(100000)]:true}),e=>e.code==='INVALID_ARGUMENT'&&e.details.field_truncated===true&&e.details.field.length<200);
  assert.equal(message({id:'a',text:'😀'},'input').text,'😀');
 });
 test('частичный результат сохраняет прежние поля и требует причину',()=>{
