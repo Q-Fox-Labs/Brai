@@ -27,7 +27,8 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
         return {content:[],structuredContent:result};
       } catch(error) {
         const code=error instanceof DialoguesFault?error.code:"INTERNAL";
-        return {isError:true,content:[{type:"text",text:JSON.stringify({code,retryable:false})}]};
+        const next_action=code==="VERSION_CONFLICT"?"Прочитайте текущий ход и повторите с новой версией и request_id":code==="PENDING_RESULTS"?"Завершите ожидающие результаты или укажите честное основание невыполнения":code==="LEGACY_TURN_OPEN"?"Завершите прежний ход по старому циклу до перехода на новые операции":code==="FINAL_RECONCILIATION_REQUIRED"?"Сверьте фактический финал клиента и восстановите статус":code==="INVALID_ARGUMENT"?"Исправьте аргументы и используйте новый request_id":"Проверьте данные и состояние перед повтором";
+        return {isError:true,content:[{type:"text",text:JSON.stringify({code,...(code==="INTERNAL"?{next_action:"Исход операции неизвестен: сначала проверьте состояние и исходный ID"}:{applied:false,next_action}),...(error instanceof DialoguesFault?error.details:{})})}]};
       }
     });
     await server.connect(transport);return s;

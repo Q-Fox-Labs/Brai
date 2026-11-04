@@ -1,6 +1,7 @@
 // ABOUTME: Хранит live-диалоги и собирает ограниченные снимки контекста PostgreSQL.
 // ABOUTME: Каждая запись блокирует владельца до commit; архивная схема не используется.
 import type { Pool, PoolClient } from "pg";
+import {createTurns} from "./turns.js";
 import {createContext} from "./context.js";
 import {enqueueDialogue} from "./jobs.js";
 import { createHash } from "node:crypto";
@@ -53,7 +54,10 @@ export function createStore(pool:DB,key:string) {
           saved.push({id:m.id,sha256:previous.content_hash,message_order:previous.message_order,replayed:true});
           continue;
         }
-        const turn=(await db.query("SELECT turn_order FROM dialogues_live.turns WHERE owner_id=$1 AND dialogue_id=$2 AND id=$3",[owner,d.id,m.turn_id])).rows[0];
+        const turn=(await db.query("SELECT turn_order,managed,status FROM dialogues_live.turns WHERE owner_id=$1 AND dialogue_id=$2 AND id=$3",[owner,d.id,m.turn_id])).rows[0];
+        if(turn?.managed && (m.kind!=="final" || turn.status==="completed"))fail("MANAGED_TURN_REQUIRES_TURN_OPERATIONS");
+        if(turn?.managed && (await db.query("SELECT 1 FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 AND kind='final'",[owner,d.id,m.turn_id])).rowCount)fail("FINAL_RECONCILIATION_REQUIRED");
+        if(!turn && (await db.query("SELECT 1 FROM dialogues_live.turns WHERE owner_id=$1 AND dialogue_id=$2 AND managed AND status<>'completed'",[owner,d.id])).rowCount)fail("MANAGED_TURN_OPEN");
         if(turn&&m.turn_order!==undefined&&String(m.turn_order)!==turn.turn_order)fail("TURN_CONFLICT");
         const turnOrder=m.turn_order??(turn?Number(turn.turn_order):Number((await db.query("SELECT COALESCE(MAX(turn_order),-1)+1 AS n FROM dialogues_live.turns WHERE owner_id=$1 AND dialogue_id=$2",[owner,d.id])).rows[0].n));
         integer(turnOrder);
@@ -66,7 +70,8 @@ export function createStore(pool:DB,key:string) {
         const hash=sha(m.text);
         await db.query("INSERT INTO dialogues_live.messages(owner_id,dialogue_id,turn_id,id,role,kind,message_order,item_order,text,payload,content_hash,occurred_at,source,change_seq) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",[owner,d.id,m.turn_id,m.id,m.role,m.kind,order,item,m.text,payload,hash,m.occurred_at,m.source,seq]);
         if(summary!==undefined)await db.query("INSERT INTO dialogues_live.message_summaries(owner_id,dialogue_id,message_id,version,text,source_hash,change_seq) VALUES($1,$2,$3,1,$4,$5,$6)",[owner,d.id,m.id,summary,hash,seq]);
-        const status=m.kind==="final"?"completed":m.turn_status;
+        const status=turn?.managed?undefined:(m.kind==="final"?"completed":m.turn_status);
+        if(turn?.managed)await db.query("UPDATE dialogues_live.turns SET version=version+1,updated_at=now(),change_seq=$4 WHERE owner_id=$1 AND dialogue_id=$2 AND id=$3",[owner,d.id,m.turn_id,seq]);
         if(status)await db.query("UPDATE dialogues_live.turns SET status=$4,completion_seq=CASE WHEN $4='completed' THEN COALESCE(completion_seq,$5) ELSE completion_seq END,change_seq=$5 WHERE owner_id=$1 AND dialogue_id=$2 AND id=$3",[owner,d.id,m.turn_id,status,seq]);
         saved.push({id:m.id,sha256:hash,message_order:String(order),replayed:false});
       }
@@ -214,5 +219,5 @@ export function createStore(pool:DB,key:string) {
       await db.query("COMMIT");return result;
     } catch(e){await db.query("ROLLBACK").catch(()=>{});throw cleanFault(e);}finally{db.release();}
   }
-  return {append,summary,context,message,...createContext(pool,key)};
+  return {append,summary,context,message,...createContext(pool,key),...createTurns(pool,key,mutation)};
 }

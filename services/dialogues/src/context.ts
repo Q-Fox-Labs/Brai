@@ -28,12 +28,12 @@ export function contextPages(metadata:Record<string,any>,items:any[],makeCursor:
  const expanded:any[]=[];
  for(const item of items){
   if(Buffer.byteLength(JSON.stringify(envelope(item)))<=budget){expanded.push(item);continue;}
-  if(typeof item.text!=='string'||!(item.type==='dialogue_summary'||item.type==='message_representation'&&item.summary_version))fail('RESPONSE_ITEM_TOO_LARGE');
+  if(typeof item.text!=='string'||!(item.type==='dialogue_summary'||item.type==='message_representation'&&item.summary_version||item.type==='turn_work'))fail('RESPONSE_ITEM_TOO_LARGE');
   const {text,truncated,next_offset,read_tool,...identity}=item;
   let total=0;for(const ch of text)total++;
   const info={total_chars:total,total_bytes:Buffer.byteLength(text),text_sha256:createHash('sha256').update(text,'utf8').digest('hex'),offset_unit:'unicode_codepoints',
    coverage:item.type==='dialogue_summary'?{through_message_id:item.through_message_id,through_order:item.through_order}:{message_id:item.message_id}};
-  const kind=item.type==='dialogue_summary'?'dialogue_summary_fragment':'message_summary_fragment';
+  const kind=item.type==='dialogue_summary'?'dialogue_summary_fragment':item.type==='turn_work'?'turn_work_fragment':'message_summary_fragment';
   const fragment=(part:string,offset:number,next:number|null)=>({...identity,...info,type:kind,representation:'summary_fragment',text:part,offset,next_offset:next,is_last_fragment:next===null,text_complete:offset===0&&next===null});
   const available=budget-Buffer.byteLength(JSON.stringify(envelope(fragment('',Number.MAX_SAFE_INTEGER,Number.MAX_SAFE_INTEGER))));
   if(available<6)fail('RESPONSE_ITEM_TOO_LARGE');
@@ -56,8 +56,8 @@ export function contextPages(metadata:Record<string,any>,items:any[],makeCursor:
 /** Создаёт owner-bound pull/ack отдельно от прежнего context_get. */
 export function createContext(pool:DB,key:string){
  async function pull(owner:string,raw:unknown){
- const a=object(raw,['request_id','consumer_id','context_instance_id','reset','continuation_cursor']);id(a.request_id);id(a.consumer_id);id(a.context_instance_id);if(a.reset!==undefined&&typeof a.reset!=='boolean')fail('INVALID_ARGUMENT');
- const normalized={request_id:a.request_id,consumer_id:a.consumer_id,context_instance_id:a.context_instance_id,reset:a.reset??false};
+ const a=object(raw,['request_id','consumer_id','context_instance_id','reset','continuation_cursor','dialogue_id']);id(a.request_id);id(a.consumer_id);id(a.context_instance_id);if(a.reset!==undefined&&typeof a.reset!=='boolean')fail('INVALID_ARGUMENT');if(a.dialogue_id!==undefined)id(a.dialogue_id);
+ const normalized={request_id:a.request_id,consumer_id:a.consumer_id,context_instance_id:a.context_instance_id,reset:a.reset??false,...(a.dialogue_id===undefined?{}:{dialogue_id:a.dialogue_id})};
  return ownerTransaction(pool,owner,async db=>{
  let delivery=(await db.query('SELECT * FROM dialogues_live.context_deliveries WHERE owner_id=$1 AND request_id=$2',[owner,a.request_id])).rows[0];if(delivery&&delivery.request_hash!==digest(normalized))fail('REQUEST_CONFLICT');let index=0;
  if(a.continuation_cursor!==undefined){const [did,n]=parseCursor(key,a.continuation_cursor,owner,a.consumer_id,a.context_instance_id);if(!delivery||delivery.id!==did)fail('INVALID_CURSOR');index=n;}
@@ -86,6 +86,12 @@ export function createContext(pool:DB,key:string){
  // Метаданные и текст разделены, чтобы JSON escaping не переполнил одну запись.
  for(const m of chosen){const {summary_text,original_fragment,...meta}=m;items.push({type:'message',...meta,summary_status:m.summary_version?'available':'missing',representation:m.summary_version?'summary':'original'});
  const text=m.summary_version?summary_text:original_fragment,offset=Array.from(text).length;items.push({type:'message_representation',dialogue_id:d.dialogue_id,message_id:m.id,summary_version:m.summary_version,text,truncated:!m.summary_version&&offset<m.total_chars,next_offset:!m.summary_version&&offset<m.total_chars?offset:null,read_tool:!m.summary_version&&offset<m.total_chars?'dialogues_message_get':null});}}
+ if(a.dialogue_id!==undefined){
+ const t=(await db.query("SELECT id,version::text,status,purpose,constraints_text FROM dialogues_live.turns WHERE owner_id=$1 AND dialogue_id=$2 AND managed AND status<>'completed'",[owner,a.dialogue_id])).rows[0];
+ if(t){const messages=(await db.query("SELECT id,role,kind,text,source,occurred_at,recorded_at,message_order,item_order,content_hash AS sha256 FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 AND kind IN ('input','final') ORDER BY message_order",[owner,a.dialogue_id,t.id])).rows;
+ const results=(await db.query('SELECT id,kind,formulation,source_refs,status,result,verification,reason,remainder,created_at,updated_at FROM dialogues_live.turn_results WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 ORDER BY created_at,id',[owner,a.dialogue_id,t.id])).rows;
+ items.push({type:'turn_work',dialogue_id:a.dialogue_id,turn_id:t.id,version:t.version,text:JSON.stringify({dialogue_id:a.dialogue_id,turn_id:t.id,version:t.version,status:t.status,purpose:t.purpose,constraints:t.constraints_text,messages,results,pending:results.filter((r:any)=>r.kind==='work'&&r.status==='pending')})});}
+ }
  const metadata={delivery_id:deliveryId,consumer_id:a.consumer_id,context_instance_id:a.context_instance_id,through_seq:boundary,summaries_mode:bootstrap?'bootstrap':'updates',summaries_from_seq:checkpoint,selected_count:selected.length,
  missing_dialogue_summaries:all.filter(d=>!d.version).length,partial_dialogue_summaries:all.filter(d=>d.version&&d.uncovered_messages).length,context_status:'complete_paginated_manifest',window_fit:'consumer_must_read_all_pages_and_report_model_window_limit',overlap_is_independent_evidence:false};
  const pages=contextPages(metadata,items,n=>cursor(key,owner,a.consumer_id,a.context_instance_id,deliveryId,n));

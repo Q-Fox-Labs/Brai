@@ -33,11 +33,11 @@ try {
     const c=client;
     try{return await c.callTool(req.params);}
     catch(e){
-      if(["dialogues_context_get","dialogues_message_get"].includes(req.params.name)){
+      if(["dialogues_context_get","dialogues_message_get","dialogues_turn_get"].includes(req.params.name)){
         if(!stale(e))throw e;await reconnect(c);return client.callTool(req.params);
       }
       if(stale(e))await reconnect(c).catch(()=>{});
-      return {isError:true,content:[{type:"text" as const,text:"Исход записи не подтверждён. Сначала прочитайте сообщение по исходному ID либо актуальную версию саммари. Автоматического повтора записи не было."}]};
+      return {isError:true,content:[{type:"text" as const,text:"Исход записи не подтверждён. Сначала прочитайте актуальный ход, сообщение по исходному ID либо версию саммари. Автоматического повтора записи не было."}]};
     }
   });
   server.onclose=()=>{void client.close();};
