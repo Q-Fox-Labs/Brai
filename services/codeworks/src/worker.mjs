@@ -7,6 +7,7 @@ import { createGit } from './git.mjs';
 import { createFlowGit } from './git-flow.mjs';
 import { createGitHub } from './github.mjs';
 import { advanceRelease, advanceSync } from './release.mjs';
+import { measureReleaseStep } from './release-timing.mjs';
 import { Fault,safeFault } from './errors.mjs';
 import {enqueueDeployment,advanceDeployment,createDeploymentAdapter} from './deployment.mjs';
 import {createCIEvidence} from './ci-evidence.mjs';
@@ -93,8 +94,8 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
     }else if(ownership?.owner==='temporal')throw new Fault('FORBIDDEN');
 
     if(scoped){
-      const guarded=port=>Object.fromEntries(Object.entries(port).map(([name,work])=>[name,typeof work==='function'?async(...args)=>{await checkpoint('before-'+name);return work.apply(port,args);}:work]));
-      git=guarded(git);flowGit=guarded(flowGit);github=guarded(github);
+      const guarded=(port, group)=>Object.fromEntries(Object.entries(port).map(([name,work])=>[name,typeof work==='function'?async(...args)=>{await checkpoint('before-'+name);return op.kind==='release'?measureReleaseStep(op.id,group+'.'+name,()=>work.apply(port,args)):work.apply(port,args);}:work]));
+      git=guarded(git,'workspace');flowGit=guarded(flowGit,'git');github=guarded(github,'github');
       if(deploymentAdapter){
         const adapter=deploymentAdapter;
         deploymentAdapter=async id=>{await checkpoint('before-rollout');return adapter(id);};
@@ -208,7 +209,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
         };
         let outcome;
         try {
-          outcome=await advanceRelease({project,workspace:w,operation:op,release},{git:flowGit,github,inspect:(...a)=>git.inspect(...a),save,evidence,checkpoint,synchronizeCheckout:sourceStep?async sha=>{
+          outcome=await measureReleaseStep(op.id,'release.advance',()=>advanceRelease({project,workspace:w,operation:op,release},{git:flowGit,github,inspect:(...a)=>git.inspect(...a),save,evidence,checkpoint,synchronizeCheckout:sourceStep?async sha=>{
             const writers=(await db.query("SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain') LIMIT 1",[w.id])).rowCount;
             if(writers)return {state:'waiting',reason:'WRITER_OUTCOME_UNKNOWN'};
             return git.synchronizeCheckout(project,w,sha);
@@ -216,7 +217,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
             const operation_id=await enqueueDeployment(db,project,target,sha,proof,verifier,{retryOf,releaseOperationId:admission?op.id:null});
             const deployment=(await db.query('SELECT status FROM codeworks.operations WHERE id=$1',[operation_id])).rows[0];
             return {operation_id,status:deployment.status};
-          }:undefined});
+          }:undefined}));
         }catch(error){
           if(admission&&['GITHUB_UNAVAILABLE','GIT_FAILED'].includes(error?.code))throw error;
           if(['GITHUB_UNAVAILABLE','GIT_FAILED'].includes(error?.code))outcome={status:'awaiting_reconciliation',reason:error.code};
