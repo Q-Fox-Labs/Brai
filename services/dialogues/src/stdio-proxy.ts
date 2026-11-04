@@ -33,11 +33,12 @@ try {
     const c=client;
     try{return await c.callTool(req.params);}
     catch(e){
-      if(["dialogues_context_get","dialogues_message_get","dialogues_turn_get"].includes(req.params.name)){
-        if(!stale(e))throw e;await reconnect(c);return client.callTool(req.params);
-      }
-      if(stale(e))await reconnect(c).catch(()=>{});
-      return {isError:true,content:[{type:"text" as const,text:"Исход записи не подтверждён. Сначала прочитайте актуальный ход, сообщение по исходному ID либо версию саммари. Автоматического повтора записи не было."}]};
+      // Listener отвечает 404 на неизвестную сессию до вызова операции.
+      // Только это подтверждённое отсутствие вызова допускает один повтор того же запроса.
+      if(stale(e)){
+        try{await reconnect(c);return await client.callTool(req.params);}catch{/* Исход повторного вызова может быть неизвестен; больше не повторяем. */}
+      } else if(["dialogues_context_get","dialogues_message_get","dialogues_turn_get"].includes(req.params.name))throw e;
+      return {isError:true,content:[{type:"text" as const,text:"Исход записи не подтверждён. Сначала прочитайте актуальный ход, сообщение по исходному ID либо версию саммари. Повтор при неизвестном исходе не выполнялся."}]};
     }
   });
   server.onclose=()=>{void client.close();};

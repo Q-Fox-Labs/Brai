@@ -42,6 +42,9 @@ test("MCP привязан к оператору; stdio восстанавлив
     assert.equal((await proxy.listTools()).tools.length,11);
     await client.close();await listener.close();
     cfg.port=Number(url.port);listener=await startMcp(store,cfg);
+    const previousCalls=calls.length;
+    assert.equal((await proxy.callTool({name:"dialogues_messages_append",arguments:{request_id:"same-id"}})).isError,undefined);
+    assert.equal(calls.length,previousCalls+1);assert.equal(calls.at(-1).args.request_id,"same-id");
     assert.equal((await proxy.callTool({name:"dialogues_context_get",arguments:{}})).isError,undefined);
     assert.equal(calls.at(-1).owner,"test-owner");
   } finally {await client.close().catch(()=>{});await proxy.close().catch(()=>{});await listener.close();await rm(dir,{recursive:true,force:true});}

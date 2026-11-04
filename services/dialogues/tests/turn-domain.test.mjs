@@ -1,0 +1,21 @@
+// ABOUTME: Проверяет предметные правила входов и результатов управляемого хода.
+// ABOUTME: Не использует PostgreSQL, MCP или другие сервисы.
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {fieldId,mergeResult,message,requireReason,validateChanges,version} from '../dist/turn-domain.js';
+
+test('версия и ID сообщают поле неверного аргумента',()=>{
+ assert.equal(version('12'),'12');assert.throws(()=>version('0'),e=>e.code==='INVALID_ARGUMENT'&&e.details.field==='expected_version');
+ assert.throws(()=>fieldId('bad id','turn_id'),e=>e.code==='INVALID_ARGUMENT'&&e.details.field==='turn_id');
+});
+test('пакет сохраняет формулировки и проверяет повтор ссылок',()=>{
+ const changes=validateChanges({add:[{id:'one',formulation:'Первая',source_refs:['input']} ]});assert.equal(changes.add[0].formulation,'Первая');
+ assert.throws(()=>validateChanges({add:[{id:'one',formulation:'Текст',source_refs:['x','x']}]}),{code:'INVALID_ARGUMENT'});
+ assert.throws(()=>validateChanges({add:[{id:'one',formulation:'Текст'}],update:[{id:'one',status:'done'}]}),{code:'DUPLICATE_RESULT_ID'});
+ assert.equal(message({id:'a',text:'😀'},'input').text,'😀');
+});
+test('частичный результат сохраняет прежние поля и требует причину',()=>{
+ const old={formulation:'Задача',source_refs:['a'],status:'pending',result:null,verification:null,reason:null,remainder:null};
+ assert.equal(mergeResult(old,{}).changed,false);const done=mergeResult(old,{status:'done',result:'готово'});assert.equal(done.changed,true);assert.deepEqual(done.next.source_refs,['a']);
+ assert.throws(()=>mergeResult(old,{status:'not_done'}),{code:'REASON_REQUIRED'});assert.throws(()=>requireReason('cancelled',''),{code:'REASON_REQUIRED'});requireReason('not_done','не проверено');
+});

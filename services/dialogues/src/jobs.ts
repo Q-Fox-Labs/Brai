@@ -10,7 +10,7 @@ export async function enqueueDialogue(db:PoolClient,owner:string,dialogue:string
  const previous=(await db.query('SELECT version,through_order,text FROM dialogues_live.dialogue_summaries WHERE owner_id=$1 AND dialogue_id=$2 ORDER BY version DESC LIMIT 1',[owner,dialogue])).rows[0];
  const from=String(BigInt(previous?.through_order??'-1')+1n);
  const tail=(await db.query(`SELECT count(*)::integer AS count,max(message_order)::text AS through_order,max(recorded_at) AS last_at
- FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND message_order>=$3 AND change_seq<=$4 AND kind IN('input','final')`,[owner,dialogue,from,boundary])).rows[0];
+ FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND message_order>=$3 AND change_seq<=$4 AND kind IN('input','final') AND NOT EXISTS(SELECT 1 FROM dialogues_live.turns z WHERE z.owner_id=dialogues_live.messages.owner_id AND z.dialogue_id=dialogues_live.messages.dialogue_id AND z.id=dialogues_live.messages.turn_id AND z.managed AND dialogues_live.messages.kind='final' AND z.final_message_id IS DISTINCT FROM dialogues_live.messages.id)`,[owner,dialogue,from,boundary])).rows[0];
  if(!tail.count||tail.count<10&&(!idle||Date.now()-Date.parse(tail.last_at)<6*3600000))return false;
  const blocked=(await db.query("SELECT 1 FROM dialogues_live.summary_jobs WHERE owner_id=$1 AND dialogue_id=$2 AND (state IN('queued','running') OR (state='failed' AND through_order>=$3)) LIMIT 1",[owner,dialogue,tail.through_order])).rowCount;
  if(blocked)return false;
@@ -71,8 +71,8 @@ export function createJobs(pool:Pool,owner:string,luna:Pick<ReturnType<typeof cr
    for(;;){
     if(stopping)fail('WORKER_STOPPING');
     const rows=(await pool.query(`SELECT id,role,kind,message_order,occurred_at,recorded_at,content_hash,char_length(text) AS total_chars,
-      substring(text FROM CASE WHEN message_order=(SELECT min(message_order) FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND change_seq<=$3 AND message_order>$4 AND message_order<=$5 AND kind IN('input','final')) THEN $6::integer ELSE 1 END FOR 12000) AS fragment
-      FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND change_seq<=$3 AND message_order>$4 AND message_order<=$5 AND kind IN('input','final') ORDER BY message_order LIMIT 32`,
+      substring(text FROM CASE WHEN message_order=(SELECT min(message_order) FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND change_seq<=$3 AND message_order>$4 AND message_order<=$5 AND kind IN('input','final') AND NOT EXISTS(SELECT 1 FROM dialogues_live.turns z WHERE z.owner_id=dialogues_live.messages.owner_id AND z.dialogue_id=dialogues_live.messages.dialogue_id AND z.id=dialogues_live.messages.turn_id AND z.managed AND dialogues_live.messages.kind='final' AND z.final_message_id IS DISTINCT FROM dialogues_live.messages.id)) THEN $6::integer ELSE 1 END FOR 12000) AS fragment
+      FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND change_seq<=$3 AND message_order>$4 AND message_order<=$5 AND kind IN('input','final') AND NOT EXISTS(SELECT 1 FROM dialogues_live.turns z WHERE z.owner_id=dialogues_live.messages.owner_id AND z.dialogue_id=dialogues_live.messages.dialogue_id AND z.id=dialogues_live.messages.turn_id AND z.managed AND dialogues_live.messages.kind='final' AND z.final_message_id IS DISTINCT FROM dialogues_live.messages.id) ORDER BY message_order LIMIT 32`,
       [owner,job.dialogue_id,job.boundary_seq,progress.last_order,job.through_order,progress.offset+1])).rows;
     if(!rows.length)break;
     let budget=12000,nextOrder=progress.last_order,nextOffset=progress.offset;

@@ -14,7 +14,7 @@ Runtime запускает dist/main.js. В том же процессе раб�
 
 Owner-миграцию dist/migrate.js запускают отдельно с DIALOGUES_OWNER_DATABASE_URL, DIALOGUES_OWNER_ROLE и DIALOGUES_APP_ROLE. Она применяет 002_live.sql, 003_context_jobs.sql и 004_managed_turns.sql только к dialogues_live; прежнюю dialogues не меняет. Health: dist/health.js.
 
-Stdio-proxy dist/stdio-proxy.js получает DIALOGUES_MCP_URL и DIALOGUES_MCP_TOKEN_FILE. Он восстанавливает устаревшую MCP-сессию чтения; неизвестное изменение автоматически не повторяет.
+Stdio-proxy dist/stdio-proxy.js получает DIALOGUES_MCP_URL и DIALOGUES_MCP_TOKEN_FILE. При ответе listener 404 до вызова операции он восстанавливает сессию и один раз передаёт тот же запрос; неизвестный исход изменения автоматически не повторяет.
 
 ## Чтение контекста v0.2
 
