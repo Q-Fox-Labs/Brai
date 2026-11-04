@@ -187,6 +187,15 @@ class ConsentTests(unittest.TestCase):
                 self.assertTrue(consent.gate("remove trip")["approved"])
                 raise RuntimeError("lost connection")
         self.assertEqual(self.store.query(self.scope.key)["status"],"unknown")
+    def test_branding_does_not_rename_the_verified_target_in_a_question(self):
+        question="Удалить папку «Hermes»?"
+        row=self.store.prepare(self.scope,self.descriptor,REVIEW,question)
+        event=types.SimpleNamespace(_brai_consent_delivery=(self.db,self.scope.key,"alice"))
+        response=consent.brand_response(event,"Hermes Agent: "+question)
+        self.assertEqual(response,"Brai: "+question)
+        consent.record_delivery(event,response,True,"10")
+        self.assertIsNotNone(self.store.query(self.scope.key)["delivered_at"])
+
     def test_delivery_requires_success_and_the_real_question(self):
         row=self.prepare()
         event=types.SimpleNamespace(_brai_consent_delivery=(self.db,self.scope.key,"alice"))
@@ -233,6 +242,63 @@ class ConsentTests(unittest.TestCase):
         self.assertEqual(len(calls),2)
         self.assertNotIn("delete trip",result["reason"])
 
+
+    def test_approved_code_covers_reviewed_nested_effects_without_a_second_question(self):
+        args={"code":"terminal('remove trip')"}
+        with consent.turn_scope(self.db,source(),"session","Проверь папку","1"),consent.tool_scope("execute_code",args,"first"):
+            with patch.object(consent,"review_action",return_value=REVIEW):
+                consent.gate(args["code"])
+        self.authorize(self.store.query(self.scope.key))
+        with consent.turn_scope(self.db,source(),"session","да","11"),consent.tool_scope("execute_code",args,"run"):
+            self.assertTrue(consent.gate(args["code"])["approved"])
+            with consent.tool_scope("terminal",{"command":"remove trip"},"nested"):
+                with patch.object(consent,"review_action",return_value={**REVIEW,"decision":"allow"}) as reviewer:
+                    self.assertTrue(consent.gate("remove trip")["approved"])
+                    self.assertEqual(reviewer.call_args.kwargs["existing_authorization"]["operation"]["tool"],"execute_code")
+            self.assertEqual(self.store.query(self.scope.key)["status"],"executing")
+        self.assertEqual(self.store.query(self.scope.key)["status"],"completed")
+
+    def test_uncovered_nested_effect_preserves_parent_unknown_and_one_new_question(self):
+        args={"code":"terminal(dynamic_command)"}
+        with consent.turn_scope(self.db,source(),"session","Проверь папку","1"),consent.tool_scope("execute_code",args,"first"):
+            with patch.object(consent,"review_action",return_value=REVIEW):
+                consent.gate(args["code"])
+        parent=self.store.query(self.scope.key)
+        self.authorize(parent)
+        with consent.turn_scope(self.db,source(),"session","да","11"),consent.tool_scope("execute_code",args,"run"):
+            self.assertTrue(consent.gate(args["code"])["approved"])
+            with consent.tool_scope("terminal",{"command":"remove other"},"nested"):
+                with patch.object(consent,"review_action",return_value={**REVIEW,"target":"Другая папка"}):
+                    self.assertEqual(consent.gate("remove other")["status"],"needs_consent")
+        self.assertEqual(self.store.operation(self.scope.key,parent["fingerprint"])["status"],"unknown")
+        pending=self.store.query(self.scope.key)
+        self.assertNotEqual(pending["id"],parent["id"])
+        self.assertEqual(pending["status"],"pending")
+
+    def test_plugin_rewrite_of_autoallowed_operation_stops_before_dispatch(self):
+        with consent.turn_scope(self.db,source(),"session","Посчитай","1"),consent.tool_scope("plugin",{"command":"calculate"},"run"):
+            with patch.object(consent,"review_action",return_value={**REVIEW,"decision":"allow"}):
+                self.assertTrue(consent.gate("calculate")["approved"])
+            self.assertEqual(consent.update_arguments({"command":"delete"})["status"],"consent_changed")
+
+    def test_database_failure_on_finish_cannot_leak_parent_authority(self):
+        with self.assertRaises(RuntimeError):
+            with patch.object(consent.Store,"finish",side_effect=RuntimeError("database unavailable")):
+                with consent.turn_scope(self.db,source(),"session","Проверь папку","1") as scope:
+                    with consent.tool_scope("terminal",{},"run"):
+                        scope.execution_ids.add("claimed")
+        self.assertIsNone(consent._action.get())
+
+    def test_plugin_arguments_without_a_command_keep_exact_consent(self):
+        args={"path":"report.txt","content":"ready"}
+        with consent.turn_scope(self.db,source(),"session","Проверь папку","1"),consent.tool_scope("file_write",args,"first"):
+            with patch.object(consent,"review_action",return_value=REVIEW):
+                consent.gate("plugin approval label")
+        self.authorize(self.store.query(self.scope.key))
+        with consent.turn_scope(self.db,source(),"session","да","11"),consent.tool_scope("file_write",args,"run"):
+            self.assertTrue(consent.gate("another internal label")["approved"])
+            self.assertIsNone(consent.update_arguments(args))
+            self.assertEqual(consent.update_arguments({**args,"path":"another.txt"})["status"],"consent_changed")
 
     def test_plugin_cannot_rewrite_consumed_consent(self):
         args={"command":"remove trip"}

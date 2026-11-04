@@ -188,8 +188,8 @@ diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
              await self._run_processing_hook("on_processing_start", event)
              event._turn_marker_handoff = self.gateway_runner is not None  # it can release the marker
              response = await self._message_handler(event)
-+            from tools.approval_conversation import brand_text
-+            response = brand_text(response)
++            from tools.approval_conversation import brand_response
++            response = brand_response(event, response)
              # A muted diagnostic wake ran for the session; its reply is not presented. The
              # policy read binds the routed profile; delivery itself stays in the launch scope.
              with self._media_delivery_scope(event.source):
