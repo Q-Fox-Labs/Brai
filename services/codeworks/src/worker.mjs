@@ -40,7 +40,10 @@ export async function runCleanupObligation(pool,id,owner,{git,flowGit,codeIndex,
       const project=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1',[item.project_id])).rows[0]?.config;
       if((!workspace&&!branch)||!project||!allowedRepositories.includes(project.repo_path))throw Error('CLEANUP_PROJECT_FORBIDDEN');
       const guardedCheckpoint=async step=>{signal.throwIfAborted();await checkpoint(step);};
-      try{return branch?await advanceBranchCleanup(db,item,project,{git,checkpoint:guardedCheckpoint}):await advanceCleanup(db,item,project,workspace,{git,flowGit,codeIndex,allowedRepositories,verifyTransfer,checkpoint:guardedCheckpoint});}
+      try{
+        const advance=()=>branch?advanceBranchCleanup(db,item,project,{git,checkpoint:guardedCheckpoint}):advanceCleanup(db,item,project,workspace,{git,flowGit,codeIndex,allowedRepositories,verifyTransfer,checkpoint:guardedCheckpoint});
+        return item.outcome==='released'&&item.source_operation_id?await measureReleaseStep(item.source_operation_id,'cleanup.advance',advance):await advance();
+      }
       catch(error){
         const blocker=error.code??error.message;
         if(!signal.aborted&&['TARGET_CHANGED','OWNERSHIP_CONFLICT','TRANSFER_UNVERIFIED','BRANCH_LIVE_TASK','BRANCH_SUBJECT_INVALID','INVALID_ARGUMENT'].includes(blocker)){
