@@ -7,6 +7,7 @@ import {createHash} from "node:crypto";
 import {Pool} from "pg";
 import {migrate} from "../dist/migrate.js";
 import {createStore} from "../dist/store.js";
+import {turnChecks} from './turn-fixture.mjs';
 import {v02Checks} from "./v02-fixture.mjs";
 const ownerUrl=process.env.DIALOGUES_TEST_OWNER_DATABASE_URL;
 const appUrl=process.env.DIALOGUES_TEST_DATABASE_URL;
@@ -42,6 +43,7 @@ test("PostgreSQL: архив, запись, 50 пар, версии, курсо�
     await migrate(owner,"dialogues_test_owner","dialogues_test_app");
     await migrate(owner,"dialogues_test_owner","dialogues_test_app");
     assert.deepEqual((await owner.query("SELECT table_name,column_name,data_type FROM information_schema.columns WHERE table_schema='dialogues' ORDER BY table_name,ordinal_position")).rows,legacyBefore);
+    await turnChecks(t,app);
     await t.test("повтор, конфликт и чужой владелец",async()=>{
       const packet={request_id:rid(),dialogue:d("a"),messages:[msg("a-u-0","a-t-0"),msg("a-c-0","a-t-0","assistant","commentary"),msg("a-f-0","a-t-0","assistant","final")]};
       const first=await api.append("owner-a",packet);

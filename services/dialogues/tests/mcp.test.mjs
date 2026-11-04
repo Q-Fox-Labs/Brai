@@ -8,12 +8,15 @@ import {fileURLToPath} from "node:url";
 import {Client} from "@modelcontextprotocol/sdk/client/index.js";
 import {StreamableHTTPClientTransport} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {StdioClientTransport} from "@modelcontextprotocol/sdk/client/stdio.js";
+import {DialoguesFault} from "../dist/domain.js";
 import {startMcp} from "../dist/mcp.js";
 test("MCP привязан к оператору; stdio восстанавливает чтение после restart",async()=>{
   const calls=[];
   const store={
     async context(owner,args){calls.push({owner,args});return {dialogues:[],next_cursor:null};},
     async append(owner,args){calls.push({owner,args});return {saved:true};},
+    async turnInput(){throw new DialoguesFault("INVALID_ARGUMENT",{field:"messages",expected:"непустой массив"});},
+    async turnFinish(){throw new DialoguesFault("PENDING_RESULTS",{pending:[{id:"x",formulation:"проверка"}]});},
     async summary(){return {version:"1"};},async message(){return {text:"synthetic"};}
   };
   const cfg={host:"127.0.0.1",port:0,owner:"test-owner",hosts:[],origins:[],token:"synthetic-token-012345678901234567890123456789"};
@@ -30,13 +33,18 @@ test("MCP привязан к оператору; stdio восстанавлив
   try {
     assert.equal((await fetch(listener.url,{method:"POST"})).status,401);
     await client.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers:{Authorization:"Bearer "+cfg.token}}}));
-    assert.deepEqual((await client.listTools()).tools.map(t=>t.name).sort(),["dialogues_context_ack","dialogues_context_get","dialogues_context_pull","dialogues_message_get","dialogues_messages_append","dialogues_summary_put"]);
+    assert.deepEqual((await client.listTools()).tools.map(t=>t.name).sort(),["dialogues_context_ack","dialogues_context_get","dialogues_context_pull","dialogues_message_get","dialogues_messages_append","dialogues_summary_put","dialogues_turn_finish","dialogues_turn_get","dialogues_turn_input","dialogues_turn_repair","dialogues_turn_update"]);
+    const invalid=await client.callTool({name:"dialogues_turn_input",arguments:{}});const invalidInfo=JSON.parse(invalid.content[0].text);assert.equal(invalidInfo.code,"INVALID_ARGUMENT");assert.equal(invalidInfo.field,"messages");assert.equal(invalidInfo.applied,false);assert.ok(invalidInfo.next_action);
+    const pending=await client.callTool({name:"dialogues_turn_finish",arguments:{}});assert.equal(JSON.parse(pending.content[0].text).pending[0].id,"x");
     await client.callTool({name:"dialogues_context_get",arguments:{}});
     assert.equal(calls.at(-1).owner,"test-owner");
     await proxy.connect(new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL("../dist/stdio-proxy.js",import.meta.url))],env:{...process.env,DIALOGUES_MCP_URL:listener.url,DIALOGUES_MCP_TOKEN_FILE:token}}));
-    assert.equal((await proxy.listTools()).tools.length,6);
+    assert.equal((await proxy.listTools()).tools.length,11);
     await client.close();await listener.close();
     cfg.port=Number(url.port);listener=await startMcp(store,cfg);
+    const previousCalls=calls.length;
+    assert.equal((await proxy.callTool({name:"dialogues_messages_append",arguments:{request_id:"same-id"}})).isError,undefined);
+    assert.equal(calls.length,previousCalls+1);assert.equal(calls.at(-1).args.request_id,"same-id");
     assert.equal((await proxy.callTool({name:"dialogues_context_get",arguments:{}})).isError,undefined);
     assert.equal(calls.at(-1).owner,"test-owner");
   } finally {await client.close().catch(()=>{});await proxy.close().catch(()=>{});await listener.close();await rm(dir,{recursive:true,force:true});}

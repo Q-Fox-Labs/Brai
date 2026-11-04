@@ -14,7 +14,7 @@ pool.on("error",()=>console.error('{"service":"dialogues","code":"DATABASE_CONNE
 let jobs:ReturnType<typeof createJobs>|undefined,luna:ReturnType<typeof createLuna>|undefined;
 let mcp:Awaited<ReturnType<typeof startMcp>>;
 try {
-  if((await pool.query("SELECT version FROM dialogues_live.migrations WHERE version=3")).rowCount!==1)throw new Error("MIGRATION_REQUIRED");
+  if((await pool.query("SELECT version FROM dialogues_live.migrations WHERE version=4")).rowCount!==1)throw new Error("MIGRATION_REQUIRED");
   mcp=await startMcp(createStore(pool,token),{host:required("DIALOGUES_MCP_HOST"),port,owner:required("DIALOGUES_MCP_OWNER_ID"),hosts:required("DIALOGUES_MCP_ALLOWED_HOSTS").split(","),origins:required("DIALOGUES_MCP_ALLOWED_ORIGINS").split(","),token});
   if(process.env.DIALOGUES_SUMMARY_ENABLED==="true"){
     luna=createLuna(required("DIALOGUES_CODEX_SOCKET_URL"),required("DIALOGUES_SUMMARY_CWD"));
