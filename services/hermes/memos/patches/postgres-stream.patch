@@ -1,10 +1,186 @@
 diff --git a/src/memos/graph_dbs/postgres.py b/src/memos/graph_dbs/postgres.py
 --- a/src/memos/graph_dbs/postgres.py
 +++ b/src/memos/graph_dbs/postgres.py
-@@ -1106,6 +1106,78 @@
+@@ -178,6 +178,7 @@
+                     ON {self.schema}.edges(target_id)
+                 """)
+
++                self._init_recall_index(cur)
+                 logger.info(f"Schema {self.schema} initialized successfully")
+         except Exception as e:
+             logger.error(f"Failed to init schema: {e}")
+@@ -1106,6 +1107,246 @@
          finally:
              self._put_conn(conn)
- 
+
++
++    memory_index_version = 1
++
++    def _init_recall_index(self, cur):
++        """Создать производный индекс; исходные записи и embedding не изменяются."""
++        cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
++        cur.execute(f"""
++            CREATE OR REPLACE FUNCTION {self.schema}.brai_recall_text_v1(text, jsonb)
++            RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $recall$
++              SELECT CASE WHEN $2->'info'->>'hermes_kind' = 'fact'
++                THEN COALESCE($2->'info'->>'hermes_fact_text', $1)
++                ELSE COALESCE((SELECT string_agg(
++                  COALESCE(m->>'role', 'source') || ': ' || COALESCE(m->>'content', ''),
++                  E'\\n\\n' ORDER BY n)
++                  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(
++                    $2->'info'->'hermes_messages') = 'array'
++                    THEN $2->'info'->'hermes_messages' ELSE '[]'::jsonb END)
++                    WITH ORDINALITY AS message(m,n)), $1) END
++            $recall$
++        """)
++        # AIDEV-NOTE: Только первая часть хранит запись полнотекстового индекса.
++        # Поиск смысла проверяет embedding КАЖДОЙ части, затем объединяет источники.
++        cur.execute(f"""
++            CREATE INDEX IF NOT EXISTS idx_brai_recall_text_v1 ON {self.schema}.memories
++            USING gin ({self.schema}.brai_recall_text_v1(memory, properties) gin_trgm_ops)
++            WHERE properties->'info'->'hermes_chunk_index' IS NULL
++               OR properties->'info'->'hermes_chunk_index' = '0'::jsonb
++        """)
++
++    def recall_index(self, *, cubes, user_id, scope, author_id, query, vector,
++                     shared_infra=False, project=None, goal='evidence', relativity=0.45):
++        """Искать все совпадения в одной области и snapshot без ANN/top_k и LLM."""
++        import math
++        import re
++        import time
++        started = time.monotonic()
++        if (not isinstance(cubes, list) or not cubes
++                or any(not isinstance(c, str) or not c for c in cubes)
++                or not isinstance(user_id, str) or not user_id
++                or not isinstance(author_id, str) or not author_id
++                or not isinstance(scope, dict) or set(scope) != {'hermes_home_scope', 'hermes_memory_epoch'}
++                or any(not isinstance(v, str) or not v for v in scope.values())
++                or not isinstance(query, str) or not query.strip()
++                or goal not in ('evidence', 'locate_document', 'latest_conversation', 'latest_topic')
++                or type(shared_infra) is not bool
++                or (project is not None and not isinstance(project, str))
++                or not isinstance(vector, list) or not vector
++                or any(type(v) not in (float, int) or not math.isfinite(v) for v in vector)
++                or not any(vector)
++                or type(relativity) not in (float, int) or not 0 <= relativity <= 1):
++            raise ValueError('Invalid recall index request')
++        # JSONB containment uses the existing GIN scope index; no foreign archive is transferred.
++        clauses = ["user_name = ANY(%s)", "properties @> %s::jsonb",
++                   "properties->'info'->>'hermes_kind' IS DISTINCT FROM 'checkpoint'",
++                   "properties->'info'->>'hermes_visibility' IS DISTINCT FROM 'business_private'",
++                   "(properties->'info'->'hermes_business_scope' IS NULL OR properties->'info'->'hermes_business_scope' = 'null'::jsonb)",
++                   "properties->'info'->>'hermes_cube' = user_name",
++                   "(properties->'info'->'hermes_memberships') @> to_jsonb(ARRAY[user_name])"]
++        params = [cubes, json.dumps({'user_id': user_id, 'info': scope})]
++        own = "properties @> %s::jsonb"
++        params.append(json.dumps({'info': {'hermes_author_id': author_id}}))
++        if shared_infra:
++            own = "(" + own + " OR (user_name = 'infra' AND properties @> %s::jsonb))"
++            params.append(json.dumps({'info': {'hermes_shared_infra': True}}))
++        clauses.append(own)
++        if project is not None:
++            clauses.append("properties @> %s::jsonb")
++            params.append(json.dumps({'info': {'hermes_projects': [project]}}))
++        where = " AND ".join(clauses)
++        anchor = "(properties->'info'->'hermes_chunk_index' IS NULL OR properties->'info'->'hermes_chunk_index' = '0'::jsonb)"
++        key = """jsonb_build_array(properties->'info'->>'hermes_author_id',
++            CASE WHEN properties->'info'->>'hermes_kind' = 'fact' THEN 'fact' ELSE 'source' END,
++            COALESCE(CASE WHEN properties->'info'->>'hermes_kind' = 'fact'
++                THEN properties->'info'->>'hermes_logical_id'
++                ELSE properties->'info'->>'hermes_event_id' END, id))"""
++        # LIKE metacharacters are escaped, including literal "_" identifiers.
++        terms = list(dict.fromkeys(re.findall(r'\w+', query, flags=re.UNICODE)))
++        def pattern(term):
++            return '%' + term.replace(chr(92), chr(92)*2).replace('%', chr(92)+'%').replace('_', chr(92)+'_') + '%'
++        patterns = [pattern(term) for term in terms] or [pattern(query)]
++        conn = self._get_conn()
++        old_autocommit = conn.autocommit
++        try:
++            conn.autocommit = False
++            with conn.cursor() as cur:
++                cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
++                cur.execute("SET LOCAL statement_timeout = '30s'")
++                cur.execute("SET LOCAL idle_in_transaction_session_timeout = '30s'")
++                cur.execute(f"""SELECT count(*), count(*) FILTER (WHERE embedding IS NULL OR vector_norm(embedding) = 0),
++                    count(DISTINCT {key}), count(DISTINCT {key}) FILTER (WHERE {anchor})
++                    FROM {self.schema}.memories WHERE {where}""", params)
++                physical, missing, logical, anchored = cur.fetchone()
++                if missing or logical != anchored:
++                    raise ValueError('Recall index coverage incomplete')
++                # Убираем служебные слова и добавляем основы слов обеих языковых
++                # конфигураций PostgreSQL. Иначе обычное "мы обсуждали в поездке"
++                # делает почти весь архив лексическим совпадением по одному "в".
++                cur.execute("SELECT term, ts_lexize('russian_stem', term), ts_lexize('english_stem', term) "
++                            "FROM unnest(%s::text[]) AS term", [terms])
++                meaningful = []
++                for term, russian, english in cur.fetchall():
++                    if russian != [] and english != []:
++                        meaningful.extend([term, *(russian or []), *(english or [])])
++                if meaningful:
++                    patterns = [pattern(term) for term in dict.fromkeys(meaningful)]
++                elif terms:
++                    patterns = [pattern(query)]
++                # AIDEV-NOTE: No ORDER BY vector-distance/LIMIT: pgvector uses exact
++                # cosine distances, not the approximate ivfflat nearest-neighbour index.
++                hit = f"""SELECT {key} AS logical FROM {self.schema}.memories WHERE {where}
++                    AND embedding <=> %s::vector <= %s
++                    UNION SELECT {key} AS logical FROM {self.schema}.memories WHERE {where}
++                    AND {anchor} AND {self.schema}.brai_recall_text_v1(memory,properties) ILIKE ANY(%s)"""
++                args = [*params, json.dumps(vector), 1 - relativity, *params, patterns]
++                if goal == 'locate_document':
++                    # Verified artifact filenames may be opaque in archived pointers.
++                    # Every document-bearing source remains eligible for metadata resolution.
++                    hit += f""" UNION SELECT {key} AS logical FROM {self.schema}.memories
++                        WHERE {where} AND {anchor} AND {self.schema}.brai_recall_text_v1(memory,properties)
++                        ~* '(artifact|\\.(pdf|docx?|odt|md|txt|html|xlsx?|csv))'"""
++                    args.extend(params)
++                if goal == 'latest_conversation':
++                    # Only compact dates/keys are evaluated across the archive; text is
++                    # fetched for the newest source and all timestamp ties.
++                    source = f"""SELECT {key} AS logical, created_at FROM {self.schema}.memories
++                        WHERE {where} AND {anchor}
++                        AND properties->'info'->>'hermes_kind' IN ('turn','native')
++                        AND NOT (EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(
++                            properties->'info'->'hermes_messages', '[]'::jsonb)) AS m
++                            WHERE m->>'role' = 'user')
++                            AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(
++                            properties->'info'->'hermes_messages', '[]'::jsonb)) AS m
++                            WHERE m->>'role' = 'user' AND m->>'content' !~ %s))"""
++                    internal_pattern = r'^(?:\[[^\]\n]+\]\s*)?\[ASYNC DELEGATION BATCH COMPLETE[^\n]*\]\s*A background fan-out unit you dispatched earlier'
++                    hit = f"SELECT logical FROM ({source}) AS sources WHERE created_at = (SELECT max(created_at) FROM ({source}) AS dates)"
++                    args = [*params, internal_pattern, *params, internal_pattern]
++                cur.execute(f"""
++                    WITH hits AS ({hit}), chosen AS (
++                      SELECT DISTINCT ON ({key}) id, memory, properties, created_at, updated_at, user_name
++                      FROM {self.schema}.memories WHERE {where} AND {anchor}
++                        AND {key} IN (SELECT logical FROM hits)
++                      ORDER BY {key}, updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id
++                    )
++                    SELECT id,memory,properties,created_at,updated_at,user_name,
++                      (SELECT min(s.created_at) FROM {self.schema}.memories AS s
++                        WHERE s.user_name = ANY(%s) AND s.properties @> %s::jsonb
++                          AND s.properties->'info'->>'hermes_event_id' =
++                              chosen.properties->'info'->>'hermes_source_event'
++                          AND s.properties->'info'->>'hermes_author_id' =
++                              chosen.properties->'info'->>'hermes_author_id')
++                    FROM chosen ORDER BY created_at DESC NULLS LAST,id
++                """, [*args, *params, cubes, json.dumps({'user_id': user_id, 'info': scope})])
++                rows = []
++                for raw in cur:
++                    row = self._parse_row(raw[:5], False)
++                    row['_cube_id'] = raw[5]
++                    row['_source_date'] = raw[6].isoformat() if raw[6] is not None else None
++                    rows.append(row)
++                return {'version': 1, 'complete': True, 'physical_count': physical,
++                        'logical_count': logical, 'matched_count': len(rows), 'memories': rows,
++                        'elapsed_seconds': time.monotonic() - started}
++        finally:
++            try:
++                conn.rollback()
++                conn.autocommit = old_autocommit
++            finally:
++                self._put_conn(conn)
++
 +    memory_stream_version = 1
 +
 +    def stream_memory(self, *, cube_id, user_id, filter=None):
@@ -83,15 +259,55 @@ diff --git a/src/memos/graph_dbs/postgres.py b/src/memos/graph_dbs/postgres.py
 diff --git a/src/memos/api/routers/server_router.py b/src/memos/api/routers/server_router.py
 --- a/src/memos/api/routers/server_router.py
 +++ b/src/memos/api/routers/server_router.py
-@@ -368,6 +368,55 @@
+@@ -368,6 +368,95 @@
          )
- 
- 
+
+
 +@router.get("/memory_capabilities")
 +def memory_capabilities():
 +    """Объявить opt-in поток только для поддерживающего его backend."""
 +    supported = getattr(naive_mem_cube.text_mem.graph_store, 'memory_stream_version', None) == 1
-+    return {"code": 200, "data": {"memory_stream": 1 if supported else None}}
++    return {"code": 200, "data": {"memory_stream": 1 if supported else None,
++        "recall_index": getattr(naive_mem_cube.text_mem.graph_store, 'memory_index_version', None)}}
++
++
++
++@router.post("/recall_index")
++def recall_index(body: dict):
++    """Искать по существующим векторам и текстовому индексу без чтения архива моделью."""
++    import time
++    started = time.monotonic()
++    store = naive_mem_cube.text_mem.graph_store
++    if getattr(store, 'memory_index_version', None) != 1:
++        raise HTTPException(501, 'Recall index unavailable')
++    required = {'cubes', 'user_id', 'scope', 'author_id', 'query'}
++    optional = {'shared_infra', 'project', 'goal'}
++    if (set(body) - required - optional or not required <= set(body)
++            or not isinstance(body['query'], str) or not body['query'].strip()):
++        raise HTTPException(422, 'Invalid recall index request')
++    embedding_started = time.monotonic()
++    try:
++        vector = naive_mem_cube.text_mem.embedder.embed([body['query']])[0]
++    except Exception as error:
++        logger.warning('Recall index: stage=embedding outcome=%s elapsed=%.3fs',
++                       type(error).__name__, time.monotonic() - embedding_started)
++        raise HTTPException(503, 'Recall query embedding unavailable') from None
++    embedded = time.monotonic() - embedding_started
++    database_started = time.monotonic()
++    try:
++        result = store.recall_index(**body, vector=list(vector))
++    except ValueError:
++        logger.warning('Recall index: stage=database outcome=invalid elapsed=%.3fs',
++                       time.monotonic() - database_started)
++        raise HTTPException(409, 'Recall index invalid or incomplete') from None
++    except Exception as error:
++        logger.warning('Recall index: stage=database outcome=%s elapsed=%.3fs',
++                       type(error).__name__, time.monotonic() - database_started)
++        raise HTTPException(503, 'Recall index unavailable') from None
++    logger.info('Recall index: embedding=%.3fs database=%.3fs total=%.3fs physical=%d logical=%d matched=%d',
++                embedded, result['elapsed_seconds'], time.monotonic() - started,
++                result['physical_count'], result['logical_count'], result['matched_count'])
++    return {'code': 200, 'data': result}
 +
 +
 +@router.post("/get_memory_stream")

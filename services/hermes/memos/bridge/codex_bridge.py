@@ -1,12 +1,12 @@
-"""Local Chat Completions adapter for text-only Codex app-server inference."""
-
 # ABOUTME: Совместимый текстовый Chat Completions bridge для MemOS.
-# ABOUTME: Запускает только явно заданный Codex в выделенном worker-каталоге.
+# ABOUTME: Ограничивает очередь и исполнение одним сроком, отменяет работу отключённого клиента.
+"""Local Chat Completions adapter for text-only Codex app-server inference."""
 
 import asyncio
 import hmac
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -27,7 +27,7 @@ CODEX_EXECUTABLE = Path(os.environ["MEMOS_CODEX_EXECUTABLE"])
 if not CODEX_EXECUTABLE.is_absolute():
     raise RuntimeError("MEMOS_CODEX_EXECUTABLE must be an absolute path")
 semaphore = asyncio.Semaphore(2)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error.memos")
 app = FastAPI(title="MemOS Codex adapter")
 BASE = (
     "You are a text processing model for a memory service. Follow the supplied task instructions. "
@@ -277,6 +277,60 @@ def models(request: Request) -> dict:
     }
 
 
+async def complete_with_budget(request, instructions, dialogue, schema):
+    """Ограничить очередь и модель одним сроком; отмена освобождает слот и процесс."""
+    try:
+        budget = float(request.headers.get("x-memos-timeout-seconds", TIMEOUT))
+        if not math.isfinite(budget) or budget <= 0:
+            raise ValueError()
+    except ValueError:
+        raise HTTPException(400, "Invalid memory request timeout") from None
+    budget = min(budget, TIMEOUT)
+    stage = request.headers.get("x-memos-stage", "unknown")
+    stage = stage if stage in {"plan", "rank", "review", "extract"} else "unknown"
+    started = time.monotonic()
+    queue_seconds = None
+    outcome = "cancelled"
+
+    async def execute():
+        nonlocal queue_seconds
+        async with semaphore:
+            queue_seconds = time.monotonic() - started
+            return await run_codex(instructions, dialogue, schema)
+
+    async def disconnected():
+        while not await request.is_disconnected():
+            await asyncio.sleep(0.1)
+
+    work = asyncio.create_task(execute())
+    monitor = asyncio.create_task(disconnected())
+    try:
+        done, _ = await asyncio.wait({work, monitor}, timeout=budget, return_when=asyncio.FIRST_COMPLETED)
+        if monitor in done:
+            outcome = "disconnected"
+            raise HTTPException(499, "Memory client disconnected")
+        if work not in done:
+            outcome = "timeout"
+            raise HTTPException(504, "Memory request timed out")
+        result = work.result()
+        outcome = "ok"
+        return result
+    except HTTPException as exc:
+        if outcome == "cancelled":
+            outcome = "http_" + str(exc.status_code)
+        raise
+    finally:
+        # AIDEV-NOTE: run_codex finally завершает дочерний процесс до освобождения слота.
+        # Отменённый ожидающий запрос не должен позднее запустить модель.
+        for task in (work, monitor):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(work, monitor, return_exceptions=True)
+        logger.info("MemOS completion: stage=%s outcome=%s queue=%.3fs elapsed=%.3fs",
+                    stage, outcome, queue_seconds if queue_seconds is not None else time.monotonic() - started,
+                    time.monotonic() - started)
+
+
 @app.post("/v1/chat/completions")
 async def completions(request: Request):
     authorize(request)
@@ -284,13 +338,7 @@ async def completions(request: Request):
     if not isinstance(body, dict):
         raise HTTPException(400, "An object is required")
     instructions, dialogue, schema = build_prompt(body)
-    try:
-        async with semaphore:
-            content, usage = await asyncio.wait_for(
-                run_codex(instructions, dialogue, schema), TIMEOUT
-            )
-    except TimeoutError as exc:
-        raise HTTPException(504, "Codex request timed out") from exc
+    content, usage = await complete_with_budget(request, instructions, dialogue, schema)
     completion_id, created = "chatcmpl-" + uuid.uuid4().hex, int(time.time())
     if body.get("stream"):
 
