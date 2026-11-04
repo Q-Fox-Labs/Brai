@@ -79,6 +79,7 @@ class Config:
     result_root: str
     chat_id: str = ""
     allowed_users: tuple[str, ...] = ()
+    game_core_enabled: bool = True
 
     def allows(self, user_id):
         """Разрешить владельца и назначенных участников общего группового профиля."""
@@ -111,7 +112,13 @@ class Config:
                 or not Path(root).is_absolute() or str(Path(root)) != root
                 or re.search(r"[\\<>?#%\x00-\x1f\x7f]", root)):
             raise ValueError("BRAI_TELEGRAM_CONFIG_INVALID")
-        return cls(owner, state, entry, node, root, chat, users)
+        game_core_enabled = True
+        tools_config = os.environ.get('BRAI_HERMES_CONFIG')
+        if tools_config:
+            game_core_enabled = json.loads(Path(tools_config).read_text()).get('gameCore', {}).get('enabled', True)
+            if type(game_core_enabled) is not bool:
+                raise ValueError('BRAI_TELEGRAM_CONFIG_INVALID')
+        return cls(owner, state, entry, node, root, chat, users, game_core_enabled)
 
 
 class Bridge:
@@ -561,9 +568,10 @@ class TelegramPlugin:
         guard = TypeHandler(Update, self.guard)
         app.add_handler(guard, group=-100)
         self.handlers.append((app, guard, -100))
-        handler = CallbackQueryHandler(self.callback, pattern=r"^brai:")
-        app.add_handler(handler)
-        self.handlers.append((app, handler, 0))
+        if self.config.game_core_enabled:
+            handler = CallbackQueryHandler(self.callback, pattern=r"^brai:")
+            app.add_handler(handler)
+            self.handlers.append((app, handler, 0))
         if self.journal is not None and "brai_files" in sys.modules:
             sys.modules["brai_files"].register_telegram_observer(self)
         if self.journal is not None:
@@ -581,6 +589,14 @@ class TelegramPlugin:
             task = self.loop.create_task(self._recover_history())
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
+        task = self.loop.create_task(self.resume_operator_request())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+        if not self.config.game_core_enabled:
+            task = self.loop.create_task(self._recover_input_notices())
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
+            return
         for row in self.tokens.uncertain_resumes():
             task = self.loop.create_task(self._report_unknown_resume(row))
             self.tasks.add(task)
@@ -602,6 +618,46 @@ class TelegramPlugin:
         task = self.loop.create_task(self._recover_input_notices())
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
+
+    async def resume_operator_request(self):
+        """Один раз передать защищённое операторское поручение штатному inject_message.
+
+        Статус submitting после обрыва означает неизвестный исход; автоматического
+        повтора нет. Успешная постановка в native loop ещё не подтверждает ответ.
+        """
+        path = self.config.state_dir / 'operator-resume.json'
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return
+        try:
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid not in {0, os.geteuid()}
+                    or info.st_nlink != 1 or info.st_mode & 0o077 or info.st_size > 16000):
+                raise BridgeError('OPERATOR_RESUME_INVALID')
+            value = json.loads(path.read_text())
+            if value.get('status') != 'pending':
+                return
+            if (set(value) != {'requestId', 'status', 'sessionKey', 'content'}
+                    or not _uuid(value['requestId']) or not isinstance(value['sessionKey'], str)
+                    or not value['sessionKey'].startswith('agent:') or ':telegram:' not in value['sessionKey']
+                    or not isinstance(value['content'], str) or not value['content'].strip()
+                    or len(value['content']) > 12000 or not callable(self.inject_message)):
+                raise BridgeError('OPERATOR_RESUME_INVALID')
+            def save(status):
+                """Атомарно записать свой статус перед единственным внешним действием."""
+                temporary = path.with_name('operator-resume.' + value['requestId'] + '.tmp')
+                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, 'w') as stream:
+                    json.dump({**value, 'status': status}, stream, ensure_ascii=False)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, path)
+            # AIDEV-NOTE: durable marker предшествует inject; restart не создаёт вторую работу.
+            save('submitting')
+            accepted = self.inject_message(value['content'], session_key=value['sessionKey'])
+            save('submitted' if accepted is True else 'rejected')
+        except Exception:
+            logging.getLogger(__name__).warning('BRAI_OPERATOR_RESUME_UNCONFIRMED')
 
     def close(self):
         """Убрать только свои handlers/tasks при native unload; SQLite сохраняет recovery."""
@@ -902,6 +958,8 @@ class TelegramPlugin:
 
     def observe_agent_move(self, tool_name="", args=None, result=None, session_id="", status="", **kwargs):
         """Persist exact successful agent claims and clear observed terminal attempts."""
+        if not self.config.game_core_enabled:
+            return
         entry = self._owner_session(session_id)
         if entry is None or status != "ok" or not isinstance(args, dict):
             return
@@ -931,6 +989,8 @@ class TelegramPlugin:
 
     async def _fail_stopped_agent_attempts(self, session_id):
         """Fail exact running attempts observed in this owner session after native terminal stop."""
+        if not self.config.game_core_enabled:
+            return
         entry = self._owner_session(session_id)
         if entry is None:
             return
@@ -963,6 +1023,8 @@ class TelegramPlugin:
 
     async def recover_durable_agent_attempts(self):
         """Retry only attempts proven terminal by a lifecycle hook or startup boundary."""
+        if not self.config.game_core_enabled:
+            return
         for row in self.tokens.agent_attempts(self.config.owner, terminal_only=True):
             entry = self._owner_session(row["session_id"])
             source = getattr(entry, "origin", None)
@@ -1238,6 +1300,9 @@ class TelegramPlugin:
 
     async def request_confirmation(self, args, **kwargs):
         """Дать модели только отправку кнопок; завершение доступно только callback handler."""
+        if not self.config.game_core_enabled:
+            return json.dumps({'ok': False, 'code': 'GAME_CORE_DISABLED',
+                               'message': 'Game Core отключён. Продолжи поручение обычным ответом без постановки и кнопок.'}, ensure_ascii=False)
         try:
             if (not isinstance(args, dict) or set(args) - {"moveId", "revisionId", "stage"}
                     or not _uuid(args.get("moveId")) or not _uuid(args.get("revisionId"))
@@ -1263,6 +1328,9 @@ class TelegramPlugin:
 
     async def submit_feedback(self, args, **kwargs):
         """Модель выбирает смысл; текст и происхождение берём из реального сообщения."""
+        if not self.config.game_core_enabled:
+            return json.dumps({'ok': False, 'code': 'GAME_CORE_DISABLED',
+                               'message': 'Game Core отключён. Продолжи поручение обычным ответом без постановки и кнопок.'}, ensure_ascii=False)
         try:
             if (not isinstance(args, dict) or set(args) - {"elementId", "revisionId", "moveId", "decision"}
                     or not _uuid(args.get("elementId")) or not _uuid(args.get("revisionId"))
@@ -1278,6 +1346,9 @@ class TelegramPlugin:
 
     async def submit_result(self, args, **kwargs):
         """Записывает практический результат из текущего реального owner MessageEvent."""
+        if not self.config.game_core_enabled:
+            return json.dumps({'ok': False, 'code': 'GAME_CORE_DISABLED',
+                               'message': 'Game Core отключён. Продолжи поручение обычным ответом без постановки и кнопок.'}, ensure_ascii=False)
         try:
             if (not isinstance(args, dict) or set(args) != {"moveId", "revisionId"}
                     or not _uuid(args.get("moveId")) or not _uuid(args.get("revisionId"))):
@@ -1739,6 +1810,9 @@ def register(ctx):
     ctx.register_hook("post_tool_call", plugin.observe_agent_move)
     ctx.register_hook("on_session_end", plugin.on_session_end)
     ctx.register_hook("agent_loop_stopped", plugin.agent_loop_stopped)
+    if not plugin.config.game_core_enabled:
+        ctx.on_unload(plugin.close)
+        return
     ctx.register_tool(name="brai_telegram_request_confirmation", toolset="brai_telegram",
         description=CONFIRMATION_DESCRIPTION,
         schema={"name": "brai_telegram_request_confirmation", "description": CONFIRMATION_DESCRIPTION,

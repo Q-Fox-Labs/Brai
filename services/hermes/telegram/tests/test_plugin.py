@@ -146,6 +146,42 @@ def ptb_stubs():
 class PluginTests(unittest.IsolatedAsyncioTestCase):
     """Проверяет авторизацию, publication и весь callback lifecycle."""
 
+    async def test_operator_resume_uses_native_session_once_without_game_core(self):
+        """Restart после постановки не дублирует работу, отрицательный ответ тоже видим."""
+        self.plugin.config = replace(self.config, game_core_enabled=False)
+        calls = []
+        self.plugin.inject_message = lambda text, **kwargs: calls.append((text, kwargs)) or True
+        path = self.config.state_dir / 'operator-resume.json'
+        request = {'requestId': ATTEMPT, 'status': 'pending',
+                   'sessionKey': self.native_context['HERMES_SESSION_KEY'], 'content': 'Продолжи визитку'}
+        path.write_text(json.dumps(request)); path.chmod(0o600)
+        await self.plugin.resume_operator_request()
+        self.assertEqual(json.loads(path.read_text())['status'], 'submitted')
+        await self.plugin.resume_operator_request()
+        self.assertEqual(calls, [('Продолжи визитку', {'session_key': request['sessionKey']})])
+        for status in ['submitting', 'rejected']:
+            path.write_text(json.dumps({**request, 'status': status}))
+            await self.plugin.resume_operator_request()
+        self.assertEqual(len(calls), 1)
+        path.write_text(json.dumps(request)); path.chmod(0o644)
+        await self.plugin.resume_operator_request()
+        self.assertEqual(len(calls), 1)
+
+    async def test_disabled_game_core_keeps_owner_input_without_workflow_calls(self):
+        """Выключенный workflow не обращается к Game Core из старых tools и recovery."""
+        self.plugin.config = replace(self.config, game_core_enabled=False)
+        for method in [self.plugin.request_confirmation, self.plugin.submit_feedback, self.plugin.submit_result]:
+            response = json.loads(await method({}))
+            self.assertEqual(response['code'], 'GAME_CORE_DISABLED')
+        await self.plugin.recover_durable_agent_attempts()
+        await self.plugin._fail_stopped_agent_attempts('native-session-1')
+        self.assertEqual(self.bridge.calls, [])
+        source = NS(platform='telegram', user_id='123', chat_id='123', chat_type='dm', thread_id='', is_bot=False)
+        event = NS(source=source, raw_message=None, message_id='44', text='Продолжи визитку', media_urls=[])
+        self.assertIsNone(await self.plugin.incoming(event, session_store=self.store))
+        self.assertIs(self.plugin.inbound_events[('123', '', '44')], event)
+        self.assertEqual(self.bridge.calls, [])
+
     async def asyncSetUp(self):
         """Поднять изолированные SQLite и native loop для каждого сценария."""
         self.tmp = tempfile.TemporaryDirectory(prefix="telegram-test-")

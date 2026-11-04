@@ -1,5 +1,9 @@
 # Planning packets and result contracts
 
+Historical optional Game Core protocol. Game Core is suspended from the ordinary
+agent workflow. Do not apply this protocol to start or resume an ordinary request.
+The current skill and conversation instructions take precedence.
+
 ## Independent planning through owner tools
 
 1. Claim the existing available planning Operation with its actual required input IDs. The independent reviewer receives the original attempt ID and packet before any candidate exists.

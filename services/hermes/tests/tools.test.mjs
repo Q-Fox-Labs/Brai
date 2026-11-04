@@ -864,3 +864,28 @@ test('closing the MCP server cancels missing endpoint rediscovery', async t => {
   assert.equal(discoveries, 1);
   await client.close();
 });
+
+
+test('disabled Game Core never discovers or calls its endpoint while publisher and timer remain usable', async () => {
+  const disabled = { ...config, gameCore: { enabled: false } };
+  assert.equal(validateConfig(disabled, owner), disabled);
+  assert.throws(() => validateConfig({ ...config, gameCore: { enabled: 'false' } }, owner), /INVALID_HERMES_CONFIG/);
+  const listed = [];
+  const { ports, calls } = fixture({ list: async endpoint => {
+    listed.push(endpoint);
+    if (endpoint === 'gameCore') throw new Error('must not contact Game Core');
+    return tools[endpoint];
+  } });
+  const runtime = await createBraiTools(disabled, ports);
+  assert.equal((await runtime.listTools()).some(tool => tool.name.startsWith('game_core_')), false);
+  assert.equal(listed.includes('gameCore'), false);
+  for (const name of ['game_core_graph_get', 'game_core_planning_packet_read', 'game_core_request_human_action', 'game_core_move_claim']) {
+    await assert.rejects(runtime.call(name, {}), /GAME_CORE_DISABLED/);
+  }
+  await assert.rejects(runtime.graph(), /GAME_CORE_DISABLED/);
+  await assert.rejects(runtime.gameCoreCall('game_core_move_complete', {}), /GAME_CORE_DISABLED/);
+  assert.equal(calls.length, 0);
+  assert.equal((await runtime.call('fetch_file', { artifactId: ids[4] })).artifactId, ids[4]);
+  await runtime.call('timer_start', { commandId: ids[0], timerId: ids[1], startedAt: '2026-10-19T12:00:00.000Z' });
+  assert.equal(calls.some(call => call.endpoint === 'gameCore'), false);
+});
