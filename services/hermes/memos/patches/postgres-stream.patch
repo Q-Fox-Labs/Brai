@@ -9,7 +9,7 @@ diff --git a/src/memos/graph_dbs/postgres.py b/src/memos/graph_dbs/postgres.py
                  logger.info(f"Schema {self.schema} initialized successfully")
          except Exception as e:
              logger.error(f"Failed to init schema: {e}")
-@@ -1106,6 +1107,246 @@
+@@ -1106,6 +1107,269 @@
          finally:
              self._put_conn(conn)
 
@@ -40,6 +40,15 @@ diff --git a/src/memos/graph_dbs/postgres.py b/src/memos/graph_dbs/postgres.py
 +            USING gin ({self.schema}.brai_recall_text_v1(memory, properties) gin_trgm_ops)
 +            WHERE properties->'info'->'hermes_chunk_index' IS NULL
 +               OR properties->'info'->'hermes_chunk_index' = '0'::jsonb
++        """)
++
++        # Hash keys keep this derived date index bounded for legacy identifiers.
++        # The lookup also compares original text, so collisions cannot change dates.
++        cur.execute(f"""
++            CREATE INDEX IF NOT EXISTS idx_brai_recall_source_date_v1
++            ON {self.schema}.memories (
++              user_name, md5(properties->'info'->>'hermes_author_id'),
++              md5(properties->'info'->>'hermes_event_id'), created_at)
 +        """)
 +
 +    def recall_index(self, *, cubes, user_id, scope, author_id, query, vector,
@@ -149,21 +158,35 @@ diff --git a/src/memos/graph_dbs/postgres.py b/src/memos/graph_dbs/postgres.py
 +                    internal_pattern = r'^(?:\[[^\]\n]+\]\s*)?\[ASYNC DELEGATION BATCH COMPLETE[^\n]*\]\s*A background fan-out unit you dispatched earlier'
 +                    hit = f"SELECT logical FROM ({source}) AS sources WHERE created_at = (SELECT max(created_at) FROM ({source}) AS dates)"
 +                    args = [*params, internal_pattern, *params, internal_pattern]
++                # Materialize compact source keys once: a correlated date lookup
++                # re-reads large transcript JSON for every selected fact on real archives.
 +                cur.execute(f"""
-+                    WITH hits AS ({hit}), chosen AS (
-+                      SELECT DISTINCT ON ({key}) id, memory, properties, created_at, updated_at, user_name
++                    WITH hits AS MATERIALIZED ({hit}), anchors AS MATERIALIZED (
++                      SELECT {key} AS logical, id,memory,properties,created_at,updated_at,user_name
 +                      FROM {self.schema}.memories WHERE {where} AND {anchor}
-+                        AND {key} IN (SELECT logical FROM hits)
-+                      ORDER BY {key}, updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id
++                    ), chosen AS MATERIALIZED (
++                      SELECT DISTINCT ON (logical) id, memory, properties, created_at, updated_at, user_name,
++                        properties->'info'->>'hermes_source_event' AS source_event,
++                        properties->'info'->>'hermes_author_id' AS author_id
++                      FROM anchors WHERE logical IN (SELECT logical FROM hits)
++                      ORDER BY logical, updated_at DESC NULLS LAST, created_at DESC NULLS LAST, id
++                    ), source_dates AS MATERIALIZED (
++                      SELECT links.source_event AS event_id, links.author_id,
++                        min(s.created_at) AS source_date
++                      FROM (SELECT DISTINCT source_event,author_id FROM chosen
++                        WHERE source_event IS NOT NULL AND author_id IS NOT NULL) AS links
++                      LEFT JOIN {self.schema}.memories AS s
++                        ON s.user_name = ANY(%s) AND s.properties @> %s::jsonb
++                        AND md5(s.properties->'info'->>'hermes_event_id') = md5(links.source_event)
++                        AND md5(s.properties->'info'->>'hermes_author_id') = md5(links.author_id)
++                        AND s.properties->'info'->>'hermes_event_id' = links.source_event
++                        AND s.properties->'info'->>'hermes_author_id' = links.author_id
++                      GROUP BY 1,2
 +                    )
-+                    SELECT id,memory,properties,created_at,updated_at,user_name,
-+                      (SELECT min(s.created_at) FROM {self.schema}.memories AS s
-+                        WHERE s.user_name = ANY(%s) AND s.properties @> %s::jsonb
-+                          AND s.properties->'info'->>'hermes_event_id' =
-+                              chosen.properties->'info'->>'hermes_source_event'
-+                          AND s.properties->'info'->>'hermes_author_id' =
-+                              chosen.properties->'info'->>'hermes_author_id')
-+                    FROM chosen ORDER BY created_at DESC NULLS LAST,id
++                    SELECT c.id,c.memory,c.properties,c.created_at,c.updated_at,c.user_name,d.source_date
++                    FROM chosen AS c LEFT JOIN source_dates AS d
++                      ON d.event_id = c.source_event AND d.author_id = c.author_id
++                    ORDER BY c.created_at DESC NULLS LAST,c.id
 +                """, [*args, *params, cubes, json.dumps({'user_id': user_id, 'info': scope})])
 +                rows = []
 +                for raw in cur:

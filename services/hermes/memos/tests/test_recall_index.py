@@ -238,6 +238,105 @@ class RecallIndexPostgresTests(unittest.TestCase):
         finally:
             server.should_exit = True; thread.join(5)
 
+
+    def test_source_dates_preserve_earliest_scoped_date_across_parts_and_cubes(self):
+        self.add('source-main', 'unrelated', event='trip', date='2001-01-01')
+        self.add('source-part', 'unrelated', event='trip', chunk=1, date='2000-01-01')
+        self.add('source-copy', 'unrelated', event='trip', cube='life_work', date='1999-01-01')
+        self.add('foreign-author', 'unrelated', event='trip', author='bob', date='1990-01-01')
+        self.add('foreign-epoch', 'unrelated', event='trip', date='1991-01-01',
+                 hermes_memory_epoch='other')
+        self.add('foreign-cube', 'unrelated', event='trip', cube='excluded', date='1992-01-01')
+        for i in range(3):
+            self.add('fact'+str(i), 'rare', logical='fact'+str(i), hermes_source_event='trip')
+        result = self.search()
+        self.assertEqual(len(result['memories']), 3)
+        self.assertEqual({r['_source_date'] for r in result['memories']},
+                         {'1999-01-01T00:00:00+00:00'})
+
+    def test_missing_source_keeps_fact_and_shared_authors_have_separate_dates(self):
+        self.add('alice-source', 'unrelated', event='same', date='2001-01-01')
+        self.add('bob-source', 'unrelated', event='same', author='bob', cube='infra',
+                 hermes_shared_infra=True, date='1998-01-01')
+        self.add('alice-fact', 'rare', logical='alice', hermes_source_event='same')
+        self.add('bob-fact', 'rare', logical='bob', author='bob', cube='infra',
+                 hermes_shared_infra=True, hermes_source_event='same')
+        self.add('orphan', 'rare', logical='orphan', hermes_source_event='missing')
+        self.add('no-link', 'rare', logical='no-link')
+        rows = {r['id']: r for r in self.search(shared_infra=True)['memories']}
+        self.assertEqual(rows['alice-fact']['_source_date'], '2001-01-01T00:00:00+00:00')
+        self.assertEqual(rows['bob-fact']['_source_date'], '1998-01-01T00:00:00+00:00')
+        self.assertIsNone(rows['orphan']['_source_date'])
+        self.assertIsNone(rows['no-link']['_source_date'])
+
+    def test_source_date_plan_does_not_repeat_archive_scan_for_each_result(self):
+        import hashlib
+        import psycopg2.extensions
+        # Large, poorly compressible metadata reproduces the real archive layout.
+        payload = ''.join(hashlib.sha256(str(i).encode()).hexdigest() for i in range(400))
+        self.add('source', 'unrelated', event='source', date='1999-01-01',
+                 messages=[{'role': 'user', 'content': payload}])
+        for i in range(36):
+            self.add('fact'+str(i), 'rare', logical=str(i), hermes_source_event='source',
+                     messages=[{'role': 'user', 'content': payload}])
+        with self.admin.cursor() as cur:
+            cur.execute("""INSERT INTO fixture.memories
+                (id,memory,properties,embedding,user_name)
+                SELECT 'padding-'||n,'unrelated',
+                    jsonb_build_object('user_id','owner','info',jsonb_build_object(
+                        'hermes_home_scope','profile','hermes_memory_epoch','epoch',
+                        'hermes_kind','native','hermes_event_id','padding-'||n,
+                        'hermes_author_id','bob','hermes_cube','main','hermes_memberships',jsonb_build_array('main'))),
+                    %s::vector,'main' FROM generate_series(1,1000) AS n""",
+                        (json.dumps([0,1,*([0]*766)]),))
+            cur.execute('ANALYZE fixture.memories')
+        queries = []
+        class RecordingCursor(psycopg2.extensions.cursor):
+            def execute(self, query, variables=None):
+                if query.lstrip().startswith('WITH'):
+                    queries.append((query, variables))
+                return super().execute(query, variables)
+        conn = self.pool.getconn()
+        factory, get, put = conn.cursor_factory, self.store._get_conn, self.store._put_conn
+        conn.cursor_factory = RecordingCursor
+        conn.autocommit = True
+        self.store._get_conn = lambda: conn
+        self.store._put_conn = lambda returned: None
+        try:
+            result = self.search()
+            self.assertEqual(result['matched_count'], 36)
+            self.assertEqual({r['_source_date'] for r in result['memories']},
+                             {'1999-01-01T00:00:00+00:00'})
+            with self.admin.cursor() as cur:
+                cur.execute('EXPLAIN (ANALYZE, FORMAT JSON) '+queries[0][0], queries[0][1])
+                plan = cur.fetchone()[0][0]['Plan']
+            def walk(node):
+                yield node
+                for child in node.get('Plans', []):
+                    yield from walk(child)
+            repeated = [n for n in walk(plan) if n.get('Node Type') == 'Aggregate'
+                        and n.get('Actual Loops', 0) > 1]
+            self.assertEqual(repeated, [], 'Source dates repeatedly scan the archive per result')
+            date_probes = [n for n in walk(plan)
+                           if n.get('Index Name') == 'idx_brai_recall_source_date_v1']
+            self.assertTrue(date_probes, 'Source dates must use the derived lookup index')
+        finally:
+            self.store._get_conn, self.store._put_conn = get, put
+            conn.rollback()
+            conn.cursor_factory = factory
+            conn.autocommit = True
+            self.pool.putconn(conn)
+
+
+    def test_source_date_index_preserves_long_and_legacy_numeric_event_keys(self):
+        for suffix,event in [('long','event-'+'x'*4000),('numeric',123)]:
+            self.add('source-'+suffix, 'unrelated', event=event, date='1997-01-01')
+            self.add('fact-'+suffix, 'rare', logical=suffix, hermes_source_event=str(event))
+        result = self.search()
+        self.assertEqual(result['matched_count'], 2)
+        self.assertEqual({r['_source_date'] for r in result['memories']},
+                         {'1997-01-01T00:00:00+00:00'})
+
     def test_document_lookup_keeps_opaque_pointer_for_verified_metadata(self):
         self.add('document', 'Delivered artifact:11111111-1111-4111-8111-111111111111')
         self.assertEqual(self.search('report topic', goal='locate_document')['matched_count'], 1)

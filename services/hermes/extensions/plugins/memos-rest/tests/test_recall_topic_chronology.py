@@ -11,6 +11,19 @@ class RecallTopicChronologyTests(unittest.TestCase):
     new_provider = RoutingTests.new_provider
     save_config = RoutingTests.save_config
 
+    def test_plan_without_context_preserves_original_request_restrictions(self):
+        router = type(self.provider.routing.router)(self.cfg['router'], self.provider.routing.catalog)
+        router.transport = lambda payload: {'goal': 'evidence', 'query': 'Only the newest shoe discussion'}
+        question = 'Find all recommendations from our earlier clothes and shoe discussions.'
+        self.assertEqual(router.plan(question), {'goal': 'evidence', 'query': question})
+
+    def test_plan_can_resolve_a_reference_from_actual_recent_context(self):
+        router = type(self.provider.routing.router)(self.cfg['router'], self.provider.routing.catalog)
+        resolved = 'The packing recommendations for our mountain trip'
+        router.transport = lambda payload: {'goal': 'evidence', 'query': resolved}
+        result = router.plan('Continue that discussion', [{'role': 'user', 'content': resolved}])
+        self.assertEqual(result, {'goal': 'evidence', 'query': resolved})
+
     def test_latest_topic_is_selected_across_batches_after_semantic_matching(self):
         router = type(self.provider.routing.router)(self.cfg['router'], self.provider.routing.catalog)
         candidates = [
