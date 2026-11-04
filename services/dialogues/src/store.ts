@@ -57,7 +57,7 @@ export function createStore(pool:DB,key:string) {
         const turn=(await db.query("SELECT turn_order,managed,status,reconciled_through_order FROM dialogues_live.turns WHERE owner_id=$1 AND dialogue_id=$2 AND id=$3",[owner,d.id,m.turn_id])).rows[0];
         if(turn?.managed && (m.kind!=="final" || turn.status==="completed"))fail("MANAGED_TURN_REQUIRES_TURN_OPERATIONS");
         if(turn?.managed && (await db.query("SELECT 1 FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 AND kind='final' AND message_order>COALESCE($4::bigint,-1)",[owner,d.id,m.turn_id,turn.reconciled_through_order])).rowCount)fail("FINAL_RECONCILIATION_REQUIRED");
-        if(turn&&!turn.managed&&m.kind!=='final'&&m.turn_status!==undefined&&m.turn_status!=='completed'&&(await db.query("SELECT 1 FROM dialogues_live.turns WHERE owner_id=$1 AND dialogue_id=$2 AND managed AND status<>'completed'",[owner,d.id])).rowCount)fail('MANAGED_TURN_OPEN');
+        if(turn&&!turn.managed&&(await db.query("SELECT 1 FROM dialogues_live.turns WHERE owner_id=$1 AND dialogue_id=$2 AND managed AND status<>'completed'",[owner,d.id])).rowCount)fail('MANAGED_TURN_OPEN');
         if(!turn && (await db.query("SELECT 1 FROM dialogues_live.turns WHERE owner_id=$1 AND dialogue_id=$2 AND managed AND status<>'completed'",[owner,d.id])).rowCount)fail("MANAGED_TURN_OPEN");
         if(turn&&m.turn_order!==undefined&&String(m.turn_order)!==turn.turn_order)fail("TURN_CONFLICT");
         const turnOrder=m.turn_order??(turn?Number(turn.turn_order):Number((await db.query("SELECT COALESCE(MAX(turn_order),-1)+1 AS n FROM dialogues_live.turns WHERE owner_id=$1 AND dialogue_id=$2",[owner,d.id])).rows[0].n));
@@ -144,12 +144,12 @@ export function createStore(pool:DB,key:string) {
       // AIDEV-NOTE: Cutoff selects immutable message/summary versions, never wall-clock dates.
       const conditions=c.mode==="history" ? "true" : c.mode==="bootstrap"
         ? "EXISTS(SELECT 1 FROM chosen x WHERE x.dialogue_id=m.dialogue_id AND x.id=m.turn_id)"
-        : "(m.change_seq>$3 OR EXISTS(SELECT 1 FROM dialogues_live.message_summaries z WHERE z.owner_id=m.owner_id AND z.dialogue_id=m.dialogue_id AND z.message_id=m.id AND z.change_seq>$3 AND z.change_seq<=$2))";
+        : "(m.change_seq>$3 OR (t.managed AND m.kind='final' AND t.final_message_id=m.id AND t.completion_seq>$3 AND t.completion_seq<=$2) OR EXISTS(SELECT 1 FROM dialogues_live.message_summaries z WHERE z.owner_id=m.owner_id AND z.dialogue_id=m.dialogue_id AND z.message_id=m.id AND z.change_seq>$3 AND z.change_seq<=$2))";
       const chosen=`WITH chosen AS (
         SELECT t.dialogue_id,t.id,t.turn_order,MIN(f.change_seq) AS completed
         FROM dialogues_live.turns t
         JOIN dialogues_live.messages f ON f.owner_id=t.owner_id AND f.dialogue_id=t.dialogue_id
-          AND f.turn_id=t.id AND f.kind='final' AND (NOT t.managed OR t.final_message_id=f.id) AND f.change_seq<=$2
+          AND f.turn_id=t.id AND f.kind='final' AND (NOT t.managed OR (t.final_message_id=f.id AND t.completion_seq<=$2)) AND f.change_seq<=$2
         WHERE t.owner_id=$1 AND $3::bigint>=0 AND EXISTS(
           SELECT 1 FROM dialogues_live.messages u WHERE u.owner_id=t.owner_id
             AND u.dialogue_id=t.dialogue_id AND u.turn_id=t.id AND u.role='user' AND u.change_seq<=$2)
@@ -168,7 +168,7 @@ export function createStore(pool:DB,key:string) {
         SELECT 'message' AS type,m.dialogue_id,m.turn_id,m.id,t.turn_order,m.message_order,0::bigint AS version
         FROM dialogues_live.messages m
         JOIN dialogues_live.turns t ON t.owner_id=m.owner_id AND t.dialogue_id=m.dialogue_id AND t.id=m.turn_id
-        WHERE m.owner_id=$1 AND NOT EXISTS(SELECT 1 FROM dialogues_live.turns z WHERE z.owner_id=m.owner_id AND z.dialogue_id=m.dialogue_id AND z.id=m.turn_id AND z.managed AND m.kind='final' AND z.final_message_id IS DISTINCT FROM m.id) AND m.change_seq<=$2 AND ($5::text IS NULL OR m.dialogue_id=$5)`
+        WHERE m.owner_id=$1 AND NOT EXISTS(SELECT 1 FROM dialogues_live.turns z WHERE z.owner_id=m.owner_id AND z.dialogue_id=m.dialogue_id AND z.id=m.turn_id AND z.managed AND m.kind='final' AND (z.final_message_id IS DISTINCT FROM m.id OR z.completion_seq>$2)) AND m.change_seq<=$2 AND ($5::text IS NULL OR m.dialogue_id=$5)`
         +(c.mode==="bootstrap"?" AND m.kind<>'commentary'":"")+" AND "+conditions+latestFinal+`
         UNION ALL
         SELECT 'dialogue_summary',ds.dialogue_id,'','',-1::bigint,-1::bigint,ds.version
@@ -176,9 +176,9 @@ export function createStore(pool:DB,key:string) {
         UNION ALL
         SELECT 'coverage_gap',m.dialogue_id,'','',-2::bigint,-2::bigint,0::bigint
         FROM dialogues_live.messages m LEFT JOIN ds ON ds.dialogue_id=m.dialogue_id
-        WHERE m.owner_id=$1 AND NOT EXISTS(SELECT 1 FROM dialogues_live.turns z WHERE z.owner_id=m.owner_id AND z.dialogue_id=m.dialogue_id AND z.id=m.turn_id AND z.managed AND m.kind='final' AND z.final_message_id IS DISTINCT FROM m.id) AND m.change_seq<=$2 AND ($5::text IS NULL OR m.dialogue_id=$5)
+        WHERE m.owner_id=$1 AND NOT EXISTS(SELECT 1 FROM dialogues_live.turns z WHERE z.owner_id=m.owner_id AND z.dialogue_id=m.dialogue_id AND z.id=m.turn_id AND z.managed AND m.kind='final' AND (z.final_message_id IS DISTINCT FROM m.id OR z.completion_seq>$2)) AND m.change_seq<=$2 AND ($5::text IS NULL OR m.dialogue_id=$5)
           AND m.message_order>COALESCE(ds.through_order,-1) AND `
-        +(c.mode!=="delta"?"true":"(m.change_seq>$3 OR ds.change_seq>$3)")+`
+        +(c.mode!=="delta"?"true":"(m.change_seq>$3 OR ds.change_seq>$3 OR EXISTS(SELECT 1 FROM dialogues_live.turns z WHERE z.owner_id=m.owner_id AND z.dialogue_id=m.dialogue_id AND z.id=m.turn_id AND z.managed AND z.final_message_id=m.id AND z.completion_seq>$3 AND z.completion_seq<=$2))")+`
         GROUP BY m.dialogue_id
       ) SELECT * FROM candidates ORDER BY dialogue_id,turn_order,message_order,id,type LIMIT 65 OFFSET $4`;
       const candidates=(await db.query(query,[owner,c.through,c.from,c.offset,c.scope])).rows;

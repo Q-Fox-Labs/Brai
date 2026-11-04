@@ -2,7 +2,7 @@
 // ABOUTME: Не использует PostgreSQL, MCP или другие сервисы.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {fieldId,mergeResult,message,requireReason,validateChanges,version} from '../dist/turn-domain.js';
+import {fieldId,mergeResult,message,requireCompletion,validateChanges,version} from '../dist/turn-domain.js';
 
 test('версия и ID сообщают поле неверного аргумента',()=>{
  assert.equal(version('12'),'12');assert.throws(()=>version('0'),e=>e.code==='INVALID_ARGUMENT'&&e.details.field==='expected_version');
@@ -17,5 +17,7 @@ test('пакет сохраняет формулировки и проверяе
 test('частичный результат сохраняет прежние поля и требует причину',()=>{
  const old={formulation:'Задача',source_refs:['a'],status:'pending',result:null,verification:null,reason:null,remainder:null};
  assert.equal(mergeResult(old,{}).changed,false);const done=mergeResult(old,{status:'done',result:'готово'});assert.equal(done.changed,true);assert.deepEqual(done.next.source_refs,['a']);
- assert.throws(()=>mergeResult(old,{status:'not_done'}),{code:'REASON_REQUIRED'});assert.throws(()=>requireReason('cancelled',''),{code:'REASON_REQUIRED'});requireReason('not_done','не проверено');
+ assert.throws(()=>mergeResult(old,{status:'not_done'}),{code:'REASON_REQUIRED'});assert.throws(()=>requireCompletion('cancelled',null,''),{code:'REASON_REQUIRED'});requireCompletion('not_done',null,'не проверено');
+ assert.throws(()=>mergeResult(old,{status:'done'}),{code:'RESULT_REQUIRED'});
+ assert.throws(()=>validateChanges({add:[{id:'x',formulation:'Задача',status:'finished'}]}),e=>e.code==='INVALID_ARGUMENT'&&e.details.field==='changes.add[0].status'&&e.details.allowed.includes('done'));
 });

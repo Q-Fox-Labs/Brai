@@ -36,54 +36,64 @@ export function message(raw: unknown, kind: 'input' | 'final') {
     const parsed = appendInput({ request_id: 'validate', dialogue: { id: 'validate', channel: 'validate' }, messages: [{ ...m, turn_id: 'validate', role: kind === 'input' ? 'user' : 'assistant', kind }] }).messages[0];
     return { id: parsed.id, text: parsed.text, occurred_at: parsed.occurred_at, source: parsed.source, summary: parsed.summary };
 }
+function changeObject(value: unknown, keys: string[], path: string) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        throw new DialoguesFault('INVALID_ARGUMENT', {field:path, expected:'объект', allowed:keys});
+    const row = value as Record<string, any>;
+    const unknown = Object.keys(row).find(key => !keys.includes(key));
+    if (unknown) throw new DialoguesFault('INVALID_ARGUMENT', {field:path+'.'+unknown, expected:'известное поле', allowed:keys});
+    return row;
+}
+function changeText(value: unknown, path: string, required=false) {
+    if (value === undefined && !required) return;
+    if (value === null && !required) return;
+    try { summaryText(value); } catch { throw new DialoguesFault('INVALID_ARGUMENT', {field:path, expected:'непустая строка'}); }
+}
 /** Проверяет пакет изменений результатов без обращения к хранилищу. */
 export function validateChanges(raw: unknown) {
-    const a = object(raw ?? {}, ['purpose', 'constraints', 'add', 'update']);
-    optionalText(a.purpose);
-    optionalText(a.constraints);
-    for (const k of ['add', 'update'])
-        if (a[k] !== undefined && !Array.isArray(a[k]))
-            fail('INVALID_ARGUMENT');
+    const a = changeObject(raw ?? {}, ['purpose','constraints','add','update'], 'changes');
+    changeText(a.purpose,'changes.purpose'); changeText(a.constraints,'changes.constraints');
     const seen = new Set<string>();
-    for (const [kind, rows] of [['add', a.add ?? []], ['update', a.update ?? []]] as const)
-        for (const rawRow of rows) {
-            const row = object(rawRow, ['id', 'formulation', 'source_refs', 'status', 'result', 'verification', 'reason', 'remainder']);
-            id(row.id);
-            if (seen.has(row.id))
-                fail('DUPLICATE_RESULT_ID');
+    for (const kind of ['add','update']) {
+        const rows = a[kind] ?? [];
+        if (!Array.isArray(rows)) throw new DialoguesFault('INVALID_ARGUMENT', {field:'changes.'+kind,expected:'массив результатов'});
+        for (let i=0;i<rows.length;i++) {
+            const path=`changes.${kind}[${i}]`;
+            const row=changeObject(rows[i], ['id','formulation','source_refs','status','result','verification','reason','remainder'], path);
+            fieldId(row.id,path+'.id');
+            if (seen.has(row.id)) throw new DialoguesFault('DUPLICATE_RESULT_ID',{field:path+'.id'});
             seen.add(row.id);
-            if (kind === 'add')
-                summaryText(row.formulation);
-            else
-                optionalText(row.formulation);
+            changeText(row.formulation,path+'.formulation',kind==='add');
             if (row.source_refs !== undefined) {
                 if (!Array.isArray(row.source_refs) || new Set(row.source_refs).size !== row.source_refs.length)
-                    fail('INVALID_ARGUMENT');
-                for (const ref of row.source_refs)
-                    id(ref);
+                    throw new DialoguesFault('INVALID_ARGUMENT',{field:path+'.source_refs',expected:'массив уникальных ID входов этого хода'});
+                row.source_refs.forEach((ref:unknown,index:number)=>fieldId(ref,`${path}.source_refs[${index}]`));
             }
-            if (row.status !== undefined && !['pending', 'done', 'not_done', 'cancelled'].includes(row.status))
-                fail('INVALID_ARGUMENT');
-            for (const field of ['result', 'verification', 'reason', 'remainder'])
-                optionalText(row[field]);
+            const allowed=['pending','done','not_done','cancelled'];
+            if (row.status !== undefined && !allowed.includes(row.status))
+                throw new DialoguesFault('INVALID_ARGUMENT',{field:path+'.status',expected:'одно из допустимых значений',allowed});
+            for (const field of ['result','verification','reason','remainder']) changeText(row[field],path+'.'+field);
         }
+    }
     return a;
 }
 
 const resultFields = ['formulation', 'source_refs', 'status', 'result', 'verification', 'reason', 'remainder'];
 
 /** Применяет частичное изменение результата и проверяет обязательное основание. */
-export function mergeResult(previous: Record<string, any>, change: Record<string, any>) {
+export function mergeResult(previous: Record<string, any>, change: Record<string, any>, path='changes.update') {
     const next: Record<string, any> = {};
     for (const field of resultFields)
         next[field] = change[field] === undefined ? previous[field] : change[field];
-    if (!next.formulation?.trim() || (['not_done', 'cancelled'].includes(next.status) && !next.reason?.trim()))
-        fail('REASON_REQUIRED');
+    if (!next.formulation?.trim()) throw new DialoguesFault('INVALID_ARGUMENT',{field:path+'.formulation',expected:'непустая строка'});
+    requireCompletion(next.status,next.result,next.reason,path);
     return { next, changed: resultFields.some(field => canonical(next[field]) !== canonical(previous[field])) };
 }
 
-/** Требует объяснение результата, который не выполнен либо отменён. */
-export function requireReason(status: string, reason: unknown) {
-    if (['not_done', 'cancelled'].includes(status) && (typeof reason !== 'string' || !reason.trim()))
-        fail('REASON_REQUIRED');
+/** Проверяет фактический результат или причину завершения обычного пункта. */
+export function requireCompletion(status: string, result: unknown, reason: unknown, path='changes.add') {
+    if (status==='done' && (typeof result!=='string' || !result.trim()))
+        throw new DialoguesFault('RESULT_REQUIRED',{field:path+'.result',expected:'непустой фактический результат для done'});
+    if (['not_done','cancelled'].includes(status) && (typeof reason!=='string' || !reason.trim()))
+        throw new DialoguesFault('REASON_REQUIRED',{field:path+'.reason',expected:'непустая причина'});
 }

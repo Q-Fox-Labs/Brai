@@ -9,6 +9,7 @@ import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {createStore} from '../dist/store.js';
 import {startMcp} from '../dist/mcp.js';
+import {createJobs} from '../dist/jobs.js';
 /** Проверяет управляемые ходы на отдельной временной базе. */
 export async function turnChecks(t,app){
  const api=createStore(app,'synthetic-turn-key');let n=0;const req=()=>`turn-test-${++n}`;
@@ -31,6 +32,8 @@ export async function turnChecks(t,app){
   assert.equal(s.results.find(r=>r.id==='first').status,'pending');
   await assert.rejects(api.turnUpdate(owner,{request_id:req(),dialogue_id:dialogue.id,turn_id:s.turn_id,expected_version:'1',changes:{purpose:'устарело'}}),{code:'VERSION_CONFLICT'});
   await assert.rejects(api.turnUpdate(owner,{request_id:req(),dialogue_id:dialogue.id,turn_id:s.turn_id,expected_version:s.version,changes:{update:[{id:'first',status:'not_done'}]}}),{code:'REASON_REQUIRED'});
+  await assert.rejects(api.turnUpdate(owner,{request_id:req(),dialogue_id:dialogue.id,turn_id:s.turn_id,expected_version:s.version,changes:{update:[{id:'first',status:'done'}]}}),e=>e.code==='RESULT_REQUIRED'&&e.details.field==='changes.update[0].result');
+  assert.equal((await get({dialogue_id:dialogue.id})).results.find(r=>r.id==='first').status,'pending');
   const changed=await api.turnUpdate(owner,{request_id:req(),dialogue_id:dialogue.id,turn_id:s.turn_id,expected_version:s.version,changes:{update:[{id:'first',status:'done',result:'готово'},{id:'second',status:'not_done',reason:'не проверено',remainder:'продолжить'}]}});
   const done=await api.turnFinish(owner,{...f,request_id:req(),expected_version:changed.version});assert.equal(done.status,'completed');
   const after=await get({dialogue_id:dialogue.id,turn_id:s.turn_id});assert.equal(after.messages.at(-1).text,'итог');assert.equal(after.results.find(r=>r.kind==='final').status,'done');
@@ -48,18 +51,31 @@ export async function turnChecks(t,app){
   await api.append(owner,{request_id:req(),dialogue,messages:[{id:'old-final',turn_id:'old-turn',role:'assistant',kind:'final',text:'старый финал'}]});
   assert.ok((await api.turnInput(owner,{...inp('new-input'),dialogue})).turn_id);
   await assert.rejects(api.append(owner,{request_id:req(),dialogue,messages:[{id:'old-again',turn_id:'old-turn',role:'user',kind:'input',text:'повторно открыть',turn_status:'in_progress'}]}),{code:'MANAGED_TURN_OPEN'});
+  await assert.rejects(api.append(owner,{request_id:req(),dialogue,messages:[{id:'old-again-implicit',turn_id:'old-turn',role:'user',kind:'input',text:'неявный вход'}]}),{code:'MANAGED_TURN_OPEN'});
+  await assert.rejects(api.append(owner,{request_id:req(),dialogue,messages:[{id:'old-again-final',turn_id:'old-turn',role:'assistant',kind:'final',text:'лишний финал'}]}),{code:'MANAGED_TURN_OPEN'});
  });
  await t.test('неподтверждённый финал сохраняется, но после сверки ход продолжается',async()=>{
   const dialogue={id:'prepared-managed',channel:'synthetic'};const start=await api.turnInput(owner,{...inp('prepared-input'),dialogue});
   const jobs=(await app.query('SELECT count(*)::int AS n FROM dialogues_live.summary_jobs WHERE owner_id=$1',[owner])).rows[0].n;
   await api.append(owner,{request_id:req(),dialogue,messages:[{id:'prepared-final',turn_id:start.turn_id,role:'assistant',kind:'final',text:'подготовленный ответ'}]});
+  const original=await api.message(owner,{dialogue_id:dialogue.id,message_id:'prepared-final'});
   assert.equal((await app.query('SELECT count(*)::int AS n FROM dialogues_live.summary_jobs WHERE owner_id=$1',[owner])).rows[0].n,jobs);
   await assert.rejects(api.turnInput(owner,{...inp('continue-input'),dialogue}),{code:'FINAL_RECONCILIATION_REQUIRED'});
   const continued=await api.turnInput(owner,{...inp('continue-input'),dialogue,reconciled_no_final:true});assert.equal(continued.turn_id,start.turn_id);
-  const view=await get({dialogue_id:dialogue.id});assert.equal(view.messages.find(m=>m.id==='prepared-final').publication_status,'not_confirmed');
+  const view=await get({dialogue_id:dialogue.id});assert.equal(view.messages.find(m=>m.id==='prepared-final').final_state,'reconciled_absent');
+  await assert.rejects(api.turnFinish(owner,{request_id:req(),dialogue_id:dialogue.id,turn_id:start.turn_id,expected_version:continued.version,final:{id:'prepared-final',text:'подготовленный ответ'}}),{code:'FINAL_ID_ALREADY_EXISTS'});
   await api.turnFinish(owner,{request_id:req(),dialogue_id:dialogue.id,turn_id:start.turn_id,expected_version:continued.version,final:{id:'actual-final-2',text:'настоящий ответ'}});
+  const unchanged=await api.message(owner,{dialogue_id:dialogue.id,message_id:'prepared-final'});assert.equal(unchanged.text,original.text);assert.equal(unchanged.sha256,original.sha256);assert.deepEqual(unchanged.source,original.source);
   const args={request_id:req(),consumer_id:'prepared-consumer',context_instance_id:'prepared-instance'};let p=await api.pull(owner,args),items=[...p.items];while(p.continuation_cursor){p=await api.pull(owner,{...args,continuation_cursor:p.continuation_cursor});items.push(...p.items);}
   assert.ok(!items.some(x=>x.type==='message'&&x.id==='prepared-final'));assert.ok(items.some(x=>x.type==='message'&&x.id==='actual-final-2'));
+ });
+ await t.test('Luna не получает неподтверждённый финал',async()=>{
+  const who='prepared-luna',dialogue={id:'prepared-luna',channel:'synthetic'};
+  const start=await api.turnInput(who,{request_id:req(),dialogue,messages:[{id:'first',text:'первый'}]});
+  await api.append(who,{request_id:req(),dialogue,messages:[{id:'draft',turn_id:start.turn_id,role:'assistant',kind:'final',text:'непубличный'}]});
+  await api.turnInput(who,{request_id:req(),dialogue,reconciled_no_final:true,messages:Array.from({length:9},(_,i)=>({id:'next-'+i,text:'ввод '+i}))});
+  const received=[];const jobs=createJobs(app,who,{async probe(){},async run(input){received.push(...JSON.parse(input).originals);return 'сводка';}});await jobs.tick();
+  assert.equal(received.length,10);assert.ok(received.every(item=>item.id!=='draft'));
  });
  await t.test('страницы Unicode и конфликт версии',async()=>{
   const dialogue={id:'big-managed',channel:'synthetic'};const start=await api.turnInput(owner,{...inp('big','😀Я'.repeat(20000)),dialogue});
@@ -69,11 +85,16 @@ export async function turnChecks(t,app){
  });
  await t.test('импорт подтверждённого финала и восстановление без дубля',async()=>{
   const dialogue={id:'repair-managed',channel:'synthetic'};const start=await api.turnInput(owner,{...inp('repair-input'),dialogue});
+  await api.turnInput(owner,{request_id:req(),dialogue,messages:Array.from({length:70},(_,i)=>({id:'repair-extra-'+i,text:'дополнение '+i}))});
   await api.append(owner,{request_id:req(),dialogue,messages:[{id:'actual-final',turn_id:start.turn_id,role:'assistant',kind:'final',text:'точный ответ',source:{kind:'native_client',native_thread_id:'thread',native_turn_id:'turn',phase:'final_answer',status:'completed'}}]});
+  const frozen=await api.context(owner,{dialogue_id:dialogue.id});assert.ok(frozen.continuation_cursor);
+  let legacy=await api.context(owner,{});while(legacy.continuation_cursor)legacy=await api.context(owner,{cursor:legacy.continuation_cursor});const checkpoint=legacy.next_cursor;
   await assert.rejects(api.turnInput(owner,{...inp('after-repair'),dialogue}),{code:'FINAL_RECONCILIATION_REQUIRED'});
   let s=await get({dialogue_id:dialogue.id});await assert.rejects(api.turnRepair(owner,{request_id:req(),dialogue_id:dialogue.id,turn_id:s.turn_id,expected_version:s.version,final_message_id:'actual-final',evidence:{kind:'native_client',native_thread_id:'thread',native_turn_id:'turn',phase:'commentary',status:'completed'}}),{code:'FINAL_EVIDENCE_REQUIRED'});
   await assert.rejects(api.turnRepair(owner,{request_id:req(),dialogue_id:dialogue.id,turn_id:s.turn_id,expected_version:s.version,final_message_id:'actual-final',evidence:{kind:'native_client',native_thread_id:'wrong',native_turn_id:'turn',phase:'final_answer',status:'completed'}}),{code:'FINAL_SOURCE_MISMATCH'});
   const repaired=await api.turnRepair(owner,{request_id:req(),dialogue_id:dialogue.id,turn_id:s.turn_id,expected_version:s.version,final_message_id:'actual-final',evidence:{kind:'native_client',native_thread_id:'thread',native_turn_id:'turn',phase:'final_answer',status:'completed'}});assert.equal(repaired.status,'completed');s=await get({dialogue_id:dialogue.id,turn_id:s.turn_id});assert.equal(s.messages.filter(m=>m.kind==='final').length,1);
+  let oldPage=await api.context(owner,{cursor:frozen.continuation_cursor}),oldIds=[];for(;;){oldIds.push(...oldPage.dialogues.flatMap(d=>d.turns.flatMap(t=>t.messages.map(m=>m.id))));if(!oldPage.continuation_cursor)break;oldPage=await api.context(owner,{cursor:oldPage.continuation_cursor});}assert.ok(!oldIds.includes('actual-final'));
+  let delta=await api.context(owner,{cursor:checkpoint}),legacyIds=[];for(;;){legacyIds.push(...delta.dialogues.flatMap(d=>d.turns.flatMap(t=>t.messages.map(m=>m.id))));if(!delta.continuation_cursor)break;delta=await api.context(owner,{cursor:delta.continuation_cursor});}assert.ok(legacyIds.includes('actual-final'));
   const next=await api.turnInput(owner,{...inp('after-repair'),dialogue});assert.notEqual(next.turn_id,start.turn_id);
  });
  await t.test('больше 50 входов, рабочий блок и независимый checkpoint',async()=>{
@@ -139,9 +160,14 @@ export async function turnChecks(t,app){
    await proxy.connect(new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../dist/stdio-proxy.js',import.meta.url))],env:{...process.env,DIALOGUES_MCP_URL:listener.url,DIALOGUES_MCP_TOKEN_FILE:token}}));
    const invalid=await proxy.callTool({name:'dialogues_turn_input',arguments:{request_id:'ok',dialogue:{id:'mcp',channel:'synthetic'},messages:[]}});const issue=JSON.parse(invalid.content[0].text);assert.equal(issue.code,'INVALID_ARGUMENT');assert.equal(issue.field,'messages');assert.equal(issue.applied,false);
    const first=await proxy.callTool({name:'dialogues_turn_input',arguments:{request_id:req(),dialogue:{id:'mcp',channel:'synthetic'},messages:[{id:'mcp-in',text:'тест'}]}});assert.ok(first.structuredContent.turn_id);
+   const invalidUpdate=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{add:[{id:'bad',formulation:'Задача',status:'finished'}]}}});const nested=JSON.parse(invalidUpdate.content[0].text);assert.equal(nested.field,'changes.add[0].status');assert.ok(nested.allowed.includes('done'));assert.equal(nested.applied,false);
+   const invalidRefs=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{add:[{id:'bad',formulation:'Задача',source_refs:'x'}]}}});assert.equal(JSON.parse(invalidRefs.content[0].text).field,'changes.add[0].source_refs');
+   const foreignRef=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{add:[{id:'bad',formulation:'Задача',source_refs:['unknown']}]}}});const badRef=JSON.parse(foreignRef.content[0].text);assert.equal(badRef.code,'INVALID_SOURCE_REFS');assert.equal(badRef.field,'changes.add[0].source_refs');assert.ok(badRef.expected);
+   const noResult=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{add:[{id:'bad',formulation:'Задача',status:'done'}]}}});const resultError=JSON.parse(noResult.content[0].text);assert.equal(resultError.code,'RESULT_REQUIRED');assert.equal(resultError.field,'changes.add[0].result');
+   const unknownField=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{add:[{id:'bad',formulation:'Задача',nonsense:true}]}}});assert.equal(JSON.parse(unknownField.content[0].text).field,'changes.add[0].nonsense');
    const added=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:first.structuredContent.version,changes:{add:[{id:'long',formulation:'х'.repeat(100000)}]}}});
    const blocked=await proxy.callTool({name:'dialogues_turn_finish',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:added.structuredContent.version,final:{id:'mcp-final',text:'готово'}}});assert.equal(JSON.parse(blocked.content[0].text).pending[0].id,'long');assert.ok(Buffer.byteLength(JSON.stringify(blocked))<65024);
-   const done=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:added.structuredContent.version,changes:{update:[{id:'long',status:'done'}]}}});
+   const done=await proxy.callTool({name:'dialogues_turn_update',arguments:{request_id:req(),dialogue_id:'mcp',turn_id:first.structuredContent.turn_id,expected_version:added.structuredContent.version,changes:{update:[{id:'long',status:'done',result:'готово'}]}}});
    const pullArgs={request_id:req(),consumer_id:'mcp-reset',context_instance_id:'ctx',reset:true,dialogue_id:'mcp'};
    const initial=await proxy.callTool({name:'dialogues_context_pull',arguments:pullArgs});assert.ok(initial.structuredContent.continuation_cursor);
    const conflict=await proxy.callTool({name:'dialogues_context_pull',arguments:{...pullArgs,reset:false,continuation_cursor:initial.structuredContent.continuation_cursor}});assert.equal(JSON.parse(conflict.content[0].text).code,'REQUEST_CONFLICT');

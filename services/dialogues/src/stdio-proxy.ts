@@ -7,6 +7,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema,ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { agentInstructions } from "./api.js";
+import {callWithRecovery} from "./proxy-recovery.js";
 try {
   const url=new URL(process.env.DIALOGUES_MCP_URL??"");
   if(url.protocol!=="http:"||!["127.0.0.1","localhost","[::1]"].includes(url.hostname)||url.username||url.password||url.search||url.hash||url.pathname!=="/mcp")throw new Error("INVALID_ENDPOINT");
@@ -31,15 +32,8 @@ try {
   });
   server.setRequestHandler(CallToolRequestSchema,async req=>{
     const c=client;
-    try{return await c.callTool(req.params);}
-    catch(e){
-      // Listener отвечает 404 на неизвестную сессию до вызова операции.
-      // Только это подтверждённое отсутствие вызова допускает один повтор того же запроса.
-      if(stale(e)){
-        try{await reconnect(c);return await client.callTool(req.params);}catch{/* Исход повторного вызова может быть неизвестен; больше не повторяем. */}
-      } else if(["dialogues_context_get","dialogues_message_get","dialogues_turn_get"].includes(req.params.name))throw e;
-      return {isError:true,content:[{type:"text" as const,text:"Исход записи не подтверждён. Сначала прочитайте актуальный ход, сообщение по исходному ID либо версию саммари. Повтор при неизвестном исходе не выполнялся."}]};
-    }
+    // Listener отвечает 404 на неизвестную сессию до вызова операции.
+    return callWithRecovery(req.params.name,()=>c.callTool(req.params),()=>reconnect(c),()=>client.callTool(req.params),stale);
   });
   server.onclose=()=>{void client.close();};
   process.stdin.once("end",()=>{void server.close().finally(()=>client.close());});

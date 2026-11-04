@@ -96,7 +96,7 @@ export function createContext(pool:DB,key:string){
  if(a.dialogue_id!==undefined){
  const t=(await db.query("SELECT id,version::text,status,purpose,constraints_text,final_message_id,reconciled_through_order FROM dialogues_live.turns WHERE owner_id=$1 AND dialogue_id=$2 AND managed AND status<>'completed'",[owner,a.dialogue_id])).rows[0];
  if(t){const messages=(await db.query("SELECT id,role,kind,text,source,occurred_at,recorded_at,message_order,item_order,content_hash AS sha256 FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 AND kind IN ('input','final') ORDER BY message_order",[owner,a.dialogue_id,t.id])).rows;
- for(const m of messages)if(m.kind==='final')m.publication_status=t.final_message_id===m.id?'confirmed':(t.reconciled_through_order!==null&&BigInt(m.message_order)<=BigInt(t.reconciled_through_order)?'not_confirmed':'awaiting_reconciliation');
+ for(const m of messages)if(m.kind==='final')m.final_state=t.final_message_id===m.id?'recorded':(t.reconciled_through_order!==null&&BigInt(m.message_order)<=BigInt(t.reconciled_through_order)?'reconciled_absent':'awaiting_reconciliation');
  const results=(await db.query('SELECT id,kind,formulation,source_refs,status,result,verification,reason,remainder,created_at,updated_at FROM dialogues_live.turn_results WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 ORDER BY created_at,id',[owner,a.dialogue_id,t.id])).rows;
  items.push({type:'turn_work',dialogue_id:a.dialogue_id,turn_id:t.id,version:t.version,text:JSON.stringify({dialogue_id:a.dialogue_id,turn_id:t.id,version:t.version,status:t.status,purpose:t.purpose,constraints:t.constraints_text,messages,results,pending:results.filter((r:any)=>r.kind==='work'&&r.status==='pending')})});}
  }

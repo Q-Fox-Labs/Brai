@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS dialogues_live.turn_results(
  PRIMARY KEY(owner_id,dialogue_id,turn_id,id),
  FOREIGN KEY(owner_id,dialogue_id,turn_id) REFERENCES dialogues_live.turns(owner_id,dialogue_id,id),
  CHECK(kind <> 'final' OR status IN ('pending','done')),
+ CHECK(kind <> 'work' OR status <> 'done' OR length(trim(coalesce(result,'')))>0),
  CHECK(status NOT IN ('not_done','cancelled') OR length(trim(coalesce(reason,'')))>0)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS turn_results_one_final ON dialogues_live.turn_results(owner_id,dialogue_id,turn_id) WHERE kind='final';

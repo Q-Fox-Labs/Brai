@@ -3,7 +3,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { randomUUID, createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { bytes, canonical, fail, id, integer, limits, object, text, DialoguesFault } from './domain.js';
-import { fieldId, message, mergeResult, requireReason, validateChanges, version } from './turn-domain.js';
+import { fieldId, message, mergeResult, requireCompletion, validateChanges, version } from './turn-domain.js';
 import { enqueueDialogue } from './jobs.js';
 type DB = Pick<Pool, 'connect'>;
 type Mutation = (owner: string, request: string, op: string, input: unknown, fn: (db: PoolClient, seq: string) => Promise<any>) => Promise<any>;
@@ -38,23 +38,24 @@ async function lookup(db: PoolClient, owner: string, dialogue: string, turn: str
 }
 async function applyChanges(db: PoolClient, owner: string, dialogue: string, turn: string, a: any) {
     let changed = false;
-    for (const row of [...(a.add ?? []), ...(a.update ?? [])])
-        if (row.source_refs?.length) {
-            const n = (await db.query("SELECT count(*)::int AS n FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 AND kind='input' AND id=ANY($4::text[])", [owner, dialogue, turn, row.source_refs])).rows[0].n;
-            if (n !== row.source_refs.length)
-                fail('INVALID_SOURCE_REFS');
-        }
-    for (const row of a.add ?? []) {
+    for (const kind of ['add','update'])
+        for (const [index,row] of (a[kind] ?? []).entries())
+            if (row.source_refs?.length) {
+                const n = (await db.query("SELECT count(*)::int AS n FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 AND kind='input' AND id=ANY($4::text[])", [owner, dialogue, turn, row.source_refs])).rows[0].n;
+                if (n !== row.source_refs.length)
+                    throw new DialoguesFault('INVALID_SOURCE_REFS',{field:`changes.${kind}[${index}].source_refs`,expected:'ID входов этого хода и владельца'});
+            }
+    for (const [index, row] of (a.add ?? []).entries()) {
         const status = row.status ?? 'pending';
-        requireReason(status, row.reason);
+        requireCompletion(status, row.result, row.reason, `changes.add[${index}]`);
         await db.query('INSERT INTO dialogues_live.turn_results(owner_id,dialogue_id,turn_id,id,kind,formulation,source_refs,status,result,verification,reason,remainder) VALUES($1,$2,$3,$4,\'work\',$5,$6,$7,$8,$9,$10,$11)', [owner, dialogue, turn, row.id, row.formulation, row.source_refs ?? [], status, row.result ?? null, row.verification ?? null, row.reason ?? null, row.remainder ?? null]);
         changed = true;
     }
-    for (const row of a.update ?? []) {
+    for (const [index, row] of (a.update ?? []).entries()) {
         const previous = (await db.query("SELECT * FROM dialogues_live.turn_results WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 AND id=$4 AND kind='work'", [owner, dialogue, turn, row.id])).rows[0];
         if (!previous)
             fail('RESULT_NOT_FOUND');
-        const { next, changed: resultChanged } = mergeResult(previous, row);
+        const { next, changed: resultChanged } = mergeResult(previous, row, `changes.update[${index}]`);
         if (resultChanged) {
             await db.query('UPDATE dialogues_live.turn_results SET formulation=$5,source_refs=$6,status=$7,result=$8,verification=$9,reason=$10,remainder=$11,updated_at=now() WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 AND id=$4', [owner, dialogue, turn, row.id, next.formulation, next.source_refs, next.status, next.result, next.verification, next.reason, next.remainder]);
             changed = true;
@@ -197,7 +198,7 @@ export function createTurns(pool: DB, key: string, mutation: Mutation) {
             const messages = (await db.query("SELECT id,role,kind,text,source,occurred_at,recorded_at,message_order,item_order,content_hash AS sha256 FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 AND kind IN ('input','final') ORDER BY message_order", [owner, a.dialogue_id, turn])).rows;
             for (const m of messages)
                 if (m.kind === 'final')
-                    m.publication_status = t.final_message_id === m.id ? 'confirmed' : (t.reconciled_through_order !== null && BigInt(m.message_order) <= BigInt(t.reconciled_through_order) ? 'not_confirmed' : 'awaiting_reconciliation');
+                    m.final_state = t.final_message_id === m.id ? 'recorded' : (t.reconciled_through_order !== null && BigInt(m.message_order) <= BigInt(t.reconciled_through_order) ? 'reconciled_absent' : 'awaiting_reconciliation');
             const results = (await db.query('SELECT id,kind,formulation,source_refs,status,result,verification,reason,remainder,created_at,updated_at FROM dialogues_live.turn_results WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 ORDER BY created_at,id', [owner, a.dialogue_id, turn])).rows;
             // Фрагменты передают полный снимок и не задают смысловой предел его размера.
             const snapshot = JSON.stringify({ dialogue_id: a.dialogue_id, turn_id: turn, version: String(t.version), status: t.status, purpose: t.purpose, constraints: t.constraints_text, messages, results, pending: results.filter((r: any) => r.kind === 'work' && r.status === 'pending') });
@@ -238,6 +239,8 @@ export function createTurns(pool: DB, key: string, mutation: Mutation) {
             await requireNoPending(db, owner, a.dialogue_id, a.turn_id);
             if ((await db.query("SELECT 1 FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 AND kind='final' AND message_order>COALESCE($4::bigint,-1)", [owner, a.dialogue_id, a.turn_id, t.reconciled_through_order])).rowCount)
                 fail('FINAL_RECONCILIATION_REQUIRED');
+            if ((await db.query('SELECT 1 FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND id=$3', [owner,a.dialogue_id,final.id])).rowCount)
+                fail('FINAL_ID_ALREADY_EXISTS');
             const saved = await insertMessage(db, owner, a.dialogue_id, a.turn_id, final, 'final', seq);
             await db.query("UPDATE dialogues_live.turn_results SET status='done',result=$4,updated_at=now() WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 AND kind='final'", [owner, a.dialogue_id, a.turn_id, final.text]);
             await db.query("UPDATE dialogues_live.turns SET status='completed',completion_seq=$4,final_message_id=$5 WHERE owner_id=$1 AND dialogue_id=$2 AND id=$3", [owner, a.dialogue_id, a.turn_id, seq, final.id]);

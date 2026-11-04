@@ -36,6 +36,7 @@
       "services/dialogues/src/turns.ts",
       "services/dialogues/src/turn-domain.ts",
       "services/dialogues/src/openrpc.ts",
+      "services/dialogues/src/proxy-recovery.ts",
       "services/dialogues/src/context.ts",
       "services/dialogues/src/jobs.ts",
       "services/dialogues/src/luna.ts"
@@ -49,6 +50,7 @@
       "services/dialogues/tests/turn-fixture.mjs",
       "services/dialogues/tests/turn-domain.test.mjs",
       "services/dialogues/tests/openrpc.test.mjs",
+      "services/dialogues/tests/proxy-recovery.test.mjs",
       "services/dialogues/tests/luna.test.mjs",
       "services/dialogues/tests/context-pages.test.mjs"
     ]
