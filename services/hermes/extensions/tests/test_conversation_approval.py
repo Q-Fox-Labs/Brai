@@ -46,6 +46,8 @@ REVIEW={"decision":"needs_consent","effects_known":True,"target":"Папка П�
 
 class ConsentTests(unittest.TestCase):
     def setUp(self):
+        self.configuration=patch.object(consent,"configuration",return_value={"interaction":"conversation"})
+        self.configuration.start()
         (ROOT/"tmp").mkdir(exist_ok=True)
         self.temp=tempfile.TemporaryDirectory(dir=ROOT/"tmp")
         self.db=Database(Path(self.temp.name)/"state.db")
@@ -53,6 +55,7 @@ class ConsentTests(unittest.TestCase):
         self.store=consent.Store(self.db)
         self.descriptor={"command":"delete trip","arguments":{},"cwd":self.temp.name}
     def tearDown(self):
+        self.configuration.stop()
         self.db.close()
         self.temp.cleanup()
     def prepare(self):
@@ -299,6 +302,18 @@ class ConsentTests(unittest.TestCase):
             self.assertTrue(consent.gate("another internal label")["approved"])
             self.assertIsNone(consent.update_arguments(args))
             self.assertEqual(consent.update_arguments({**args,"path":"another.txt"})["status"],"consent_changed")
+
+    def test_missing_configuration_cannot_consume_an_authorized_operation(self):
+        args={"command":"remove trip"}
+        with consent.turn_scope(self.db,source(),"session","Проверь папку","1"),consent.tool_scope("terminal",args,"first"):
+            with patch.object(consent,"review_action",return_value=REVIEW):
+                consent.gate(args["command"])
+        self.authorize(self.store.query(self.scope.key))
+        with consent.turn_scope(self.db,source(),"session","да","11"),consent.tool_scope("terminal",args,"run"):
+            with patch.object(consent,"configuration",return_value={}):
+                self.assertTrue(consent.enabled())
+                self.assertEqual(consent.gate(args["command"])["status"],"review_unavailable")
+        self.assertEqual(self.store.query(self.scope.key)["status"],"authorized")
 
     def test_plugin_cannot_rewrite_consumed_consent(self):
         args={"command":"remove trip"}

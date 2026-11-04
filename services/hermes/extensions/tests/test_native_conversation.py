@@ -93,6 +93,11 @@ class NativeConsentTests(unittest.TestCase):
             with patch.object(i18n,"_load_catalog",side_effect=lambda lang,home: {"fixture":"Hermes Agent: {value}"} if lang=="en" else {}):
                 self.assertEqual(i18n.t("fixture",lang=language,value="hermes config"),"Brai: hermes config")
 
+    def test_missing_profile_config_never_enters_legacy_transport(self):
+        with patch.object(approval.approval_context,"_get_approval_config",return_value={}),patch.object(approval,"_present_with_selected_transport",side_effect=AssertionError("legacy UI")):
+            self.assertTrue(consent.enabled())
+            self.assertEqual(self.invoke()["status"],"review_unavailable")
+
     def test_old_callback_never_grants_consent(self):
         self.assertEqual(approval.resolve_gateway_approval("test-session","always"),0)
     def test_unbound_child_has_no_technical_fallback(self):

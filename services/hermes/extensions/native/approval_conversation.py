@@ -52,10 +52,18 @@ def brand_text(text):
                    for part in protected.split(text))
 
 
+def configuration():
+    """Read managed approval settings without treating an unavailable profile as legacy mode."""
+    try:
+        from tools.approval_context import _get_approval_config
+        value=_get_approval_config()
+        return value if isinstance(value,dict) else {}
+    except Exception:
+        return {}
+
 def enabled():
-    """Read the active profile's opt-in without changing its configuration."""
-    from tools.approval_context import _get_approval_config
-    return _get_approval_config().get("interaction") == "conversation"
+    """Keep unknown/missing settings on the conversation path, which fails closed below."""
+    return configuration().get("interaction") not in ("native","legacy")
 
 def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -345,6 +353,8 @@ def gate(command, description="", *, cwd=None, backend=None):
 def _gate(command, description="", *, cwd=None, backend=None):
     """Return a conversation decision before every legacy human transport/fallback."""
     scope=_scope.get()
+    if configuration().get("interaction")!="conversation":
+        return _result("review_unavailable",_NOTICE)
     if scope is None or not scope.db or not scope.owner:
         return _result("review_unavailable",_NOTICE)
     action=_action.get()
