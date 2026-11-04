@@ -1,20 +1,27 @@
 ---
 name: brai-task-workflows
 description: Use when planning or continuing tasks in Brai.
-version: 0.2.0
+version: 0.3.0
 ---
 
-# Brai task workflows
+# Работа с поручениями
 
-Use the current owner-fixed tools and planning rules. This skill supplies data handling, never an alternative lifecycle.
+Game Core временно исключён из обязательного контура. Выполняй поручения прямо
+в текущем разговоре, без создания Элементов, Ходов, постановки и кнопок сервиса.
 
-1. Before creating anything, inspect the full current graph and compare the actual result, object, context, and time. Do not duplicate an existing task. Native `read_file` can paginate readable spill files; a preview, a truncated long line, or failed read is not a complete graph. Do not create blindly when full matching data is unavailable. For an already identified task, reread its available Moves and current inputs.
-2. Discover and describe real tools before writes. Use real IDs and actual required resources. After an unknown mutation outcome, read its record before any retry.
-3. For planning and replanning use the [packet protocol](references/planning-and-results.md). Reuse the existing correction Operation after actual owner remarks. Keep independent requirements before a candidate and verify that exact candidate before applying it.
-4. Read `game_core_request_human_action` for the current Action and call `brai_telegram_request_confirmation` with the returned IDs. That tool presents a saved plan or a required human decision. On success finish with exactly `NO_REPLY`. Do not duplicate the plan, invent a decision, or perform unapproved work.
-5. Remarks, cancellation, clarification answers, and practical human results must come from the real current Telegram message through the corresponding Telegram tool. A button is not evidence of practical work. Questions and discussion are not decisions.
-6. Continue permitted work using actual required resources and output contract keys. Set `approval_required=false` unless the user explicitly requested acceptance. Complete the available finish Operation and deliver the result; save any actual human choice or explicitly requested decision first. Verify completed status. On cancellation preserve completed work.
+1. Сверь исходное поручение, все уточнения и уже полученные результаты по истории
+   текущего разговора. Продолжай существующую работу, не создавай дубликаты.
+2. Используй реальные инструменты и материалы. Небольшой план веди во временной
+   рабочей заметке, когда это помогает. Не записывай фиктивное исполнение.
+3. Учитывай замечания сразу. Задавай обычным сообщением только существенный вопрос,
+   без которого нельзя продолжить. Не требуй повторного согласования внутреннего плана.
+4. Выполни разрешённую работу, проверь результат и передай его в этот же разговор.
+   Файлы сохраняй и доставляй через Artifacts; путь и обещание не заменяют файл.
+5. Соблюдай явные остановки и отмены. После неизвестного исхода внешнего действия
+   сначала сверь состояние; не повторяй запись вслепую.
 
-When Game Core is unavailable, continue work that does not depend on its data or a pending user decision. Do not invent records or decisions, and reconcile uncertain writes before retrying. If the request specifically requires saving or continuing a task, explain that this part is blocked.
+Промежуточные сообщения начинай с «⏳ Работаю:». Фоновое поручение означает работу,
+а не готовность. Не обещай автоматического продолжения, если оно не запущено.
 
-Keep progress brief and begin intermediate updates with `⏳ Работаю:`. Do not expose service checks. A background delegation is still work in progress, not completion. Return the required yield when native asynchronous delegation needs delivery on a later turn; never poll transcript files. Present a saved plan once through the confirmation tool.
+[Прежний протокол](references/planning-and-results.md) сохранён как справка для
+отдельной работы с Game Core. Не загружай и не применяй его для обычных поручений.

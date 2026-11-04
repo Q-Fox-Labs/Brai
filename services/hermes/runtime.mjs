@@ -137,6 +137,7 @@ export async function connectPorts(config) {
   try {
     const endpoints = {};
     for (const name of ['gameCore', 'history', 'transcription']) {
+      if (name === 'gameCore' && config.gameCore?.enabled === false) continue;
       const endpoint = config[name];
       const endpointClient = await connectMcpEndpoint(endpoint, { timeout, callTimeout: config.longRequestTimeoutMs ?? 300_000, endpointName: name });
       clients.push(endpointClient);
@@ -199,6 +200,8 @@ export async function createBraiTools(config, ports) {
     properties: { text: voiceDefinition.inputSchema.properties.text }, required: ['text'] };
   const validateVoiceInput = compileInput(voiceInputSchema);
   const endpointTools = new Map([['gameCore', gameCoreNames], ['history', historyNames], ['transcription', transcriptionNames], ['publisher', new Set(['publish_file', 'fetch_file'])]]);
+  const gameCoreEnabled = config.gameCore?.enabled !== false;
+  if (!gameCoreEnabled) endpointTools.delete('gameCore');
   const discovered = new Set(), discovering = new Map(), unavailable = new Set();
   for (const definition of natsTools) tools.push(definition === voiceDefinition
     ? { name: definition.name, description: 'Синтезировать текст локальным голосом. Запиши английские слова и числа кириллицей, раскрой символы словами. При VOICE_TEXT_REQUIRES_CYRILLIC исправь текст и повтори. При неизвестном исходе автоматического повтора нет.', inputSchema: voiceInputSchema }
@@ -208,7 +211,7 @@ export async function createBraiTools(config, ports) {
   const humanRequest = { name: 'game_core_request_human_action', description: 'Прочитать Action и следующий допустимый шаг. Для старого результата сначала проверь, поручал ли пользователь отдельное принятие. Этот вызов не начинает человеческую попытку.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['moveId'], properties: { moveId: { type: 'string', format: 'uuid' } } } };
   const validateHumanRequest = compileInput(humanRequest.inputSchema);
-  tools.push(humanRequest);
+  if (gameCoreEnabled) tools.push(humanRequest);
   const validatePlanningRead = compileInput(planningReadTool.inputSchema);
   async function discoverEndpoint(endpoint) {
     if (discovered.has(endpoint)) return;
@@ -240,7 +243,10 @@ export async function createBraiTools(config, ports) {
   }
   await listTools();
   let active = 0;
-  async function gameCoreCall(name, args, signal) { return ports.mcp('gameCore', name, args, signal); }
+  async function gameCoreCall(name, args, signal) {
+    if (!gameCoreEnabled) throw fault('GAME_CORE_DISABLED');
+    return ports.mcp('gameCore', name, args, signal);
+  }
   async function graph(signal) {
     const value = await gameCoreCall('game_core_graph_get', {}, signal);
     if (!Array.isArray(value.moves) || !Array.isArray(value.attempts) || !Array.isArray(value.elements)) throw fault('INVALID_UPSTREAM_RESPONSE');
@@ -259,6 +265,8 @@ export async function createBraiTools(config, ports) {
     /** Вызывает только объявленный инструмент; максимум восемь текущих вызовов, очереди нет. */
     async call(name, args = {}, signal) {
       if (!object(args) || hasOwner(args)) throw fault('INVALID_ARGUMENT');
+      // AIDEV-NOTE: Старый каталог загруженной сессии не может обойти выключение владельцем.
+      if (!gameCoreEnabled && name.startsWith('game_core_')) throw fault('GAME_CORE_DISABLED');
       if (name === 'local_ai_invoke_synthesize' && typeof args.text === 'string' && /[^А-Яа-яЁё\s.,!?;:—–\-…«»"'()]/u.test(args.text)) throw fault('VOICE_TEXT_REQUIRES_CYRILLIC');
       if (Buffer.byteLength(JSON.stringify(args)) > MAX_REQUEST_BYTES) throw fault('REQUEST_TOO_LARGE');
       if (active >= 8) throw fault('OVERLOADED');
