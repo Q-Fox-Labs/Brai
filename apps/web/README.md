@@ -194,3 +194,16 @@ FIFO ограничен 512 неизменными намерениями. Пу�
 - [components/ui/README.md](components/ui/README.md).
 - [public/brand/README.md](public/brand/README.md).
 - [public/fonts/README.md](public/fonts/README.md).
+
+## Дневник
+
+Раздел `/diary` сохраняет тексты, фотографии, аудио, видео и произвольные файлы.
+Записи и материалы хранятся неизменяемыми оригиналами в Artifacts. Запись сохраняется
+до файлов; принятые материалы доступны после обрыва и перезапуска. Расшифровки и
+исправления прикладываются раздельно. Обсуждения, распознавание и отправка провайдерам
+не включены. [Контракт](app/diary/CONTRACT.md) описывает HTTP и повторы.
+
+Web получает `DIARY_ARTIFACTS_INTERNAL_ORIGIN` (origin чтения файлов) и
+`DIARY_ARTIFACTS_UPLOAD_BASE_URL` (канонический origin загрузки Artifacts, одинаковый
+для DEV и preview). NATS identity нужны `prepare`, `get`, `list` Artifacts.
+Подключение Дневника не зависит от разрешения Agent.

@@ -1,0 +1,46 @@
+/* ABOUTME: Оформляет архив Дневника внутри общей рабочей оболочки. */
+/* ABOUTME: Сохраняет отдельную прокрутку и читаемость длинных оригинальных текстов. */
+.diary-screen{height:100%;overflow-y:auto;padding:32px clamp(20px,4vw,64px);color:var(--foreground);min-width:0}
+.diary-rail{padding:16px 12px;display:flex;flex-direction:column;gap:16px}
+.diary-rail>p,.diary-muted{color:var(--muted-foreground);font-size:13px;line-height:1.6}
+.diary-rail nav{display:flex;flex-direction:column;gap:4px}
+.diary-rail nav button{display:block;text-align:left;width:100%;padding:13px 12px;border-radius:8px;background:transparent;border:1px solid transparent;cursor:pointer}
+.diary-rail nav button:hover,.diary-rail nav button.selected{background:var(--accent);border-color:var(--border)}
+.diary-rail nav strong{display:block;font-weight:500;font-size:14px;overflow-wrap:anywhere}
+.diary-rail nav span{display:block;color:var(--muted-foreground);font-size:12px;margin-top:5px}
+.diary-entry,.diary-compose{max-width:760px;margin:0 auto}
+.diary-entry>header{border-bottom:1px solid var(--border);padding-bottom:24px;margin-bottom:32px}
+.diary-screen h1{font-size:clamp(26px,3vw,36px);line-height:1.25;letter-spacing:-.025em;font-weight:550;margin:8px 0 12px;overflow-wrap:anywhere}
+.diary-date{font-size:13px;color:var(--muted-foreground)}
+.diary-text{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;font:inherit;font-size:16px;line-height:1.85;max-width:100%;margin:0}
+.diary-compose{display:flex;flex-direction:column;gap:18px;padding-bottom:48px}
+.diary-compose label{display:flex;flex-direction:column;gap:7px;font-size:13px}
+.diary-compose input:not([type=file]),.diary-compose textarea,.diary-compose select{border:1px solid var(--border);border-radius:8px;background:var(--background);color:var(--foreground);padding:10px 12px;min-width:0}
+.diary-compose textarea{font-size:16px;line-height:1.7;resize:vertical}
+.diary-compose input:focus-visible,.diary-compose textarea:focus-visible,.diary-compose select:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.diary-compose input:disabled,.diary-compose textarea:disabled{opacity:.6}
+.diary-compose .diary-upload{align-items:center;flex-direction:row;flex-wrap:wrap;padding:16px;border:1px dashed var(--border);border-radius:10px}
+.diary-upload input{max-width:100%;font-size:13px}
+.diary-upload-list{display:flex;flex-direction:column;gap:12px;list-style:none;padding:0}
+.diary-upload-list li{display:flex;gap:12px;align-items:center;justify-content:space-between;font-size:13px}
+.diary-upload-list li span{min-width:0;overflow-wrap:anywhere}
+.diary-upload-list small{display:block;color:var(--muted-foreground);margin-top:4px}
+.diary-compose>button{align-self:flex-start}
+.diary-empty{height:100%;min-height:340px;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;gap:12px}
+.diary-empty>svg{color:var(--muted-foreground)}
+.diary-empty p{font-size:14px;color:var(--muted-foreground);line-height:1.75;margin:0 0 12px}
+.diary-message{max-width:760px;margin:0 auto 20px;padding:14px 16px;border:1px solid var(--border);border-radius:8px;font-size:13px;line-height:1.7}
+.diary-error{border-color:var(--destructive);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.diary-materials{display:flex;flex-direction:column;gap:20px;margin-top:36px;padding-bottom:32px}
+.diary-materials h2{font-size:15px;font-weight:600}
+.diary-material{border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.diary-material header{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px 16px;background:var(--muted)}
+.diary-material header strong{display:block;font-size:13px;font-weight:500;overflow-wrap:anywhere}
+.diary-material header span{display:block;margin-top:4px;font-size:12px;color:var(--muted-foreground)}
+.diary-material header a{padding:6px}
+.diary-material img,.diary-material video{display:block;max-width:100%;max-height:720px;object-fit:contain;margin:0 auto}
+.diary-material audio{display:block;width:calc(100% - 32px);margin:16px}
+.diary-material details{padding:16px}
+.diary-material summary{cursor:pointer;font-size:13px;margin-bottom:12px}
+.diary-file-link{display:flex;align-items:center;gap:8px;padding:18px;font-size:13px;text-decoration:underline}
+@media(max-width:600px){.diary-screen{padding:24px 18px}.diary-upload-list li{align-items:flex-start;flex-direction:column}.diary-entry>header{padding-bottom:18px;margin-bottom:24px}}
