@@ -55,7 +55,7 @@ export default function TelegramAgentEntry({ username, active = true, enabled = 
     <section className="w-full rounded-2xl border bg-card p-8 text-card-foreground shadow-sm sm:p-10">
       <p className="text-sm font-medium text-muted-foreground">Brai Agent</p>
       <h1 className="mt-2 text-2xl font-semibold tracking-tight">Продолжайте в Telegram</h1>
-      <p className="mt-3 max-w-xl text-sm leading-6 text-muted-foreground">Откройте рабочий чат Brai в Telegram и отправьте сообщение боту{username ? ` @${username}` : ""}. Hermes продолжит разговор в этом чате.</p>
+      <p className="mt-3 max-w-xl text-sm leading-6 text-muted-foreground">Откройте рабочий чат Brai в Telegram и отправьте сообщение боту{username ? ` @${username}` : ""}. Brai продолжит разговор в этом чате.</p>
     </section>
   </main></WorkspaceFrame>;
   return <TelegramObserver userId={userId} username={username} active={active} />;

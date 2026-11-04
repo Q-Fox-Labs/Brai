@@ -206,7 +206,9 @@
       "services/hermes/telegram/observer/outgoing.py",
       "services/hermes/telegram/observer/server.mjs",
       "services/hermes/telegram/observer/CONTRACT.md",
-      "services/hermes/telegram/observer/asyncapi.yaml"
+      "services/hermes/telegram/observer/asyncapi.yaml",
+      "services/hermes/extensions/native/approval_conversation.py",
+      "services/hermes/extensions/patches/conversational-approvals.patch"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
@@ -492,7 +494,9 @@
       "services/hermes/telegram/observer/outgoing.py",
       "services/hermes/telegram/observer/server.mjs",
       "services/hermes/telegram/observer/CONTRACT.md",
-      "services/hermes/telegram/observer/asyncapi.yaml"
+      "services/hermes/telegram/observer/asyncapi.yaml",
+      "services/hermes/extensions/native/approval_conversation.py",
+      "services/hermes/extensions/patches/conversational-approvals.patch"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",
