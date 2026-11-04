@@ -40,7 +40,7 @@ export function createJobs(pool:Pool,owner:string,luna:Pick<ReturnType<typeof cr
   });
  }
  async function save(job:any,progress:any){
-  const execution:Execution=progress.execution?.native_thread_id?progress.execution:progress.probe_execution??{};
+  const execution:Execution=progress.execution?.execution_state?progress.execution:progress.probe_execution??{};
   const r=await pool.query(`UPDATE dialogues_live.summary_jobs SET progress=$4,native_thread_id=$5,native_turn_id=$6,native_launch_id=$7,execution_state=$8,lease_until=now()+interval '3 minutes'
    WHERE owner_id=$1 AND id=$2 AND lease_id=$3 AND state='running'`,[owner,job.id,job.lease_id,progress,execution.native_thread_id??null,execution.native_turn_id??null,execution.native_launch_id??null,execution.execution_state??'not_started']);
   if(r.rowCount!==1)fail('LEASE_LOST');
@@ -95,7 +95,7 @@ export function createJobs(pool:Pool,owner:string,luna:Pick<ReturnType<typeof cr
    await publish(job,progress.working_summary);
   }catch(e){
    const code=e instanceof DialoguesFault?e.code:'SUMMARY_EXECUTION_FAILED';
-   // AIDEV-NOTE: Ambiguous execution сохраняет IDs и при повторе только читается.
+   // AIDEV-NOTE: Потерянный временный запрос повторяется из сохранённого фрагмента; lease и лимит попыток сохраняются.
    await pool.query(`UPDATE dialogues_live.summary_jobs SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'queued' END,
     available_at=now()+make_interval(secs=>30*attempts),lease_id=NULL,lease_until=NULL,error_code=$4
     WHERE owner_id=$1 AND id=$2 AND lease_id=$3 AND state='running'`,[owner,job.id,job.lease_id,code]);
