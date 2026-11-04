@@ -174,11 +174,12 @@ class Client:
         self.user_id = str(config["user_id"])
         self.cube_id = str(config["cube_id"])
         self._stream_version = None
+        self._index_version = None
         self.timeout = float(config.get("request_timeout", 30))
         # A proxy configured for other providers must never see local memory traffic.
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    def request(self, path, body=None, *, timeout=None):
+    def request(self, path, body=None, *, timeout=None, allow_missing=False):
         """Выполнить scoped API без повтора записи при потере ответа."""
         if (path == '/product/get_memory' and isinstance(body, dict)
                 and not set(body) - {'mem_cube_id', 'user_id', 'filter', 'include_preference',
@@ -186,7 +187,7 @@ class Client:
                 and all(body.get(flag) is False for flag in
                         ('include_preference', 'include_tool_memory', 'include_skill_memory'))):
             return self._memory_read(body, timeout)
-        return self._request_json(path, body, timeout=timeout)
+        return self._request_json(path, body, timeout=timeout, allow_missing=allow_missing)
 
     def _request_json(self, path, body=None, *, timeout=None, allow_missing=False):
         request = urllib.request.Request(
@@ -297,6 +298,41 @@ class Client:
                 del pending[:end]
             if len(pending) > 8388608:
                 raise MemOSError('MemOS memory stream record is too large')
+
+
+    def indexed_search(self, query, *, cubes, scope, author_id, shared_infra=False,
+                       project=None, goal='evidence'):
+        """Вернуть все индексные совпадения; None означает только старый backend."""
+        if self._index_version is None:
+            capabilities = self.request('/product/memory_capabilities', allow_missing=True)
+            data = (capabilities or {}).get('data', {})
+            if not isinstance(data, dict):
+                raise MemOSError('MemOS memory capabilities are invalid')
+            version = data.get('recall_index')
+            if version is not None and (type(version) is not int or version != 1):
+                raise MemOSError('MemOS recall index version is incompatible')
+            self._index_version = version or False
+        if self._index_version is False:
+            return None
+        response = self.request('/product/recall_index', {
+            'query': query, 'cubes': cubes, 'user_id': self.user_id, 'scope': scope,
+            'author_id': author_id, 'shared_infra': shared_infra, 'project': project, 'goal': goal})
+        data = response.get('data')
+        if (not isinstance(data, dict) or type(data.get('version')) is not int or data['version'] != 1
+                or data.get('complete') is not True or not isinstance(data.get('memories'), list)
+                or any(type(data.get(key)) is not int or data[key] < 0
+                       for key in ('physical_count', 'logical_count', 'matched_count'))
+                or not len(data['memories']) == data['matched_count'] <= data['logical_count'] <= data['physical_count']):
+            raise MemOSError('MemOS recall index result is incomplete or invalid')
+        seen = set()
+        for row in data['memories']:
+            if (not isinstance(row, dict) or not isinstance(row.get('id'), str)
+                    or row['id'] in seen or row.get('_cube_id') not in cubes
+                    or not isinstance(row.get('metadata'), dict)
+                    or row['metadata'].get('user_id') != self.user_id):
+                raise MemOSError('MemOS recall index returned invalid or foreign memory')
+            seen.add(row['id'])
+        return data
 
     def health(self):
         return self.request("/health", timeout=3)

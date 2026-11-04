@@ -539,7 +539,7 @@ class MemOSProvider(MemoryProvider):
         if key is None:
             return ""
         with self._lock:
-            cached = self._cache.get(key)
+            cached = None if self.routing else self._cache.get(key)
         try:
             rows = cached[1] if cached and time.monotonic() - cached[0] < 30 else self._search(query, sid, None)
             if self._recall_key(sid, query) != key:
