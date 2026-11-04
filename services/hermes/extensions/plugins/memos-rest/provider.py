@@ -20,7 +20,7 @@ from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_promp
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write, read_json_or_empty
 
-from .client import Client, MemOSError, public_memory, internal_dialogue
+from .client import Client, MemOSError, public_memory, internal_dialogue, recall_budget
 from .outbox import Outbox
 from .schemas import TOOLS, ROUTED_TOOLS
 
@@ -29,7 +29,7 @@ DEFAULTS = {
     "base_url": "http://127.0.0.1:8001", "user_id": "root", "cube_id": "main",
     "relativity": 0.45, "excerpt_chars": 1400,
     "request_timeout": 30, "tool_write_timeout": 10, "flush_timeout": 10,
-    "prefetch_timeout_seconds": 60,
+    "prefetch_timeout_seconds": 180,
 }
 
 
@@ -491,6 +491,10 @@ class MemOSProvider(MemoryProvider):
             self._cache.clear()
 
     def _search(self, query, sid, top_k):
+        with recall_budget(self.prefetch_timeout_seconds):
+            return self._search_with_budget(query, sid, top_k)
+
+    def _search_with_budget(self, query, sid, top_k):
         if self.routing:
             return self.routing.search(scrub(query), sid, top_k, expand_sources=True,
                                        context=self.recent_dialogue)
@@ -520,6 +524,12 @@ class MemOSProvider(MemoryProvider):
                 digest(self.routing.catalog.data) if self.routing else '')
 
     def prefetch(self, query, *, session_id=""):
+        """Прочитать память до общего срока, оставив Hermes время на завершение."""
+        seconds = self.prefetch_timeout_seconds
+        with recall_budget(seconds - min(1, seconds / 10)):
+            return self._prefetch_with_budget(query, session_id=session_id)
+
+    def _prefetch_with_budget(self, query, *, session_id=""):
         with self._lock:
             self._recall = None
         if is_trivial_prompt(query) or len(query.strip()) < 3:
@@ -676,9 +686,10 @@ class MemOSProvider(MemoryProvider):
                 raise ValueError('Legacy top_k must be a positive integer; omit it for complete recall')
             # AIDEV-NOTE: Старые сессии ещё могут прислать прежний top_k.
             # Он не должен снова обрезать ответ инструмента модели.
-            rows = (self.routing.search(query, sid, None, args.get('project'), args.get('cubes'),
-                                        bool(args.get('include_archive', False)), bool(args.get('all_cubes', False)))
-                    if self.routing else self._search(query, sid, None))
+            with recall_budget(self.prefetch_timeout_seconds):
+                rows = (self.routing.search(query, sid, None, args.get('project'), args.get('cubes'),
+                                            bool(args.get('include_archive', False)), bool(args.get('all_cubes', False)))
+                        if self.routing else self._search(query, sid, None))
             return {"status": "ok", "memories": [public_memory(row) for row in rows],
                     "returned": len(rows), "scanned": getattr(rows, 'scanned', None),
                     "result_limit_applied": False,

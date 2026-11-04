@@ -2,6 +2,8 @@
 # ABOUTME: Основание — цитаты и цель разговора; правила по ключевым словам не используются.
 """Semantic extraction and independent review, with exact source grounding."""
 import hashlib
+import logging
+import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -12,7 +14,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from .client import MemOSError, document_references
+from .client import MemOSError, document_references, remaining_timeout, context_map
+
+logger = logging.getLogger(__name__)
 
 STATUSES = {'idea', 'plan', 'decision', 'reported_done', 'verified_done', 'observation', 'preference', 'unknown'}
 QUALITY_VERSION = 'grounded-facts-v4'
@@ -235,14 +239,36 @@ class SemanticRouter:
         if key:
             headers['Authorization'] = 'Bearer ' + key
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        data = json.loads(payload[-1]['content'])
+        stage = ('plan' if 'recall_goal_query' in data else 'rank' if 'recall_candidates' in data
+                 else 'review' if 'candidates' in data else 'extract')
         def request(path, body=None):
-            req = urllib.request.Request(base + path, headers=headers,
+            budget = remaining_timeout(float(self.config.get('timeout', 90)))
+            request_headers = {**headers, 'X-Memos-Timeout-Seconds': str(budget), 'X-Memos-Stage': stage}
+            req = urllib.request.Request(base + path, headers=request_headers,
                 data=None if body is None else json.dumps(body, ensure_ascii=False).encode())
+            started = time.monotonic()
+            outcome = 'ok'
             try:
-                with opener.open(req, timeout=float(self.config.get('timeout', 90))) as response:
-                    return json.load(response)
-            except (OSError, ValueError):
-                raise MemOSError('Semantic router request failed') from None
+                with opener.open(req, timeout=budget) as response:
+                    result = json.load(response)
+                remaining_timeout(budget)
+                return result
+            except MemOSError:
+                outcome = 'deadline'
+                raise
+            except urllib.error.HTTPError as exc:
+                outcome = 'http_' + str(exc.code)
+                exc.close()
+                raise MemOSError(f'Semantic router {stage}: HTTP {exc.code}') from None
+            except (TimeoutError, OSError, ValueError) as exc:
+                outcome = ('timeout' if isinstance(exc, TimeoutError) or
+                           isinstance(getattr(exc, 'reason', None), TimeoutError)
+                           else 'invalid_json' if isinstance(exc, ValueError) else 'connection')
+                raise MemOSError(f'Semantic router {stage}: {outcome}') from None
+            finally:
+                logger.info('MemOS model request: stage=%s outcome=%s elapsed=%.3fs',
+                            stage, outcome, time.monotonic() - started)
         model = self.config.get('model')
         if not model:
             models = request('/v1/models').get('data', [])
@@ -566,7 +592,7 @@ class SemanticRouter:
         references = list(dict.fromkeys(ref for _, c in indexed for ref in c['document_refs']))
         if resolver and references:
             with ThreadPoolExecutor(max_workers=min(4, len(references))) as executor:
-                metadata = dict(zip(references, executor.map(resolver, references)))
+                metadata = dict(zip(references, context_map(executor, resolver, references)))
             indexed = [(i, {**c, 'document_metadata': [metadata[ref] for ref in c['document_refs']
                                                      if metadata[ref] is not None]}) for i, c in indexed]
         if goal == 'latest_conversation':
@@ -675,12 +701,12 @@ class SemanticRouter:
                          if newest is None or dialogue_date(batch[0][1]) >= newest]
             if remaining:
                 with ThreadPoolExecutor(max_workers=min(4, len(remaining))) as executor:
-                    results.extend(executor.map(evaluate, remaining))
+                    results.extend(context_map(executor, evaluate, remaining))
         elif len(batches) == 1:
             results = [evaluate(batches[0])]
         else:
             with ThreadPoolExecutor(max_workers=min(4, len(batches))) as executor:
-                results = list(executor.map(evaluate, batches))
+                results = list(context_map(executor, evaluate, batches))
         matches = [match for result in results for match in result['matches']]
         if goal == 'latest_topic' and matches:
             latest = {i for i, _ in latest_dialogue([(m['index'], candidates[m['index']]) for m in matches])}

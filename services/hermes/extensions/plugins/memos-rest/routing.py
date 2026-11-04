@@ -2,14 +2,19 @@
 # ABOUTME: Переписка хранится отдельно от фактов; автор и область проверяются локально.
 """Profile-local multi-cube worker. Durable jobs pin extraction before delivery."""
 import json
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 import math
 import re
 from collections import Counter
 from pathlib import Path
 
-from .client import Client, MemOSError, fact_fields, memory_text, internal_dialogue
+from .client import Client, MemOSError, fact_fields, memory_text, internal_dialogue, context_map, remaining_timeout
 from .router import Catalog, SemanticRouter, stable_id, QUALITY_VERSION, evidence_context
+
+
+logger = logging.getLogger(__name__)
 
 
 class RecallRows(list):
@@ -316,6 +321,7 @@ class RoutedRuntime:
         остальные знания. BM25 только упорядочивает кандидатов; смысловой
         проверяющий решает, относятся ли они к вопросу, и может вернуть ноль.
         """
+        started = time.monotonic()
         config = self.reload()
         if not config.get('enabled', True) or config.get('suspended', False):
             return RecallRows()
@@ -331,9 +337,9 @@ class RoutedRuntime:
                 return RecallRows(needs_topic=True, source_query=query)
         candidates, source_dates = {}, {}
         def collect(cube):
-            return self.client(cube).get({})
+            return self.client(cube).get({}, timeout=remaining_timeout(self.api.timeout))
         with ThreadPoolExecutor(max_workers=min(4, max(1, len(selected)))) as executor:
-            pools = list(executor.map(collect, selected))
+            pools = list(context_map(executor, collect, selected))
         for pool in pools:
             for row in pool:
                 if not self.allowed(row, config):
@@ -390,6 +396,9 @@ class RoutedRuntime:
             scanned += len(archive)
             archive_searched = True
             result = {**source_result, 'needs_sources': result['needs_sources'] or source_result['needs_sources']}
+        remaining_timeout(self.api.timeout)
+        logger.info('MemOS search: scanned=%d matched=%d archive=%s elapsed=%.3fs',
+                    scanned, len(rows), archive_searched, time.monotonic() - started)
         rows.sort(key=lambda row: row['_relevance'] != 'direct')
         return RecallRows(rows[:top_k], scanned=scanned, needs_sources=result['needs_sources'],
                           source_query=result['source_query'], archive_searched=archive_searched)

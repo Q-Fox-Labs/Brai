@@ -3,6 +3,8 @@
 """MemOS product API; all reads and writes explicitly select one configured cube."""
 
 import hashlib
+from contextlib import contextmanager
+from contextvars import ContextVar, copy_context
 import http.client
 import json
 import re
@@ -18,6 +20,39 @@ MAX_MEMORY_PART_BYTES = 768
 
 class MemOSError(RuntimeError):
     pass
+
+
+# AIDEV-NOTE: Срок принадлежит одному поиску, а не общему экземпляру provider.
+# Отдельная context copy передаёт тот же срок каждому параллельному пакету.
+_RECALL_DEADLINE = ContextVar("memos_recall_deadline", default=None)
+
+
+@contextmanager
+def recall_budget(seconds):
+    """Ограничить весь поиск одним сроком; вложенный вызов не продлевает его."""
+    deadline = time.monotonic() + seconds
+    previous = _RECALL_DEADLINE.get()
+    token = _RECALL_DEADLINE.set(min(deadline, previous) if previous is not None else deadline)
+    try:
+        yield
+        remaining_timeout(seconds)
+    finally:
+        _RECALL_DEADLINE.reset(token)
+
+
+def remaining_timeout(cap):
+    """Вернуть оставшиеся секунды до общего срока, не превышая лимит операции."""
+    deadline = _RECALL_DEADLINE.get()
+    remaining = min(float(cap), deadline - time.monotonic()) if deadline is not None else float(cap)
+    if remaining <= 0:
+        raise MemOSError("Memory search deadline exceeded")
+    return remaining
+
+
+def context_map(executor, function, items):
+    """Передать срок поиска каждому worker, сохранив порядок и ошибки map."""
+    work = [(copy_context(), item) for item in items]
+    return executor.map(lambda pair: pair[0].run(function, pair[1]), work)
 
 
 def memory_rows(response):
@@ -160,7 +195,7 @@ class Client:
             headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
         try:
-            with self.opener.open(request, timeout=timeout or self.timeout) as response:
+            with self.opener.open(request, timeout=remaining_timeout(timeout or self.timeout)) as response:
                 result = json.load(response)
         except urllib.error.HTTPError as exc:
             exc.close()
@@ -178,7 +213,7 @@ class Client:
 
     def _memory_read(self, body, timeout):
         """Выбрать поток по явной версии; старый API сохраняет полную выдачу."""
-        deadline = time.monotonic() + (timeout or self.timeout)
+        deadline = time.monotonic() + remaining_timeout(timeout or self.timeout)
         if self._stream_version is None:
             capabilities = self._request_json('/product/memory_capabilities', allow_missing=True, timeout=timeout)
             data = (capabilities or {}).get('data', {})
