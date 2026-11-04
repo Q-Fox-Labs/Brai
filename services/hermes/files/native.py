@@ -89,16 +89,30 @@ def batch_key(event, group):
 
 
 async def capture(adapter, event):
-    """Сохранить элемент после авторизации, до debounce и декодирования."""
+    """Опубликовать вход; при ошибке не оставлять финал в ожидании файла."""
+    try:
+        return await _capture(adapter, event)
+    except BaseException:
+        reserved = getattr(event, '_brai_preparation', None)
+        if reserved is not None:
+            reserved[2].set()
+        raise
+
+
+async def _capture(adapter, event):
+    """Отдельный готовый файл уточняет ход сразу; настоящий альбом сохраняет сборку."""
     runner = getattr(adapter, 'gateway_runner', None)
     raw = getattr(event, 'raw_message', None)
     if (runner is None or not runner._is_user_authorized_for_source(event.source)
             or not getattr(event.source, 'user_id', None) or getattr(event.source, 'is_bot', False)
             or getattr(raw, 'sender_chat', None) or getattr(raw, 'business_connection_id', None)):
         raise FileError('FILES_NOT_AUTHORIZED')
+    reservation = reserve_steer_input(runner, event)
     try:
         await accept_event(event, admit=False)
-    except Exception:
+    except BaseException:
+        if reservation is not None:
+            reservation.set()
         await _notify_observer('observe_files', event, 'failed')
         raise
     await _notify_observer('observe_files', event, 'ready')
@@ -107,6 +121,17 @@ async def capture(adapter, event):
         lease = store().materialize(refs, ['capture', source_of(event), str(event.message_id)])
         await asyncio.to_thread(lease.__enter__)
         event._brai_capture_leases = [lease]
+    key_for_source = getattr(runner, '_session_key_for_source', None)
+    # Настоящий альбом сохраняет media_group_id и передаётся целым набором после сборки.
+    if (callable(key_for_source) and not getattr(runner, '_draining', False)
+            and not getattr(raw, 'media_group_id', None)):
+        if await steer_active_input(runner, event, key_for_source(event.source)):
+            event.metadata['_brai_steered'] = True
+            accept = getattr(adapter, '_accept_update', None)
+            if callable(accept):
+                accept()
+            return True
+    return False
 
 
 async def accept_event(event, admit=True):
@@ -194,28 +219,272 @@ async def accept_event(event, admit=True):
     return True
 
 
-def should_queue_inbound_set(event):
-    """Фото Telegram, альбом или дополнение ждёт занятый ход без прерывания."""
-    refs = (getattr(event, 'metadata', None) or {}).get('_brai_artifacts', [])
-    if len(refs) > 1:
-        return True
-    if not refs:
+class SteerText(str):
+    """Нести проверенные inline-изображения вместе со строкой штатного steer."""
+
+    def __new__(cls, text, images=(), admission=None):
+        """Связать строку с проверенными изображениями и однократной фиксацией допуска."""
+        value = super().__new__(cls, text)
+        value.images, value.admission = tuple(images), admission
+        return value
+
+    def strip(self, chars=None):
+        """Сохранить вложения при штатной нормализации steer."""
+        return SteerText(super().strip(chars), self.images, self.admission)
+
+    def __add__(self, other):
+        """Не терять изображения при объединении последовательных уточнений."""
+        if not isinstance(other, str):
+            return NotImplemented
+        return SteerText(str(self) + str(other), self.images + getattr(other, 'images', ()))
+
+    def __radd__(self, other):
+        """Поддержать добавление обычного текстового префикса к steer."""
+        if not isinstance(other, str):
+            return NotImplemented
+        return SteerText(str(other) + str(self), getattr(other, 'images', ()) + self.images)
+
+
+def steer_content(text, formatted):
+    """Вернуть штатный маркер с изображениями только из проверенного файлового входа."""
+    images = getattr(text, 'images', ())
+    return [{'type': 'text', 'text': formatted}, *images] if images else formatted
+
+
+def admit_steer(agent, text):
+    """Под lock штатного steer согласовать приём с атомарной границей финала."""
+    if getattr(agent, '_brai_steer_closed', False):
         return False
-    platform = getattr(getattr(event, 'source', None), 'platform', None)
-    if (str(getattr(platform, 'value', platform)) == 'telegram'
-            and any(item.get('file', {}).get('mimeType', '').startswith('image/') for item in refs)):
-        return True
-    if (getattr(event, 'metadata', None) or {}).get('recovered'):
-        return True
-    with store().db() as db:
-        for group in {item['groupId'] for item in refs}:
-            row = db.execute('SELECT admitted FROM groups WHERE identity=?', (group,)).fetchone()
-            if row and row[0] and json.loads(row[0]):
-                return True
-            origin = db.execute('SELECT source FROM items WHERE group_key=? LIMIT 1', (group,)).fetchone()
-            if origin and json.loads(origin[0]).get('mediaGroupId') is not None:
-                return True
-    return False
+    admission = getattr(text, 'admission', None)
+    if admission is not None:
+        admission()
+        text.admission = None
+    return True
+
+
+def continue_final_steer(agent, messages):
+    """Учесть принятый до фиксации финала steer в том же цикле, не публикуя черновик."""
+    if getattr(agent, '_brai_steer_turn', None) is None:
+        return False
+    turn = agent._brai_steer_turn
+    while True:
+        with agent._pending_steer_lock:
+            if turn._brai_steer_generation is not agent._brai_steer_generation:
+                return False
+            preparing = tuple(getattr(turn, '_brai_preparing_inputs', {}).values())
+            waiting = [item for item in preparing if not item.is_set()]
+            if not waiting:
+                turn._brai_preparing_inputs = {}
+                pending = agent._pending_steer
+                if not pending:
+                    agent._brai_steer_closed = True
+                    return False
+                agent._pending_steer = None
+                break
+        if getattr(agent, '_interrupt_requested', False):
+            return False
+        # Ждём только уже принятый файловый вход этого хода, не завершая ответ раньше него.
+        waiting[0].wait(0.2)
+    from agent.prompt_builder import steer_user_row
+    from agent.message_metadata import append_message
+    append_message(messages, steer_user_row(pending))
+    return True
+
+
+def _steer_identity(source, message_id):
+    return (str(getattr(source.platform, 'value', source.platform)), str(source.chat_id),
+            str(source.thread_id or ''), str(source.user_id or ''), str(message_id))
+
+
+def _steer_lock(turn):
+    import threading
+    if not hasattr(turn, '_brai_steer_lock'):
+        turn._brai_steer_lock = threading.RLock()
+        turn._brai_steer_generation = object()
+    return turn._brai_steer_lock
+
+
+def reserve_steer_input(runner, event):
+    """Удержать финал, пока уже принятый файл публикуется или собирается настоящий альбом."""
+    import threading
+    key_for_source = getattr(runner, '_session_key_for_source', None)
+    if not callable(key_for_source) or not runner._is_user_authorized_for_source(event.source):
+        return None
+    state = runner._peek_session_state(key_for_source(event.source))
+    if state is None or not state.turn.started_ts:
+        return None
+    turn = state.turn
+    with _steer_lock(turn):
+        agent = getattr(turn, '_brai_steer_agent', None)
+        with agent._pending_steer_lock if agent is not None else nullcontext():
+            if agent is not None and getattr(agent, '_brai_steer_closed', False):
+                return None
+            group = getattr(getattr(event, 'raw_message', None), 'media_group_id', None)
+            identity = (source_of(event)['sender'], str(group or event.message_id))
+            preparing = getattr(turn, '_brai_preparing_inputs', {})
+            ready = preparing.get(identity)
+            if ready is None or ready.is_set():
+                ready = threading.Event()
+                preparing[identity] = ready
+            turn._brai_preparing_inputs = preparing
+            event._brai_preparation = (turn, turn._brai_steer_generation, ready)
+            return ready
+
+
+def finish_steer_preparation(event):
+    """Снять ожидание файлового входа, отклонённого до передачи исполнителю."""
+    reserved = getattr(event, '_brai_preparation', None)
+    if reserved is not None:
+        reserved[2].set()
+
+
+def bind_steer_turn(agent, runner, ctx):
+    """Связать ожидающие уточнения с исполнителем того же поколения хода."""
+    if str(getattr(ctx.source.platform, 'value', ctx.source.platform)) != 'telegram':
+        return
+    state = runner._peek_session_state(ctx.session_key)
+    generation = getattr(ctx, 'run_generation', None)
+    if state is None or (generation is not None and not runner._is_session_run_current(ctx.session_key, generation)):
+        return
+    turn = state.turn
+    with _steer_lock(turn):
+        if turn.ctx is not None and turn.ctx is not ctx:
+            clear_steer_turn(turn)
+        # Native promotion публикует ctx лишь через polling; ранние входы принадлежат уже занятому ходу.
+        turn.ctx, turn.agent = ctx, agent
+        agent._brai_steer_closed = False
+        agent._brai_steer_turn = turn
+        agent._brai_steer_generation = turn._brai_steer_generation
+        turn._brai_steer_agent = agent
+        ids = getattr(turn, '_brai_input_ids', set())
+        ids.add(_steer_identity(ctx.source, ctx.inbound_message_id))
+        turn._brai_input_ids = ids
+        pending, turn._brai_pending_steers = getattr(turn, '_brai_pending_steers', []), []
+        for payload in pending:
+            if not agent.steer(payload):
+                raise FileError('STEER_INPUT_NOT_ACCEPTED')
+
+
+def release_steer_inputs(agent):
+    """Освободить временные копии уточнений после завершения текущего исполнителя."""
+    turn = getattr(agent, '_brai_steer_turn', None)
+    if turn is not None:
+        with agent._pending_steer_lock:
+            agent._brai_steer_closed = True
+        with _steer_lock(turn):
+            if getattr(turn, '_brai_steer_agent', None) is agent:
+                events, turn._brai_steer_events = getattr(turn, '_brai_steer_events', []), []
+                for event in events:
+                    release_event(event)
+
+
+def clear_steer_turn(turn):
+    """Не переносить IDs и временные копии завершённого хода в следующий."""
+    with _steer_lock(turn):
+        for event in getattr(turn, '_brai_steer_events', []):
+            release_event(event)
+        for ready in getattr(turn, '_brai_preparing_inputs', {}).values():
+            ready.set()
+        turn._brai_preparing_inputs = {}
+        turn._brai_steer_generation = object()
+        turn._brai_steer_events = []
+        turn._brai_pending_steers = []
+        turn._brai_input_ids = set()
+        turn._brai_steer_agent = None
+
+
+async def steer_active_input(runner, event, session_key):
+    """Передать авторизованный Telegram-вход текущему ходу вместо FIFO новых задач."""
+    platform = str(getattr(event.source.platform, 'value', event.source.platform))
+    if platform != 'telegram' or getattr(event, 'internal', False):
+        return False
+    if not runner._is_user_authorized_for_source(event.source):
+        return False
+    state = runner._peek_session_state(session_key)
+    if state is None or not state.turn.started_ts:
+        return False
+    turn = state.turn
+    with _steer_lock(turn):
+        generation = turn._brai_steer_generation
+    reserved = getattr(event, '_brai_preparation', None)
+    if reserved is not None and (reserved[0] is not turn or reserved[1] is not generation):
+        release_event(event)
+        return True  # Завершённый/остановленный ход не передаёт свой отложенный вход новому.
+    if not getattr(event, '_bot_loop_admitted', False):
+        if not runner._admit_bot_message_for_source(event.source):
+            finish_steer_preparation(event)
+            release_event(event)
+            return True
+        event._bot_loop_admitted = True
+    if not await accept_event(event):
+        release_event(event)
+        if reserved is not None:
+            reserved[2].set()
+        return True  # Повтор уже принятого набора не становится новым поручением.
+    text = event.text or ''
+    audio_paths = getattr(runner, '_pending_event_audio_paths', lambda _: [])(event)
+    if audio_paths:
+        text = await runner._prepare_busy_steer_text(event)
+    images = []
+    if event.media_urls:
+        from agent.image_routing import build_native_content_parts
+        paths = [path for path, mime in zip(event.media_urls, event.media_types) if mime.startswith('image/')]
+        if paths:
+            parts, skipped = build_native_content_parts('', paths)
+            if skipped:
+                raise FileError('NATIVE_IMAGE_INPUT_UNAVAILABLE')
+            images = [part for part in parts if part.get('type') == 'image_url']
+        # Документы остаются доступными модели по owner-bound artifactId.
+    if not text.strip() and not images:
+        return False
+    origin = runner._steer_text_with_origin(text or '[Изображения пользователя]', event)
+    prepared = _prepared_inbound.get()
+    ticket = prepared[2] if prepared and prepared[:2] == (source_of(event), str(event.message_id)) else None
+    payload = SteerText(origin, images, lambda: commit_inbound(event.source, event.message_id, ticket))
+    with _steer_lock(turn):
+        current = runner._peek_session_state(session_key)
+        if current is None or current.turn is not turn or turn._brai_steer_generation is not generation:
+            release_event(event)
+            if reserved is not None:
+                reserved[2].set()
+            return True
+        agent = getattr(turn, '_brai_steer_agent', None)
+        if agent is not None:
+            if not agent.steer(payload):
+                return False  # Финал уже зафиксирован; это следующий пользовательский ход.
+        else:
+            pending = getattr(turn, '_brai_pending_steers', [])
+            pending.append(payload)
+            turn._brai_pending_steers = pending
+        events = getattr(turn, '_brai_steer_events', [])
+        events.append(event)
+        turn._brai_steer_events = events
+        ids = getattr(turn, '_brai_input_ids', set())
+        ids.add(_steer_identity(event.source, event.message_id))
+        turn._brai_input_ids = ids
+        if reserved is not None:
+            reserved[2].set()
+    return True
+
+
+def active_telegram_edit(adapter, message):
+    """Разрешить повторный dispatch правки только сообщения незавершённого хода."""
+    runner = getattr(adapter, 'gateway_runner', None)
+    if runner is None:
+        return False
+    source = adapter._source_from_message_for_auth(message)
+    state = runner._peek_session_state(runner._session_key_for_source(source))
+    if state is None or not state.turn.started_ts:
+        return False
+    turn = state.turn
+    with _steer_lock(turn):
+        agent = getattr(turn, '_brai_steer_agent', None)
+        if agent is not None and getattr(agent, '_brai_steer_closed', False):
+            return False
+        identity = _steer_identity(source, message.message_id)
+        initial = getattr(turn, 'event', None)
+        return (identity in getattr(turn, '_brai_input_ids', set()) or
+                (initial is not None and identity == _steer_identity(initial.source, initial.message_id)))
 
 
 def track_inbound(event):
@@ -409,6 +678,7 @@ def conversation(agent, user_message, task_id=None):
             commit_inbound(*inbound)
         yield prepared
     finally:
+        release_steer_inputs(agent)
         _operation.reset(token)
         if not workspace_in_use(Path(agent._brai_workspace)):
             store().release_operation(operation)
@@ -1098,13 +1368,21 @@ async def download_url(url, identity, mime=''):
 
 async def capture_authorized(adapter, event):
     """Общая граница до native очередей сохраняет исходные IDs каждого канала."""
+    if (getattr(event, 'metadata', None) or {}).get('_brai_steered'):
+        return False
     if not getattr(event, 'media_urls', None) and not (getattr(event, 'metadata', None) or {}).get('_brai_artifacts'):
         return True
     runner = getattr(adapter, 'gateway_runner', None)
     if runner is None or not runner._is_user_authorized_for_source(event.source):
+        finish_steer_preparation(event)
         return False
     if str(getattr(event.source.platform, 'value', event.source.platform)) == 'telegram':
-        await capture(adapter, event)
-    else:
-        await accept_event(event, admit=False)
+        admit = getattr(runner, '_admit_bot_message_for_source', None)
+        if callable(admit) and not getattr(event, '_bot_loop_admitted', False):
+            if not admit(event.source):
+                finish_steer_preparation(event)
+                return False
+            event._bot_loop_admitted = True
+        return not await capture(adapter, event)
+    await accept_event(event, admit=False)
     return True

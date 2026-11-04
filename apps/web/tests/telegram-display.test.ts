@@ -2,7 +2,7 @@
 // ABOUTME: Проверяет сохранение пользовательских подписей и посторонних ссылок.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { emptyTelegramMessage, telegramText, updateTelegramMessage } from "../app/agent/telegram-display.ts";
+import { emptyTelegramMessage, isTelegramConversationMessage, telegramText, updateTelegramMessage } from "../app/agent/telegram-display.ts";
 
 const first = "11111111-1111-4111-8111-111111111111";
 const second = "22222222-2222-4222-8222-222222222222";
@@ -32,4 +32,11 @@ test("объединяет квитанцию и прямое наблюдени
   const delivered = { ...pending, telegram_id: "7", text: "Ответ" };
   assert.deepEqual(updateTelegramMessage([pending, direct], delivered), [delivered]);
   assert.equal(updateTelegramMessage([pending], direct), null);
+});
+
+test("служебное событие не становится репликой; неизвестный тип не скрывается", () => {
+  assert.equal(isTelegramConversationMessage({ message_type: "service" }), false);
+  for (const message_type of [undefined, "unknown", "text", "photo", "unsupported:poll"]) {
+    assert.equal(isTelegramConversationMessage({ message_type }), true);
+  }
 });

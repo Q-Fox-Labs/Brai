@@ -819,6 +819,10 @@ class TelegramPlugin:
             except Exception:
                 # Ошибка наблюдения не меняет Telegram dispatch; диагностируется без содержимого.
                 logging.getLogger(__name__).warning("BRAI_TELEGRAM_OBSERVER_WRITE_FAILED")
+        if original is not None and getattr(update, "edited_message", None) is not None:
+            files = sys.modules.get("brai_files")
+            if files is None or not files.active_telegram_edit(self.adapter, original):
+                raise ApplicationHandlerStop
         if original is not None and not any(getattr(original, field, None) for field in
                 ("text", "photo", "document", "video", "audio", "voice", "sticker", "location", "venue")):
             kind = next((field for field in ("animation", "video_note", "contact", "poll", "dice", "game", "story", "paid_media")

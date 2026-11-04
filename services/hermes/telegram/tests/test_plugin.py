@@ -280,6 +280,26 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         with observer.journal.db() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM messages").fetchone()[0], 1)
 
+    async def test_old_edit_updates_observer_without_dispatch_or_reply(self):
+        """Старая правка сохраняется в журнале, но не запускает native обработчики."""
+        config=replace(self.config,entry=str(REPO/'services/hermes/trusted.mjs'))
+        with patch.dict(os.environ,{'BRAI_TELEGRAM_OBSERVER_ENABLED':'1'}):
+            observer=mod.TelegramPlugin(config,self.bridge,self.inject)
+        message=NS(message_id=91,text='Исправленный старый текст',date=None,edit_date=None)
+        update=NS(message=None,edited_message=message,effective_message=message,
+            effective_chat=NS(id=123,type='private'),effective_user=NS(id=123,full_name='Анна'))
+        files=NS(active_telegram_edit=lambda adapter,message:False)
+        stop=sys.modules['telegram.ext'].ApplicationHandlerStop
+        with patch.dict(sys.modules,{'brai_files':files}):
+            with self.assertRaises(stop):await observer.guard(update,None)
+        with observer.journal.db() as db:
+            self.assertEqual(db.execute('SELECT text FROM messages').fetchone()[0],message.text)
+        self.assertEqual(self.bot.sent,[])
+        files.active_telegram_edit=lambda adapter,message:True
+        with patch.dict(sys.modules,{'brai_files':files}):
+            await observer.guard(update,None)
+        observer.close()
+
     async def set_group_route(self, chat=GROUP):
         """Перезапустить только плагин с прежним SQLite и новым защищённым route."""
         self.plugin.close()
