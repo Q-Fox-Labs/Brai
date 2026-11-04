@@ -337,7 +337,13 @@ class RoutedRuntime:
                 return RecallRows(needs_topic=True, source_query=query)
         candidates, source_dates = {}, {}
         def collect(cube):
-            return self.client(cube).get({}, timeout=remaining_timeout(self.api.timeout))
+            # AIDEV-NOTE: Отсекаем заведомо чужую область до передачи больших
+            # transcript-метаданных; allowed() остаётся обязательной проверкой.
+            filters = {'hermes_home_scope': self.home_scope,
+                       'hermes_memory_epoch': config['memory_epoch']}
+            if cube != 'infra' or self.catalog.data.get('shared_infra') is not True:
+                filters['hermes_author_id'] = self.provider.author['id']
+            return self.client(cube).get(filters, timeout=remaining_timeout(self.api.timeout))
         with ThreadPoolExecutor(max_workers=min(4, max(1, len(selected)))) as executor:
             pools = list(context_map(executor, collect, selected))
         for pool in pools:
