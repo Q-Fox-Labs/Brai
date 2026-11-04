@@ -2,7 +2,7 @@
 // ABOUTME: Каждая запись блокирует владельца до commit; архивная схема не используется.
 import type { Pool, PoolClient } from "pg";
 import {createTurns} from "./turns.js";
-import {createContext} from "./context.js";
+import {createContext,contextPages,ownerTransaction} from "./context.js";
 import {enqueueDialogue} from "./jobs.js";
 import { createHash } from "node:crypto";
 import { appendInput, summaryInput, canonical, digest, decodeCursor, encodeCursor, fail, id, integer, object, limits, type Cursor, DialoguesFault } from "./domain.js";
@@ -27,6 +27,9 @@ export function createStore(pool:DB,key:string) {
       const seq=(await db.query("SELECT nextval('dialogues_live.change_seq')::text AS seq")).rows[0].seq;
       const result=await write(db,seq);
       await db.query("INSERT INTO dialogues_live.requests(owner_id,id,operation,hash,result,change_seq) VALUES($1,$2,$3,$4,$5,$6)",[owner,requestId,operation,hash,result,seq]);
+      const a=input as any;
+      const resultIds=[...(a.changes?.add??[]),...(a.changes?.update??[])].map((x:any)=>x.id);
+      await db.query("INSERT INTO dialogues_live.exchange_events(owner_id,event_id,event_type,dialogue_id,turn_id,result_ids) VALUES($1,$2,$3,$4,$5,$6)",[owner,'operation:'+requestId,operation,result.dialogue_id??a.dialogue_id??a.dialogue?.id??null,result.turn_id??a.turn_id??null,JSON.stringify(resultIds)]);
       await db.query("COMMIT");
       return result;
     } catch(e) {await db.query("ROLLBACK").catch(()=>{});throw cleanFault(e);}
@@ -221,6 +224,40 @@ export function createStore(pool:DB,key:string) {
       await db.query("COMMIT");return result;
     } catch(e){await db.query("ROLLBACK").catch(()=>{});throw cleanFault(e);}finally{db.release();}
   }
+  /** Возвращает историю краткими представлениями; оригиналы читаются отдельно по ID. */
+  async function history(owner:string,raw:unknown) {
+    const a=object(raw,["dialogue_id","cursor"]);id(a.dialogue_id);
+    const cursor=a.cursor===undefined?null:decodeCursor(a.cursor,key,owner);
+    if(cursor&&(cursor.mode!=="history"||cursor.scope!==a.dialogue_id))fail("INVALID_CURSOR");
+    const db=await pool.connect();
+    try {
+      await db.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const boundary=cursor?.through??(await db.query(headSQL,[owner])).rows[0].seq;
+      const rows=(await db.query(`SELECT m.id,m.dialogue_id,m.turn_id,m.role,m.kind,m.message_order,m.item_order,m.source,m.occurred_at,m.recorded_at,m.content_hash AS sha256,
+        s.version AS summary_version,CASE WHEN char_length(m.text)<=100 THEN m.text ELSE s.text END AS summary
+        FROM dialogues_live.messages m LEFT JOIN LATERAL(SELECT version,text FROM dialogues_live.message_summaries
+        WHERE owner_id=m.owner_id AND dialogue_id=m.dialogue_id AND message_id=m.id AND change_seq<=$3 ORDER BY version DESC LIMIT 1)s ON true
+        WHERE m.owner_id=$1 AND m.dialogue_id=$2 AND m.change_seq<=$3
+        AND NOT EXISTS(SELECT 1 FROM dialogues_live.turns z WHERE z.owner_id=m.owner_id AND z.dialogue_id=m.dialogue_id AND z.id=m.turn_id AND z.managed AND m.kind='final' AND (z.final_message_id IS DISTINCT FROM m.id OR z.completion_seq>$3))
+        ORDER BY m.message_order,m.id`,[owner,a.dialogue_id,boundary])).rows;
+      if(rows.some((m:any)=>m.summary===null))fail("SUMMARY_REQUIRED");
+      const items:any[]=[];
+      for(const row of rows){
+        const {summary,...meta}=row;
+        items.push({type:'message',...meta});
+        items.push({type:'message_representation',dialogue_id:a.dialogue_id,message_id:row.id,summary_version:row.summary_version,text:summary});
+      }
+      const makeCursor=(index:number)=>encodeCursor({v:1,owner,mode:"history",scope:a.dialogue_id,from:"0",through:boundary,offset:index},key);
+      const pages=contextPages({dialogue_id:a.dialogue_id,representation:'message_summaries',through_seq:boundary},items,makeCursor,56*1024);
+      const index=cursor?.offset??0;if(index>=pages.length)fail("INVALID_CURSOR");
+      await db.query("COMMIT");
+      return pages[index];
+    } catch(e){await db.query("ROLLBACK").catch(()=>{});throw cleanFault(e);}finally{db.release();}
+  }
+  async function logExchange(owner:string,request:string,action:string,dialogue:string,turn:string|null,resultIds:string[]=[]){
+    const eventId='exchange:'+sha(JSON.stringify([request,action]));
+    await ownerTransaction(pool,owner,async db=>{await db.query('INSERT INTO dialogues_live.exchange_events(owner_id,event_id,event_type,dialogue_id,turn_id,result_ids) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING',[owner,eventId,action,dialogue,turn,JSON.stringify(resultIds)]);});
+  }
   const contextApi=createContext(pool,key);
-  return {append,summary,context,message,...contextApi,...createTurns(pool,key,mutation,contextApi)};
+  return {append,summary,context,message,history,logExchange,...contextApi,...createTurns(pool,key,mutation,contextApi)};
 }

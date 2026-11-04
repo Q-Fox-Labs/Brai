@@ -1,7 +1,7 @@
 // ABOUTME: Определяет безопасный повтор запроса при потере MCP-сессии.
 // ABOUTME: Не открывает сеть и не повторяет операцию при неизвестном исходе.
 
-const readOnly = new Set(['dialogues_context_get','dialogues_message_get','dialogues_turn_get']);
+const readOnly = new Set<string>();
 const unknownOutcome = {isError:true,content:[{type:'text' as const,text:'Исход записи не подтверждён. Сначала прочитайте актуальный ход, сообщение по исходному ID либо версию саммари. Повтор при неизвестном исходе не выполнялся.'}]};
 
 /** Повторяет запрос один раз только после подтверждённого отказа до вызова операции. */
