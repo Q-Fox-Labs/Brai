@@ -541,6 +541,89 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(next(iter(turn._brai_preparing_inputs.values())).is_set())
         native.clear_steer_turn(turn)
 
+    async def test_adapter_guard_accepts_steer_before_gateway_claim(self):
+        """Реальный guard занят, но медленный admission ещё не установил started_ts."""
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source,preparing=True)
+        turn.started_ts=0;turn.agent=None
+        runner._session_key_for_source=lambda _:'session'
+        entered,unblock=asyncio.Event(),asyncio.Event()
+        async def background(event,session_key):
+            entered.set()
+            await unblock.wait()
+        scope={'asyncio':asyncio}
+        function('gateway/platforms/base.py',['_start_session_processing','_track_session_task','_release_session_guard'],scope)
+        adapter=SimpleNamespace(gateway_runner=runner,_active_sessions={},_session_tasks={},
+            _background_tasks=set(),_expected_cancelled_tasks=set(),_process_message_background=background)
+        for name in scope.keys() & {'_start_session_processing','_track_session_task','_release_session_guard'}:
+            setattr(adapter,name,MethodType(scope[name],adapter))
+        native.install_adapter(adapter)
+        initial=SimpleNamespace(source=source,message_id='initial',text='Альбом',internal=False,
+            metadata={},get_command=lambda:None)
+        guidance=SimpleNamespace(source=source,message_id='later',text='Уточнение',internal=False,
+            metadata={},media_urls=[],media_types=[])
+        self.assertTrue(adapter._start_session_processing(initial,'session'))
+        task=adapter._session_tasks['session']
+        try:
+            await asyncio.wait_for(entered.wait(),2)
+            self.assertEqual(turn.started_ts,0)
+            self.assertTrue(await native.steer_active_input(runner,guidance,'session'))
+            self.assertTrue(native.active_telegram_edit(SimpleNamespace(gateway_runner=runner,
+                _source_from_message_for_auth=lambda _:source),SimpleNamespace(message_id='later')))
+            guidance.text='Уточнение после правки'
+            guidance.raw_message=SimpleNamespace(edit_date=object())
+            self.assertTrue(await native.steer_active_input(runner,guidance,'session'))
+            file=SimpleNamespace(source=source,message_id='file',text='Документ',internal=False,
+                metadata={},media_urls=[str(self.input_file())],media_types=['text/plain'],
+                raw_message=SimpleNamespace(media_group_id=None))
+            self.assertTrue(await native.capture(adapter,file))
+            self.assertIsNone(agent._pending_steer)
+            turn.started_ts=1;turn.event=initial
+            with patch.dict(sys.modules,{'brai_files':native}):
+                native.bind_steer_turn(agent,runner,ctx)
+            self.assertIn('Уточнение после правки',agent._pending_steer)
+            self.assertIn('новая редакция заменяет прежнюю',agent._pending_steer)
+            self.assertIn('artifactId=',agent._pending_steer)
+            self.assertFalse(native.active_telegram_edit(SimpleNamespace(gateway_runner=runner,
+                _source_from_message_for_auth=lambda _:source),SimpleNamespace(message_id='old')))
+        finally:
+            unblock.set();await task
+            adapter._release_session_guard('session')
+            native.clear_steer_turn(turn)
+
+    async def test_preclaim_guard_release_does_not_leak_inputs_to_next_turn(self):
+        """Ошибка admission освобождает вход; старый guard не управляет следующим ходом."""
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source,preparing=True)
+        turn.started_ts=0;turn.agent=None
+        runner._session_key_for_source=lambda _:'session'
+        scope={};function('gateway/platforms/base.py',['_release_session_guard'],scope)
+        first,second=asyncio.Event(),asyncio.Event()
+        adapter=SimpleNamespace(gateway_runner=runner,_active_sessions={'session':first})
+        adapter._start_session_processing=lambda *a,**kw:True
+        adapter._release_session_guard=MethodType(scope['_release_session_guard'],adapter)
+        native.install_adapter(adapter)
+        initial=SimpleNamespace(source=source,message_id='initial',internal=False,get_command=lambda:None)
+        adapter._start_session_processing(initial,'session')
+        event=SimpleNamespace(source=source,message_id='later',text='Уточнение',internal=False,
+            metadata={},media_urls=[],media_types=[])
+        self.assertTrue(await native.steer_active_input(runner,event,'session'))
+        ready=native.reserve_steer_input(runner,event)
+        self.assertFalse(ready.is_set())
+        adapter._release_session_guard('session',guard=second)
+        self.assertIsNotNone(native.active_steer_turn(runner,'session'))
+        adapter._release_session_guard('session',guard=first)
+        self.assertIsNone(native.active_steer_turn(runner,'session'))
+        self.assertTrue(ready.is_set())
+        self.assertTrue(await native.steer_active_input(runner,event,'session'))
+        self.assertEqual(turn._brai_pending_steers,[])
+        adapter._active_sessions['session']=second
+        self.assertIsNone(native.active_steer_turn(runner,'session'))
+        adapter._start_session_processing(initial,'session')
+        with patch.dict(sys.modules,{'brai_files':native}):native.bind_steer_turn(agent,runner,ctx)
+        self.assertIsNone(agent._pending_steer)
+        native.clear_steer_turn(turn)
+
     async def test_input_during_agent_preparation_is_steered_before_final(self):
         source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
         runner,agent,turn,ctx=self.steering_runner(source,preparing=True)
