@@ -75,7 +75,7 @@ async function applyChanges(db: PoolClient, owner: string, dialogue: string, tur
 async function requireNoPending(db: PoolClient, owner: string, dialogue: string, turn: string) {
     const rows = (await db.query("SELECT id,count(*) OVER()::integer AS total FROM dialogues_live.turn_results WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 AND kind='work' AND status='pending' ORDER BY created_at,id LIMIT 64", [owner, dialogue, turn])).rows;
     if (rows.length)
-        throw new DialoguesFault('PENDING_RESULTS', { pending: rows.map((r: any) => ({ id: r.id })), pending_count: rows[0].total, pending_complete: rows.length === rows[0].total, read_tool: 'dialogues_turn_get' });
+        throw new DialoguesFault('PENDING_RESULTS', { pending: rows.map((r: any) => ({ id: r.id })), pending_count: rows[0].total, pending_complete: rows.length === rows[0].total, read_tool: 'dialogues_exchange: snapshot' });
 }
 async function bump(db: PoolClient, owner: string, dialogue: string, turn: string, seq: string) { return (await db.query('UPDATE dialogues_live.turns SET version=version+1,updated_at=now(),change_seq=$4 WHERE owner_id=$1 AND dialogue_id=$2 AND id=$3 RETURNING version::text', [owner, dialogue, turn, seq])).rows[0].version; }
 function sign(key: string, value: any) { const p = Buffer.from(JSON.stringify(value)).toString('base64url'); return p + '.' + createHmac('sha256', key).update('dialogues-turn-v1:' + p).digest('base64url'); }
@@ -230,7 +230,16 @@ export function createTurns(pool: DB, key: string, mutation: Mutation, contextAp
             const t = await lookup(db, owner, a.dialogue_id, turn);
             if (c && String(t.version) !== c.version)
                 fail('VERSION_CONFLICT');
-            const messages = (await db.query("SELECT id,role,kind,text,source,occurred_at,recorded_at,message_order,item_order,content_hash AS sha256 FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND turn_id=$3 AND kind IN ('input','final') ORDER BY message_order", [owner, a.dialogue_id, turn])).rows;
+            if(c && c.through===undefined)
+                fail('INVALID_CURSOR');
+            const through = c?.through ?? (await db.query('SELECT COALESCE(MAX(change_seq),0)::text AS seq FROM dialogues_live.requests WHERE owner_id=$1',[owner])).rows[0].seq;
+            if(typeof through!=='string'||!/^[0-9]+$/.test(through))fail('INVALID_CURSOR');
+            const messages = (await db.query(`SELECT m.id,m.role,m.kind,CASE WHEN char_length(m.text)<=100 THEN m.text ELSE s.text END AS text,
+                m.source,m.occurred_at,m.recorded_at,m.message_order,m.item_order,m.content_hash AS sha256
+                FROM dialogues_live.messages m LEFT JOIN LATERAL(
+                    SELECT text FROM dialogues_live.message_summaries WHERE owner_id=m.owner_id AND dialogue_id=m.dialogue_id AND message_id=m.id AND change_seq<=$4 ORDER BY version DESC LIMIT 1
+                )s ON true WHERE m.owner_id=$1 AND m.dialogue_id=$2 AND m.turn_id=$3 AND m.change_seq<=$4 AND m.kind IN ('input','final') ORDER BY m.message_order`, [owner, a.dialogue_id, turn, through])).rows;
+            if(messages.some((m:any)=>m.text===null))fail('SUMMARY_REQUIRED');
             for (const m of messages)
                 if (m.kind === 'final')
                     m.final_state = t.final_message_id === m.id ? 'recorded' : (t.reconciled_through_order !== null && BigInt(m.message_order) <= BigInt(t.reconciled_through_order) ? 'reconciled_absent' : 'awaiting_reconciliation');
@@ -245,7 +254,7 @@ export function createTurns(pool: DB, key: string, mutation: Mutation, contextAp
             let end = Math.min(chars.length, offset + 8000);
             while (end > offset && bytes(chars.slice(offset, end).join('')) > 24000)
                 end--;
-            const next = end < chars.length ? sign(key, { owner, dialogue: a.dialogue_id, turn, version: String(t.version), offset: end }) : null;
+            const next = end < chars.length ? sign(key, { owner, dialogue: a.dialogue_id, turn, version: String(t.version), through, offset: end }) : null;
             await db.query('COMMIT');
             return { dialogue_id: a.dialogue_id, turn_id: turn, version: String(t.version), representation: 'json_fragments', offset, text: chars.slice(offset, end).join(''), next_cursor: next, total_chars: chars.length, total_bytes: Buffer.byteLength(snapshot), sha256: hash(snapshot) };
         }

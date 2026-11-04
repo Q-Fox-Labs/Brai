@@ -8,6 +8,11 @@ test('версия и ID сообщают поле неверного аргум
  assert.equal(version('12'),'12');assert.throws(()=>version('0'),e=>e.code==='INVALID_ARGUMENT'&&e.details.field==='expected_version');
  assert.throws(()=>fieldId('bad id','turn_id'),e=>e.code==='INVALID_ARGUMENT'&&e.details.field==='turn_id');
 });
+test('саммари обязательно при длине более 100 символов Unicode',()=>{
+ assert.equal(message({id:'a',text:'😀'.repeat(100)},'input').text.length,200);
+ assert.throws(()=>message({id:'b',text:'😀'.repeat(101)},'input'),e=>e.code==='INVALID_ARGUMENT'&&e.details.field==='summary');
+ assert.equal(message({id:'c',text:'😀'.repeat(101),summary:'Кратко'},'final').summary,'Кратко');
+});
 test('пакет сохраняет формулировки и проверяет повтор ссылок',()=>{
  const changes=validateChanges({add:[{id:'one',formulation:'Первая',source_refs:['input']} ]});assert.equal(changes.add[0].formulation,'Первая');
  assert.throws(()=>validateChanges({add:[{id:'one',formulation:'Текст',source_refs:['x','x']}]}),{code:'INVALID_ARGUMENT'});
