@@ -522,12 +522,13 @@ def _uuid(value):
 class TelegramPlugin:
     """Собирает native hooks, private RPC и локальное состояние подтверждений."""
 
-    def __init__(self, config, bridge=None, inject_message=None):
+    def __init__(self, config, bridge=None, inject_message=None, injection_ready=None):
         """Создать порт и хранилище; сеть Telegram подключает только native factory."""
         self.config = config
         self.bridge = bridge or Bridge(config)
         self.tokens = Tokens(config.state_dir)
         self.inject_message = inject_message
+        self.injection_ready = injection_ready or (lambda: True)
         self.session_store = None
         self.loop = self.bot = self.adapter = None
         self._stop_outgoing_observer = None
@@ -634,7 +635,8 @@ class TelegramPlugin:
             if (not stat.S_ISREG(info.st_mode) or info.st_uid not in {0, os.geteuid()}
                     or info.st_nlink != 1 or info.st_mode & 0o077 or info.st_size > 16000):
                 raise BridgeError('OPERATOR_RESUME_INVALID')
-            value = json.loads(path.read_text())
+            raw = path.read_text()
+            value = json.loads(raw)
             if value.get('status') != 'pending':
                 return
             if (set(value) != {'requestId', 'status', 'sessionKey', 'content'}
@@ -643,6 +645,18 @@ class TelegramPlugin:
                     or not isinstance(value['content'], str) or not value['content'].strip()
                     or len(value['content']) > 12000 or not callable(self.inject_message)):
                 raise BridgeError('OPERATOR_RESUME_INVALID')
+            # AIDEV-NOTE: PTB factory вызывается до публикации native gateway host.
+            # Ожидаем только готовность; inject не пробуем и не повторяем в этом цикле.
+            for _ in range(180):
+                if self.closed:
+                    return
+                if self.injection_ready():
+                    break
+                await asyncio.sleep(1)
+            else:
+                raise BridgeError('OPERATOR_RESUME_HOST_NOT_READY')
+            if path.read_text() != raw:
+                return
             def save(status):
                 """Атомарно записать свой статус перед единственным внешним действием."""
                 temporary = path.with_name('operator-resume.' + value['requestId'] + '.tmp')
@@ -1800,8 +1814,11 @@ def file_rpc(method, params, timeout):
 def register(ctx):
     """Подключить плагин через публичный API закреплённого Hermes."""
     from types import SimpleNamespace
+    from hermes_cli.plugins import get_plugin_manager
+    manager = get_plugin_manager()
     sys.modules['_brai_hermes_file_port'] = SimpleNamespace(call=file_rpc)
-    plugin = TelegramPlugin(Config.from_env(), inject_message=getattr(ctx, "inject_message", None))
+    plugin = TelegramPlugin(Config.from_env(), inject_message=getattr(ctx, "inject_message", None),
+                            injection_ready=lambda: manager.has_gateway_message_injector)
     ctx.register_telegram_handler(plugin.factory)
     ctx.register_hook("pre_gateway_dispatch", plugin.incoming)
     ctx.register_hook("transform_llm_output", plugin.outgoing)
