@@ -7,7 +7,7 @@ import { createGit } from './git.mjs';
 import { createFlowGit } from './git-flow.mjs';
 import { createGitHub } from './github.mjs';
 import { advanceRelease, advanceSync } from './release.mjs';
-import { measureReleaseStep } from './release-timing.mjs';
+import { measureReleaseStep, recordReleaseState } from './release-timing.mjs';
 import { Fault,safeFault } from './errors.mjs';
 import {enqueueDeployment,advanceDeployment,createDeploymentAdapter} from './deployment.mjs';
 import {createCIEvidence} from './ci-evidence.mjs';
@@ -107,7 +107,12 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
     const project=(await db.query('SELECT config FROM codeworks.projects WHERE id=$1',[op.project_id])).rows[0].config;
     const w=(await db.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[op.workspace_id])).rows[0];
     await db.query("UPDATE codeworks.operations SET status='running',updated_at=now() WHERE id=$1",[op.id]);
-    const finish=(status,step,result)=>db.query('UPDATE codeworks.operations SET status=$2,step=$3,result=$4,error=NULL,updated_at=now() WHERE id=$1',[op.id,status,step,result]);
+    if(op.kind==='release'||op.kind==='rollout')recordReleaseState(op.id,'running',op.step);
+    const finish=async(status,step,result)=>{
+      const updated=await db.query('UPDATE codeworks.operations SET status=$2,step=$3,result=$4,error=NULL,updated_at=now() WHERE id=$1',[op.id,status,step,result]);
+      if(op.kind==='release'||op.kind==='rollout')recordReleaseState(op.id,status,step);
+      return updated;
+    };
     const reconcileDeployment=async id=>{
       const deployment=(await db.query('SELECT * FROM codeworks.operations WHERE id=$1',[id])).rows[0];
       if(deployment&&!['failed','succeeded'].includes(deployment.status)&&deploymentAdapter?.inspect){

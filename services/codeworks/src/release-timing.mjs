@@ -11,8 +11,13 @@ export async function measureReleaseStep(operationId, step, action, {emit = cons
     outcome = 'succeeded';
     return result;
   } finally {
-    const event = {operation_id: operationId, step, outcome, duration_ms: Math.max(0, Math.round(now() - started))};
+    const event = {operation_id: operationId, step, outcome, at: new Date().toISOString(), duration_ms: Math.max(0, Math.round(now() - started))};
     // AIDEV-NOTE: Диагностика не меняет результат уже начатой внешней операции.
     try { emit('CODEWORKS_RELEASE_TIMING ' + JSON.stringify(event)); } catch {}
   }
+}
+
+/** Сообщить переход состояния: время между событиями показывает очередь и ожидания. */
+export function recordReleaseState(operationId, status, step, {emit = console.info, now = () => new Date()} = {}) {
+  try { emit('CODEWORKS_RELEASE_STATE ' + JSON.stringify({operation_id: operationId, status, step, at: now().toISOString()})); } catch {}
 }
