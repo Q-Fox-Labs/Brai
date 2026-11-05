@@ -70,6 +70,28 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_children_do_not_repeat_parent_admission(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from contextvars import copy_context
+        source = SimpleNamespace(platform='telegram', chat_id='chat', thread_id='topic', user_id='alice', profile='dev')
+        def child(index):
+            agent = SimpleNamespace(session_id=f'child-{index}')
+            with native.conversation(agent, 'extract'):
+                self.assertIsNone(native._inbound.get())
+                self.assertIs(native._conversation_source.get(), source)
+                return agent._brai_workspace
+        with patch.object(native, 'commit_inbound') as commit:
+            with native.inbound_handoff(source, 'voice'):
+                with native.conversation(SimpleNamespace(session_id='parent'), 'assemble'):
+                    with ThreadPoolExecutor(max_workers=3) as pool:
+                        futures = [pool.submit(copy_context().run, child, i) for i in range(3)]
+                        paths = [future.result() for future in futures]
+                self.assertIsNotNone(native._inbound.get())
+            commit.assert_called_once()
+        self.assertEqual(len(set(paths)), 3)
+        self.assertIsNone(native._inbound.get())
+        self.assertIsNone(native._conversation_source.get())
+
     def test_failure_footer_reports_issue_without_technical_details(self):
         for header in (
             '⚠️ Проверка изменений файлов: 1 правок файлов в этом ходе НЕ УДАЛИСЬ.',
