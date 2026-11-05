@@ -339,6 +339,11 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(pending,{})
                 self.assertEqual(tasks,{})
 
+    def edit_allowed(self, adapter, message):
+        """Предоставить enum канала при проверке действующего runtime guard."""
+        with patch.dict(sys.modules,{'gateway.platforms.event':module(MessageType=SimpleNamespace(TEXT='text'))}):
+            return native.active_telegram_edit(adapter,message)
+
     def steering_runner(self, source, *, preparing=False):
         """Реальный steer движка; подменены только канальные и модельные порты."""
         scope = {'_ic_lock': lambda a, _: a._pending_steer_lock,
@@ -394,8 +399,8 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(content),3)
             self.assertIn('Уточнение маршрута',content[0]['text'])
             runner._session_key_for_source=lambda _:'session'
-            self.assertTrue(native.active_telegram_edit(SimpleNamespace(gateway_runner=runner,
-                _source_from_message_for_auth=lambda _:event.source),SimpleNamespace(message_id='later')))
+            self.assertTrue(self.edit_allowed(SimpleNamespace(gateway_runner=runner,
+                _build_message_event=lambda *a:SimpleNamespace(source=event.source)),SimpleNamespace(message_id='later')))
             with self.store.db() as db:
                 self.assertEqual(len(json.loads(db.execute('SELECT admitted FROM groups ORDER BY rowid LIMIT 1').fetchone()[0])),2)
             # Повтор тех же фото не добавляется к steer второй раз.
@@ -568,8 +573,8 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(entered.wait(),2)
             self.assertEqual(turn.started_ts,0)
             self.assertTrue(await native.steer_active_input(runner,guidance,'session'))
-            self.assertTrue(native.active_telegram_edit(SimpleNamespace(gateway_runner=runner,
-                _source_from_message_for_auth=lambda _:source),SimpleNamespace(message_id='later')))
+            self.assertTrue(self.edit_allowed(SimpleNamespace(gateway_runner=runner,
+                _build_message_event=lambda *a:SimpleNamespace(source=source)),SimpleNamespace(message_id='later')))
             guidance.text='Уточнение после правки'
             guidance.raw_message=SimpleNamespace(edit_date=object())
             self.assertTrue(await native.steer_active_input(runner,guidance,'session'))
@@ -584,8 +589,8 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
             self.assertIn('Уточнение после правки',agent._pending_steer)
             self.assertIn('новая редакция заменяет прежнюю',agent._pending_steer)
             self.assertIn('artifactId=',agent._pending_steer)
-            self.assertFalse(native.active_telegram_edit(SimpleNamespace(gateway_runner=runner,
-                _source_from_message_for_auth=lambda _:source),SimpleNamespace(message_id='old')))
+            self.assertFalse(self.edit_allowed(SimpleNamespace(gateway_runner=runner,
+                _build_message_event=lambda *a:SimpleNamespace(source=source)),SimpleNamespace(message_id='old')))
         finally:
             unblock.set();await task
             adapter._release_session_guard('session')
@@ -623,6 +628,55 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict(sys.modules,{'brai_files':native}):native.bind_steer_turn(agent,runner,ctx)
         self.assertIsNone(agent._pending_steer)
         native.clear_steer_turn(turn)
+
+    def test_edit_lookup_uses_actual_telegram_route_in_forums_and_profiles(self):
+        """Настоящие auth и input builders дают разные ключи форума; edit должен найти input."""
+        platform=SimpleNamespace(TELEGRAM=SimpleNamespace(value='telegram'),WHATSAPP=object(),SLACK=object())
+        scope={'Platform':platform,'MessageEvent':SimpleNamespace,'expand_link_entities':lambda m:m.text,
+            '_session_key_namespace':lambda profile:'agent:'+(profile or 'main'),
+            '_canonical_participant':lambda source:source.user_id}
+        function('plugins/platforms/telegram/adapter.py',
+            ['_source_from_message_for_auth','_build_message_event','_normalize_chat_type'],scope)
+        function('gateway/session.py',['build_session_key'],scope)
+        def source(**values):
+            defaults={'profile':None,'prospective_thread_id':None,'scope_id':None,'user_id_alt':None}
+            return SimpleNamespace(**{**defaults,**values})
+        ports={'gateway.session':module(SessionSource=source),
+            'gateway.platforms.base':module(resolve_channel_prompt=lambda *a:None),
+            'plugins.platforms.telegram.telegram_context':module(group_identity_prompt=lambda *a:None)}
+        cases=[('supergroup',True,1312,True,None),('supergroup',True,None,False,None),
+            ('supergroup',True,1312,True,'secondary'),('private',False,None,False,None),
+            ('private',False,7,True,None),('group',False,None,False,None)]
+        for chat_type,is_forum,thread,is_topic,profile in cases:
+            with self.subTest(chat_type=chat_type,thread=thread,profile=profile),patch.dict(sys.modules,ports):
+                message=SimpleNamespace(chat=SimpleNamespace(id=-10042,type=chat_type,is_forum=is_forum,title='Test'),
+                    from_user=SimpleNamespace(id=2,is_bot=False,username='test',full_name='Test'),
+                    message_thread_id=thread,is_topic_message=is_topic,message_id=1455,text='Цвет: зелёный',date=None)
+                adapter=SimpleNamespace(config=SimpleNamespace(extra={}),_chat_type_str=lambda chat:chat.type,
+                    _effective_message_thread_id=lambda m:str(m.message_thread_id or 1) if m.chat.is_forum
+                        else str(m.message_thread_id) if m.is_topic_message and m.message_thread_id is not None else None,
+                    _resolve_topic_binding=lambda *a:(None,None),_reply_context=lambda m:(None,None),
+                    build_source=lambda **kw:source(platform=platform.TELEGRAM,profile=profile,**kw))
+                adapter._normalize_chat_type=scope['_normalize_chat_type']
+                for name in ['_source_from_message_for_auth','_build_message_event']:
+                    setattr(adapter,name,MethodType(scope[name],adapter))
+                initial=adapter._build_message_event(message,'text')
+                key=lambda value:scope['build_session_key'](value,profile=value.profile)
+                route=key(initial.source)
+                runner,agent,turn,ctx=self.steering_runner(initial.source)
+                state=SimpleNamespace(turn=turn)
+                runner._peek_session_state=lambda candidate:state if candidate==route else None
+                runner._session_key_for_source=key
+                turn._brai_input_ids.add(native._steer_identity(initial.source,message.message_id))
+                adapter.gateway_runner=runner
+                self.assertTrue(self.edit_allowed(adapter,message))
+                message.message_id=999
+                self.assertFalse(self.edit_allowed(adapter,message))
+                message.message_id=1455;message.from_user.id=3
+                self.assertFalse(self.edit_allowed(adapter,message))
+                message.from_user.id=2;agent._brai_steer_closed=True
+                self.assertFalse(self.edit_allowed(adapter,message))
+                native.clear_steer_turn(turn)
 
     async def test_input_during_agent_preparation_is_steered_before_final(self):
         source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
@@ -696,15 +750,15 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
         runner,agent,turn,ctx=self.steering_runner(source)
         runner._session_key_for_source=lambda _:'session'
         turn.event=SimpleNamespace(source=source,message_id='initial')
-        adapter=SimpleNamespace(gateway_runner=runner,_source_from_message_for_auth=lambda _:source)
-        self.assertTrue(native.active_telegram_edit(adapter,SimpleNamespace(message_id='initial')))
-        self.assertFalse(native.active_telegram_edit(adapter,SimpleNamespace(message_id='old')))
+        adapter=SimpleNamespace(gateway_runner=runner,_build_message_event=lambda *a:SimpleNamespace(source=source))
+        self.assertTrue(self.edit_allowed(adapter,SimpleNamespace(message_id='initial')))
+        self.assertFalse(self.edit_allowed(adapter,SimpleNamespace(message_id='old')))
         foreign=SimpleNamespace(**{**vars(source),'user_id':'another'})
-        adapter._source_from_message_for_auth=lambda _:foreign
-        self.assertFalse(native.active_telegram_edit(adapter,SimpleNamespace(message_id='initial')))
-        adapter._source_from_message_for_auth=lambda _:source
+        adapter._build_message_event=lambda *a:SimpleNamespace(source=foreign)
+        self.assertFalse(self.edit_allowed(adapter,SimpleNamespace(message_id='initial')))
+        adapter._build_message_event=lambda *a:SimpleNamespace(source=source)
         agent._brai_steer_closed=True
-        self.assertFalse(native.active_telegram_edit(adapter,SimpleNamespace(message_id='initial')))
+        self.assertFalse(self.edit_allowed(adapter,SimpleNamespace(message_id='initial')))
         native.clear_steer_turn(turn)
         self.assertFalse(turn._brai_input_ids)
 

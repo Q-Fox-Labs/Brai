@@ -494,7 +494,9 @@ def active_telegram_edit(adapter, message):
     runner = getattr(adapter, 'gateway_runner', None)
     if runner is None:
         return False
-    source = adapter._source_from_message_for_auth(message)
+    from gateway.platforms.event import MessageType
+    # AIDEV-NOTE: Auth source называет форум forum, native input — group; ключ обязан совпасть с dispatch.
+    source = adapter._build_message_event(message, MessageType.TEXT).source
     turn = active_steer_turn(runner, runner._session_key_for_source(source))
     if turn is None:
         return False
