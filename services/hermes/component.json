@@ -500,7 +500,9 @@
       "services/hermes/telegram/observer/CONTRACT.md",
       "services/hermes/telegram/observer/asyncapi.yaml",
       "services/hermes/extensions/native/approval_conversation.py",
-      "services/hermes/extensions/patches/conversational-approvals.patch"
+      "services/hermes/extensions/patches/conversational-approvals.patch",
+      "services/hermes/extensions/scripts/context_gif.py",
+      "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",
