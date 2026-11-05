@@ -27,7 +27,11 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
         return {content:[],structuredContent:result};
       } catch(error) {
         const code=error instanceof DialoguesFault?error.code:"INTERNAL";
-        return {isError:true,content:[{type:"text",text:JSON.stringify({code,retryable:false})}]};
+        const next_action=code==="VERSION_CONFLICT"?"Прочитайте текущий ход и повторите с новой версией и request_id":code==="PENDING_RESULTS"?"Завершите ожидающие результаты или укажите честное основание невыполнения":code==="LEGACY_TURN_OPEN"?"Для восстановления прежнего хода проверьте историю и сохраните подтверждённый финал через exchange import; затем повторите ввод":code==="FINAL_RECONCILIATION_REQUIRED"?"Сверьте фактический финал клиента и восстановите статус":code==="INVALID_ARGUMENT"?"Исправьте аргументы и используйте новый request_id":"Проверьте данные и состояние перед повтором";
+        const diagnostic={code,...(code==="INTERNAL"?{next_action:"Исход операции неизвестен: сначала проверьте состояние и исходный ID"}:{applied:false,next_action}),...(error instanceof DialoguesFault?error.details:{})};
+        let text=JSON.stringify(diagnostic);
+        if(Buffer.byteLength(text)>16_384)text=JSON.stringify({code,...(code==="INTERNAL"?{}:{applied:false}),next_action:"Диагностика сокращена; прочитайте состояние и исправьте аргументы",diagnostic_truncated:true});
+        return {isError:true,content:[{type:"text",text}]};
       }
     });
     await server.connect(transport);return s;

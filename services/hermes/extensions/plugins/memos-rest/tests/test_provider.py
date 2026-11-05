@@ -34,6 +34,8 @@ class Backend:
     def request(self, client, path, body=None, **kwargs):
         from importlib import import_module
         error = import_module(client.__class__.__module__).MemOSError
+        if path == '/product/memory_capabilities':
+            return {'code': 200, 'data': {}}
         self.calls.append((path, copy.deepcopy(body)))
         if self.offline:
             raise error("MemOS test service unavailable")

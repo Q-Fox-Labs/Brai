@@ -30,6 +30,63 @@ class RecallCompletenessTests(unittest.TestCase):
             self.backend.rows[str(i)]={'id':str(i),'cube':'life_work','memory':'A neutral useful fact. '*30,
                 'metadata':{'user_id':'root','session_id':'neutral','info':info}}
 
+    def respect_server_filters(self):
+        """Сымитировать PostgreSQL stream, который фильтрует записи до передачи."""
+        original = self.backend.request
+        transferred = []
+        def request(client, path, body=None, **kwargs):
+            result = original(client, path, body, **kwargs)
+            if path == '/product/get_memory':
+                filters = (body or {}).get('filter', {})
+                for group in result['data']['text_mem']:
+                    def matches(row):
+                        for key, expected in filters.items():
+                            actual = row['metadata']
+                            for part in key.split('.'):
+                                actual = actual.get(part) if isinstance(actual, dict) else None
+                            if actual != expected:
+                                return False
+                        return True
+                    group['memories'] = [row for row in group['memories'] if matches(row)]
+                    transferred.extend(row['id'] for row in group['memories'])
+            return result
+        self.backend.request = request
+        return transferred
+
+    def test_scoped_search_does_not_transfer_other_authors_or_old_areas(self):
+        self.seed_facts()
+        for key, change in [('other-author', {'hermes_author_id': 'bob'}),
+                            ('other-profile', {'hermes_home_scope': 'other-profile'}),
+                            ('old-epoch', {'hermes_memory_epoch': 'old-epoch'})]:
+            row = copy.deepcopy(self.backend.rows['0'])
+            row['id'] = key
+            row['metadata']['info'].update(change)
+            self.backend.rows[key] = row
+        transferred = self.respect_server_filters()
+        value = json.loads(self.provider.handle_tool_call('memos_search', {'query': 'neutral facts'}))
+        self.assertEqual(value['status'], 'ok')
+        self.assertEqual(len(value['memories']), 30)
+        self.assertEqual(set(transferred), {str(i) for i in range(30)})
+
+    def test_scoped_search_keeps_shared_infra_and_checks_local_privacy(self):
+        runtime = self.provider.routing
+        catalog = {**runtime.catalog.data, 'shared_infra': True}
+        (self.home / 'memos-catalog.json').write_text(json.dumps(catalog))
+        for identifier, author, shared in [('own', 'alice', False), ('shared', 'bob', True),
+                                            ('private', 'bob', False)]:
+            info = {'hermes_kind': 'fact', 'hermes_author_id': author,
+                    'hermes_logical_id': identifier, 'hermes_cube': 'infra',
+                    'hermes_memberships': ['infra'], 'hermes_home_scope': runtime.home_scope,
+                    'hermes_memory_epoch': self.cfg['memory_epoch'], 'hermes_shared_infra': shared}
+            self.backend.rows[identifier] = {'id': identifier, 'cube': 'infra',
+                'memory': 'A neutral infrastructure fact.',
+                'metadata': {'user_id': 'root', 'info': info}}
+        self.respect_server_filters()
+        value = json.loads(self.provider.handle_tool_call('memos_search',
+                                                        {'query': 'infrastructure', 'cubes': ['infra']}))
+        self.assertEqual(value['status'], 'ok')
+        self.assertEqual({row['id'] for row in value['memories']}, {'own', 'shared'})
+
     def test_obsolete_top_k_from_existing_sessions_cannot_truncate_model_tool_results(self):
         self.seed_facts()
         value=json.loads(self.provider.handle_tool_call('memos_search',{'query':'neutral facts','top_k':5}))

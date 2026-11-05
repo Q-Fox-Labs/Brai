@@ -15,7 +15,7 @@ import tempfile
 import time
 from types import ModuleType, SimpleNamespace as NS
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 PLUGIN = Path(__file__).resolve().parents[1]
@@ -167,6 +167,75 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         await self.plugin.resume_operator_request()
         self.assertEqual(len(calls), 1)
 
+    async def test_operator_resume_waits_for_native_host_before_its_only_injection(self):
+        """Factory может стартовать до host; до готовности нет попытки или смены marker."""
+        calls = []
+        path = self.config.state_dir / 'operator-resume.json'
+        request = {'requestId': ATTEMPT, 'status': 'pending',
+                   'sessionKey': self.native_context['HERMES_SESSION_KEY'], 'content': 'Продолжи визитку'}
+        path.write_text(json.dumps(request)); path.chmod(0o600)
+        readiness = iter([False, False, True])
+        self.plugin.injection_ready = lambda: next(readiness)
+        self.plugin.inject_message = lambda text, **kw: calls.append((text, kw)) or True
+        async def wait_for_host(delay):
+            self.assertEqual(delay, 1)
+            self.assertEqual(calls, [])
+            self.assertEqual(json.loads(path.read_text())['status'], 'pending')
+        with patch.object(mod.asyncio, 'sleep', new=AsyncMock(side_effect=wait_for_host)) as sleep:
+            await self.plugin.resume_operator_request()
+        self.assertEqual(sleep.await_count, 2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(json.loads(path.read_text())['status'], 'submitted')
+
+    async def test_operator_resume_host_timeout_preserves_pending_without_injection(self):
+        """Недоступный host не расходует единственную попытку и не создаёт скрытый retry."""
+        path = self.config.state_dir / 'operator-resume.json'
+        request = {'requestId': ATTEMPT, 'status': 'pending',
+                   'sessionKey': self.native_context['HERMES_SESSION_KEY'], 'content': 'Продолжи визитку'}
+        raw = json.dumps(request)
+        path.write_text(raw); path.chmod(0o600)
+        self.plugin.injection_ready = lambda: False
+        self.plugin.inject_message = lambda *a, **kw: self.fail('host not ready')
+        with patch.object(mod.asyncio, 'sleep', new=AsyncMock()) as sleep:
+            await self.plugin.resume_operator_request()
+        self.assertEqual(sleep.await_count, 180)
+        self.assertEqual(path.read_text(), raw)
+
+    async def test_operator_resume_preserves_operator_cancellation_during_host_wait(self):
+        """Изменённый оператором pending не перезаписывается после готовности host."""
+        path = self.config.state_dir / 'operator-resume.json'
+        request = {'requestId': ATTEMPT, 'status': 'pending',
+                   'sessionKey': self.native_context['HERMES_SESSION_KEY'], 'content': 'Продолжи визитку'}
+        path.write_text(json.dumps(request)); path.chmod(0o600)
+        readiness = iter([False, True])
+        self.plugin.injection_ready = lambda: next(readiness)
+        self.plugin.inject_message = lambda *a, **kw: self.fail('operator cancelled')
+        cancelled = json.dumps({**request, 'status': 'cancelled'})
+        async def cancel(delay):
+            path.write_text(cancelled)
+        with patch.object(mod.asyncio, 'sleep', new=AsyncMock(side_effect=cancel)):
+            await self.plugin.resume_operator_request()
+        self.assertEqual(path.read_text(), cancelled)
+
+    async def test_registration_binds_readiness_to_the_native_profile_manager(self):
+        """Рабочая регистрация ждёт именно публичный host status профильного manager."""
+        manager = NS(has_gateway_message_injector=False)
+        factories = []
+        ctx = NS(inject_message=lambda *a, **kw: True,
+                 register_telegram_handler=factories.append,
+                 register_hook=lambda *a: None,
+                 register_tool=lambda **kw: self.fail('Game Core disabled'),
+                 on_unload=lambda *a: None)
+        modules = {"hermes_cli.plugins": NS(get_plugin_manager=lambda: manager)}
+        with patch.dict(sys.modules, modules), patch.object(mod.Config, 'from_env',
+                return_value=replace(self.config, game_core_enabled=False)):
+            mod.register(ctx)
+        plugin = factories[0].__self__
+        self.addCleanup(plugin.close)
+        self.assertFalse(plugin.injection_ready())
+        manager.has_gateway_message_injector = True
+        self.assertTrue(plugin.injection_ready())
+
     async def test_disabled_game_core_keeps_owner_input_without_workflow_calls(self):
         """Выключенный workflow не обращается к Game Core из старых tools и recovery."""
         self.plugin.config = replace(self.config, game_core_enabled=False)
@@ -279,6 +348,26 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             await observer.guard(update, None)
         with observer.journal.db() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM messages").fetchone()[0], 1)
+
+    async def test_old_edit_updates_observer_without_dispatch_or_reply(self):
+        """Старая правка сохраняется в журнале, но не запускает native обработчики."""
+        config=replace(self.config,entry=str(REPO/'services/hermes/trusted.mjs'))
+        with patch.dict(os.environ,{'BRAI_TELEGRAM_OBSERVER_ENABLED':'1'}):
+            observer=mod.TelegramPlugin(config,self.bridge,self.inject)
+        message=NS(message_id=91,text='Исправленный старый текст',date=None,edit_date=None)
+        update=NS(message=None,edited_message=message,effective_message=message,
+            effective_chat=NS(id=123,type='private'),effective_user=NS(id=123,full_name='Анна'))
+        files=NS(active_telegram_edit=lambda adapter,message:False)
+        stop=sys.modules['telegram.ext'].ApplicationHandlerStop
+        with patch.dict(sys.modules,{'brai_files':files}):
+            with self.assertRaises(stop):await observer.guard(update,None)
+        with observer.journal.db() as db:
+            self.assertEqual(db.execute('SELECT text FROM messages').fetchone()[0],message.text)
+        self.assertEqual(self.bot.sent,[])
+        files.active_telegram_edit=lambda adapter,message:True
+        with patch.dict(sys.modules,{'brai_files':files}):
+            await observer.guard(update,None)
+        observer.close()
 
     async def set_group_route(self, chat=GROUP):
         """Перезапустить только плагин с прежним SQLite и новым защищённым route."""
@@ -2205,8 +2294,13 @@ class NativeContractTests(unittest.TestCase):
         ctx = NS(register_telegram_handler=lambda f: calls.append(("factory", f)),
                  register_hook=lambda name, f: calls.append((name, f)),
                  register_tool=lambda **kw: calls.append(("tool", kw)), on_unload=lambda f: calls.append(("unload", f)))
-        with patch.object(mod.Config, "from_env", return_value=NS()), patch.object(mod, "TelegramPlugin") as plugin:
+        manager = NS(has_gateway_message_injector=True)
+        modules = {"hermes_cli.plugins": NS(get_plugin_manager=lambda: manager)}
+        with patch.dict(sys.modules, modules), patch.object(mod.Config, "from_env", return_value=NS()), patch.object(mod, "TelegramPlugin") as plugin:
             mod.register(ctx)
+            self.assertTrue(plugin.call_args.kwargs["injection_ready"]())
+            manager.has_gateway_message_injector = False
+            self.assertFalse(plugin.call_args.kwargs["injection_ready"]())
             self.assertEqual([name for name, _ in calls], ["factory", "pre_gateway_dispatch", "transform_llm_output", "transform_tool_result", "post_llm_call", "post_tool_call", "on_session_end", "agent_loop_stopped", "tool", "tool", "tool", "unload"])
             self.assertTrue(calls[8][1]["is_async"])
             self.assertIs(calls[8][1]["handler"], plugin.return_value.request_confirmation)

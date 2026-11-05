@@ -980,11 +980,18 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
                 release.set()
             transfer_future.result(timeout=5)
 
-    async def test_recovered_single_attachment_queues_without_interrupting(self):
-        event = self.event('recovered')
-        event.metadata = {'recovered': True, '_brai_artifacts': [{'groupId': 'not-admitted'}]}
-        with patch.object(self.store, 'db', side_effect=AssertionError('recovered attachment must queue')):
-            self.assertTrue(native.should_queue_inbound_set(event))
+    async def test_rejected_file_admission_releases_final_wait_without_publication(self):
+        """Отказ native допуска снимает ожидание принятого файла без обращения к Artifacts."""
+        event=self.event('rejected')
+        turn=SimpleNamespace(started_ts=1)
+        runner=SimpleNamespace(_is_user_authorized_for_source=lambda _:True,
+            _session_key_for_source=lambda _:'session',_peek_session_state=lambda _:SimpleNamespace(turn=turn),
+            _admit_bot_message_for_source=lambda _:False)
+        ready=native.reserve_steer_input(runner,event)
+        self.assertFalse(ready.is_set())
+        self.assertFalse(await native.capture_authorized(SimpleNamespace(gateway_runner=runner),event))
+        self.assertTrue(ready.is_set())
+        self.assertEqual(self.backend.calls,[])
 
     async def test_recovered_files_do_not_merge_into_pending_user_text(self):
         seen, scheduled = [], []

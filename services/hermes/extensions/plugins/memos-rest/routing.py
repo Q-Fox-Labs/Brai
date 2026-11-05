@@ -2,14 +2,19 @@
 # ABOUTME: Переписка хранится отдельно от фактов; автор и область проверяются локально.
 """Profile-local multi-cube worker. Durable jobs pin extraction before delivery."""
 import json
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 import math
 import re
 from collections import Counter
 from pathlib import Path
 
-from .client import Client, MemOSError, fact_fields, memory_text, internal_dialogue
+from .client import Client, MemOSError, fact_fields, memory_text, internal_dialogue, context_map, remaining_timeout
 from .router import Catalog, SemanticRouter, stable_id, QUALITY_VERSION, evidence_context
+
+
+logger = logging.getLogger(__name__)
 
 
 class RecallRows(list):
@@ -310,12 +315,13 @@ class RoutedRuntime:
 
     def search(self, query, sid, top_k=None, project=None, cubes=None, include_archive=False, all_cubes=False,
                *, expand_sources=False, context=None):
-        """Проверить всю разрешённую область и отобрать свидетельства по вопросу.
+        """Найти индексные кандидаты в разрешённой области и проверить смысл.
 
-        Кубы задают явную область, но автоматическая классификация не закрывает
-        остальные знания. BM25 только упорядочивает кандидатов; смысловой
-        проверяющий решает, относятся ли они к вопросу, и может вернуть ноль.
+        Кубы задают область, а не лимит результатов. Индекс проверяет все части,
+        модель получает найденные уникальные источники. Старый backend без
+        индекса сохраняет полное чтение. BM25 только упорядочивает кандидатов.
         """
+        started = time.monotonic()
         config = self.reload()
         if not config.get('enabled', True) or config.get('suspended', False):
             return RecallRows()
@@ -329,11 +335,31 @@ class RoutedRuntime:
             query = plan['query']
             if plan['goal'] == 'needs_topic':
                 return RecallRows(needs_topic=True, source_query=query)
+        if not selected:
+            return RecallRows(archive_searched=include_archive or expand_sources)
+        index_result = self.api.indexed_search(query, cubes=list(selected),
+            scope={'hermes_home_scope': self.home_scope, 'hermes_memory_epoch': config['memory_epoch']},
+            author_id=self.provider.author['id'],
+            shared_infra=self.catalog.data.get('shared_infra') is True, project=project,
+            goal=plan['goal'] if plan else 'evidence')
         candidates, source_dates = {}, {}
         def collect(cube):
-            return self.client(cube).get({})
-        with ThreadPoolExecutor(max_workers=min(4, max(1, len(selected)))) as executor:
-            pools = list(executor.map(collect, selected))
+            # AIDEV-NOTE: Отсекаем заведомо чужую область до передачи больших
+            # transcript-метаданных; allowed() остаётся обязательной проверкой.
+            filters = {'hermes_home_scope': self.home_scope,
+                       'hermes_memory_epoch': config['memory_epoch']}
+            if cube != 'infra' or self.catalog.data.get('shared_infra') is not True:
+                filters['hermes_author_id'] = self.provider.author['id']
+            return self.client(cube).get(filters, timeout=remaining_timeout(self.api.timeout))
+        if index_result is not None:
+            pools = [index_result['memories']]
+            logger.info('MemOS index: covered=%d logical=%d candidates=%d database=%.3fs',
+                        index_result['physical_count'], index_result['logical_count'],
+                        index_result['matched_count'], index_result.get('elapsed_seconds', 0))
+        else:
+            # Старые версии MemOS сохраняют полный совместимый путь.
+            with ThreadPoolExecutor(max_workers=min(4, max(1, len(selected)))) as executor:
+                pools = list(context_map(executor, collect, selected))
         for pool in pools:
             for row in pool:
                 if not self.allowed(row, config):
@@ -351,9 +377,9 @@ class RoutedRuntime:
                     continue
                 decorated = self.decorate(row)
                 if info.get('hermes_kind') == 'fact':
-                    key = info.get('hermes_logical_id') or row['id']
+                    key = (info.get('hermes_author_id'), info.get('hermes_logical_id') or row['id'])
                 else:
-                    key = 'source:' + str(info.get('hermes_event_id') or row['id'])
+                    key = (info.get('hermes_author_id'), 'source:' + str(info.get('hermes_event_id') or row['id']))
                     # У исходника остаётся физический ID, полный диалог читается
                     # memos_read(include_transcript=true), без потери частей.
                     dialogue = info.get('hermes_messages') or []
@@ -362,7 +388,7 @@ class RoutedRuntime:
                             str(m.get('role', 'source')) + ': ' + str(m.get('content', '')) for m in dialogue)}
                 if key not in candidates:
                     candidates[key] = decorated
-        ordered = lexical_order(query, [{**row, '_source_date': (source_dates.get(
+        ordered = lexical_order(query, [{**row, '_source_date': (row.get('_source_date') or source_dates.get(
             row['metadata']['info'].get('hermes_source_event'))
             if row['metadata']['info'].get('hermes_kind') == 'fact' else row['metadata'].get('created_at'))}
             for row in candidates.values()])
@@ -378,9 +404,9 @@ class RoutedRuntime:
             return rows, result
         document_lookup = bool(plan and plan['goal'] in ('locate_document', 'latest_conversation', 'latest_topic'))
         initial = ([row for row in ordered if row['metadata']['info'].get('hermes_kind') == 'fact']
-                   if expand_sources and not include_archive and not document_lookup else ordered)
+                   if index_result is None and expand_sources and not include_archive and not document_lookup else ordered)
         rows, result = select(initial)
-        scanned, archive_searched = len(initial), include_archive or document_lookup
+        scanned, archive_searched = len(initial), include_archive or document_lookup or (index_result is not None and expand_sources)
         if expand_sources and not archive_searched and (not rows or result['needs_sources']):
             archive = [row for row in ordered if row['metadata']['info'].get('hermes_kind') != 'fact']
             # AIDEV-NOTE: Исходники уже прочитаны с той же проверкой доступа.
@@ -390,6 +416,9 @@ class RoutedRuntime:
             scanned += len(archive)
             archive_searched = True
             result = {**source_result, 'needs_sources': result['needs_sources'] or source_result['needs_sources']}
+        remaining_timeout(self.api.timeout)
+        logger.info('MemOS search: scanned=%d matched=%d archive=%s elapsed=%.3fs',
+                    scanned, len(rows), archive_searched, time.monotonic() - started)
         rows.sort(key=lambda row: row['_relevance'] != 'direct')
         return RecallRows(rows[:top_k], scanned=scanned, needs_sources=result['needs_sources'],
                           source_query=result['source_query'], archive_searched=archive_searched)

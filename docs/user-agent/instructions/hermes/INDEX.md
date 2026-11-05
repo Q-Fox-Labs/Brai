@@ -25,6 +25,7 @@ SOUL.md — штатная точка входа Hermes. В начале сес�
 
 - [codex](skills/autonomous-ai-agents/codex/SKILL.md)
 - [hermes-agent](skills/autonomous-ai-agents/hermes-agent/SKILL.md)
+- [art-director](skills/creative/art-director/SKILL.md) — для постеров, афиш, баннеров и другой графики; прочитай файл по ссылке.
 - [reply-feedback-learning](skills/creative/reply-feedback-learning/SKILL.md)
 - [youtube-content](skills/media/youtube-content/SKILL.md)
 - [memos-memory](skills/note-taking/memos-memory/SKILL.md)
