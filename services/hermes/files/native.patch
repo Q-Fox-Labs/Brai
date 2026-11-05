@@ -1171,7 +1171,7 @@
 
 --- a/gateway/run_notifications.py
 +++ b/gateway/run_notifications.py
-@@ -1247,6 +1247,13 @@
+@@ -1247,6 +1247,14 @@
          gateway route. Not transactional: a crash after acceptance can replay (at-least-once).
          """
          from gateway.wake import WakeNotAccepted, adapter_supports_push, admit_internal_event
@@ -1180,7 +1180,8 @@
 +            if evt.get("task_failure_notice"):
 +                # Per-child outcomes are retained by record_unit_child; one terminal batch wakes the parent.
 +                return True
-+            if context_completion_consumed(str(evt.get("delegation_id") or "")):
++            identities = evt.get("brai_delegation_ids") or [str(evt.get("delegation_id") or "")]
++            if all(context_completion_consumed(identity) for identity in identities):
 +                return True
          source = await asyncio.to_thread(self._build_process_event_source, evt)
          if not source:

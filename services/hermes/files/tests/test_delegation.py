@@ -1,5 +1,6 @@
 # ABOUTME: Проверяет потребление результатов помощников на реальной SQLite.
 # ABOUTME: Исполняет точные функции native patch без модели, Telegram и пользовательских данных.
+import asyncio
 import contextlib
 import json
 from pathlib import Path
@@ -85,5 +86,19 @@ class CompletionTests(unittest.TestCase):
         self.add('first');self.assertTrue(self.run_gate())
         self.add('second');self.assertTrue(self.run_gate())
         self.assertTrue(self.consumed('second'))
+
+    def test_coalesced_notification_retains_new_sibling_and_suppresses_handled_batch(self):
+        source = (Path(__file__).parents[1] / 'native.patch').read_text()
+        fragment = source.split('--- a/gateway/run_notifications.py', 1)[1]
+        fragment = fragment.split('         source = await asyncio.to_thread', 1)[0]
+        added = '\n'.join(line[1:] for line in fragment.splitlines() if line.startswith('+') and not line.startswith('+++'))
+        scope = {}
+        exec('async def decision(evt):\n' + added + '\n        return False', scope)
+        self.add('handled');self.assertTrue(self.run_gate())
+        self.add('new')
+        with patch.dict(sys.modules, {'tools.async_delegation': types.SimpleNamespace(context_completion_consumed=self.consumed)}):
+            self.assertFalse(asyncio.run(scope['decision']({'type':'async_delegation','brai_delegation_ids':['handled','new']})))
+            self.assertTrue(asyncio.run(scope['decision']({'type':'async_delegation','brai_delegation_ids':['handled']})))
+            self.assertTrue(asyncio.run(scope['decision']({'type':'async_delegation','task_failure_notice':True})))
 
 if __name__ == '__main__': unittest.main()
