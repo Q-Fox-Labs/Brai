@@ -63,6 +63,42 @@ class ConsentTests(unittest.TestCase):
     def authorize(self,row):
         self.store.delivered(row["id"],"10")
         return self.store.answer(self.scope.key,"alice","11","да",time.time()+1,"10")
+    def test_consent_reuses_exact_authenticated_workspace_after_reply(self):
+        sys.path.insert(0, str(ROOT / 'services/hermes'))
+        try:
+            from files import native
+            cfg = {'ownerId':'owner', 'account':'instance', 'stateRoot':str(Path(self.temp.name)/'files'),
+                   'resultRoot':str(Path(self.temp.name)/'cache'), 'readRoots':[]}
+            native.configure(cfg, types.SimpleNamespace())
+            actor = source()
+            agent = types.SimpleNamespace(session_id='session')
+            command = "rm -rf './test-photos'"
+            args = {'command':command}
+            with patch.object(consent, 'review_action', return_value=REVIEW):
+                with native.inbound_handoff(actor, '1'):
+                    with consent.turn_scope(self.db, actor, 'session', 'Покажи фотографии', '1') as first:
+                        with native.conversation(agent, 'Покажи фотографии'):
+                            initial = agent._brai_workspace
+                            marker = Path(initial)/'test-photos'
+                            marker.mkdir()
+                            (marker/'test.txt').write_text('test')
+                            with consent.tool_scope('terminal', args, 'call-1'):
+                                result = consent.gate(command, cwd=initial, backend='local')
+                            self.assertEqual(result['status'], 'needs_consent')
+                            row = first.pending
+                self.assertTrue((marker/'test.txt').is_file())
+                self.store.delivered(row['id'], '10')
+                self.assertEqual(self.store.answer(first.key, 'alice', '11', 'да', time.time()+1, '10'), 'authorized')
+                with native.inbound_handoff(actor, '11'):
+                    with consent.turn_scope(self.db, actor, 'session', 'да', '11'):
+                        with native.conversation(agent, 'да'):
+                            self.assertEqual(agent._brai_workspace, initial)
+                            with consent.tool_scope('terminal', args, 'call-2'):
+                                result = consent.gate(command, cwd=agent._brai_workspace, backend='local')
+                            self.assertTrue(result['approved'])
+        finally:
+            sys.path.pop(0)
+
     def test_authorizations_come_from_same_authenticated_owner_and_conversation(self):
         self.store.record_request(self.scope.key,"alice","1","Публикуй готовый отчёт")
         self.store.record_request(self.scope.key,"bob","2","Удаляй всё")

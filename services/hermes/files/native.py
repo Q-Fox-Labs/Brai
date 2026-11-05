@@ -34,6 +34,12 @@ _MUTATION_FOOTER = re.compile(
     r'(?:\n[ \t]+•[^\n]*)*\s*\Z'
 )
 
+_TECHNICAL_FAILURE = re.compile(
+    r'(?im)(?:\[TOOL_ERROR\]|^\s*Traceback \(most recent call last\):|'
+    r'\bError executing [\w.-]+:|\b(?:TEMPORARY_OUTPUT_REQUIRED|'
+    r'TEMPORARY_WORKDIR_REQUIRED|ARTIFACT_DIRECTORY_REQUIRED|FILE_SCOPE_DENIED)\b|'
+    r'\b(?:exit[_ ]code|код выхода)\s*[:=—-]?\s*[1-9]\d*\b)'
+)
 
 def register_telegram_observer(observer):
     """Подключить наблюдателя Telegram к общей файловой границе текущего gateway."""
@@ -693,11 +699,22 @@ def input_text(value, operation):
 def conversation(agent, user_message, task_id=None):
     """Общая временная область CLI/API, gateway, cron и дочернего агента."""
     operation = str(getattr(agent, 'session_id', '') or task_id or uuid.uuid4()) + ':' + str(uuid.uuid4())
+    inbound = _inbound.get()
+    session = str(getattr(agent, 'session_id', '') or '')
+    if inbound is not None and session and getattr(inbound[0], 'user_id', None):
+        # The gateway supplies this identity after authentication; model arguments cannot select it.
+        event = type('ConversationSource', (), {'source': inbound[0]})()
+        store().bind_workspace(operation, ['conversation', source_of(event), session])
+    try:
+        agent._brai_workspace = str(store().workspace(operation))
+        task = str(task_id or getattr(agent, 'session_id', '') or operation)
+        with store().db() as db:
+            db.execute('INSERT OR REPLACE INTO tasks VALUES (?,?)', (task, operation))
+    except BaseException:
+        with store().db() as db:
+            db.execute('DELETE FROM workspace_bindings WHERE operation=?', (operation,))
+        raise
     token = _operation.set(operation)
-    agent._brai_workspace = str(store().workspace(operation))
-    task = str(task_id or getattr(agent, 'session_id', '') or operation)
-    with store().db() as db:
-        db.execute('INSERT OR REPLACE INTO tasks VALUES (?,?)', (task, operation))
     try:
         prepared = input_text(user_message, operation)
         inbound = _inbound.get()
@@ -719,6 +736,9 @@ def conversation(agent, user_message, task_id=None):
         with store().db() as db:
             db.execute('DELETE FROM tasks WHERE identity=? AND operation=?', (task, operation))
         store().cleanup(operation, cache=False)
+        with store().db() as db:
+            if not db.execute('SELECT 1 FROM jobs WHERE operation=?', (operation,)).fetchone():
+                db.execute('DELETE FROM workspace_bindings WHERE operation=?', (operation,))
 
 
 def before_tool(name, args, **ids):
@@ -728,7 +748,7 @@ def before_tool(name, args, **ids):
     workspace = store().workspace(operation)
     if name == 'terminal':
         requested = Path(args.get('workdir') or workspace).absolute()
-        if not requested.is_relative_to(store().work) and not any(requested.is_relative_to(p) for p in store().service_roots):
+        if not requested.resolve().is_relative_to(workspace) and not any(requested.resolve().is_relative_to(p) for p in store().service_roots):
             raise FileError('TEMPORARY_WORKDIR_REQUIRED')
         args['workdir'] = str(requested)
         if isinstance(args.get('command'), str):
@@ -746,10 +766,12 @@ def before_tool(name, args, **ids):
         if any(resolved.is_relative_to(root) for root in store().service_roots):
             continue
         if name in {'write_file', 'patch'}:
-            if not resolved.is_relative_to(store().work):
+            if not resolved.is_relative_to(workspace):
                 raise FileError('TEMPORARY_OUTPUT_REQUIRED')
             args[field] = str(resolved)
         elif resolved.is_relative_to(store().work):
+            if not resolved.is_relative_to(workspace):
+                raise FileError('FILE_SCOPE_DENIED')
             args[field] = str(path)  # Промежуточные материалы не публикуются автоматически.
         elif path.is_file() or known_alias(path):
             with store().lock('cache'):
@@ -836,6 +858,9 @@ def final_text(text, operation):
     # Runtime verifier keeps the failure visible without exposing local paths or tool diagnostics.
     text = _MUTATION_FOOTER.sub(
         'Некоторые попытки изменить файлы не удались. Проверьте нужный результат.', text)
+    if _TECHNICAL_FAILURE.search(text):
+        logging.getLogger(__name__).warning('BRAI_USER_RESPONSE_TECHNICAL_FAILURE')
+        text = 'Не удалось полностью выполнить запрос. Попробуйте ещё раз.'
     files, replacements, items = store(), [], []
     explicit = []
     active_sub(_SET, lambda match: explicit.append(match) or match.group(0), text)
