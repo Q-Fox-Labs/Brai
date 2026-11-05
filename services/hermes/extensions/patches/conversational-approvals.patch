@@ -1,0 +1,660 @@
+diff --git a/agent/i18n.py b/agent/i18n.py
+--- a/agent/i18n.py
++++ b/agent/i18n.py
+@@ -234,6 +234,8 @@
+     if value is None:
+         logger.debug("i18n miss: key=%r lang=%r", key, target)
+         value = key
++    from tools.approval_conversation import brand_text
++    value = brand_text(value)
+     if not format_kwargs:
+         return value
+     try:
+diff --git a/agent/terminal_approval_batch.py b/agent/terminal_approval_batch.py
+--- a/agent/terminal_approval_batch.py
++++ b/agent/terminal_approval_batch.py
+@@ -287,6 +287,10 @@
+ 
+ @contextmanager
+ def terminal_approval_batch(agent, calls, messages, task_id):
++    from tools.approval_conversation import enabled
++    if enabled():
++        yield
++        return
+     from gateway.session_context import get_session_env
+     from tools import approval
+     from agent.tool_executor import _parse_tool_call
+diff --git a/agent/tool_executor.py b/agent/tool_executor.py
+--- a/agent/tool_executor.py
++++ b/agent/tool_executor.py
+@@ -746,12 +746,22 @@
+     elif ref.name == "skill_manage":
+         agent._iters_since_skill = 0
+ 
++    from tools.approval_conversation import update_arguments
++    conversation_block=update_arguments(ref.args)
++    if conversation_block is not None:
++        _advance_start_order()
++        state.blocked=True
++        return _blocked_tool_result(agent,ref,block_body=conversation_block,block_error_type="consent_changed",guardrail_decision=None)
+     from agent.terminal_approval_batch import prepare_current_terminal
+     prepare_current_terminal(ref)
+     _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
+     return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
+ 
+ 
++from tools.approval_conversation import conversation_tool
++
++
++@conversation_tool
+ def _run_agent_tool_execution_middleware(
+     agent,
+     *,
+diff --git a/apps/desktop/src/app/pet-overlay/pet-overlay-app.tsx b/apps/desktop/src/app/pet-overlay/pet-overlay-app.tsx
+--- a/apps/desktop/src/app/pet-overlay/pet-overlay-app.tsx
++++ b/apps/desktop/src/app/pet-overlay/pet-overlay-app.tsx
+@@ -448,7 +448,7 @@
+               stopPropagation keeps a click from starting a window drag. */}
+           {unread && (
+             <button
+-              aria-label="Open in Hermes"
++              aria-label="Open in Brai"
+               onClick={openApp}
+               onPointerDown={e => e.stopPropagation()}
+               onPointerUp={e => e.stopPropagation()}
+diff --git a/apps/desktop/src/app/quick-entry/quick-entry-app.tsx b/apps/desktop/src/app/quick-entry/quick-entry-app.tsx
+--- a/apps/desktop/src/app/quick-entry/quick-entry-app.tsx
++++ b/apps/desktop/src/app/quick-entry/quick-entry-app.tsx
+@@ -162,7 +162,7 @@
+                 dispatch({ type: 'dismiss' })
+               }
+             }}
+-            placeholder={state.connected ? 'Ask Hermes…' : 'Not connected — open Hermes to reconnect'}
++            placeholder={state.connected ? 'Ask Brai…' : 'Not connected — open Brai to reconnect'}
+             ref={inputRef}
+             spellCheck={false}
+             style={{
+diff --git a/apps/desktop/src/app/settings/computer-use-panel.tsx b/apps/desktop/src/app/settings/computer-use-panel.tsx
+--- a/apps/desktop/src/app/settings/computer-use-panel.tsx
++++ b/apps/desktop/src/app/settings/computer-use-panel.tsx
+@@ -173,7 +173,7 @@
+         <div className="min-w-0">
+           {status.can_grant ? (
+             <p className="text-[0.72rem] text-muted-foreground">
+-              Grants attach to CuaDriver&apos;s own identity (com.trycua.driver), not Hermes — so the dialog is
++              Grants attach to CuaDriver&apos;s own identity (com.trycua.driver), not Brai — so the dialog is
+               attributed to the process that drives your Mac.
+             </p>
+           ) : (
+diff --git a/apps/desktop/src/components/assistant-ui/thread/message-reactions.tsx b/apps/desktop/src/components/assistant-ui/thread/message-reactions.tsx
+--- a/apps/desktop/src/components/assistant-ui/thread/message-reactions.tsx
++++ b/apps/desktop/src/components/assistant-ui/thread/message-reactions.tsx
+@@ -197,7 +197,7 @@
+           <span
+             className="reaction-pop leading-none"
+             key={`${reaction.author}-${reaction.emoji}`}
+-            title="Reacted by Hermes"
++            title="Reacted by Brai"
+           >
+             {reaction.emoji}
+           </span>
+diff --git a/apps/desktop/src/i18n/registry.ts b/apps/desktop/src/i18n/registry.ts
+--- a/apps/desktop/src/i18n/registry.ts
++++ b/apps/desktop/src/i18n/registry.ts
+@@ -16,6 +16,7 @@
+ 
+ import {
+   adaptStringOverrides,
++  brandDisplayCatalog,
+   type FlatMessages,
+   isRecord,
+   mergeTranslations,
+@@ -243,6 +244,7 @@
+     }
+   }
+ 
++  value = brandDisplayCatalog(value)
+   resolved.set(locale, { version, value })
+ 
+   return value
+diff --git a/apps/desktop/src/plugins/hermes-bots/roster-pane-dialogs.tsx b/apps/desktop/src/plugins/hermes-bots/roster-pane-dialogs.tsx
+--- a/apps/desktop/src/plugins/hermes-bots/roster-pane-dialogs.tsx
++++ b/apps/desktop/src/plugins/hermes-bots/roster-pane-dialogs.tsx
+@@ -110,7 +110,7 @@
+             <span>
+               {'This will permanently delete the bot '}
+               <span className="font-medium text-foreground">{deleting.name}</span>
+-              {' and its associated Hermes profile at '}
++              {' and its associated Brai profile at '}
+               <span className="font-mono text-xs">{deleting.path}</span>. This cannot be undone.
+             </span>
+           ) : null
+diff --git a/apps/shared/src/i18n.ts b/apps/shared/src/i18n.ts
+--- a/apps/shared/src/i18n.ts
++++ b/apps/shared/src/i18n.ts
+@@ -1,3 +1,5 @@
++// ABOUTME: Provides locale composition and product display naming for Brai.
++// ABOUTME: Preserves technical identifiers and callable catalog interfaces.
+ // Locale scaffolding shared by the desktop and web i18n layers. Generic over the
+ // translation catalog type: each app supplies its own `Translations`/`en` and
+ // wraps `mergeTranslations` in a one-line `defineLocale`.
+@@ -206,3 +208,25 @@
+   document.documentElement.lang = locale
+   document.documentElement.dir = rtl ? 'rtl' : 'ltr'
+ }
++
++/** Product display name; source identifiers, code, links and paths stay exact. */
++export function brandDisplayText(text: string): string {
++  const protectedText = /(```[\s\S]*?```|`[^`\n]*`|https?:\/\/[^\s<>]+|(?:[A-Za-z]:)?\/[^\s<>]+)/g
++  return text.split(protectedText).map((part, index) => index % 2
++    ? part
++    : part.replace(/(?<![\w./-])(?:Hermes(?: Agent)?|HERMES(?: AGENT)?|Гермес|ГЕРМЕС)(?![\w./-])/g, 'Brai')).join('')
++}
++
++/** Brand catalog leaves without rewriting keys or changing callable leaf arity. */
++export function brandDisplayCatalog<T>(catalog: T): T {
++  if (typeof catalog === 'string') return brandDisplayText(catalog) as T
++  if (typeof catalog === 'function') {
++    const translated = (...args: unknown[]) => brandDisplayText(catalog(...args))
++    Object.defineProperty(translated, 'length', { value: catalog.length })
++    return translated as T
++  }
++  if (Array.isArray(catalog)) return catalog.map(value => brandDisplayCatalog(value)) as T
++  if (!isRecord(catalog)) return catalog
++  return Object.fromEntries(Object.entries(catalog).map(([key, value]) =>
++    [key, brandDisplayCatalog(value)])) as T
++}
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -4582,12 +4582,15 @@
+     async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
+         """Background task that actually processes the message."""
+         delivery_attempted = delivery_succeeded = False  # feeds the processing-complete hook
++        delivery_message_id = None
+ 
+         def _record_delivery(result):
+-            nonlocal delivery_attempted, delivery_succeeded
++            nonlocal delivery_attempted, delivery_succeeded, delivery_message_id
+             if result is not None:
+                 delivery_attempted = True
+                 delivery_succeeded = delivery_succeeded or bool(getattr(result, "success", False))
++                if getattr(result,"success",False):
++                    delivery_message_id=getattr(result,"message_id",None)
+         # Reuse the interrupt event handle_message() installed; new Event only if removed externally.
+         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
+         self._active_sessions[session_key] = interrupt_event
+@@ -4597,6 +4600,8 @@
+             await self._run_processing_hook("on_processing_start", event)
+             event._turn_marker_handoff = self.gateway_runner is not None  # it can release the marker
+             response = await self._message_handler(event)
++            from tools.approval_conversation import brand_response
++            response = brand_response(event, response)
+             # A muted diagnostic wake ran for the session; its reply is not presented. The
+             # policy read binds the routed profile; delivery itself stays in the launch scope.
+             with self._media_delivery_scope(event.source):
+@@ -4657,6 +4662,8 @@
+                     record_delivery=_record_delivery)
+             await self._release_turn_marker(event)
+             processing_ok = delivery_succeeded if delivery_attempted else not bool(response)
++            from tools.approval_conversation import record_delivery
++            await asyncio.to_thread(record_delivery,event,response,delivery_succeeded,delivery_message_id)
+             # Clean up the per-turn streaming-TTS flag.
+             self._streaming_tts_completed_turns.discard(self._streaming_tts_turn_key(
+                 session_key, getattr(interrupt_event, "_hermes_run_generation", None),
+diff --git a/gateway/run_inbound.py b/gateway/run_inbound.py
+--- a/gateway/run_inbound.py
++++ b/gateway/run_inbound.py
+@@ -1300,6 +1300,7 @@
+         """Handle an incoming message from any platform: auth → command check → running-agent
+         interrupt → get/create session → build context → run agent → return response."""
+         from gateway.run import _AGENT_PENDING_SENTINEL
++        _original_consent_event = event
+         _admitted = await self._hm_admit_event(event)
+         if _admitted is None:
+             return None
+@@ -1321,6 +1322,10 @@
+             return _paused_notice
+ 
+         _quick_key = self._session_key_for_source(source)
++        from tools.approval_conversation import gateway_input
++        _consent_reply = await asyncio.to_thread(gateway_input,self,event,_original_consent_event)
++        if _consent_reply is not None:
++            return _consent_reply
+         _reply = await self._hm_pending_reply_intercepts(event, source, _quick_key)
+         if _reply is not None:
+             return _reply
+diff --git a/gateway/run_turn_runner.py b/gateway/run_turn_runner.py
+--- a/gateway/run_turn_runner.py
++++ b/gateway/run_turn_runner.py
+@@ -1457,6 +1457,9 @@
+     def _approval_notify_sync(self, approval_data: dict) -> None:
+         """Send the approval request from the agent thread: the adapter's interactive button
+         approvals (``send_exec_approval``) when available, else plain text with ``/approve`` steps."""
++        from tools.approval_conversation import enabled
++        if enabled():
++            raise RuntimeError("BRAI_LEGACY_APPROVAL_DISABLED")
+         from gateway.run import _approval_send_outcome, _format_exec_approval_fallback, _interim_metadata, _redact_approval_command
+         from gateway.run_turn_runner_approval_settle import register_timeout_notice
+         ctx = self._ctx
+@@ -1720,7 +1723,12 @@
+                 kwargs["persist_user_platform_id"] = str(ctx.inbound_message_id)
+             from agent.notification_presentation import notification_turn
+             import brai_files
+-            with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""), brai_files.inbound_handoff(ctx.source, ctx.inbound_message_id, inline_images=getattr(self, "_brai_inline_images", ())):
++            from tools.approval_conversation import turn_scope, enabled, resume_note
++            from contextlib import nullcontext
++            consent_context=(turn_scope(self._runner.session_store._db_for_key(session_key),ctx.source,ctx.session_id,ctx.message,ctx.inbound_message_id,real_input=not ctx.persist_user_display_kind) if enabled() else nullcontext(None))
++            with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""), brai_files.inbound_handoff(ctx.source, ctx.inbound_message_id, inline_images=getattr(self, "_brai_inline_images", ())), consent_context as consent_scope:
++                if consent_scope is not None:
++                    agent._gateway_turn_context_notes += "\n"+resume_note(consent_scope)
+                 result = agent.run_conversation(api_message, **kwargs)
+                 if isinstance(result, dict) and (result.get("failed") or (result.get("partial") and result.get("error"))):
+                     with suppress(Exception):
+diff --git a/hermes_cli/banner.py b/hermes_cli/banner.py
+--- a/hermes_cli/banner.py
++++ b/hermes_cli/banner.py
+@@ -70,12 +70,7 @@
+ from hermes_cli import __release_date__ as RELEASE_DATE
+ from hermes_cli.version_info import get_version_info
+ 
+-HERMES_AGENT_LOGO = """[bold #FFD700]██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
+-[bold #FFD700]██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
+-[#FFBF00]███████║█████╗  ██████╔╝██╔████╔██║█████╗  ███████╗█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║[/]
+-[#FFBF00]██╔══██║██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══╝  ╚════██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/]
+-[#CD7F32]██║  ██║███████╗██║  ██║██║ ╚═╝ ██║███████╗███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/]
+-[#CD7F32]╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]"""
++HERMES_AGENT_LOGO = "[bold #FFD700]Brai[/]"
+ 
+ HERMES_CADUCEUS = """[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀⠀⢀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+ [#CD7F32]⠀⠀⠀⠀⠀⠀⢀⣠⣴⣾⣿⣿⣇⠸⣿⣿⠇⣸⣿⣿⣷⣦⣄⡀⠀⠀⠀⠀⠀⠀[/]
+@@ -210,7 +205,7 @@
+ 
+     stamp = read_install_stamp(get_project_root())
+     if stamp.get("distribution") == "desktop-app":
+-        label = f"Hermes Agent v{get_version_info().derived_version}"
++        label = f"Brai v{get_version_info().derived_version}"
+         if stamp.get("source") == "commit-build":
+             return f"{label} · commit-build · {str(stamp.get('commit') or '')[:12]}"
+         if stamp.get("tag"):
+@@ -223,7 +218,7 @@
+             return f"{label} · installer"
+         return label
+ 
+-    base = f"Hermes Agent v{get_version_info().derived_version} ({RELEASE_DATE})"
++    base = f"Brai v{get_version_info().derived_version} ({RELEASE_DATE})"
+     from hermes_cli.config import load_config
+     from hermes_cli.update_channel import resolve_update_channel
+ 
+diff --git a/hermes_cli/cli_chat_turn_mixin.py b/hermes_cli/cli_chat_turn_mixin.py
+--- a/hermes_cli/cli_chat_turn_mixin.py
++++ b/hermes_cli/cli_chat_turn_mixin.py
+@@ -365,7 +365,11 @@
+         try:
+             from agent.notification_presentation import notification_turn
+             muted = getattr(turn, "mute_notification_reply", False)
+-            with notification_turn(self.agent, muted=muted, session_id=self.session_id):
++            from tools.approval_conversation import cli_turn
++            with notification_turn(self.agent, muted=muted, session_id=self.session_id), cli_turn(self,turn,message) as consent_scope:
++                if consent_scope is not None and consent_scope.reply_only:
++                    turn.result={"final_response":consent_scope.reply_only,"messages":[],"completed":True,"api_calls":0}
++                    return
+                 turn.result = self.agent.run_conversation(
+                     user_message=agent_message,
+                     conversation_history=self.conversation_history[:-1],
+@@ -554,6 +558,8 @@
+ 
+         self._chat_print_reasoning_box(turn)
+         self._chat_print_response_panel(turn, response)
++        from tools.approval_conversation import cli_delivered
++        cli_delivered(turn,response)
+ 
+         # History suppressed so the marker is never recorded in _OUTPUT_HISTORY
+         # (appending it to `response` duplicated it on redraw).
+diff --git a/hermes_cli/cli_commands_mixin.py b/hermes_cli/cli_commands_mixin.py
+--- a/hermes_cli/cli_commands_mixin.py
++++ b/hermes_cli/cli_commands_mixin.py
+@@ -1007,6 +1007,8 @@
+             return _cp(f"  {kanban_refusal}")
+         if target_id == self.session_id:
+             return _cp(f"  {_t('resume.already_on')}")
++        from tools.approval_conversation import cancel_cli
++        cancel_cli(self)
+         old_session_id = self.session_id
+         _end_current_session(self, "resumed_other")
+         self.session_id, self._resumed, self._pending_title = target_id, True, None
+diff --git a/hermes_cli/ui_localization.py b/hermes_cli/ui_localization.py
+--- a/hermes_cli/ui_localization.py
++++ b/hermes_cli/ui_localization.py
+@@ -97,8 +97,9 @@
+ 
+ def translate_ui(text: str, *, language: str | None = None) -> str:
+     """Translate known display copy; leave user values and machine identifiers untouched."""
++    from tools.approval_conversation import brand_text
+     language = language or _display_language()
+     if language == "en" or not isinstance(text, str):
+-        return text
+-    return "".join(part if _ANSI.fullmatch(part) else _plain(part, language)
+-                   for part in _ANSI.split(text))
++        return brand_text(text)
++    return brand_text("".join(part if _ANSI.fullmatch(part) else _plain(part, language)
++                   for part in _ANSI.split(text)))
+diff --git a/run_agent.py b/run_agent.py
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -1241,6 +1241,8 @@
+             record_guardrail_decision(self, decision.action, decision.code)
+ 
+     def _toolguard_controlled_halt_response(self, decision: ToolGuardrailDecision) -> str:
++        if decision.code == "brai_conversation":
++            return decision.message
+         # Shown to the user as the reply, so no decision codes; the code stays in result["guardrail"].
+         return (
+             f"I stopped retrying because I kept running {decision.tool_name or 'the same tool'} "
+diff --git a/tools/approval.py b/tools/approval.py
+--- a/tools/approval.py
++++ b/tools/approval.py
+@@ -146,6 +146,9 @@
+     (FIFO) or the one matching *request_id*. *reason* is the ``/deny <reason>`` free text,
+     relayed to the agent in the BLOCKED message. Returns the number resolved.
+     """
++    from tools.approval_conversation import enabled
++    if enabled():
++        return 0
+     with _lock:
+         queue = _gateway_queues.get(session_key)
+         if not queue:
+@@ -547,6 +550,9 @@
+     """Queue an approval nobody can answer right now (no gateway notifier, no CLI panel) for
+     ``/approve`` / ``/deny`` review. Command/code gates return the backward-compatible
+     ``pending_approval`` shape (``pattern_keys`` + STOP text); the action gate ``approval_required``."""
++    from tools.approval_conversation import enabled, gate
++    if enabled():
++        return gate(command,description)
+     pending = {"command": command, "pattern_key": pattern_key}
+     if spec.pending_keys:
+         pending["pattern_keys"] = pattern_keys
+@@ -780,6 +786,9 @@
+     owner override reduces every surface to once/deny and persists nothing. ``pending_body`` is a thunk, built only once a human is
+     actually asked, so a smart APPROVE never pays for redacting a large script.
+     """
++    from tools.approval_conversation import enabled, gate
++    if enabled():
++        return gate(command,description)
+     from agent.redact import redact_sensitive_text
+ 
+     smart_denied = False
+diff --git a/tools/approval_conversation.py b/tools/approval_conversation.py
+new file mode 100644
+--- /dev/null
++++ b/tools/approval_conversation.py
+@@ -0,0 +1,17 @@
++# ABOUTME: Загружает поставляемый модуль разговорных согласований Brai.
++# ABOUTME: Использует только явный абсолютный корень управляемых расширений.
++import importlib.util
++import os
++from pathlib import Path
++import sys
++
++root=Path(os.environ.get("HERMESCUSTOM_ROOT",""))
++if not root.is_absolute():
++    raise RuntimeError("BRAI_EXTENSIONS_ROOT_REQUIRED")
++source=root/"native"/"approval_conversation.py"
++spec=importlib.util.spec_from_file_location(__name__,source)
++if spec is None or spec.loader is None:
++    raise RuntimeError("BRAI_CONSENT_MODULE_UNAVAILABLE")
++module=importlib.util.module_from_spec(spec)
++sys.modules[__name__]=module
++spec.loader.exec_module(module)
+diff --git a/tools/approval_gateway_wait.py b/tools/approval_gateway_wait.py
+--- a/tools/approval_gateway_wait.py
++++ b/tools/approval_gateway_wait.py
+@@ -143,6 +143,10 @@
+     the user must /approve N times while the agent sits wedged. Followers adopt
+     the leader's ``session``/``always``/``deny``/timeout; a ``once`` covers only
+     the leader, so the follower falls through to a fresh prompt."""
++    from tools.approval_conversation import enabled, gate
++    if enabled():
++        result=gate(approval_data.get("command",""),approval_data.get("description",""))
++        return {"resolved":False,"choice":None,"cancelled":"conversation","conversation_result":result}
+     from tools import approval as _approval
+     from agent.terminal_approval_batch import approval_published, preparing_terminal_approval, register_prepared_approval
+ 
+diff --git a/tools/terminal_tool.py b/tools/terminal_tool.py
+--- a/tools/terminal_tool.py
++++ b/tools/terminal_tool.py
+@@ -1023,6 +1023,8 @@
+         return _ApprovalVerdict(approved_run=True)
+     approval = _check_all_guards(command, env_type, has_host_access=_docker_has_host_access(config))
+     if not approval["approved"]:
++        if approval.get("status") in {"needs_information","needs_consent","review_unavailable","consent_pending","consent_changed","execution_unknown","execution_already_completed","denied","policy_denied"}:
++            raise _Rejected(json.dumps({"output":"","exit_code":None,**approval},ensure_ascii=False))
+         if approval.get("status") == "pending_approval":  # gateway ask mode
+             raise _Rejected(_error_json(
+                 "", status="pending_approval",
+@@ -1454,7 +1456,9 @@
+             ))
+         # Pre-exec security checks (floors + dangerous command detection);
+         # force=True means the user already confirmed.
+-        verdict = _run_approval_guards(command, env_type, plan.config, force=force)
++        from tools.approval_conversation import execution_context, enabled as conversation_enabled
++        with execution_context(_resolve_command_cwd(workdir=workdir,default_cwd=cwd,session_key=session_key,env_type=env_type,mounted_host=getattr(env,"host_cwd",None) or plan.host_cwd),env_type):
++            verdict = _run_approval_guards(command, env_type, plan.config, force=force and not conversation_enabled())
+ 
+         pty_disabled = pty and _command_requires_pipe_stdin(command)
+         if plan.promoted_from_foreground_timeout is not None:
+diff --git a/web/index.html b/web/index.html
+--- a/web/index.html
++++ b/web/index.html
+@@ -7,7 +7,7 @@
+       name="viewport"
+       content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+     />
+-    <title>Hermes Agent — Панель управления</title>
++    <title>Brai — Панель управления</title>
+   </head>
+   <body>
+     <div id="root"></div>
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -619,7 +619,7 @@
+                 <PluginSlot name="header-left" />
+ 
+                 <Typography className="font-bold text-[1.125rem] leading-[0.95] tracking-[0.0525rem] text-midground uppercase">
+-                  Hermes
++                  Brai
+                   <br />
+                   Agent
+                 </Typography>
+diff --git a/web/src/components/HermesConsoleModal.tsx b/web/src/components/HermesConsoleModal.tsx
+--- a/web/src/components/HermesConsoleModal.tsx
++++ b/web/src/components/HermesConsoleModal.tsx
+@@ -523,7 +523,7 @@
+               id="hermes-console-title"
+               className="font-mondwest text-display text-base tracking-wider"
+             >
+-              Hermes Console
++              Brai Console
+             </h2>
+             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+               <Badge tone={statusTone}>{connectionState}</Badge>
+diff --git a/web/src/i18n/context.tsx b/web/src/i18n/context.tsx
+--- a/web/src/i18n/context.tsx
++++ b/web/src/i18n/context.tsx
+@@ -1,4 +1,6 @@
+-import { applyDocumentLocale, LOCALE_ENDONYMS } from "@hermes/shared/i18n";
++// ABOUTME: Selects and displays Brai language catalogs.
++// ABOUTME: Keeps locale storage and technical keys compatible.
++import { applyDocumentLocale, brandDisplayCatalog, LOCALE_ENDONYMS } from "@hermes/shared/i18n";
+ import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
+ import type { Locale, Translations } from "./types";
+ import { en } from "./en";
+@@ -72,7 +74,7 @@
+ const I18nContext = createContext<I18nContextValue>({
+   locale: "ru",
+   setLocale: () => {},
+-  t: ru,
++  t: brandDisplayCatalog(ru),
+ });
+ 
+ export function I18nProvider({ children }: { children: ReactNode }) {
+@@ -94,7 +96,7 @@
+   const value: I18nContextValue = {
+     locale,
+     setLocale,
+-    t: TRANSLATIONS[locale],
++    t: brandDisplayCatalog(TRANSLATIONS[locale]),
+   };
+ 
+   return (
+diff --git a/web/src/pages/ChannelsPage.tsx b/web/src/pages/ChannelsPage.tsx
+--- a/web/src/pages/ChannelsPage.tsx
++++ b/web/src/pages/ChannelsPage.tsx
+@@ -463,7 +463,7 @@
+                     </a>
+                   </div>
+                   <p className="text-xs">
+-                    You can leave allowed users blank. Hermes will then send new DM
++                    You can leave allowed users blank. Brai will then send new DM
+                     users a code that you approve from the Pairing page.
+                   </p>
+                 </div>
+@@ -1004,7 +1004,7 @@
+ 
+               {phase === "waiting" && (
+                 <div className="text-xs text-muted-foreground">
+-                  After saving, unknown DMs use Hermes pairing codes unless their
++                  After saving, unknown DMs use Brai pairing codes unless their
+                   number is already allowed.
+                 </div>
+               )}
+@@ -1313,7 +1313,7 @@
+         </span>
+         <span className="text-xs text-muted-foreground">
+           Both options connect a bot you control and save its credentials only to
+-          this Hermes installation.
++          this Brai installation.
+         </span>
+       </div>
+ 
+@@ -1326,7 +1326,7 @@
+             <Badge tone="success">recommended</Badge>
+           </div>
+           <p className="text-xs text-muted-foreground">
+-            Scan a QR code and confirm in Telegram. Hermes creates the bot and
++            Scan a QR code and confirm in Telegram. Brai creates the bot and
+             detects your Telegram user ID automatically.
+           </p>
+           <Button
+diff --git a/web/src/pages/McpPage.tsx b/web/src/pages/McpPage.tsx
+--- a/web/src/pages/McpPage.tsx
++++ b/web/src/pages/McpPage.tsx
+@@ -449,7 +449,7 @@
+                   )}
+                   {httpAuth === "oauth" && (
+                     <p className="text-xs text-muted-foreground">
+-                      Add the server, then use Authenticate. Hermes opens the
++                      Add the server, then use Authenticate. Brai opens the
+                       OAuth browser on the machine running the Dashboard
+                       backend.
+                     </p>
+diff --git a/web/src/pages/PluginsPage.tsx b/web/src/pages/PluginsPage.tsx
+--- a/web/src/pages/PluginsPage.tsx
++++ b/web/src/pages/PluginsPage.tsx
+@@ -164,7 +164,7 @@
+   if (!hasDetails || !setup) {
+     return (
+       <p className="border border-destructive/50 px-3 py-2 text-xs text-destructive">
+-        This provider is installed but unavailable. It may need local dependencies or a manual setup step before Hermes can activate it.
++        This provider is installed but unavailable. It may need local dependencies or a manual setup step before Brai can activate it.
+       </p>
+     );
+   }
+@@ -178,7 +178,7 @@
+     >
+       <p className={isBlocked ? "text-destructive" : "text-muted-foreground"}>
+         {needsDependencySetup
+-          ? "Finish these setup steps before Hermes can activate this provider."
++          ? "Finish these setup steps before Brai can activate this provider."
+           : "Provider dependency setup completed."}
+       </p>
+ 
+@@ -247,7 +247,7 @@
+       {setup.required_env.length && needsDependencySetup ? (
+         <div className="grid gap-2">
+           <p className="text-muted-foreground">
+-            Required environment values. Fill the matching fields below, or set them in the Hermes environment.
++            Required environment values. Fill the matching fields below, or set them in the Brai environment.
+           </p>
+           <div className="flex flex-wrap gap-2">
+             {setup.required_env.map((envKey) => (
+@@ -612,7 +612,7 @@
+ 
+                   {!selectedMemoryName && (
+                     <p className="text-xs text-muted-foreground">
+-                      Hermes will use the built-in MEMORY.md and USER.md files.
++                      Brai will use the built-in MEMORY.md and USER.md files.
+                     </p>
+                   )}
+ 
+diff --git a/web/src/pages/SkillsPage.tsx b/web/src/pages/SkillsPage.tsx
+--- a/web/src/pages/SkillsPage.tsx
++++ b/web/src/pages/SkillsPage.tsx
+@@ -706,7 +706,7 @@
+           <DialogHeader>
+             <DialogTitle>Learn a skill</DialogTitle>
+             <DialogDescription>
+-              Point Hermes at anything and it will distill a reusable skill —
++              Point Brai at anything and it will distill a reusable skill —
+               following the house authoring standards. Fill in any combination
+               below; the agent gathers the sources and writes the skill in chat.
+             </DialogDescription>
+@@ -1117,7 +1117,7 @@
+                   Featured skills
+                 </span>
+                 <span className="text-xs text-text-tertiary">
+-                  from the Hermes index — search above for thousands more
++                  from the Brai index — search above for thousands more
+                 </span>
+               </div>
+               {featured.map((r) => (
+diff --git a/web/src/pages/SystemPage.tsx b/web/src/pages/SystemPage.tsx
+--- a/web/src/pages/SystemPage.tsx
++++ b/web/src/pages/SystemPage.tsx
+@@ -739,7 +739,7 @@
+         open={canUpdateHermes && updateConfirmOpen}
+         onCancel={() => setUpdateConfirmOpen(false)}
+         onConfirm={() => void applyUpdate()}
+-        title="Update Hermes?"
++        title="Update Brai?"
+         description={
+           updateInfo && updateInfo.behind && updateInfo.behind > 0
+             ? `This will run 'hermes update' (${updateInfo.update_command}) and pull ${updateInfo.behind} new commit${updateInfo.behind === 1 ? "" : "s"}. The gateway restarts when the update finishes; the current session keeps its prompt cache until then.`
+@@ -923,7 +923,7 @@
+                 <div>{stats?.python_impl} {stats?.python_version}</div>
+               </div>
+               <div>
+-                <div className="text-xs uppercase tracking-wider text-muted-foreground">Hermes</div>
++                <div className="text-xs uppercase tracking-wider text-muted-foreground">Brai</div>
+                 <div className="flex items-center gap-2">
+                   <span>v{stats?.hermes_version}</span>
+                   {canUpdateHermes &&
+@@ -1436,7 +1436,7 @@
+             </div>
+             <ConfirmDialog
+               open={!!importConfirmTarget}
+-              title="Restore full Hermes backup?"
++              title="Restore full Brai backup?"
+               description={`This will overwrite your current Hermes configuration, skills, sessions, and data with the contents of ${backupImportLabel(importConfirmTarget)}. This cannot be undone.`}
+               destructive
+               confirmLabel="Restore"
+@@ -1463,7 +1463,7 @@
+                   <span className="text-sm font-medium">Share debug report</span>
+                   <span className="text-xs text-muted-foreground max-w-prose">
+                     Uploads system info + logs to a public paste service and
+-                    returns links to send the Hermes team. Pastes auto-delete
++                    returns links to send the Brai team. Pastes auto-delete
+                     after 6 hours.
+                   </span>
+                 </div>
