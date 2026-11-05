@@ -29,7 +29,14 @@ test("MCP предоставляет только обмен и ACK; stdio во�
  try{
   assert.equal((await fetch(listener.url,{method:'POST'})).status,401);
   await client.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers:{Authorization:'Bearer '+cfg.token}}}));
-  assert.deepEqual((await client.listTools()).tools.map(t=>t.name).sort(),['dialogues_context_ack','dialogues_exchange']);
+  const listed=(await client.listTools()).tools;
+  assert.deepEqual(listed.map(t=>t.name).sort(),['dialogues_context_ack','dialogues_exchange']);
+  const exchange=listed.find(t=>t.name==='dialogues_exchange');
+  assert.deepEqual(exchange.inputSchema.properties.context.required,['consumer_id','context_instance_id']);
+  assert.equal(exchange.inputSchema.oneOf,undefined);
+  const input=exchange.inputSchema.properties.arguments.anyOf.find(v=>v.properties.dialogue&&v.properties.messages?.items?.required?.includes('text')&&!v.properties.messages.items.required.includes('turn_id'));
+  assert.deepEqual(input.properties.dialogue.required,['id','channel']);
+  assert.deepEqual(input.properties.messages.items.required,['id','text']);
   const old=await client.callTool({name:'dialogues_turn_input',arguments:{}});assert.equal(old.isError,true);assert.equal(JSON.parse(old.content[0].text).code,'UNKNOWN_OPERATION');
   const invalid=await client.callTool({name:'dialogues_exchange',arguments:{action:'input',arguments:{request_id:'invalid',dialogue:{id:'chat',channel:'synthetic'}},context:ctx}});
   assert.equal(invalid.isError,true);assert.equal(JSON.parse(invalid.content[0].text).field,'messages');
