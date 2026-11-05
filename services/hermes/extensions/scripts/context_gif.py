@@ -1,5 +1,5 @@
-# ABOUTME: Запрашивает готовую GIF через подписочный Images endpoint Codex.
-# ABOUTME: Сохраняет настройку собеседника без API-ключей, сборки кадров и дневной квоты.
+# ABOUTME: Запрашивает готовые GIF через явно настроенный OpenAI API или Codex.
+# ABOUTME: Маршрут GIF отделён от модели диалога; предпочтения сохраняются без дневной квоты.
 import argparse
 import base64
 import fcntl
@@ -7,6 +7,7 @@ import hashlib
 import importlib
 import json
 import os
+import stat
 from pathlib import Path
 import sys
 import uuid
@@ -64,8 +65,55 @@ def gif_frames(raw):
     raise GifError('NOT_AN_ANIMATED_GIF')
 
 
+
+def api_generate(home, prompt, config):
+    """Сгенерировать GIF через отдельный API-ключ, не меняя провайдер диалога."""
+    import httpx
+    path = Path(config.get('key_file', ''))
+    if not path.is_absolute() or path.is_symlink():
+        raise GifError('GIF_API_KEY_FILE_REQUIRED')
+    meta = path.stat()
+    if (not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0, os.geteuid())
+            or meta.st_mode & 0o077 or not 0 < meta.st_size <= 4096):
+        raise GifError('GIF_API_KEY_FILE_UNSAFE')
+    key = path.read_text().strip()
+    if not key or any(char.isspace() for char in key):
+        raise GifError('GIF_API_KEY_INVALID')
+    model = 'gpt-image-2.6-flare'
+    body = {'model': model, 'prompt': prompt, 'size': 'auto', 'quality': 'low',
+            'complexity': 'low', 'n': 1, 'output_format': 'gif',
+            'frame_count': 9, 'frame_duration_ms': 200}
+    headers = {'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'}
+    with httpx.Client(timeout=httpx.Timeout(180, connect=30), headers=headers) as client:
+        with client.stream('POST', 'https://api.openai.com/v1/images/generations', json=body) as response:
+            response.raise_for_status()
+            chunks, total = [], 0
+            for chunk in response.iter_bytes():
+                total += len(chunk)
+                if total > 14 * 1024 * 1024:
+                    raise GifError('GIF_RESPONSE_TOO_LARGE')
+                chunks.append(chunk)
+            payload = json.loads(b''.join(chunks))
+    raw = base64.b64decode(payload['data'][0]['b64_json'], validate=True)
+    frames = gif_frames(raw)
+    cache = home / 'cache/generated/images'
+    cache.mkdir(parents=True, exist_ok=True)
+    target = cache / (uuid.uuid4().hex + '.gif')
+    with target.open('xb') as output:
+        output.write(raw)
+    return {'success': True, 'image': str(target), 'provider': 'openai',
+            'model': model, 'method': 'native-gif', 'frames': frames,
+            'mime_type': 'image/gif', 'published': False, 'usage': payload.get('usage')}
+
+
 def native_generate(home, prompt):
-    """Получить готовые GIF-байты Codex; не менять профиль и способ авторизации."""
+    """Выбрать только явно заданный GIF-маршрут; не переключаться при ошибке."""
+    settings = home / 'context-gifs.json'
+    config = json.loads(settings.read_text()) if settings.exists() else {'provider': 'openai-codex'}
+    if config.get('provider') == 'openai':
+        return api_generate(home, prompt, config)
+    if config.get('provider') != 'openai-codex':
+        raise GifError('GIF_PROVIDER_INVALID')
     from tools.image_generation_tool import _get_plugin_provider
     from plugins.image_gen._common import load_image_gen_config
     from agent.codex_headers import codex_cloudflare_headers
