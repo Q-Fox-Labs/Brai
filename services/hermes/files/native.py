@@ -29,6 +29,10 @@ _event_cleanup = ContextVar('brai_file_event_cleanup', default=None)
 _MEDIA = re.compile(r'MEDIA:\s*(?:"([^"\n]+)"|\x27([^\x27\n]+)\x27|([^\s<>]+))')
 _DESCRIPTOR = re.compile(r'!?\[(?P<label>(?:\\.|[^\]\\\n])*)\]\((?:<(?P<angle>[^>\n]+)>|(?P<plain>[^)\n]+))\)')
 _SET = re.compile(r'^BRAI_FILES:(\{[^\n]+\})\s*$', re.M)
+_MUTATION_FOOTER = re.compile(
+    r'(?m)^⚠️?\s*(?:Проверка изменений файлов:|File-mutation verifier:)[^\n]*'
+    r'(?:\n[ \t]+•[^\n]*)*\s*\Z'
+)
 
 
 def register_telegram_observer(observer):
@@ -829,6 +833,9 @@ def final_text(text, operation):
     """Подготовить отдельные временные копии всего исходящего набора до выдачи."""
     if not isinstance(text, str):
         return text
+    # Runtime verifier keeps the failure visible without exposing local paths or tool diagnostics.
+    text = _MUTATION_FOOTER.sub(
+        'Некоторые попытки изменить файлы не удались. Проверьте нужный результат.', text)
     files, replacements, items = store(), [], []
     explicit = []
     active_sub(_SET, lambda match: explicit.append(match) or match.group(0), text)

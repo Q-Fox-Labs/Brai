@@ -70,6 +70,23 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_failure_footer_reports_issue_without_technical_details(self):
+        for header in (
+            '⚠️ Проверка изменений файлов: 1 правок файлов в этом ходе НЕ УДАЛИСЬ.',
+            '⚠️ File-mutation verifier: 1 file edit(s) FAILED this turn.',
+        ):
+            text = ('Создана папка.\n\n' + header +
+                    '\n  • `/private/file` — [write_file] [TOOL_ERROR] TEMPORARY_OUTPUT_REQUIRED')
+            result = native.final_text(text, 'footer-test')
+            self.assertIn('Создана папка.', result)
+            self.assertIn('Некоторые попытки изменить файлы не удались.', result)
+            for private in ('/private/file', 'TOOL_ERROR', 'TEMPORARY_OUTPUT_REQUIRED'):
+                self.assertNotIn(private, result)
+
+    def test_footer_does_not_rewrite_ordinary_message(self):
+        text = 'Создана папка. Ошибок не обнаружено.'
+        self.assertEqual(native.final_text(text, 'normal-test'), text)
+
     def file(self, index=0, suffix='.jpg'):
         path = self.input / ('file-' + str(index) + suffix)
         path.write_bytes(('fixture-' + str(index)).encode())
