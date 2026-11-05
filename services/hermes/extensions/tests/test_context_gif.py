@@ -132,6 +132,39 @@ class ContextGifTests(unittest.TestCase):
             self.native(status_error=RuntimeError('quota'))
         self.assertEqual(len(self.requests), 1)
 
+    def api_settings(self):
+        """Настроить только GIF на фиктивный ключ; native-профиль не менять."""
+        key = self.home / 'gif-test.key'
+        key.write_text('not-a-real-key')
+        key.chmod(0o400)
+        (self.home / 'context-gifs.json').write_text(json.dumps({'provider': 'openai', 'key_file': str(key)}))
+        return key
+
+    def test_only_gif_uses_api_with_explicit_configuration(self):
+        self.api_settings()
+        result = self.native()
+        self.assertEqual(result['provider'], 'openai')
+        self.assertEqual(result['model'], 'gpt-image-2.6-flare')
+        self.assertEqual(self.requests[0][0][1], 'https://api.openai.com/v1/images/generations')
+        body = self.requests[0][1]['json']
+        self.assertEqual((body['output_format'], body['quality'], body['complexity']), ('gif', 'low', 'low'))
+        self.assertEqual(Path(result['image']).read_bytes(), animation())
+        self.assertEqual(self.client_options['headers']['Authorization'], 'Bearer not-a-real-key')
+
+    def test_api_error_does_not_fall_back_to_subscription(self):
+        self.api_settings()
+        with self.assertRaises(RuntimeError):
+            self.native(status_error=RuntimeError('quota'))
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.requests[0][0][1], 'https://api.openai.com/v1/images/generations')
+
+    def test_api_rejects_unprotected_secret(self):
+        key = self.api_settings()
+        key.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, 'GIF_API_KEY_FILE_UNSAFE'):
+            self.native()
+        self.assertEqual(self.requests, [])
+
 
 if __name__ == '__main__':
     unittest.main()
