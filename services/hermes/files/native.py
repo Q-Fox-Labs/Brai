@@ -304,16 +304,31 @@ def _steer_lock(turn):
     return turn._brai_steer_lock
 
 
+def active_steer_turn(runner, session_key):
+    """Включить подготовку входа под guard адаптера в тот же пользовательский ход."""
+    state = runner._peek_session_state(session_key)
+    if state is None:
+        return None
+    turn = state.turn
+    if turn.started_ts:
+        return turn
+    admission = getattr(turn, '_brai_adapter_admission', None)
+    if admission is not None:
+        adapter, guard = admission
+        if getattr(adapter, '_active_sessions', {}).get(session_key) is guard:
+            return turn
+    return None
+
+
 def reserve_steer_input(runner, event):
     """Удержать финал, пока уже принятый файл публикуется или собирается настоящий альбом."""
     import threading
     key_for_source = getattr(runner, '_session_key_for_source', None)
     if not callable(key_for_source) or not runner._is_user_authorized_for_source(event.source):
         return None
-    state = runner._peek_session_state(key_for_source(event.source))
-    if state is None or not state.turn.started_ts:
+    turn = active_steer_turn(runner, key_for_source(event.source))
+    if turn is None:
         return None
-    turn = state.turn
     with _steer_lock(turn):
         agent = getattr(turn, '_brai_steer_agent', None)
         with agent._pending_steer_lock if agent is not None else nullcontext():
@@ -391,6 +406,8 @@ def clear_steer_turn(turn):
         turn._brai_pending_steers = []
         turn._brai_input_ids = set()
         turn._brai_steer_agent = None
+        turn._brai_adapter_admission = None
+        turn._brai_adapter_event = None
 
 
 async def steer_active_input(runner, event, session_key):
@@ -400,13 +417,16 @@ async def steer_active_input(runner, event, session_key):
         return False
     if not runner._is_user_authorized_for_source(event.source):
         return False
-    state = runner._peek_session_state(session_key)
-    if state is None or not state.turn.started_ts:
+    turn = active_steer_turn(runner, session_key)
+    reserved = getattr(event, '_brai_preparation', None)
+    if turn is None:
+        if reserved is not None:
+            finish_steer_preparation(event)
+            release_event(event)
+            return True  # Отменённая подготовка не создаёт новый ход после поздней публикации.
         return False
-    turn = state.turn
     with _steer_lock(turn):
         generation = turn._brai_steer_generation
-    reserved = getattr(event, '_brai_preparation', None)
     if reserved is not None and (reserved[0] is not turn or reserved[1] is not generation):
         release_event(event)
         return True  # Завершённый/остановленный ход не передаёт свой отложенный вход новому.
@@ -427,9 +447,9 @@ async def steer_active_input(runner, event, session_key):
         text = await runner._prepare_busy_steer_text(event)
     images = []
     if event.media_urls:
-        from agent.image_routing import build_native_content_parts
         paths = [path for path, mime in zip(event.media_urls, event.media_types) if mime.startswith('image/')]
         if paths:
+            from agent.image_routing import build_native_content_parts
             parts, skipped = build_native_content_parts('', paths)
             if skipped:
                 raise FileError('NATIVE_IMAGE_INPUT_UNAVAILABLE')
@@ -437,6 +457,8 @@ async def steer_active_input(runner, event, session_key):
         # Документы остаются доступными модели по owner-bound artifactId.
     if not text.strip() and not images:
         return False
+    if getattr(getattr(event, 'raw_message', None), 'edit_date', None):
+        text = '[Правка сообщения ' + str(event.message_id) + ': новая редакция заменяет прежнюю.]\n' + text
     origin = runner._steer_text_with_origin(text or '[Изображения пользователя]', event)
     prepared = _prepared_inbound.get()
     ticket = prepared[2] if prepared and prepared[:2] == (source_of(event), str(event.message_id)) else None
@@ -473,16 +495,15 @@ def active_telegram_edit(adapter, message):
     if runner is None:
         return False
     source = adapter._source_from_message_for_auth(message)
-    state = runner._peek_session_state(runner._session_key_for_source(source))
-    if state is None or not state.turn.started_ts:
+    turn = active_steer_turn(runner, runner._session_key_for_source(source))
+    if turn is None:
         return False
-    turn = state.turn
     with _steer_lock(turn):
         agent = getattr(turn, '_brai_steer_agent', None)
         if agent is not None and getattr(agent, '_brai_steer_closed', False):
             return False
         identity = _steer_identity(source, message.message_id)
-        initial = getattr(turn, 'event', None)
+        initial = getattr(turn, 'event', None) or getattr(turn, '_brai_adapter_event', None)
         return (identity in getattr(turn, '_brai_input_ids', set()) or
                 (initial is not None and identity == _steer_identity(initial.source, initial.message_id)))
 
@@ -1060,7 +1081,39 @@ async def deliver_attachments(adapter, event, media_files, local_files, metadata
 
 
 def install_adapter(adapter):
-    """Охватить прямые отправки cron/send_message вне final response."""
+    """Связать ранний вход с ходом и охватить прямые отправки вне final response."""
+    start = getattr(adapter, '_start_session_processing', None)
+    release_guard = getattr(adapter, '_release_session_guard', None)
+    if start is not None and release_guard is not None:
+        @wraps(start)
+        def start_admitted_turn(event, session_key, **kwargs):
+            started = start(event, session_key, **kwargs)
+            runner = getattr(adapter, 'gateway_runner', None)
+            platform = str(getattr(event.source.platform, 'value', event.source.platform))
+            if (started and runner is not None and platform == 'telegram'
+                    and not getattr(event, 'internal', False) and not event.get_command()
+                    and runner._is_user_authorized_for_source(event.source)):
+                turn = runner._session_state(session_key).turn
+                if not turn.started_ts:
+                    # AIDEV-NOTE: Guard уже занят, а _hm_admit_event ещё может ждать файлы/плагины.
+                    # Отметка ставится синхронно, до первого шага фоновой задачи.
+                    clear_steer_turn(turn)
+                    turn._brai_adapter_admission = (adapter, adapter._active_sessions[session_key])
+                    turn._brai_adapter_event = event
+            return started
+        adapter._start_session_processing = start_admitted_turn
+
+        @wraps(release_guard)
+        def release_admitted_turn(session_key, **kwargs):
+            guard = getattr(adapter, '_active_sessions', {}).get(session_key)
+            release_guard(session_key, **kwargs)
+            runner = getattr(adapter, 'gateway_runner', None)
+            state = runner._peek_session_state(session_key) if runner is not None else None
+            if (state is not None and not state.turn.started_ts
+                    and getattr(state.turn, '_brai_adapter_admission', None) == (adapter, guard)
+                    and getattr(adapter, '_active_sessions', {}).get(session_key) is not guard):
+                clear_steer_turn(state.turn)
+        adapter._release_session_guard = release_admitted_turn
     while_active = getattr(adapter, '_handle_message_while_active', None)
     if while_active is not None:
         @wraps(while_active)
