@@ -223,6 +223,7 @@
       "services/hermes/tests/planning-read.test.mjs",
       "services/hermes/tests/files.test.mjs",
       "services/hermes/files/tests/test_files.py",
+      "services/hermes/files/tests/test_delegation.py",
       "services/hermes/files/tests/test_engine.py",
       "services/hermes/tests/extensions.test.mjs",
       "services/hermes/extensions/**/*.py",

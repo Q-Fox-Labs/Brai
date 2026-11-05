@@ -14,6 +14,7 @@ import mimetypes
 from pathlib import Path
 import re
 import uuid
+import time
 from urllib.parse import unquote, urlparse
 from .store import FileStore, FileError, canonical, key, deliver, workspace_in_use
 
@@ -23,6 +24,7 @@ _recovery_targets = {}
 _operation = ContextVar('brai_file_operation', default=None)
 _sending = ContextVar('brai_file_sending', default=False)
 _inbound = ContextVar('brai_file_inbound', default=None)
+_conversation_source = ContextVar('brai_file_conversation_source', default=None)
 _prepared_inbound = ContextVar('brai_file_prepared_inbound', default=None)
 _inline_images = ContextVar('brai_file_inline_images', default=frozenset())
 _event_cleanup = ContextVar('brai_file_event_cleanup', default=None)
@@ -701,9 +703,10 @@ def conversation(agent, user_message, task_id=None):
     operation = str(getattr(agent, 'session_id', '') or task_id or uuid.uuid4()) + ':' + str(uuid.uuid4())
     inbound = _inbound.get()
     session = str(getattr(agent, 'session_id', '') or '')
-    if inbound is not None and session and getattr(inbound[0], 'user_id', None):
+    source = inbound[0] if inbound is not None else _conversation_source.get()
+    if source is not None and session and getattr(source, 'user_id', None):
         # The gateway supplies this identity after authentication; model arguments cannot select it.
-        event = type('ConversationSource', (), {'source': inbound[0]})()
+        event = type('ConversationSource', (), {'source': source})()
         store().bind_workspace(operation, ['conversation', source_of(event), session])
     try:
         agent._brai_workspace = str(store().workspace(operation))
@@ -715,13 +718,22 @@ def conversation(agent, user_message, task_id=None):
             db.execute('DELETE FROM workspace_bindings WHERE operation=?', (operation,))
         raise
     token = _operation.set(operation)
+    admission_token = source_token = None
     try:
         prepared = input_text(user_message, operation)
         inbound = _inbound.get()
         if inbound is not None:
             commit_inbound(*inbound)
+        # AIDEV-NOTE: Worker наследует владельца, но не право повторного приёма.
+        admission_token = _inbound.set(None)
+        source_token = _conversation_source.set(source)
+        agent._brai_delegation_turn_started = time.time()
         yield prepared
     finally:
+        if source_token is not None:
+            _conversation_source.reset(source_token)
+        if admission_token is not None:
+            _inbound.reset(admission_token)
         release_steer_inputs(agent)
         _operation.reset(token)
         if not workspace_in_use(Path(agent._brai_workspace)):
