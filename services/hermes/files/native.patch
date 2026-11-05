@@ -105,7 +105,20 @@
          """Handle an incoming message from any platform: auth → command check → running-agent
          interrupt → get/create session → build context → run agent → return response."""
          from gateway.run import _AGENT_PENDING_SENTINEL
-@@ -1715,6 +1731,9 @@
+@@ -1290,6 +1306,12 @@
+         if _admitted is None:
+             return None
+         event, source, is_internal = _admitted
++        if is_internal:
++            identities = (event.metadata or {}).get("brai_delegation_ids", ())
++            if identities:
++                from tools.async_delegation import context_completion_consumed
++                if all(context_completion_consumed(identity) for identity in identities):
++                    return None
+         if not is_internal:
+             from hermes_cli.observability.shared_metrics_events import record_gateway_slash_command
+             record_gateway_slash_command(event)
+@@ -1715,6 +1737,9 @@
          @ references behave the same. Side effect: buffers per-session native image paths when the
          model supports native vision; the caller consumes that buffer at ``run_conversation``."""
          rehome_inbound_media(event)  # before any consumer (vision, STT, document notes) reads media_urls
@@ -117,7 +130,7 @@
          # Prefer the caller's resolved session key so this write key matches the consume key at the
 --- a/gateway/platforms/base.py
 +++ b/gateway/platforms/base.py
-@@ -1824,6 +1824,8 @@
+@@ -1822,6 +1822,8 @@
          # side. Captions merge in every absorbing case.
          if both_photo or existing.media_urls or incoming_has_media:
              if both_photo or incoming_has_media:
@@ -126,7 +139,7 @@
                  existing.media_urls.extend(event.media_urls)
                  existing.media_types.extend(event.media_types)
                  existing.media_text_inlined.extend(incoming_inline_flags)
-@@ -1966,6 +1968,8 @@
+@@ -1964,6 +1966,8 @@
      def __init__(self, config: PlatformConfig, platform: Platform):
          self.config = config
          self.platform = platform
@@ -135,7 +148,7 @@
          self._message_handler: Optional[MessageHandler] = None
          self._no_message_handler_logged: bool = False
          self._reaction_handler: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None
-@@ -2359,6 +2363,8 @@
+@@ -2357,6 +2361,8 @@
      def set_message_handler(self, handler: MessageHandler) -> None:
          """Set the incoming-message handler (MessageEvent -> optional response str)."""
          self._message_handler = handler
@@ -144,7 +157,7 @@
 
      def set_platform_event_handler(
          self, handler: Optional[Callable[[dict[str, Any], Any], Awaitable[None]]]) -> None:
-@@ -2582,6 +2588,8 @@
+@@ -2580,6 +2586,8 @@
              if event.text:
                  existing.text = _append_text(existing.text, event.text)
              if event.media_urls:
@@ -825,7 +838,33 @@
      if task_id:
 --- a/gateway/run_turn_runner.py
 +++ b/gateway/run_turn_runner.py
-@@ -1308,6 +1308,8 @@
+@@ -182,22 +182,9 @@
+             self._progress_emit(msg)
+
+     def _progress_subagent_notice(self, preview, kwargs: dict) -> None:
+-        """Only terminal failure statuses render (same notice rail as credit warnings)."""
+-        ctx = self._ctx
+-        from gateway.warning_notifications import render_notification
+-        status = kwargs.get("status")
+-        try:
+-            from tools.delegate_tool import SUBAGENT_FAILURE_STATUSES, format_subagent_failure_line
+-            if status in SUBAGENT_FAILURE_STATUSES and ctx._run_still_current():
+-                line = format_subagent_failure_line(
+-                    kwargs.get("goal"), status, error=kwargs.get("summary") or preview,
+-                    duration_seconds=kwargs.get("duration_seconds"), failure_reason=kwargs.get("failure_reason"),
+-                )
+-                render_notification(
+-                    lambda: self._schedule(self._runner._deliver_platform_notice(ctx.source, line), "subagent failure notice scheduling error"),
+-                    platform=ctx.source.platform, user_config=ctx.user_config)
+-        except Exception:
+-            logger.debug("subagent failure notice failed", exc_info=True)
++        """Keep child failures in diagnostics; the parent owns user-facing outcomes."""
++        if kwargs.get("status") in {"failed", "error", "timeout"}:
++            logger.warning("Brai delegated task stopped: status=%s", kwargs.get("status"))
+
+     def _progress_live_status(self, event_type: str, tool_name, args) -> None:
+         """Live status line (Slack assistant status): stash the tool phrase on the adapter; the
+@@ -1310,6 +1297,8 @@
              agent.interim_assistant_callback = None
              agent.thinking_progress = False
          ctx.agent_holder[0] = agent  # interrupt support
@@ -834,7 +873,7 @@
          # The titler fires from the turn prologue, so attach the rename lane before the run.
          self._attach_session_title_callback(agent, ctx)
          # Publish turn ownership for /stop, /new, disconnect and shutdown interrupts; older session
-@@ -1665,21 +1667,22 @@
+@@ -1663,21 +1652,22 @@
      def _native_image_run_message(self):
          """Wrap the user turn as an OpenAI-style multimodal content list when
          _prepare_inbound_message_text buffered image paths; consume-and-clear so later turns on the
@@ -869,7 +908,16 @@
 
      def _run_conversation_with_approval(self, agent, agent_history, observed_group_context,
                                          persist_user_message_override, persist_user_timestamp_override):
-@@ -1720,7 +1723,8 @@
+@@ -1692,6 +1682,8 @@
+         register_gateway_notify(session_key, self._approval_notify_sync)
+         try:
+             api_message = _wrap_current_message_with_observed_context(self._native_image_run_message(), observed_group_context)
++            agent._brai_internal_delegation_ids = tuple(
++                (ctx.persist_user_display_metadata or {}).get("brai_delegation_ids", ()))
+             kwargs = {"conversation_history": agent_history, "task_id": ctx.session_id}
+             if _accepts_keyword(agent.run_conversation, "turn_author"):
+                 # Sent on every transport: a provider gating durable writes needs the bot flag in a DM too.
+@@ -1718,7 +1710,8 @@
              if ctx.inbound_message_id is not None:
                  kwargs["persist_user_platform_id"] = str(ctx.inbound_message_id)
              from agent.notification_presentation import notification_turn
@@ -1024,3 +1072,149 @@
 
 
  @dataclass
+--- a/tools/async_delegation.py
++++ b/tools/async_delegation.py
+@@ -425,6 +425,68 @@
+     """Run one UPDATE on the ledger; True iff exactly one row changed."""
+     with _DB_LOCK, _transaction() as conn:
+         return conn.execute(sql, params).rowcount == 1
++
++
++def _context_was_persisted(conn, identity, sid):
++    """Recognize a trusted context row after a crash between session flush and acknowledgement."""
++    return conn.execute("""SELECT 1 FROM messages, json_each(messages.display_metadata,
++        '$.brai_delegation_ids') AS ids WHERE session_id=? AND role='user' AND ids.value=? LIMIT 1""",
++        (sid, identity)).fetchone() is not None
++
++
++def context_completion_consumed(delegation_id: str) -> bool:
++    """Whether this profile durably included the result in its owning session."""
++    with _DB_LOCK, _transaction() as conn:
++        row = conn.execute("SELECT result_json FROM async_delegations WHERE delegation_id=?", (delegation_id,)).fetchone()
++        if row and _json_object(row[0]).get("_brai_context_consumed"):
++            return True
++        owner = conn.execute("SELECT parent_session_id FROM async_delegations WHERE delegation_id=?", (delegation_id,)).fetchone()
++        return bool(owner and _context_was_persisted(conn, delegation_id, owner[0]))
++
++
++def consume_completed_context(agent, final_msg, messages, conversation_history) -> bool:
++    """Persist ready results before a foreground final; acknowledge only a successful flush.
++
++    Delivery to an adapter is not consumption by the model. The session turn lease
++    serializes this operation with internal turns; durable flags survive restarts.
++    """
++    sid = getattr(agent, "session_id", None)
++    if not sid or not getattr(agent, "_session_db", None) or getattr(agent, "_delegate_depth", 0):
++        return False
++    with _DB_LOCK, _transaction() as conn:
++        rows = conn.execute("""SELECT delegation_id,event_json,result_json FROM async_delegations
++            WHERE parent_session_id=? AND state NOT IN ('running','stalling','finalizing')
++              AND event_json IS NOT NULL ORDER BY completed_at,delegation_id""", (sid,)).fetchall()
++    internal_ids = set(getattr(agent, "_brai_internal_delegation_ids", ()))
++    started = getattr(agent, "_brai_delegation_turn_started", time.time())
++    ready = [(identity, _json_object(event)) for identity,event,result in rows
++             if not _json_object(result).get("_brai_context_consumed")
++             and (identity in internal_ids or _json_object(event).get("dispatched_at", 0) >= started)]
++    if not ready:
++        return False
++    with _DB_LOCK, _transaction() as conn:
++        included = {identity for identity,_ in ready if _context_was_persisted(conn, identity, sid)}
++    fresh = [(identity,event) for identity,event in ready if identity not in internal_ids and identity not in included]
++    from agent.message_metadata import append_message
++    from tools.process_registry_notifications import _format_async_delegation
++    if fresh:
++        # A candidate final is retained in context but is never emitted as an interim answer.
++        append_message(messages, dict(final_msg))
++        text = "\n\n".join(_format_async_delegation(event) for _,event in fresh)
++        append_message(messages, {"role":"user", "content":
++            "[INTERNAL COMPLETIONS: use these results before your final answer; "
++            "do not repeat an earlier answer or file. Use [SILENT] if nothing changed.]\n" + text,
++            "display_kind": "hidden", "display_metadata": {"brai_delegation_ids": [identity for identity,_ in fresh]}})
++        agent._session_messages = messages
++    if agent._flush_messages_to_session_db(messages, conversation_history) is not True:
++        raise RuntimeError("DELEGATION_CONTEXT_NOT_PERSISTED")
++    now = time.time()
++    with _DB_LOCK, _transaction() as conn:
++        for identity,_ in ready:
++            conn.execute("""UPDATE async_delegations SET result_json=json_set(COALESCE(result_json,'{}'),
++                '$._brai_context_consumed',json('true')),delivery_state='delivered',delivered_at=?,updated_at=?
++                WHERE delegation_id=? AND parent_session_id=?""", (now,now,identity,sid))
++    return bool(fresh)
+
+
+ def mark_completion_delivered(delegation_id: str) -> bool:
+--- a/agent/turn_stop_gates.py
++++ b/agent/turn_stop_gates.py
+@@ -129,6 +129,10 @@
+             ),
+         )
+
++    from tools.async_delegation import consume_completed_context
++    if consume_completed_context(agent, final_msg, messages, conversation_history):
++        return StopGateVerdict(True, None, None, False)
++
+     _verify_nudge = _verify_on_stop_nudge(agent)
+     if _verify_nudge:
+         agent._verification_stop_nudges = getattr(agent, "_verification_stop_nudges", 0) + 1
+--- a/gateway/warning_notifications.py
++++ b/gateway/warning_notifications.py
+@@ -33,6 +33,10 @@
+     if getattr(event, "internal", False) and (getattr(event, "metadata", None) or {}).get(
+             "notification_category") == "diagnostic":
+         return {"notification_category": "diagnostic"}
++    if getattr(event, "internal", False):
++        identities = (getattr(event, "metadata", None) or {}).get("brai_delegation_ids")
++        if identities:
++            return {"brai_delegation_ids": list(identities)}
+     return {}
+
+
+--- a/gateway/run_notifications.py
++++ b/gateway/run_notifications.py
+@@ -1247,6 +1247,13 @@
+         gateway route. Not transactional: a crash after acceptance can replay (at-least-once).
+         """
+         from gateway.wake import WakeNotAccepted, adapter_supports_push, admit_internal_event
++        if evt.get("type") == "async_delegation":
++            from tools.async_delegation import context_completion_consumed
++            if evt.get("task_failure_notice"):
++                # Per-child outcomes are retained by record_unit_child; one terminal batch wakes the parent.
++                return True
++            if context_completion_consumed(str(evt.get("delegation_id") or "")):
++                return True
+         source = await asyncio.to_thread(self._build_process_event_source, evt)
+         if not source:
+             # API-server sessions bind the RAW X-Hermes-Session-Id key, not a structured ``agent:...`` key.
+@@ -1280,6 +1287,8 @@
+             return await self._self_post_api_server(adapter, synth_text, raw_sid, evt)
+         try:
+             metadata = {"notification_origin": "process_registry_synthetic"}
++            if evt.get("type") == "async_delegation":
++                metadata["brai_delegation_ids"] = evt.get("brai_delegation_ids") or [evt["delegation_id"]]
+             synth_text = _mark_internal_notification(synth_text)
+             session_key = str(evt.get("session_key") or "").strip()
+             from agent.notification_presentation import diagnostic_process_event
+@@ -1566,6 +1575,9 @@
+                 if self._completion_identity_seen(identity, claim=True):
+                     return None
+                 identity_claimed = True
++            if evt.get("type") == "async_delegation":
++                evt = {**evt, "brai_delegation_ids": [evt["delegation_id"],
++                    *[event["delegation_id"] for event, _ in sibling_claims]]}
+             injection_result = await self._inject_watch_notification(synth_text, evt, raise_not_accepted=True)
+             if injection_result is not True:
+                 return injection_result
+--- a/tools/delegate_tool.py
++++ b/tools/delegate_tool.py
+@@ -624,7 +624,10 @@
+     "BETWEEN your turns: finish whatever does not depend on them, then give a one-line status and END YOUR TURN. Never "
+     "wait or poll on transcripts, artifact files, or CI for a child. "
+     "While children run, `action` (list/steer/stop) controls them live.\n\n"
+-    "USE FOR: reasoning-heavy subtasks, work that would flood your context, or independent parallel workstreams.\n"
++    "USE FOR: independent substantial subtasks, work that would flood your context, or a separate review. "
++    "Work alone for ordinary requests. Choose the smallest useful number of children; "
++    "state a concrete output and acceptance check, pass only necessary context, verify results yourself. "
++    "Do not repeat an unchanged failed task without fixing its cause. Limits are not a monetary budget.\n"
+     "DO NOT USE FOR (use these instead):\n"
+     "- Mechanical multi-step work with no reasoning needed -> execute_code\n"
+     "- A single tool call -> call the tool directly\n"

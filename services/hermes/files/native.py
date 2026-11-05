@@ -14,6 +14,7 @@ import mimetypes
 from pathlib import Path
 import re
 import uuid
+import time
 from urllib.parse import unquote, urlparse
 from .store import FileStore, FileError, canonical, key, deliver, workspace_in_use
 
@@ -726,6 +727,7 @@ def conversation(agent, user_message, task_id=None):
         # AIDEV-NOTE: Worker наследует владельца, но не право повторного приёма.
         admission_token = _inbound.set(None)
         source_token = _conversation_source.set(source)
+        agent._brai_delegation_turn_started = time.time()
         yield prepared
     finally:
         if source_token is not None:
