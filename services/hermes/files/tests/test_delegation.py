@@ -87,6 +87,17 @@ class CompletionTests(unittest.TestCase):
         self.add('second');self.assertTrue(self.run_gate())
         self.assertTrue(self.consumed('second'))
 
+    def test_early_failure_never_acknowledges_a_terminal_sibling(self):
+        source = (Path(__file__).parents[1] / 'native.patch').read_text()
+        fragment = source.split('     async def _deliver_async_delegation_group_scoped', 1)[1].split('         from gateway.run', 1)[0]
+        added = '\n'.join(line[1:] for line in fragment.splitlines() if line.startswith('+'))
+        scope = {}
+        exec('async def filter_group(group):\n' + added + '\n        return group', scope)
+        early = {'delegation_id':'batch','task_failure_notice':True}
+        final = {'delegation_id':'batch','status':'completed'}
+        self.assertEqual(asyncio.run(scope['filter_group']([early,final])),[final])
+        self.assertTrue(asyncio.run(scope['filter_group']([early])))
+
     def test_coalesced_notification_retains_new_sibling_and_suppresses_handled_batch(self):
         source = (Path(__file__).parents[1] / 'native.patch').read_text()
         fragment = source.split('--- a/gateway/run_notifications.py', 1)[1]

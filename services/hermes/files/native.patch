@@ -1205,6 +1205,14 @@
              injection_result = await self._inject_watch_notification(synth_text, evt, raise_not_accepted=True)
              if injection_result is not True:
                  return injection_result
+@@ -1777,4 +1789,7 @@
+     async def _deliver_async_delegation_group_scoped(self, group: list[dict]) -> Optional[bool]:
++        group = [evt for evt in group if not evt.get("task_failure_notice")]
++        if not group:
++            return True
+         from gateway.run import _format_gateway_process_notification
+         from tools.process_registry import process_registry as _pr
+         # API delivery does not start a model turn, so there is nothing to coalesce.
 --- a/tools/delegate_tool.py
 +++ b/tools/delegate_tool.py
 @@ -624,7 +624,10 @@
