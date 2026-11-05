@@ -21,18 +21,10 @@ SOUL.md — штатная точка входа Hermes. В начале сес�
 
 ## Навыки
 
-Навыки открывай штатным skill_view; их справочники — по маршрутам навыка. Эти ссылки задают канонический источник текста. Наличие навыка не подтверждает доступность его внешней программы.
+Навыки и справочники обновляются отдельно как документация. По поручению владельца сохраняй самостоятельные текстовые правки напрямую в Git-документации, без feature-ветки, CI-сборки и пересборки Hermes; затем отдельно примени и проверь тексты. Это уточняет прежний общий порядок встроенных навыков в INSTRUCTION_CHANGES.md: базовые политики остаются в поставке, а тексты навыков — в отдельной документации. Скрипты по-прежнему проходят выпуск кода. Найди подходящий навык штатным поиском и открой его полным вызовом skill_view. Справочники читай по путям установленного навыка. Старые копии skills/ рядом с этим индексом могут сохраняться как история; не используй их вместо установленного навыка.
 
-- [codex](skills/autonomous-ai-agents/codex/SKILL.md)
-- [hermes-agent](skills/autonomous-ai-agents/hermes-agent/SKILL.md)
-- [art-director](skills/creative/art-director/SKILL.md) — для постеров, афиш, баннеров и другой графики; прочитай файл по ссылке.
-- [reply-feedback-learning](skills/creative/reply-feedback-learning/SKILL.md)
-- [youtube-content](skills/media/youtube-content/SKILL.md)
-- [memos-memory](skills/note-taking/memos-memory/SKILL.md)
-- [silero-local-voice](skills/silero-local-voice/SKILL.md)
-- [instaloader](skills/social-media/instaloader/SKILL.md)
-- [requesting-code-review](skills/software-development/requesting-code-review/SKILL.md)
+Для постеров, афиш и баннеров используй art-director. Для настройки и диагностики Hermes — hermes-agent. Наличие навыка не подтверждает доступность внешних программ. Добавление навыка не требует изменения этого индекса.
 
-Для настройки и диагностики плагинов используй руководства рядом с их установленным кодом и установленный [навык Hermes](skills/autonomous-ai-agents/hermes-agent/SKILL.md) с его справочниками. Промпт Telegram Business — [здесь](prompts/telegram-reply.md); отправка требует подтверждения владельца.
+Промпт Telegram Business — [здесь](prompts/telegram-reply.md); отправка требует подтверждения владельца.
 
 Документы установщика и правила разработки не являются инструкциями пользовательского агента. Секреты, память и переписка в этот раздел не переносятся.
