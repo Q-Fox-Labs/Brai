@@ -54,6 +54,8 @@ def check_source():
 
 def destination_safe(root, relative):
     """Отклонить ссылки и неподходящие объекты в пути назначения."""
+    if relative.is_absolute() or '..' in relative.parts:
+        raise ValueError('Недопустимый путь назначения')
     path = root
     if any(p.is_symlink() for p in (root, *root.parents)):
         raise ValueError(f'Ссылка в назначении: {root}')
@@ -112,6 +114,10 @@ def build_plan(home, instructions, runtime, only, overwrite, owner):
             entries['skills/' + rel.removeprefix('skill-scripts/')] = (render(source.read_bytes(), home, owner), stat.S_IMODE(source.stat().st_mode))
     for group in ('skills', 'policies', 'prompts'):
         directory = instructions / group
+        if (group == 'skills' and not directory.exists() and not directory.is_symlink()
+                and (PACKAGE / 'tools/skill_docs.py').is_file()):
+            # AIDEV-NOTE: Тексты устанавливает skill_docs.py независимо от payload кода.
+            continue
         if not directory.is_dir() or directory.is_symlink():
             raise ValueError(f'Нет инструкций: {directory}')
         for path in sorted(directory.rglob('*')):
