@@ -22,15 +22,14 @@ def browser_unit(profile, *, chrome_root, instance='dev'):
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,31}', instance):
         raise ValueError('Invalid instance')
     worker = 'brai-hermes-' + instance + '-user-' + profile_id + '.service'
-    source = home + '/browser'
-    browser = '/var/lib/brai-browser'
+    browser = home + '/browser'
     chrome = str(PurePosixPath(root) / 'chrome')
     lines = [
         '[Unit]', 'Description=Brai personal browser ' + profile_id,
         'After=' + worker, 'Requires=' + worker, 'BindsTo=' + worker,
         'PartOf=' + worker, 'JoinsNamespaceOf=' + worker,
         '[Service]', 'Type=simple', 'User=' + name, 'Group=' + name,
-        'Environment=HOME=' + browser, 'Environment=TMPDIR=' + browser + '/tmp',
+        'Environment=HOME=' + home, 'Environment=TMPDIR=' + browser + '/tmp',
         'Environment=XDG_CACHE_HOME=' + browser + '/cache',
         'ExecStart=' + chrome + ' --headless=new --remote-debugging-address=127.0.0.1'
         ' --remote-debugging-port=19364 --user-data-dir=' + browser + '/profile'
@@ -47,8 +46,8 @@ def browser_unit(profile, *, chrome_root, instance='dev'):
         'TemporaryFileSystem=/run:ro /var/lib:ro /opt:ro',
         'InaccessiblePaths=-/srv -/etc/brai -/etc/brai-dev -/etc/ansible -/mnt -/media',
         'BindReadOnlyPaths=' + root + ':' + root,
-        'BindPaths=' + source + ':' + browser,
-        'ReadWritePaths=' + browser,
+        'BindPaths=' + home,
+        'ReadWritePaths=' + home,
         'KillMode=control-group', 'TimeoutStopSec=30', 'LimitNOFILE=4096',
         'TasksMax=256', 'MemoryHigh=1G', 'MemoryMax=2G',
         '[Install]', 'WantedBy=multi-user.target', '',
