@@ -63,6 +63,8 @@ class ProfileTests(unittest.TestCase):
         self.assertIn('BindPaths=' + self.profile()['home'], value)
         self.assertIn('BindReadOnlyPaths=/software/pm-bootstrap:/opt/brai-profile/pm', value)
         self.assertNotIn('BindPaths=' + self.profile()['home'] + '/pm:', value)
+        self.assertIn('BindPaths=/var/lib/brai-dev/identity/pm-locks/' + self.profile()['profileId'] + '.lock:/opt/brai-profile/pm/installs/', value)
+        self.assertIn('/.install.lock\n', value)
         self.assertIn('/software/runtime:/opt/brai-profile/runtime', value)
         self.assertIn('/software/site-packages:/opt/brai-profile/site-packages', value)
         self.assertIn('Wants=brai-hermes-dev-browser-' + self.profile()['profileId'] + '.service', value)

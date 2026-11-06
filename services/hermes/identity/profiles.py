@@ -164,6 +164,9 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
     home, user = profile['home'], profile['username']
     pm_key = hashlib.sha256(b'/opt/brai-profile/engine').hexdigest()[:16]
     pm_environment = '/opt/brai-profile/pm/installs/' + pm_key + '/environments/accepted/venv'
+    if str(uuid.UUID(profile['profileId'])) != profile['profileId']:
+        raise ValueError('Invalid profile identity')
+    pm_lock = str(PurePosixPath(home).parent.parent / 'pm-locks' / (profile['profileId'] + '.lock'))
     software_root = str(PurePosixPath(runtime_root).parent)
     if not re.fullmatch(r'braiu-[0-9a-f]{20}', user):
         raise ValueError('Invalid profile account')
@@ -214,6 +217,7 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         'BindPaths=' + home,
         'BindReadOnlyPaths=' + software_root + '/pm-bootstrap:/opt/brai-profile/pm',
         'BindReadOnlyPaths=' + software_root + '/venv:' + pm_environment,
+        'BindPaths=' + pm_lock + ':/opt/brai-profile/pm/installs/' + pm_key + '/.install.lock',
         'ReadWritePaths=' + home,
         'BindReadOnlyPaths=' + engine_root + ':/opt/brai-profile/engine',
         'BindReadOnlyPaths=' + python_root + ':/opt/brai-profile/python',
