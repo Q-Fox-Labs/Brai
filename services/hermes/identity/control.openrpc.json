@@ -607,6 +607,9 @@
             ]
           }
         }
+      },
+      "MemoryDetailChunk": {
+        "$ref": "./schemas/control.schema.json#/definitions/MemoryGetBody"
       }
     },
     "errors": {

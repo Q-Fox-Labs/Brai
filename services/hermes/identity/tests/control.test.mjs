@@ -4,14 +4,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Control } from '../control.mjs';
 
-const profile = { userId: 'u1', profileId: 'p1', telegramId: '42', status: 'active' };
+const profile = { userId: 'u1', profileId: 'p1', telegramId: '42', memoryEpoch: 'epoch-1', status: 'active' };
 const registry = async () => ({ version: 1, profiles: { '1001': profile } });
 const headers = { cookie: 'session=token', origin: 'https://brai.example' };
 function setup(overrides = {}) {
   const calls = [];
   const authCall = async (op, value) => {
     calls.push(op);
-    if (op === 'session') return { status: 200, body: { user: { role: 'admin', status: 'active' }, session: {} } };
+    if (op === 'session') return { status: 200, body: { user: { id: 'admin', role: 'admin', status: 'active' }, session: {} } };
     if (op === 'admin-audit') return { status: 200 };
     if (op === 'telegram-resolve') return { user: { id: 'u1', profileId: 'p1', telegramId: '42', status: 'active' } };
     if (op === 'telegram-code-issue') return { code: '123456789ABC', origin: 'https://brai.example', expiresAt: 'later' };
@@ -154,9 +154,9 @@ test('archive admin reads use only configured quarantine owners and audit reserv
       quarantineProfile: archive, quarantineArtifactsOwnerId: 'legacy-artifacts',
       authCall: async (name, args) => {
         calls.push([name, args]);
-        return name === 'session' ? { status: 200, body: { user: { role: 'admin', status: 'active' }, session: {} } } : { status: 200 };
+        return name === 'session' ? { status: 200, body: { user: { id: 'admin', role: 'admin', status: 'active' }, session: {} } } : { status: 200 };
       },
-      [port]: async ({ profile: selected }) => { calls.push(['read', selected]); return { ok: true }; },
+      [port]: async ({ profile: selected, id }) => { calls.push(['read', selected]); return operation === 'admin-memory-get' ? { id, profileId: selected.profileId } : { ok: true }; },
     });
     assert.equal((await c.invoke(operation, { headers, userId: '__quarantine__', ...extra })).status, 200);
     assert.deepEqual(calls.map(item => item[0]), ['session', 'admin-audit', 'read']);
@@ -180,7 +180,7 @@ test('archive requires active admin, successful audit and complete protected con
   assert.equal((await control.invoke('admin-memory-list', { headers, userId: '__quarantine__' })).status, 403);
   const deniedAudit = setup({ quarantineProfile: archive, memoryRead: port,
     authCall: async name => name === 'session'
-      ? { status: 200, body: { user: { role: 'admin', status: 'active' }, session: {} } }
+      ? { status: 200, body: { user: { id: 'admin', role: 'admin', status: 'active' }, session: {} } }
       : { status: 403 } }).control;
   assert.equal((await deniedAudit.invoke('admin-memory-list', { headers, userId: '__quarantine__' })).status, 403);
   const missingConfig = setup({ memoryRead: port }).control;

@@ -6,6 +6,7 @@ import { AdminDetail } from "./detail";
 import { ArchiveTarget, ARCHIVE_TARGET } from "./archive-target";
 import { InviteCommand } from "./invite-command";
 import { mergeChatPage } from "./chat-pages";
+import { loadMemoryDetail } from "./memory-detail";
 import "./styles.css";
 type User = { id: string; name: string; role: "admin" | "user"; status: "active" | "blocked" | "provisioning"; telegramId: string | null; profileId: string | null };
 type Invite = { id: string; expiresAt: string; revokedAt: string | null; consumedAt: string | null; code?: string };
@@ -26,7 +27,10 @@ export default function AdminScreen() {
  const selection = useRef(0);
  const [chatId, setChatId] = useState("");
  useEffect(() => { setView(""); setChatId(""); }, [selected]);
- async function inspect(operation: string, extra: Record<string, string> = {}) { if (!selected) return; if (operation === "admin-chat-get") operation = "admin-chats-get"; const current = ++selection.current; try { const value = await call(operation, { userId: selected, ...extra }); if (current !== selection.current) return; if (operation === "admin-chats-get") { if (extra.cursor && extra.chatId !== chatId) throw new Error("Не удалось продолжить чтение чата."); setDetail(mergeChatPage(detail, value, !!extra.cursor)); setChatId(extra.chatId); } else setDetail(value); setView(operation); setError(""); } catch (e) { if (current === selection.current) setError(e instanceof Error ? e.message : "Ошибка"); } }
+ async function inspect(operation: string, extra: Record<string, string> = {}) { if (!selected) return; if (operation === "admin-chat-get") operation = "admin-chats-get"; const current = ++selection.current; try { const value = operation === "admin-memory-get" ? await loadMemoryDetail(selected, extra.memoryId, cursor => {
+   if (current !== selection.current) throw new Error("Выбор изменился.");
+   return call(operation, { userId: selected, memoryId: extra.memoryId, ...(cursor ? { cursor } : {}) });
+  }) : await call(operation, { userId: selected, ...extra }); if (current !== selection.current) return; if (operation === "admin-chats-get") { if (extra.cursor && extra.chatId !== chatId) throw new Error("Не удалось продолжить чтение чата."); setDetail(mergeChatPage(detail, value, !!extra.cursor)); setChatId(extra.chatId); } else setDetail(value); setView(operation); setError(""); } catch (e) { if (current === selection.current) setError(e instanceof Error ? e.message : "Ошибка"); } }
  const rawPage = detail && typeof detail === "object" ? detail as { items?: { id?: string; artifactId?: string; title?: string; filename?: string; text?: string }[]; nextCursor?: string | null } : null;
  const chatCursor = view === "admin-chats-get" && detail && typeof detail === "object" && "nextCursor" in detail && typeof detail.nextCursor === "string" ? detail.nextCursor : null;
  const page = rawPage?.items ? { nextCursor: rawPage.nextCursor, items: rawPage.items.map(item => ({ ...item, id: item.id || item.artifactId || "", title: item.title || item.filename })) } : null;

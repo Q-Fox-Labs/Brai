@@ -38,6 +38,15 @@ class WorkerConfigTest(unittest.TestCase):
 
 
 class ToolClientTest(unittest.TestCase):
+    def test_login_catalog_requires_explicit_request_in_private_telegram(self):
+        with patch.object(tool_client, 'broker_call', return_value={'tools': []}):
+            result = tool_client.handle('tools/list', {})
+        login = next(item for item in result['tools'] if item['name'] == 'brai_login')
+        self.assertIn('явной просьбе', login['description'])
+        self.assertIn('личном чате Telegram', login['description'])
+        self.assertFalse(login['inputSchema']['properties'])
+        self.assertFalse(login['inputSchema']['additionalProperties'])
+
     def test_login_never_exposes_broker_payload(self):
         with patch.object(tool_client, 'broker_call', return_value={'status':'sent', 'suppressFinal':True, 'code':'secret'}):
             result = tool_client.handle('tools/call', {'name':'brai_login', 'arguments':{}})

@@ -193,6 +193,10 @@ class MemoryGatewayBoundaryTests(unittest.TestCase):
         first = self.boundary.admin(0, "/admin/list", {"userId": "user-a", "limit": 1, "query": ""})
         self.assertEqual(len(first["items"]), 1)
         self.assertTrue(first["nextCursor"])
+        second = self.boundary.admin(0, "/admin/list", {"userId": "user-a", "limit": 1, "cursor": first["nextCursor"]})
+        self.assertEqual(first["items"][0]["id"], "one")
+        self.assertEqual(second["items"][0]["id"], "two")
+        self.assertIsNone(second["nextCursor"])
         with self.assertRaises(Denied):
             self.boundary.admin(A_UID, "/admin/list", {"userId": "user-a", "limit": 1, "query": ""})
         with self.assertRaises(Denied):

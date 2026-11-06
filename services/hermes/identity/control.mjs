@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { request } from 'node:http';
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { once } from 'node:events';
@@ -41,6 +41,8 @@ export class Control {
   constructor({ origin, cursorKey, registry, authCall, memoryRead, chatRead, artifactsCall, telegramSend, toolCatalog, perUserRuntime, historyCall, quarantineProfile: archiveProfile, quarantineArtifactsOwnerId }) {
     if (!text(origin) || new URL(origin).origin !== origin || !text(cursorKey) || Buffer.byteLength(cursorKey) < 32 || typeof registry !== 'function' || typeof authCall !== 'function') throw new TypeError('Invalid control configuration');
     Object.assign(this, { origin, cursorKey, registry, authCall, memoryRead, chatRead, artifactsCall, telegramSend, toolCatalog, perUserRuntime, historyCall, archiveProfile, quarantineArtifactsOwnerId });
+    this.memorySnapshots = new Map();
+    this.memoryReads = 0;
   }
 
   /** Подписать cursor вместе с владельцем и параметрами запроса. */
@@ -91,9 +93,18 @@ export class Control {
       const port = this[entry[1]];
       if (typeof port !== 'function') return error(503, 'SOURCE_UNAVAILABLE');
       const binding = { operation, userId: input.userId, id: idKey ? input[idKey] : null, query: input.query ?? null, limit: input.limit ?? 50 };
+      if (operation === 'admin-memory-get') {
+        if (!text(session.body.user.id) || !text(selected.profileId) || !text(selected.memoryEpoch)) return error(503, 'SOURCE_UNAVAILABLE');
+        binding.actor = session.body.user.id;
+        binding.session = createHmac('sha256', this.cursorKey).update(input.headers.cookie).digest('hex');
+        binding.profileId = selected.profileId;
+        binding.memoryEpoch = selected.memoryEpoch;
+      }
       let cursor;
       try { cursor = input.cursor === undefined ? undefined : this.decodeCursor(binding, input.cursor); } catch { return error(400, 'INVALID_CURSOR'); }
-      const result = await port({ operation, profile: selected, id: idKey ? input[idKey] : undefined, query: input.query, cursor, limit: input.limit ?? 50 });
+      const result = operation === 'admin-memory-get'
+        ? await this.memoryDetail({ port, selected, input, binding, cursor })
+        : await port({ operation, profile: selected, id: idKey ? input[idKey] : undefined, query: input.query, cursor, limit: input.limit ?? 50 });
       if (!object(result)) return error(503, 'SOURCE_UNAVAILABLE');
       const body = { ...result };
       if ('nextCursor' in body && body.nextCursor !== null) {
@@ -102,6 +113,55 @@ export class Control {
       }
       return { status: 200, body, setCookies: [] };
     } catch (err) { return err?.code === 'PAYLOAD_TOO_LARGE' ? error(413, 'PAYLOAD_TOO_LARGE') : error(503, 'SOURCE_UNAVAILABLE'); }
+  }
+
+  /** Удалить временные снимки при остановке управляющего процесса. */
+  closeMemorySnapshots() {
+    for (const item of this.memorySnapshots.values()) clearTimeout(item.timer);
+    this.memorySnapshots.clear();
+  }
+
+  /** Вернуть последовательную часть неизменяемой записи только тому же администратору и сессии. */
+  async memoryDetail({ port, selected, input, binding, cursor }) {
+    const now = Date.now(), maxBytes = 16 * 1024 * 1024, chunkBytes = 450000;
+    const remove = key => {
+      const item = this.memorySnapshots.get(key);
+      if (!item) return;
+      clearTimeout(item.timer);
+      this.memorySnapshots.delete(key);
+    };
+    for (const [key, item] of this.memorySnapshots) if (item.expires <= now) remove(key);
+    let snapshot, key, offset = 0;
+    if (cursor !== undefined) {
+      const match = /^([0-9a-f-]{36}):(0|[1-9]\d*)$/.exec(cursor);
+      if (!match || !(snapshot = this.memorySnapshots.get(match[1])) || snapshot.binding !== JSON.stringify(binding)) throw new Error('SOURCE_UNAVAILABLE');
+      key = match[1]; offset = Number(match[2]);
+      if (!Number.isSafeInteger(offset) || offset !== snapshot.next) throw new Error('SOURCE_UNAVAILABLE');
+    } else {
+      if (this.memorySnapshots.size >= 8 || this.memoryReads >= 4) throw new Error('SOURCE_UNAVAILABLE');
+      let record;
+      this.memoryReads++;
+      try { record = await port({ operation: 'admin-memory-get', profile: selected, id: input.memoryId }); }
+      finally { this.memoryReads--; }
+      if (!object(record) || record.id !== input.memoryId || record.profileId !== selected.profileId) throw new Error('SOURCE_UNAVAILABLE');
+      const bytes = Buffer.from(JSON.stringify(record), 'utf8');
+      if (bytes.length > maxBytes) throw Object.assign(new Error('PAYLOAD_TOO_LARGE'), { code: 'PAYLOAD_TOO_LARGE' });
+      if (this.memorySnapshots.size >= 8) throw new Error('SOURCE_UNAVAILABLE');
+      let total = bytes.length;
+      for (const item of this.memorySnapshots.values()) total += item.bytes.length;
+      if (total > 64 * 1024 * 1024) throw new Error('SOURCE_UNAVAILABLE');
+      key = randomUUID();
+      snapshot = { bytes, binding: JSON.stringify(binding), hash: createHash('sha256').update(bytes).digest('hex'), expires: now + 120000, next: 0 };
+      snapshot.timer = setTimeout(() => remove(key), 120000); snapshot.timer.unref();
+      this.memorySnapshots.set(key, snapshot);
+    }
+    const end = Math.min(offset + chunkBytes, snapshot.bytes.length), more = end < snapshot.bytes.length;
+    const result = { userId: input.userId, memoryId: input.memoryId, snapshotId: key, offset, totalBytes: snapshot.bytes.length,
+      sha256: snapshot.hash, chunkBase64: snapshot.bytes.subarray(offset, end).toString('base64'),
+      nextCursor: more ? `${key}:${end}` : null };
+    snapshot.next = end;
+    if (!more) remove(key);
+    return result;
   }
 
   /** Запустить инструмент каталога в области актуального владельца UID. */
@@ -313,6 +373,41 @@ export function createArtifactReader({ wire, internalBaseURL }) {
   };
 }
 
+/** Читать HTTP memory gateway с жёстким пределом и немедленным завершением при обрыве. */
+export function createMemoryReader(socketPath) {
+  return ({ operation, profile, id, query, cursor, limit }) => new Promise((resolve, reject) => {
+    const isList = operation === 'admin-memory-list', maxBytes = isList ? 900000 : 16 * 1024 * 1024;
+    const body = isList
+      ? { userId: profile.userId, ...(query === undefined ? {} : { query }), ...(cursor === undefined ? {} : { cursor }), limit }
+      : { userId: profile.userId, memoryId: id };
+    const data = Buffer.from(JSON.stringify(body)), chunks = []; let size = 0, settled = false, response;
+    const fail = () => {
+      if (settled) return;
+      settled = true;
+      response?.destroy();
+      req.destroy();
+      reject(new Error('SOURCE_UNAVAILABLE'));
+    };
+    const req = request({ socketPath, path: isList ? '/admin/list' : '/admin/read', method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': data.length }, timeout: 10000 }, res => {
+      response = res;
+      const declared = res.headers['content-length'];
+      if (res.statusCode !== 200 || (declared !== undefined && (!/^\d+$/.test(declared) || Number(declared) > maxBytes))) { fail(); return; }
+      res.on('data', chunk => { size += chunk.length; if (size > maxBytes) fail(); else chunks.push(chunk); });
+      res.on('aborted', fail); res.on('error', fail);
+      res.on('close', () => { if (!res.complete) fail(); });
+      res.on('end', () => {
+        if (settled) return;
+        try {
+          const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, size)));
+          settled = true; resolve(value);
+        } catch { fail(); }
+      });
+    });
+    req.on('error', fail); req.on('timeout', fail); req.end(data);
+  });
+}
+
 /** Вернуть успех или допустимую ошибку через заголовки NATS Service API. */
 export function respondControl(msg, result) {
   const allowed = {
@@ -344,18 +439,7 @@ export async function startControl(config, adapters = {}) {
   };
   const authCall = (name, body) => wire(`brai.auth.${name === 'session' ? 'v1' : 'v2'}.${name}`, body);
   const registry = () => readProtectedJSON(config.registryPath);
-  const memoryRead = ({ operation, profile, id, query, cursor, limit }) => new Promise((resolve, reject) => {
-    const body = operation === 'admin-memory-list'
-      ? { userId: profile.userId, ...(query === undefined ? {} : { query }), ...(cursor === undefined ? {} : { cursor }), limit }
-      : { userId: profile.userId, memoryId: id };
-    const data = Buffer.from(JSON.stringify(body));
-    const req = request({ socketPath: config.memorySocket, path: operation === 'admin-memory-list' ? '/admin/list' : '/admin/read', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': data.length }, timeout: 10000 }, res => {
-      const chunks = []; let size = 0;
-      res.on('data', chunk => { size += chunk.length; if (size > 1048576) req.destroy(); else chunks.push(chunk); });
-      res.on('end', () => { try { if (res.statusCode !== 200) throw new Error(); resolve(JSON.parse(Buffer.concat(chunks))); } catch { reject(new Error('SOURCE_UNAVAILABLE')); } });
-    });
-    req.on('error', reject); req.on('timeout', () => req.destroy()); req.end(data);
-  });
+  const memoryRead = createMemoryReader(config.memorySocket);
   const artifactsCall = createArtifactReader({ wire, internalBaseURL: config.artifactsInternalBaseURL });
   const telegramSend = async ({ telegramId, message }) => {
     const response = await fetch(`https://api.telegram.org/bot${config.telegramToken}/sendMessage`, {
@@ -387,7 +471,7 @@ export async function startControl(config, adapters = {}) {
       })();
     },
   });
-  return { control, authCall, registry, async stop() { await service.stop(); await nc.drain(); } };
+  return { control, authCall, registry, async stop() { await service.stop(); control.closeMemorySnapshots(); await nc.drain(); } };
 }
 
 /** Приватный протокол доступен только управляющему процессу через его stdin/stdout. */

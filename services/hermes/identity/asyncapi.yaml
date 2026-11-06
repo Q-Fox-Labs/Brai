@@ -15,6 +15,10 @@ info:
     413 PAYLOAD_TOO_LARGE, 503 AUTH_UNAVAILABLE, REGISTRY_UNAVAILABLE,
     SOURCE_UNAVAILABLE или UNAVAILABLE. Подробности срока действия cursor,
     размерных пределов источников и приватности описаны в CONTROL.md.
+    admin-memory-get возвращает части полной записи до 450000 исходных байт;
+    каждая часть требует нового запроса с cursor, отдельной проверки и аудита.
+    Снимок привязан к сессии, целевому профилю и записи; срок 120 секунд.
+    Предел полной записи 16777216 байт, кеш до восьми снимков и 67108864 байт.
 defaultContentType: application/json
 channels:
   adminMemoryList:

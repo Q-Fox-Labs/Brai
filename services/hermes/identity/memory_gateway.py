@@ -4,6 +4,7 @@
 
 import argparse
 import base64
+import bisect
 import hashlib
 import hmac
 import importlib.util
@@ -29,6 +30,8 @@ from .memory_registry import load_registry
 
 MAX_BODY = 8 * 1024 * 1024
 MAX_RESULT = 128 * 1024 * 1024
+MAX_ADMIN_LIST = 820000
+ADMIN_TEXT_BYTES = 2048
 MAX_SPOOL = 2 * 1024 * 1024 * 1024
 SPOOL_SLOTS = threading.BoundedSemaphore(2)
 MAX_IDS = 1000
@@ -420,31 +423,8 @@ class Boundary:
         query = body.get('query', '')
         if not isinstance(query, str) or len(query) > 4096:
             raise Denied('INVALID_QUERY')
-        rows, display_bytes = [], 0
-        for cube in profile['cubes']:
-            spool = self.spool_read(profile, 'POST', '/product/get_memory_stream',
-                                    {'mem_cube_id': cube}, include_private=True, quarantine=is_quarantine)
-            try:
-                for raw in spool.file:
-                    item = json.loads(raw)
-                    if item.get('type') != 'memory':
-                        continue
-                    row = item['memory']
-                    if query and query.casefold() not in str(row.get('memory', '')).casefold():
-                        continue
-                    info = row['metadata'].get('info') or {}
-                    display = {'id': row['id'], 'kind': info.get('hermes_kind', 'memory'),
-                               'text': row.get('memory', ''), 'cubeId': cube,
-                               'createdAt': row['metadata'].get('created_at'), 'profileId': profile['profileId']}
-                    display_bytes += len(json.dumps(display, ensure_ascii=False).encode())
-                    if display_bytes > MAX_RESULT:
-                        raise Denied('RESULT_TOO_LARGE')
-                    rows.append(display)
-            finally:
-                spool.close()
-        rows.sort(key=lambda row: (row['cubeId'], row['id']))
         query_hash = hashlib.sha256(query.encode()).hexdigest()
-        offset = 0
+        after = None
         if body.get('cursor'):
             try:
                 encoded, signature = body['cursor'].split('.')
@@ -454,21 +434,80 @@ class Boundary:
                 cursor = json.loads(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)))
                 if cursor[:3] != [profile['userId'], profile['profileId'], query_hash]:
                     raise ValueError()
-                offset = cursor[3]
-                if type(offset) is not int or offset < 0:
+                after = cursor[3]
+                if (len(cursor) != 4 or not isinstance(after, list) or len(after) != 2
+                        or any(not isinstance(v, str) for v in after) or after[0] not in profile['cubes']):
                     raise ValueError()
+                after = tuple(after)
             except (ValueError, TypeError, IndexError):
                 raise Denied('INVALID_CURSOR') from None
         limit = body.get('limit', 50)
         if type(limit) is not int or not 1 <= limit <= 100:
             raise Denied('INVALID_LIMIT')
-        page = rows[offset:offset + limit]
-        next_cursor = None
-        if offset + limit < len(rows):
-            raw = json.dumps([profile['userId'], profile['profileId'], query_hash, offset + limit], separators=(',', ':')).encode()
+        def make_cursor(row):
+            raw = json.dumps([profile['userId'], profile['profileId'], query_hash,
+                              [row['cubeId'], row['id']]], separators=(',', ':')).encode()
             encoded = base64.urlsafe_b64encode(raw).decode().rstrip('=')
-            next_cursor = encoded + '.' + hmac.new(self.cursor_key, encoded.encode(), hashlib.sha256).hexdigest()
-        return {'items': page, 'nextCursor': next_cursor}
+            return encoded + '.' + hmac.new(self.cursor_key, encoded.encode(), hashlib.sha256).hexdigest()
+
+        page, has_more, page_full = [], False, False
+        for cube in sorted(profile['cubes']):
+            spool = self.spool_read(profile, 'POST', '/product/get_memory_stream',
+                                    {'mem_cube_id': cube}, include_private=True, quarantine=is_quarantine)
+            try:
+                # Храним только ключи и позиции будущей страницы, а не все тексты.
+                candidates = []
+                while True:
+                    position = spool.file.tell()
+                    raw = spool.file.readline()
+                    if not raw:
+                        break
+                    item = json.loads(raw)
+                    if item.get('type') != 'memory':
+                        continue
+                    row = item['memory']
+                    key = (cube, row['id'])
+                    if (after is not None and key <= after) or (query and query.casefold() not in str(row.get('memory', '')).casefold()):
+                        continue
+                    if len(page) == limit or page_full:
+                        has_more = True
+                        continue
+                    bisect.insort(candidates, (row['id'], position))
+                    if len(candidates) > limit - len(page) + 1:
+                        candidates.pop()
+                take = limit - len(page)
+                if len(candidates) > take:
+                    has_more = True
+                for _, position in candidates[:take]:
+                    spool.file.seek(position)
+                    row = json.loads(spool.file.readline())['memory']
+                    info = row['metadata'].get('info') or {}
+                    text = row.get('memory', '')
+                    if not isinstance(text, str):
+                        raise Denied('UPSTREAM_INVALID')
+                    text_bytes = text.encode('utf-8')
+                    kind = info.get('hermes_kind', 'memory')
+                    created = row['metadata'].get('created_at')
+                    if not isinstance(kind, str) or len(kind.encode('utf-8')) > 256:
+                        kind = 'memory'
+                    if created is not None and (not isinstance(created, str) or len(created.encode('utf-8')) > 256):
+                        created = None
+                    display = {'id': row['id'], 'kind': kind,
+                               'text': text_bytes[:ADMIN_TEXT_BYTES].decode('utf-8', errors='ignore'),
+                               'textTruncated': len(text_bytes) > ADMIN_TEXT_BYTES,
+                               'totalMemoryBytes': len(text_bytes), 'cubeId': cube,
+                               'createdAt': created, 'profileId': profile['profileId']}
+                    # Reserve space for the signed continuation even on the final page.
+                    candidate = {'items': page + [display], 'nextCursor': make_cursor(display)}
+                    if len(json.dumps(candidate, ensure_ascii=False).encode('utf-8')) > MAX_ADMIN_LIST:
+                        if not page:
+                            raise Denied('RESULT_TOO_LARGE')
+                        page_full = has_more = True
+                        break
+                    page.append(display)
+            finally:
+                spool.close()
+        return {'items': page, 'nextCursor': make_cursor(page[-1]) if has_more else None}
 
 
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

@@ -13,6 +13,7 @@
 .admin-screen button:focus-visible, .admin-download:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .admin-screen article { background: var(--card); overflow-wrap: anywhere; }
 .admin-screen article p { white-space: pre-wrap; line-height: 1.55; }
+.admin-record pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
 .admin-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
 .admin-tabs button[aria-pressed="true"] { background: var(--accent); border-color: var(--foreground); }
 .admin-items { margin: 8px 0; }

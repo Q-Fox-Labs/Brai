@@ -299,6 +299,7 @@
       "services/hermes/memos/tests/test_postgres_stream.py",
       "services/hermes/identity/tests/control_contract.test.mjs",
       "services/hermes/identity/tests/control_pagination.test.mjs",
+      "services/hermes/identity/tests/control_memory_detail.test.mjs",
       "services/hermes/identity/tests/memory_author.test.mjs",
       "services/hermes/identity/tests/memory_spool.test.mjs",
       "services/hermes/identity/tests/test_memory_spool.py"

@@ -36,3 +36,12 @@ test("archive is a separate read-only target, not a user account", () => {
  assert.match(html, /Архив до разделения/); assert.match(html, /Неподтверждённые источники доступны только администратору/);
  assert.match(html, /Открыть архив/); assert.doesNotMatch(html, /роль|статус|сесси|приглаш/i);
 });
+
+test("memory renders full metadata as text without interpreting markup", () => {
+ const html = renderToStaticMarkup(createElement(module.exports.AdminDetail,
+  { view:"admin-memory-get", userId:"u", value:{id:"m",memory:"<script>alert(1)</script>",metadata:{source:"<img src=x>"}} }));
+ assert.ok(html.includes("&lt;script&gt;alert(1)&lt;/script&gt;"));
+ assert.match(html, /Все сведения и источники/);
+ assert.match(html, /&lt;img src=x&gt;/);
+ assert.doesNotMatch(html, /<script>|<img /);
+});

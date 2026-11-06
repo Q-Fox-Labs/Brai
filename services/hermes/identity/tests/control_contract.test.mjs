@@ -119,3 +119,16 @@ test('reserved archive target is valid only in existing administrative request s
     assert.equal(validate({ headers: { cookie: 'a=b', origin: 'https://example.test' }, userId: '__quarantine__', ...extra, home: '/etc' }), false);
   }
 });
+
+test('memory-get chunk validates shared schema and never exposes record inline', async () => {
+  const headers = { cookie:'a=b', origin:'https://example.test' };
+  const c = new Control({ origin:headers.origin, cursorKey:'x'.repeat(32),
+    registry:async()=>({version:1,profiles:{'1001':{userId:'u',profileId:'p',memoryEpoch:'e',status:'active'}}}),
+    authCall:async op=>op==='session'?{status:200,body:{user:{id:'admin',role:'admin',status:'active'},session:{}}}:{status:200},
+    memoryRead:async()=>({id:'m',profileId:'p',memory:'sensitive'}) });
+  const result = await c.invoke('admin-memory-get',{headers,userId:'u',memoryId:'m'});
+  const validate = ajv.getSchema(schema.$id+'#/definitions/MemoryGetResponse');
+  assert.equal(validate(result),true,JSON.stringify(validate.errors));
+  assert.equal(Object.hasOwn(result.body,'memory'),false);
+  assert.equal(result.body.userId,'u');
+});

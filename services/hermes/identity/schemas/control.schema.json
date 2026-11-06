@@ -526,23 +526,65 @@
       }
     },
     "MemoryGetBody": {
-      "description": "Строка memory gateway с metadata, источниками и profileId.",
       "type": "object",
+      "additionalProperties": false,
       "required": [
-        "id",
-        "profileId"
+        "userId",
+        "memoryId",
+        "snapshotId",
+        "offset",
+        "totalBytes",
+        "sha256",
+        "chunkBase64",
+        "nextCursor"
       ],
       "properties": {
-        "id": {
-          "type": "string"
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
         },
-        "profileId": {
-          "type": "string"
+        "memoryId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
         },
-        "metadata": {
-          "type": "object"
+        "snapshotId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
         },
-        "memory": {}
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777216
+        },
+        "totalBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "chunkBase64": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 600000,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
       }
     },
     "MemoryListResponse": {
