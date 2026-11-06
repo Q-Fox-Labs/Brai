@@ -77,3 +77,16 @@ test('provisioning exposes only verified configuration without starting tools',a
  await assert.rejects(privateCall(runtime,'files.configuration',{uid:1001}));
  await f.adapters.close();
 });
+
+test('factory derives scope from registry profile and refuses protected aliases that disagree',async()=>{
+ const {serviceDataScope}=await import('../../../auth/contracts/service-data-scope.mjs');
+ const f=fixture();let config;
+ const adapters=createRuntimeAdapters({runtimeProfiles:f.profiles},{readProtected:path=>structuredClone(f.records[path]),verifyDirectory:()=>{},start:async value=>{config=value;return {close:async()=>{}};}});
+ await adapters.perUserRuntime(f.profile('1001'));
+ assert.equal(config.ownerId,'u1');assert.equal(config.serviceDataScope,serviceDataScope('p1'));
+ f.profiles['1001'].serviceDataScope=serviceDataScope('p2');
+ await assert.rejects(adapters.perUserRuntime(f.profile('1001')),/CONFIG_NOT_READY/);
+ delete f.profiles['1001'].serviceDataScope;f.records['/cfg/1'].serviceDataScope=serviceDataScope('p2');
+ await assert.rejects(adapters.perUserRuntime(f.profile('1001')),/CONFIG_NOT_READY/);
+ await adapters.close();
+});

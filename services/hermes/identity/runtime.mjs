@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { validateConfig } from '../config.mjs';
+import { serviceDataScope } from '../../auth/contracts/service-data-scope.mjs';
 import { startBraiTools } from '../runtime.mjs';
 import { fileConfiguration } from '../files/configuration.mjs';
 import { readProtectedJSON, runStdio as runControl } from './control.mjs';
@@ -55,7 +56,11 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
   const uid=String(profile?.workerUid), entry=entries[uid];
   if(!entry||profile.userId!==entry.userId||profile.profileId!==entry.profileId||profile.home!==entry.home||profile.status!==status)invalid();
   verifyDirectory(entry.stagingRoot);
-  const tools=validateConfig(readProtected(entry.toolsConfigPath),entry.userId);
+  const scope=serviceDataScope(entry.profileId);
+  if(entry.serviceDataScope!==undefined&&entry.serviceDataScope!==scope)invalid();
+  const sourceTools=validateConfig(readProtected(entry.toolsConfigPath),entry.userId);
+  if(sourceTools.serviceDataScope!==undefined&&sourceTools.serviceDataScope!==scope)invalid();
+  const tools={...sourceTools,serviceDataScope:scope};
   // AIDEV-NOTE: Bearer MCP должен быть проверенно привязан сервисом к owner; до этого доступ закрыт.
   if(['gameCore','history','transcription'].some(name=>tools[name]?.enabled!==false||Object.keys(tools[name]).some(key=>key!=='enabled')))invalid();
   const publisher=readProtected(tools.publisher.configPath);

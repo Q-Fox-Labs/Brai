@@ -91,3 +91,15 @@ test("history routes derive trusted identity, enforce owner input and classify w
   transportError = new Error("secret broker url"); await check(await list(request()), 503, "UNAVAILABLE");
  } finally { transportError = undefined; if (previous === undefined) delete process.env.NATS_URL; else process.env.NATS_URL = previous; }
 });
+
+test("Telegram History list and guessed detail derive the profile scope for ordinary admin too",async()=>{
+ const {serviceDataScope}=await import("../../../services/auth/contracts/service-data-scope.mjs");
+ const mode=process.env.WEB_IDENTITY_MODE,nats=process.env.NATS_URL;process.env.WEB_IDENTITY_MODE="telegram";process.env.NATS_URL="nats://fixture.invalid:4222";
+ try{
+  authBody={...session("old-canonical"),user:{id:"old-canonical",profileId:"profile-1",role:"admin",status:"active"}};
+  ownerHeaders=new Headers();raw=undefined;transportError=undefined;ownerBody={items:[],next_cursor:null};
+  await check(await list(request()),200);assert.equal(calls.at(-1)?.body.user_id,serviceDataScope("profile-1"));
+  ownerBody={event:{...event,scope_id:serviceDataScope("profile-1")}};
+  await check(await get(request(),context()),200);assert.equal(calls.at(-1)?.body.user_id,serviceDataScope("profile-1"));
+ }finally{if(mode===undefined)delete process.env.WEB_IDENTITY_MODE;else process.env.WEB_IDENTITY_MODE=mode;if(nats===undefined)delete process.env.NATS_URL;else process.env.NATS_URL=nats;}
+});

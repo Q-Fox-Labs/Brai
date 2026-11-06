@@ -64,6 +64,16 @@ class NativeMemoryTests(unittest.TestCase):
             self.assertNotIn('_handle_memory_command', methods)
             self.assertIn('_handle_skills_command', methods)
 
+    def test_idle_dispatch_omits_removed_memory_command(self):
+        tree = ast.parse((Path(ENGINE) / 'gateway/run_busy.py').read_text())
+        assignment = next(node for node in ast.walk(tree)
+                          if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == '_IDLE_COMMANDS'
+                                  for target in node.targets))
+        commands = ast.literal_eval(assignment.value)
+        self.assertNotIn('memory', commands)
+        self.assertIn('skills', commands)
+
     def test_shared_command_catalog_has_no_memory_command(self):
         # Реальные CommandDef и реестр выполняются с нейтральными импортами.
         source = ast.parse((Path(ENGINE) / 'hermes_cli/commands.py').read_text())

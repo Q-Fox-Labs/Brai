@@ -19,15 +19,15 @@ function load(file:string, modules:Record<string,unknown>) {
 }
 function fixture() {
  const calls:{owner:string;operation:string;input:unknown}[] = [];
- let authorized = true, origin = true;
+ let authorized = true, origin = true, personal = false;
  const route = load("../app/api/goals/route.ts",{
-  "@/server/auth":{checkOrigin:() => {if(!origin) throw new GatewayError(403,"ORIGIN");},requireSession:async () => {if(!authorized) throw new GatewayError(401,"UNAUTHORIZED");return {user:{id:"owner"}};}},
+  "@/server/auth":{personalDataScope:(session:{user:{id:string}})=>personal?"brai-personal-v1:"+ "1".repeat(64):session.user.id,checkOrigin:() => {if(!origin) throw new GatewayError(403,"ORIGIN");},requireSession:async () => {if(!authorized) throw new GatewayError(401,"UNAUTHORIZED");return {user:{id:"owner"}};}},
   "@/server/goals":{goalsRequest:async (owner:string,operation:string,input:unknown) => {calls.push({owner,operation,input});return {items:[]};}},
   "@/server/gateway":{GatewayError},
   "@/server/http":{failure:(error:GatewayError) => Response.json({code:error.code,outcome:error.outcome},{status:error.status})},
   "@/server/request-body":{readBoundedJson:async (request:Request) => request.json(),RequestBodyFailure}
  }) as {GET:(request:Request)=>Promise<Response>;POST:(request:Request)=>Promise<Response>};
- return {route,calls,unauthorize:()=>{authorized=false;},badOrigin:()=>{origin=false;}};
+ return {route,calls,personal:()=>{personal=true;},unauthorize:()=>{authorized=false;},badOrigin:()=>{origin=false;}};
 }
 function request(operation:string,input:unknown={}) {return new Request("https://example.test/api/goals",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({operation,input})});}
 
@@ -55,4 +55,15 @@ test("web gateway independently rejects mutations before connecting",async () =>
   await assert.rejects(gateway.goalsRequest("owner",operation,{}),(error:unknown)=>error instanceof GatewayError && error.outcome==="not-published");
  }
  assert.equal(connections,0);
+});
+
+test("Telegram Goals uses a fresh personal scope for overview and guessed history keys",async()=>{
+ const f=fixture();f.personal();
+ assert.equal((await f.route.GET(new Request("https://example.test/api/goals"))).status,200);
+ assert.equal((await f.route.POST(request("goals_history",{entity:"goals",id:"old-key"}))).status,200);
+ assert.ok(f.calls.every(call=>call.owner==="brai-personal-v1:"+"1".repeat(64)));
+ const before=f.calls.length;
+ assert.equal((await f.route.POST(request("goals_history",{owner_id:"other"}))).status,200);
+ assert.equal(f.calls.at(-1)?.owner,"brai-personal-v1:"+"1".repeat(64));
+ assert.equal(f.calls.length,before+1);
 });

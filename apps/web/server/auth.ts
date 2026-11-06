@@ -1,6 +1,7 @@
 // ABOUTME: Проверяет сессию Better Auth через NATS и передаёт cookie без раскрытия токена браузеру.
 // ABOUTME: Ошибки сервиса закрывают доступ; мутации требуют канонического Origin.
 import { isIP } from "node:net";
+import { serviceDataScope } from "../../../services/auth/contracts/service-data-scope.mjs";
 import { valid } from "./contracts";
 import { GatewayError, natsConnection } from "./gateway";
 export type Session = { session: { id: string; userId: string; expiresAt: string }; user: { id: string; email: string; emailVerified?: boolean; name?: string; role?: "admin" | "user"; status?: "provisioning" | "active" | "blocked"; telegramId?: string | null; profileId?: string | null } };
@@ -67,4 +68,12 @@ export async function requireTimerSession(request: Request, eventStream = false)
  const expected = eventStream ? new URL(request.url).searchParams.get("expectedUserId") : request.headers.get("x-brai-user");
  if (!expected || expected !== session.user.id) throw new GatewayError(401, "ACCOUNT_CHANGED", "not-published");
  return session;
+}
+
+/** Возвращает личный namespace только из проверенного Auth profile; старый режим сохраняет owner. */
+export function personalDataScope(session: Session): string {
+ if (!telegramIdentity()) return session.user.id;
+ if (session.user.status !== "active") throw new GatewayError(403, "PROFILE_NOT_READY");
+ try { return serviceDataScope(session.user.profileId!); }
+ catch { throw new GatewayError(401, "UNAUTHORIZED"); }
 }

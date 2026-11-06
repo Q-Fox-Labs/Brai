@@ -378,6 +378,15 @@
         "services/transcription/contracts",
         "services/transcription/schemas"
       ]
+    },
+    {
+      "id": "auth",
+      "inputs": [
+        "services/auth/contracts/**"
+      ],
+      "delivery": [
+        "services/auth/contracts"
+      ]
     }
   ],
   "commands": {
@@ -602,7 +611,6 @@
       "services/hermes/files/identity.py",
       "services/hermes/identity/broker.openrpc.json",
       "services/hermes/memos/README.md",
-      "services/hermes/memos/embedding/adapter.test.mjs",
       "services/hermes/identity/schemas/control.schema.json",
       "services/hermes/identity/parent_runner.py",
       "services/hermes/identity/control.openrpc.json",
@@ -630,7 +638,8 @@
     "smokeImports": [
       "services/hermes/catalog.mjs",
       "services/hermes/trusted.mjs",
-      "services/hermes/memos/embedding/adapter.mjs"
+      "services/hermes/memos/embedding/adapter.mjs",
+      "services/hermes/identity/runtime.mjs"
     ],
     "systemRequirements": [
       "Node.js 24.22.1",

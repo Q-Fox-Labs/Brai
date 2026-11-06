@@ -310,7 +310,8 @@
       "apps/web/tests/timer-http.test.ts",
       "apps/web/tests/workspace-link.test.ts",
       "apps/web/tests/telegram-display.test.ts",
-      "apps/web/tests/telegram-observer.test.ts"
+      "apps/web/tests/telegram-observer.test.ts",
+      "apps/web/tests/game-core-identity.test.ts"
     ]
   },
   "dependencies": [
@@ -348,10 +349,12 @@
     {
       "id": "auth",
       "inputs": [
-        "services/auth/schemas/**"
+        "services/auth/schemas/**",
+        "services/auth/contracts/**"
       ],
       "delivery": [
-        "services/auth/schemas"
+        "services/auth/schemas",
+        "services/auth/contracts"
       ]
     },
     {

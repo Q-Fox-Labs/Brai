@@ -1,6 +1,7 @@
 // ABOUTME: Реализует транзакционный порт alerts в собственной PostgreSQL-БД.
 // ABOUTME: Доверенные web-операции используют отдельную роль и локальный RLS-контекст.
 import type { Pool, PoolClient } from 'pg';
+import { isServiceDataScope } from '../../auth/contracts/service-data-scope.mjs';
 import { AlertsFault, checkContext, type AlertsStore, type AlertsTransaction, type OperationContext } from './domain.js';
 import type { Notification, Summary } from '../contracts/index.mjs';
 
@@ -21,6 +22,8 @@ function failure(error: unknown): Error {
   return new AlertsFault('INTERNAL');
 }
 function port(client: PoolClient, context: OperationContext, userId: string | null): AlertsTransaction {
+  // AIDEV-NOTE: Новый epoch не наследует старые system/global, включая поздний replay.
+  const visibility = isServiceDataScope(userId) ? "n.scope_type='user' AND n.scope_id=current_setting('app.user_id',true)" : 'true';
   async function query(sql: string, values: unknown[] = []) {
     checkContext(context);
     await client.query("SELECT set_config('statement_timeout',$1,true)", [String(Math.max(1, Math.floor(context.deadlineAt - performance.now())))]);
@@ -37,16 +40,16 @@ function port(client: PoolClient, context: OperationContext, userId: string | nu
       return (await query(`SELECT id FROM alerts.sys_types WHERE code=$1`, [code])).rows[0]?.id ?? null;
     },
     async get(serviceId, id) {
-      return (await query(`SELECT ${fields} ${joins} WHERE n.service_id=$1 AND n.id=$2`, [serviceId, id])).rows[0] as Notification ?? null;
+      return (await query(`SELECT ${fields} ${joins} WHERE ${visibility} AND n.service_id=$1 AND n.id=$2`, [serviceId, id])).rows[0] as Notification ?? null;
     },
     async list(after, count) {
-      return (await query(`SELECT ${fields} ${joins} ${after ? 'WHERE (n.recorded_at,n.service_id,n.id)<($2::timestamptz,$3::text,$4::uuid)' : ''}
+      return (await query(`SELECT ${fields} ${joins} WHERE ${visibility} ${after ? 'AND (n.recorded_at,n.service_id,n.id)<($2::timestamptz,$3::text,$4::uuid)' : ''}
         ORDER BY n.recorded_at DESC,n.service_id DESC,n.id DESC LIMIT $1`, [count, ...(after ?? [])])).rows as Notification[];
     },
     async summary() {
       // AIDEV-NOTE: count и цвет получают один statement snapshot; отдельные SELECT могли бы дать несовместимый итог при ingestion.
       const row = (await query(`WITH unread AS MATERIALIZED (
-        SELECT n.recorded_at,n.service_id,n.id,c.id AS category_id,c.code,c.name,c.color,c.importance ${joins} WHERE r.id IS NULL
+        SELECT n.recorded_at,n.service_id,n.id,c.id AS category_id,c.code,c.name,c.color,c.importance ${joins} WHERE ${visibility} AND r.id IS NULL
       ) SELECT (SELECT count(*)::text FROM unread) AS count,
         (SELECT jsonb_build_object('id',category_id,'code',code,'name',name,'color',color,'importance',importance)
          FROM unread ORDER BY importance DESC,recorded_at DESC,service_id DESC,id DESC LIMIT 1) AS category`)).rows[0];
@@ -57,7 +60,7 @@ function port(client: PoolClient, context: OperationContext, userId: string | nu
     async read(serviceId, id) {
       if (userId === null) throw new AlertsFault('INVALID_ARGUMENT');
       return !!(await query(`INSERT INTO alerts.read_marks(user_id,service_id,id)
-        SELECT $1,n.service_id,n.id FROM alerts.notifications n WHERE n.service_id=$2 AND n.id=$3
+        SELECT $1,n.service_id,n.id FROM alerts.notifications n WHERE ${visibility} AND n.service_id=$2 AND n.id=$3
         ON CONFLICT(user_id,service_id,id) DO NOTHING RETURNING id`, [userId, serviceId, id])).rowCount;
     },
     async readAll() {
@@ -65,7 +68,7 @@ function port(client: PoolClient, context: OperationContext, userId: string | nu
       // AIDEV-NOTE: INSERT SELECT захватывает доступные строки на начале оператора; watermark по timestamp ошибочно включал бы поздний commit.
       return !!(await query(`INSERT INTO alerts.read_marks(user_id,service_id,id)
         SELECT $1,n.service_id,n.id FROM alerts.notifications n
-        WHERE NOT EXISTS(SELECT 1 FROM alerts.read_marks r WHERE r.user_id=$1 AND r.service_id=n.service_id AND r.id=n.id)
+        WHERE ${visibility} AND NOT EXISTS(SELECT 1 FROM alerts.read_marks r WHERE r.user_id=$1 AND r.service_id=n.service_id AND r.id=n.id)
         ORDER BY n.service_id,n.id ON CONFLICT(user_id,service_id,id) DO NOTHING`, [userId])).rowCount;
     },
   };

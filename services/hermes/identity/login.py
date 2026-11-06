@@ -13,5 +13,3 @@ async def send_login(peer):
     if not isinstance(result, dict) or set(result) != {'status'} or result['status'] not in ('sent', 'denied', 'failed', 'unknown', 'unavailable'):
         return {'status': 'unknown'}
     return result
-
-

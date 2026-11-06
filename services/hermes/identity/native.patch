@@ -187,15 +187,15 @@
          from gateway.run import (
              _AGENT_PENDING_SENTINEL, _auto_continue_freshness_window, _is_fresh_gateway_interruption,
          )
-@@ -1147,6 +1157,8 @@
-             from hermes_cli.plugins import get_plugin_manager
-             self._subscribe_plugin_rewire(get_plugin_manager())
-         self.hooks.discover_and_load()
+@@ -1140,6 +1150,8 @@
+ 
+     async def _start_recover_previous_run(self) -> None:
+         """Plugins, relay, hooks, then crash/clean-exit recovery of processes and sessions."""
 +        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
-+            return  # Не восстанавливать общие процессы и сессии прежнего владельца.
-         # Recover background processes from checkpoint (crash recovery). ``_checkpoint_path`` is
-         # scope-relative, so a served secondary's turn wrote ITS home's processes.json; recover each
-         # served profile's file under its scope or those processes are never re-adopted.
++            return  # Не запускать прежние hooks, плагины и восстановление.
+         from gateway.run import _hermes_home
+         self._start_register_plugins_relay_hooks()
+         # Plugins that load later (force re-discovery, install/enable nudge) re-wire live adapters (#87770).
 @@ -1511,6 +1523,9 @@
  
      async def _start_finish_wiring(self, connected_count: int) -> None:
@@ -260,3 +260,38 @@
          from gateway.run import MultiplexConfigError
          from tools.process_registry import process_registry as _pr
          # The launch profile's durable completions replay here, not at import (#123265); the
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -1842,6 +1842,8 @@
+     DEVNULL stdin even passes ``isatty``), so discovery runs with interactive OAuth suppressed — the
+     same gate the CLI's background discovery uses. An expired token then parks the server with an
+     actionable ``hermes mcp login`` warning instead of opening an authorize tab.
+     """
++    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++        return  # Пользовательские MCP доступны только из изолированного worker.
+     from tools.mcp_oauth import suppress_interactive_oauth
+     from tools.mcp_tool_discovery import discover_mcp_tools
+     loop = asyncio.get_running_loop()
+--- a/hermes_cli/env_loader.py
++++ b/hermes_cli/env_loader.py
+@@ -460,6 +460,9 @@
+ ) -> list[Path]:
+     """Load Hermes env files: ``~/.hermes/.env`` overrides stale shell exports; project ``.env`` is a dev
+     fallback that only fills gaps when the user env exists (and overrides shell vars when it does not)."""
++    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++        # Parent получает только root-owned systemd EnvironmentFile, без HOME override.
++        return []
+     # Process home on purpose (never the per-turn override): a startup .env load must not follow a routed
+     # profile — see the multiplex guard below.
+     from hermes_constants import get_process_hermes_home
+--- a/gateway/run_startup.py
++++ b/gateway/run_startup.py
+@@ -54,6 +54,8 @@
+     home and the default root (the multiplex primary; a named launcher is then served as a
+     secondary). Every secondary runs :func:`recover_left_core_in` before its plugins are discovered,
+     so a platform plugin it gets starts its adapter in the same gateway start."""
++    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++        return  # Старый HOME не устанавливает платформы и плагины в identity ingress.
+     from hermes_cli.left_core_migration import recover_at_startup
+     from hermes_constants import get_default_hermes_root, get_hermes_home
+     recover_at_startup()
