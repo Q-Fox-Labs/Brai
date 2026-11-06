@@ -95,11 +95,9 @@
     "cache_ttl": "5m"
   },
   "memory": {
-    "memory_enabled": true,
-    "user_profile_enabled": true,
-    "memory_char_limit": 2200,
-    "user_char_limit": 1375,
-    "nudge_interval": 10,
+    "memory_enabled": false,
+    "user_profile_enabled": false,
+    "nudge_interval": 0,
     "provider": "memos-rest"
   },
   "max_concurrent_sessions": null,
