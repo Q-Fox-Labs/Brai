@@ -719,7 +719,15 @@ def conversation(agent, user_message, task_id=None):
         raise
     token = _operation.set(operation)
     admission_token = source_token = None
+    previous_prompt = getattr(agent, 'ephemeral_system_prompt', None)
     try:
+        # API-only context: keep the user's persisted text and the shared process environment unchanged.
+        agent.ephemeral_system_prompt = (previous_prompt or '') + (
+            '\n\n[Trusted file runtime for this turn] Your temporary working and output directory is '
+            + agent._brai_workspace + '. Use relative output paths, or this exact directory. '
+            'For terminal omit workdir or use this directory; TMPDIR is set there by the runtime. '
+            'This turn-specific directory supersedes generic working/scratch paths in older context. '
+            'Publish finished files through the file tools. Do not read another agent workspace.')
         prepared = input_text(user_message, operation)
         inbound = _inbound.get()
         if inbound is not None:
@@ -730,6 +738,7 @@ def conversation(agent, user_message, task_id=None):
         agent._brai_delegation_turn_started = time.time()
         yield prepared
     finally:
+        agent.ephemeral_system_prompt = previous_prompt
         if source_token is not None:
             _conversation_source.reset(source_token)
         if admission_token is not None:

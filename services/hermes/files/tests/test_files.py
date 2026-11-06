@@ -75,11 +75,15 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         from contextvars import copy_context
         source = SimpleNamespace(platform='telegram', chat_id='chat', thread_id='topic', user_id='alice', profile='dev')
         def child(index):
-            agent = SimpleNamespace(session_id=f'child-{index}')
+            agent = SimpleNamespace(session_id=f'child-{index}', ephemeral_system_prompt='owner policy')
             with native.conversation(agent, 'extract'):
                 self.assertIsNone(native._inbound.get())
                 self.assertIs(native._conversation_source.get(), source)
-                return agent._brai_workspace
+                self.assertIn(agent._brai_workspace, agent.ephemeral_system_prompt)
+                self.assertIn('owner policy', agent.ephemeral_system_prompt)
+                workspace = agent._brai_workspace
+            self.assertEqual(agent.ephemeral_system_prompt, 'owner policy')
+            return workspace
         with patch.object(native, 'commit_inbound') as commit:
             with native.inbound_handoff(source, 'voice'):
                 with native.conversation(SimpleNamespace(session_id='parent'), 'assemble'):
@@ -91,6 +95,15 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(set(paths)), 3)
         self.assertIsNone(native._inbound.get())
         self.assertIsNone(native._conversation_source.get())
+
+    def test_runtime_workspace_prompt_restores_after_failure(self):
+        agent = SimpleNamespace(session_id='prompt-failure', ephemeral_system_prompt='owner policy')
+        with self.assertRaisesRegex(RuntimeError, 'fixture failure'):
+            with native.conversation(agent, 'unchanged user text') as message:
+                self.assertEqual(message, 'unchanged user text')
+                self.assertIn(agent._brai_workspace, agent.ephemeral_system_prompt)
+                raise RuntimeError('fixture failure')
+        self.assertEqual(agent.ephemeral_system_prompt, 'owner policy')
 
     def test_failure_footer_reports_issue_without_technical_details(self):
         for header in (
