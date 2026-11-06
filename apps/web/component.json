@@ -257,7 +257,19 @@
       "apps/web/app/agent/telegram-observer.css",
       "apps/web/app/api/telegram-observer/[...path]/route.ts",
       "apps/web/app/api/telegram-observer/file-auth/route.ts",
-      "apps/web/server/telegram-observer.ts"
+      "apps/web/server/telegram-observer.ts",
+      "apps/web/app/api/diary/entry/route.ts",
+      "apps/web/app/api/diary/file/route.ts",
+      "apps/web/app/api/diary/materials/route.ts",
+      "apps/web/app/api/diary/route.ts",
+      "apps/web/app/api/diary/upload/route.ts",
+      "apps/web/app/diary/CONTRACT.md",
+      "apps/web/app/diary/page.tsx",
+      "apps/web/app/diary/screen.tsx",
+      "apps/web/app/diary/styles.css",
+      "apps/web/app/diary/types.ts",
+      "apps/web/server/diary-core.ts",
+      "apps/web/server/diary-http.ts"
     ],
     "checks": [
       "apps/web/tests/account-render.test.ts",
@@ -310,7 +322,8 @@
       "apps/web/tests/timer-http.test.ts",
       "apps/web/tests/workspace-link.test.ts",
       "apps/web/tests/telegram-display.test.ts",
-      "apps/web/tests/telegram-observer.test.ts"
+      "apps/web/tests/telegram-observer.test.ts",
+      "apps/web/tests/diary.test.ts"
     ]
   },
   "dependencies": [
