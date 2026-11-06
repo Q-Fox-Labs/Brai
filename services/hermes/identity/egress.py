@@ -3,9 +3,11 @@
 import argparse
 import asyncio
 import ipaddress
+import hashlib
 import json
 import os
 import pwd
+from pathlib import Path
 import re
 import signal
 import socket
@@ -194,47 +196,147 @@ def _model_target(method, target, config, body):
     return host, port, prefix + (path[3:] if config.get("codexSubscription") else path), body, key
 
 
-def _codex_parameters(provider):
-    """Проверить фиксированные параметры установленного владельца credential."""
-    paths = ("python", "core", "runtime", "ownerHome", "profileHome")
-    if any(not isinstance(provider.get(k), str) or not os.path.isabs(provider[k])
-           or os.path.normpath(provider[k]) != provider[k] for k in paths):
+def _root_directory(path):
+    """Проверить canonical Root каталог программы и всех его предков."""
+    path = Path(path)
+    if (not path.is_absolute() or os.path.normpath(str(path)) != str(path)
+            or any(c in str(path) for c in " \t\r\n\\")):
         raise Rejected(503)
-    uid, gid = provider.get("uid"), provider.get("gid")
-    if type(uid) is not int or type(gid) is not int or uid <= 0 or gid <= 0:
-        raise Rejected(503)
-    if provider["ownerHome"] != os.path.join(provider["runtime"], "owner"):
-        raise Rejected(503)
-    if not provider["python"].startswith(provider["runtime"] + "/installs/"):
-        raise Rejected(503)
-    try:
-        owner = pwd.getpwuid(uid)
-        if owner.pw_gid != gid:
+    for parent in (path, *path.parents):
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
             raise Rejected(503)
-    except KeyError:
+    return path
+
+
+def _root_file(path, expected=None, *, executable=False):
+    """Прочитать bounded закреплённые данные или проверить Root программу без импорта."""
+    path = Path(path)
+    _root_directory(path.parent)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
+                or info.st_mode & 0o6022 or executable and not info.st_mode & 0o111):
+            raise Rejected(503)
+        if expected is None:
+            return None
+        if not isinstance(expected, str) or not re.fullmatch("[a-f0-9]{64}", expected):
+            raise Rejected(503)
+        raw = stream.read(32 * 1024 * 1024 + 1)
+        after, current = os.fstat(stream.fileno()), path.lstat()
+    token = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+    if (len(raw) > 32 * 1024 * 1024 or hashlib.sha256(raw).hexdigest() != expected
+            or token(info) != token(after) or token(info) != token(current)):
+        raise Rejected(503)
+    return raw
+
+
+def _codex_source(provider):
+    """Сверить программы с принятой aggregate квитанцией без прежнего HOME."""
+    reference = provider["providerSourceReceipt"]
+    if not isinstance(reference, dict) or set(reference) != {"path", "sha256"}:
+        raise Rejected(503)
+    if any(not isinstance(provider.get(key), str) or not re.fullmatch("[a-f0-9]{64}", provider[key])
+           for key in ("expectedProviderSourceProducerSha256", "helperSha256")):
+        raise Rejected(503)
+    closed = provider["closedConfig"]
+    if not isinstance(closed, dict) or set(closed) != {"path", "sha256"}:
+        raise Rejected(503)
+    source = json.loads(_root_file(reference["path"], reference["sha256"]))
+    paths = ("python", "sitePackages", "codex", "node", "ownerHome", "codexHome", "workerDir", "componentRoot")
+    if (not isinstance(source, dict) or source.get("version") != 1 or source.get("kind") != "brai_identity_provider_source"
+            or source.get("state") != "verified" or source.get("sourceSha") != provider["sourceSha"]
+            or source.get("producerSha256") != provider["expectedProviderSourceProducerSha256"]
+            or source.get("paths") != {key: provider[key] for key in paths}
+            or source.get("closedConfig") != provider["closedConfig"]):
+        raise Rejected(503)
+    _root_file(source["producerPath"], provider["expectedProviderSourceProducerSha256"])
+    helper = str(Path(provider["componentRoot"]) / "services/hermes/extensions/tools/codex_cli_owner.py")
+    if provider["helperPath"] != helper:
+        raise Rejected(503)
+    _root_file(helper, provider["helperSha256"])
+    for name in ("python", "codex", "node"):
+        _root_file(provider[name], executable=True)
+    _root_directory(provider["sitePackages"])
+    _root_directory(provider["workerDir"])
+    closed = provider["closedConfig"]
+    _root_file(closed["path"], closed["sha256"])
+
+
+def _codex_mounts(provider):
+    """Проверить mounts owner каталогов и read-only закрытого Codex config."""
+    with open("/proc/self/mountinfo", encoding="utf-8") as source:
+        mounts = {re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), line.split()[4]): line.split()[5].split(",")
+                  for line in source}
+    home, codex_home = provider["ownerHome"], provider["codexHome"]
+    target = codex_home + "/config.toml"
+    if home not in mounts or codex_home not in mounts or "ro" not in mounts.get(target, []):
+        raise Rejected(503)
+    closed = provider["closedConfig"]
+    descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        raw = stream.read(65537)
+    if (info.st_uid != 0 or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o222
+            or len(raw) > 65536 or hashlib.sha256(raw).hexdigest() != closed["sha256"]):
+        raise Rejected(503)
+
+
+def _codex_parameters(provider):
+    """Допустить только Root программы и отдельного владельца credential DATA."""
+    try:
+        paths = ("python", "sitePackages", "codex", "node", "ownerHome", "codexHome", "workerDir", "componentRoot", "helperPath")
+        if (any(not isinstance(provider.get(k), str) or not os.path.isabs(provider[k])
+                or os.path.normpath(provider[k]) != provider[k]
+                or any(c in provider[k] for c in " \t\r\n\\") for k in paths)
+                or not re.fullmatch("[a-f0-9]{40}", provider.get("sourceSha", ""))
+                or any(key in provider for key in ("core", "runtime", "profileHome"))
+                or provider["codexHome"] != provider["ownerHome"] + "/.codex"):
+            raise Rejected(503)
+        uid, gid = provider.get("uid"), provider.get("gid")
+        if type(uid) is not int or type(gid) is not int or uid <= 0 or gid <= 0 or pwd.getpwuid(uid).pw_gid != gid:
+            raise Rejected(503)
+        _root_directory(Path(provider["ownerHome"]).parent)
+        for name in ("ownerHome", "codexHome"):
+            info = Path(provider[name]).lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or info.st_gid != gid
+                    or stat.S_IMODE(info.st_mode) != 0o700):
+                raise Rejected(503)
+        _codex_source(provider)
+        _codex_mounts(provider)
+        return uid, gid
+    except (OSError, KeyError, ValueError, TypeError):
         raise Rejected(503) from None
-    return uid, gid
+
+
+_CODEX_OWNER_PROGRAM = """import hashlib,importlib.util,json,sys
+from pathlib import Path
+p=json.loads(sys.argv[1]); helper=Path(p['helperPath'])
+if hashlib.sha256(helper.read_bytes()).hexdigest()!=p['helperSha256'] or (helper.parent.parent/'.brai-runtime.json').exists():
+    raise ValueError('CODEX_OWNER_SOURCE_REJECTED')
+spec=importlib.util.spec_from_file_location('_brai_codex_owner',helper)
+owner=importlib.util.module_from_spec(spec);spec.loader.exec_module(owner)
+owner.HOME,owner.CODEX_HOME=owner.owner_paths(p['ownerHome'],p['codexHome'])
+owner.BINARY=Path(p['codex']);owner.LOCK=owner.CODEX_HOME/'hermes-owner.lock'
+v=owner.resolve();print(json.dumps({'access':v['api_key'],'account':v['account_id']}))
+"""
 
 
 async def _codex_credentials(provider):
-    """Получить access/account через штатный owner; refresh выполняет Codex CLI."""
+    """Получить credential через принятый stdlib код и отдельное DATA хранилище."""
     uid, gid = _codex_parameters(provider)
-    home, core, runtime = provider["ownerHome"], provider["core"], provider["runtime"]
-    env = {"HOME": home, "CODEX_HOME": home + "/.codex", "HERMES_ROOT": core,
-           "HERMES_HOME": provider.get("profileHome", ""), "HERMES_RUNTIME_DIR": runtime + "/tools",
-           "PYTHONPATH": core, "PYTHONDONTWRITEBYTECODE": "1",
-           "PATH": home + "/.local/bin:/usr/local/bin:/usr/bin:/bin"}
-    if not os.path.isabs(env["HERMES_HOME"]) or os.path.normpath(env["HERMES_HOME"]) != env["HERMES_HOME"]:
-        raise Rejected(503)
-    # AIDEV-NOTE: subprocess не наследует окружение egress и не выводит stderr.
-    program = ("import json; from hermes_cli.codex_cli_owner import resolve; "
-               "v=resolve(); print(json.dumps({'access':v['api_key'],'account':v['account_id']}))")
+    env = {"HOME": provider["ownerHome"], "CODEX_HOME": provider["codexHome"],
+           "PATH": str(Path(provider["node"]).parent) + ":/usr/bin:/bin",
+           "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"}
+    parameters = {key: provider[key] for key in ("helperPath", "helperSha256", "ownerHome", "codexHome", "codex")}
     process = None
     try:
         process = await asyncio.create_subprocess_exec(
-            provider["python"], "-B", "-c", program, cwd=core, env=env,
-            user=uid, group=gid, extra_groups=[], stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, limit=16384)
+            provider["python"], "-I", "-S", "-B", "-c", _CODEX_OWNER_PROGRAM, json.dumps(parameters),
+            cwd=provider["workerDir"], env=env, user=uid, group=gid, extra_groups=[],
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL, limit=16384)
         raw = await asyncio.wait_for(process.stdout.readuntil(b"\n"), CREDENTIAL_TIMEOUT)
         status = await asyncio.wait_for(process.wait(), 1)
         if status != 0:

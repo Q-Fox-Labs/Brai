@@ -1,8 +1,15 @@
 # ABOUTME: Проверяет границу доступа и передачу потоков через настоящий Unix-сокет.
 # ABOUTME: Внешние сетевые соединения заменены локальным тестовым сервером.
 import asyncio
+import base64
+import hashlib
+import io
 import json
 import os
+from pathlib import Path
+import subprocess
+import sys
+import time
 import socket
 import tempfile
 import unittest
@@ -181,70 +188,120 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             server.close()
             await asyncio.gather(relay.wait_closed(), server.wait_closed())
 
-    async def test_codex_parameters_reject_unsafe_identity_and_paths(self):
+    def codex_provider(self):
         import pwd
-        uid = os.getuid()
-        gid = pwd.getpwuid(uid).pw_gid
-        provider = {"type": "codex-cli", "uid": uid, "gid": gid,
-                    "runtime": "/runtime", "ownerHome": "/runtime/owner",
-                    "python": "/runtime/installs/fixture/bin/python",
-                    "core": "/engine", "profileHome": "/profile"}
-        self.assertEqual(egress._codex_parameters(provider), (uid, gid))
-        for override in ({"uid": 0}, {"uid": True}, {"gid": 0},
-                         {"gid": gid + 1}, {"ownerHome": "/other/owner"},
-                         {"python": "/runtime/installs/../other/python"},
-                         {"core": "relative"}):
+        home = Path(self.tmp.name) / "fresh-owner"
+        home.mkdir(mode=0o700, exist_ok=True)
+        (home / ".codex").mkdir(mode=0o700, exist_ok=True)
+        return {"type": "codex-cli", "uid": os.getuid(), "gid": pwd.getpwuid(os.getuid()).pw_gid,
+                "sourceSha": "a" * 40, "python": "/sealed/python/bin/python3.14", "sitePackages": "/sealed/site-packages",
+                "codex": "/sealed/codex/bin/codex", "node": "/sealed/node", "ownerHome": str(home),
+                "codexHome": str(home / ".codex"), "workerDir": "/sealed/cwd", "componentRoot": "/sealed/component",
+                "helperPath": "/sealed/component/services/hermes/extensions/tools/codex_cli_owner.py", "helperSha256": "b" * 64,
+                "closedConfig": {"path": "/sealed/closed.toml", "sha256": "c" * 64},
+                "providerSourceReceipt": {"path": "/sealed/provider-receipt.json", "sha256": "d" * 64},
+                "expectedProviderSourceProducerSha256": "e" * 64}
+
+    async def test_codex_parameters_reject_unsafe_identity_and_paths(self):
+        provider = self.codex_provider()
+        with patch.object(egress, "_root_directory"), patch.object(egress, "_codex_source"), patch.object(egress, "_codex_mounts"):
+            self.assertEqual(egress._codex_parameters(provider), (provider["uid"], provider["gid"]))
+            for override in ({"uid": 0}, {"uid": True}, {"gid": 0}, {"gid": provider["gid"] + 1},
+                             {"codexHome": "/other/.codex"}, {"python": "/sealed/../other/python"},
+                             {"componentRoot": "relative"}, {"runtime": "/legacy/runtime"}, {"sourceSha": "bad"}):
+                with self.subTest(override=override), self.assertRaises(egress.Rejected):
+                    egress._codex_parameters({**provider, **override})
+        with patch.object(egress, "_root_directory"), patch.object(egress, "_codex_source"), \
+             patch.object(egress, "_codex_mounts", side_effect=egress.Rejected(503)):
             with self.assertRaises(egress.Rejected):
-                egress._codex_parameters({**provider, **override})
+                egress._codex_parameters(provider)
+
+    async def test_codex_source_refuses_old_receipt_and_path_or_producer_drift(self):
+        provider = self.codex_provider()
+        paths = {key: provider[key] for key in ("python", "sitePackages", "codex", "node", "ownerHome", "codexHome", "workerDir", "componentRoot")}
+        source = {"version": 1, "kind": "brai_identity_provider_source", "state": "verified", "sourceSha": provider["sourceSha"],
+                  "paths": paths, "closedConfig": provider["closedConfig"], "producerPath": "/sealed/producer.py", "producerSha256": "e" * 64}
+        with patch.object(egress, "_root_file", return_value=json.dumps(source).encode()) as sealed, patch.object(egress, "_root_directory"):
+            egress._codex_source(provider)
+            self.assertEqual(sum(call.kwargs.get("executable", False) for call in sealed.call_args_list), 3)
+        for change in ({"kind": "codex-only"}, {"producerSha256": "f" * 64}, {"paths": {**paths, "python": "/old995/python"}}):
+            with patch.object(egress, "_root_file", return_value=json.dumps({**source, **change}).encode()), self.assertRaises(egress.Rejected):
+                egress._codex_source(provider)
+
+    async def test_codex_mounts_require_pinned_directories_and_readonly_config(self):
+        provider = self.codex_provider()
+        target = Path(provider["codexHome"]) / "config.toml"
+        target.write_bytes(b"closed")
+        target.chmod(0o444)
+        provider["closedConfig"]["sha256"] = hashlib.sha256(b"closed").hexdigest()
+        mount = lambda path, flags: "1 0 0:1 / " + str(path) + " " + flags + " - tmpfs tmpfs rw\n"
+        rows = mount(provider["ownerHome"], "rw") + mount(provider["codexHome"], "rw") + mount(target, "ro")
+        real_fstat = os.fstat
+        def root_metadata(fd):
+            value = list(real_fstat(fd)); value[4] = 0; return os.stat_result(value)
+        with patch("builtins.open", return_value=io.StringIO(rows)), patch.object(egress.os, "fstat", side_effect=root_metadata):
+            egress._codex_mounts(provider)
+        for invalid in (rows.replace(str(provider["codexHome"]) + " rw", "/other rw"), rows.replace(str(target) + " ro", str(target) + " rw")):
+            with patch("builtins.open", return_value=io.StringIO(invalid)), self.assertRaises(egress.Rejected):
+                egress._codex_mounts(provider)
 
     async def test_codex_subprocess_identity_environment_and_timeout(self):
-        import pwd
-        uid = os.getuid()
-        gid = pwd.getpwuid(uid).pw_gid
-        provider = {"type": "codex-cli", "uid": uid, "gid": gid,
-                    "runtime": "/runtime", "ownerHome": "/runtime/owner",
-                    "python": "/runtime/installs/fixture/bin/python",
-                    "core": "/engine", "profileHome": "/profile"}
+        provider = self.codex_provider()
         calls = []
-
         class FakeProcess:
             def __init__(self, payload):
                 self.stdout = asyncio.StreamReader()
                 if payload is not None:
-                    self.stdout.feed_data(payload)
-                    self.stdout.feed_eof()
+                    self.stdout.feed_data(payload); self.stdout.feed_eof()
                 self.returncode = 0 if payload is not None else None
                 self.killed = False
-
             async def wait(self):
-                if self.returncode is None:
-                    self.returncode = -9
+                if self.returncode is None: self.returncode = -9
                 return self.returncode
-
-            def kill(self):
-                self.killed = True
-
+            def kill(self): self.killed = True
         process = FakeProcess(b'{"access":"token","account":"account"}\n')
-
         async def spawn(*args, **kwargs):
-            calls.append((args, kwargs))
-            return process
-
-        with patch.object(egress.asyncio, "create_subprocess_exec", spawn):
+            calls.append((args, kwargs)); return process
+        with patch.object(egress, "_codex_parameters", return_value=(provider["uid"], provider["gid"])), \
+             patch.object(egress.asyncio, "create_subprocess_exec", spawn):
             self.assertEqual(await egress._codex_credentials(provider), ("token", "account"))
         args, kwargs = calls[0]
-        self.assertEqual(args[:2], (provider["python"], "-B"))
-        self.assertEqual((kwargs["user"], kwargs["group"], kwargs["extra_groups"]), (uid, gid, []))
-        self.assertEqual(kwargs["env"]["HOME"], "/runtime/owner")
-        self.assertNotIn("OPENAI_API_KEY", kwargs["env"])
-        self.assertNotIn("OPENROUTER_API_KEY", kwargs["env"])
-
+        self.assertEqual(args[:4], (provider["python"], "-I", "-S", "-B"))
+        self.assertEqual((kwargs["user"], kwargs["group"], kwargs["extra_groups"]), (provider["uid"], provider["gid"], []))
+        self.assertEqual(kwargs["cwd"], provider["workerDir"])
+        self.assertEqual(kwargs["env"], {"HOME": provider["ownerHome"], "CODEX_HOME": provider["codexHome"],
+            "PATH": "/sealed:/usr/bin:/bin", "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"})
         process = FakeProcess(None)
-        with patch.object(egress.asyncio, "create_subprocess_exec", spawn), \
-             patch.object(egress, "CREDENTIAL_TIMEOUT", 0.01):
-            with self.assertRaises(egress.Rejected):
-                await egress._codex_credentials(provider)
+        with patch.object(egress, "_codex_parameters", return_value=(provider["uid"], provider["gid"])), \
+             patch.object(egress.asyncio, "create_subprocess_exec", spawn), patch.object(egress, "CREDENTIAL_TIMEOUT", 0.01):
+            with self.assertRaises(egress.Rejected): await egress._codex_credentials(provider)
         self.assertTrue(process.killed)
+
+    async def test_real_stdlib_resolver_rebinds_only_fresh_data_and_ignores_ambient_imports(self):
+        provider = self.codex_provider()
+        root = Path(self.tmp.name)
+        helper = root / "component/tools/codex_cli_owner.py"
+        helper.parent.mkdir(parents=True)
+        original = Path(__file__).resolve().parents[2] / "extensions/tools/codex_cli_owner.py"
+        helper.write_bytes(original.read_bytes())
+        provider["helperPath"], provider["helperSha256"] = str(helper), hashlib.sha256(helper.read_bytes()).hexdigest()
+        claims = {"exp": int(time.time()) + 3600, "https://api.openai.com/auth": {"chatgpt_account_id": "fixture-account"}}
+        payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+        token = "fixture." + payload + ".fixture"
+        auth = Path(provider["codexHome"]) / "auth.json"
+        auth.write_text(json.dumps({"tokens": {"access_token": token, "account_id": "fixture-account"}})); auth.chmod(0o600)
+        evil = root / "ambient"; evil.mkdir()
+        (evil / "sitecustomize.py").write_text("raise RuntimeError('ambient startup executed')")
+        (evil / "json.py").write_text("raise RuntimeError('ambient json executed')")
+        parameters = {key: provider[key] for key in ("helperPath", "helperSha256", "ownerHome", "codexHome", "codex")}
+        environment = {"HOME": provider["ownerHome"], "CODEX_HOME": provider["codexHome"],
+                       "PATH": "/usr/bin:/bin", "PYTHONPATH": str(evil), "PYTHONUSERBASE": str(evil)}
+        argv = [sys.executable, "-I", "-S", "-B", "-c", egress._CODEX_OWNER_PROGRAM, json.dumps(parameters)]
+        result = subprocess.run(argv, cwd=evil, env=environment, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(json.loads(result.stdout), {"access": token, "account": "fixture-account"})
+        helper.write_text("raise RuntimeError('tampered helper')")
+        self.assertNotEqual(subprocess.run(argv, cwd=evil, env=environment, capture_output=True, timeout=5).returncode, 0)
 
     async def test_codex_resolver_failure_fails_closed(self):
         async def failure(provider):
