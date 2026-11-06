@@ -4,6 +4,7 @@ import { Pool } from "pg";
 import { getMigrations } from "better-auth/db/migration";
 import { config } from "./config.js";
 import { createAuth } from "./auth.js";
+import { migrateIdentity } from "./identity-schema.js";
 const cfg=config(process.env,"migration");const pool=new Pool({connectionString:cfg.databaseURL,connectionTimeoutMillis:5000});
 try {
  const owner=process.env.AUTH_OWNER_ROLE,role=process.env.AUTH_APP_ROLE;
@@ -14,6 +15,7 @@ try {
  if(!runtime||Object.values(runtime).some(Boolean))throw new Error("Unsafe runtime role");
  const auth=createAuth(cfg,pool,async()=>{throw new Error("Email disabled in migration");});
  const plan=await getMigrations(auth.options);if(plan.schemaProblems.length)throw new Error("Invalid schema");await plan.runMigrations();
+ await migrateIdentity(pool);
  const quote=(name:string)=>'"'+name.replaceAll('"','""')+'"';
  await pool.query(`REVOKE ALL ON DATABASE ${quote(identity.db)} FROM PUBLIC`);
  await pool.query(`REVOKE CREATE ON DATABASE ${quote(identity.db)} FROM ${quote(role)}`);
@@ -23,6 +25,10 @@ try {
  await pool.query(`GRANT USAGE ON SCHEMA public TO ${quote(role)}`);
  await pool.query(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC,${quote(role)}`);
  await pool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ${quote(role)}`);
+ await pool.query(`REVOKE UPDATE, DELETE ON brai_identity_audit FROM ${quote(role)}`);
+ await pool.query(`REVOKE INSERT, UPDATE, DELETE ON brai_owner_bootstrap FROM ${quote(role)}`);
+ await pool.query(`REVOKE ALL ON SCHEMA auth_identity_owner FROM PUBLIC,${quote(role)}`);
+ await pool.query(`REVOKE ALL ON ALL TABLES IN SCHEMA auth_identity_owner FROM PUBLIC,${quote(role)}`);
  await pool.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ${quote(role)}`);
  console.log("auth migrations complete");
 }catch{console.error("auth migration failed");process.exitCode=1;}finally{await pool.end();}

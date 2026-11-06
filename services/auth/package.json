@@ -5,6 +5,12 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "bootstrap-owner": "node dist/bootstrap.js",
+    "import-identities": "node dist/import-identities.js",
+    "provision-identities": "node dist/provision-identities.js",
+    "ready-profiles": "node dist/ready-profiles.js",
+    "revoke-legacy": "node dist/revoke-legacy.js",
+    "verify-provision": "node dist/verify-provision.js",
     "start": "node dist/main.js",
     "migrate": "node dist/migrate.js",
     "health": "node dist/health.js",
@@ -17,7 +23,8 @@
     "nats": "2.29.3",
     "pg": "8.16.3",
     "resend": "6.9.3",
-    "ajv": "8.17.1"
+    "ajv": "8.17.1",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@types/node": "24.10.1",

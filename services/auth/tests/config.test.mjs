@@ -12,3 +12,10 @@ test('trusted origins extend the default and reject unsafe forms',()=>{
   assert.throws(()=>config({...env,AUTH_TRUSTED_ORIGINS:value},'migration'),/AUTH_TRUSTED_ORIGINS/);
  }
 });
+
+test('identity mode defaults to email and rejects unknown modes',()=>{
+ assert.equal(config(env,'migration').identityMode,'email');
+ const telegram=config({...env,AUTH_IDENTITY_MODE:'telegram',AUTH_EMAIL_FROM:''},'migration');
+ assert.equal(telegram.identityMode,'telegram');assert.equal(telegram.emailFrom,'');
+ assert.throws(()=>config({...env,AUTH_IDENTITY_MODE:'unknown'},'migration'),/AUTH_IDENTITY_MODE/);
+});
