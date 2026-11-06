@@ -265,6 +265,7 @@
       "services/hermes/tests/planning-read.test.mjs",
       "services/hermes/tests/files.test.mjs",
       "services/hermes/files/tests/test_files.py",
+      "services/hermes/files/tests/test_delegation.py",
       "services/hermes/files/tests/test_engine.py",
       "services/hermes/tests/extensions.test.mjs",
       "services/hermes/extensions/**/*.py",
@@ -605,7 +606,9 @@
       "services/hermes/identity/schemas/control.schema.json",
       "services/hermes/identity/parent_runner.py",
       "services/hermes/identity/control.openrpc.json",
-      "services/hermes/identity/asyncapi.yaml"
+      "services/hermes/identity/asyncapi.yaml",
+      "services/hermes/extensions/scripts/context_gif.py",
+      "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",

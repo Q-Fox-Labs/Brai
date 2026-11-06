@@ -172,3 +172,142 @@ diff --git a/agent/turn_context.py b/agent/turn_context.py
  
      # Title the session now: titling depends only on the user's ask (before any injected
      # context lands on list content), so it runs concurrently with the turn. Daemon thread,
+diff --git a/gateway/slash_commands.py b/gateway/slash_commands.py
+--- a/gateway/slash_commands.py
++++ b/gateway/slash_commands.py
+@@ -1,3 +1,5 @@
++# ABOUTME: Интегрирует Hermes с памятью Brai через MemOS.
++# ABOUTME: Файловая память и её команда недоступны; навыки сохраняют штатный lifecycle.
+ """Gateway slash-command handlers for GatewayRunner: lifted out of ``gateway/run.py`` into a mixin
+ so ``self._handle_*_command`` keeps resolving via the MRO.  Cohesive clusters live in the sibling
+ mixins (``slash_commands_model/_session/_status/_goals``); this module keeps the shared helpers plus
+@@ -883,19 +885,6 @@
+         self._track_background_task(_run_side_question())
+         return t("gateway.btw.started", preview=preview)
+
+-    async def _handle_memory_command(self, event: MessageEvent) -> str:
+-        """Handle /memory — review pending memory writes + toggle the approval gate. Entries are small
+-        enough to review inline, so the full flow works on every platform."""
+-        from hermes_cli.write_approval_commands import handle_pending_subcommand
+-        from tools import write_approval as wa
+-        from tools.memory_tool import load_on_disk_store
+-        # Apply approved writes against a fresh on-disk store (the gateway has no long-lived agent;
+-        # the store persists to the same MEMORY/USER.md and honors the configured char limits).
+-        out = handle_pending_subcommand(
+-            wa.MEMORY, event.get_command_args().strip().split(), memory_store=load_on_disk_store(),
+-            set_mode_fn=self._write_approval_setter("memory", event))
+-        return out if out is not None else t("gateway.memory.unknown_subcommand")
+-
+     async def _handle_skills_command(self, event: MessageEvent) -> str:
+         """Handle /skills on the gateway — pending skill-write review only (hub stays CLI-only). Gated
+         by ``skills.write_approval`` but still answers when staged writes exist after the gate is off
+diff --git a/hermes_cli/cli_commands_mixin.py b/hermes_cli/cli_commands_mixin.py
+--- a/hermes_cli/cli_commands_mixin.py
++++ b/hermes_cli/cli_commands_mixin.py
+@@ -1,3 +1,5 @@
++# ABOUTME: Интегрирует Hermes с памятью Brai через MemOS.
++# ABOUTME: Файловая память и её команда недоступны; навыки сохраняют штатный lifecycle.
+ """Slash-command handlers for the interactive CLI (``HermesCLI`` inherits ``CLICommandsMixin``).
+
+ cli.py-internal symbols (``_cprint``/``_ACCENT``/``save_config_value``…) are imported LAZILY inside
+@@ -1509,7 +1511,7 @@
+             from hermes_cli.cron import _run_outcome
+             print(f"  {_run_outcome(job)}")
+
+-    # ---- delegating handlers: /suggestions, /blueprint, /curator, /kanban, /skills, /memory --
++    # ---- delegating handlers: /suggestions, /blueprint, /curator, /kanban, /skills --
+     def _handle_suggestions_command(self, cmd: str):
+         """Handle /suggestions — review/accept/dismiss suggested automations via the shared handler.
+         CLI origin is the local platform so an accepted job's "origin" delivery resolves to a home channel."""
+@@ -1581,28 +1583,8 @@
+         from hermes_cli.skills_hub import handle_skills_slash
+         handle_skills_slash(cmd, ChatConsole())
+
+-    def _handle_memory_command(self, cmd: str):
+-        """Handle /memory slash command — pending review + approval-gate toggle."""
+-        from hermes_cli.write_approval_commands import handle_pending_subcommand
+-        from tools import write_approval as wa
+-        args = cmd.strip().split()[1:]
+-        store = getattr(self.agent, "_memory_store", None) if getattr(self, "agent", None) else None
+-        if store is None:
+-            # No live agent store (e.g. Desktop GUI): use a fresh on-disk store, as the gateway
+-            # does — same MEMORY/USER.md, same configured char limits.
+-            # Apply against a freshly loaded on-disk store, mirroring the gateway path
+-            # (gateway/slash_commands.py): it persists to the same MEMORY/USER.md and creates MEMORY.md on
+-            # the first approved write. Without this the shared handler returns "memory store unavailable".
+-            # See #46783.
+-            from tools.memory_tool import load_on_disk_store
+-            store = load_on_disk_store()
+-        out = handle_pending_subcommand(
+-            wa.MEMORY, args, memory_store=store,
+-            set_mode_fn=lambda enabled: self._save_write_approval("memory", enabled))
+-        print(out if out is not None else _t("memory.unknown_subcommand"))
+-
+     def _save_write_approval(self, subsystem: str, enabled: bool):
+-        """Persist <subsystem>.write_approval to config (for /memory|/skills approval)."""
++        """Persist <subsystem>.write_approval to config (for /skills approval)."""
+         _save(f"{subsystem}.write_approval", bool(enabled))
+
+     # ---- prompt-queueing handlers: /learn, /plan, /init -----------------------------------
+diff --git a/hermes_cli/commands.py b/hermes_cli/commands.py
+--- a/hermes_cli/commands.py
++++ b/hermes_cli/commands.py
+@@ -1,3 +1,5 @@
++# ABOUTME: Интегрирует Hermes с памятью Brai через MemOS.
++# ABOUTME: Файловая память и её команда недоступны; навыки сохраняют штатный lifecycle.
+ """Slash command registry for the Hermes CLI and gateway.
+
+ Every consumer -- CLI help, gateway dispatch, Telegram BotCommands, Slack
+@@ -260,9 +262,6 @@
+                # (#98330 review).
+                desktop_subcommands=("pending", "approve", "reject", "diff",
+                                     "approval")),
+-    CommandDef("memory", "Review pending memory writes / toggle the approval gate",
+-               "Tools & Skills", args_hint="[pending|approve|reject|approval] [id|on|off]",
+-               subcommands=("pending", "approve", "reject", "approval")),
+     CommandDef("bundles", "List skill bundles (aliases /<name> for multiple skills)",
+                "Tools & Skills", execute="bundles"),
+     CommandDef("pet", "Toggle or adopt a petdex mascot (/pet, /pet list, /pet <slug>)", "Tools & Skills",
+diff --git a/tools/memory_tool.py b/tools/memory_tool.py
+--- a/tools/memory_tool.py
++++ b/tools/memory_tool.py
+@@ -1,4 +1,6 @@
+ #!/usr/bin/env python3
++# ABOUTME: Интегрирует Hermes с памятью Brai через MemOS.
++# ABOUTME: Файловая память и её команда недоступны; навыки сохраняют штатный lifecycle.
+ """Memory Tool - persistent curated memory (MEMORY.md = agent notes, USER.md = user
+ profile). Both enter the system prompt as a FROZEN snapshot at session start;
+ mid-session writes hit disk but never change the prompt (prefix cache intact).
+@@ -218,18 +220,7 @@
+     or batch (``operations``, atomic against the final budget). ``new_text``
+     aliases ``content`` -- for 'replace' both mean the COMPLETE new entry (the
+     whole matched entry is overwritten; old_text only locates it)."""
+-    if store is None:
+-        return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
+-    token = FAILURE_CLASS.set("other")
+-    try:
+-        outcome, result = _memory_tool(action, target, content, old_text, new_text, operations, store)
+-        failure_class = "none" if outcome == "success" else FAILURE_CLASS.get()
+-    finally:
+-        FAILURE_CLASS.reset(token)
+-    from hermes_cli.observability.shared_metrics_loop import record_builtin_memory_call
+-    record_builtin_memory_call(action, operations, outcome=outcome, failure_class=failure_class)
+-    return result
+-
++    return tool_error("Built-in file memory is unavailable in Brai. Use the MemOS tools.", success=False)
+
+ def _applied(result: dict[str, Any]) -> tuple[str, str]:
+     return ("success" if result.get("success") else "failed"), json.dumps(result, ensure_ascii=False)
+@@ -295,9 +286,9 @@
+
+
+ def get_builtin_memory_store_flags(config: Optional[dict[str, Any]] = None) -> tuple[bool, bool]:
+-    """Return ``(memory_enabled, user_profile_enabled)`` from resolved config."""
+-    section = get_builtin_memory_config(config)
+-    return tuple(is_truthy_value(section.get(k), default=True) for k in ("memory_enabled", "user_profile_enabled"))
++    """Отключить файловую память Brai независимо от прежних настроек профиля."""
++    # AIDEV-NOTE: BRAI_MEMOS_ONLY — память принадлежит внешнему provider MemOS.
++    return False, False
+
+
+ @no_cache_check_fn
