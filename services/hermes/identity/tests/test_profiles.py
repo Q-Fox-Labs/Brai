@@ -7,6 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity.profiles import native_profile, profile_for_user, plan_users, registry, worker_unit
+from identity.browser import browser_unit
 
 
 class ProfileTests(unittest.TestCase):
@@ -26,6 +27,7 @@ class ProfileTests(unittest.TestCase):
     def test_model_routes_responses_to_named_local_provider(self):
         value = native_profile(self.profile(), instructions_root='/software/instructions',
                                model='fixture-model')
+        self.assertEqual(value['browser'], {'backend': 'browser-use'})
         self.assertEqual(value['model'], {'provider': 'brai-model', 'default': 'fixture-model'})
         self.assertEqual(value['providers']['brai-model'], {
             'base_url': 'http://127.0.0.1:18080/model/v1',
@@ -56,6 +58,7 @@ class ProfileTests(unittest.TestCase):
                             site_packages='/software/site-packages', instructions_root='/software/instructions')
         self.assertIn('ExecStart=/opt/brai-profile/python/bin/python3.14 -P -B -m identity.worker', value)
         self.assertIn('PrivateNetwork=yes', value)
+        self.assertIn('Environment=BU_CDP_URL=http://127.0.0.1:19364', value)
         self.assertIn('TemporaryFileSystem=/run:ro /var/lib:ro /opt:ro', value)
         self.assertIn('BindPaths=' + self.profile()['home'], value)
         self.assertIn('/software/runtime:/opt/brai-profile/runtime', value)
@@ -64,6 +67,23 @@ class ProfileTests(unittest.TestCase):
         self.assertNotIn('EnvironmentFile=', value)
         self.assertNotIn('docker.sock', value)
         self.assertNotIn('\\n', value)
+
+    def test_browser_joins_only_own_worker_and_keeps_sandbox(self):
+        profile = self.profile()
+        value = browser_unit(profile, chrome_root='/software/chrome')
+        worker = 'brai-hermes-dev-user-' + profile['profileId'] + '.service'
+        self.assertIn('JoinsNamespaceOf=' + worker, value)
+        self.assertIn('BindsTo=' + worker, value)
+        self.assertIn('User=' + profile['username'], value)
+        self.assertIn('TemporaryFileSystem=/run:ro /var/lib:ro /opt:ro', value)
+        self.assertIn('BindPaths=' + profile['home'] + '/browser', value)
+        self.assertIn('RestrictNamespaces=user pid net', value)
+        self.assertIn('--proxy-server=http://127.0.0.1:18080', value)
+        self.assertIn('--proxy-bypass-list=<-loopback>', value)
+        self.assertNotIn('--no-sandbox', value)
+        self.assertNotIn('docker.sock', value)
+        with self.assertRaises(ValueError):
+            browser_unit(profile, chrome_root='/software/chrome\\nUser=root')
 
     def test_worker_unit_rejects_operator_path_injection(self):
         with self.assertRaises(ValueError):
