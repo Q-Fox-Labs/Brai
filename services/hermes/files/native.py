@@ -1450,8 +1450,10 @@ def result_envelope(result, agent=None):
     if not isinstance(response, str):
         return result
     # The engine appends its verifier footer after the earlier output transform.
-    response = _public_response_text(response)
-    result = {**result, 'final_response': response}
+    cleaned = _public_response_text(response)
+    if cleaned != response:
+        response = cleaned
+        result = {**result, 'final_response': response}
     paths = []
     def found(match):
         paths.append(next(value for value in match.groups() if value is not None))
