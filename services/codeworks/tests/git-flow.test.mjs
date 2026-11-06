@@ -34,14 +34,15 @@ async function fixture(t,kind='feature') {
   const operation={id:randomUUID(),created_at:'2026-10-21T10:00:00.000Z'};
   let release={requested_sha:head,details:{}};const saved=[],proofs=new Map([['prod',{id:randomUUID(),commit_sha:base}]]),checks=new Map();
   const git=createFlowGit({localRemote:true,requireLock:()=>{}});
-  const prs=[];let creations=0;
+  const prs=[],bindings=new Map();let creations=0;
+  const pullRequests={get:async(_,__,leg)=>bindings.get(leg.target)??null,bind:async(_,__,leg,pr)=>{assert.ok(!bindings.has(leg.target)||bindings.get(leg.target)===pr.number);bindings.set(leg.target,pr.number);}};
   const gh={
-    async find(_,leg,{state='open',workspaceId,head}={}){const matches=prs.filter(p=>p.head.ref===leg.branch&&p.base.ref===leg.target&&(state==='all'||p.state==='open')&&(!workspaceId||(p.body.includes('Codeworks workspace '+workspaceId+';')&&p.head.sha===head)));if(matches.length>1)throw Object.assign(Error('ambiguous'),{code:'PR_AMBIGUOUS'});return matches[0]??null;},
+    async find(_,leg,{state='open',head}={}){const matches=prs.filter(p=>p.head.ref===leg.branch&&p.base.ref===leg.target&&(state==='all'||p.state==='open')&&(!head||p.head.sha===head));if(matches.length>1)throw Object.assign(Error('ambiguous'),{code:'PR_AMBIGUOUS'});return matches[0]??null;},
     async create(_,leg,body){creations++;const pr={number:prs.length+1,html_url:'https://github.com/fixture/repository/pull/'+(prs.length+1),state:'open',merged:false,body,head:{sha:leg.head,ref:leg.branch,repo:{full_name:project.github.repository}},base:{ref:leg.target,repo:{full_name:project.github.repository}}};prs.push(pr);return pr;},
     async get(_,number){const pr=prs.find(p=>p.number===number);const leg=Object.values(release.details).find(l=>l.pr_number===number);if(leg?.merge_sha&&await git.verifyMerge(project,leg)){pr.merged=true;pr.state='closed';pr.merge_commit_sha=leg.merge_sha;}return pr;},
     async checks(_,sha){return checks.get(sha)??[];},
   };
-  const deps={synchronizeCheckout:async sha=>({state:'ready',commit_sha:sha,lock_sha256:'a'.repeat(64),dependency_graph_sha256:'b'.repeat(64)}),git,github:gh,inspect:async()=>({head,dirty:false}),save:async details=>{saved.push(structuredClone(details));release.details=structuredClone(details);},evidence:async(target,sha)=>{const p=proofs.get(target);return p&&(!sha||p.commit_sha===sha)?p:null;}};
+  const deps={synchronizeCheckout:async sha=>({state:'ready',commit_sha:sha,lock_sha256:'a'.repeat(64),dependency_graph_sha256:'b'.repeat(64)}),git,github:gh,pullRequests,inspect:async()=>({head,dirty:false}),save:async details=>{saved.push(structuredClone(details));release.details=structuredClone(details);},evidence:async(target,sha)=>{const p=proofs.get(target);return p&&(!sha||p.commit_sha===sha)?p:null;}};
   async function advance(extra={}){
     // Новый объект имитирует чтение durable JSON после рестарта процесса.
     release=structuredClone(release);
@@ -49,7 +50,7 @@ async function fixture(t,kind='feature') {
   }
   const good=sha=>checks.set(sha,[check(sha)]);
   const installed=(target,sha)=>proofs.set(target,{id:randomUUID(),commit_sha:sha});
-  return {root,bare,repo,g,base,dev,head,branch,project,workspace,operation,git,gh,proofs,checks,saved,prs,advance,good,installed,get release(){return release;},get creations(){return creations;}};
+  return {root,bare,repo,g,base,dev,head,branch,project,workspace,operation,git,gh,pullRequests,bindings,proofs,checks,saved,prs,advance,good,installed,get release(){return release;},get creations(){return creations;}};
 }
 test('checks fail closed on absence, pending, failure, skipped, wrong SHA/app and duplicates',()=>{
   const sha='a'.repeat(40);assert.equal(checksPassed(required,[check(sha)],sha),true);
@@ -161,7 +162,7 @@ test('hotfix reconciles a lost main push before considering a subsequent dev bac
 });
 
 test('identity changes reject the PR while stale head waits for GitHub',async t=>{
-  for(const alter of [p=>p.head.repo.full_name='foreign/repository',p=>p.body='foreign']){
+  for(const alter of [p=>p.head.repo.full_name='foreign/repository',p=>p.head.ref='foreign',p=>p.base.ref='main',p=>p.number++]){
     const f=await fixture(t);await f.advance();alter(f.prs[0]);f.good(f.head);
     await assert.rejects(f.advance(),{code:'PR_IDENTITY_CONFLICT'});
     assert.equal(await f.git.remote(f.project,'dev'),f.dev);
@@ -171,7 +172,7 @@ test('identity changes reject the PR while stale head waits for GitHub',async t=
   assert.equal(await f.git.remote(f.project,'dev'),f.dev);
 });
 test('fresh PR read revalidates identity before target mutation',async t=>{
-  const changes={target:p=>p.base.ref='main',source:p=>p.head.ref='foreign',headRepository:p=>p.head.repo.full_name='foreign/repository',baseRepository:p=>p.base.repo.full_name='foreign/repository',ownership:p=>p.body='foreign',number:p=>p.number++};
+  const changes={target:p=>p.base.ref='main',source:p=>p.head.ref='foreign',headRepository:p=>p.head.repo.full_name='foreign/repository',baseRepository:p=>p.base.repo.full_name='foreign/repository',number:p=>p.number++};
   for(const [name,alter] of Object.entries(changes))await t.test(name,async t=>{
     const f=await fixture(t);f.good(f.head);const github={...f.gh,get:async(...args)=>{const pr=structuredClone(await f.gh.get(...args));alter(pr);return pr;}};
     await assert.rejects(f.advance({github}),{code:'PR_IDENTITY_CONFLICT'});
@@ -186,18 +187,20 @@ test('stale PR head becomes fresh without bypassing release gates',async t=>{
 });
 test('closed history is ignored and multiple open PRs are ambiguous',async t=>{
   const f=await fixture(t),input={project:f.project,workspace:f.workspace,operation:{request:{commit_sha:f.head}},details:{}};
-  const ports={git:f.git,github:f.gh,inspect:async()=>({head:f.head,dirty:false}),save:async()=>{}};
+  const ports={pullRequests:f.pullRequests,git:f.git,github:f.gh,inspect:async()=>({head:f.head,dirty:false}),save:async()=>{}};
   const old=await f.gh.create(f.project,{branch:f.branch,target:'dev',head:f.base},'Codeworks workspace '+f.workspace.id+'; old');old.state='closed';old.merged=true;
   assert.equal((await advanceSync(input,ports)).status,'succeeded');assert.equal(f.prs.length,2);
   await f.gh.create(f.project,{branch:f.branch,target:'dev',head:f.head},'Codeworks workspace '+f.workspace.id+'; other');
-  await assert.rejects(advanceSync(input,ports),{code:'PR_AMBIGUOUS'});
+  assert.equal((await advanceSync(input,ports)).status,'succeeded');assert.equal(input.details.primary.pr_number,2);
+  const unbound={...f.pullRequests,get:async()=>null};
+  await assert.rejects(advanceSync({...input,details:{}},{...ports,pullRequests:unbound}),{code:'PR_AMBIGUOUS'});
 });
 test('GitHub search traverses historical pages and filters the recorded attempt',async()=>{
   const p={github:{repository:'fixture/repository'}},leg={branch:'feature/task',target:'dev',head:'a'.repeat(40)};
   const old=Array.from({length:100},(_,i)=>({number:i+1,body:'old',head:{sha:'b'.repeat(40)}}));
-  const wanted={number:101,body:'Codeworks workspace fixture;',head:{sha:leg.head}};let calls=0;
+  const wanted={number:101,body:'Новое описание без служебных строк',head:{sha:leg.head}};let calls=0;
   const gh=createGitHub({run:async()=>({stdout:JSON.stringify(++calls===1?old:[wanted])})});
-  assert.equal((await gh.find(p,leg,{state:'all',workspaceId:'fixture',head:leg.head})).number,101);assert.equal(calls,2);
+  assert.equal((await gh.find(p,leg,{state:'all',head:leg.head})).number,101);assert.equal(calls,2);
 });
 
 test('GitHub adapter preserves exact query SHA, app identity and lost API error boundary',async()=>{
@@ -216,7 +219,7 @@ test('failed/pending/wrong-SHA checks block target mutation through the actual r
 
 for(const kind of ['feature','hotfix'])test(kind+' sync publishes a working PR and never mutates a target or checks acceptance',async t=>{
   const f=await fixture(t,kind),details={},saved=[];
-  const ports={git:f.git,github:{...f.gh,checks:()=>assert.fail('sync must not inspect release checks')},inspect:async()=>({head:f.head,dirty:false}),save:async value=>saved.push(structuredClone(value))};
+  const ports={pullRequests:f.pullRequests,git:f.git,github:{...f.gh,checks:()=>assert.fail('sync must not inspect release checks')},inspect:async()=>({head:f.head,dirty:false}),save:async value=>saved.push(structuredClone(value))};
   const input={project:f.project,workspace:f.workspace,operation:{request:{commit_sha:f.head}},details};
   assert.deepEqual(await advanceSync(input,ports),{status:'succeeded',reason:'SYNCHRONIZED'});
   assert.equal(await f.git.remote(f.project,f.branch),f.head);assert.equal(f.prs.length,1);
@@ -227,7 +230,7 @@ for(const kind of ['feature','hotfix'])test(kind+' sync publishes a working PR a
 });
 test('sync rejects changed or dirty HEAD before publishing and recovers a lost push response',async t=>{
   const f=await fixture(t),input={project:f.project,workspace:f.workspace,operation:{request:{commit_sha:f.head}},details:{}};
-  const ports={git:f.git,github:f.gh,inspect:async()=>({head:f.head,dirty:false}),save:async()=>{}};
+  const ports={pullRequests:f.pullRequests,git:f.git,github:f.gh,inspect:async()=>({head:f.head,dirty:false}),save:async()=>{}};
   for(const current of [{head:f.base,dirty:false},{head:f.head,dirty:true}]){
     await assert.rejects(advanceSync(input,{...ports,inspect:async()=>current}),{code:'CONFLICT'});
     assert.equal(await f.git.remote(f.project,f.branch),null);assert.equal(f.creations,0);
@@ -243,8 +246,9 @@ test('sync reconciles a lost PR response and keeps an unknown outcome for inspec
   for(const created of [true,false]){
     const f=await fixture(t),input={project:f.project,workspace:f.workspace,operation:{request:{commit_sha:f.head}},details:{}};
     const github={...f.gh,create:async(...args)=>{if(created)await f.gh.create(...args);throw Error('sync PR response lost');}};
-    const ports={git:f.git,github,inspect:async()=>({head:f.head,dirty:false}),save:async()=>{}};
+    const ports={pullRequests:f.pullRequests,git:f.git,github,inspect:async()=>({head:f.head,dirty:false}),save:async()=>{}};
     await assert.rejects(advanceSync(input,ports),/sync PR response lost/);
+    if(created)f.prs[0].body='Описание полностью заменено после потерянного ответа';
     assert.equal((await advanceSync(input,ports)).status,created?'succeeded':'awaiting_reconciliation');
     assert.equal(f.creations,created?1:0);assert.equal(await f.git.remote(f.project,'dev'),f.dev);
   }
@@ -362,4 +366,29 @@ test('verified installation keeps DEV lane until local checkout and dependencies
   assert.equal(attempts,2);assert.equal(f.creations,1);
   assert.equal((await f.advance({releaseLane})).status,'succeeded');
   assert.equal(releases,1);assert.equal(f.release.details.primary.local_checkout.commit_sha,merged);
+});
+
+for(const kind of ['feature','hotfix'])test(kind+' keeps one bound PR across body edits, fresh sync and release',async t=>{
+  const f=await fixture(t,kind),target=kind==='hotfix'?'main':'dev';
+  const sync=()=>advanceSync({project:f.project,workspace:f.workspace,operation:{request:{commit_sha:f.head}},details:{}},{git:f.git,github:f.gh,pullRequests:f.pullRequests,inspect:async()=>({head:f.head,dirty:false}),save:async()=>{}});
+  await sync();const pr=f.prs[0];
+  for(const body of ['',null,'Полностью новое описание','Codeworks workspace another-workspace;']){
+    pr.body=body;assert.equal((await sync()).status,'succeeded');assert.equal(f.creations,1);
+  }
+  // Поиск возвращает чужой PR, но закреплённый номер читается напрямую.
+  const github={...f.gh,find:async()=>assert.fail('bound PR must be read by number')};
+  f.good(f.head);assert.equal((await f.advance({github})).reason,'MERGE_CHECKS_REQUIRED');
+  assert.equal(f.release.details.primary.pr_number,pr.number);assert.equal(f.bindings.get(target),pr.number);assert.equal(f.creations,1);
+});
+test('bound PR cannot be replaced when the original disappears',async t=>{
+  const f=await fixture(t);await f.advance();
+  await assert.rejects(f.advance({github:{...f.gh,get:async()=>null,create:async()=>assert.fail('must not replace a bound PR')}}),{code:'PR_IDENTITY_CONFLICT'});
+  assert.equal(await f.git.remote(f.project,'dev'),f.dev);
+});
+
+test('unbound stale head read cannot switch PR number during reconciliation',async t=>{
+  const f=await fixture(t);f.good(f.head);
+  const github={...f.gh,create:async(...args)=>{const pr=await f.gh.create(...args);return {...pr,head:{...pr.head,sha:'f'.repeat(40)}};},get:async(_,number)=>({...f.prs[number-1],number:number+1})};
+  await assert.rejects(f.advance({github}),{code:'PR_IDENTITY_CONFLICT'});
+  assert.equal(f.bindings.size,0);assert.equal(await f.git.remote(f.project,'dev'),f.dev);
 });
