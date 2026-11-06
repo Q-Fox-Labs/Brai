@@ -29,3 +29,41 @@ dist/import.js capture SOURCE THREAD START_ID формирует закрыты�
 dist/import.js import SNAPSHOT THREAD START_ID передаёт снимок через тот же MCP и дочитывает каждый оригинал для проверки. Подключение задаётся DIALOGUES_MCP_URL и DIALOGUES_MCP_TOKEN_FILE; для новых длинных сообщений дополнительно нужны DIALOGUES_CODEX_SOCKET_URL и DIALOGUES_SUMMARY_CWD. Вывод содержит только ID, счётчики и хеши, без текстов. Это явная разовая операция, не перехват новых сообщений.
 
 Наличие исходников не подтверждает установленный экземпляр. Установка и подключение проверяются по receipt и реальным вызовам MCP.
+
+## Примеры и исправление отказов
+
+Ниже — полный вызов `dialogues_exchange` для ввода. Неизвестное время можно
+не передавать. Длинный оригинал требует отдельного `summary` в сообщении.
+
+```json
+{"action":"input","arguments":{"request_id":"request-1","dialogue":{"id":"chat-1","channel":"codex"},"messages":[{"id":"user-1","text":"Привет","source":{"kind":"codex"}}]},"context":{"consumer_id":"codex:chat-1","context_instance_id":"instance-1"}}
+```
+
+После чтения всех страниц подтвердите выдачу через `dialogues_context_ack`:
+
+```json
+{"request_id":"ack-1","consumer_id":"codex:chat-1","context_instance_id":"instance-1","delivery_id":"DELIVERY_FROM_CONTEXT"}
+```
+
+Для финала используйте `turn_id` и актуальную `version` из квитанции хода:
+
+```json
+{"action":"finish","arguments":{"request_id":"request-2","dialogue_id":"chat-1","turn_id":"TURN_FROM_INPUT","expected_version":"1","final":{"id":"final-1","text":"Готово"}},"context":{"consumer_id":"codex:chat-1","context_instance_id":"instance-1"}}
+```
+
+Роль и ID хода внутри сообщения не передавайте. Для `input` нужны `id` и
+`channel`, а не архивное `external_id`; происхождение и вложения помещайте в
+`source`. Эти же примеры доступны агенту в описании MCP-инструмента.
+
+При `INVALID_ARGUMENT` с `applied:false` прочитайте `field`,
+`expected` и `allowed`, исправьте запрос и сразу повторите с новым
+`request_id`, сохранив ID сообщения и его текст. Например, для
+`arguments.messages[0].role` удалите `role`.
+При неизвестном исходе сначала проверьте состояние; при `context_error`
+дочитайте контекст без повторной записи. Полные гарантии — в
+[контракте отказов](CONTRACT.md#отказ-и-исправленный-повтор-mcp).
+
+Отказы MCP поступают в stderr как JSON с `event=request_rejected`,
+ID запроса, кодом, полем и длительностью. Содержимое переписки и credentials
+в журнал не попадает. В контейнерной установке читайте журнал контейнера;
+systemd-журнал обёртки отражает только запуск и остановку.

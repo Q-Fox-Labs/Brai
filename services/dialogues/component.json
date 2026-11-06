@@ -24,6 +24,7 @@
       "services/dialogues/migrations/001.sql",
       "services/dialogues/migrations/002_live.sql",
       "services/dialogues/src/api.ts",
+      "services/dialogues/src/validate.ts",
       "services/dialogues/src/domain.ts",
       "services/dialogues/src/store.ts",
       "services/dialogues/src/mcp.ts",
@@ -49,6 +50,7 @@
     "checks": [
       "services/dialogues/tests/domain.test.mjs",
       "services/dialogues/tests/mcp.test.mjs",
+      "services/dialogues/tests/rejection-recovery.test.mjs",
       "services/dialogues/tests/postgres.integration.test.mjs",
       "services/dialogues/tests/import.test.mjs",
       "services/dialogues/tests/v02-fixture.mjs",
