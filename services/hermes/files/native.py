@@ -719,7 +719,15 @@ def conversation(agent, user_message, task_id=None):
         raise
     token = _operation.set(operation)
     admission_token = source_token = None
+    previous_prompt = getattr(agent, 'ephemeral_system_prompt', None)
     try:
+        # API-only context: keep the user's persisted text and the shared process environment unchanged.
+        agent.ephemeral_system_prompt = (previous_prompt or '') + (
+            '\n\n[Trusted file runtime for this turn] Your temporary working and output directory is '
+            + agent._brai_workspace + '. Use relative output paths, or this exact directory. '
+            'For terminal omit workdir or use this directory; TMPDIR is set there by the runtime. '
+            'This turn-specific directory supersedes generic working/scratch paths in older context. '
+            'Publish finished files through the file tools. Do not read another agent workspace.')
         prepared = input_text(user_message, operation)
         inbound = _inbound.get()
         if inbound is not None:
@@ -730,6 +738,7 @@ def conversation(agent, user_message, task_id=None):
         agent._brai_delegation_turn_started = time.time()
         yield prepared
     finally:
+        agent.ephemeral_system_prompt = previous_prompt
         if source_token is not None:
             _conversation_source.reset(source_token)
         if admission_token is not None:
@@ -863,8 +872,8 @@ def paths_key(paths):
     return canonical(sorted(set(paths)))
 
 
-def final_text(text, operation):
-    """Подготовить отдельные временные копии всего исходящего набора до выдачи."""
+def _public_response_text(text):
+    """Сохранить последствия отказа без внутренних путей и технических кодов."""
     if not isinstance(text, str):
         return text
     # Runtime verifier keeps the failure visible without exposing local paths or tool diagnostics.
@@ -873,6 +882,14 @@ def final_text(text, operation):
     if _TECHNICAL_FAILURE.search(text):
         logging.getLogger(__name__).warning('BRAI_USER_RESPONSE_TECHNICAL_FAILURE')
         text = 'Не удалось полностью выполнить запрос. Попробуйте ещё раз.'
+    return text
+
+
+def final_text(text, operation):
+    """Подготовить отдельные временные копии всего исходящего набора до выдачи."""
+    if not isinstance(text, str):
+        return text
+    text = _public_response_text(text)
     files, replacements, items = store(), [], []
     explicit = []
     active_sub(_SET, lambda match: explicit.append(match) or match.group(0), text)
@@ -1432,6 +1449,11 @@ def result_envelope(result, agent=None):
     response = result.get('final_response', '')
     if not isinstance(response, str):
         return result
+    # The engine appends its verifier footer after the earlier output transform.
+    cleaned = _public_response_text(response)
+    if cleaned != response:
+        response = cleaned
+        result = {**result, 'final_response': response}
     paths = []
     def found(match):
         paths.append(next(value for value in match.groups() if value is not None))
