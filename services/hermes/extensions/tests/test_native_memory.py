@@ -64,6 +64,34 @@ class NativeMemoryTests(unittest.TestCase):
             self.assertNotIn('_handle_memory_command', methods)
             self.assertIn('_handle_skills_command', methods)
 
+    def test_idle_dispatch_does_not_bind_removed_memory_handler(self):
+        tree = ast.parse((Path(ENGINE) / 'gateway/run_busy.py').read_text())
+        names = {'_command_handler_table', '_gateway_idle_command_handlers'}
+        owner = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                     and any(isinstance(child, ast.FunctionDef) and child.name in names for child in node.body))
+        constants = {}
+        for node in owner.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id in {'_IDLE_COMMANDS', '_COMMAND_HANDLER_ALIASES'}:
+                        constants[target.id] = ast.literal_eval(node.value)
+        body = [node for node in owner.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        namespace = {}
+        future = ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[future, *body], type_ignores=[])),
+                     'gateway/run_busy.py', 'exec'), namespace)
+        runner = types.SimpleNamespace(**constants)
+        runner._command_handler_table = types.MethodType(namespace['_command_handler_table'], runner)
+        # Удалённого метода действительно нет; обычный idle вход всё равно строит эту таблицу.
+        for command in runner._IDLE_COMMANDS:
+            if command != 'memory':
+                method = runner._COMMAND_HANDLER_ALIASES.get(command, f"_handle_{command.replace('-', '_')}_command")
+                setattr(runner, method, Mock(name=method))
+        handlers = namespace['_gateway_idle_command_handlers'](runner)
+        self.assertNotIn('memory', handlers)
+        self.assertIs(handlers['skills'], runner._handle_skills_command)
+        self.assertIn('model', handlers)
+
     def test_shared_command_catalog_has_no_memory_command(self):
         # Реальные CommandDef и реестр выполняются с нейтральными импортами.
         source = ast.parse((Path(ENGINE) / 'hermes_cli/commands.py').read_text())
