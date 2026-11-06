@@ -39,13 +39,13 @@ test("MCP предоставляет только обмен и ACK; stdio во�
   assert.deepEqual(input.properties.messages.items.required,['id','text']);
   const old=await client.callTool({name:'dialogues_turn_input',arguments:{}});assert.equal(old.isError,true);assert.equal(JSON.parse(old.content[0].text).code,'UNKNOWN_OPERATION');
   const invalid=await client.callTool({name:'dialogues_exchange',arguments:{action:'input',arguments:{request_id:'invalid',dialogue:{id:'chat',channel:'synthetic'}},context:ctx}});
-  assert.equal(invalid.isError,true);assert.equal(JSON.parse(invalid.content[0].text).field,'messages');
-  const blocked=await client.callTool({name:'dialogues_exchange',arguments:{action:'finish',arguments:{request_id:'finish',dialogue_id:'chat',turn_id:'turn'},context:ctx}});
+  assert.equal(invalid.isError,true);assert.equal(JSON.parse(invalid.content[0].text).field,'arguments.messages');
+  const blocked=await client.callTool({name:'dialogues_exchange',arguments:{action:'finish',arguments:{request_id:'finish',dialogue_id:'chat',turn_id:'turn',expected_version:'1',final:{id:'f',text:'Готово'}},context:ctx}});
   assert.equal(blocked.structuredContent.status,'rejected');assert.equal(blocked.structuredContent.code,'PENDING_RESULTS');assert.equal(blocked.structuredContent.pending[0].id,'x');
   await proxy.connect(new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../dist/stdio-proxy.js',import.meta.url))],env:{...process.env,DIALOGUES_MCP_URL:listener.url,DIALOGUES_MCP_TOKEN_FILE:token}}));
   assert.equal((await proxy.listTools()).tools.length,2);
   await client.close();await listener.close();cfg.port=Number(url.port);listener=await startMcp(store,cfg);
-  const response=await proxy.callTool({name:'dialogues_exchange',arguments:{action:'import',arguments:{request_id:'same-id',dialogue:{id:'chat',channel:'synthetic'},messages:[]},context:ctx}});
+  const response=await proxy.callTool({name:'dialogues_exchange',arguments:{action:'import',arguments:{request_id:'same-id',dialogue:{id:'chat',channel:'synthetic'},messages:[{id:'imported',turn_id:'turn',role:'user',kind:'input',text:'Привет'}]},context:ctx}});
   assert.equal(response.structuredContent.saved,true);assert.equal(calls.at(-2).owner,'test-owner');assert.equal(calls.at(-2).args.request_id,'same-id');
   const ack=await proxy.callTool({name:'dialogues_context_ack',arguments:{request_id:'ack',...ctx,delivery_id:'delivery'}});
   assert.equal(ack.structuredContent.acknowledged,true);

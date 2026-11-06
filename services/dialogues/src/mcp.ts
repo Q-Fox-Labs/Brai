@@ -11,9 +11,16 @@ import type { createStore } from "./store.js";
 type Session={server:Server;transport:StreamableHTTPServerTransport;touched:number};
 export type McpConfig={host:string;port:number;owner:string;hosts:string[];origins:string[];token:string};
 /** Запускает MCP; тесты могут использовать временный port=0. */
-export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfig) {
+export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfig,log:(entry:Record<string,unknown>)=>void=entry=>console.error(JSON.stringify(entry))) {
   if(!["127.0.0.1","::1","0.0.0.0"].includes(cfg.host)||!cfg.owner||!cfg.hosts.length||!cfg.origins.length||!/^[A-Za-z0-9_-]{32,128}$/.test(cfg.token))throw new Error("INVALID_MCP_CONFIG");
   const sessions=new Map<string,Session>(),pending=new Set<Session>();
+  const safeId=(v:unknown)=>typeof v==='string'&&/^[A-Za-z0-9_.:/-]{1,256}$/.test(v)?v:undefined;
+  function rejected(name:string,raw:any,diagnostic:Record<string,any>,started:number){
+    const action=['input','update','finish','poll','page','read','history','snapshot','import','summary','repair'].includes(raw?.action)?raw.action:undefined;
+    try{log({service:'dialogues',event:'request_rejected',tool:['dialogues_exchange','dialogues_context_ack'].includes(name)?name:'unknown',
+      action,request_id:safeId(raw?.arguments?.request_id??raw?.request_id),code:diagnostic.code,
+      field:diagnostic.unknown_property?(diagnostic.parent_field?diagnostic.parent_field+'.':'')+'<unknown>':diagnostic.field,applied:diagnostic.applied,duration_ms:Date.now()-started});}catch{/* Журнал не меняет исход операции. */}
+  }
   async function make():Promise<Session> {
     const server=new Server({name:"brai-dialogues",version:"0.2.0"},{capabilities:{tools:{listChanged:false}},instructions:agentInstructions});
     const transport=new StreamableHTTPServerTransport({sessionIdGenerator:randomUUID,enableJsonResponse:true,enableDnsRebindingProtection:true,allowedHosts:cfg.hosts,allowedOrigins:cfg.origins});
@@ -21,16 +28,21 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
     transport.onclose=()=>{if(transport.sessionId)sessions.delete(transport.sessionId);pending.delete(s);};
     server.setRequestHandler(ListToolsRequestSchema,async()=>({tools:toolDefinitions as Tool[]}));
     server.setRequestHandler(CallToolRequestSchema,async req=>{
+      const started=Date.now();
       try {
         const result=await invoke(store,cfg.owner,req.params.name,req.params.arguments??{});
         if(Buffer.byteLength(JSON.stringify(result))>65_024)throw new DialoguesFault("RESPONSE_TOO_LARGE");
+        if(result.status==='rejected')rejected(req.params.name,req.params.arguments,{code:result.code,applied:false},started);
         return {content:[],structuredContent:result};
       } catch(error) {
         const code=error instanceof DialoguesFault?error.code:"INTERNAL";
-        const next_action=code==="VERSION_CONFLICT"?"Прочитайте текущий ход и повторите с новой версией и request_id":code==="PENDING_RESULTS"?"Завершите ожидающие результаты или укажите честное основание невыполнения":code==="LEGACY_TURN_OPEN"?"Для восстановления прежнего хода проверьте историю и сохраните подтверждённый финал через exchange import; затем повторите ввод":code==="FINAL_RECONCILIATION_REQUIRED"?"Сверьте фактический финал клиента и восстановите статус":code==="INVALID_ARGUMENT"?"Исправьте аргументы и используйте новый request_id":"Проверьте данные и состояние перед повтором";
-        const diagnostic={code,...(code==="INTERNAL"?{next_action:"Исход операции неизвестен: сначала проверьте состояние и исходный ID"}:{applied:false,next_action}),...(error instanceof DialoguesFault?error.details:{})};
-        let text=JSON.stringify(diagnostic);
-        if(Buffer.byteLength(text)>16_384)text=JSON.stringify({code,...(code==="INTERNAL"?{}:{applied:false}),next_action:"Диагностика сокращена; прочитайте состояние и исправьте аргументы",diagnostic_truncated:true});
+        const next_action=code==="VERSION_CONFLICT"?"Прочитайте текущий ход и повторите с новой версией и request_id":code==="PENDING_RESULTS"?"Завершите ожидающие результаты или укажите честное основание невыполнения":code==="LEGACY_TURN_OPEN"?"Для восстановления прежнего хода проверьте историю и сохраните подтверждённый финал через exchange import; затем повторите ввод":code==="FINAL_RECONCILIATION_REQUIRED"?"Сверьте фактический финал клиента и восстановите статус":code==="INVALID_ARGUMENT"?"Исправьте field по expected и allowed; сразу повторите с новым request_id, сохранив ID сообщения и исходный текст":"Проверьте данные и состояние перед повтором";
+        const outcomeUnknown=code==="INTERNAL"||code==="RESPONSE_TOO_LARGE";
+        const diagnostic={code,...(outcomeUnknown?{next_action:"Исход операции неизвестен: сначала проверьте состояние и исходный ID"}:{applied:false,next_action}),...(error instanceof DialoguesFault?error.details:{})};
+        const request_id=safeId((req.params.arguments as any)?.arguments?.request_id??(req.params.arguments as any)?.request_id);
+        rejected(req.params.name,req.params.arguments,diagnostic,started);
+        let text=JSON.stringify({...diagnostic,request_id});
+        if(Buffer.byteLength(text)>16_384)text=JSON.stringify({code,...(outcomeUnknown?{}:{applied:false}),next_action:"Диагностика сокращена; прочитайте состояние и исправьте аргументы",diagnostic_truncated:true});
         return {isError:true,content:[{type:"text",text}]};
       }
     });
