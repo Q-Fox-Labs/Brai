@@ -19,7 +19,10 @@ export function validateConfig(value, trustedOwnerId) {
   if (!object(value.nats) || !Array.isArray(value.nats.servers) || !value.nats.servers.length ||
     value.nats.servers.some(server => typeof server !== 'string' || !server.trim()) ||
     ['user', 'password', 'inboxPrefix'].some(key => value.nats[key] !== undefined && typeof value.nats[key] !== 'string')) invalid();
-  for (const name of ['history', 'transcription']) endpoint(value[name]);
+  for (const name of ['history', 'transcription']) {
+    if (!object(value[name]) || value[name].enabled !== undefined && typeof value[name].enabled !== 'boolean') invalid();
+    if (value[name].enabled !== false) endpoint(value[name]);
+  }
   if (!object(value.gameCore) || value.gameCore.enabled !== undefined && typeof value.gameCore.enabled !== 'boolean') invalid();
   if (value.gameCore.enabled !== false) {
     endpoint(value.gameCore);

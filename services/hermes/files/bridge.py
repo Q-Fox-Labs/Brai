@@ -38,6 +38,11 @@ class Bridge:
         # The managed bootstrap provides this in-memory port only to this exact plugin.
         # Legacy gateway launches retain the existing trusted stdio subprocess below.
         import sys
+        worker = sys.modules.get('_brai_identity_worker')
+        if worker is not None:
+            return worker.call(method, params, timeout)
+        if os.environ.get('BRAI_IDENTITY_MODE') in ('telegram', 'worker'):
+            raise BridgeError('FILES_OWNER_REQUIRED')
         private = sys.modules.get('_brai_codeworks_gateway')
         if private is not None:
             try:

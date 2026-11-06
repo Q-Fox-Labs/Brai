@@ -1,0 +1,199 @@
+# ABOUTME: Описывает административные NATS операции доверенной границы Hermes.
+# ABOUTME: Данные доступны только после проверки сессии, аудита и владельца.
+asyncapi: 3.0.0
+info:
+  title: Brai Hermes identity control
+  version: 1.0.0
+  description: >-
+    NATS Services brai_hermes_identity, version 1.0.0, queue brai_hermes_identity;
+    PING, INFO, STATS. Core request-reply; JetStream не используется. Не более
+    32 одновременных запросов, вход до 32768 байт. Каждый запрос заново проверяет
+    сессию и пишет аудит до чтения; повтор создаёт новую запись аудита. Таймаут
+    не отменяет запрос. На ошибку два заголовка Nats-Service-Error и
+    Nats-Service-Error-Code; успешный payload содержит status/body/setCookies.
+    Коды 400 INVALID_ARGUMENT или INVALID_CURSOR, 403 FORBIDDEN, 404 NOT_FOUND,
+    413 PAYLOAD_TOO_LARGE, 503 AUTH_UNAVAILABLE, REGISTRY_UNAVAILABLE,
+    SOURCE_UNAVAILABLE или UNAVAILABLE. Подробности срока действия cursor,
+    размерных пределов источников и приватности описаны в CONTROL.md.
+defaultContentType: application/json
+channels:
+  adminMemoryList:
+    address: brai.hermes.identity.v1.admin-memory-list
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/MemoryListRequest"
+  adminMemoryGet:
+    address: brai.hermes.identity.v1.admin-memory-get
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/MemoryGetRequest"
+  adminChatsList:
+    address: brai.hermes.identity.v1.admin-chats-list
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ChatsListRequest"
+  adminChatsGet:
+    address: brai.hermes.identity.v1.admin-chats-get
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ChatsGetRequest"
+  adminArtifactsList:
+    address: brai.hermes.identity.v1.admin-artifacts-list
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ArtifactsListRequest"
+  adminArtifactsGet:
+    address: brai.hermes.identity.v1.admin-artifacts-get
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ArtifactsGetRequest"
+  adminArtifactsDownload:
+    address: brai.hermes.identity.v1.admin-artifacts-download
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ArtifactsDownloadRequest"
+  replies:
+    address: null
+    description: Transient reply inbox supplied by requester.
+    messages:
+      adminMemoryList:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/MemoryListResponse"
+      adminMemoryGet:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/MemoryGetResponse"
+      adminChatsList:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ChatsListResponse"
+      adminChatsGet:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ChatsGetResponse"
+      adminArtifactsList:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ArtifactsListResponse"
+      adminArtifactsGet:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ArtifactsGetResponse"
+      adminArtifactsDownload:
+        payload:
+          $ref: "./schemas/control.schema.json#/definitions/ArtifactsDownloadResponse"
+operations:
+  adminMemoryList:
+    action: receive
+    channel:
+      $ref: "#/channels/adminMemoryList"
+    messages:
+      - $ref: "#/channels/adminMemoryList/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/adminMemoryList"
+  adminMemoryGet:
+    action: receive
+    channel:
+      $ref: "#/channels/adminMemoryGet"
+    messages:
+      - $ref: "#/channels/adminMemoryGet/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/adminMemoryGet"
+  adminChatsList:
+    action: receive
+    channel:
+      $ref: "#/channels/adminChatsList"
+    messages:
+      - $ref: "#/channels/adminChatsList/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/adminChatsList"
+  adminChatsGet:
+    action: receive
+    channel:
+      $ref: "#/channels/adminChatsGet"
+    messages:
+      - $ref: "#/channels/adminChatsGet/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/adminChatsGet"
+  adminArtifactsList:
+    action: receive
+    channel:
+      $ref: "#/channels/adminArtifactsList"
+    messages:
+      - $ref: "#/channels/adminArtifactsList/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/adminArtifactsList"
+  adminArtifactsGet:
+    action: receive
+    channel:
+      $ref: "#/channels/adminArtifactsGet"
+    messages:
+      - $ref: "#/channels/adminArtifactsGet/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/adminArtifactsGet"
+  adminArtifactsDownload:
+    action: receive
+    channel:
+      $ref: "#/channels/adminArtifactsDownload"
+    messages:
+      - $ref: "#/channels/adminArtifactsDownload/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/replies"
+      messages:
+        - $ref: "#/channels/replies/messages/adminArtifactsDownload"

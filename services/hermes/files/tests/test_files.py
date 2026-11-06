@@ -207,6 +207,7 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             for name in ('engine', 'profile', 'runtime/services/hermes/files', 'config'):
                 (root / name).mkdir(parents=True, exist_ok=True)
             (root / 'runtime/services/hermes/files/bootstrap.py').write_text("CONFIG = '__BRAI_FILES_CONFIG__'\\n")
+            (root / 'runtime/services/hermes/files/transport.py').write_text('# transport fixture\\n')
             publisher_path = root / 'config/publisher.json'
             publisher_path.write_text('{}')
             tools = root / 'config/tools.json'
@@ -216,7 +217,7 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             plan = install.configuration_plan(root / 'engine', root / 'profile', root / 'runtime',
                 root / 'config/files.json', tools, account, 'owner-' + account, 'brai-' + account,
                 str(root / 'private/node'), account == 'dev', publisher, identity)
-            config = json.loads(plan[1][1])
+            config = json.loads(next(row[1] for row in plan if row[0] == root / 'config/files.json'))
             self.assertEqual(config['engineRoot'], str(root / 'engine'))
             self.assertEqual(config['node'], str(root / 'private/node'))
             self.assertEqual(config['ownerId'], 'owner-' + account)

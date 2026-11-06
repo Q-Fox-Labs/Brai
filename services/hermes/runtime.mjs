@@ -137,7 +137,7 @@ export async function connectPorts(config) {
   try {
     const endpoints = {};
     for (const name of ['gameCore', 'history', 'transcription']) {
-      if (name === 'gameCore' && config.gameCore?.enabled === false) continue;
+      if (config[name]?.enabled === false) continue;
       const endpoint = config[name];
       const endpointClient = await connectMcpEndpoint(endpoint, { timeout, callTimeout: config.longRequestTimeoutMs ?? 300_000, endpointName: name });
       clients.push(endpointClient);
@@ -202,6 +202,8 @@ export async function createBraiTools(config, ports) {
   const endpointTools = new Map([['gameCore', gameCoreNames], ['history', historyNames], ['transcription', transcriptionNames], ['publisher', new Set(['publish_file', 'fetch_file'])]]);
   const gameCoreEnabled = config.gameCore?.enabled !== false;
   if (!gameCoreEnabled) endpointTools.delete('gameCore');
+  if (config.history?.enabled === false) endpointTools.delete('history');
+  if (config.transcription?.enabled === false) endpointTools.delete('transcription');
   const discovered = new Set(), discovering = new Map(), unavailable = new Set();
   for (const definition of natsTools) tools.push(definition === voiceDefinition
     ? { name: definition.name, description: 'Синтезировать текст локальным голосом. Запиши английские слова и числа кириллицей, раскрой символы словами. При VOICE_TEXT_REQUIRES_CYRILLIC исправь текст и повтори. При неизвестном исходе автоматического повтора нет.', inputSchema: voiceInputSchema }

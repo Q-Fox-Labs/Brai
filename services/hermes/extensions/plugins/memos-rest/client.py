@@ -164,9 +164,50 @@ def dialogue_parts(messages, limit=MAX_MEMORY_PART_BYTES):
     return parts
 
 
+class UnixHTTPConnection(http.client.HTTPConnection):
+    """Подключить HTTP только к указанному Unix-сокету."""
+
+    def __init__(self, host, *, socket_path, **kwargs):
+        super().__init__(host, **kwargs)
+        self.socket_path = socket_path
+
+    def connect(self):
+        """Открыть локальный сокет с установленным сроком ожидания."""
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self.socket_path)
+
+
+class UnixHTTPHandler(urllib.request.HTTPHandler):
+    """Направить HTTP-запросы urllib через локальный Unix-сокет."""
+
+    def __init__(self, socket_path):
+        super().__init__()
+        self.socket_path = socket_path
+
+    def http_open(self, request):
+        """Открыть запрос через заданный сокет без сетевого fallback."""
+        return self.do_open(lambda host, **kwargs: UnixHTTPConnection(
+            host, socket_path=self.socket_path, **kwargs), request)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Запретить перенаправления локальных запросов в сеть."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        """Отклонить любой ответ перенаправления."""
+        return None
+
+
 class Client:
     def __init__(self, config):
-        self.base_url = str(config["base_url"]).rstrip("/")
+        socket_path = config.get("socket_path")
+        if socket_path == "":
+            socket_path = None
+        if socket_path is not None and (not isinstance(socket_path, str) or not socket_path.startswith("/") or "\x00" in socket_path):
+            raise ValueError("MemOS socket path must be an absolute Unix socket path")
+        self.unix_socket = socket_path is not None
+        self.base_url = "http://localhost" if socket_path is not None else str(config["base_url"]).rstrip("/")
         parsed = urllib.parse.urlsplit(self.base_url)
         if (parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1", "::1")
                 or parsed.username or parsed.password or parsed.query or parsed.fragment):
@@ -177,7 +218,10 @@ class Client:
         self._index_version = None
         self.timeout = float(config.get("request_timeout", 30))
         # A proxy configured for other providers must never see local memory traffic.
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        handlers = [urllib.request.ProxyHandler({})]
+        if socket_path is not None:
+            handlers.extend((UnixHTTPHandler(socket_path), NoRedirect()))
+        self.opener = urllib.request.build_opener(*handlers)
 
     def request(self, path, body=None, *, timeout=None, allow_missing=False):
         """Выполнить scoped API без повтора записи при потере ответа."""
@@ -228,14 +272,25 @@ class Client:
         if remaining <= 0:
             raise MemOSError('MemOS memory read timed out')
         if self._stream_version is False:
+            if self.unix_socket:
+                raise MemOSError('Secure MemOS memory stream unavailable')
             return self._request_json('/product/get_memory', body, timeout=remaining)
+        rows = list(self.iter_memory(body, deadline, remaining=remaining))
+        return {'code': 200, 'data': {'text_mem': [{'cube_id': body['mem_cube_id'], 'memories': rows}]}}
+
+    def iter_memory(self, body, deadline, *, remaining=None):
+        """Передать проверенные записи потока; полная проверка требует дочитать iterator."""
+        if remaining is None:
+            remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise MemOSError('MemOS memory read timed out')
         request = urllib.request.Request(
             self.base_url + '/product/get_memory_stream',
             data=json.dumps({key: body[key] for key in ('mem_cube_id', 'user_id', 'filter') if key in body},
                             ensure_ascii=False).encode('utf-8'),
             headers={'Content-Type': 'application/json', 'Accept': 'application/x-ndjson'},
         )
-        rows, ids = [], set()
+        count, ids = 0, set()
         header = ended = False
         try:
             with self.opener.open(request, timeout=remaining) as response:
@@ -259,9 +314,10 @@ class Client:
                                 or row['metadata'].get('user_id') != body['user_id']):
                             raise MemOSError('MemOS memory stream has invalid or foreign memory')
                         ids.add(row['id'])
-                        rows.append({**row, '_cube_id': body['mem_cube_id']})
+                        count += 1
+                        yield {**row, '_cube_id': body['mem_cube_id']}
                     elif item.get('type') == 'end' and set(item) == {'type', 'count'}:
-                        if type(item['count']) is not int or item['count'] != len(rows):
+                        if type(item['count']) is not int or item['count'] != count:
                             raise MemOSError('MemOS memory stream count mismatch')
                         ended = True
                     else:
@@ -275,7 +331,6 @@ class Client:
             raise MemOSError('MemOS memory stream has invalid JSON') from None
         if not header or not ended:
             raise MemOSError('MemOS memory stream ended without complete trailer')
-        return {'code': 200, 'data': {'text_mem': [{'cube_id': body['mem_cube_id'], 'memories': rows}]}}
 
     @staticmethod
     def _stream_lines(response, deadline):
@@ -313,6 +368,8 @@ class Client:
                 raise MemOSError('MemOS recall index version is incompatible')
             self._index_version = version or False
         if self._index_version is False:
+            if self.unix_socket:
+                raise MemOSError('Secure MemOS recall index unavailable')
             return None
         response = self.request('/product/recall_index', {
             'query': query, 'cubes': cubes, 'user_id': self.user_id, 'scope': scope,
