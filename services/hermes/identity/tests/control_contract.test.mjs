@@ -4,6 +4,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import Ajv from 'ajv';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { Control, controlSubjects, respondControl, handlePrivateRpc } from '../control.mjs';
 
@@ -42,7 +44,7 @@ test('admin schemas accept actual success and reject wrong fields', async () => 
   const control = new Control({ origin: headers.origin, cursorKey: 'x'.repeat(32),
     registry: async () => ({ version: 1, profiles: { '1001': profile } }),
     authCall: async op => op === 'session' ? { status: 200, body: { user: { role: 'admin', status: 'active' }, session: {} } } : { status: 200 },
-    memoryRead: async () => ({ items: [{ id:'i',kind:'memory',text:'text',cubeId:'c',createdAt:null,profileId:'p' }], nextCursor: null }),
+    memoryRead: async () => ({ items: [{ id:'i',kind:'memory',text:'text',textTruncated:false,totalMemoryBytes:4,cubeId:'c',createdAt:null,profileId:'p' }], nextCursor: null }),
     chatRead: async ({ operation }) => operation.endsWith('list') ? { items:[{id:'c',title:'chat',updatedAt:'2026-01-01T00:00:00Z'}],nextCursor:null } : { messages:[{id:'1',role:'user',text:'text',createdAt:'2026-01-01T00:00:00Z'}],nextCursor:null } });
   const cases = [
     ['admin-memory-list', 'MemoryList', {headers,userId:'u'}],
@@ -131,4 +133,43 @@ test('memory-get chunk validates shared schema and never exposes record inline',
   assert.equal(validate(result),true,JSON.stringify(validate.errors));
   assert.equal(Object.hasOwn(result.body,'memory'),false);
   assert.equal(result.body.userId,'u');
+});
+
+test('actual memory gateway list matches schema and rejects malformed preview metadata', () => {
+  const program = `
+import json
+from services.hermes.identity.memory_gateway import Boundary
+from services.hermes.identity.tests.test_memory_boundary_contract import FakeClient, PROFILE_A, row
+
+record = row('long')
+record['memory'] = 'Я' * 1100
+FakeClient.rows_by_cube = {'main': [record]}
+gateway = Boundary('/unused', 'http://127.0.0.1:1', authorize=lambda *_: True,
+    cursor_key=b'synthetic-cursor-key-that-is-long-enough', admin_uid=0,
+    registry_loader=lambda _: {21001: dict(PROFILE_A)}, clients=FakeClient)
+print(json.dumps(gateway.admin(0, '/admin/list', {'userId':'user-a'}), ensure_ascii=False))
+`;
+  const child = spawnSync(process.env.PYTHON || 'python3', ['-B', '-c', program], {
+    encoding: 'utf8', timeout: 10000, cwd: fileURLToPath(new URL('../../../', root)),
+    env: { ...process.env, BRAI_MEMORY_GATEWAY_TMP: '/tmp' },
+  });
+  assert.equal(child.status, 0, child.stderr || child.error?.message);
+  const body = JSON.parse(child.stdout);
+  const validate = ajv.getSchema(schema.$id + '#/definitions/MemoryListResponse');
+  const envelope = { status: 200, body, setCookies: [] };
+  assert.equal(validate(envelope), true, JSON.stringify(validate.errors));
+  assert.equal(body.items[0].textTruncated, true);
+  assert.equal(body.items[0].totalMemoryBytes, 2200);
+  assert.ok(Buffer.byteLength(body.items[0].text) <= 2048);
+  for (const mutate of [
+    item => { delete item.textTruncated; },
+    item => { delete item.totalMemoryBytes; },
+    item => { item.textTruncated = 'true'; },
+    item => { item.totalMemoryBytes = -1; },
+    item => { item.totalMemoryBytes = 2.5; },
+  ]) {
+    const invalid = structuredClone(envelope);
+    mutate(invalid.body.items[0]);
+    assert.equal(validate(invalid), false);
+  }
 });
