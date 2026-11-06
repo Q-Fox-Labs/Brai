@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { loadAccountSession } from "@/server/account-session";
 import Account from "../account";
 import { continuation, ssoConfig } from "@/server/sso";
+import { telegramIdentity } from "@/server/auth";
 /** Проверяет сессию нового документа перед показом формы входа. */
 export default async function AuthPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
  const config = ssoConfig();
@@ -15,5 +16,5 @@ export default async function AuthPage({ searchParams }: { searchParams: Promise
  const initialSession = await loadAccountSession(await headers());
  if (initialSession.status === "authenticated") redirect(next ?? "/");
  if (initialSession.status === "anonymous" && config?.role === "preview") redirect("/api/auth/sso/start");
- return <Account initialSession={initialSession} authContinuation={next} ssoPreview={config?.role === "preview"} />;
+ return <Account initialSession={initialSession} authContinuation={next} ssoPreview={config?.role === "preview"} telegramIdentity={telegramIdentity()} />;
 }

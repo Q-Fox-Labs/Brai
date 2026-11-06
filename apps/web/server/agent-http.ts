@@ -1,6 +1,6 @@
 // ABOUTME: Передаёт закрытые HTTP команды agent v3 и ограниченный поток снимков.
 // ABOUTME: Авторизует web сессию; не повторяет мутации и не хранит историю агента.
-import { checkOrigin, requireTimerSession, type Session } from "./auth";
+import { checkOrigin, requireTimerSession, telegramIdentity, type Session } from "./auth";
 import { GatewayError, natsConnection } from "./gateway";
 import { bytes, limits, rpcTimeouts, subjects, validateCommand, validateEnvelope, validateLimits } from "@brai/agent/contracts";
 import type { AgentLimits, Command, ErrorResponse, EventEnvelope, NativeSnapshot } from "@brai/agent/contracts";
@@ -15,10 +15,11 @@ let pending = 0;
 class Failure extends Error {
   constructor(public status: number, public body: ErrorResponse) { super(body.code); }
 }
-export const permittedAgent = (session: Session) => (process.env.BRAI_AGENT_ALLOWED_EMAILS ?? "").split(",").map(email => email.trim().toLowerCase()).filter(Boolean).includes(session.user.email.trim().toLowerCase());
+export const permittedAgent = (session: Session) => telegramIdentity() ? session.user.status === "active" : (process.env.BRAI_AGENT_ALLOWED_EMAILS ?? "").split(",").map(email => email.trim().toLowerCase()).filter(Boolean).includes(session.user.email.trim().toLowerCase());
 const fail = (status: number, code: string, outcome: ErrorResponse["outcome"]) => new Failure(status, { code, outcome });
 /** Берёт owner только из проверенной сессии и доверенной пары; неполная настройка закрывает доступ. */
 export function agentOwnerId(session: Session): string {
+  if (telegramIdentity()) return session.user.id;
   const email = process.env.BRAI_AGENT_OWNER_EMAIL?.trim().toLowerCase(), ownerId = process.env.BRAI_AGENT_OWNER_ID?.trim();
   if (!email && !ownerId) return session.user.id;
   if (!email || !ownerId || ownerId.length > 128 || !/\S/.test(ownerId)) throw new GatewayError(503, "AGENT_OWNER_NOT_CONFIGURED");

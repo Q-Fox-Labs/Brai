@@ -1,6 +1,6 @@
 // ABOUTME: Передаёт HTTP авторизации отдельному NATS сервису Better Auth.
 // ABOUTME: Cookie передаются сервером; JSON входа не раскрывает сессионные токены.
-import { authRequest, authResponse, checkOrigin } from "@/server/auth";
+import { authRequest, authResponse, checkOrigin, telegramIdentity } from "@/server/auth";
 import { GatewayError } from "@/server/gateway";
 import { failure } from "@/server/http";
 export const runtime = "nodejs";
@@ -8,6 +8,7 @@ export const dynamic = "force-dynamic";
 /** Выполняет одну попытку send-code; неизвестный исход входа восстанавливают проверкой сессии. */
 export async function POST(request: Request) {
  try {
+  if (telegramIdentity()) throw new GatewayError(404, "NOT_FOUND");
   checkOrigin(request);
   if (!request.headers.get("content-type")?.startsWith("application/json")) throw new GatewayError(415, "CONTENT_TYPE");
   const reader = request.body?.getReader(); if (!reader) throw new GatewayError(400, "INVALID_ARGUMENT");

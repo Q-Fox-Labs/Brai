@@ -51,6 +51,16 @@ function fixture(mapped = true) {
   return { session, artifact, binding, calls, connections, request, agent, artifacts, transport, setUpload(value: string) { uploadUrl = value; }, setAgent(value: unknown) { agentReply = value; }, close() { for (const key of variables) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; } } };
 }
 const prepare = { projectId: "project", threadId: "thread", requestId: "prepare-id", kind: "original", filename: "image.png", mimeType: "image/png" };
+test("Telegram Agent uses the active session identity regardless of email mapping", () => {
+  const previous = process.env.WEB_IDENTITY_MODE, f = fixture();
+  try {
+    process.env.WEB_IDENTITY_MODE = "telegram";
+    const session = { user: { id: "local-user", status: "active" }, session: { id: "session", userId: "local-user" } };
+    assert.equal(f.agent.permittedAgent(session), true);
+    assert.equal(f.agent.agentOwnerId(session), "local-user");
+    assert.equal(f.agent.permittedAgent({ ...session, user: { ...session.user, status: "provisioning" } }), false);
+  } finally { f.close(); if (previous === undefined) delete process.env.WEB_IDENTITY_MODE; else process.env.WEB_IDENTITY_MODE = previous; }
+});
 test("readState and readMark use session-owned storage, strict methods and reject owner injection", async () => {
   const f = fixture();
   try {

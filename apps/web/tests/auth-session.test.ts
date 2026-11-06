@@ -140,3 +140,24 @@ test("new documents distinguish expired or revoked sessions from temporary auth 
   ownerReply = { status: 200, body: null };
   assert.deepEqual(await load(headers), { status: "unavailable" });
 });
+
+test("Telegram identity rejects blocked users and redeems a code once through v2", async () => {
+  const previous = process.env.WEB_IDENTITY_MODE;
+  process.env.WEB_IDENTITY_MODE = "telegram";
+  try {
+    const request = new Request("https://brai.example/api/auth/session", { headers: { cookie: "session=fake" } });
+    const requireSession = auth.requireSession as (request: Request) => Promise<unknown>;
+    const authRequest = auth.authRequest as (request: Request, operation: string, body: object) => Promise<unknown>;
+    const identity = { ...session(), user: { id: "user-1", name: "Имя", role: "user", status: "active", telegramId: "1", profileId: null } };
+    ownerReply = reply(200, identity);
+    assert.deepEqual(await requireSession(request), identity);
+    ownerReply = reply(200, { ...identity, user: { ...identity.user, status: "blocked" } });
+    await assert.rejects(requireSession(request), error => error instanceof GatewayError && error.status === 401);
+    ownerReply = reply(200, { success: true });
+    const before = calls.length;
+    await authRequest(request, "login-code-redeem", { code: "0123456789AB" });
+    assert.equal(calls.length, before + 1);
+    assert.equal(calls.at(-1)?.subject, "brai.auth.v2.login-code-redeem");
+    await assert.rejects(authRequest(request, "login-code-redeem", { code: "INVALID" }), error => error instanceof GatewayError && error.status === 400);
+  } finally { if (previous === undefined) delete process.env.WEB_IDENTITY_MODE; else process.env.WEB_IDENTITY_MODE = previous; }
+});

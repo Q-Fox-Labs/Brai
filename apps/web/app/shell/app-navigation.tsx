@@ -30,9 +30,10 @@ const mobileQuery = "(max-width: 860px)";
 const historyMarker = "__braiNavigationPanel";
 
 /** Отображает desktop rail и мобильный dock с независимыми панелями. */
-export default function AppNavigation({ email, timerElapsed, onLogout }: {
+export default function AppNavigation({ email, timerElapsed, admin = false, onLogout }: {
   email: string;
   timerElapsed: string | null;
+  admin?: boolean;
   onLogout: () => void;
 }) {
   const pathname = usePathname();
@@ -117,6 +118,7 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
       <Link className="brai-rail-brand" href="/agent" aria-label="Brai — Агент"><BraiBrandIcon /></Link>
       <nav className="brai-rail-links" aria-label="Разделы Brai">
         {routes.map(route => <RouteLink key={route.href} route={route} current={pathname === route.href} compact timerElapsed={timerElapsed} />)}
+        {admin && <a className="brai-navigation-link is-compact" href="/admin" aria-label="Администрирование"><span className="brai-navigation-label">Администрирование</span></a>}
       </nav>
       <div className="brai-rail-footer"><AlertsBell /><ThemeButton /><ProfileMenu email={email} onLogout={onLogout} open={profileOpen} setOpen={setProfileOpen} /></div>
     </aside>
@@ -135,13 +137,13 @@ export default function AppNavigation({ email, timerElapsed, onLogout }: {
           onClick={event => panel === "shortcuts" ? setPanel(null) : openPanel("shortcuts", event.currentTarget)}>{panel === "shortcuts" ? <ChevronDown /> : <ChevronUp />}</button>
       </motion.nav>
     </div>
-    {panel && <MobilePanel panel={panel} email={email} onClose={closePanel} onLogout={onLogout}
+    {panel && <MobilePanel panel={panel} email={email} admin={admin} onClose={closePanel} onLogout={onLogout}
       onNavigate={navigateWorkspace} />}
   </>;
 }
 
-function MobilePanel({ panel, email, onClose, onLogout, onNavigate }: {
-  panel: MobilePanel; email: string; onClose: () => void; onLogout: () => void;
+function MobilePanel({ panel, email, admin, onClose, onLogout, onNavigate }: {
+  panel: MobilePanel; email: string; admin: boolean; onClose: () => void; onLogout: () => void;
   onNavigate: (href: Route["href"]) => void;
 }) {
   const pathname = usePathname();
@@ -230,7 +232,7 @@ function MobilePanel({ panel, email, onClose, onLogout, onNavigate }: {
       <div className="brai-mobile-panel-grip" aria-hidden="true" />
       <header className="brai-mobile-panel-heading"><span>Brai</span><button type="button" aria-label="Закрыть панель" onClick={() => closeSheet()}><X /></button></header>
       <nav className="brai-mobile-panel-routes" aria-label="Разделы Brai">{routes.map(route => <RouteLink key={route.href} route={route} current={pathname === route.href} mobile
-        onNavigate={event => navigateFromPanel(event, route.href, closeSheet, onNavigate)} />)}</nav>
+        onNavigate={event => navigateFromPanel(event, route.href, closeSheet, onNavigate)} />)}{admin && <a href="/admin">Администрирование</a>}</nav>
       <div className="brai-mobile-panel-account"><Avatar className="brai-profile-avatar"><AvatarFallback className="bg-primary text-xs font-semibold text-primary-foreground">{email.trim().slice(0, 1).toLocaleUpperCase("ru-RU") || "?"}</AvatarFallback></Avatar><span>{email}</span></div>
       <div className="brai-mobile-panel-actions"><AlertsBell onClick={event => navigateFromPanel(event, "/alerts", closeSheet, onNavigate)} /><ThemeButton /><button className="brai-mobile-logout" type="button" onClick={() => closeSheet(() => onLogoutRef.current())}>Выйти</button></div>
     </aside> : <aside ref={sheet.sheetRef} className="brai-mobile-shortcut-sheet" style={sheet.sheetStyle} role="dialog" aria-modal="true" aria-label="Быстрые настройки" tabIndex={-1}

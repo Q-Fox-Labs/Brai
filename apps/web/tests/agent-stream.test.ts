@@ -50,7 +50,7 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = f
     "../lib/agent/stream": { encodeFrame },
     "./web-config": { disabledAgentResponse: () => null },
     "./gateway": { natsConnection: async () => nc, GatewayError: class extends Error {} },
-    "./auth": { checkOrigin() {}, requireTimerSession: async () => { if (!allowed) throw new Error("revoked"); return session; } },
+    "./auth": { telegramIdentity: () => false, checkOrigin() {}, requireTimerSession: async () => { if (!allowed) throw new Error("revoked"); return session; } },
   };
   new Function("require", "module", "exports", "setInterval", "clearInterval", output)(
     (name: string) => overrides[name] ?? require(name), module, module.exports,
