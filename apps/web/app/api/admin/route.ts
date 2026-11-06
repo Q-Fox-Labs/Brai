@@ -5,9 +5,10 @@ import { GatewayError, natsConnection } from "@/server/gateway";
 import { failure } from "@/server/http";
 import { adminDownload } from "@/server/admin-download";
 import { readBoundedJson } from "@/server/request-body";
+import { readAdminPersonal } from "@/server/admin-personal";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-const reads = new Set(["users-list", "users-get", "invite-list", "admin-memory-list", "admin-memory-get", "admin-chats-list", "admin-chats-get", "admin-artifacts-list", "admin-artifacts-get", "admin-artifacts-download"]);
+const reads = new Set(["users-list", "users-get", "invite-list", "admin-memory-list", "admin-memory-get", "admin-chats-list", "admin-chats-get", "admin-artifacts-list", "admin-artifacts-get", "admin-artifacts-download", "admin-personal-get"]);
 const writes = new Set(["role-set", "status-set", "sessions-revoke", "invite-create", "invite-revoke"]);
 /** Выполняет операцию активного администратора без автоматического повтора. */
 async function handle(request: Request) {
@@ -25,6 +26,7 @@ async function handle(request: Request) {
   const bridge = operation.startsWith("admin-");
   if (bridge && (typeof input.userId !== "string" || !input.userId)) throw new GatewayError(400, "INVALID_ARGUMENT");
   const nc = await natsConnection();
+  if (operation === "admin-personal-get") return Response.json(await readAdminPersonal(nc, headers, input));
   const reply = await nc.request(`${bridge ? "brai.hermes.identity.v1" : "brai.auth.v2"}.${operation}`, Buffer.from(JSON.stringify(bridge ? { ...input, headers } : { headers, body: input })), { timeout: 10000 });
   const serviceError = reply.headers?.get("Nats-Service-Error"), serviceStatus = reply.headers?.get("Nats-Service-Error-Code");
   if (reply.headers?.has("Nats-Service-Error") || reply.headers?.has("Nats-Service-Error-Code")) {

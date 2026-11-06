@@ -3,6 +3,7 @@
 // ABOUTME: Данные памяти и чатов запрашиваются только после выбора пользователя.
 import { useEffect, useRef, useState } from "react";
 import { AdminDetail } from "./detail";
+import { AdminPersonalSection } from "./personal";
 import { ArchiveTarget, ARCHIVE_TARGET } from "./archive-target";
 import { InviteCommand } from "./invite-command";
 import { mergeChatPage } from "./chat-pages";
@@ -42,6 +43,7 @@ export default function AdminScreen() {
     <button type="button" onClick={() => void mutate("role-set", { userId: user.id, role: user.role === "admin" ? "user" : "admin" })}>{user.role === "admin" ? "Сделать пользователем" : "Сделать администратором"}</button>
     <button type="button" onClick={() => void mutate("status-set", { userId: user.id, status: user.status === "blocked" ? "active" : "blocked" })}>{user.status === "blocked" ? "Разблокировать" : "Заблокировать"}</button>
     <button type="button" onClick={() => void mutate("sessions-revoke", { userId: user.id })}>Завершить сессии</button></div></article>)}</section>
+  {selected && selected !== ARCHIVE_TARGET && <AdminPersonalSection key={selected} userId={selected} />}
   <ArchiveTarget selected={selected === ARCHIVE_TARGET} onSelect={() => { selection.current++; setSelected(ARCHIVE_TARGET); setDetail(null); }} />
   {selected && <section className="admin-data"><h2>Данные: {selected === ARCHIVE_TARGET ? "Архив до разделения" : users.find(user => user.id === selected)?.name || "Пользователь"}</h2><nav className="admin-tabs" aria-label="Данные выбранного источника"><button type="button" aria-pressed={view.startsWith("admin-memory")} onClick={() => void inspect("admin-memory-list")}>Память</button><button type="button" aria-pressed={view.startsWith("admin-chat")} onClick={() => void inspect("admin-chats-list")}>Чаты</button><button type="button" aria-pressed={view.startsWith("admin-artifacts")} onClick={() => void inspect("admin-artifacts-list")}>Файлы</button></nav>{page?.items ? <><ul className="admin-items">{page.items.map(item => <li key={item.id}><button type="button" onClick={() => void inspect(view === "admin-memory-list" ? "admin-memory-get" : view === "admin-chats-list" ? "admin-chat-get" : "admin-artifacts-get", { [view === "admin-memory-list" ? "memoryId" : view === "admin-chats-list" ? "chatId" : "artifactId"]: item.id })}>{item.title || item.text || item.id}</button></li>)}</ul>{!page.items.length && <p className="admin-empty">Здесь пока нет записей.</p>}{page.nextCursor && <button type="button" onClick={() => void inspect(view, { cursor: page.nextCursor! })}>Следующая страница</button>}</> : detail !== null ? <AdminDetail value={detail} view={view} userId={selected} /> : <p className="admin-empty">Выберите раздел, чтобы открыть данные.</p>}</section>}
   {selected && chatId && chatCursor && <button type="button" onClick={() => void inspect("admin-chat-get", { chatId, cursor: chatCursor })}>Загрузить ещё сообщения</button>}
