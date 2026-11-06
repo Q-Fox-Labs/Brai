@@ -8,8 +8,14 @@
     "prod"
   ],
   "executableSources": [
+    "services/auth/src/bootstrap.ts",
     "services/auth/src/health.ts",
+    "services/auth/src/import-identities.ts",
     "services/auth/src/main.ts",
+    "services/auth/src/provision-identities.ts",
+    "services/auth/src/ready-profiles.ts",
+    "services/auth/src/revoke-legacy.ts",
+    "services/auth/src/verify-provision.ts",
     "services/auth/src/migrate.ts"
   ],
   "inputs": {
@@ -19,16 +25,32 @@
     "runtime": [
       "services/auth/package.json",
       "services/auth/schemas/messages.schema.json",
+      "services/auth/src/admin.ts",
       "services/auth/src/auth.ts",
+      "services/auth/src/bootstrap.ts",
       "services/auth/src/bridge.ts",
       "services/auth/src/config.ts",
       "services/auth/src/email.ts",
       "services/auth/src/health.ts",
+      "services/auth/src/identity-schema.ts",
+      "services/auth/src/identity-types.ts",
+      "services/auth/src/identity.ts",
+      "services/auth/src/import-identities.ts",
+      "services/auth/src/login-code.ts",
       "services/auth/src/main.ts",
       "services/auth/src/migrate.ts",
       "services/auth/src/nats.ts",
+      "services/auth/src/provision-identities.ts",
+      "services/auth/src/ready-profiles.ts",
+      "services/auth/src/revoke-legacy.ts",
       "services/auth/src/schema.ts",
-      "services/auth/src/sso.ts"
+      "services/auth/src/sso.ts",
+      "services/auth/src/verify-provision.ts",
+      "services/auth/src/telegram-plugin.ts",
+      "services/auth/src/v2.ts",
+      "services/auth/contracts/service-data-scope.mjs",
+      "services/auth/contracts/service-data-scope.d.mts",
+      "services/auth/contracts/PERSONAL_DATA.md"
     ],
     "checks": [
       "services/auth/tests/bridge.test.mjs",
@@ -37,9 +59,12 @@
       "services/auth/tests/integration/auth.test.mjs",
       "services/auth/tests/integration/compose.yml",
       "services/auth/tests/integration/init.sql",
+      "services/auth/tests/integration/identity.test.mjs",
       "services/auth/tests/integration/migration.test.mjs",
       "services/auth/tests/integration/sso.test.mjs",
-      "services/auth/tests/sso.test.mjs"
+      "services/auth/tests/sso.test.mjs",
+      "services/auth/tests/v2.test.mjs",
+      "services/auth/tests/service-data-scope.test.mjs"
     ]
   },
   "dependencies": [],
@@ -52,9 +77,16 @@
     "files": [
       "services/auth/dist",
       "services/auth/package.json",
-      "services/auth/schemas"
+      "services/auth/schemas",
+      "services/auth/contracts"
     ],
     "entrypoints": [
+      "services/auth/dist/bootstrap.js",
+      "services/auth/dist/import-identities.js",
+      "services/auth/dist/provision-identities.js",
+      "services/auth/dist/ready-profiles.js",
+      "services/auth/dist/revoke-legacy.js",
+      "services/auth/dist/verify-provision.js",
       "services/auth/dist/main.js",
       "services/auth/dist/migrate.js",
       "services/auth/dist/health.js"

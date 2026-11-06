@@ -92,6 +92,7 @@ def configuration_plan(engine, profile, runtime, config_path, tools_path, owner_
     publisher['allowedReadRoots'] = roots
     bootstrap_uid, bootstrap_mode = (0, 0o440) if sealed_engine else (identity.pw_uid, 0o644)
     plan = [(engine / 'brai_files.py', (files / 'bootstrap.py').read_text().replace(repr('__BRAI_FILES_CONFIG__'), repr(str(config_path))).encode(), bootstrap_uid, identity.pw_gid, bootstrap_mode),
+            (engine / 'brai_files_transport.py', (files / 'transport.py').read_bytes(), bootstrap_uid, identity.pw_gid, bootstrap_mode),
             (config_path, encode(config), 0, identity.pw_gid, 0o640),
             (publisher_path, encode(publisher), publisher_path.stat().st_uid, publisher_path.stat().st_gid, publisher_path.stat().st_mode & 0o777)]
     return plan

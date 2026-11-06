@@ -161,6 +161,27 @@ async def accept_event(event, admit=True):
     files = store()
     event.metadata = dict(getattr(event, 'metadata', None) or {})
     refs = event.metadata.get('_brai_artifacts')
+    inputs = getattr(event, '_brai_identity_inputs', None)
+    if refs is None and inputs:
+        # AIDEV-NOTE: Ingress сохранил исходные message/attachment IDs до native album merge.
+        # Прежние fixed-owner aliases и artifact metadata через эту границу не принимаются.
+        if (not isinstance(inputs, list) or len(inputs) != len(paths)
+                or any(not isinstance(item, dict) or item.get('path') != path
+                       or not isinstance(item.get('itemId'), str) or not item['itemId']
+                       for item, path in zip(inputs, paths))):
+            raise FileError('INVALID_SOURCE')
+        source, refs = source_of(event), []
+        for position, item in enumerate(inputs):
+            message_id, _, attachment_id = item['itemId'].rpartition(':')
+            if message_id.isdecimal() and attachment_id.isdecimal():
+                position = int(message_id) * 1000 + int(attachment_id)
+            refs.append(await asyncio.to_thread(files.ingest, source, item['itemId'], item['path'],
+                position, item.get('caption') or '', item.get('groupId') or str(event.message_id)))
+        event.metadata['_brai_artifacts'] = refs
+        with files.db() as db:
+            route = {'chat_type': getattr(event.source, 'chat_type', 'dm'), 'profile': getattr(event.source, 'profile', None)}
+            for gid in {item['groupId'] for item in refs}:
+                db.execute('INSERT OR REPLACE INTO routes VALUES (?,?)', (gid, canonical(route)))
     if refs is None:
         source, msg = source_of(event), str(event.message_id or '')
         if not msg:

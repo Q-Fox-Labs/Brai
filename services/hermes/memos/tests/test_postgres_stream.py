@@ -95,6 +95,22 @@ class StreamPostgresTests(unittest.TestCase):
         self.assertEqual(list(self.scan({'session_id':"session' OR true --"})),[])
         self.assertEqual(len(list(self.scan({'info.absent':None}))),2048)
 
+    def test_a_profile_cubes_do_not_cross_even_with_the_same_logical_name(self):
+        records = [('profile-a', 'owner-a', 'profile-a__main'),
+                   ('profile-b', 'owner-b', 'profile-b__main')]
+        with self.admin.cursor() as cur:
+            for identifier, owner, cube in records:
+                cur.execute('INSERT INTO fixture.memories (id,memory,properties,user_name) VALUES (%s,%s,%s,%s)',
+                            (identifier, 'synthetic', json.dumps({'user_id': owner}), cube))
+        try:
+            for identifier, owner, cube in records:
+                self.assertEqual([item['id'] for item in self.store.stream_memory(cube_id=cube, user_id=owner)], [identifier])
+                foreign = 'profile-b' if identifier == 'profile-a' else 'profile-a'
+                self.assertEqual(list(self.store.stream_memory(cube_id=cube, user_id=owner, filter={'id': foreign})), [])
+        finally:
+            with self.admin.cursor() as cur:
+                cur.execute('DELETE FROM fixture.memories WHERE id = ANY(%s)', [[record[0] for record in records]])
+
     def test_a_dates_use_exact_parse_row_isoformat_including_null(self):
         with self.admin.cursor() as cur:
             cur.execute("SELECT created_at,updated_at FROM fixture.memories WHERE id='5'")

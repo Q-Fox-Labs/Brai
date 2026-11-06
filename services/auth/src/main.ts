@@ -6,7 +6,7 @@ import { createAuth } from "./auth.js";
 import { connectNats,runNats } from "./nats.js";
 const cfg=config();const pool=new Pool({connectionString:cfg.databaseURL,max:8,connectionTimeoutMillis:5000,statement_timeout:10000});
 pool.on("error",()=>console.error("auth database unavailable"));
-try{await pool.query('SELECT 1 FROM "session" LIMIT 0');const auth=createAuth(cfg,pool);const nc=await connectNats(cfg);const runtime=await runNats(nc,cfg,auth.handler);console.log("auth ready");
+try{await pool.query('SELECT 1 FROM "session" LIMIT 0');if(cfg.identityMode==="telegram")await pool.query("SELECT 1 FROM brai_identity,brai_login_code,brai_auth_limit,brai_invite,brai_identity_request,brai_identity_audit,brai_owner_bootstrap LIMIT 0");const auth=createAuth(cfg,pool);const nc=await connectNats(cfg);const runtime=await runNats(nc,cfg,auth.handler,pool);console.log("auth ready");
  let stopping=false;const stop=async()=>{if(stopping)return;stopping=true;await runtime.stop();await nc.drain();await pool.end();};
  process.on("SIGTERM",()=>void stop());process.on("SIGINT",()=>void stop());await nc.closed();await stop();
 }catch{console.error("auth startup failed");await pool.end();process.exitCode=1;}

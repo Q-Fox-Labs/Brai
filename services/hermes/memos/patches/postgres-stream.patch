@@ -1,7 +1,21 @@
 diff --git a/src/memos/graph_dbs/postgres.py b/src/memos/graph_dbs/postgres.py
 --- a/src/memos/graph_dbs/postgres.py
 +++ b/src/memos/graph_dbs/postgres.py
-@@ -178,6 +178,7 @@
+@@ -116,6 +116,13 @@
+     def _init_schema(self):
+         """Create schema and tables if they don't exist."""
+         conn = self._get_conn()
+         try:
+             with conn.cursor() as cur:
++                import os
++                managed = os.environ.get('MEMOS_SCHEMA_MANAGED', '0')
++                if managed not in ('0', '1'):
++                    raise ValueError('Invalid MEMOS_SCHEMA_MANAGED')
++                if managed == '1':
++                    self._validate_managed_schema(cur)
++                    return
+                 # A pre-provisioned schema must work without database CREATE privileges.
+@@ -178,6 +185,7 @@
                      ON {self.schema}.edges(target_id)
                  """)
 
@@ -9,10 +23,92 @@ diff --git a/src/memos/graph_dbs/postgres.py b/src/memos/graph_dbs/postgres.py
                  logger.info(f"Schema {self.schema} initialized successfully")
          except Exception as e:
              logger.error(f"Failed to init schema: {e}")
-@@ -1106,6 +1107,269 @@
+@@ -1106,6 +1114,351 @@
          finally:
              self._put_conn(conn)
 
++
++    def _validate_managed_schema(self, cur):
++        """Проверить управляемую владельцем схему без DDL runtime."""
++        cur.execute("SELECT extname FROM pg_catalog.pg_extension WHERE extname IN ('vector','pg_trgm')")
++        if {row[0] for row in cur.fetchall()} != {'vector', 'pg_trgm'}:
++            raise RuntimeError('Managed MemOS extensions unavailable')
++        cur.execute("""SELECT c.relname,a.attname,t.typname,a.atttypmod,a.attnotnull
++            FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
++            JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid
++            JOIN pg_catalog.pg_type t ON t.oid=a.atttypid
++            WHERE n.nspname=%s AND c.relname IN ('memories','edges')
++              AND c.relkind='r' AND a.attnum>0 AND NOT a.attisdropped""", (self.schema,))
++        columns = {(table, name): (kind, modifier, required) for table,name,kind,modifier,required in cur.fetchall()}
++        expected = {
++            ('memories','id'):'text', ('memories','memory'):'text', ('memories','properties'):'jsonb',
++            ('memories','embedding'):'vector', ('memories','user_name'):'text',
++            ('memories','created_at'):'timestamptz', ('memories','updated_at'):'timestamptz',
++            ('edges','id'):'int4', ('edges','source_id'):'text', ('edges','target_id'):'text',
++            ('edges','edge_type'):'text', ('edges','created_at'):'timestamptz'}
++        if (set(columns) != set(expected) or any(columns[key][0] != kind for key,kind in expected.items())
++                or columns[('memories','embedding')][1] != self.config.embedding_dimension
++                or any(not columns[key][2] for key in (('memories','id'),('memories','memory'),
++                    ('memories','properties'),('edges','id'),('edges','source_id'),('edges','target_id'),('edges','edge_type')))):
++            raise RuntimeError('Managed MemOS columns invalid')
++        cur.execute("""SELECT i.relname,t.relname,pg_catalog.pg_get_indexdef(i.oid),x.indisunique,x.indisprimary
++            FROM pg_catalog.pg_index x JOIN pg_catalog.pg_class i ON i.oid=x.indexrelid
++            JOIN pg_catalog.pg_class t ON t.oid=x.indrelid
++            JOIN pg_catalog.pg_namespace n ON n.oid=t.relnamespace
++            WHERE n.nspname=%s AND t.relname IN ('memories','edges') AND x.indisvalid AND x.indisready""", (self.schema,))
++        indexes = {name:(table, definition, unique, primary) for name,table,definition,unique,primary in cur.fetchall()}
++        required = {
++            'idx_memories_user':('memories',('USING btree (user_name)',)),
++            'idx_memories_props':('memories',('USING gin (properties)',)),
++            'idx_memories_embedding':('memories',('USING ivfflat (embedding vector_cosine_ops)',)),
++            'idx_edges_source':('edges',('USING btree (source_id)',)),
++            'idx_edges_target':('edges',('USING btree (target_id)',)),
++            'idx_brai_recall_text_v1':('memories',('USING gin', 'brai_recall_text_v1(memory, properties) gin_trgm_ops',
++                'WHERE', 'hermes_chunk_index', 'IS NULL', "= '0'::jsonb")),
++            'idx_brai_recall_source_date_v1':('memories',('USING btree (user_name,', 'md5(',
++                'hermes_author_id', 'hermes_event_id', 'created_at)'))}
++        if (any(name not in indexes or indexes[name][0] != table or any(part not in indexes[name][1] for part in parts)
++                for name,(table,parts) in required.items())
++                or not any(t == 'memories' and primary and '(id)' in definition for t,definition,unique,primary in indexes.values())
++                or not any(t == 'edges' and primary and '(id)' in definition for t,definition,unique,primary in indexes.values())
++                or not any(t == 'edges' and unique and all(k in definition for k in ('source_id','target_id','edge_type'))
++                           for t,definition,unique,primary in indexes.values())):
++            raise RuntimeError('Managed MemOS indexes invalid')
++        cur.execute("""SELECT p.prosrc,p.provolatile,p.proparallel,p.prosecdef,l.lanname,
++                    pg_catalog.has_function_privilege(current_user,p.oid,'EXECUTE')
++            FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
++            JOIN pg_catalog.pg_language l ON l.oid=p.prolang
++            WHERE n.nspname=%s AND p.proname='brai_recall_text_v1'
++              AND pg_catalog.pg_get_function_identity_arguments(p.oid)='text, jsonb'""", (self.schema,))
++        functions = cur.fetchall()
++        expected_source = """
++              SELECT CASE WHEN $2->'info'->>'hermes_kind' = 'fact'
++                THEN COALESCE($2->'info'->>'hermes_fact_text', $1)
++                ELSE COALESCE((SELECT string_agg(
++                  COALESCE(m->>'role', 'source') || ': ' || COALESCE(m->>'content', ''),
++                  E'\\n\\n' ORDER BY n)
++                  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(
++                    $2->'info'->'hermes_messages') = 'array'
++                    THEN $2->'info'->'hermes_messages' ELSE '[]'::jsonb END)
++                    WITH ORDINALITY AS message(m,n)), $1) END
++            """
++        normalize = lambda value: '\n'.join(line.strip() for line in value.strip().splitlines())
++        if (len(functions) != 1 or normalize(functions[0][0]) != normalize(expected_source)
++                or functions[0][1:] != ('i','s',False,'sql',True)):
++            raise RuntimeError('Managed MemOS function invalid')
++        cur.execute("""SELECT pg_catalog.has_schema_privilege(current_user,n.oid,'USAGE'),
++            c.relname,pg_catalog.has_table_privilege(current_user,c.oid,'SELECT'),
++            pg_catalog.has_table_privilege(current_user,c.oid,'INSERT'),
++            pg_catalog.has_table_privilege(current_user,c.oid,'UPDATE'),
++            pg_catalog.has_table_privilege(current_user,c.oid,'DELETE')
++            FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
++            WHERE n.nspname=%s AND c.relname IN ('memories','edges') AND c.relkind='r'""", (self.schema,))
++        grants = cur.fetchall()
++        if len(grants) != 2 or any(not all((row[0], *row[2:])) for row in grants):
++            raise RuntimeError('Managed MemOS runtime grants invalid')
++        cur.execute("SELECT pg_catalog.has_sequence_privilege(current_user, pg_catalog.pg_get_serial_sequence(format('%%I.%%I',%s,'edges'),'id'), 'USAGE')", (self.schema,))
++        if cur.fetchone() != (True,):
++            raise RuntimeError('Managed MemOS sequence grants invalid')
 +
 +    memory_index_version = 1
 +
@@ -378,3 +474,22 @@ diff --git a/src/memos/api/routers/server_router.py b/src/memos/api/routers/serv
  @router.post("/get_memory", summary="Get memories for user", response_model=GetMemoryResponse)
  def get_memories(memory_req: GetMemoryRequest):
      return handlers.memory_handler.handle_get_memories(
+
+diff --git a/src/memos/api/handlers/add_handler.py b/src/memos/api/handlers/add_handler.py
+--- a/src/memos/api/handlers/add_handler.py
++++ b/src/memos/api/handlers/add_handler.py
+@@ -55,5 +55,1 @@
+-        self.logger.info(
+-            f"[DIAGNOSTIC] server_router -> add_handler.handle_add_memories called (Modified at 2025-11-29 18:46). Full request: {add_req.model_dump_json(indent=2)}"
+-        )
+-
+         if add_req.info:
+diff --git a/src/memos/multi_mem_cube/single_cube.py b/src/memos/multi_mem_cube/single_cube.py
+--- a/src/memos/multi_mem_cube/single_cube.py
++++ b/src/memos/multi_mem_cube/single_cube.py
+@@ -64,5 +64,2 @@
+         sync_mode = add_req.async_mode or self._get_sync_mode()
+-        self.logger.info(
+-            f"[DIAGNOSTIC] single_cube.add_memories called for cube_id: {self.cube_id}. sync_mode: {sync_mode}. Request: {add_req.model_dump_json(indent=2)}"
+-        )
+         user_context = UserContext(

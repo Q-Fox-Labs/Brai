@@ -1,6 +1,6 @@
 // ABOUTME: Открывает личные и общие alerts signals только для действующей сессии.
 // ABOUTME: Подписчик подключается до сверки; каждый frame проверяет неизменность сессии.
-import { requireSession } from "@/server/auth";
+import { personalDataScope, requireSession } from "@/server/auth";
 import { requireAlertsSession } from "@/server/alerts-http";
 import { alertsRequest } from "@/server/alerts";
 import { alertsRuntime } from "@/server/alerts-runtime";
@@ -17,11 +17,11 @@ export async function GET(request: Request) {
   const session = await requireAlertsSession(request, true), instance = alertsRuntime();
   await instance.connect();
   const authorized = async () => {
-   try { const current = await requireSession(request); return current.user.id === session.user.id && current.session.id === session.session.id; }
+   try { const current = await requireSession(request); return current.user.id === session.user.id && personalDataScope(current) === personalDataScope(session) && current.session.id === session.session.id; }
    catch { return false; }
   };
-  return new Response(alertsStream(instance.hub, () => alertsRequest("summary", { user_id: session.user.id }), request.signal,
-   session.user.id, session.session.id, authorized), { headers: {
+  return new Response(alertsStream(instance.hub, () => alertsRequest("summary", { user_id: personalDataScope(session) }), request.signal,
+   personalDataScope(session), session.session.id, authorized), { headers: {
    "Content-Type": "text/event-stream", "Cache-Control": "no-store, no-transform", "Connection": "keep-alive", "X-Accel-Buffering": "no" } });
  } catch (error) { return failure(error); }
 }

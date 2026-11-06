@@ -1,6 +1,6 @@
 // ABOUTME: Ограничивает HTTP вход и преобразует ошибки шлюза в безопасный ответ.
 // ABOUTME: Команда не публикуется при неверном origin, размере или JSON.
-import { requireTimerSession, checkOrigin } from "./auth";
+import { personalDataScope, requireTimerSession, checkOrigin } from "./auth";
 import { GatewayError, publish } from "./gateway";
 /** Возвращает safe JSON error без серверных адресов и секретов. */
 export function failure(error: unknown): Response {
@@ -26,7 +26,7 @@ export async function postCommand(request: Request, type: "start" | "stop" | "ed
   try { body = JSON.parse(Buffer.concat(chunks).toString()); }
   catch { throw new GatewayError(400, "INVALID_ARGUMENT", "not-published"); }
   if (!body || typeof body !== "object" || Array.isArray(body) || "userId" in body) throw new GatewayError(400, "INVALID_ARGUMENT", "not-published");
-  await publish(type, { ...body, userId: session.user.id });
+  await publish(type, { ...body, userId: personalDataScope(session) });
   return Response.json({ commandId: (body as { commandId: string }).commandId, status: "queued" }, { status: 202, headers: { "Cache-Control": "no-store" } });
  } catch (error) { return failure(error); }
 }

@@ -51,6 +51,42 @@ function fixture(mapped = true) {
   return { session, artifact, binding, calls, connections, request, agent, artifacts, transport, setUpload(value: string) { uploadUrl = value; }, setAgent(value: unknown) { agentReply = value; }, close() { for (const key of variables) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; } } };
 }
 const prepare = { projectId: "project", threadId: "thread", requestId: "prepare-id", kind: "original", filename: "image.png", mimeType: "image/png" };
+test("Telegram Agent admits only active administrators and uses their session identity", () => {
+  const previous = process.env.WEB_IDENTITY_MODE, f = fixture();
+  try {
+    process.env.WEB_IDENTITY_MODE = "telegram";
+    const session = { user: { id: "local-user", role: "admin", status: "active" }, session: { id: "session", userId: "local-user" } };
+    assert.equal(f.agent.permittedAgent(session), true);
+    assert.equal(f.agent.agentOwnerId(session), "local-user");
+    for (const user of [{ ...session.user, role: "user" }, { ...session.user, role: undefined }, { ...session.user, status: "provisioning" }, { ...session.user, status: "blocked" }]) {
+      assert.equal(f.agent.permittedAgent({ ...session, user }), false);
+      assert.throws(() => f.agent.agentOwnerId({ ...session, user }));
+    }
+  } finally { f.close(); if (previous === undefined) delete process.env.WEB_IDENTITY_MODE; else process.env.WEB_IDENTITY_MODE = previous; }
+});
+test("Telegram members and demoted admins cannot reach raw Agent operations or finalize", async () => {
+  const previous = process.env.WEB_IDENTITY_MODE, f = fixture();
+  try {
+    process.env.WEB_IDENTITY_MODE = "telegram";
+    Object.assign(f.session.user, { role: "admin", status: "active" });
+    f.setAgent({ marks: {} });
+    const route = (action: string) => ({ params: Promise.resolve({ path: [action] }) });
+    assert.equal((await f.agent.agentGet(f.request("readState"), route("readState"))).status, 200);
+    assert.equal(f.calls.at(-1)?.payload.ownerId, "local-user");
+    Object.assign(f.session.user, { role: "user" });
+    const before = f.calls.filter(call => call.subject === "brai.agent.v3.rpc").length;
+    for (const action of ["projects", "threads", "open", "turns", "items", "events"]) {
+      const path = action === "events" ? "events?expectedUserId=local-user" : action;
+      assert.equal((await f.agent.agentGet(f.request(path), route(action))).status, 403, action);
+    }
+    for (const action of ["create", "archive", "start", "steer", "interrupt"]) assert.equal((await f.agent.agentPost(f.request(action, {}), route(action))).status, 403, action);
+    assert.equal((await f.artifacts.finalizeAttachment(f.request("attachments/finalize", {}))).status, 403);
+    assert.equal((await f.artifacts.artifactReadAuth(new Request("https://dev.test/api/agent/artifact-auth", { headers: { "x-forwarded-method": "GET", "x-forwarded-uri": `/api/agent/results/${id}?expectedUserId=local-user` } }))).status, 403);
+    assert.equal(f.calls.filter(call => call.subject === "brai.agent.v3.rpc").length, before);
+    Object.assign(f.session.user, { role: "admin", status: "blocked" });
+    assert.notEqual((await f.agent.agentGet(f.request("readState"), route("readState"))).status, 200);
+  } finally { f.close(); if (previous === undefined) delete process.env.WEB_IDENTITY_MODE; else process.env.WEB_IDENTITY_MODE = previous; }
+});
 test("readState and readMark use session-owned storage, strict methods and reject owner injection", async () => {
   const f = fixture();
   try {

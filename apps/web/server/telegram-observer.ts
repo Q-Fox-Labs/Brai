@@ -8,7 +8,7 @@ const subject = "brai.hermes.telegram.observer.v1.query";
 const noStore = { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" };
 const maxStreams = 64;
 let activeStreams = 0;
-const enabled = () => process.env.BRAI_ENVIRONMENT === "dev" && process.env.BRAI_WEB_AGENT_MODE === "hermes_telegram" && process.env.BRAI_WEB_TELEGRAM_OBSERVER_ENABLED !== "0";
+const enabled = () => process.env.WEB_IDENTITY_MODE !== "telegram" && process.env.BRAI_ENVIRONMENT === "dev" && process.env.BRAI_WEB_AGENT_MODE === "hermes_telegram" && process.env.BRAI_WEB_TELEGRAM_OBSERVER_ENABLED !== "0";
 const natural = (value: string | null): number | undefined => {
   if (value === null) return undefined;
   if (!/^(0|[1-9][0-9]{0,15})$/.test(value)) throw new GatewayError(400, "INVALID_ARGUMENT");
@@ -19,6 +19,7 @@ const natural = (value: string | null): number | undefined => {
 
 /** Читает фиксированный порт Hermes без передачи пользовательской identity. */
 export async function observerQuery<T>(body: object): Promise<T> {
+  if (!enabled()) throw new GatewayError(404, "NOT_FOUND");
   try {
     const nc = await natsConnection();
     const reply = await nc.request(subject, Buffer.from(JSON.stringify(body)), { timeout: 2000 });
@@ -38,6 +39,7 @@ export async function observerGet(request: Request): Promise<Response> {
   try {
     if (!enabled()) throw new GatewayError(404, "NOT_FOUND");
     const session = await requireSession(request);
+    if (!enabled()) throw new GatewayError(404, "NOT_FOUND");
     const url = new URL(request.url), action = url.pathname.split("/").at(-1);
     if (action === "events") {
       const after = natural(request.headers.get("last-event-id") ?? url.searchParams.get("after")) ?? 0;
@@ -54,7 +56,9 @@ export async function observerGet(request: Request): Promise<Response> {
       if (!chatId || !/^-?[1-9][0-9]{0,24}$/.test(chatId) || !/^([1-9][0-9]{0,24})?$/.test(threadId)) throw new GatewayError(400, "INVALID_ARGUMENT");
       body = { action, chatId, threadId, limit, ...(before === undefined ? {} : { before }) };
     } else throw new GatewayError(404, "NOT_FOUND");
-    return Response.json(await observerQuery(body), { headers: noStore });
+    const result = await observerQuery(body);
+    if (!enabled()) throw new GatewayError(404, "NOT_FOUND");
+    return Response.json(result, { headers: noStore });
   } catch (error) { return failure(error); }
 }
 
@@ -72,8 +76,10 @@ function observerEvents(request: Request, after: number, sessionId: string): Res
         if (closed || busy) return;
         busy = true;
         try {
+          if (!enabled()) { close(); return; }
           if (++ticks % 15 === 0 && (await requireSession(request)).session.id !== sessionId) { close(); return; }
           const batch = await observerQuery<{ changes: { change_seq: number }[]; cursor: number }>({ action: "changes", after: cursor, limit: 100 });
+          if (!enabled()) { close(); return; }
           if (!Array.isArray(batch.changes) || !Number.isSafeInteger(batch.cursor) || batch.cursor < cursor) throw new Error("BAD_REPLY");
           for (const event of batch.changes) {
             if (closed || (controller.desiredSize ?? 0) <= 0) { close(); return; }
@@ -100,6 +106,7 @@ export async function observerFileAuth(request: Request): Promise<Response> {
   try {
     if (!enabled()) throw new GatewayError(404, "NOT_FOUND");
     await requireSession(request);
+    if (!enabled()) throw new GatewayError(404, "NOT_FOUND");
     if (!["GET", "HEAD"].includes(request.headers.get("x-forwarded-method") ?? "")) throw new GatewayError(405, "METHOD_NOT_ALLOWED");
     const original = request.headers.get("x-forwarded-uri");
     if (!original?.startsWith("/") || original.startsWith("//") || original.includes("\\")) throw new GatewayError(400, "INVALID_ARGUMENT");
@@ -119,6 +126,7 @@ export async function observerFileAuth(request: Request): Promise<Response> {
     if (reply.headers?.has("Nats-Service-Error")) throw new GatewayError(404, "NOT_FOUND");
     const item = JSON.parse(Buffer.from(reply.data).toString()) as { ownerId: string; status: string; filename: string; mimeType: string };
     if (!validateResponse(artifacts.get, item) || item.ownerId !== linked.ownerId || item.status !== "ready") throw new GatewayError(404, "NOT_FOUND");
+    if (!enabled()) throw new GatewayError(404, "NOT_FOUND");
     const inline = !download && ["image/png", "image/jpeg", "image/webp", "image/gif", "video/mp4", "video/webm", "audio/ogg", "audio/opus", "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/webm", "audio/wav"].includes(item.mimeType);
     const encoded = encodeURIComponent(item.filename).replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
     return new Response(null, { headers: { ...noStore, "Content-Type": inline ? item.mimeType : "application/octet-stream",

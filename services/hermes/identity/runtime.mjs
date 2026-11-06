@@ -1,0 +1,127 @@
+// ABOUTME: Собирает личные инструменты Hermes для проверенного UID и владельца.
+// ABOUTME: Общие MCP без подтверждённой привязки владельца не подключаются.
+import { lstatSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, normalize, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+import { validateConfig } from '../config.mjs';
+import { serviceDataScope } from '../../auth/contracts/service-data-scope.mjs';
+import { startBraiTools } from '../runtime.mjs';
+import { fileConfiguration } from '../files/configuration.mjs';
+import { readProtectedJSON, runStdio as runControl } from './control.mjs';
+
+const invalid=()=>{throw new Error('IDENTITY_RUNTIME_CONFIG_NOT_READY');};
+const object=value=>value && typeof value==='object' && !Array.isArray(value);
+const overlaps=(a,b)=>a===b||a.startsWith(b+sep)||b.startsWith(a+sep);
+function rootDirectory(path) {
+ if(typeof path!=='string'||!isAbsolute(path)||normalize(path)!==path||realpathSync(path)!==path)invalid();
+ for(let dir=path;;dir=dirname(dir)){
+  const stat=lstatSync(dir);
+  if(!stat.isDirectory()||stat.uid!==0||(stat.mode&0o022))invalid();
+  if(dir==='/')break;
+ }
+ return path;
+}
+function checkSnapshot(path,root) {
+ if(typeof path!=='string'||!isAbsolute(path)||normalize(path)!==path||!path.startsWith(root+sep)||realpathSync(path)!==path)invalid();
+ rootDirectory(dirname(path));
+ const stat=lstatSync(path);
+ if(!stat.isFile()||stat.uid!==0||(stat.mode&0o022)||stat.nlink!==1||stat.size>67108864)invalid();
+}
+/** Собирает порты только из root-owned конфигураций, закреплённых за профилем. */
+export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,start=startBraiTools,verifyDirectory=rootDirectory,verifySnapshot=checkSnapshot,readFiles=fileConfiguration}={}) {
+ const cache=new Map();
+ function loadEntries(){
+  const entries=config?.runtimeProfilesPath?readProtected(config.runtimeProfilesPath):config?.runtimeProfiles;
+  if(!object(entries))invalid();
+  const uids=Object.keys(entries), all=new Set();
+  for(const uid of uids){
+   const entry=entries[uid];
+   if(!/^[1-9]\d*$/.test(uid)||!object(entry)||typeof entry.userId!=='string'||!entry.userId||typeof entry.profileId!=='string'||!entry.profileId||
+      typeof entry.home!=='string'||!isAbsolute(entry.home)||normalize(entry.home)!==entry.home||entry.home==='/'||
+      typeof entry.toolsConfigPath!=='string'||!isAbsolute(entry.toolsConfigPath)||
+      typeof entry.cacheRoot!=='string'||!isAbsolute(entry.cacheRoot)||normalize(entry.cacheRoot)!==entry.cacheRoot||entry.cacheRoot==='/'||
+      typeof entry.stagingRoot!=='string'||!isAbsolute(entry.stagingRoot)||normalize(entry.stagingRoot)!==entry.stagingRoot||basename(entry.stagingRoot)!==uid||
+      overlaps(entry.cacheRoot,entry.stagingRoot)||overlaps(entry.home,entry.cacheRoot)||overlaps(entry.home,entry.stagingRoot))invalid();
+   for(const key of ['userId','profileId','home','toolsConfigPath','stagingRoot','cacheRoot']){const value=key+':'+entry[key];if(all.has(value))invalid();all.add(value);}
+  }
+  for(let i=0;i<uids.length;i++)for(let j=i+1;j<uids.length;j++){
+   const a=entries[uids[i]], b=entries[uids[j]];
+   if([a.home,a.stagingRoot,a.cacheRoot].some(left=>[b.home,b.stagingRoot,b.cacheRoot].some(right=>overlaps(left,right))))invalid();
+  }
+  return {entries,uids};
+ }
+ function validateProfile(profile,status) {
+  const {entries,uids}=loadEntries();
+  const uid=String(profile?.workerUid), entry=entries[uid];
+  if(!entry||profile.userId!==entry.userId||profile.profileId!==entry.profileId||profile.home!==entry.home||profile.status!==status)invalid();
+  verifyDirectory(entry.stagingRoot);
+  const scope=serviceDataScope(entry.profileId);
+  if(entry.serviceDataScope!==undefined&&entry.serviceDataScope!==scope)invalid();
+  const sourceTools=validateConfig(readProtected(entry.toolsConfigPath),entry.userId);
+  if(sourceTools.serviceDataScope!==undefined&&sourceTools.serviceDataScope!==scope)invalid();
+  const tools={...sourceTools,serviceDataScope:scope};
+  // AIDEV-NOTE: Bearer MCP должен быть проверенно привязан сервисом к owner; до этого доступ закрыт.
+  if(['gameCore','history','transcription'].some(name=>tools[name]?.enabled!==false||Object.keys(tools[name]).some(key=>key!=='enabled')))invalid();
+  const publisher=readProtected(tools.publisher.configPath);
+  if(publisher?.ownerId!==entry.userId||publisher.resultRoot!==entry.cacheRoot||!Array.isArray(publisher.allowedReadRoots)||publisher.allowedReadRoots.length!==1||publisher.allowedReadRoots[0]!==entry.stagingRoot)invalid();
+  verifyDirectory(publisher.resultRoot);
+  for(const otherUid of uids){
+   if(otherUid===uid)continue;
+   const other=entries[otherUid], otherTools=validateConfig(readProtected(other.toolsConfigPath),other.userId);
+   if(otherTools.publisher.configPath===tools.publisher.configPath)invalid();
+   const otherPublisher=readProtected(otherTools.publisher.configPath);
+   if(typeof otherPublisher?.resultRoot!=='string'||overlaps(otherPublisher.resultRoot,publisher.resultRoot))invalid();
+  }
+  return {uid,entry,tools,publisher};
+ }
+ async function checkedFiles(entry,tools){
+  const value=await readFiles(tools,invalid);
+  const roots=[join(entry.home,'workspace'),join(entry.home,'media'),join(entry.home,'results')];
+  if(value?.ownerId!==entry.userId||value.stateRoot!==join(entry.home,'workspace','files')||value.resultRoot!==roots[2]||
+    !Array.isArray(value.readRoots)||value.readRoots.length!==roots.length||roots.some(root=>!value.readRoots.includes(root)))invalid();
+  return {...value,moduleRoot:'/opt/brai-profile/runtime/services/hermes/files'};
+ }
+ async function perUserRuntime(profile) {
+  const {uid,entry,tools,publisher}=validateProfile(profile,'active');
+  const signature=JSON.stringify([entry,tools,publisher]), existing=cache.get(uid);
+  if(existing?.signature===signature)return existing.promise;
+  if(existing){cache.delete(uid);const old=await existing.promise.catch(()=>null);await old?.close();}
+  const promise=(async()=>{
+   const runtime=await start(tools);
+   return {
+    async listTools(){return (await runtime.listTools()).filter(tool=>!['publish_file','fetch_file'].includes(tool.name));},
+    async callTool(name,args,signal){if(['publish_file','fetch_file'].includes(name))invalid();return runtime.call(name,args,signal);},
+    async filesConfiguration(){return checkedFiles(entry,tools);},
+    async publishSnapshot(path,requestId){verifySnapshot(path,entry.stagingRoot);return runtime.call('publish_file',{path,requestId});},
+    async fetchArtifact(artifactId){return runtime.call('fetch_file',{artifactId});},
+    close:()=>runtime.close(),
+   };
+  })();
+  cache.set(uid,{signature,promise,userId:entry.userId});
+  try{return await promise;}catch(error){if(cache.get(uid)?.promise===promise)cache.delete(uid);throw error;}
+ }
+ return {
+  perUserRuntime,
+  async bootstrapFilesConfiguration(profile){const {entry,tools}=validateProfile(profile,'provisioning');return checkedFiles(entry,tools);},
+  async historyCall(profile,name,args,signal){
+   if(!['history_list','history_get'].includes(name))invalid();
+   const runtime=await perUserRuntime(profile);return runtime.callTool(name,args,signal);
+  },
+  async onIdentityChanged({userId}){
+   const uid=[...cache.keys()].find(key=>cache.get(key).userId===userId), item=uid&&cache.get(uid);
+   if(!item)return;
+   cache.delete(uid);const runtime=await item.promise.catch(()=>null);await runtime?.close();
+  },
+  async close(){const current=[...cache.values()];cache.clear();await Promise.allSettled(current.map(async item=>(await item.promise).close()));}
+ };
+}
+/** Запускает закрытый control через stdio с персональными портами. */
+export async function runStdio() {
+ const config=readProtectedJSON(process.env.BRAI_IDENTITY_CONTROL_CONFIG);
+ const adapters=createRuntimeAdapters(config);
+ try{await runControl(adapters);}finally{await adapters.close();}
+}
+if(process.argv[1]&&fileURLToPath(import.meta.url)===resolve(process.argv[1])&&process.argv[2]==='--stdio') {
+ runStdio().catch(()=>{process.stderr.write('Identity runtime unavailable\n');process.exitCode=1;});
+}

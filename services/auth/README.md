@@ -1,6 +1,6 @@
 # Авторизация Brai
 
-Сервис владеет пользователями, OTP и сессиями в отдельной PostgreSQL БД. Неизменённый официальный Better Auth 1.7.6 выполняет регистрацию, проверку и отзыв. Adapter вызывает его HTTP-handler в памяти; открытого HTTP-порта нет. Web обращается через NATS Services `brai_auth`, версия `1.0.0`, queue `brai_auth`; доступны PING, INFO и STATS.
+Сервис владеет пользователями, OTP и сессиями в отдельной PostgreSQL БД. Неизменённый официальный Better Auth 1.7.6 выполняет регистрацию, проверку и отзыв. Adapter вызывает его HTTP-handler в памяти; открытого HTTP-порта нет. Web обращается через NATS Services `brai_auth`, версия `2.0.0`, queue `brai_auth`; доступны PING, INFO и STATS.
 
 ## Контракт
 
@@ -23,9 +23,36 @@
 
 Код — строка из шести цифр, включая ведущие нули. Срок 300 секунд, максимум 3 неверных попытки; повторная отправка вращает код. Штатный лимит Email OTP — 3 запроса за 60 секунд. OTP хранится как hash. Сессия — 15552000 секунд с момента входа, disableSessionRefresh=true, активность срок не продлевает.
 
+## Идентичности Telegram (v2)
+
+`AUTH_IDENTITY_MODE=telegram` отключает Email OTP; по умолчанию действует `email`. До переключения нужны миграция, настройка владельца и отдельные ACL NATS. Синтетический email `@identity.brai.invalid` не определяет права. В этом режиме `v1.session` возвращает `user: {id,name,role,status,telegramId,profileId}` и внутренние `session: {id,userId,expiresAt}`; неактивный пользователь получает null. Токен сессии не возвращается.
+
+| Subject `brai.auth.v2.` | Запрос | Ответ |
+| --- | --- | --- |
+| `telegram-resolve` | `{telegramId}` | `{user}` или null |
+| `telegram-code-issue` | `{telegramId,requestId}` | `{code,expiresAt,origin}` |
+| `identity-provision` | `{requestId,telegramId,name?,role,userId?,profileId?,status}` | `{user}` |
+| `profile-ready` | `{userId,profileId}` | `{user}` или null |
+| `invite-redeem` | `{telegramId,code,name?}` | `{user}` или null |
+| `login-code-redeem` | `{headers,body:{code}}` | `{status,body,setCookies}` |
+
+Первые пять subjects доступны только доверенному Telegram ingress через ACL, не браузеру и не web. Auth не отправляет сообщения в Telegram. Код — 12 случайных символов Crockford32; регистр и дефисы игнорируются. Срок — 120 секунд; новый код отменяет прежний. В БД хранится HMAC. Выдача ограничена тремя запросами за 60 секунд на пользователя; проверка ограничена по клиенту и глобально, без блокировки владельца подбираемого кода. Погашение одноразово и создаёт новую сессию через официальное расширение Better Auth. Origin и CSRF проверяются, JSON не содержит токен. `requestId` выдачи предназначен для корреляции; после неопределённого ответа новый запрос создаёт новый код.
+
+Provision идемпотентен по `requestId` и точным параметрам; конфликт повтора отклоняется. Telegram ID и profile ID уникальны. Доверенный вызов не может создать первого администратора. `profile-ready` активирует пользователя с совпадающей привязкой, кроме блокированного. Приглашение случайно, действительно 24 часа и хранится как HMAC; повторное погашение тем же отправителем возвращает созданного пользователя.
+
+Web операции принимают `{headers,body}` и возвращают `{status,body,setCookies}`; нужны активная admin-сессия и разрешённый Origin. `users-list` возвращает `{users}`, `users-get` с `{userId}` — `{user}`. `role-set` принимает `{userId,role}`, `status-set` — `{userId,status}`, `sessions-revoke` — `{userId}`. Последнего активного администратора нельзя заблокировать или понизить: 409 `{code:"LAST_ADMIN"}`. `invite-create` и `invite-list` с пустым body возвращают `{invite}` и `{invites}`; секрет `invite.code` виден только при создании. `invite-revoke` принимает `{inviteId}`. `admin-audit` принимает `{userId,action}`, где action — `memory.list`, `memory.read`, `chats.list`, `chats.read`, `artifacts.list`, `artifacts.read` либо `personal.read`, и возвращает `{auditId}`. Аудит хранит автора из сессии, цель и действие без содержимого и секретов; runtime не может изменять или удалять записи.
+
+Первого владельца создаёт оператор после миграции командой `npm run bootstrap-owner --workspace=@brai/auth`. Через окружение передаются owner `AUTH_DATABASE_URL`, `AUTH_OWNER_ROLE` и `AUTH_BOOTSTRAP_FILE`. Последний указывает на принадлежащий процессу обычный JSON-файл с правами не шире 0600: `{telegramId,name,userId?,profileId?}`. С profileId владелец active, иначе provisioning до `profile-ready`. Повторная настройка запрещена; первый сетевой посетитель не становится владельцем. Данные пользователя не помещают в Git.
+
+После настройки владельца оператор может привязать существующих пользователей командой `npm run import-identities --workspace=@brai/auth`, указав owner `AUTH_DATABASE_URL`, `AUTH_OWNER_ROLE` и `AUTH_IMPORT_FILE`. Файл с теми же требованиями защиты содержит массив `{userId,telegramId,profileId,role,status}`; `profileId` может быть null только для неактивной записи. Импорт выполняется одной транзакцией, повтор идентичных привязок безопасен, конфликт отменяет весь импорт.
+
 ## Запуск и обновление
 
-Входы: AUTH_DATABASE_URL, AUTH_SECRET (не менее 32 символов), AUTH_ORIGIN (публичный origin без path), AUTH_EMAIL_FROM, RESEND_API_KEY; NATS_SERVERS (через запятую) либо NATS_URL, NATS_USER/NATS_PASSWORD либо NATS_CREDS_FILE, при TLS NATS_CA_FILE. AUTH_TRUSTED_ORIGINS необязателен и добавляет доверенные origin через запятую к AUTH_ORIGIN. Каждый адрес должен быть полным http/https origin без пути, учётных данных и wildcard. Origin и CSRF по-прежнему проверяет Better Auth. Нет встроенных адресов экземпляра.
+Операторский `revoke-legacy` выполняется только при подтверждённом maintenance и закрытом входе. В окружении задаются owner `AUTH_DATABASE_URL`, `AUTH_OWNER_ROLE`, runtime `AUTH_APP_ROLE` и стабильный `AUTH_REVOKE_REQUEST_ID`. Одна транзакция блокирует таблицы Better Auth, переносит прежние session и verification в owner-only схему `auth_identity_owner`, удаляет исходные строки и сохраняет счётчики. Повтор того же ID не удаляет новые записи. Вывод содержит только счётчики, время и признак повтора, без токенов; runtime и PUBLIC не имеют доступа к схеме и таблицам.
+
+Восстановление тех же строк возможно только до открытия входа с `AUTH_CUTOVER_ACTION=restore`, `AUTH_ROLLBACK_PREOPEN=1` и тем же ID; внешняя операторская проверка обязана подтвердить закрытый вход. Транзакция отказывает, если после отзыва появились новые session или verification. Повторное восстановление и отзыв уже восстановленной операции отклоняются. Снимок содержит секретные токены и подлежит защищённому хранению; автоматическое восстановление после открытия запрещено.
+
+Входы: AUTH_DATABASE_URL, AUTH_SECRET (не менее 32 символов), AUTH_ORIGIN (публичный origin без path), AUTH_IDENTITY_MODE; в режиме email также обязательны AUTH_EMAIL_FROM и RESEND_API_KEY. NATS_SERVERS (через запятую) либо NATS_URL, NATS_USER/NATS_PASSWORD либо NATS_CREDS_FILE, при TLS NATS_CA_FILE. AUTH_TRUSTED_ORIGINS необязателен и добавляет доверенные origin через запятую к AUTH_ORIGIN. Каждый адрес должен быть полным http/https origin без пути, учётных данных и wildcard. Origin и CSRF по-прежнему проверяет Better Auth. Нет встроенных адресов экземпляра.
 
 БД и роли создаёт администратор. `npm run migrate --workspace=@brai/auth` использует owner URL и штатный `getMigrations(auth.options)`; AUTH_OWNER_ROLE обязан совпасть с владельцем БД и current_user; отдельная непривилегированная AUTH_APP_ROLE без членства в других ролях получает DML-права только в собственной БД. Runtime получает app URL без DDL-прав. Миграция запускается отдельно; старт не меняет схему. При обновлении официального пакета закрепить версию, пересоздать план миграций и повторить проверки на изолированном стенде, затем применить миграцию. Патчи и форк запрещены.
 

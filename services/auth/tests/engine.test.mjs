@@ -66,3 +66,21 @@ test('second trusted origin can complete OTP sign-in while an untrusted origin i
  const cookie=signed.setCookies.map(c=>c.split(';')[0]).join('; ');
  check((await f.call('session',{},cookie,'https://preview.example')).body?.user?.email===email,'preview session valid');
 });
+
+test('Telegram mode disables email and issues cookie without a JSON token',async()=>{
+ const now=new Date();let consumed=false;
+ const client={async query(sql){
+  if(sql.includes('INSERT INTO brai_auth_limit'))return {rows:[{count:1}]};
+  if(sql.includes('DELETE FROM brai_login_code')){if(consumed)return {rows:[]};consumed=true;return {rows:[{user_id:'user1'}]};}
+  return {rows:[]};
+ },release(){}};
+ const configured=createAuth({...cfg,identityMode:'telegram'},{connect:async()=>client});
+ const db={user:[{id:'user1',name:'Test',email:'user1@identity.brai.invalid',emailVerified:false,createdAt:now,updatedAt:now}],session:[],verification:[],account:[],rateLimit:[]};
+ const auth=betterAuth({...configured.options,database:memoryAdapter(db)});
+ const call=(path,origin=cfg.origin)=>auth.handler(new Request(cfg.origin+'/api/auth'+path,{method:'POST',headers:{origin,'content-type':'application/json','x-forwarded-for':'192.0.2.1'},body:JSON.stringify({code:'0123-4567-89AB'})}));
+ const evil=await call('/brai/telegram-redeem','https://evil.example');assert.equal(evil.status,403);assert.equal(consumed,false);
+ const signed=await call('/brai/telegram-redeem');assert.equal(signed.status,200);
+ assert.deepEqual(await signed.json(),{success:true});assert.match(signed.headers.get('set-cookie'),/session_token/);
+ assert.equal((await call('/brai/telegram-redeem')).status,401);
+ const email=await call('/email-otp/send-verification-otp');assert.equal(email.status,404);
+});

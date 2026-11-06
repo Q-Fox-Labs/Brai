@@ -1817,6 +1817,10 @@ def file_rpc(method, params, timeout):
 
 def register(ctx):
     """Подключить плагин через публичный API закреплённого Hermes."""
+    if os.environ.get('BRAI_IDENTITY_MODE') == 'telegram':
+        from identity.native_ingress import register as register_identity
+        register_identity(ctx)
+        return
     from types import SimpleNamespace
     from hermes_cli.plugins import get_plugin_manager
     manager = get_plugin_manager()

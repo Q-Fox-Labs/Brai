@@ -2,6 +2,7 @@
 // ABOUTME: Владелец и адреса задаются доверенным запуском, а не аргументами модели.
 import { readFile } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
+import { isServiceDataScope } from '../auth/contracts/service-data-scope.mjs';
 
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const invalid = () => { throw Object.assign(new Error('INVALID_HERMES_CONFIG'), { code: 'INVALID_HERMES_CONFIG' }); };
@@ -16,10 +17,14 @@ const endpoint = value => {
 export function validateConfig(value, trustedOwnerId) {
   if (!object(value) || typeof value.ownerId !== 'string' || value.ownerId !== trustedOwnerId ||
     !value.ownerId || /\s/.test(value.ownerId) || [...value.ownerId].length > 128) invalid();
+  if (value.serviceDataScope !== undefined && !isServiceDataScope(value.serviceDataScope)) invalid();
   if (!object(value.nats) || !Array.isArray(value.nats.servers) || !value.nats.servers.length ||
     value.nats.servers.some(server => typeof server !== 'string' || !server.trim()) ||
     ['user', 'password', 'inboxPrefix'].some(key => value.nats[key] !== undefined && typeof value.nats[key] !== 'string')) invalid();
-  for (const name of ['history', 'transcription']) endpoint(value[name]);
+  for (const name of ['history', 'transcription']) {
+    if (!object(value[name]) || value[name].enabled !== undefined && typeof value[name].enabled !== 'boolean') invalid();
+    if (value[name].enabled !== false) endpoint(value[name]);
+  }
   if (!object(value.gameCore) || value.gameCore.enabled !== undefined && typeof value.gameCore.enabled !== 'boolean') invalid();
   if (value.gameCore.enabled !== false) {
     endpoint(value.gameCore);

@@ -42,7 +42,17 @@
       "services/alerts/tests/load.test.mjs"
     ]
   },
-  "dependencies": [],
+  "dependencies": [
+    {
+      "id": "auth",
+      "inputs": [
+        "services/auth/contracts/**"
+      ],
+      "delivery": [
+        "services/auth/contracts"
+      ]
+    }
+  ],
   "commands": {
     "build": "npm run build",
     "check": "node --test tests/*.test.mjs"

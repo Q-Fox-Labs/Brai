@@ -54,7 +54,7 @@ function add(name, subject, service, file, request, response, ownerKey, mutation
   const alertOperation = name.replace('alerts_', '');
   const validateRequest = service === 'local-ai' ? value => localAi.validateRequest(subject, value) : service === 'alerts' ? value => alerts.validateRequest(alertOperation, value) : compiledRequest;
   const validateResponse = service === 'local-ai' ? value => localAi.validateResponse(subject, value) : service === 'alerts' ? value => alerts.validateResponse(alertOperation, value) : compiledResponse;
-  natsTools.push({ name, subject, ownerKey, mutation, command, inputSchema, validateInput, validateRequest, validateResponse,
+  natsTools.push({ name, subject, service, ownerKey, mutation, command, inputSchema, validateInput, validateRequest, validateResponse,
     description: command ? 'Отправить намерение Timer v2. PubAck означает хранение, итог читать timer_command_get с прежним commandId.' : mutation ? 'Операция владельца. При потере ответа исход неизвестен; автоматического повтора нет.' : 'Чтение опубликованного API в области текущего владельца.' });
 }
 for (const [operation, request, response] of [['snapshot', 'SnapshotRequest', 'SnapshotResponse'], ['history', 'HistoryRequest', 'HistoryResponse'], ['command', 'CommandLookupRequest', 'CommandLookupResponse'], ['statistics', 'StatisticsRequest', 'StatisticsResponse']])

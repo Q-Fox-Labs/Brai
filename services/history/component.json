@@ -10,7 +10,8 @@
   "executableSources": [
     "services/history/src/health.ts",
     "services/history/src/main.ts",
-    "services/history/src/migrate.ts"
+    "services/history/src/migrate.ts",
+    "services/history/src/personal-transfer.ts"
   ],
   "inputs": {
     "build": [
@@ -18,8 +19,10 @@
     ],
     "runtime": [
       "services/history/DEPLOYMENT.md",
+      "services/history/PERSONAL_TRANSFER.md",
       "services/history/migrations/001.sql",
       "services/history/migrations/002-game-core-source.sql",
+      "services/history/migrations/003-personal-attribution.sql",
       "services/history/package.json",
       "services/history/schemas/common.schema.json",
       "services/history/schemas/messages.schema.json",
@@ -32,6 +35,7 @@
       "services/history/src/main.ts",
       "services/history/src/mcp.ts",
       "services/history/src/migrate.ts",
+      "services/history/src/personal-transfer.ts",
       "services/history/src/nats.ts",
       "services/history/src/storage.ts",
       "services/history/CONTRACT.md"
@@ -43,6 +47,7 @@
       "services/history/tests/integration/init.sql",
       "services/history/tests/integration/mcp.test.mjs",
       "services/history/tests/integration/nats-runtime.test.mjs",
+      "services/history/tests/integration/personal-transfer.test.mjs",
       "services/history/tests/integration/storage.test.mjs",
       "services/history/tests/load.test.mjs",
       "services/history/tests/nats-runtime.test.mjs"
@@ -57,6 +62,7 @@
     "kind": "oci-context",
     "files": [
       "services/history/CONTRACT.md",
+      "services/history/PERSONAL_TRANSFER.md",
       "services/history/dist",
       "services/history/migrations",
       "services/history/package.json",
@@ -65,6 +71,7 @@
     "entrypoints": [
       "services/history/dist/main.js",
       "services/history/dist/migrate.js",
+      "services/history/dist/personal-transfer.js",
       "services/history/dist/health.js"
     ],
     "smokeImports": [],

@@ -168,3 +168,19 @@ integration('repeat migration removes extra permissive policies and preserves no
   assert.equal((await f.owner.query('SELECT count(*) FROM alerts.notifications')).rows[0].count, '1');
   assert.equal((await f.owner.query('SELECT count(*) FROM alerts.read_marks')).rows[0].count, '1');
 });
+
+integration('new personal scope hides retained and delayed global plus legacy owner, while own notifications remain writable',async()=>{
+ const {serviceDataScope}=await import('../../../auth/contracts/service-data-scope.mjs');
+ const user=serviceDataScope('profile-1'), other=serviceDataScope('profile-2');
+ const mine=event({scope_id:user}), legacy=event({scope_id:'old-canonical'}), foreign=event({scope_id:other}), global=event({scope_type:'system',scope_id:'global'});
+ for(const value of [mine,legacy,foreign,global])await f.handlers.ingest(value);
+ assert.equal((await summary(user)).unread_count,1);
+ assert.deepEqual((await f.handlers.execute('list',{user_id:user})).items.map(x=>x.id),[mine.id]);
+ for(const value of [global,legacy,foreign])for(const op of ['get','read'])await assert.rejects(f.handlers.execute(op,{user_id:user,service_id:value.service_id,id:value.id}),{code:'NOT_FOUND'});
+ await f.handlers.execute('read_all',{user_id:user});
+ assert.equal((await summary(user)).unread_count,0);
+ assert.equal((await f.owner.query('SELECT count(*) FROM alerts.read_marks WHERE user_id=$1',[user])).rows[0].count,'1');
+ await f.handlers.ingest(event({scope_type:'system',scope_id:'global'}));
+ assert.equal((await summary(user)).unread_count,0);
+ assert.equal((await summary('legacy-new-user')).unread_count,2);
+});

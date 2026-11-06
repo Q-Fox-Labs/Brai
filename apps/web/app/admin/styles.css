@@ -1,0 +1,28 @@
+/* ABOUTME: Оформляет административный экран в цветах рабочей оболочки Brai. */
+/* ABOUTME: Не меняет общие стили и сохраняет доступность на узком экране. */
+.admin-screen { max-width: 1100px; margin: 0 auto; padding: 32px; display: grid; gap: 28px; }
+.admin-back { width: fit-content; color: var(--muted-foreground); font-size: 14px; }
+.admin-back:hover { color: var(--foreground); }
+.admin-heading { border-bottom: 1px solid var(--border); padding-bottom: 22px; }
+.admin-heading h1 { font-size: 25px; font-weight: 650; letter-spacing: -.025em; }
+.admin-heading p { color: var(--muted-foreground); margin-top: 5px; font-size: 14px; }
+.admin-screen section { min-width: 0; }
+.admin-screen section > h2 { margin-bottom: 14px; font-size: 17px; font-weight: 600; }
+.admin-screen button, .admin-download { display: inline-flex; align-items: center; min-height: 34px; padding: 6px 11px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; background: var(--background); }
+.admin-screen button:hover, .admin-download:hover { background: var(--accent); }
+.admin-screen button:focus-visible, .admin-download:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.admin-screen article { background: var(--card); overflow-wrap: anywhere; }
+.admin-screen article p { white-space: pre-wrap; line-height: 1.55; }
+.admin-record pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
+.admin-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+.admin-tabs button[aria-pressed="true"] { background: var(--accent); border-color: var(--foreground); }
+.admin-items { margin: 8px 0; }
+.admin-items li button { display: block; width: 100%; text-align: left; border: 0; border-radius: 0; border-bottom: 1px solid var(--border); padding: 12px; }
+.admin-records article, .admin-record { border-bottom: 1px solid var(--border); padding: 14px 0; }
+.admin-records small, .admin-record small, .admin-empty { color: var(--muted-foreground); }.admin-download { margin-top: 12px; }
+.admin-archive { padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); }
+.admin-archive p { color: var(--muted-foreground); margin-bottom: 12px; line-height: 1.5; }
+.admin-invite-command { display: grid; gap: 10px; padding: 16px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; }
+.admin-invite-command p { line-height: 1.5; }
+.admin-invite-command code { display: block; overflow-wrap: anywhere; user-select: all; }.admin-invite-command button { width: fit-content; }
+@media (max-width: 600px) { .admin-screen { padding: 20px 16px 80px; gap: 24px; } .admin-tabs { flex-wrap: wrap; } }

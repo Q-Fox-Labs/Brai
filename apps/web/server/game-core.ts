@@ -35,6 +35,8 @@ function boardData(value: unknown): value is BoardData {
 
 /** Передаёт только известный subject и owner-контекст через существующее соединение web. */
 async function requestValue(subject: string, request: unknown): Promise<unknown> {
+ // AIDEV-NOTE: Legacy GameCore связывает данные и Artifacts одним owner; профильный actor API ещё не удостоверен.
+ if (process.env.WEB_IDENTITY_MODE === "telegram") throw new GatewayError(503, "GAME_CORE_PERSONAL_UNAVAILABLE");
  let reply;
  try {
   const nc = await natsConnection();
@@ -79,7 +81,7 @@ async function requestGraph(userId: string): Promise<unknown> {
 
 /** Включает ручные команды только в явно настроенном DEV контуре. */
 export function manualStatusEnabled(): boolean {
- return process.env.BRAI_ENVIRONMENT === "dev" && process.env.GAME_CORE_DEV_STATUS_ENABLED === "true";
+ return process.env.WEB_IDENTITY_MODE !== "telegram" && process.env.BRAI_ENVIRONMENT === "dev" && process.env.GAME_CORE_DEV_STATUS_ENABLED === "true";
 }
 
 type FileArtifact = { artifactId: string; ownerId: string; filename: string; status: string; internalUrl?: string };

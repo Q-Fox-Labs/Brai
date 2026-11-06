@@ -3,7 +3,7 @@
 // ABOUTME: Смена сессии размонтирует клиент и прекращает его очередь, запросы и SSE.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
-import type { AccountSession as InitialSession } from "@/server/account-session";
+import type { AccountSession as InitialSession, AccountUser } from "@/server/account-session";
 import type { WebAgentMode } from "@/server/web-config";
 import Timer from "./timer";
 // AIDEV-NOTE: Прежний импорт сохранён для будущего возврата Codex в Telegram-режим.
@@ -21,14 +21,17 @@ import AlertsScreen from "./alerts/screen";
 import "./navigation.css";
 import { Button } from "@/components/ui/button";
 import { AuthRequestError, AuthScreen, type OtpSendResult } from "./auth/screen";
-type User = { id: string; email: string };
+type User = AccountUser;
+function canUseGlobalAgent(user: User): boolean {
+ return user.agentOwnerId === undefined ? user.role === undefined : user.agentOwnerId === user.id && user.role === "admin" && user.status === "active";
+}
 /** Собирает общую оболочку; таймер явно передаёт отсчёт в навигацию текущего аккаунта. */
-export default function Account({ initialSession, agentMode = "dev_agent", telegramBotUsername = null, telegramObserverEnabled = false, authContinuation = null, ssoPreview = false }: { ssoPreview?: boolean; authContinuation?: string | null; initialSession: InitialSession; agentMode?: WebAgentMode; telegramBotUsername?: string | null; telegramObserverEnabled?: boolean }) {
+export default function Account({ initialSession, agentMode = "dev_agent", telegramBotUsername = null, telegramObserverEnabled = false, authContinuation = null, ssoPreview = false, telegramIdentity = false }: { ssoPreview?: boolean; authContinuation?: string | null; initialSession: InitialSession; agentMode?: WebAgentMode; telegramBotUsername?: string | null; telegramObserverEnabled?: boolean; telegramIdentity?: boolean }) {
  const [timerElapsed, setTimerElapsed] = useState<string | null>(null);
- return <AccountSession ssoPreview={ssoPreview} authContinuation={authContinuation} initialSession={initialSession} agentMode={agentMode} telegramBotUsername={telegramBotUsername} telegramObserverEnabled={telegramObserverEnabled} timerElapsed={timerElapsed} onTimerElapsed={setTimerElapsed} />;
+ return <AccountSession telegramIdentity={telegramIdentity} ssoPreview={ssoPreview} authContinuation={authContinuation} initialSession={initialSession} agentMode={agentMode} telegramBotUsername={telegramBotUsername} telegramObserverEnabled={telegramObserverEnabled} timerElapsed={timerElapsed} onTimerElapsed={setTimerElapsed} />;
 }
 /** Управляет подтверждённой сервером сессией без хранения токена в браузере. */
-function AccountSession({ ssoPreview, authContinuation, initialSession, agentMode, telegramBotUsername, telegramObserverEnabled, timerElapsed, onTimerElapsed }: { ssoPreview: boolean; authContinuation: string | null; initialSession: InitialSession; agentMode: WebAgentMode; telegramBotUsername: string | null; telegramObserverEnabled: boolean; timerElapsed: string | null; onTimerElapsed: (elapsed: string | null) => void }) {
+function AccountSession({ telegramIdentity, ssoPreview, authContinuation, initialSession, agentMode, telegramBotUsername, telegramObserverEnabled, timerElapsed, onTimerElapsed }: { telegramIdentity: boolean; ssoPreview: boolean; authContinuation: string | null; initialSession: InitialSession; agentMode: WebAgentMode; telegramBotUsername: string | null; telegramObserverEnabled: boolean; timerElapsed: string | null; onTimerElapsed: (elapsed: string | null) => void }) {
  const pathname = usePathname();
  const view = pathname === "/focus" ? "focus" : pathname === "/goals" ? "goals" : pathname === "/game-core" ? "game-core" : pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : pathname === "/alerts" ? "alerts" : "timer";
  const [user, setUser] = useState<User | null>(() => initialSession.status === "authenticated" ? initialSession.user : null), [ready, setReady] = useState(initialSession.status !== "unavailable"), [exiting, setExiting] = useState(false);
@@ -46,7 +49,7 @@ function AccountSession({ ssoPreview, authContinuation, initialSession, agentMod
   try {
    const response = await fetch("/api/auth/session", { cache: "no-store", signal: request.signal });
    if (current !== generation.current) return false;
-   if (response.ok) { const data = await response.json() as { user: User }; if (current !== generation.current) return false; if (expectedEmail && data.user.email.trim().toLowerCase() !== expectedEmail.trim().toLowerCase()) return false; setUser(previous => previous?.id === data.user.id ? previous : data.user); setReady(true); return true; }
+   if (response.ok) { const data = await response.json() as { user: User }; if (current !== generation.current) return false; if (expectedEmail && data.user.email?.trim().toLowerCase() !== expectedEmail.trim().toLowerCase()) return false; setUser(data.user); setReady(true); return true; }
    else if (response.status === 401) { setUser(null); setReady(true); }
   } catch { /* Потеря связи не превращает подтверждённый вход в успешный выход. */ }
   finally { if (refreshRequest.current === request) refreshRequest.current = null; }
@@ -70,7 +73,7 @@ function AccountSession({ ssoPreview, authContinuation, initialSession, agentMod
     throw pendingSignInError(verificationPending.current.accepted);
    }
    if (operation === "verify-code") verificationPending.current = { email, accepted: false };
-   const response = await fetch(`/api/auth/${operation}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(operation === "send-code" ? { email } : { email, otp: code }) });
+   const response = await fetch(`/api/auth/${operation}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(operation === "send-code" ? { email } : telegramIdentity ? { code } : { email, otp: code }) });
    if (!response.ok) {
     const data: unknown = await response.json().catch(() => null);
     const code = data && typeof data === "object" && "code" in data && typeof data.code === "string" ? data.code : undefined;
@@ -79,7 +82,7 @@ function AccountSession({ ssoPreview, authContinuation, initialSession, agentMod
      throw pendingSignInError(false);
     }
     if (operation === "verify-code" && response.status < 500) verificationPending.current = null;
-    throw new AuthRequestError(authFailureMessage(operation, response.status, code), operation === "verify-code" && response.status >= 500);
+    throw new AuthRequestError(telegramIdentity && operation === "verify-code" && response.status < 500 ? "Код не подошёл или срок его действия истёк. Попросите Брая прислать новый код." : authFailureMessage(operation, response.status, code), operation === "verify-code" && response.status >= 500);
    }
    if (operation === "verify-code") {
     verificationPending.current = { email, accepted: true };
@@ -110,11 +113,11 @@ function AccountSession({ ssoPreview, authContinuation, initialSession, agentMod
  if (!ready) return <div className="workspace-shell brai-workspace-shell"><main className="p-8"><p role="status">Сервис входа временно недоступен. Повторим подключение автоматически.</p><Button className="mt-4" onClick={() => { void refresh(); }}>Повторить подключение</Button></main></div>;
  if (user && pathname === "/auth") return <main role="status" className="p-8">Открываем Brai…</main>;
  if (user && !exiting) return <AlertsProvider key={user.id} userId={user.id} onUnauthorized={unauthorized}><div className="workspace-shell brai-workspace-shell">
-  <Navigation key={user.id} timerElapsed={timerElapsed} email={user.email} onLogout={() => { void logout(); }} />
+  <Navigation key={user.id} timerElapsed={timerElapsed} email={user.name || user.email || "Пользователь"} admin={user.role === "admin" && user.status === "active"} showAgent={agentMode === "hermes_telegram" || canUseGlobalAgent(user)} onLogout={() => { void logout(); }} />
   <div className="workspace-content"><AccountScreens key={user.id} view={view} user={user} agentMode={agentMode} telegramBotUsername={telegramBotUsername} telegramObserverEnabled={telegramObserverEnabled} onLogout={() => { void logout(); }} onUnauthorized={unauthorized} accountMessage={message} onTimerElapsed={onTimerElapsed} /></div>
  </div></AlertsProvider>;
  if (exiting) return <div className="workspace-shell brai-workspace-shell"><main className="p-8" role="status">Выходим…</main></div>;
- return <AuthScreen busy={busy} onRequestOtp={email => submit("send-code", email)} onVerifyOtp={async (email, otp) => { await submit("verify-code", email, otp); }} />;
+ return <AuthScreen telegramIdentity={telegramIdentity} busy={busy} onRequestOtp={email => submit("send-code", email)} onVerifyOtp={async (email, otp) => { await submit("verify-code", email, otp); }} />;
 }
 
 /** Сохраняет состояние посещённых экранов; выход или смена пользователя удаляют их. */
@@ -123,16 +126,16 @@ function AccountScreens({ view, user, agentMode, telegramBotUsername, telegramOb
  const [visitedGoals, setVisitedGoals] = useState(view === "focus" || view === "goals");
  useEffect(() => { if (view === "focus" || view === "goals") setVisitedGoals(true); }, [view]);
  useEffect(() => { if (view === "do") setVisitedDo(true); }, [view]);
- const props = { userId: user.id, email: user.email, onLogout, onUnauthorized, accountMessage };
+ const props = { userId: user.id, email: user.name || user.email || "Пользователь", onLogout, onUnauthorized, accountMessage };
  // AIDEV-NOTE: Базовые состояния Agent и Timer подключены после входа; hidden сохраняет клиентов.
  return <>
   <div className="workspace-screen" hidden={view !== "focus" && view !== "goals"}>{(visitedGoals || view === "focus" || view === "goals") && <GoalsScreen userId={user.id} mode={view === "focus" ? "focus" : "goals"} active={view === "focus" || view === "goals"} onUnauthorized={onUnauthorized} />}</div>
-  <div className="workspace-screen" hidden={view !== "game-core"}>{view === "game-core" && <WorkspaceFrame section="game-core" userId={user.id} title="Элементы"><GameCoreScreen userId={user.id} /></WorkspaceFrame>}</div>
+  <div className="workspace-screen" hidden={view !== "game-core"}>{view === "game-core" && <WorkspaceFrame section="game-core" userId={user.id} title="Элементы"><GameCoreScreen userId={user.id} disabled={Boolean(user.profileId)} /></WorkspaceFrame>}</div>
   <div className="workspace-screen" hidden={view !== "alerts"}><WorkspaceFrame section="alerts" userId={user.id} title="Уведомления"><AlertsScreen active={view === "alerts"} /></WorkspaceFrame></div>
   <div className="workspace-screen" hidden={view !== "agent"}>
    {/* AIDEV-NOTE: Прежнее подключение сохранено до возвращения чатов Codex. */}
    {/* {agentMode === "hermes_telegram" ? <TelegramAgentEntry userId={user.id} username={telegramBotUsername} /> : <AgentScreen {...props} active={view === "agent"} />} */}
-   {agentMode === "hermes_telegram" ? <TelegramAgentEntry userId={user.id} username={telegramBotUsername} active={view === "agent"} enabled={telegramObserverEnabled} /> : <ExistingAgentScreen {...props} active={view === "agent"} />}
+   {agentMode === "hermes_telegram" ? <TelegramAgentEntry userId={user.id} username={telegramBotUsername} active={view === "agent"} enabled={telegramObserverEnabled} /> : canUseGlobalAgent(user) ? <ExistingAgentScreen {...props} active={view === "agent"} /> : view === "agent" ? <main className="p-8">Раздел доступен администратору.</main> : null}
   </div>
   <div className="workspace-screen workspace-timer" hidden={view !== "timer"}><Timer userId={user.id} onUnauthorized={onUnauthorized} accountMessage={accountMessage} onElapsed={onTimerElapsed} /></div>
   <div className="workspace-screen" hidden={view !== "do"}>{(visitedDo || view === "do") && <DoScreen {...props} active={view === "do"} />}</div>

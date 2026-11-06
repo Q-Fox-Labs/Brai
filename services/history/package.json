@@ -8,6 +8,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node dist/main.js",
     "migrate": "node dist/migrate.js",
+    "personal-transfer": "node dist/personal-transfer.js",
     "health": "node dist/health.js",
     "test": "npm run build && node --test tests/*.test.mjs",
     "test:integration": "npm run build && node --test --test-concurrency=1 tests/integration/*.test.mjs"

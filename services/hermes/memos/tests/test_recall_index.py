@@ -60,7 +60,7 @@ class RecallIndexPostgresTests(unittest.TestCase):
         self.scope = {'hermes_home_scope': 'profile', 'hermes_memory_epoch': 'epoch'}
 
     def add(self, identifier, text, *, event=None, logical=None, cube='main', author='alice',
-            chunk=0, vector=(0, 1, 0), messages=None, date='2000-01-01T00:00:00Z', **extra):
+            chunk=0, vector=(0, 1, 0), messages=None, date='2000-01-01T00:00:00Z', owner='owner', **extra):
         info = {**self.scope, 'hermes_kind': 'fact' if logical else 'native',
                 'hermes_event_id': event or identifier, 'hermes_author_id': author,
                 'hermes_cube': cube, 'hermes_memberships': [cube],
@@ -71,12 +71,24 @@ class RecallIndexPostgresTests(unittest.TestCase):
             info['hermes_messages'] = messages
         with self.admin.cursor() as cur:
             cur.execute('INSERT INTO fixture.memories (id,memory,properties,embedding,user_name,created_at) VALUES (%s,%s,%s,%s::vector,%s,%s)',
-                        (identifier, text, json.dumps({'user_id': 'owner', 'info': info}),
+                        (identifier, text, json.dumps({'user_id': owner, 'info': info}),
                          json.dumps([*vector, *([0]*765)]) if vector is not None else None, cube, date))
 
     def search(self, query='rare', **extra):
         return self.store.recall_index(cubes=['main', 'life_work', 'infra'], user_id='owner',
             scope=self.scope, author_id='alice', query=query, vector=[1, 0, 0, *([0]*765)], **extra)
+
+    def test_profile_cubes_and_owners_are_isolated_in_real_index(self):
+        self.add('a', 'rare shared marker', cube='profile-a__main', owner='owner-a')
+        self.add('b', 'rare shared marker', cube='profile-b__main', owner='owner-b')
+        for owner, cube, wanted in [('owner-a', 'profile-a__main', 'a'), ('owner-b', 'profile-b__main', 'b')]:
+            result = self.store.recall_index(cubes=[cube], user_id=owner, scope=self.scope,
+                author_id='alice', query='rare', vector=[1, 0, 0, *([0]*765)])
+            self.assertEqual([item['id'] for item in result['memories']], [wanted])
+            self.assertEqual(result['physical_count'], 1)
+        result = self.store.recall_index(cubes=['profile-b__main'], user_id='owner-a', scope=self.scope,
+            author_id='alice', query='rare', vector=[1, 0, 0, *([0]*765)])
+        self.assertEqual(result['memories'], [])
 
     def test_full_text_crosses_parts_and_returns_one_original_without_rewriting_rows(self):
         messages = [{'role': 'user', 'content': 'x'*766+'rare_boundary_token'},

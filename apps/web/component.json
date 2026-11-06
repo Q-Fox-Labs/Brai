@@ -22,6 +22,8 @@
       "apps/web/app/(workspace)/layout.tsx",
       "apps/web/app/(workspace)/page.tsx",
       "apps/web/app/account.tsx",
+      "apps/web/app/admin/personal.tsx",
+      "apps/web/server/admin-personal.ts",
       "apps/web/app/agent/activities.css",
       "apps/web/app/agent/activities.tsx",
       "apps/web/app/agent/agent.css",
@@ -261,6 +263,7 @@
     ],
     "checks": [
       "apps/web/tests/account-render.test.ts",
+      "apps/web/tests/admin-personal.test.ts",
       "apps/web/tests/agent-activity-presentation.test.ts",
       "apps/web/tests/agent-boundary.test.ts",
       "apps/web/tests/agent-catalog.test.ts",
@@ -310,7 +313,8 @@
       "apps/web/tests/timer-http.test.ts",
       "apps/web/tests/workspace-link.test.ts",
       "apps/web/tests/telegram-display.test.ts",
-      "apps/web/tests/telegram-observer.test.ts"
+      "apps/web/tests/telegram-observer.test.ts",
+      "apps/web/tests/game-core-identity.test.ts"
     ]
   },
   "dependencies": [
@@ -348,10 +352,12 @@
     {
       "id": "auth",
       "inputs": [
-        "services/auth/schemas/**"
+        "services/auth/schemas/**",
+        "services/auth/contracts/**"
       ],
       "delivery": [
-        "services/auth/schemas"
+        "services/auth/schemas",
+        "services/auth/contracts"
       ]
     },
     {

@@ -137,7 +137,7 @@ export async function connectPorts(config) {
   try {
     const endpoints = {};
     for (const name of ['gameCore', 'history', 'transcription']) {
-      if (name === 'gameCore' && config.gameCore?.enabled === false) continue;
+      if (config[name]?.enabled === false) continue;
       const endpoint = config[name];
       const endpointClient = await connectMcpEndpoint(endpoint, { timeout, callTimeout: config.longRequestTimeoutMs ?? 300_000, endpointName: name });
       clients.push(endpointClient);
@@ -202,6 +202,8 @@ export async function createBraiTools(config, ports) {
   const endpointTools = new Map([['gameCore', gameCoreNames], ['history', historyNames], ['transcription', transcriptionNames], ['publisher', new Set(['publish_file', 'fetch_file'])]]);
   const gameCoreEnabled = config.gameCore?.enabled !== false;
   if (!gameCoreEnabled) endpointTools.delete('gameCore');
+  if (config.history?.enabled === false) endpointTools.delete('history');
+  if (config.transcription?.enabled === false) endpointTools.delete('transcription');
   const discovered = new Set(), discovering = new Map(), unavailable = new Set();
   for (const definition of natsTools) tools.push(definition === voiceDefinition
     ? { name: definition.name, description: 'Синтезировать текст локальным голосом. Запиши английские слова и числа кириллицей, раскрой символы словами. При VOICE_TEXT_REQUIRES_CYRILLIC исправь текст и повтори. При неизвестном исходе автоматического повтора нет.', inputSchema: voiceInputSchema }
@@ -321,8 +323,9 @@ export async function createBraiTools(config, ports) {
         if (!definition || !definition.validateInput(args)) throw fault('INVALID_ARGUMENT');
         mutation = definition.mutation;
         const payload = { ...args };
+        const owner = config.serviceDataScope && ['timer', 'history', 'alerts'].includes(definition.service) ? config.serviceDataScope : config.ownerId;
         // Read-only global catalog/status не имеют owner в owner schema.
-        if (definition.validateRequest({ ...payload, [definition.ownerKey]: config.ownerId })) payload[definition.ownerKey] = config.ownerId;
+        if (definition.validateRequest({ ...payload, [definition.ownerKey]: owner })) payload[definition.ownerKey] = owner;
         if (!definition.validateRequest(payload)) throw fault('INVALID_ARGUMENT');
         if (definition.command) {
           await ports.publish(definition.subject, payload, signal);
@@ -331,8 +334,8 @@ export async function createBraiTools(config, ports) {
         const timeout = args.deadlineAt ? Math.min(config.longRequestTimeoutMs ?? 300_000, Math.max(1, Date.parse(args.deadlineAt) - Date.now())) : undefined;
         const value = await ports.request(definition.subject, payload, signal, timeout);
         if (!definition.validateResponse(value)) throw fault('INVALID_UPSTREAM_RESPONSE');
-        if (value.userId !== undefined && value.userId !== config.ownerId) throw fault('OWNER_MISMATCH');
-        if (value.ownerId !== undefined && value.ownerId !== config.ownerId) throw fault('OWNER_MISMATCH');
+        if (value.userId !== undefined && value.userId !== owner) throw fault('OWNER_MISMATCH');
+        if (value.ownerId !== undefined && value.ownerId !== owner) throw fault('OWNER_MISMATCH');
         return value;
       } catch (error) {
         if (mutation && uncertain(error)) throw fault('OUTCOME_UNKNOWN', { requestId: args.requestId ?? args.commandId ?? args.idempotency_key ?? args.attempt_id ?? args.revision_id ?? null });

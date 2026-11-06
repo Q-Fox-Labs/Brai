@@ -1,6 +1,6 @@
 // ABOUTME: Возвращает полную дневную статистику владельца timer.
 // ABOUTME: Запрос использует проверенную сессию и не суммирует браузерные страницы.
-import { requireTimerSession } from "@/server/auth";
+import { personalDataScope, requireTimerSession } from "@/server/auth";
 import { statistics } from "@/server/gateway";
 import { failure } from "@/server/http";
 export const runtime = "nodejs";
@@ -9,6 +9,6 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
  try {
   const session = await requireTimerSession(request);
-  return Response.json(await statistics(session.user.id), { headers: { "Cache-Control": "no-store" } });
+  return Response.json(await statistics(personalDataScope(session)), { headers: { "Cache-Control": "no-store" } });
  } catch (error) { return failure(error); }
 }

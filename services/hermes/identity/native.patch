@@ -1,0 +1,297 @@
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -2881,6 +2881,13 @@
+ 
+     async def handle_message(self, event: MessageEvent) -> None:
+         self._accept_update()
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            dispatch = getattr(self, "_brai_identity_dispatch", None)
++            if getattr(self, "_brai_identity_ingress_ready", False) is not True or not callable(dispatch):
++                self._fail_update_preparation()
++                raise RuntimeError("BRAI_IDENTITY_INGRESS_UNAVAILABLE")
++            await dispatch(event)
++            return
+         await super().handle_message(event)
+ 
+     def _register_handlers(self, app) -> None:
+@@ -3075,7 +3082,13 @@
+                     self._bot = self._app.bot
+                     # Same order as connect(): plugin handlers first (the wired-set is keyed per app, so
+                     # the rebuilt app gets them again), then core and the observer in lockstep.
++                    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++                        self._brai_identity_ingress_ready = False
+                     self._wire_plugin_handlers(self._app)
++                    if (os.environ.get("BRAI_IDENTITY_MODE") == "telegram"
++                            and (getattr(self, "_brai_identity_ingress_ready", False) is not True
++                                 or not callable(getattr(self, "_brai_identity_dispatch", None)))):
++                        raise RuntimeError("BRAI_IDENTITY_INGRESS_UNAVAILABLE")
+                     self._register_handlers(self._app)
+                     with contextlib.suppress(Exception):
+                         await _shutdown_abandoned_app(old_app)
+@@ -3197,7 +3210,13 @@
+             self._app = builder.build()
+             self._bot = self._app.bot
+             # Plugin PTB handlers go BEFORE core: PTB dispatches the first matching handler per group.
++            if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++                self._brai_identity_ingress_ready = False
+             self._wire_plugin_handlers(self._app)
++            if (os.environ.get("BRAI_IDENTITY_MODE") == "telegram"
++                    and (getattr(self, "_brai_identity_ingress_ready", False) is not True
++                         or not callable(getattr(self, "_brai_identity_dispatch", None)))):
++                raise RuntimeError("BRAI_IDENTITY_INGRESS_UNAVAILABLE")
+             self._register_handlers(self._app)
+             await self._initialize_app_with_retries(builder)
+             await self._app.start()
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -5623,6 +5623,17 @@
+ def _start_gateway_start_cron_and_housekeeping(runner):
+     """Start the cron scheduler thread + gateway housekeeping thread; returns
+     ``(cron_stop, cron_provider, cron_thread, housekeeping_thread)``."""
++    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++        # Общий gateway не исполняет пользовательские задания и связанные housekeeping jobs.
++        stop = threading.Event()
++        class _DisabledCron:
++            def stop(self):
++                pass
++        cron_thread = threading.Thread(target=stop.wait, daemon=True, name="brai-cron-disabled")
++        housekeeping_thread = threading.Thread(target=stop.wait, daemon=True, name="brai-housekeeping-disabled")
++        cron_thread.start()
++        housekeeping_thread.start()
++        return stop, _DisabledCron(), cron_thread, housekeeping_thread
+     # The event loop is passed so cron delivery can use live adapters (E2EE support).
+     from cron.scheduler_provider import (
+         InProcessCronScheduler, resolve_cron_scheduler, scheduler_for_profile_mode)
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -944,6 +944,9 @@
+ 
+         Only rejects when it can make the same context-aware decision the runner would; unknown DMs pass through when
+         there is no allowlist or pairing is the unauthorized-DM behavior."""
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            from identity.native_ingress import message_admitted
++            return message_admitted(message)
+         source = self._source_from_message_for_auth(message)
+         user_id = source.user_id
+         # No identity → service message or channel post without sender_chat; defer to message gating.
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -5766,6 +5766,8 @@
+ 
+     def _telegram_observe_unmentioned_group_messages(self) -> bool:
+         """Store skipped unmentioned group messages as context (observe chatter, dispatch only when addressed)."""
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            return False
+         return self._extra_bool(
+             "observe_unmentioned_group_messages", "TELEGRAM_OBSERVE_UNMENTIONED_GROUP_MESSAGES", "false",
+             "ingest_unmentioned_group_messages")
+@@ -6280,6 +6282,12 @@
+         reply_msg = getattr(msg, "reply_to_message", None)
+         if reply_msg is None:
+             return
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            sender = getattr(msg, "from_user", None)
++            author = getattr(reply_msg, "from_user", None)
++            if (not sender or not author or getattr(author, "is_bot", False)
++                    or str(getattr(sender, "id", "")) != str(getattr(author, "id", ""))):
++                return
+         status, cached = await self._download_observed_media(reply_msg, "replied-to media")
+         if status == "ok":
+             self._attach_cached(
+@@ -6544,6 +6552,22 @@
+         await self.handle_message(self._apply_telegram_group_observe_attribution(event))
+ 
+     # -- Text message aggregation (handles Telegram client-side splits) --
++
++    @staticmethod
++    def _brai_identity_batch_scope(source):
++        """Отделить каждого подтверждённого автора до любого объединения."""
++        sender = str(getattr(source, "user_id", "") or "")
++        chat = str(getattr(source, "chat_id", "") or "")
++        thread = str(getattr(source, "thread_id", "") or "")
++        if not sender.isascii() or not sender.isdecimal() or not chat or getattr(source, "is_bot", False):
++            raise PermissionError("BRAI_IDENTITY_BATCH_SOURCE_INVALID")
++        return sender, chat, thread
++
++    def _source_session_key(self, source):
++        key = super()._source_session_key(source)
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            return key + ":brai-user:" + self._brai_identity_batch_scope(source)[0]
++        return key
+ 
+     def _text_batch_key(self, event: MessageEvent) -> str:
+         """Session-scoped batching key; topic recovery first so DM-topic batches coalesce on the recovered lane."""
+@@ -6651,6 +6675,9 @@
+         if existing is None:
+             pending[key] = event
+             return
++        if (os.environ.get("BRAI_IDENTITY_MODE") == "telegram"
++                and self._brai_identity_batch_scope(existing.source) != self._brai_identity_batch_scope(event.source)):
++            raise PermissionError("BRAI_IDENTITY_BATCH_SOURCE_MISMATCH")
+         import brai_files
+         brai_files.merge_events(existing, event)
+         existing.media_urls.extend(event.media_urls)
+@@ -6897,6 +6924,8 @@
+         import brai_files
+         if await brai_files.capture(self, event):
+             return
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            media_group_id = json.dumps([self._brai_identity_batch_scope(event.source), str(media_group_id)])
+         media_group_id = brai_files.batch_key(event, media_group_id)
+         self._merge_into_pending(self._media_group_events, media_group_id, event)
+         event.metadata = dict(event.metadata or {})
+--- a/gateway/run_startup.py
++++ b/gateway/run_startup.py
+@@ -293,6 +293,8 @@
+         ``_send_restart_notification`` and ``_redeliver_pending_obligations`` used to be awaited inline
+         *before* ``_finish_startup_restore`` released the gate. See #91969.
+         """
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            return
+         from gateway.run import _startup_restore_drain_timeout_secs
+         claimed = await self._claim_pending_obligations()
+ 
+@@ -348,6 +350,8 @@
+         take (#91969). Flood-refused rows adopted inside their wait come back flagged ``adopted``: their
+         flags are cleared here too, and ``_redeliver_claimed_obligations`` leaves them to the timer.
+         """
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            return []
+         try:
+             from gateway.delivery_ledger import ledger_enabled, sweep_recoverable
+             if not await asyncio.to_thread(ledger_enabled):
+@@ -448,6 +452,8 @@
+         """Redeliver final responses for claimed rows (network half of the split): runs inside the
+         bounded boot-send task, so a flood-limited send can be abandoned by the restore gate without
+         reopening the turn-replay window. Returns the redelivered count."""
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            return 0
+         # No early return on an empty claim: the boot sweep may have ADOPTED flood-refused rows that are
+         # not due yet, and those still need their timer armed below.
+         try:
+@@ -530,6 +536,8 @@
+         """Replay one adapter identity's transient failures after reconnect: the startup sweep cannot
+         claim live-owner rows, so ``send_path_degraded`` responses would otherwise stay failed until
+         the next restart. Best-effort; reuses the startup redelivery contract."""
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            return 0
+         try:
+             from gateway.delivery_ledger import ledger_enabled, sweep_failed_for_runtime
+             if not await asyncio.to_thread(ledger_enabled):
+@@ -602,6 +610,8 @@
+         ``_is_resume_pending`` injection path owns the wording). Sessions whose adapter is offline stay
+         ``resume_pending`` for the reconnect watcher, which re-calls this scoped to that ``platform``;
+         sessions with a running agent are skipped so none is resumed twice."""
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            return 0
+         from gateway.run import (
+             _AGENT_PENDING_SENTINEL, _auto_continue_freshness_window, _is_fresh_gateway_interruption,
+         )
+@@ -1140,6 +1150,8 @@
+ 
+     async def _start_recover_previous_run(self) -> None:
+         """Plugins, relay, hooks, then crash/clean-exit recovery of processes and sessions."""
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            return  # Не запускать прежние hooks, плагины и восстановление.
+         from gateway.run import _hermes_home
+         self._start_register_plugins_relay_hooks()
+         # Plugins that load later (force re-discovery, install/enable nudge) re-wire live adapters (#87770).
+@@ -1511,6 +1523,9 @@
+ 
+     async def _start_finish_wiring(self, connected_count: int) -> None:
+         """Post-connect wiring: services, boot notifications, startup restore, recovered watchers."""
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            self._startup_restore_in_progress = False
++            return
+         from gateway.run import _planned_restart_notification_pending, _restart_notification_pending
+         from gateway.shutdown_flush import recover_gateway_pending
+         await self._start_post_connect_services(connected_count)
+@@ -1570,6 +1585,9 @@
+ 
+     def _start_spawn_background_watchers(self) -> None:
+         """Spawn the long-lived supervised background watchers."""
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            self._spawn_reconnect_watcher()
++            return
+         for method in self._PRE_RECONNECT_WATCHERS:
+             self._spawn_supervised(getattr(self, method), method[1:])
+         if self._failed_platforms:
+@@ -1632,15 +1650,17 @@
+         # identity to already exist. Blocking here, before any adapter connects, is what keeps a fast
+         # first DM from arriving with nothing to resolve. With the launch gate unset this is a local
+         # inventory and no network.
+-        await self._run_free_tier_bootstrap()
++        if os.environ.get("BRAI_IDENTITY_MODE") != "telegram":
++            await self._run_free_tier_bootstrap()
+         # Serialize startup restore against inbound: adapters receive as soon as they connect, so inbound
+         # queues until every synthetic resume turn has finished.
+-        self._startup_restore_in_progress = True
++        self._startup_restore_in_progress = os.environ.get("BRAI_IDENTITY_MODE") != "telegram"
+         self._startup_restore_queue = []
+         self._startup_restore_tasks = []
+         # Fresh boot: the gate opens while the turn machinery is still cold (skeleton prompts). Warm NOW
+         # to overlap the connects; _finish_startup_restore awaits it (bounded).
+-        self._start_startup_warmup()
++        if os.environ.get("BRAI_IDENTITY_MODE") != "telegram":
++            self._start_startup_warmup()
+         startup_nonretryable_errors: list[str] = []
+         startup_retryable_errors: list[str] = []
+         self._startup_parked_platforms = False  # fresh boot: no platform has failed yet
+--- a/gateway/run_adapters.py
++++ b/gateway/run_adapters.py
+@@ -895,6 +895,8 @@
+     def _schedule_planned_restart_replay(self) -> None:
+         """Replay the owed planned-restart notice after a reconnect, in the background: notification delivery
+         must not hold up adapter recovery or other platforms' reconnects."""
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            return  # Старый notice не относится к проверенному личному ходу.
+         from gateway.run import _planned_restart_notification_pending
+         if _planned_restart_notification_pending():
+             task = self._retain_background_task(asyncio.create_task(
+--- a/gateway/run_startup.py
++++ b/gateway/run_startup.py
+@@ -1368,6 +1368,9 @@
+         self, connected_count: int, _multiplex_skipped_platforms: list
+     ) -> tuple[bool, int]:
+         """Bring up multiplexed secondary-profile adapters. Returns (aborted, connected_count)."""
++        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++            self._platform_lock_takeover_on_start = False
++            return False, connected_count
+         from gateway.run import MultiplexConfigError
+         from tools.process_registry import process_registry as _pr
+         # The launch profile's durable completions replay here, not at import (#123265); the
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -1842,6 +1842,8 @@
+     DEVNULL stdin even passes ``isatty``), so discovery runs with interactive OAuth suppressed — the
+     same gate the CLI's background discovery uses. An expired token then parks the server with an
+     actionable ``hermes mcp login`` warning instead of opening an authorize tab.
+     """
++    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++        return  # Пользовательские MCP доступны только из изолированного worker.
+     from tools.mcp_oauth import suppress_interactive_oauth
+     from tools.mcp_tool_discovery import discover_mcp_tools
+     loop = asyncio.get_running_loop()
+--- a/hermes_cli/env_loader.py
++++ b/hermes_cli/env_loader.py
+@@ -460,6 +460,9 @@
+ ) -> list[Path]:
+     """Load Hermes env files: ``~/.hermes/.env`` overrides stale shell exports; project ``.env`` is a dev
+     fallback that only fills gaps when the user env exists (and overrides shell vars when it does not)."""
++    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++        # Parent получает только root-owned systemd EnvironmentFile, без HOME override.
++        return []
+     # Process home on purpose (never the per-turn override): a startup .env load must not follow a routed
+     # profile — see the multiplex guard below.
+     from hermes_constants import get_process_hermes_home
+--- a/gateway/run_startup.py
++++ b/gateway/run_startup.py
+@@ -54,6 +54,8 @@
+     home and the default root (the multiplex primary; a named launcher is then served as a
+     secondary). Every secondary runs :func:`recover_left_core_in` before its plugins are discovered,
+     so a platform plugin it gets starts its adapter in the same gateway start."""
++    if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
++        return  # Старый HOME не устанавливает платформы и плагины в identity ingress.
+     from hermes_cli.left_core_migration import recover_at_startup
+     from hermes_constants import get_default_hermes_root, get_hermes_home
+     recover_at_startup()

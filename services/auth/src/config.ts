@@ -1,6 +1,6 @@
 // ABOUTME: Читает явную конфигурацию автономного сервиса авторизации.
 // ABOUTME: Не содержит адресов экземпляра и не выводит секреты.
-export interface Config { databaseURL:string; secret:string; origin:string; trustedOrigins:string[]; ssoHubOrigin?:string; ssoPreviewOrigins?:string[]; emailFrom:string; resendKey:string; natsServers:string[]; natsUser?:string; natsPassword?:string; natsCredsFile?:string; natsCAFile?:string; }
+export interface Config { databaseURL:string; secret:string; origin:string; trustedOrigins:string[]; identityMode?:"email"|"telegram"; ssoHubOrigin?:string; ssoPreviewOrigins?:string[]; emailFrom:string; resendKey:string; natsServers:string[]; natsUser?:string; natsPassword?:string; natsCredsFile?:string; natsCAFile?:string; }
 /** Проверяет необходимые входы запуска; бросает ошибку с именем отсутствующего параметра. */
 export function config(env:NodeJS.ProcessEnv=process.env, mode:"runtime"|"migration"="runtime"):Config {
  const required=(key:string)=>{const value=env[key];if(!value)throw new Error(`Missing ${key}`);return value;};
@@ -8,9 +8,11 @@ export function config(env:NodeJS.ProcessEnv=process.env, mode:"runtime"|"migrat
  const origin=validateOrigin(required("AUTH_ORIGIN"),"AUTH_ORIGIN");
  const trustedOrigins=[...new Set([origin,...(env.AUTH_TRUSTED_ORIGINS === undefined ? [] : env.AUTH_TRUSTED_ORIGINS.split(",").map(value=>validateOrigin(value.trim(),"AUTH_TRUSTED_ORIGINS")))])];
  const secret=required("AUTH_SECRET"); if(secret.length<32)throw new Error("AUTH_SECRET requires 32 characters");
+ const identityMode=env.AUTH_IDENTITY_MODE??"email";
+ if(identityMode!=="email"&&identityMode!=="telegram")throw new Error("Invalid AUTH_IDENTITY_MODE");
  const ssoHubOrigin=env.AUTH_SSO_HUB_ORIGIN, rawPreviews=env.AUTH_SSO_PREVIEW_ORIGINS;
  if((ssoHubOrigin===undefined)!==(rawPreviews===undefined))throw new Error("AUTH_SSO_HUB_ORIGIN and AUTH_SSO_PREVIEW_ORIGINS must be configured together");
  const ssoPreviewOrigins=rawPreviews?.split(",").map(value=>validateOrigin(value.trim(),"AUTH_SSO_PREVIEW_ORIGINS"));
  if(ssoHubOrigin!==undefined&&(validateOrigin(ssoHubOrigin,"AUTH_SSO_HUB_ORIGIN")!==origin||!ssoHubOrigin.startsWith("https://")||!ssoPreviewOrigins?.length||ssoPreviewOrigins.some(value=>!value.startsWith("https://")||value===origin||!trustedOrigins.includes(value))))throw new Error("Invalid AUTH_SSO configuration");
- return {ssoHubOrigin,ssoPreviewOrigins,databaseURL:required("AUTH_DATABASE_URL"),secret,origin,trustedOrigins,emailFrom:required("AUTH_EMAIL_FROM"),resendKey:mode==="runtime"?required("RESEND_API_KEY"):"",natsServers:mode==="runtime"?(env.NATS_SERVERS??required("NATS_URL")).split(","):[],natsUser:env.NATS_USER,natsPassword:env.NATS_PASSWORD,natsCredsFile:env.NATS_CREDS_FILE,natsCAFile:env.NATS_CA_FILE};
+ return {identityMode,ssoHubOrigin,ssoPreviewOrigins,databaseURL:required("AUTH_DATABASE_URL"),secret,origin,trustedOrigins,emailFrom:identityMode==="email"?required("AUTH_EMAIL_FROM"):"",resendKey:mode==="runtime"&&identityMode==="email"?required("RESEND_API_KEY"):"",natsServers:mode==="runtime"?(env.NATS_SERVERS??required("NATS_URL")).split(","):[],natsUser:env.NATS_USER,natsPassword:env.NATS_PASSWORD,natsCredsFile:env.NATS_CREDS_FILE,natsCAFile:env.NATS_CA_FILE};
 }

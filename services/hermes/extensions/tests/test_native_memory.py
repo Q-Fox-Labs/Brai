@@ -64,6 +64,16 @@ class NativeMemoryTests(unittest.TestCase):
             self.assertNotIn('_handle_memory_command', methods)
             self.assertIn('_handle_skills_command', methods)
 
+    def test_idle_dispatch_omits_removed_memory_command(self):
+        tree = ast.parse((Path(ENGINE) / 'gateway/run_busy.py').read_text())
+        assignment = next(node for node in ast.walk(tree)
+                          if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == '_IDLE_COMMANDS'
+                                  for target in node.targets))
+        commands = ast.literal_eval(assignment.value)
+        self.assertNotIn('memory', commands)
+        self.assertIn('skills', commands)
+
     def test_idle_dispatch_does_not_bind_removed_memory_handler(self):
         tree = ast.parse((Path(ENGINE) / 'gateway/run_busy.py').read_text())
         names = {'_command_handler_table', '_gateway_idle_command_handlers'}
