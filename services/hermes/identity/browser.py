@@ -28,7 +28,7 @@ def browser_unit(profile, *, chrome_root, instance='dev'):
     lines = [
         '[Unit]', 'Description=Brai personal browser ' + profile_id,
         'After=' + worker, 'Requires=' + worker, 'BindsTo=' + worker,
-        'JoinsNamespaceOf=' + worker,
+        'PartOf=' + worker, 'JoinsNamespaceOf=' + worker,
         '[Service]', 'Type=simple', 'User=' + name, 'Group=' + name,
         'Environment=HOME=' + browser, 'Environment=TMPDIR=' + browser + '/tmp',
         'Environment=XDG_CACHE_HOME=' + browser + '/cache',

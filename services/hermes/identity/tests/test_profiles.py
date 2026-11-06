@@ -63,6 +63,7 @@ class ProfileTests(unittest.TestCase):
         self.assertIn('BindPaths=' + self.profile()['home'], value)
         self.assertIn('/software/runtime:/opt/brai-profile/runtime', value)
         self.assertIn('/software/site-packages:/opt/brai-profile/site-packages', value)
+        self.assertIn('Wants=brai-hermes-dev-browser-' + self.profile()['profileId'] + '.service', value)
         self.assertIn('brai-hermes-dev-identity-broker.service', value)
         self.assertNotIn('EnvironmentFile=', value)
         self.assertNotIn('docker.sock', value)
@@ -101,6 +102,7 @@ class ProfileTests(unittest.TestCase):
         worker = 'brai-hermes-dev-user-' + profile['profileId'] + '.service'
         self.assertIn('JoinsNamespaceOf=' + worker, value)
         self.assertIn('BindsTo=' + worker, value)
+        self.assertIn('PartOf=' + worker, value)
         self.assertIn('User=' + profile['username'], value)
         self.assertIn('TemporaryFileSystem=/run:ro /var/lib:ro /opt:ro', value)
         self.assertIn('BindPaths=' + profile['home'] + '/browser:/var/lib/brai-browser', value)
