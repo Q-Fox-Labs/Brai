@@ -34,7 +34,8 @@
       "services/artifacts/src/migrate.ts",
       "services/artifacts/src/nats.ts",
       "services/artifacts/src/ports.ts",
-      "services/artifacts/src/postgres.ts"
+      "services/artifacts/src/postgres.ts",
+      "services/artifacts/OWNERSHIP_MIGRATION.md"
     ],
     "checks": [
       "services/artifacts/tests/config.test.mjs",
@@ -48,7 +49,10 @@
       "services/artifacts/tests/integration/transport-runtime.test.mjs",
       "services/artifacts/tests/mcp.test.mjs",
       "services/artifacts/tests/runtime-cli.test.mjs",
-      "services/artifacts/tests/transport-runtime.test.mjs"
+      "services/artifacts/tests/transport-runtime.test.mjs",
+      "services/artifacts/ownership_migration.py",
+      "services/artifacts/tests/ownership.test.mjs",
+      "services/artifacts/tests/test_ownership.py"
     ]
   },
   "dependencies": [],
