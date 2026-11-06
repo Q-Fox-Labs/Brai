@@ -58,6 +58,28 @@ class BridgeBudgetTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await bridge.complete_with_budget(Request(), "", "", None), ("ok", {}))
         self.assertEqual(bridge.semaphore._value, 1)
 
+    async def test_disconnect_probe_swallowing_cancel_does_not_hold_completed_request(self):
+        probing = asyncio.Event()
+        class ScopedRequest(Request):
+            async def is_disconnected(self):
+                probing.set()
+                try:
+                    await asyncio.sleep(0.01)
+                except asyncio.CancelledError:
+                    # Starlette проверяет receive внутри отменённого AnyIO scope.
+                    pass
+                return False
+        async def model(*args):
+            await probing.wait()
+            return "ok", {}
+        with patch.object(bridge, "run_codex", new=model):
+            result = await asyncio.wait_for(
+                bridge.complete_with_budget(ScopedRequest(), "", "", None), 0.5)
+        self.assertEqual(result, ("ok", {}))
+        self.assertEqual(bridge.semaphore._value, 1)
+        self.assertFalse(any(task.get_coro().__name__ == "disconnected"
+                             for task in asyncio.all_tasks()))
+
     async def test_queued_request_expires_without_starting_model(self):
         await bridge.semaphore.acquire()
         model = AsyncMock()
