@@ -190,6 +190,26 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(transport.FileError):
             transport.store()
 
+    async def test_parent_admit_hooks_preserve_metadata_without_file_store_or_io(self):
+        event = SimpleNamespace(message_id='42', text='caption', media_urls=['/missing/private-input'],
+                                metadata={}, raw_message=None)
+        with patch('builtins.open', side_effect=AssertionError('No file IO')), \
+                patch('os.open', side_effect=AssertionError('No descriptor IO')), \
+                patch.object(native, 'store', side_effect=AssertionError('No shared FileStore')):
+            self.assertTrue(await transport.accept_event(event, admit=False))
+            transport.track_inbound(event)
+            with transport.inbound_events(event) as current:
+                self.assertIs(current, event)
+                self.assertTrue(await transport.accept_event(event))
+        self.assertEqual(event._brai_identity_inputs,
+                         [{'path': '/missing/private-input', 'itemId': '42:0', 'caption': 'caption', 'groupId': '42'}])
+        self.assertNotIn('_brai_artifacts', event.metadata)
+        event.metadata['fileSetStatus'] = 'incomplete'
+        with self.assertRaisesRegex(transport.FileError, 'INCOMPLETE_FILE_SET'):
+            await transport.accept_event(event, admit=False)
+        with self.assertRaisesRegex(transport.FileError, 'FILES_OWNER_REQUIRED'):
+            transport.conversation(None, 'agent execution', None)
+
     async def test_worker_ingests_each_original_message_and_caption(self):
         backend = Backend(self.home / 'results')
         native.configure({'ownerId': 'owner', 'account': 'test', 'stateRoot': str(self.home / 'workspace' / 'files'),

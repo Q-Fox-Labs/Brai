@@ -27,6 +27,23 @@ async def capture(adapter, event):
     return False
 
 
+async def accept_event(event, admit=True):
+    """Принять только transport metadata; личный worker выполнит ingest после owner prepare."""
+    if (getattr(event, 'metadata', None) or {}).get('fileSetStatus') == 'incomplete':
+        raise FileError('INCOMPLETE_FILE_SET')
+    await capture(None, event)
+    return True
+
+
+def track_inbound(event):
+    """Transport не создаёт FileStore leases и не регистрирует файловый cleanup."""
+
+
+def inbound_events(event):
+    """Сохранить native transport lifecycle без файловых side effects."""
+    return nullcontext(event)
+
+
 async def capture_authorized(adapter, event):
     """Продолжить transport после сохранения метаданных."""
     await capture(adapter, event)

@@ -15,11 +15,15 @@ let pending = 0;
 class Failure extends Error {
   constructor(public status: number, public body: ErrorResponse) { super(body.code); }
 }
-export const permittedAgent = (session: Session) => telegramIdentity() ? session.user.status === "active" : (process.env.BRAI_AGENT_ALLOWED_EMAILS ?? "").split(",").map(email => email.trim().toLowerCase()).filter(Boolean).includes(session.user.email.trim().toLowerCase());
+/** В Telegram глобальный Agent доступен только действующему администратору. */
+export const permittedAgent = (session: Session) => telegramIdentity() ? session.user.status === "active" && session.user.role === "admin" : (process.env.BRAI_AGENT_ALLOWED_EMAILS ?? "").split(",").map(email => email.trim().toLowerCase()).filter(Boolean).includes(session.user.email.trim().toLowerCase());
 const fail = (status: number, code: string, outcome: ErrorResponse["outcome"]) => new Failure(status, { code, outcome });
 /** Берёт owner только из проверенной сессии и доверенной пары; неполная настройка закрывает доступ. */
 export function agentOwnerId(session: Session): string {
-  if (telegramIdentity()) return session.user.id;
+  if (telegramIdentity()) {
+    if (!permittedAgent(session)) throw new GatewayError(403, "AGENT_ACCESS_DENIED");
+    return session.user.id;
+  }
   const email = process.env.BRAI_AGENT_OWNER_EMAIL?.trim().toLowerCase(), ownerId = process.env.BRAI_AGENT_OWNER_ID?.trim();
   if (!email && !ownerId) return session.user.id;
   if (!email || !ownerId || ownerId.length > 128 || !/\S/.test(ownerId)) throw new GatewayError(503, "AGENT_OWNER_NOT_CONFIGURED");

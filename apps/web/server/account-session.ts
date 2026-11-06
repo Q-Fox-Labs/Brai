@@ -3,7 +3,7 @@
 import { requireSession, telegramIdentity } from "./auth";
 import { GatewayError } from "./gateway";
 
-export type AccountUser = { id: string; name?: string; role?: "admin" | "user"; status?: "provisioning" | "active" | "blocked"; telegramId?: string | null; profileId?: string | null; email?: string };
+export type AccountUser = { id: string; name?: string; role?: "admin" | "user"; status?: "provisioning" | "active" | "blocked"; telegramId?: string | null; profileId?: string | null; email?: string; agentOwnerId?: string | null };
 export type AccountSession =
   | { status: "authenticated"; user: AccountUser }
   | { status: "anonymous" }
@@ -22,5 +22,5 @@ export async function loadAccountSession(headers: Headers): Promise<AccountSessi
 }
 /** Возвращает разрешённые поля идентичности без данных сессии. */
 export function publicUser(user: Awaited<ReturnType<typeof requireSession>>["user"]): AccountUser {
- return telegramIdentity() ? { id: user.id, name: user.name?.trim() || "Пользователь", role: user.role, status: user.status, telegramId: user.telegramId ?? null, profileId: user.profileId ?? null } : { id: user.id, email: user.email };
+ return telegramIdentity() ? { id: user.id, name: user.name?.trim() || "Пользователь", role: user.role, status: user.status, telegramId: user.telegramId ?? null, profileId: user.profileId ?? null, agentOwnerId: user.role === "admin" && user.status === "active" ? user.id : null } : { id: user.id, email: user.email };
 }

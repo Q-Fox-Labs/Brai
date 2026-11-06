@@ -22,6 +22,9 @@ import "./navigation.css";
 import { Button } from "@/components/ui/button";
 import { AuthRequestError, AuthScreen, type OtpSendResult } from "./auth/screen";
 type User = AccountUser;
+function canUseGlobalAgent(user: User): boolean {
+ return user.agentOwnerId === undefined ? user.role === undefined : user.agentOwnerId === user.id && user.role === "admin" && user.status === "active";
+}
 /** Собирает общую оболочку; таймер явно передаёт отсчёт в навигацию текущего аккаунта. */
 export default function Account({ initialSession, agentMode = "dev_agent", telegramBotUsername = null, telegramObserverEnabled = false, authContinuation = null, ssoPreview = false, telegramIdentity = false }: { ssoPreview?: boolean; authContinuation?: string | null; initialSession: InitialSession; agentMode?: WebAgentMode; telegramBotUsername?: string | null; telegramObserverEnabled?: boolean; telegramIdentity?: boolean }) {
  const [timerElapsed, setTimerElapsed] = useState<string | null>(null);
@@ -110,7 +113,7 @@ function AccountSession({ telegramIdentity, ssoPreview, authContinuation, initia
  if (!ready) return <div className="workspace-shell brai-workspace-shell"><main className="p-8"><p role="status">Сервис входа временно недоступен. Повторим подключение автоматически.</p><Button className="mt-4" onClick={() => { void refresh(); }}>Повторить подключение</Button></main></div>;
  if (user && pathname === "/auth") return <main role="status" className="p-8">Открываем Brai…</main>;
  if (user && !exiting) return <AlertsProvider key={user.id} userId={user.id} onUnauthorized={unauthorized}><div className="workspace-shell brai-workspace-shell">
-  <Navigation key={user.id} timerElapsed={timerElapsed} email={user.name || user.email || "Пользователь"} admin={user.role === "admin" && user.status === "active"} onLogout={() => { void logout(); }} />
+  <Navigation key={user.id} timerElapsed={timerElapsed} email={user.name || user.email || "Пользователь"} admin={user.role === "admin" && user.status === "active"} showAgent={agentMode === "hermes_telegram" || canUseGlobalAgent(user)} onLogout={() => { void logout(); }} />
   <div className="workspace-content"><AccountScreens key={user.id} view={view} user={user} agentMode={agentMode} telegramBotUsername={telegramBotUsername} telegramObserverEnabled={telegramObserverEnabled} onLogout={() => { void logout(); }} onUnauthorized={unauthorized} accountMessage={message} onTimerElapsed={onTimerElapsed} /></div>
  </div></AlertsProvider>;
  if (exiting) return <div className="workspace-shell brai-workspace-shell"><main className="p-8" role="status">Выходим…</main></div>;
@@ -132,7 +135,7 @@ function AccountScreens({ view, user, agentMode, telegramBotUsername, telegramOb
   <div className="workspace-screen" hidden={view !== "agent"}>
    {/* AIDEV-NOTE: Прежнее подключение сохранено до возвращения чатов Codex. */}
    {/* {agentMode === "hermes_telegram" ? <TelegramAgentEntry userId={user.id} username={telegramBotUsername} /> : <AgentScreen {...props} active={view === "agent"} />} */}
-   {agentMode === "hermes_telegram" ? <TelegramAgentEntry userId={user.id} username={telegramBotUsername} active={view === "agent"} enabled={telegramObserverEnabled} /> : <ExistingAgentScreen {...props} active={view === "agent"} />}
+   {agentMode === "hermes_telegram" ? <TelegramAgentEntry userId={user.id} username={telegramBotUsername} active={view === "agent"} enabled={telegramObserverEnabled} /> : canUseGlobalAgent(user) ? <ExistingAgentScreen {...props} active={view === "agent"} /> : view === "agent" ? <main className="p-8">Раздел доступен администратору.</main> : null}
   </div>
   <div className="workspace-screen workspace-timer" hidden={view !== "timer"}><Timer userId={user.id} onUnauthorized={onUnauthorized} accountMessage={accountMessage} onElapsed={onTimerElapsed} /></div>
   <div className="workspace-screen" hidden={view !== "do"}>{(visitedDo || view === "do") && <DoScreen {...props} active={view === "do"} />}</div>

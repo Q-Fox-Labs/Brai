@@ -22,7 +22,8 @@ def browser_unit(profile, *, chrome_root, instance='dev'):
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,31}', instance):
         raise ValueError('Invalid instance')
     worker = 'brai-hermes-' + instance + '-user-' + profile_id + '.service'
-    browser = home + '/browser'
+    source = home + '/browser'
+    browser = '/var/lib/brai-browser'
     chrome = str(PurePosixPath(root) / 'chrome')
     lines = [
         '[Unit]', 'Description=Brai personal browser ' + profile_id,
@@ -46,7 +47,7 @@ def browser_unit(profile, *, chrome_root, instance='dev'):
         'TemporaryFileSystem=/run:ro /var/lib:ro /opt:ro',
         'InaccessiblePaths=-/srv -/etc/brai -/etc/brai-dev -/etc/ansible -/mnt -/media',
         'BindReadOnlyPaths=' + root + ':' + root,
-        'BindPaths=' + browser,
+        'BindPaths=' + source + ':' + browser,
         'ReadWritePaths=' + browser,
         'KillMode=control-group', 'TimeoutStopSec=30', 'LimitNOFILE=4096',
         'TasksMax=256', 'MemoryHigh=1G', 'MemoryMax=2G',

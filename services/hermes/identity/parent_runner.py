@@ -18,6 +18,14 @@ def main():
     if not (engine / 'brai_files_transport.py').is_file():
         raise RuntimeError('Native identity transport unavailable')
     sys.path.insert(0, str(engine))
+    # Пакет SDK должен иметь приоритет над одноимённым каталогом Brai plugin.
+    site_packages = Path('/opt/brai-profile/site-packages')
+    sys.path.insert(0, str(site_packages))
+    import telegram
+    import telegram.ext
+    sdk_path = Path(telegram.__file__).resolve()
+    if not sdk_path.is_relative_to(site_packages.resolve()):
+        raise RuntimeError('Trusted Telegram SDK unavailable')
     # Discovery по старому HOME запрещён до первого импорта native engine.
     os.environ['HERMES_SAFE_MODE'] = '1'
     from hermes_cli.plugins import get_plugin_manager, parse_manifest_file

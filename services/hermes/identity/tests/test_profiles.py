@@ -68,6 +68,33 @@ class ProfileTests(unittest.TestCase):
         self.assertNotIn('docker.sock', value)
         self.assertNotIn('\\n', value)
 
+    def test_telegram_sdk_wins_over_runtime_adapter_package(self):
+        import os
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            roots = {name: Path(temp) / name for name in ('site', 'engine', 'runtime')}
+            for root in roots.values():
+                root.mkdir()
+            for name, value in (('site', 'sdk'), ('runtime', 'adapter')):
+                package = roots[name] / 'telegram'
+                package.mkdir()
+                (package / '__init__.py').write_text('ORIGIN = ' + repr(value), encoding='utf-8')
+            unit = worker_unit(self.profile(), engine_root='/engine', runtime_root='/runtime',
+                               python='/python/bin/python', ingress_uid=995,
+                               broker_socket='/run/broker', memory_socket='/run/memory',
+                               egress_socket='/run/egress', site_packages='/site')
+            line = next(line for line in unit.splitlines() if line.startswith('Environment=PYTHONPATH='))
+            paths = line.removeprefix('Environment=PYTHONPATH=').split(':')
+            mapping = {'/opt/brai-profile/site-packages': str(roots['site']),
+                       '/opt/brai-profile/engine': str(roots['engine']),
+                       '/opt/brai-profile/runtime/services/hermes': str(roots['runtime'])}
+            env = {**os.environ, 'PYTHONPATH': ':'.join(mapping[path] for path in paths)}
+            result = subprocess.run([sys.executable, '-P', '-B', '-c',
+                                     "import telegram; assert telegram.ORIGIN == 'sdk'"],
+                                    cwd=temp, env=env, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+
     def test_browser_joins_only_own_worker_and_keeps_sandbox(self):
         profile = self.profile()
         value = browser_unit(profile, chrome_root='/software/chrome')
@@ -76,7 +103,8 @@ class ProfileTests(unittest.TestCase):
         self.assertIn('BindsTo=' + worker, value)
         self.assertIn('User=' + profile['username'], value)
         self.assertIn('TemporaryFileSystem=/run:ro /var/lib:ro /opt:ro', value)
-        self.assertIn('BindPaths=' + profile['home'] + '/browser', value)
+        self.assertIn('BindPaths=' + profile['home'] + '/browser:/var/lib/brai-browser', value)
+        self.assertIn('Environment=TMPDIR=/var/lib/brai-browser/tmp', value)
         self.assertIn('RestrictNamespaces=user pid net', value)
         self.assertIn('--proxy-server=http://127.0.0.1:18080', value)
         self.assertIn('--proxy-bypass-list=<-loopback>', value)

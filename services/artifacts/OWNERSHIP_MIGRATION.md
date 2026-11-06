@@ -4,7 +4,7 @@
 
 ## Источники и назначение
 
-Оператор передаёт typed snapshot таблиц `artifacts`, `artifact_references`, `artifact_output_bindings`, `artifact_relations`, `artifact_links` и root-private mapping пользователей. Автор подтверждается фактическим входящим Telegram journal/FileStore ledger либо согласованными private native session и подтверждённой outgoing квитанцией. Сам UUID в тексте, даже в аттестованной памяти, ownership не доказывает.
+Оператор передаёт typed snapshot таблиц `artifacts`, `artifact_references`, `artifact_output_bindings`, `artifact_relations`, `artifact_links` и root-private mapping пользователей. Автор подтверждается фактическим входящим Telegram journal/FileStore ledger либо записью реального создания в проверенной private native session. Для publish_file одновременно сверяются actual tool call, ID/SHA/bytes ответа, immutable agentPublisher fingerprint, эффективный requestId публикации и createdAt внутри интервала вызова. Повтор старого запроса, fetch, outgoing доставка и UUID в тексте, даже в аттестованной памяти, ownership не доказывают. Неполный набор доказательств остаётся в карантине.
 
 Назначение каждого Artifact должно вести к проверенному userId. Отсутствующая или противоречивая аттестация даёт отдельный непродуктовый quarantine owner, который не совпадает ни с одним реальным пользователем и не подключён к агентскому профилю. Связанный relation-component с различными назначениями целиком уходит в карантин. Неподтверждённые межвладельческие relations и действующие share grants требуют отдельной проверки и останавливают перенос.
 
@@ -30,7 +30,7 @@ References/output bindings сохраняют точные исходные кл
 
 ## Интеграция оператора
 
-Ansible-адаптер и фактические параметры экземпляра принадлежат Admin. Оператор использует существующий PostgreSQL owner, не выдавая credentials пользовательским процессам. Для DEV root-private inventory, plan и закреплённая копия ядра хранятся в каталоге текущего identity transition; stdout содержит только counts/hash.
+Ansible-адаптер и фактические параметры экземпляра принадлежат Admin. Оператор использует существующий PostgreSQL owner, не выдавая credentials пользовательским процессам. Для DEV root-private inventory, plan и закреплённая копия ядра хранятся в каталоге текущего identity transition; stdout содержит только counts/hash. После quiescence provenance читает только три закреплённые consistent read models: native state.db, Telegram observer.sqlite3 и FileStore files.sqlite. Их SHA и sourceGroupSha256 входят в provenance binding; возврат к свежим transport базам старого HOME закрыт. Перед apply/verify требуется повторный inventory/plan на этих снимках.
 
 Квитанция `brai_artifacts_owner_verify` связывает `accountsPath/accountsSha256`, `ownerSoftwareHash`, `sourceHash`, `postHash`, `currentHash`, `provenanceHash`, закрытые inventory/plan/software paths и hashes, snapshot runId/schema, summary и verifiedAt. Её дата должна следовать реальному maintenance freeze. Квитанция тестового стенда не заменяет owner verify живых данных.
 

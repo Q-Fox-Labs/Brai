@@ -5,10 +5,11 @@ import { useEffect, useRef } from "react";
 import AppNavigation from "./shell/app-navigation";
 
 /** Отображает навигацию Brai и сохраняет отсчёт в заголовке вкладки. */
-export default function Navigation({ timerElapsed, email, admin = false, onLogout }: {
+export default function Navigation({ timerElapsed, email, admin = false, showAgent = true, onLogout }: {
   timerElapsed: string | null;
   email: string;
   admin?: boolean;
+  showAgent?: boolean;
   onLogout: () => void;
 }) {
   const originalTitle = useRef("Brai");
@@ -19,5 +20,5 @@ export default function Navigation({ timerElapsed, email, admin = false, onLogou
   useEffect(() => {
     document.title = timerElapsed ? timerElapsed + " · " + originalTitle.current : originalTitle.current;
   }, [timerElapsed]);
-  return <AppNavigation admin={admin} email={email} timerElapsed={timerElapsed} onLogout={onLogout} />;
+  return <AppNavigation admin={admin} showAgent={showAgent} email={email} timerElapsed={timerElapsed} onLogout={onLogout} />;
 }

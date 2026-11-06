@@ -151,6 +151,10 @@ test("Telegram identity rejects blocked users and redeems a code once through v2
     const identity = { ...session(), user: { id: "user-1", name: "Имя", role: "user", status: "active", telegramId: "1", profileId: null } };
     ownerReply = reply(200, identity);
     assert.deepEqual(await requireSession(request), identity);
+    const load = accountSession.loadAccountSession as (headers: Headers) => Promise<{ status: string; user: { agentOwnerId: string | null } }>;
+    assert.equal((await load(new Headers({ cookie: "session=fake" }))).user.agentOwnerId, null);
+    ownerReply = reply(200, { ...identity, user: { ...identity.user, role: "admin" } });
+    assert.equal((await load(new Headers({ cookie: "session=fake" }))).user.agentOwnerId, "user-1");
     ownerReply = reply(200, { ...identity, user: { ...identity.user, status: "blocked" } });
     await assert.rejects(requireSession(request), error => error instanceof GatewayError && error.status === 401);
     ownerReply = reply(200, { success: true });

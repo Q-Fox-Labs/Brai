@@ -170,9 +170,9 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
     prefix = 'brai-hermes-' + instance + '-identity-'
     python_root = str(PurePosixPath(python).parent.parent)
     python_name = PurePosixPath(python).name
-    paths = ['/opt/brai-profile/runtime/services/hermes', '/opt/brai-profile/engine']
-    if site_packages:
-        paths.append('/opt/brai-profile/site-packages')
+    # AIDEV-NOTE: SDK telegram должен разрешаться раньше локального каталога адаптера telegram.
+    paths = ['/opt/brai-profile/site-packages'] if site_packages else []
+    paths.extend(['/opt/brai-profile/engine', '/opt/brai-profile/runtime/services/hermes'])
     lines = [
         '[Unit]', 'Description=Brai personal Hermes ' + profile['profileId'],
         'After=' + ' '.join(prefix + name + '.service' for name in ('broker', 'memory', 'egress')),
