@@ -872,8 +872,8 @@ def paths_key(paths):
     return canonical(sorted(set(paths)))
 
 
-def final_text(text, operation):
-    """Подготовить отдельные временные копии всего исходящего набора до выдачи."""
+def _public_response_text(text):
+    """Сохранить последствия отказа без внутренних путей и технических кодов."""
     if not isinstance(text, str):
         return text
     # Runtime verifier keeps the failure visible without exposing local paths or tool diagnostics.
@@ -882,6 +882,14 @@ def final_text(text, operation):
     if _TECHNICAL_FAILURE.search(text):
         logging.getLogger(__name__).warning('BRAI_USER_RESPONSE_TECHNICAL_FAILURE')
         text = 'Не удалось полностью выполнить запрос. Попробуйте ещё раз.'
+    return text
+
+
+def final_text(text, operation):
+    """Подготовить отдельные временные копии всего исходящего набора до выдачи."""
+    if not isinstance(text, str):
+        return text
+    text = _public_response_text(text)
     files, replacements, items = store(), [], []
     explicit = []
     active_sub(_SET, lambda match: explicit.append(match) or match.group(0), text)
@@ -1441,6 +1449,9 @@ def result_envelope(result, agent=None):
     response = result.get('final_response', '')
     if not isinstance(response, str):
         return result
+    # The engine appends its verifier footer after the earlier output transform.
+    response = _public_response_text(response)
+    result = {**result, 'final_response': response}
     paths = []
     def found(match):
         paths.append(next(value for value in match.groups() if value is not None))

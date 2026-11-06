@@ -113,6 +113,7 @@ class FilesTest(unittest.IsolatedAsyncioTestCase):
             text = ('Создана папка.\n\n' + header +
                     '\n  • `/private/file` — [write_file] [TOOL_ERROR] TEMPORARY_OUTPUT_REQUIRED')
             result = native.final_text(text, 'footer-test')
+            self.assertEqual(native.result_envelope({'final_response': text})['final_response'], result)
             self.assertIn('Создана папка.', result)
             self.assertIn('Некоторые попытки изменить файлы не удались.', result)
             for private in ('/private/file', 'TOOL_ERROR', 'TEMPORARY_OUTPUT_REQUIRED'):
