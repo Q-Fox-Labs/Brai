@@ -11,6 +11,7 @@ import Timer from "./timer";
 // Отдельный dev_agent продолжает использовать существующий экран.
 import ExistingAgentScreen from "./agent/screen";
 import TelegramAgentEntry from "./agent/telegram-entry";
+import AdminChats from "./agent/admin-chats";
 import DoScreen from "./do/screen";
 import Navigation from "./navigation";
 import WorkspaceFrame from "./shell/workspace-frame";
@@ -133,9 +134,10 @@ function AccountScreens({ view, user, agentMode, telegramBotUsername, telegramOb
   <div className="workspace-screen" hidden={view !== "game-core"}>{view === "game-core" && <WorkspaceFrame section="game-core" userId={user.id} title="Элементы"><GameCoreScreen userId={user.id} disabled={Boolean(user.profileId)} /></WorkspaceFrame>}</div>
   <div className="workspace-screen" hidden={view !== "alerts"}><WorkspaceFrame section="alerts" userId={user.id} title="Уведомления"><AlertsScreen active={view === "alerts"} /></WorkspaceFrame></div>
   <div className="workspace-screen" hidden={view !== "agent"}>
-   {/* AIDEV-NOTE: Прежнее подключение сохранено до возвращения чатов Codex. */}
-   {/* {agentMode === "hermes_telegram" ? <TelegramAgentEntry userId={user.id} username={telegramBotUsername} /> : <AgentScreen {...props} active={view === "agent"} />} */}
-   {agentMode === "hermes_telegram" ? <TelegramAgentEntry userId={user.id} username={telegramBotUsername} active={view === "agent"} enabled={telegramObserverEnabled} /> : canUseGlobalAgent(user) ? <ExistingAgentScreen {...props} active={view === "agent"} /> : view === "agent" ? <main className="p-8">Раздел доступен администратору.</main> : null}
+   {agentMode === "hermes_telegram" ? telegramObserverEnabled && user.role === "admin" && user.status === "active"
+     ? <AdminChats userId={user.id} active={view === "agent"} onUnauthorized={onUnauthorized} />
+     : <TelegramAgentEntry userId={user.id} username={telegramBotUsername} active={view === "agent"} enabled={telegramObserverEnabled && user.role === undefined} />
+     : canUseGlobalAgent(user) ? <ExistingAgentScreen {...props} active={view === "agent"} /> : view === "agent" ? <main className="p-8">Раздел доступен администратору.</main> : null}
   </div>
   <div className="workspace-screen workspace-timer" hidden={view !== "timer"}><Timer userId={user.id} onUnauthorized={onUnauthorized} accountMessage={accountMessage} onElapsed={onTimerElapsed} /></div>
   <div className="workspace-screen" hidden={view !== "do"}>{(visitedDo || view === "do") && <DoScreen {...props} active={view === "do"} />}</div>

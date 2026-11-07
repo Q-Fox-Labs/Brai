@@ -70,7 +70,8 @@ export class Control {
     const entry = operations[operation];
     if (!entry || !object(input) || !object(input.headers) || !text(input.userId)) return error(400, 'INVALID_ARGUMENT');
     const idKey = operation.endsWith('-get') || operation === 'admin-artifacts-download' ? operation.includes('memory') ? 'memoryId' : operation.includes('chats') ? 'chatId' : 'artifactId' : null;
-    const allowed = new Set(['headers', 'userId', 'cursor', 'limit', ...(operation === 'admin-memory-list' ? ['query'] : []), ...(idKey ? [idKey] : [])]);
+    const allowed = new Set(['headers', 'userId', 'cursor', 'limit', ...(operation === 'admin-chats-get' ? ['order'] : []), ...(operation === 'admin-memory-list' ? ['query'] : []), ...(idKey ? [idKey] : [])]);
+    if (input.order !== undefined && !['asc', 'desc'].includes(input.order)) return error(400, 'INVALID_ARGUMENT');
     if (Object.keys(input).some(k => !allowed.has(k)) || Object.keys(input.headers).some(k => !['cookie', 'origin'].includes(k)) || input.headers.origin !== this.origin || !text(input.headers.cookie)) return error(403, 'FORBIDDEN');
     if ((idKey && !text(input[idKey])) || (input.query !== undefined && (typeof input.query !== 'string' || input.query.length > 4096)) || (input.limit !== undefined && (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 100))) return error(400, 'INVALID_ARGUMENT');
     try {
@@ -92,7 +93,7 @@ export class Control {
       }
       const port = this[entry[1]];
       if (typeof port !== 'function') return error(503, 'SOURCE_UNAVAILABLE');
-      const binding = { operation, userId: input.userId, id: idKey ? input[idKey] : null, query: input.query ?? null, limit: input.limit ?? 50 };
+      const binding = { operation, userId: input.userId, id: idKey ? input[idKey] : null, query: input.query ?? null, limit: input.limit ?? 50, ...(operation === 'admin-chats-get' ? { order: input.order ?? 'asc' } : {}) };
       if (operation === 'admin-memory-get') {
         if (!text(session.body.user.id) || !text(selected.profileId) || !text(selected.memoryEpoch)) return error(503, 'SOURCE_UNAVAILABLE');
         binding.actor = session.body.user.id;
@@ -104,7 +105,7 @@ export class Control {
       try { cursor = input.cursor === undefined ? undefined : this.decodeCursor(binding, input.cursor); } catch { return error(400, 'INVALID_CURSOR'); }
       const result = operation === 'admin-memory-get'
         ? await this.memoryDetail({ port, selected, input, binding, cursor })
-        : await port({ operation, profile: selected, id: idKey ? input[idKey] : undefined, query: input.query, cursor, limit: input.limit ?? 50 });
+        : await port({ operation, profile: selected, id: idKey ? input[idKey] : undefined, query: input.query, cursor, limit: input.limit ?? 50, order: input.order ?? 'asc' });
       if (!object(result)) return error(503, 'SOURCE_UNAVAILABLE');
       const body = { ...result };
       if ('nextCursor' in body && body.nextCursor !== null) {
@@ -255,6 +256,27 @@ export function snapshotSessionDB(profile, useCopy, { afterCopy, retainCopy = fa
   }
 }
 
+/** Читает последние сообщения; cursor по ID переживает новые записи и не удерживает копию БД между опросами. */
+function recentChatPage(profile, id, cursor, limit) {
+  if (cursor !== undefined && !/^before:[1-9][0-9]*$/.test(cursor)) throw new Error('INVALID_CURSOR');
+  return snapshotSessionDB(profile, db => {
+    if (!db.prepare("SELECT id FROM sessions WHERE id=? AND source='telegram'").get(id)) throw new Error('SOURCE_UNAVAILABLE');
+    const before = cursor?.slice(7) ?? null;
+    const rows = db.prepare("SELECT id,role,CASE WHEN length(CAST(content AS BLOB)) <= 900000 THEN content END AS content,timestamp FROM messages WHERE session_id=? AND role IN ('user','assistant') AND content IS NOT NULL AND (? IS NULL OR id < CAST(? AS INTEGER)) ORDER BY id DESC LIMIT ?").iterate(id, before, before, limit + 1);
+    const messages = []; let size = 0, more = false;
+    for (const row of rows) {
+      if (messages.length === limit) { more = true; break; }
+      if (row.content === null) throw new Error('SOURCE_UNAVAILABLE');
+      const item = { id: String(row.id), role: row.role, text: row.content, createdAt: new Date(row.timestamp * 1000).toISOString() };
+      const bytes = Buffer.byteLength(JSON.stringify(item)) + 1;
+      if (size + bytes > 900000) { if (!messages.length) throw new Error('SOURCE_UNAVAILABLE'); more = true; break; }
+      size += bytes; messages.push(item);
+    }
+    const nextCursor = more ? `before:${messages.at(-1).id}` : null;
+    return { messages: messages.reverse(), nextCursor };
+  });
+}
+
 /** Хранить закрытую копию SQLite и читать из неё только одну страницу. */
 export function createChatRead() {
   const snapshots = new Map();
@@ -265,7 +287,8 @@ export function createChatRead() {
     clearTimeout(snapshot.timer);
     rmSync(snapshot.directory, { recursive: true, force: true });
   }
-  return async ({ operation, profile, id, cursor, limit }) => {
+  return async ({ operation, profile, id, cursor, limit, order = 'asc' }) => {
+    if (operation === 'admin-chats-get' && order === 'desc') return recentChatPage(profile, id, cursor, limit);
     const now = Date.now();
     for (const [key, value] of snapshots) if (value.expires <= now) dispose(key);
     let snapshot, offset = 0, key;

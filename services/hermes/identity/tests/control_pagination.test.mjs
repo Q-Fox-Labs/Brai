@@ -67,3 +67,31 @@ test('artifact collection over 1000 items uses bounded owner pages and signed cu
   assert.equal(pages, 13);
   assert.ok(requests.every((request, i) => request.filter.ownerId === 'u1' && request.limit === 100 && request.offset === 100 * i));
 });
+
+test('recent chat reads keep ID pagination stable across new records without retaining snapshots', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'identity-recent-'));
+  let db;
+  try {
+    db = new DatabaseSync(join(home, 'state.db'));
+    db.exec("CREATE TABLE sessions(id TEXT,source TEXT,title TEXT,started_at REAL,last_activity_at REAL); CREATE TABLE messages(id INTEGER,session_id TEXT,role TEXT,content TEXT,timestamp REAL); INSERT INTO sessions VALUES('chat','telegram','Chat',1,1); INSERT INTO sessions VALUES('foreign','cli','Hidden',1,1)");
+    const insert = db.prepare("INSERT INTO messages VALUES(?,'chat','user',?,1)");
+    for (let id=1;id<=155;id++) insert.run(id,'text '+id);
+    const reader=createChatRead(), profile={userId:'u1',home,workerUid:process.getuid()};
+    const c=setup({registry:async()=>({version:1,profiles:{[process.getuid()]:{...profile,status:'active'}}}),chatRead:reader});
+    const request={headers,userId:'u1',chatId:'chat',order:'desc',limit:50};
+    const first=await c.invoke('admin-chats-get',request);
+    assert.equal(first.status,200);
+    assert.equal(first.body.messages[0].id,'106'); assert.equal(first.body.messages.at(-1).id,'155');
+    insert.run(156,'new');
+    const second=await c.invoke('admin-chats-get',{...request,cursor:first.body.nextCursor});
+    assert.equal(second.status,200); assert.equal(second.body.messages[0].id,'56'); assert.equal(second.body.messages.at(-1).id,'105');
+    const fresh=await c.invoke('admin-chats-get',request);
+    assert.equal(fresh.body.messages.at(-1).id,'156');
+    // AIDEV-NOTE: Прежний лимит 20 снимков не должен ограничивать непрерывное наблюдение.
+    for(let i=0;i<25;i++) assert.equal((await c.invoke('admin-chats-get',request)).status,200);
+    for(const extra of [{order:'asc',cursor:first.body.nextCursor},{chatId:'foreign'},{order:'sql'}]) assert.notEqual((await c.invoke('admin-chats-get',{...request,...extra})).status,200);
+    let cursor=second.body.nextCursor, ids=[...second.body.messages,...first.body.messages].map(m=>m.id);
+    while(cursor){const page=await c.invoke('admin-chats-get',{...request,cursor});assert.equal(page.status,200);ids.unshift(...page.body.messages.map(m=>m.id));cursor=page.body.nextCursor;}
+    assert.deepEqual(ids,Array.from({length:155},(_,i)=>String(i+1)));
+  } finally {db?.close();rmSync(home,{recursive:true,force:true});}
+});

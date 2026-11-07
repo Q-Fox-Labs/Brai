@@ -59,3 +59,13 @@ test("archive permits admin reads but rejects user-management writes", async () 
  }
  assert.equal(sent, 1);
 });
+
+test("chat tail parameters reach the existing owner API and numeric limits stay numeric", async () => {
+ role = "admin"; serviceStatus = ""; responseBody = { messages: [], nextCursor: null };
+ const response = await mod.exports.GET(new Request("https://brai.test/api/admin?operation=admin-chats-get&userId=target&chatId=chat&order=desc&limit=50"));
+ assert.equal(response.status, 200);
+ assert.deepEqual(payload, {userId:"target",chatId:"chat",order:"desc",limit:50,headers:{origin:"https://brai.test"}});
+ const count = sent;
+ for (const limit of ["0", "101", "50x"]) assert.equal((await mod.exports.GET(new Request("https://brai.test/api/admin?operation=admin-chats-get&userId=target&chatId=c&limit=" + limit))).status, 400);
+ assert.equal(sent,count);
+});
