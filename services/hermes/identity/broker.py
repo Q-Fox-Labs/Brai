@@ -296,19 +296,21 @@ class Broker:
                         or any(character not in '0123456789abcdef' for character in input_id)):
                     raise ValueError('Invalid input identity')
                 private = params.get('privateChat') is True and str(params.get('chatId')) == str(profile['telegramId'])
+                thread_id = params.get('threadId')
                 old = self.turns.get(profile['uid'])
                 request_id = login_request_id(profile['uid'], profile, params.get('chatId'), input_id)
                 outcome = self.delivery_state().lookup(request_id)
                 if old is not None:
                     if (old['turnId'] != turn_id or old['telegramId'] != profile['telegramId']
-                            or old['chatId'] != str(params.get('chatId')) or old['privateChat'] != private):
+                            or old['chatId'] != str(params.get('chatId')) or old['privateChat'] != private
+                            or old.get('threadId') != thread_id):
                         raise PermissionError('Another turn active')
                     if old['inputId'] == input_id or outcome is not None:
                         # Повтор старого input не отменяет более новое живое уточнение.
                         return profile
                 receipt = {'requestId': request_id, 'outcome': outcome}
                 self.turns[profile['uid']] = {'turnId': turn_id, 'privateChat': private, 'chatId': str(params.get('chatId')),
-                    'telegramId': profile['telegramId'], 'inputId': input_id,
+                    'telegramId': profile['telegramId'], 'inputId': input_id, 'threadId': thread_id,
                     'requestId': receipt['requestId'], 'loginRecord': receipt,
                     'suppressFinal': receipt['outcome'] == 'sent'}
                 return profile
@@ -370,7 +372,8 @@ class Broker:
                         try:
                             result = await self.control.call('login.send', {'uid': peer_uid,
                                 'telegramId': str(turn['telegramId']), 'privateChat': True,
-                                'requestId': receipt['requestId']})
+                                'requestId': receipt['requestId'],
+                                **({'threadId': turn['threadId']} if turn.get('threadId') is not None else {})})
                         except Exception:
                             result = {'status': 'unknown'}
                         status = result.get('status') if isinstance(result, dict) else None
@@ -391,7 +394,7 @@ PARAMETERS = {
     'authorize': ({'uid'}, set()),
     'identity.resolve': ({'telegramId'}, set()),
     'identity.invite-redeem': ({'telegramId', 'code'}, {'name'}),
-    'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId'}),
+    'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId', 'threadId'}),
     'ingress.status': ({'uid', 'turnId'}, set()),
     'ingress.close': ({'uid', 'turnId'}, set()),
     'ingress.prepare': ({'uid', 'turnId', 'paths'}, set()),
@@ -432,6 +435,9 @@ def validate_params(method, params):
         raise ValueError('Invalid chat')
     if 'args' in params and not isinstance(params['args'], dict):
         raise ValueError('Invalid args')
+    if 'threadId' in params and (type(params['threadId']) is not int
+            or not 1 <= params['threadId'] <= 9007199254740991):
+        raise ValueError('Invalid Telegram thread')
     if 'telegramId' in params and (not params['telegramId'].isascii() or not params['telegramId'].isdecimal()):
         raise ValueError('Invalid Telegram identity')
     if 'inputId' in params and (not isinstance(params['inputId'], str) or len(params['inputId']) != 64

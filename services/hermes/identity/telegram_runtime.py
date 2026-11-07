@@ -152,7 +152,8 @@ class Resolver:
         input_id = hashlib.sha256(json.dumps(origin, ensure_ascii=False, sort_keys=True,
                                             separators=(',', ':')).encode()).hexdigest()
         await broker_call('ingress.admit', {'inputId': input_id, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
-            'privateChat': getattr(event.source, 'chat_type', '') == 'dm', 'turnId': turn['id']})
+            'privateChat': getattr(event.source, 'chat_type', '') == 'dm', 'turnId': turn['id'],
+            **({'threadId': int(route[1])} if route[1] else {})})
         fields = ('text', 'user_name', 'message_id', 'media_urls', 'media_types',
                   'media_text_inlined', 'reply_to_message_id', 'reply_expected')
         data = {key: getattr(event, key) for key in fields if getattr(event, key, None) is not None}

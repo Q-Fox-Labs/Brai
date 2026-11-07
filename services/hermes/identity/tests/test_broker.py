@@ -335,6 +335,29 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         issued = [params['requestId'] for method, params, _ in self.control.calls if method == 'login.send']
         self.assertEqual(issued, [first_id, second_id])
 
+    async def test_login_uses_admitted_topic_and_rejects_worker_topic_override(self):
+        admission = {'telegramId': '111222', 'chatId': '111222', 'privateChat': True,
+                     'turnId': 'topic-turn', 'inputId': 'a' * 64, 'threadId': 73}
+        broker_module.validate_params('ingress.admit', admission)
+        await self.broker.call(INGRESS_UID, 'ingress.admit', admission)
+        with self.assertRaises(PermissionError):
+            await self.broker.call(WORKER_UID, 'login.send', {'threadId': 99})
+        with self.assertRaises(PermissionError):
+            await self.broker.call(INGRESS_UID, 'ingress.admit', {**admission, 'threadId': 99})
+        self.assertEqual(await self.broker.call(WORKER_UID, 'login.send', {}),
+                         {'status': 'sent', 'suppressFinal': True})
+        sends = [params for method, params, _ in self.control.calls if method == 'login.send']
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(sends[0]['threadId'], 73)
+        # Смена темы после закрытия хода не разрешает повтор прежнего input.
+        await self.broker.call(INGRESS_UID, 'ingress.close', {'uid': WORKER_UID, 'turnId': 'topic-turn'})
+        await self.broker.call(INGRESS_UID, 'ingress.admit', {**admission, 'turnId': 'next-turn', 'threadId': 99})
+        await self.broker.call(WORKER_UID, 'login.send', {})
+        self.assertEqual(len([c for c in self.control.calls if c[0] == 'login.send']), 1)
+        for invalid in (0, -1, True, '73', None, 1.5, 9007199254740992):
+            with self.subTest(threadId=invalid), self.assertRaises(ValueError):
+                broker_module.validate_params('ingress.admit', {**admission, 'threadId': invalid})
+
     async def test_failed_unknown_exception_and_cancellation_are_not_automatically_replayed(self):
         original = self.control.call
         sends = []

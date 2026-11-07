@@ -36,6 +36,15 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(admission['privateChat'], True)
         self.assertEqual(admission['telegramId'], '123')
 
+    async def test_dm_topic_is_passed_only_from_trusted_source(self):
+        incoming = event()
+        incoming.source.thread_id = '73'
+        resolver = runtime.Resolver(NS())
+        broker = AsyncMock(side_effect=[{}, {'paths': ['/user/a']}])
+        with patch.object(runtime, 'broker_call', broker):
+            await resolver.prepare(profile(), incoming)
+        self.assertEqual(broker.await_args_list[0].args[1]['threadId'], 73)
+
     async def test_media_paths_rewritten_and_original_ids_preserved(self):
         resolver = runtime.Resolver(NS())
         async def broker(method, params, **kwargs):
