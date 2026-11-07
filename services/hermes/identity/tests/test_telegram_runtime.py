@@ -22,6 +22,40 @@ def event():
 
 
 class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
+    async def test_registered_private_user_is_admitted(self):
+        update = NS(effective_message=NS(sender_chat=None, business_connection_id=None),
+                    effective_user=NS(id=123, is_bot=False), effective_chat=NS(id=123, type='private'))
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value=profile())) as broker:
+            self.assertTrue(await runtime.admit_update(update, NS()))
+        broker.assert_awaited_once_with('identity.resolve', {'telegramId': '123'})
+
+    async def test_non_private_updates_are_ignored_before_broker_or_notice(self):
+        for chat_type, chat_id in [('group', -10), ('supergroup', -100), ('channel', -100),
+                                   ('private', 456), (None, 123)]:
+            for text in ['hello', '/start invite_abcdefghijklmnop']:
+                with self.subTest(chat_type=chat_type, text=text):
+                    update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text=text),
+                                effective_user=NS(id=123, is_bot=False),
+                                effective_chat=NS(id=chat_id, type=chat_type))
+                    adapter = NS(send=AsyncMock())
+                    with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
+                        self.assertFalse(await runtime.admit_update(update, adapter))
+                    broker.assert_not_awaited()
+                    adapter.send.assert_not_awaited()
+
+    async def test_non_private_event_cannot_register_turn_or_prepare_media(self):
+        for chat_type, chat_id in [('group', '-10'), ('supergroup', '-100'), ('channel', '-100'),
+                                   ('dm', '456'), ('', '123')]:
+            with self.subTest(chat_type=chat_type, chat_id=chat_id):
+                incoming = event()
+                incoming.source.chat_type, incoming.source.chat_id = chat_type, chat_id
+                resolver = runtime.Resolver(NS())
+                with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
+                    with self.assertRaisesRegex(PermissionError, 'Only private Telegram'):
+                        await resolver.prepare(profile(), incoming)
+                broker.assert_not_awaited()
+                self.assertEqual(resolver.turns, {})
+
     async def test_dm_admission_registers_private_context(self):
         resolver = runtime.Resolver(NS())
         calls = []
@@ -85,7 +119,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         adapter = NS()
         for user, sender in [(NS(id=123,is_bot=True), None), (NS(id=123,is_bot=False), NS(id=9))]:
             update = NS(effective_message=NS(sender_chat=sender, business_connection_id=None),
-                        effective_user=user, effective_chat=NS(id=123))
+                        effective_user=user, effective_chat=NS(id=123, type='private'))
             with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
                 self.assertFalse(await runtime.admit_update(update, adapter))
                 broker.assert_not_awaited()
@@ -93,7 +127,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_invite_cannot_be_redeemed(self):
         adapter = NS(send=AsyncMock())
         update = NS(effective_message=NS(sender_chat=None,business_connection_id=None,text='/start bad'),
-                    effective_user=NS(id=123,is_bot=False,full_name='User'), effective_chat=NS(id=123))
+                    effective_user=NS(id=123,is_bot=False,full_name='User'), effective_chat=NS(id=123,type='private'))
         broker = AsyncMock(side_effect=PermissionError('denied'))
         with patch.object(runtime, 'broker_call', broker), patch.object(runtime, '_notice', AsyncMock()):
             self.assertFalse(await runtime.admit_update(update, adapter))

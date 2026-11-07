@@ -66,6 +66,7 @@ async def admit_update(update, adapter):
     user = getattr(update, 'effective_user', None)
     chat = getattr(update, 'effective_chat', None)
     if (message is None or user is None or chat is None or getattr(user, 'is_bot', False)
+            or getattr(chat, 'type', None) != 'private' or str(chat.id) != str(user.id)
             or getattr(message, 'sender_chat', None) or getattr(message, 'business_connection_id', None)):
         return False
     telegram = str(getattr(user, 'id', ''))
@@ -134,7 +135,10 @@ class Resolver:
         return bridge
 
     async def prepare(self, profile, event):
-        """Скопировать media в личный профиль и исключить общий reply-контекст."""
+        """Допустить только личный чат владельца и скопировать его media в профиль."""
+        if (getattr(event.source, 'chat_type', '') != 'dm'
+                or str(event.source.chat_id) != str(profile['telegramId'])):
+            raise PermissionError('Only private Telegram chats are supported')
         uid = profile['uid']
         route = (str(event.source.chat_id), str(event.source.thread_id or ''))
         turn = self.turns.get(uid)
