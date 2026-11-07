@@ -82,7 +82,7 @@ async def admit_update(update, adapter):
     if str(getattr(chat, 'id', '')) == telegram and invitation:
         try:
             await broker_call('identity.invite-redeem', {'telegramId': telegram, 'code': invitation[1],
-                'name': str(getattr(user, 'full_name', '') or 'Пользователь')[:120]}, timeout=180)
+                'name': str(getattr(user, 'full_name', '') or 'Пользователь')[:120]}, timeout=700)
             await _notice(adapter, telegram, 'Профиль готов. Администраторы этого сервиса могут просматривать вашу переписку, память и файлы. Напишите, с чем помочь. Для входа на сайт попросите меня прислать код.')
         except Exception:
             await _notice(adapter, telegram, 'Приглашение не удалось активировать. Проверьте его или обратитесь к владельцу.')

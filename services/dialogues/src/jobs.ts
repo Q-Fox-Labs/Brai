@@ -20,7 +20,7 @@ export async function enqueueDialogue(db:PoolClient,owner:string,dialogue:string
  return true;
 }
 /** Работает только с защищённым owner; внешний исполнитель заменяем в тестах. */
-export function createJobs(pool:Pool,owner:string,luna:Pick<ReturnType<typeof createLuna>,'run'|'probe'>){
+export function createJobs(pool:Pool,owner:string,luna:{run:ReturnType<typeof createLuna>['run'];probe:(state?:Execution,save?:(state:Execution)=>Promise<void>)=>Promise<unknown>},authorize?:()=>Promise<void>){
  let running=false,stopping=false,timer:NodeJS.Timeout|undefined,active:Promise<void>|undefined,verified=false;
  async function schedule(){
   return ownerTransaction(pool,owner,async db=>{
@@ -40,12 +40,14 @@ export function createJobs(pool:Pool,owner:string,luna:Pick<ReturnType<typeof cr
   });
  }
  async function save(job:any,progress:any){
+  await authorize?.();
   const execution:Execution=progress.execution?.execution_state?progress.execution:progress.probe_execution??{};
   const r=await pool.query(`UPDATE dialogues_live.summary_jobs SET progress=$4,native_thread_id=$5,native_turn_id=$6,native_launch_id=$7,execution_state=$8,lease_until=now()+interval '3 minutes'
    WHERE owner_id=$1 AND id=$2 AND lease_id=$3 AND state='running'`,[owner,job.id,job.lease_id,progress,execution.native_thread_id??null,execution.native_turn_id??null,execution.native_launch_id??null,execution.execution_state??'not_started']);
   if(r.rowCount!==1)fail('LEASE_LOST');
  }
  async function publish(job:any,value:string){
+  await authorize?.();
   summaryText(value);
   return ownerTransaction(pool,owner,async db=>{
    const held=(await db.query("SELECT lease_id,state FROM dialogues_live.summary_jobs WHERE owner_id=$1 AND id=$2 FOR UPDATE",[owner,job.id])).rows[0];
@@ -70,6 +72,7 @@ export function createJobs(pool:Pool,owner:string,luna:Pick<ReturnType<typeof cr
   try{
    for(;;){
     if(stopping)fail('WORKER_STOPPING');
+    await authorize?.();
     const rows=(await pool.query(`SELECT id,role,kind,message_order,occurred_at,recorded_at,content_hash,char_length(text) AS total_chars,
       substring(text FROM CASE WHEN message_order=(SELECT min(message_order) FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND change_seq<=$3 AND message_order>$4 AND message_order<=$5 AND kind IN('input','final') AND NOT EXISTS(SELECT 1 FROM dialogues_live.turns z WHERE z.owner_id=dialogues_live.messages.owner_id AND z.dialogue_id=dialogues_live.messages.dialogue_id AND z.id=dialogues_live.messages.turn_id AND z.managed AND dialogues_live.messages.kind='final' AND (z.final_message_id IS DISTINCT FROM dialogues_live.messages.id OR z.completion_seq>$3))) THEN $6::integer ELSE 1 END FOR 12000) AS fragment
       FROM dialogues_live.messages WHERE owner_id=$1 AND dialogue_id=$2 AND change_seq<=$3 AND message_order>$4 AND message_order<=$5 AND kind IN('input','final') AND NOT EXISTS(SELECT 1 FROM dialogues_live.turns z WHERE z.owner_id=dialogues_live.messages.owner_id AND z.dialogue_id=dialogues_live.messages.dialogue_id AND z.id=dialogues_live.messages.turn_id AND z.managed AND dialogues_live.messages.kind='final' AND (z.final_message_id IS DISTINCT FROM dialogues_live.messages.id OR z.completion_seq>$3)) ORDER BY message_order LIMIT 32`,
@@ -95,6 +98,9 @@ export function createJobs(pool:Pool,owner:string,luna:Pick<ReturnType<typeof cr
    await publish(job,progress.working_summary);
   }catch(e){
    const code=e instanceof DialoguesFault?e.code:'SUMMARY_EXECUTION_FAILED';
+   if(code==='LUNA_BUSY'){
+    await pool.query("UPDATE dialogues_live.summary_jobs SET state='queued',attempts=GREATEST(attempts-1,0),available_at=now()+interval '15 seconds',lease_id=NULL,lease_until=NULL,error_code=NULL WHERE owner_id=$1 AND id=$2 AND lease_id=$3 AND state='running'",[owner,job.id,job.lease_id]);return;
+   }
    // AIDEV-NOTE: Потерянный временный запрос повторяется из сохранённого фрагмента; lease и лимит попыток сохраняются.
    await pool.query(`UPDATE dialogues_live.summary_jobs SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'queued' END,
     available_at=now()+make_interval(secs=>30*attempts),lease_id=NULL,lease_until=NULL,error_code=$4
@@ -104,7 +110,7 @@ export function createJobs(pool:Pool,owner:string,luna:Pick<ReturnType<typeof cr
  /** Один шаг позволяет проверить очередь без таймеров и реальной модели. */
  async function tick(){
   if(running||stopping)return;running=true;
-  try{await schedule();const job=await claim();if(!job)return;if(!verified){try{await luna.probe(job.progress.probe_execution??{},async execution=>{job.progress={...job.progress,probe_execution:execution};await save(job,job.progress);});verified=true;}catch(e){await pool.query("UPDATE dialogues_live.summary_jobs SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'queued' END,available_at=now()+make_interval(secs=>30*attempts),lease_id=NULL,lease_until=NULL,error_code=$4 WHERE owner_id=$1 AND id=$2 AND lease_id=$3",[owner,job.id,job.lease_id,e instanceof DialoguesFault?e.code:'LUNA_PROBE_FAILED']);return;}}await execute(job);}
+  try{await authorize?.();await schedule();const job=await claim();if(!job)return;if(!verified){try{await luna.probe(job.progress.probe_execution??{},async execution=>{job.progress={...job.progress,probe_execution:execution};await save(job,job.progress);});verified=true;}catch(e){if(e instanceof DialoguesFault&&e.code==='LUNA_BUSY'){await pool.query("UPDATE dialogues_live.summary_jobs SET state='queued',attempts=GREATEST(attempts-1,0),available_at=now()+interval '15 seconds',lease_id=NULL,lease_until=NULL,error_code=NULL WHERE owner_id=$1 AND id=$2 AND lease_id=$3 AND state='running'",[owner,job.id,job.lease_id]);return;}await pool.query("UPDATE dialogues_live.summary_jobs SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'queued' END,available_at=now()+make_interval(secs=>30*attempts),lease_id=NULL,lease_until=NULL,error_code=$4 WHERE owner_id=$1 AND id=$2 AND lease_id=$3",[owner,job.id,job.lease_id,e instanceof DialoguesFault?e.code:'LUNA_PROBE_FAILED']);return;}}await execute(job);}
   finally{running=false;}
  }
  /** Старт и минута тишины проверяются в том же процессе, без нового сервиса. */

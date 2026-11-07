@@ -57,6 +57,7 @@
       "docs/user-agent/instructions/hermes/BASE.md",
       "docs/user-agent/instructions/hermes/INDEX.md",
       "docs/user-agent/instructions/hermes/policies/DATA_STORAGE.md",
+      "docs/user-agent/instructions/hermes/policies/DIALOGUES.md",
       "docs/user-agent/instructions/hermes/policies/INSTRUCTION_CHANGES.md",
       "docs/user-agent/instructions/hermes/policies/LOCAL_VOICE.md",
       "docs/user-agent/instructions/hermes/policies/MEMORY_OPERATIONS.md",
@@ -307,7 +308,9 @@
       "services/hermes/identity/tests/control_memory_detail.test.mjs",
       "services/hermes/identity/tests/memory_author.test.mjs",
       "services/hermes/identity/tests/memory_spool.test.mjs",
-      "services/hermes/identity/tests/test_memory_spool.py"
+      "services/hermes/identity/tests/test_memory_spool.py",
+      "services/hermes/tests/dialogues-port.test.mjs",
+      "services/hermes/tests/dialogues-summary.test.mjs"
     ]
   },
   "dependencies": [
@@ -398,7 +401,7 @@
   ],
   "commands": {
     "build": null,
-    "check": "node --test --test-isolation=none tests/*.test.mjs memos/embedding/*.test.mjs identity/tests/*.test.mjs memos/tests/*.test.mjs files/tests/identity.test.mjs"
+    "check": "npm run test && npm run test:identity"
   },
   "delivery": {
     "kind": "ready-files",
@@ -427,6 +430,7 @@
       "docs/user-agent/instructions/hermes/BASE.md",
       "docs/user-agent/instructions/hermes/INDEX.md",
       "docs/user-agent/instructions/hermes/policies/DATA_STORAGE.md",
+      "docs/user-agent/instructions/hermes/policies/DIALOGUES.md",
       "docs/user-agent/instructions/hermes/policies/INSTRUCTION_CHANGES.md",
       "docs/user-agent/instructions/hermes/policies/LOCAL_VOICE.md",
       "docs/user-agent/instructions/hermes/policies/MEMORY_OPERATIONS.md",

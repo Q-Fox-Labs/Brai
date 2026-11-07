@@ -590,7 +590,7 @@ export async function servePrivateRpc(runtime, source, destination) {
       const work = (async () => {
         let result;
         try {
-          if (Buffer.byteLength(line) > 32768) throw new Error();
+          if (Buffer.byteLength(line) > 2*1024*1024+65536) throw new Error();
           result = await handlePrivateRpc(runtime, JSON.parse(line));
         } catch { result = { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }; }
         if (result !== null && !destination.write(JSON.stringify(result) + '\n')) await once(destination, 'drain');

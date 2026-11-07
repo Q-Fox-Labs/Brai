@@ -21,7 +21,7 @@ try:
 except ImportError:
     from files.identity import OwnerFiles
 
-MAX_FRAME = 2 * 1024 * 1024
+MAX_FRAME = 2 * 1024 * 1024 + 65536
 
 
 def protected_json(path):
@@ -204,6 +204,7 @@ class Broker:
     def __init__(self, config, control):
         self.config, self.control = config, control
         self.turns, self.locks = {}, {}
+        self.summary_lock = asyncio.Lock()
         self.login_locks, self.login_state = {}, None
         self.files = OwnerFiles(config, control, protected_json)
 
@@ -253,7 +254,7 @@ class Broker:
 
     async def authorize_dialogues(self, peer_uid):
         """Проверить UID обработчика и его неизменную связь с актуальным Auth."""
-        if peer_uid == 0 or peer_uid in self.profiles():
+        if peer_uid in (0, self.config['ingressUid']) or peer_uid in self.profiles():
             raise PermissionError('Separate service UID required')
         path = self.config.get('dialoguesServicesPath')
         if not isinstance(path, str):
@@ -270,6 +271,107 @@ class Broker:
         if any(profile.get(key) != binding[key] for key in ('userId', 'profileId')):
             raise PermissionError('Service profile changed')
         return {'userId': profile['userId'], 'profileId': profile['profileId']}
+
+    async def stream_dialogues_summary(self, peer_uid, request, reader, writer):
+        """Передать свёртку через ограниченные буферы; всё вычисление живёт в контейнере."""
+        identifier = request.get('id')
+        if (set(request) != {'jsonrpc', 'id', 'method', 'params'} or request['jsonrpc'] != '2.0'
+                or request['params'] != {} or not isinstance(identifier, str) or not 0 < len(identifier) <= 256):
+            raise ValueError('Invalid stream header')
+        async def reply(value):
+            encoded = json.dumps({'jsonrpc': '2.0', 'id': identifier, 'result': value}, ensure_ascii=False).encode() + b'\n'
+            if len(encoded) > 65536:
+                raise ValueError('Summary frame too large')
+            writer.write(encoded)
+            await asyncio.wait_for(writer.drain(), 5)
+        principal = await self.authorize_dialogues(peer_uid)
+        if self.summary_lock.locked():
+            await reply({'status': 'busy'})
+            return
+        async with self.summary_lock:
+            command = self.config.get('dialoguesSummaryCommand')
+            config_path = self.config.get('dialoguesSummaryConfigPath')
+            if (not isinstance(command, list) or not command or not all(isinstance(x, str) and x for x in command)
+                    or not Path(command[0]).is_absolute() or not isinstance(config_path, str)):
+                raise PermissionError('Summary executor unavailable')
+            protected_json(config_path)
+            child = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True, limit=65537,
+                env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'DIALOGUES_SUMMARY_CONFIG': config_path})
+            tasks = []
+            try:
+                await reply({'status': 'ready'})
+                async def input_frames():
+                    while True:
+                        raw = await asyncio.wait_for(reader.readline(), 5)
+                        if len(raw) > 65536 or not raw.endswith(b'\n'):
+                            raise ValueError('Invalid input frame')
+                        part = json.loads(raw)
+                        if not isinstance(part, dict) or part.get('id') != identifier:
+                            raise ValueError('Invalid input identity')
+                        terminal = set(part) == {'id', 'end'} and part['end'] is True
+                        if not terminal and (set(part) != {'id', 'text'} or not isinstance(part['text'], str)):
+                            raise ValueError('Invalid input chunk')
+                        if await self.authorize_dialogues(peer_uid) != principal:
+                            raise PermissionError('Summary principal changed')
+                        child.stdin.write(raw)
+                        await asyncio.wait_for(child.stdin.drain(), 5)
+                        if terminal:
+                            child.stdin.close()
+                            return
+                async def output_frames():
+                    offset, digest = 0, hashlib.sha256()
+                    while True:
+                        raw = await child.stdout.readline()
+                        if len(raw) > 65536 or not raw.endswith(b'\n'):
+                            raise ValueError('Invalid output frame')
+                        part = json.loads(raw)
+                        if await self.authorize_dialogues(peer_uid) != principal:
+                            raise PermissionError('Summary principal changed')
+                        if part.get('status') == 'chunk':
+                            if set(part) != {'status', 'offset', 'text'} or part['offset'] != offset or not isinstance(part['text'], str):
+                                raise ValueError('Invalid output chunk')
+                            encoded = part['text'].encode()
+                            offset += len(encoded)
+                            digest.update(encoded)
+                            await reply(part)
+                        elif part.get('status') == 'completed':
+                            if set(part) != {'status', 'totalBytes', 'sha256'} or part['totalBytes'] != offset or part['sha256'] != digest.hexdigest():
+                                raise ValueError('Invalid output checksum')
+                            if await child.wait() != 0:
+                                raise PermissionError('Summary execution failed')
+                            await reply(part)
+                            return
+                        else:
+                            raise ValueError('Invalid output status')
+                tasks = [asyncio.create_task(input_frames()), asyncio.create_task(output_frames())]
+                deadline = asyncio.get_running_loop().time() + 170
+                while not all(task.done() for task in tasks):
+                    await asyncio.wait(tasks, timeout=1, return_when=asyncio.FIRST_EXCEPTION)
+                    for task in tasks:
+                        if task.done():
+                            task.result()
+                    if await self.authorize_dialogues(peer_uid) != principal:
+                        raise PermissionError('Summary principal changed')
+                    if asyncio.get_running_loop().time() >= deadline:
+                        raise TimeoutError('Summary deadline exceeded')
+                for task in tasks:
+                    task.result()
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                if child.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(child.pid, signal.SIGTERM)
+                    try:
+                        await asyncio.wait_for(child.wait(), 20)
+                    except asyncio.TimeoutError:
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(child.pid, signal.SIGKILL)
+                        await child.wait()
 
     async def call(self, peer_uid, method, params):
         """Принять один запрос; worker никогда не выбирает собственный UID или owner."""
@@ -296,6 +398,8 @@ class Broker:
             async with lock:
                 result = await self.control.call(method, params)
                 user = result.get('user')
+                if isinstance(user, dict) and user.get('status') == 'active':
+                    return await self.resolve(str(user['telegramId']))
                 if not isinstance(user, dict) or user.get('status') != 'provisioning':
                     raise PermissionError('Invitation unavailable')
                 command = self.config.get('provisionCommand')
@@ -303,8 +407,16 @@ class Broker:
                     raise PermissionError('Provisioning unavailable')
                 child = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-                    env={'PATH': '/usr/local/bin:/usr/bin:/bin'})
-                await asyncio.wait_for(child.communicate(json.dumps({'user': user}).encode()), 180)
+                    env={'PATH': '/usr/local/bin:/usr/bin:/bin'}, start_new_session=True)
+                try:
+                    await asyncio.wait_for(child.communicate(json.dumps({'user': user}).encode()), 660)
+                except BaseException:
+                    with contextlib.suppress(ProcessLookupError): os.killpg(child.pid, signal.SIGTERM)
+                    try: await asyncio.wait_for(child.wait(), 10)
+                    except asyncio.TimeoutError:
+                        with contextlib.suppress(ProcessLookupError): os.killpg(child.pid, signal.SIGKILL)
+                        await child.wait()
+                    raise
                 if child.returncode != 0:
                     raise PermissionError('Provisioning failed')
                 await self.control.call('identity.profile-ready', {'userId': user['id'], 'profileId': user['profileId']})
@@ -544,15 +656,27 @@ async def serve(config):
     await control.start()
     broker = Broker(config, control)
     slots = asyncio.Semaphore(32)
-    async def accept(reader, writer):
+    # AIDEV-NOTE: tools.call может ждать обратной авторизации обработчика; общий бюджет дал бы взаимную блокировку.
+    personal_slots = asyncio.Semaphore(64)
+    async def accept(reader, writer, personal_only=False):
         try:
-            if slots.locked():
+            budget = personal_slots if personal_only else slots
+            if budget.locked():
                 return
-            async with slots:
+            async with budget:
                 uid = struct.unpack('3i', writer.get_extra_info('socket').getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[1]
                 raw = await asyncio.wait_for(reader.readline(), 5)
-                if len(raw) > MAX_FRAME or not raw.endswith(b'\n'):
+                if len(raw) > (8192 if personal_only else MAX_FRAME) or not raw.endswith(b'\n'):
                     raise ValueError('Frame too large')
+                try:
+                    header = json.loads(raw)
+                except (ValueError, UnicodeError):
+                    header = None
+                if personal_only and (not isinstance(header, dict) or header.get('method') not in ('dialogues.authorize', 'dialogues.summarize-stream')):
+                    raise PermissionError('Personal service operation denied')
+                if isinstance(header, dict) and header.get('method') == 'dialogues.summarize-stream':
+                    await broker.stream_dialogues_summary(uid, header, reader, writer)
+                    return
                 response = await rpc_frame(broker, uid, raw)
                 if response is None:
                     return
@@ -574,6 +698,25 @@ async def serve(config):
         path.unlink()
     server = await asyncio.start_unix_server(accept, path=str(path), limit=MAX_FRAME + 1)
     os.chmod(path, 0o666)
+    personal_server = None
+    personal_path = config.get('dialoguesSocketPath')
+    if personal_path:
+        personal_path = Path(personal_path)
+        parent = personal_path.parent
+        parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        for directory in (parent, *parent.parents):
+            meta = directory.lstat()
+            if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != 0 or meta.st_mode & 0o022:
+                raise PermissionError('Unsafe personal socket parent')
+        if personal_path.exists() or personal_path.is_symlink():
+            meta = personal_path.lstat()
+            if not stat.S_ISSOCK(meta.st_mode) or meta.st_uid != 0:
+                raise PermissionError('Foreign personal socket')
+            personal_path.unlink()
+        async def personal_accept(reader, writer):
+            await accept(reader, writer, True)
+        personal_server = await asyncio.start_unix_server(personal_accept, path=str(personal_path), limit=65537)
+        os.chmod(personal_path, 0o666)
     stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -584,6 +727,10 @@ async def serve(config):
     finally:
         server.close()
         await server.wait_closed()
+        if personal_server:
+            personal_server.close()
+            await personal_server.wait_closed()
+            personal_path.unlink(missing_ok=True)
         await control.close()
         if broker.login_state is not None:
             broker.login_state.close()

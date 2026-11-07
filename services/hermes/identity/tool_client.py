@@ -8,7 +8,7 @@ import struct
 import sys
 import uuid
 
-MAX_FRAME = 1024 * 1024
+MAX_FRAME = 2 * 1024 * 1024 + 65536
 
 
 def broker_call(method, params, *, path=None, timeout=120):

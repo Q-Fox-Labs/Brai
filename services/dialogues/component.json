@@ -12,7 +12,9 @@
     "services/dialogues/src/health.ts",
     "services/dialogues/src/stdio-proxy.ts",
     "services/dialogues/src/import.ts",
-    "services/dialogues/src/backfill.ts"
+    "services/dialogues/src/backfill.ts",
+    "services/dialogues/src/isolation-cli.ts",
+    "services/dialogues/src/summary-worker.ts"
   ],
   "inputs": {
     "build": [
@@ -48,7 +50,11 @@
       "services/dialogues/src/context.ts",
       "services/dialogues/src/exchange.ts",
       "services/dialogues/src/jobs.ts",
-      "services/dialogues/src/luna.ts"
+      "services/dialogues/src/luna.ts",
+      "services/dialogues/src/isolation-cli.ts",
+      "services/dialogues/src/summary-worker.ts",
+      "services/dialogues/src/personal-summary.ts",
+      "services/dialogues/src/personal-summary-stream.ts"
     ],
     "checks": [
       "services/dialogues/tests/domain.test.mjs",
@@ -66,7 +72,10 @@
       "services/dialogues/tests/proxy-recovery.test.mjs",
       "services/dialogues/tests/luna.test.mjs",
       "services/dialogues/tests/context-pages.test.mjs",
-      "services/dialogues/tests/fence-http.test.mjs"
+      "services/dialogues/tests/fence-http.test.mjs",
+      "services/dialogues/tests/personal-summary.test.mjs",
+      "services/dialogues/tests/personal-stack.integration.test.mjs",
+      "services/dialogues/tests/personal-summary-stream.test.mjs"
     ]
   },
   "dependencies": [],
@@ -88,7 +97,9 @@
       "services/dialogues/dist/health.js",
       "services/dialogues/dist/stdio-proxy.js",
       "services/dialogues/dist/import.js",
-      "services/dialogues/dist/backfill.js"
+      "services/dialogues/dist/backfill.js",
+      "services/dialogues/dist/isolation-cli.js",
+      "services/dialogues/dist/summary-worker.js"
     ],
     "smokeImports": [],
     "systemRequirements": [
