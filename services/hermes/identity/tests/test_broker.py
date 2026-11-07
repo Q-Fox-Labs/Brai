@@ -550,6 +550,32 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             await self.broker.call(WORKER_UID, 'files.configuration', {})
 
+    async def test_control_reserves_authorization_capacity_when_tool_calls_are_full(self):
+        control = broker_module.ControlPort([], '/unused')
+        class Input:
+            def write(self, _payload):
+                pass
+            async def drain(self):
+                pass
+        control.process = SimpleNamespace(returncode=None, stdin=Input())
+        tools = [asyncio.create_task(control.call('tools.call', {'uid': i})) for i in range(32)]
+        await asyncio.sleep(0)
+        try:
+            self.assertEqual(len(control.pending), 32)
+            with self.assertRaises(ConnectionError):
+                await control.call('tools.call', {})
+            authorization = asyncio.create_task(control.call('authorize', {'uid': WORKER_UID}))
+            await asyncio.sleep(0)
+            self.assertEqual(len(control.pending), 33)
+            control.pending[control.counter].set_result({'allowed': True})
+            self.assertEqual(await authorization, {'allowed': True})
+            self.assertEqual(control.pending_budgets[True], 0)
+        finally:
+            for task in tools:
+                task.cancel()
+            await asyncio.gather(*tools, return_exceptions=True)
+        self.assertEqual(control.pending_budgets, {False: 0, True: 0})
+
     async def test_late_control_response_does_not_break_current_request(self):
         control = broker_module.ControlPort([], '/unused')
         reader = asyncio.StreamReader()

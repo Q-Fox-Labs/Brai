@@ -55,7 +55,7 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
   }
   const http=createServer(async(req,res)=>{
     try {
-      if(req.url==="/health"&&req.method==="GET"){res.writeHead(200,{"content-type":"application/json"}).end('{"ready":true}');return;}
+      if(req.url==="/health"&&req.method==="GET"){res.writeHead(200,{"content-type":"application/json"}).end(JSON.stringify({ready:true,tools:toolDefinitions.map(tool=>tool.name)}));return;}
       if(req.url!=="/mcp"){res.writeHead(404).end();return;}
       const supplied=Buffer.from(req.headers.authorization??"");
       const matches=(token:string)=>{const expected=Buffer.from("Bearer "+token);return supplied.length===expected.length&&timingSafeEqual(supplied,expected);};

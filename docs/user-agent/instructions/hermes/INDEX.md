@@ -12,6 +12,7 @@ SOUL.md — штатная точка входа Hermes. В начале сес�
 | Изменение инструкций, промпта, навыка или персональной замены | [INSTRUCTION_CHANGES.md](policies/INSTRUCTION_CHANGES.md) |
 | Установка ПО, настройка системы и служб | [SYSTEM_OPERATIONS.md](policies/SYSTEM_OPERATIONS.md) |
 | Использование имени или представление от лица владельца | [OWNER_IDENTITY.md](policies/OWNER_IDENTITY.md) |
+| Каждый публичный ход при подключённых Диалогах | [DIALOGUES.md](policies/DIALOGUES.md) |
 | Запись, исправление, удаление или передача памяти | [MEMORY_POLICY.md](policies/MEMORY_POLICY.md) |
 | Pause/resume памяти, SQL-права или восстановление | [MEMORY_OPERATIONS.md](policies/MEMORY_OPERATIONS.md) |
 | Приём и хранение секретов, форма Telegram | [SECRETS.md](policies/SECRETS.md) |

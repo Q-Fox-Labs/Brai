@@ -13,6 +13,7 @@ import socket
 import sqlite3
 import stat
 import struct
+import sys
 import uuid
 
 from .memory_registry import load_registry
@@ -131,6 +132,7 @@ class ControlPort:
         self.command, self.config = command, config
         self.process = self.reader = None
         self.pending = {}
+        self.pending_budgets = {False: 0, True: 0}
         self.write_lock = asyncio.Lock()
         self.counter = 0
 
@@ -170,8 +172,12 @@ class ControlPort:
 
     async def call(self, method, params, timeout=35):
         """Послать один вызов с ограниченным сроком и без повтора."""
-        if not self.process or self.process.returncode is not None or len(self.pending) >= 32:
+        authorization = method == 'authorize'
+        # AIDEV-NOTE: Ожидающие tools.call требуют обратного Auth; его ёмкость резервируется отдельно.
+        if (not self.process or self.process.returncode is not None
+                or self.pending_budgets[authorization] >= (96 if authorization else 32)):
             raise ConnectionError('Control unavailable')
+        self.pending_budgets[authorization] += 1
         self.counter += 1
         request_id = self.counter
         future = asyncio.get_running_loop().create_future()
@@ -184,6 +190,7 @@ class ControlPort:
             return await asyncio.wait_for(future, timeout)
         finally:
             self.pending.pop(request_id, None)
+            self.pending_budgets[authorization] -= 1
 
     async def close(self):
         """Завершить дочерний процесс вместе с broker."""
@@ -662,6 +669,7 @@ async def serve(config):
         try:
             budget = personal_slots if personal_only else slots
             if budget.locked():
+                sys.stderr.write(json.dumps({'event': 'identity_connection_rejected', 'code': 'CAPACITY', 'personal': personal_only}) + '\n')
                 return
             async with budget:
                 uid = struct.unpack('3i', writer.get_extra_info('socket').getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[1]
@@ -685,8 +693,10 @@ async def serve(config):
                     raise ValueError('Response too large')
                 writer.write(encoded)
                 await writer.drain()
-        except (Exception, asyncio.CancelledError):
+        except asyncio.CancelledError:
             pass
+        except Exception as error:
+            sys.stderr.write(json.dumps({'event': 'identity_connection_rejected', 'code': type(error).__name__, 'personal': personal_only}) + '\n')
         finally:
             writer.close()
             with contextlib.suppress(Exception):
