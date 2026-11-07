@@ -73,6 +73,39 @@ test('потеря PubAck или LocalAI ответа даёт неизвест�
   assert.equal(publishes, 1); assert.equal(requests, 1);
 });
 
+test('личный STT доступен в настоящем каталоге и передаёт Local AI только доверенного owner', async () => {
+  const args = { requestId: ids[0], operationId: ids[1], model: { modelId: 'gigaam-v3-e2e-ctc', revision: 'pinned', profileId: 'gigaam_pytorch' },
+    audioArtifactId: ids[4], deadlineAt: '2026-11-07T12:00:00.000Z' };
+  const result = { requestId: args.requestId, operationId: args.operationId, model: args.model,
+    text: 'Контрольное голосовое.', segments: null, durationMs: 12 };
+  let requested = 0;
+  const { ports } = fixture({ request: async (subject, payload, signal, timeout) => {
+    requested++;
+    assert.equal(subject, 'brai.local_ai.v1.invoke.transcribe');
+    assert.deepEqual(payload, { ...args, ownerId: owner });
+    assert.equal(payload.deadlineAt, args.deadlineAt);
+    assert.ok(timeout > 0 && timeout <= 300_000);
+    return result;
+  } });
+  const runtime = await createBraiTools(config, ports);
+  assert.ok(runtime.tools.some(tool => tool.name === 'local_ai_invoke_transcribe'));
+  assert.deepEqual(await runtime.call('local_ai_invoke_transcribe', args), result);
+  await assert.rejects(runtime.call('local_ai_invoke_transcribe', { ...args, ownerId: 'foreign' }), /INVALID_ARGUMENT/);
+  await assert.rejects(runtime.call('local_ai_invoke_transcribe', { ...args, audioArtifactId: '/tmp/local.ogg' }), /INVALID_ARGUMENT/);
+  assert.equal(requested, 1);
+});
+
+test('потерянный ответ личного STT не запускает повтор распознавания', async () => {
+  let requests = 0;
+  const { ports } = fixture({ request: async () => { requests++; throw fault('TIMEOUT'); } });
+  const runtime = await createBraiTools(config, ports);
+  await assert.rejects(runtime.call('local_ai_invoke_transcribe', { requestId: ids[0], operationId: ids[1],
+    model: { modelId: 'gigaam-v3-e2e-ctc', revision: 'pinned', profileId: 'gigaam_pytorch' },
+    audioArtifactId: ids[4], deadlineAt: '2026-11-07T12:00:00.000Z' }),
+    error => error.code === 'OUTCOME_UNKNOWN' && error.requestId === ids[0]);
+  assert.equal(requests, 1);
+});
+
 test('History читает user scope, не выставляет административные MCP операции', async () => {
   const { ports, calls } = fixture({ request: async (subject, payload) => { calls.push({ subject, payload }); return { items: [], next_cursor: null }; } });
   const runtime = await createBraiTools(config, ports);
