@@ -295,3 +295,13 @@
      from hermes_cli.left_core_migration import recover_at_startup
      from hermes_constants import get_default_hermes_root, get_hermes_home
      recover_at_startup()
+--- a/hermes_constants.py
++++ b/hermes_constants.py
+@@ -617,3 +617,7 @@
+         return
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        from identity.permissions import secure_profile_parent
++        if secure_profile_parent(parent):
++            return
+     with contextlib.suppress(OSError):
+         os.chmod(parent, 0o700)
