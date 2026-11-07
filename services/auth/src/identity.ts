@@ -2,7 +2,7 @@
 // ABOUTME: Доверенный запрос не может создать первого администратора по сети.
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import { lifecycleLock } from "./lifecycle.js";
+import { lifecycleLock, requestLifecycle } from "./lifecycle.js";
 import type { IdentityUser, ProvisionRequest } from "./identity-types.js";
 
 const selectUser=`SELECT u.id,u.name,i.role,i.status,i.telegram_id AS "telegramId",i.profile_id AS "profileId"
@@ -71,9 +71,22 @@ export async function redeemInvite(pool:Pool,secret:string,telegramId:string,cod
    const refreshed:IdentityUser|undefined=current.rows[0];
    return refreshed&&refreshed.status!=='blocked'&&refreshed.profileId?refreshed:null;
   };
+  const queueProfile=async(user:IdentityUser):Promise<IdentityUser|null>=>{
+   if(user.status!=='provisioning')return user;
+   const latest=(await client.query('SELECT request_id,kind,state FROM brai_user_operation WHERE user_id=$1 ORDER BY generation DESC LIMIT 1',[user.id])).rows[0];
+   if(latest&&latest.kind==='prepare'&&['pending','running'].includes(latest.state))return user;
+   const prefix='invite:'+invite.rows[0].id+':';
+   // AIDEV-NOTE: Старое приглашение не отменяет terminal admin-решение или чужую ошибку.
+   if(latest&&!(latest.state==='failed'&&latest.request_id.startsWith(prefix)))return null;
+   const generation=(await client.query('SELECT lifecycle_generation FROM brai_identity WHERE user_id=$1',[user.id])).rows[0].lifecycle_generation+1;
+   const queued=await requestLifecycle(client,user.id,'invite-profile',{requestId:prefix+generation,userId:user.id});
+   if(queued.status!==200)throw new Error('Invite lifecycle unavailable');
+   return (await client.query(selectUser+' WHERE i.user_id=$1',[user.id])).rows[0]??null;
+  };
   if(invite.rows[0].consumed_by){
    const user=previous&&previous.id===invite.rows[0].consumed_by?await ensureProfile(previous):null;
-   await client.query("COMMIT");return user;
+   const queued=user?await queueProfile(user):null;
+   await client.query("COMMIT");return queued;
   }
   if((invite.rows[0].expires_at as Date).getTime()<=Date.now()){await client.query("COMMIT");return null;}
   let user=previous?await ensureProfile(previous):null;
@@ -85,7 +98,8 @@ export async function redeemInvite(pool:Pool,secret:string,telegramId:string,cod
    user={id,name:userName,role:"user",status:"provisioning",telegramId,profileId};
   }
   await client.query("UPDATE brai_invite SET consumed_at=now(),consumed_by=$2 WHERE id=$1",[invite.rows[0].id,user.id]);
-  await client.query("COMMIT");return user;
+  const queued=await queueProfile(user);
+  await client.query("COMMIT");return queued;
  }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
 }
 function asSyntheticEmail(id:string):string {

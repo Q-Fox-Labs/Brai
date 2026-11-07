@@ -67,7 +67,8 @@
       "services/auth/tests/v2.test.mjs",
       "services/auth/tests/service-data-scope.test.mjs",
       "services/auth/tests/lifecycle.test.mjs",
-      "services/auth/tests/integration/lifecycle.test.mjs"
+      "services/auth/tests/integration/lifecycle.test.mjs",
+      "services/auth/tests/integration/invite-lifecycle.test.mjs"
     ]
   },
   "dependencies": [],

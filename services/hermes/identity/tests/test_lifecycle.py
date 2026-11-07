@@ -79,5 +79,70 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(reply['error']['code'], -32601)
 
 
+class BootstrapAndInviteTests(unittest.IsolatedAsyncioTestCase):
+    """Старое приглашение не обходит очередь; restore открывает только startup config."""
+
+    def fixture(self, statuses):
+        from identity.broker import Broker
+        profile = {'userId': 'u', 'profileId': 'p', 'telegramId': '123',
+                   'status': 'active', 'home': '/unused'}
+        class Port:
+            def __init__(self):
+                self.calls = []
+                self.states = iter(statuses)
+                self.state = 'provisioning'
+            async def call(self, method, params, timeout=35):
+                self.calls.append(method)
+                if method == 'identity.invite-redeem':
+                    return {'user': {'id': 'u', 'profileId': 'p', 'telegramId': '123',
+                                     'status': 'provisioning'}}
+                if method == 'identity.resolve':
+                    self.state = next(self.states, self.state)
+                    return {'user': {'id': 'u', 'profileId': 'p', 'telegramId': '123',
+                                     'status': self.state}}
+                raise PermissionError('Tools require active Auth')
+        port = Port()
+        broker = Broker({'ingressUid': 995, 'registryPath': '/unused',
+                         'accessCommand': [sys.executable, '/unused/access.py']}, port)
+        broker.profiles = lambda: {1001: profile}
+        return broker, port
+
+    async def test_prepared_restore_bootstrap_is_not_data_or_tools_access(self):
+        from unittest.mock import AsyncMock
+        broker, port = self.fixture(['provisioning'])
+        prior = broker.profiles()[1001]
+        broker.profiles = lambda: {1001: {**prior, 'status': 'provisioning'}}
+        broker.files.configuration = AsyncMock(return_value={'ownerId': 'u'})
+        self.assertEqual(await broker.call(1001, 'files.configuration', {}), {'ownerId': 'u'})
+        with self.assertRaises(PermissionError):
+            await broker.call(1001, 'tools.list', {})
+        self.assertEqual(broker.files.configuration.await_count, 1)
+
+    async def test_blocked_profile_has_no_bootstrap_exemption(self):
+        from unittest.mock import AsyncMock
+        broker, port = self.fixture(['blocked'])
+        broker.files.configuration = AsyncMock()
+        with self.assertRaises(PermissionError):
+            await broker.call(1001, 'files.configuration', {})
+        broker.files.configuration.assert_not_called()
+
+    async def test_invitation_waits_for_queue_without_starting_another_installer(self):
+        from unittest.mock import AsyncMock, patch
+        broker, port = self.fixture(['provisioning', 'active', 'active'])
+        with patch('asyncio.create_subprocess_exec', side_effect=AssertionError('Legacy bypass')), \
+                patch('asyncio.sleep', new=AsyncMock()):
+            result = await broker.call(995, 'identity.invite-redeem', {
+                'telegramId': '123', 'code': 'synthetic'})
+        self.assertEqual(result['userId'], 'u')
+        self.assertNotIn('identity.profile-ready', port.calls)
+
+    async def test_revocation_aborts_waiting_invitation(self):
+        from unittest.mock import AsyncMock, patch
+        broker, port = self.fixture(['provisioning', 'blocked'])
+        with patch('asyncio.create_subprocess_exec', side_effect=AssertionError('Legacy bypass')), \
+                patch('asyncio.sleep', new=AsyncMock()), self.assertRaises(PermissionError):
+            await broker.call(995, 'identity.invite-redeem', {'telegramId': '123', 'code': 'synthetic'})
+
+
 if __name__ == '__main__':
     unittest.main()
