@@ -7,6 +7,31 @@
   },
   "methods": [
     {
+      "name": "dialogues.authorize",
+      "paramStructure": "by-name",
+      "description": "Служебный UID из SO_PEERCRED; актуальный Auth, без аргументов владельца.",
+      "params": [],
+      "result": {
+        "name": "principal",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "userId",
+            "profileId"
+          ],
+          "properties": {
+            "userId": {
+              "type": "string"
+            },
+            "profileId": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
       "name": "identity.resolve",
       "paramStructure": "by-name",
       "params": [

@@ -293,6 +293,7 @@
       "services/hermes/memos/tests/migration.test.mjs",
       "services/hermes/memos/tests/test_migration.py",
       "services/hermes/tests/network.test.mjs",
+      "services/hermes/tests/dialogues-service.test.mjs",
       "services/hermes/identity/tests/memory_gateway_cli.test.mjs",
       "services/hermes/identity/tests/profiles.test.mjs",
       "services/hermes/identity/tests/worker.test.mjs",

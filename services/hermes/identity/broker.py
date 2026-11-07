@@ -251,12 +251,36 @@ class Broker:
         """Сохранить внутренний порт публикации через owner-bound snapshot."""
         return await self.files.publish(uid, profile, params)
 
+    async def authorize_dialogues(self, peer_uid):
+        """Проверить UID обработчика и его неизменную связь с актуальным Auth."""
+        if peer_uid == 0 or peer_uid in self.profiles():
+            raise PermissionError('Separate service UID required')
+        path = self.config.get('dialoguesServicesPath')
+        if not isinstance(path, str):
+            raise PermissionError('Dialogues unavailable')
+        data = protected_json(path)
+        services = data.get('services') if isinstance(data, dict) and data.get('version') == 1 else None
+        binding = services.get(str(peer_uid)) if isinstance(services, dict) else None
+        if not isinstance(binding, dict) or set(binding) != {'workerUid', 'userId', 'profileId'}:
+            raise PermissionError('Unknown personal service')
+        uid = binding['workerUid']
+        if type(uid) is not int or uid <= 0 or uid == peer_uid:
+            raise PermissionError('Invalid personal service')
+        profile = await self.authorize(uid)
+        if any(profile.get(key) != binding[key] for key in ('userId', 'profileId')):
+            raise PermissionError('Service profile changed')
+        return {'userId': profile['userId'], 'profileId': profile['profileId']}
+
     async def call(self, peer_uid, method, params):
         """Принять один запрос; worker никогда не выбирает собственный UID или owner."""
         if not isinstance(params, dict):
             raise ValueError('Invalid params')
         ingress = peer_uid == self.config['ingressUid']
         trusted = peer_uid == 0
+        if method == 'dialogues.authorize':
+            if params:
+                raise ValueError('Service authorization has no arguments')
+            return await self.authorize_dialogues(peer_uid)
         if method == 'authorize' and trusted:
             try:
                 await self.authorize(params.get('uid'))
@@ -392,6 +416,7 @@ class Broker:
 # Только именованные параметры; worker никогда не передаёт свой UID или owner.
 PARAMETERS = {
     'authorize': ({'uid'}, set()),
+    'dialogues.authorize': (set(), set()),
     'identity.resolve': ({'telegramId'}, set()),
     'identity.invite-redeem': ({'telegramId', 'code'}, {'name'}),
     'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId', 'threadId'}),
