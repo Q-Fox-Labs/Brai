@@ -215,6 +215,10 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         'Environment=HTTP_PROXY=http://127.0.0.1:18080',
         'Environment=HTTPS_PROXY=http://127.0.0.1:18080',
         'Environment=BU_CDP_URL=http://127.0.0.1:19364',
+        # AIDEV-NOTE: HOME с UUID превышает AF_UNIX sun_path. /tmp отдельный у
+        # каждого worker; SHARED сохраняет отдельный сокет для каждого BU_NAME.
+        'Environment=BH_RUNTIME_DIR=/tmp/brai-browser',
+        'Environment=BH_RUNTIME_DIR_SHARED=1',
         'Environment=http_proxy=http://127.0.0.1:18080',
         'Environment=https_proxy=http://127.0.0.1:18080',
         'Environment=NO_PROXY=127.0.0.1,localhost',
