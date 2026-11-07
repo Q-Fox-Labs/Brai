@@ -373,7 +373,16 @@ class Boundary:
                 payload['mem_cube_id'] = physical
             with self.lock:
                 # add не обладает exactly-once: не повторяем после неизвестного ответа.
-                return client.request(path, payload)
+                result = client.request(path, payload)
+            rows = result.get('data')
+            if (not isinstance(rows, list) or not rows
+                    or any(not isinstance(row, dict) or row.get('cube_id') != physical
+                           or not isinstance(row.get('memory_id'), str) or not row['memory_id']
+                           for row in rows)):
+                raise Denied('UPSTREAM_SCOPE_MISMATCH')
+            # Вернуть тот же логический куб, который был разрешён на входе.
+            # Physical IDs остаются за границей личного шлюза.
+            return {**result, 'data': [{**row, 'cube_id': cube} for row in rows]}
         if path == '/product/delete_memory':
             if set(body) - {'user_id', 'mem_cube_id', 'memory_ids', 'writable_cube_ids', 'auto_cleanup_working'} or body.get('auto_cleanup_working', False) is not False:
                 raise Denied('INVALID_DELETE')
