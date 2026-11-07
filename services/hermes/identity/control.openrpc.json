@@ -228,6 +228,16 @@
             "minLength": 1,
             "maxLength": 4096
           }
+        },
+        {
+          "name": "threadId",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Тема исходного личного Telegram запроса; задаётся только доверенным ingress."
+          }
         }
       ],
       "result": {

@@ -188,8 +188,9 @@ export class Control {
   }
 
   /** Выдать код для UID и личного события, проверенных доверенным ingress. */
-  async sendLogin({ uid, telegramId, privateChat, requestId }) {
+  async sendLogin({ uid, telegramId, privateChat, requestId, threadId }) {
     if (!Number.isSafeInteger(uid) || uid <= 0 || !/^\d+$/.test(String(telegramId)) || privateChat !== true || !text(requestId) || typeof this.telegramSend !== 'function') return { status: 'denied' };
+    if (threadId !== undefined && (!Number.isSafeInteger(threadId) || threadId <= 0)) return { status: 'denied' };
     try {
       const registry = await this.registry();
       const profile = registry?.version === 1 && registry.profiles?.[String(uid)];
@@ -200,7 +201,7 @@ export class Control {
       const issued = await this.authCall('telegram-code-issue', { telegramId: String(telegramId), requestId });
       if (!/^[0-9A-HJKMNP-TV-Z]{12}$/.test(issued?.code ?? '') || issued.origin !== this.origin || !issued.expiresAt) return { status: 'unavailable' };
       const message = `Для входа откройте ${this.origin} и введите код: ${issued.code}. Код действует 120 секунд.`;
-      const receipt = await this.telegramSend({ telegramId: String(telegramId), message });
+      const receipt = await this.telegramSend({ telegramId: String(telegramId), message, ...(threadId === undefined ? {} : { threadId }) });
       return { status: receipt?.ok === true ? 'sent' : receipt?.ok === false ? 'failed' : 'unknown' };
     } catch { return { status: 'unknown' }; }
   }
@@ -441,10 +442,10 @@ export async function startControl(config, adapters = {}) {
   const registry = () => readProtectedJSON(config.registryPath);
   const memoryRead = createMemoryReader(config.memorySocket);
   const artifactsCall = createArtifactReader({ wire, internalBaseURL: config.artifactsInternalBaseURL });
-  const telegramSend = async ({ telegramId, message }) => {
+  const telegramSend = async ({ telegramId, message, threadId }) => {
     const response = await fetch(`https://api.telegram.org/bot${config.telegramToken}/sendMessage`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ chat_id: telegramId, text: message }), signal: AbortSignal.timeout(10000),
+      body: JSON.stringify({ chat_id: telegramId, text: message, ...(threadId === undefined ? {} : { message_thread_id: threadId }) }), signal: AbortSignal.timeout(10000),
     });
     if (response.status >= 500 || response.status === 429) return {};
     const value = await response.json();

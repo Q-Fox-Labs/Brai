@@ -47,6 +47,20 @@ test('login sends only to bound private owner and returns no secret', async () =
   assert.match(calls[2].message, /123456789ABC/);
 });
 
+test('login preserves trusted DM topic and rejects invalid topics before issuing a code', async () => {
+  for (const threadId of [0, -1, true, '73', null, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const { control, calls } = setup();
+    assert.deepEqual(await control.sendLogin({ uid: 1001, telegramId: '42', privateChat: true, requestId: 'r', threadId }), { status: 'denied' });
+    assert.equal(calls.length, 0);
+  }
+  const { control, calls } = setup();
+  assert.deepEqual(await control.sendLogin({ uid: 1001, telegramId: '42', privateChat: true, requestId: 'r', threadId: 73 }), { status: 'sent' });
+  assert.equal(calls[2].threadId, 73);
+  assert.equal(calls[2].telegramId, '42');
+  const failed = setup({ telegramSend: async () => ({ ok: false }) });
+  assert.deepEqual(await failed.control.sendLogin({ uid: 1001, telegramId: '42', privateChat: true, requestId: 'r', threadId: 73 }), { status: 'failed' });
+});
+
 test('tools require current identity and reject owner overrides', async () => {
   const calls = [];
   const { control } = setup({ toolCatalog: new Map([['timer_snapshot_get', () => true]]),
