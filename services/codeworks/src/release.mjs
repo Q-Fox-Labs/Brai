@@ -3,16 +3,26 @@
 import { Fault } from './errors.mjs';
 const waiting=(status,reason)=>({status,reason});
 function validatePR(p,w,leg,pr) {
-  if(!pr||!pr.body?.includes('Codeworks workspace '+w.id+';')||pr.head?.ref!==leg.branch||pr.base?.ref!==leg.target||pr.head?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||pr.base?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||(leg.pr_number&&pr.number!==leg.pr_number))throw new Fault('PR_IDENTITY_CONFLICT','PR identity differs from pinned intent.');
+  // AIDEV-NOTE: Владение хранится в Codeworks; body и title свободно редактируются.
+  if(!pr||!Number.isSafeInteger(pr.number)||pr.number<1||pr.head?.ref!==leg.branch||pr.base?.ref!==leg.target||pr.head?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||pr.base?.repo?.full_name?.toLowerCase()!==p.github.repository.toLowerCase()||(leg.pr_number&&pr.number!==leg.pr_number))throw new Fault('PR_IDENTITY_CONFLICT','PR identity differs from pinned intent.');
+}
+async function readPR(p,w,leg,github,pullRequests) {
+  const number=await pullRequests.get(p,w,leg);
+  if(number)leg.pr_number=number;
+  if(!leg.pr_number)return github.find(p,leg);
+  const pr=await github.get(p,leg.pr_number);
+  if(!pr)throw new Fault('PR_IDENTITY_CONFLICT','Bound PR is unavailable; a replacement is not permitted.');
+  return pr;
 }
 async function confirmPRHead(p,w,leg,pr,github,git) {
   validatePR(p,w,leg,pr);
+  const candidate={...leg,pr_number:pr.number};
   if(pr.head?.sha===leg.head)return {pr};
   if(await git.remote(p,leg.branch)!==leg.head)return {wait:waiting('awaiting_reconciliation','PR_HEAD_PENDING')};
   // AIDEV-NOTE: GitHub может отставать от подтверждённого push; идентичность проверяется при каждом чтении.
   for(let attempt=0;attempt<2;attempt++) {
     pr=await github.get(p,pr.number);
-    validatePR(p,w,leg,pr);
+    validatePR(p,w,candidate,pr);
     if(pr.head?.sha===leg.head)return {pr};
   }
   return {wait:waiting('awaiting_reconciliation','PR_HEAD_UNCONFIRMED')};
@@ -20,7 +30,7 @@ async function confirmPRHead(p,w,leg,pr,github,git) {
 /** Один проход; save фиксирует намерения до мутаций, evidence читает доверенную установку.
  * deploy(target,sha,proof,retryOf) возвращает {operation_id,status}; retryOf разрешает одну явную попытку.
  */
-export async function advanceRelease({project:p,workspace:w,operation:op,release}, {git,github,inspect,save,evidence,deploy,acquire,releaseLane=async()=>{},synchronizeCheckout=async()=>({state:'waiting',reason:'LOCAL_CHECKOUT_SYNC_REQUIRED'}),verifyEvidence=async()=>true,checkpoint=async()=>{}}) {
+export async function advanceRelease({project:p,workspace:w,operation:op,release}, {git,github,pullRequests,inspect,save,evidence,deploy,acquire,releaseLane=async()=>{},synchronizeCheckout=async()=>({state:'waiting',reason:'LOCAL_CHECKOUT_SYNC_REQUIRED'}),verifyEvidence=async()=>true,checkpoint=async()=>{}}) {
   if(!['feature','hotfix'].includes(w.kind))throw new Fault('INVALID_ARGUMENT');
   const queued=!!acquire;acquire??=async()=>true;
   const flow=release.details;
@@ -95,10 +105,10 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
         await mutation(leg,'push_attempted',()=>git.push(p,leg.branch,leg.head));
         if(await git.remote(p,leg.branch)!==leg.head)return waiting('awaiting_reconciliation','BRANCH_PUSH_UNCERTAIN');
       }
-      let pr=leg.pr_number?await github.get(p,leg.pr_number):await github.find(p,leg);
+      let pr=await readPR(p,w,leg,github,pullRequests);
       if(!pr){
         if(leg.pr_attempted){
-          const historical=await github.find(p,leg,{state:'all',workspaceId:w.id,head:leg.head});
+          const historical=await github.find(p,leg,{state:'all',head:leg.head});
           if(historical)validatePR(p,w,leg,historical);
           return waiting('awaiting_reconciliation','PR_CREATE_UNCERTAIN');
         }
@@ -106,6 +116,7 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
         await mutation(leg,'pr_attempted',async()=>{pr=await github.create(p,leg,marker);});
       }
       const confirmed=await confirmPRHead(p,w,leg,pr,github,git);if(confirmed.wait)return confirmed.wait;pr=confirmed.pr;
+      await pullRequests.bind(p,w,leg,pr);
       leg.pr_number=pr.number;leg.pr_url=pr.html_url;await persist();
       if(leg.merge_sha&&await git.verifyMerge(p,leg)){
         if(!pr.merged||pr.merge_commit_sha!==leg.merge_sha)return waiting('awaiting_reconciliation','GITHUB_MERGE_NOT_CONFIRMED');
@@ -149,7 +160,7 @@ export async function advanceRelease({project:p,workspace:w,operation:op,release
   return waiting('succeeded','VERIFIED_RELEASE_COMPLETED');
 }
 /** Публикует рабочую ветку и PR без принятия задачи, слияния и развёртывания. */
-export async function advanceSync({project:p,workspace:w,operation:op,details}, {git,github,inspect,save,checkpoint=async()=>{}}) {
+export async function advanceSync({project:p,workspace:w,operation:op,details}, {git,github,pullRequests,inspect,save,checkpoint=async()=>{}}) {
   if(!p.github)throw new Fault('CONFLICT','GitHub is not configured.');
   const current=await inspect(p,w),head=op.request.commit_sha;
   if(current.dirty||current.head!==head)throw new Fault('CONFLICT','Workspace changed during synchronization.');
@@ -161,10 +172,10 @@ export async function advanceSync({project:p,workspace:w,operation:op,details}, 
     await git.push(p,w.branch,head);await checkpoint('after-sync-push');
     if(await git.remote(p,w.branch)!==head)return waiting('awaiting_reconciliation','BRANCH_PUSH_UNCERTAIN');
   }
-  let pr=await github.find(p,leg);
+  let pr=await readPR(p,w,leg,github,pullRequests);
   if(!pr){
     if(leg.pr_attempted){
-      const historical=await github.find(p,leg,{state:'all',workspaceId:w.id,head:leg.head});
+      const historical=await github.find(p,leg,{state:'all',head:leg.head});
       if(historical)validatePR(p,w,leg,historical);
       return waiting('awaiting_reconciliation','PR_CREATE_UNCERTAIN');
     }
@@ -173,6 +184,7 @@ export async function advanceSync({project:p,workspace:w,operation:op,details}, 
   }
   const confirmed=await confirmPRHead(p,w,leg,pr,github,git);if(confirmed.wait)return confirmed.wait;pr=confirmed.pr;
   if(pr.state!=='open'||pr.merged)throw new Fault('CONFLICT','Working PR is already closed.');
+  await pullRequests.bind(p,w,leg,pr);
   leg.pr_number=pr.number;leg.pr_url=pr.html_url;await save(details);
   return waiting('succeeded','SYNCHRONIZED');
 }

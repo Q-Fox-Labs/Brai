@@ -2,7 +2,7 @@
 // ABOUTME: GitHub — явный double; source/target commits реальны, installed evidence создаёт только test verifier.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {writeFile,rm,lstat} from 'node:fs/promises';
+import {readFile,writeFile,rm,lstat} from 'node:fs/promises';
 import path from 'node:path';
 import {configured,setup} from './fixture.mjs';
 import {fixtureLifecycle,fixtureTimeout} from './fixture-lifecycle.mjs';
@@ -11,6 +11,7 @@ import {createFlowGit} from '../../src/git-flow.mjs';
 import {runOperation} from '../../src/worker.mjs';
 import {recordDeployment} from '../../src/deployment-evidence.mjs';
 import {createStore} from '../../src/storage.mjs';
+import {createPullRequests} from '../../src/pull-requests.mjs';
 const required_checks=[{name:'Codeworks components',app_id:42}];
 const ci={check_name:'Codeworks components',app_id:42,workflow_sha256:'a'.repeat(64),recipe_sha256:'b'.repeat(64)};
 const good=sha=>[{name:'Codeworks components',app_id:42,sha,status:'completed',conclusion:'success',ci_verified:true,ci_evidence:{head_sha:sha,run_id:'123',attempt:1,workflow:'.github/workflows/codeworks.yml',recipe:ci.recipe_sha256,composition_digest:'sha256:'+'c'.repeat(64),composition_reference:'ghcr.io/fixture/repository-components/release@sha256:'+'c'.repeat(64),url:'https://github.com/fixture/repository/actions/runs/123'}}];
@@ -164,6 +165,7 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
     let creates=0,pushes=0;
     const github={
       find:async()=>prs[0]??null,
+      get:async(_,number)=>prs.find(pr=>pr.number===number)??null,
       create:async(_,leg,body)=>{creates++;const pr={number:1,body,html_url:'https://github.com/fixture/repository/pull/1',state:'open',merged:false,head:{sha:leg.head,ref:leg.branch,repo:{full_name:p.github.repository}},base:{ref:leg.target,repo:{full_name:p.github.repository}}};prs.push(pr);return pr;},
       checks:async()=>assert.fail('sync must not request CI or deploy'),
     };
@@ -176,6 +178,45 @@ test('durable Git flow on PostgreSQL and real Git',{skip:!configured,timeout:fix
     assert.equal((await f.app.query('SELECT count(*)::int AS count FROM codeworks.releases WHERE workspace_id=$1',[w.id])).rows[0].count,0);
     assert.equal((await f.app.query('SELECT count(*)::int AS count FROM codeworks.deployments WHERE project_id=$1',[p.id])).rows[0].count,0);
     assert.deepEqual(await f.h.call('sync',request,'codex'),accepted);await run();assert.equal(pushes,1);assert.equal(creates,1);
+    const stored=(await f.app.query('SELECT * FROM codeworks.pull_requests WHERE workspace_id=$1',[w.id])).rows[0];
+    assert.equal(Number(stored.pr_number),1);assert.equal(stored.repository,p.github.repository);assert.equal(stored.branch,w.branch);assert.equal(stored.target,'dev');
+    await assert.rejects(f.app.query('UPDATE codeworks.pull_requests SET pr_number=2 WHERE workspace_id=$1',[w.id]),{code:'42501'});
+    prs[0].body='Полностью заменённое описание без маркера Codeworks';
+    const next=await f.h.call('sync',{...request,request_key:'sync-after-body-edit'},'codex');
+    const boundGitHub={...github,find:async()=>assert.fail('persisted binding must bypass search')};
+    await own.guard(()=>runOperation(f.app,next.operation_id,git,{allowedRepositories:[p.repo_path],flowGit:publishing,github:boundGitHub}))();
+    assert.equal((await op(p,next.operation_id)).status,'succeeded');assert.equal(creates,1);
+    const release=await f.h.call('release',{...request,request_key:'release-after-body-edit'},'codex');
+    const releaseGitHub={...boundGitHub,checks:async()=>[]};
+    await own.guard(()=>runOperation(f.app,release.operation_id,git,{allowedRepositories:[p.repo_path],flowGit:publishing,github:releaseGitHub}))();
+    assert.equal((await op(p,release.operation_id)).step,'HEAD_CHECKS_REQUIRED');
+    const releaseDetails=(await f.app.query('SELECT details FROM codeworks.releases WHERE operation_id=$1',[release.operation_id])).rows[0].details;
+    assert.equal(releaseDetails.primary.pr_number,1);assert.equal(creates,1);
+    const binding=createPullRequests(f.app),leg={branch:w.branch,target:'dev',pr_number:1};
+    await binding.bind(p,w,leg,prs[0]);
+    await assert.rejects(binding.bind(p,w,leg,{number:2}),{code:'PR_IDENTITY_CONFLICT'});
+    await assert.rejects(binding.get({...p,github:{...p.github,repository:'foreign/repository'}},w,leg),{code:'PR_IDENTITY_CONFLICT'});
+    await assert.rejects(binding.get(p,w,{...leg,branch:'feature/foreign'}),{code:'PR_IDENTITY_CONFLICT'});
+    await assert.rejects(binding.get(p,w,{...leg,pr_number:2}),{code:'PR_IDENTITY_CONFLICT'});
+    // AIDEV-NOTE: Транзакционный откат сохраняет исходную fixture; проверяется реальный SQL upgrade.
+    const migration=await readFile(new URL('../../migrations/015.sql',import.meta.url),'utf8'),owner=await f.owner.connect();
+    try {
+      for(const conflicting of [false,true]){
+        await owner.query('BEGIN');
+        try {
+          await owner.query('DROP TABLE codeworks.pull_requests');
+          if(conflicting)await owner.query("UPDATE codeworks.operations SET result=jsonb_set(result,'{primary,pr_number}','2') WHERE id=$1",[next.operation_id]);
+          if(conflicting)await assert.rejects(owner.query(migration),{code:'23505'});
+          else {
+            await owner.query(migration);
+            const restored=(await owner.query('SELECT pr_number FROM codeworks.pull_requests WHERE workspace_id=$1',[w.id])).rows[0];
+            assert.equal(Number(restored.pr_number),1);
+          }
+        }finally{await owner.query('ROLLBACK');}
+      }
+    }finally{owner.release();}
+
+
   });
   for(const mutation of ['dirty','changed-head'])await subtest('release rejects '+mutation+' after durable admission',async()=>{
     const p=await f.project({github:{repository:'fixture/repository',required_checks,ci}});
