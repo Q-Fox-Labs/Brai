@@ -153,6 +153,12 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
             'gateway.platforms.event': types.ModuleType('gateway.platforms.event'),
             'gateway.session': types.ModuleType('gateway.session'),
         }
+        from unittest.mock import AsyncMock, Mock
+        discovery = AsyncMock()
+        modules['gateway.run']._discover_gateway_mcp_tools = discovery
+        modules['tools.registry'] = types.ModuleType('tools.registry')
+        entry = Mock(return_value=object())
+        modules['tools.registry'].registry = SimpleNamespace(get_entry=entry)
         modules['gateway.run'].GatewayRunner = Runner
         modules['gateway.config'].Platform = Platform
         modules['gateway.config'].PlatformConfig = type('Config', (), {})
@@ -163,7 +169,14 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
         modules['gateway.session'].SessionSource = Source
         with patch.dict(sys.modules, modules):
             worker = Worker(os.getuid() + 1, 'owner', '123', publish)
+            entry.return_value = None
+            with self.assertRaisesRegex(RuntimeError, 'login tool unavailable'):
+                await worker.start(Rpc())
+            self.assertIsNone(worker.adapter)
+            entry.return_value = object()
             await worker.start(Rpc())
+            self.assertEqual(discovery.await_count, 2)
+            entry.assert_called_with('mcp__brai__brai_login')
             source = {'user_id':'123', 'platform':'telegram', 'chat_id':'x'}
             started = await worker.dispatch({'source':source, 'text':'hello', 'message_id':'1'}, 'owner')
             self.assertTrue(started['accepted'])

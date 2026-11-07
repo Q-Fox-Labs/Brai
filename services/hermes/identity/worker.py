@@ -57,6 +57,13 @@ class Worker:
         self.runner = self.runner_factory() if self.runner_factory else GatewayRunner()
         if getattr(self.runner.config, 'multiplex_profiles', False):
             raise RuntimeError('worker cannot multiplex profiles')
+        if self.runner_factory is None:
+            # Embedded runner не проходит через start_gateway, где native загружает MCP.
+            from gateway.run import _discover_gateway_mcp_tools
+            await _discover_gateway_mcp_tools(self.runner.config)
+            from tools.registry import registry
+            if registry.get_entry('mcp__brai__brai_login') is None:
+                raise RuntimeError('worker login tool unavailable')
         self.adapter = make_adapter(PlatformConfig(), Platform.TELEGRAM, peer, self.publish_file)
         self.adapter.gateway_runner = self.runner
         # Только вход, проверенный SO_PEERCRED и привязкой Telegram ID в dispatch.
