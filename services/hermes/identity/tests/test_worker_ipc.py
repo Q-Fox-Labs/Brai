@@ -2,6 +2,7 @@
 # ABOUTME: Тесты не обращаются к настоящему Telegram и пользовательской памяти.
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -155,6 +156,9 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
         }
         from unittest.mock import AsyncMock, Mock
         discovery = AsyncMock()
+        modules['hermes_cli'] = types.ModuleType('hermes_cli')
+        modules['hermes_cli.config'] = types.ModuleType('hermes_cli.config')
+        modules['hermes_cli.config'].load_config_readonly = lambda: json.loads((Path(os.environ['HERMES_HOME']) / 'config.yaml').read_text())
         modules['gateway.run']._discover_gateway_mcp_tools = discovery
         modules['tools.registry'] = types.ModuleType('tools.registry')
         entry = Mock(return_value=object())
@@ -180,7 +184,6 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
                 await worker.dispatch({'source':source, 'text':'hello', 'message_id':'0'}, 'owner')
             self.assertEqual(worker.adapter._session_tasks, {})
             entry.return_value = object()
-            import os
             with tempfile.TemporaryDirectory() as profile_home, patch.dict(os.environ, {'BRAI_DIALOGUES_REQUIRED': '1', 'HERMES_HOME': profile_home}):
                 path = Path(profile_home) / 'config.yaml'
                 path.write_text(json.dumps({'agent': {'system_prompt': 'incomplete'}}))

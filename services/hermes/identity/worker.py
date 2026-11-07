@@ -85,9 +85,8 @@ class Worker:
                 raise RpcError(-32603, 'Worker login tool unavailable')
             if os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1':
                 # Проверяется установленный файл профиля, который читает native GatewayRunner.
-                path = Path(os.environ['HERMES_HOME']) / 'config.yaml'
-                with path.open(encoding='utf-8') as source:
-                    prompt = json.load(source).get('agent', {}).get('system_prompt', '')
+                from hermes_cli.config import load_config_readonly
+                prompt = load_config_readonly().get('agent', {}).get('system_prompt', '')
                 if not all(value in prompt for value in ('mcp__brai__dialogues_exchange',
                         'mcp__brai__dialogues_context_ack', 'context_request_id', 'finish')):
                     raise RpcError(-32603, 'Worker Dialogues instruction unavailable')
