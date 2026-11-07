@@ -9,10 +9,12 @@ import { agentInstructions,toolDefinitions,invoke } from "./api.js";
 import { DialoguesFault,limits } from "./domain.js";
 import type { createStore } from "./store.js";
 type Session={server:Server;transport:StreamableHTTPServerTransport;touched:number};
-export type McpConfig={host:string;port:number;owner:string;hosts:string[];origins:string[];token:string};
+export type McpConfig={host:string;port:number;owner:string;hosts:string[];origins:string[];token:string;personal?:{userId:string;profileId:string;authorize:()=>Promise<void>;operatorToken?:string}};
 /** Запускает MCP; тесты могут использовать временный port=0. */
 export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfig,log:(entry:Record<string,unknown>)=>void=entry=>console.error(JSON.stringify(entry))) {
   if(!["127.0.0.1","::1","0.0.0.0"].includes(cfg.host)||!cfg.owner||!cfg.hosts.length||!cfg.origins.length||!/^[A-Za-z0-9_-]{32,128}$/.test(cfg.token))throw new Error("INVALID_MCP_CONFIG");
+  if(cfg.personal&&(!cfg.personal.userId||!cfg.personal.profileId||typeof cfg.personal.authorize!=='function'))throw new Error('INVALID_PERSONAL_BINDING');
+  if(cfg.personal?.operatorToken!==undefined&&(!/^[A-Za-z0-9_-]{32,128}$/.test(cfg.personal.operatorToken)||cfg.personal.operatorToken===cfg.token))throw new Error('INVALID_OPERATOR_TOKEN');
   const sessions=new Map<string,Session>(),pending=new Set<Session>();
   const safeId=(v:unknown)=>typeof v==='string'&&/^[A-Za-z0-9_.:/-]{1,256}$/.test(v)?v:undefined;
   function rejected(name:string,raw:any,diagnostic:Record<string,any>,started:number){
@@ -30,7 +32,10 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
     server.setRequestHandler(CallToolRequestSchema,async req=>{
       const started=Date.now();
       try {
+        await cfg.personal?.authorize();
         const result=await invoke(store,cfg.owner,req.params.name,req.params.arguments??{});
+        // AIDEV-NOTE: Поздний отказ может следовать за commit: исход не объявляется неприменённым.
+        await cfg.personal?.authorize();
         if(Buffer.byteLength(JSON.stringify(result))>65_024)throw new DialoguesFault("RESPONSE_TOO_LARGE");
         if(result.status==='rejected')rejected(req.params.name,req.params.arguments,{code:result.code,applied:false},started);
         return {content:[],structuredContent:result};
@@ -52,8 +57,14 @@ export async function startMcp(store:ReturnType<typeof createStore>,cfg:McpConfi
     try {
       if(req.url==="/health"&&req.method==="GET"){res.writeHead(200,{"content-type":"application/json"}).end('{"ready":true}');return;}
       if(req.url!=="/mcp"){res.writeHead(404).end();return;}
-      const supplied=Buffer.from(req.headers.authorization??""),expected=Buffer.from("Bearer "+cfg.token);
-      if(supplied.length!==expected.length||!timingSafeEqual(supplied,expected)){res.writeHead(401).end();return;}
+      const supplied=Buffer.from(req.headers.authorization??"");
+      const matches=(token:string)=>{const expected=Buffer.from("Bearer "+token);return supplied.length===expected.length&&timingSafeEqual(supplied,expected);};
+      const operator=cfg.personal?.operatorToken!==undefined&&matches(cfg.personal.operatorToken);
+      if(!matches(cfg.token)&&!operator){res.writeHead(401).end();return;}
+      if(cfg.personal){
+        if(!operator&&(req.headers['x-brai-user-id']!==cfg.personal.userId||req.headers['x-brai-profile-id']!==cfg.personal.profileId)){res.writeHead(403).end();return;}
+        try{await cfg.personal.authorize();}catch{res.writeHead(403).end();return;}
+      }
       let body:unknown;
       if(req.method==="POST") {
         const chunks:Buffer[]=[];let size=0;
