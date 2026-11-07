@@ -170,14 +170,19 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict(sys.modules, modules):
             worker = Worker(os.getuid() + 1, 'owner', '123', publish)
             entry.return_value = None
-            with self.assertRaisesRegex(RuntimeError, 'login tool unavailable'):
-                await worker.start(Rpc())
-            self.assertIsNone(worker.adapter)
-            entry.return_value = object()
             await worker.start(Rpc())
-            self.assertEqual(discovery.await_count, 2)
-            entry.assert_called_with('mcp__brai__brai_login')
+            self.assertTrue((await worker.health())['ready'])
+            discovery.assert_not_awaited()
+            with self.assertRaisesRegex(RpcError, 'login tool unavailable'):
+                await worker.health(require_tools=True)
             source = {'user_id':'123', 'platform':'telegram', 'chat_id':'x'}
+            with self.assertRaisesRegex(RpcError, 'login tool unavailable'):
+                await worker.dispatch({'source':source, 'text':'hello', 'message_id':'0'}, 'owner')
+            self.assertEqual(worker.adapter._session_tasks, {})
+            entry.return_value = object()
+            self.assertTrue((await worker.health(require_tools=True))['ready'])
+            self.assertEqual(discovery.await_count, 3)
+            entry.assert_called_with('mcp__brai__brai_login')
             started = await worker.dispatch({'source':source, 'text':'hello', 'message_id':'1'}, 'owner')
             self.assertTrue(started['accepted'])
             self.assertTrue((await worker.dispatch({'source':source, 'text':'steer', 'message_id':'2'}, 'owner'))['accepted'])
@@ -185,6 +190,7 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await worker.cancel(started['turn_id'], 'owner'))['state'], 'stopped')
             receipt = await worker.adapter.send('x', 'text')
             self.assertTrue(receipt.success)
+            self.assertEqual(discovery.await_count, 3)
             with self.assertRaises(RpcError):
                 await worker.dispatch({'source':dict(source, user_id='999'), 'text':'bad', 'message_id':'3'}, 'owner')
 

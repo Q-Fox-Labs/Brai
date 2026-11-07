@@ -29,6 +29,8 @@ class Worker:
         self.runner_factory = runner_factory
         self.peer = self.runner = self.adapter = None
         self.active = {}
+        self.tools_ready = False
+        self.tools_lock = asyncio.Lock()
 
     async def serve_connection(self, reader, writer):
         """Проверить SO_PEERCRED и обслуживать один ingress; остальные отклонить."""
@@ -57,13 +59,7 @@ class Worker:
         self.runner = self.runner_factory() if self.runner_factory else GatewayRunner()
         if getattr(self.runner.config, 'multiplex_profiles', False):
             raise RuntimeError('worker cannot multiplex profiles')
-        if self.runner_factory is None:
-            # Embedded runner не проходит через start_gateway, где native загружает MCP.
-            from gateway.run import _discover_gateway_mcp_tools
-            await _discover_gateway_mcp_tools(self.runner.config)
-            from tools.registry import registry
-            if registry.get_entry('mcp__brai__brai_login') is None:
-                raise RuntimeError('worker login tool unavailable')
+        self.tools_ready = False
         self.adapter = make_adapter(PlatformConfig(), Platform.TELEGRAM, peer, self.publish_file)
         self.adapter.gateway_runner = self.runner
         # Только вход, проверенный SO_PEERCRED и привязкой Telegram ID в dispatch.
@@ -75,10 +71,28 @@ class Worker:
         self.runner._publish_primary_adapter(Platform.TELEGRAM, self.adapter)
         self.runner.delivery_router.adapters = self.runner.adapters
 
-    async def health(self):
+    async def ensure_tools(self):
+        """Загрузить инструменты после Auth-активации и до первого принятого сообщения."""
+        if self.runner_factory is not None:
+            return
+        async with self.tools_lock:
+            if self.tools_ready:
+                return
+            from gateway.run import _discover_gateway_mcp_tools
+            await _discover_gateway_mcp_tools(self.runner.config)
+            from tools.registry import registry
+            if registry.get_entry('mcp__brai__brai_login') is None:
+                raise RpcError(-32603, 'Worker login tool unavailable')
+            self.tools_ready = True
+
+    async def health(self, require_tools=False):
         """Подтвердить готовность и привязку после полного запуска runner."""
+        if type(require_tools) is not bool:
+            raise RpcError(-32602, 'Invalid health check')
         if self.runner is None or self.adapter is None:
             raise RpcError(-32603, 'Worker not ready')
+        if require_tools:
+            await self.ensure_tools()
         return {'ready': True, 'userId': self.user_id, 'telegramId': self.telegram_id}
 
     async def dispatch(self, event, owner):
@@ -116,6 +130,7 @@ class Worker:
             raise RpcError(-32602, 'Message ID required')
         key = self.adapter._event_session_key(message)
         before = self.adapter._session_tasks.get(key)
+        await self.ensure_tools()
         await self.adapter.handle_message(message)
         task = self.adapter._session_tasks.get(key)
         token = None
