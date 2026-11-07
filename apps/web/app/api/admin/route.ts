@@ -8,8 +8,8 @@ import { readBoundedJson } from "@/server/request-body";
 import { readAdminPersonal } from "@/server/admin-personal";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-const reads = new Set(["users-list", "users-get", "invite-list", "admin-memory-list", "admin-memory-get", "admin-chats-list", "admin-chats-get", "admin-artifacts-list", "admin-artifacts-get", "admin-artifacts-download", "admin-personal-get"]);
-const writes = new Set(["role-set", "status-set", "sessions-revoke", "invite-create", "invite-revoke"]);
+const reads = new Set(["users-list", "users-get", "users-operation-get", "invite-list", "admin-memory-list", "admin-memory-get", "admin-chats-list", "admin-chats-get", "admin-artifacts-list", "admin-artifacts-get", "admin-artifacts-download", "admin-personal-get"]);
+const writes = new Set(["users-add", "users-revoke", "role-set", "status-set", "sessions-revoke", "invite-create", "invite-revoke"]);
 /** Выполняет операцию активного администратора без автоматического повтора. */
 async function handle(request: Request) {
  try {

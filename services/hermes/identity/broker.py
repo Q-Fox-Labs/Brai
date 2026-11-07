@@ -16,6 +16,7 @@ import struct
 import uuid
 
 from .memory_registry import load_registry
+from .lifecycle import LifecycleRunner
 try:
     from ..files.identity import OwnerFiles
 except ImportError:
@@ -518,6 +519,8 @@ async def serve(config):
     control = ControlPort(config['controlCommand'], config['controlConfigPath'])
     await control.start()
     broker = Broker(config, control)
+    lifecycle = (asyncio.create_task(LifecycleRunner(control, config['accessCommand']).run())
+                 if config.get('accessCommand') else None)
     slots = asyncio.Semaphore(32)
     async def accept(reader, writer):
         try:
@@ -559,6 +562,9 @@ async def serve(config):
     finally:
         server.close()
         await server.wait_closed()
+        if lifecycle is not None:
+            lifecycle.cancel()
+            await asyncio.gather(lifecycle, return_exceptions=True)
         await control.close()
         if broker.login_state is not None:
             broker.login_state.close()

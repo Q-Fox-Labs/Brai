@@ -38,9 +38,9 @@
 
 Первые пять subjects доступны только доверенному Telegram ingress через ACL, не браузеру и не web. Auth не отправляет сообщения в Telegram. Код — 12 случайных символов Crockford32; регистр и дефисы игнорируются. Срок — 120 секунд; новый код отменяет прежний. В БД хранится HMAC. Выдача ограничена тремя запросами за 60 секунд на пользователя; проверка ограничена по клиенту и глобально, без блокировки владельца подбираемого кода. Погашение одноразово и создаёт новую сессию через официальное расширение Better Auth. Origin и CSRF проверяются, JSON не содержит токен. `requestId` выдачи предназначен для корреляции; после неопределённого ответа новый запрос создаёт новый код.
 
-Provision идемпотентен по `requestId` и точным параметрам; конфликт повтора отклоняется. Telegram ID и profile ID уникальны. Доверенный вызов не может создать первого администратора. `profile-ready` активирует пользователя с совпадающей привязкой, кроме блокированного. Приглашение случайно, действительно 24 часа и хранится как HMAC; повторное погашение тем же отправителем возвращает созданного пользователя.
+Provision идемпотентен по `requestId` и точным параметрам; конфликт повтора отклоняется. Telegram ID и profile ID уникальны. Доверенный вызов не может создать первого администратора. `profile-ready` активирует пользователя с совпадающей привязкой, кроме блокированного. После первой административной lifecycle-операции этот путь больше не активирует provisioning: такая учётная запись активируется только подтверждением worker. Приглашение случайно, действительно 24 часа и хранится как HMAC; повторное погашение тем же отправителем возвращает созданного пользователя.
 
-Web операции принимают `{headers,body}` и возвращают `{status,body,setCookies}`; нужны активная admin-сессия и разрешённый Origin. `users-list` возвращает `{users}`, `users-get` с `{userId}` — `{user}`. `role-set` принимает `{userId,role}`, `status-set` — `{userId,status}`, `sessions-revoke` — `{userId}`. Последнего активного администратора нельзя заблокировать или понизить: 409 `{code:"LAST_ADMIN"}`. `invite-create` и `invite-list` с пустым body возвращают `{invite}` и `{invites}`; секрет `invite.code` виден только при создании. `invite-revoke` принимает `{inviteId}`. `admin-audit` принимает `{userId,action}`, где action — `memory.list`, `memory.read`, `chats.list`, `chats.read`, `artifacts.list`, `artifacts.read` либо `personal.read`, и возвращает `{auditId}`. Аудит хранит автора из сессии, цель и действие без содержимого и секретов; runtime не может изменять или удалять записи.
+Web операции принимают `{headers,body}` и возвращают `{status,body,setCookies}`; нужны активная admin-сессия и разрешённый Origin. `users-list` возвращает `{users}`, `users-get` с `{userId}` — `{user}`. `role-set` принимает `{userId,role}`, `status-set` — `{userId,status,requestId?}`, `sessions-revoke` — `{userId}`. Последнего активного администратора нельзя заблокировать или понизить: 409 `{code:"LAST_ADMIN"}`. `invite-create` и `invite-list` с пустым body возвращают `{invite}` и `{invites}`; секрет `invite.code` виден только при создании. `invite-revoke` принимает `{inviteId}`. `admin-audit` принимает `{userId,action}`, где action — `memory.list`, `memory.read`, `chats.list`, `chats.read`, `artifacts.list`, `artifacts.read` либо `personal.read`, и возвращает `{auditId}`. Аудит хранит автора из сессии, цель и действие без содержимого и секретов; runtime не может изменять или удалять записи.
 
 Первого владельца создаёт оператор после миграции командой `npm run bootstrap-owner --workspace=@brai/auth`. Через окружение передаются owner `AUTH_DATABASE_URL`, `AUTH_OWNER_ROLE` и `AUTH_BOOTSTRAP_FILE`. Последний указывает на принадлежащий процессу обычный JSON-файл с правами не шире 0600: `{telegramId,name,userId?,profileId?}`. С profileId владелец active, иначе provisioning до `profile-ready`. Повторная настройка запрещена; первый сетевой посетитель не становится владельцем. Данные пользователя не помещают в Git.
 
@@ -61,3 +61,35 @@ Web операции принимают `{headers,body}` и возвращают
 ## Одноразовый вход в превью
 
 SSO выключен без пары AUTH_SSO_HUB_ORIGIN и AUTH_SSO_PREVIEW_ORIGINS. Hub равен AUTH_ORIGIN; оба значения и каждый origin превью — точные HTTPS origin без пути и wildcard. Превью также входят в AUTH_TRUSTED_ORIGINS. Issue принимает cookie активной сессии hub и `{targetOrigin,challenge}`; ответ содержит `{ticket}`. Redeem принимает `{ticket,verifier,targetOrigin}` от соответствующего origin и возвращает `{success:true}` и host-only cookie той же сессии. Challenge — base64url без padding от SHA-256 UTF-8 строки verifier; verifier — base64url без padding от 32 случайных байт. Оба имеют 43 символа. Билет зашифрован, действует не более 60 секунд и используется один раз. Ошибки не возвращают секреты или cookie. Автоматически не повторять issue и redeem; после неопределённого redeem проверить session. Отзыв исходной сессии действует также для превью.
+
+## Очередь пользовательских окружений
+
+Web-команды используют оболочку `{headers,body}`, действующую admin-сессию и разрешённый Origin; ответ `{status,body,setCookies}`. DTO принадлежат JSON Schema.
+
+| Subject `brai.auth.v2.` | body | body ответа |
+| --- | --- | --- |
+| `users-add` | `{requestId,telegramId}` | `{user,operation}` |
+| `users-revoke` | `{requestId,userId}` | `{user,operation}` |
+| `users-operation-get` | `{requestId}` | `{operation,user?}`, operation null для неизвестного ID |
+
+Новый пользователь получает роль user, UUID userId и profileId, статус provisioning. Восстановление blocked сохраняет IDs, роль, имя и данные. Для active создание возвращает ту же учётную запись и завершённую операцию без подготовки. Отзыв сразу ставит blocked и удаляет сессии и коды входа в одной транзакции с аудитом. Последнего активного admin нельзя отозвать, понизить или перевести в provisioning: 409 LAST_ADMIN.
+
+`status-set` active/blocked проходит ту же очередь prepare/stop. provisioning также ставит prepare, но успешная подготовка сохраняет provisioning. Для надёжного повтора клиент передаёт requestId; старые клиенты без него получают новый ID на каждый вызов. `users-list` и `users-get` возвращают `user.lifecycle: {id,requestId,kind,state,errorCode}|null`. Отдельная operation содержит также userId и целочисленное generation. Состояния: pending, running, succeeded, failed, cancelled. LeaseToken в web-ответы не входит.
+
+RequestId уникален глобально. Повтор с тем же автором и параметрами возвращает прежнюю операцию, даже после более нового отзыва; другие параметры дают 409 REQUEST_CONFLICT. Старый запрос не создаёт новое поколение. Новое действие увеличивает поколение пользователя и отменяет его pending/running операции. Ошибка worker фиксирует failed; автоматического повтора failed нет, нужна новая команда администратора с новым requestId.
+
+Только доверенный lifecycle worker через отдельные NATS ACL вызывает:
+
+| Subject `brai.auth.v2.` | Запрос | Ответ |
+| --- | --- | --- |
+| `lifecycle-claim` | `{workerId}` | `{operation:null\|{id,requestId,userId,generation,kind,state,errorCode,leaseToken,user}}` |
+| `lifecycle-renew` | `{operationId,leaseToken}` | `{accepted}` |
+| `lifecycle-complete` | `{operationId,leaseToken,success,errorCode?}` | `{accepted,operation}` |
+
+kind — prepare либо stop. user содержит id,name,role,status,telegramId,profileId. Глобально выдаётся одна аренда на 45 секунд; worker продлевает её каждые 10 секунд. При потере аренды worker прекращает собственную работу. До её завершения или истечения следующая работа не выдаётся, включая отменённую операцию. Истечение позволяет повторить незавершённую работу с новым leaseToken. Эффекты worker обязаны быть идемпотентны; сеть не гарантирует однократное выполнение. Только актуальная running prepare с действующей арендой активирует provisioning после успеха; blocked не активируется. Устаревший или неверный lease получает accepted:false. stop сохраняет blocked. Подтверждение отменённой работы своим ещё действующим token освобождает аренду и возвращает accepted:false.
+
+errorCode — безопасная константа `[A-Z][A-Z0-9_]{0,63}`; вывод внешних команд, пути и секреты не передаются. Таймаут запроса 10 секунд. После неопределённой web-мутации опросить users-operation-get с прежним requestId или повторить те же параметры. После неопределённого claim подождать срок аренды; renew и complete допускают повтор, после принятого complete повтор получает accepted:false и текущее состояние. Внутренние subjects недоступны web-процессу.
+
+Данные очереди принадлежат Auth. Миграция добавляет поколение с начальным 0 без замены существующих IDs и таблицу brai_user_operation с комментариями. Обычный migrate предоставляет runtime DML на новую public-таблицу, сохраняя ограничения аудита и owner-only схемы.
+
+Каждая Telegram-сессия хранит brai_generation, совпадающее с текущим поколением доступа. После погашения кода сессия создаётся официальным Better Auth, затем Auth атомарно подтверждает то же active-поколение; старый код при гонке с revoke/restore не получает действительную сессию. Проверки текущей сессии и admin-действия сверяют поколение при каждом обращении. Миграция даёт существующим идентичностям и сессиям поколение 0. Добавление уже активного пользователя сохраняет существующие действующие сессии, переносит только совпадающее прежнее поколение и не восстанавливает устаревшие сессии.

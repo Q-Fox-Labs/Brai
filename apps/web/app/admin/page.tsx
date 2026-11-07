@@ -4,6 +4,7 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { loadAccountSession } from "@/server/account-session";
 import AdminScreen from "./screen";
+export const metadata = { title: "Админка · Brai" };
 /** Проверяет актуальную сессию до передачи административного экрана. */
 export default async function AdminPage() {
  const session = await loadAccountSession(await headers());

@@ -50,7 +50,8 @@
       "services/auth/src/v2.ts",
       "services/auth/contracts/service-data-scope.mjs",
       "services/auth/contracts/service-data-scope.d.mts",
-      "services/auth/contracts/PERSONAL_DATA.md"
+      "services/auth/contracts/PERSONAL_DATA.md",
+      "services/auth/src/lifecycle.ts"
     ],
     "checks": [
       "services/auth/tests/bridge.test.mjs",
@@ -64,7 +65,9 @@
       "services/auth/tests/integration/sso.test.mjs",
       "services/auth/tests/sso.test.mjs",
       "services/auth/tests/v2.test.mjs",
-      "services/auth/tests/service-data-scope.test.mjs"
+      "services/auth/tests/service-data-scope.test.mjs",
+      "services/auth/tests/lifecycle.test.mjs",
+      "services/auth/tests/integration/lifecycle.test.mjs"
     ]
   },
   "dependencies": [],
