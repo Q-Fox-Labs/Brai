@@ -72,6 +72,52 @@ class QualityContractTests(unittest.TestCase):
         self.assertEqual(float(request.get_header('X-memos-timeout-seconds')), timeout)
         self.assertEqual(request.get_header('X-memos-stage'), 'plan')
 
+    def test_subscription_router_uses_responses_and_preserves_schema_and_budget(self):
+        from io import BytesIO
+        self.router.config = {'base_url': 'http://127.0.0.1:18080/model/v1',
+                              'model': 'gpt-6.1-sol', 'transport': 'codex_responses'}
+        answer = {'goal': 'evidence', 'query': 'neutral'}
+        result = {'status': 'completed', 'output': [{'type': 'message', 'role': 'assistant',
+                  'content': [{'type': 'output_text', 'text': json.dumps(answer)}]}]}
+        stream = ('data: ' + json.dumps({'type': 'response.completed', 'response': result}) + '\n\n').encode()
+        calls = []
+        def opened(request, *, timeout):
+            calls.append((request, timeout))
+            return BytesIO(stream)
+        with patch.object(router_module.urllib.request.OpenerDirector, 'open', side_effect=opened):
+            with router_module.remaining_timeout.__globals__['recall_budget'](2):
+                self.assertEqual(self.router.plan('neutral'), answer)
+        self.assertEqual(len(calls), 1)
+        request, timeout = calls[0]
+        body = json.loads(request.data)
+        self.assertEqual(request.full_url, 'http://127.0.0.1:18080/model/v1/responses')
+        self.assertFalse(body['store'])
+        self.assertTrue(body['stream'])
+        self.assertTrue(body['instructions'])
+        self.assertEqual(body['text']['format']['type'], 'json_schema')
+        self.assertTrue(body['text']['format']['strict'])
+        self.assertTrue(0 < timeout <= 2)
+        self.assertEqual(request.get_header('X-memos-stage'), 'plan')
+        self.assertNotIn('temperature', body)
+        self.assertNotIn('messages', body)
+
+    def test_subscription_router_rejects_partial_failed_and_refused_results(self):
+        from io import BytesIO
+        self.router.config = {'base_url': 'http://127.0.0.1:18080/model/v1',
+                              'model': 'gpt-6.1-sol', 'transport': 'codex_responses'}
+        cases = [b'', b'data: {"type":"response.output_text.delta","delta":"{}"}\n\n']
+        for kind in ('error', 'response.failed', 'response.incomplete'):
+            cases.append(('data: ' + json.dumps({'type': kind}) + '\n\n').encode())
+        for output in ([], [{'type': 'message', 'role': 'assistant', 'content': [{'type': 'refusal', 'refusal': 'private'}]}]):
+            cases.append(('data: ' + json.dumps({'type': 'response.completed', 'response': {
+                'status': 'completed', 'output': output}}) + '\n\n').encode())
+        for stream in cases:
+            with self.subTest(stream=stream), patch.object(router_module.urllib.request.OpenerDirector, 'open',
+                    side_effect=lambda *a, **kw: BytesIO(stream)):
+                with self.assertRaises(router_module.MemOSError) as caught:
+                    self.router.plan('neutral')
+                self.assertNotIn('private', str(caught.exception))
+
     def test_long_plain_source_does_not_backtrack_for_a_document_path(self):
         self.assertEqual(router_module.document_references('x' * 100000 + ' report.pdf'), ['report.pdf'])
 
