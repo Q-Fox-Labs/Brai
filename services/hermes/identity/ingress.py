@@ -45,6 +45,9 @@ class Bridge:
         source = event.source
         if source.platform.value != 'telegram' or str(source.user_id) != self.telegram_id or source.is_bot:
             raise PermissionError('Event owner mismatch')
+        # Отказ подключения не должен занимать беседу или допускать input,
+        # который worker заведомо не сможет получить.
+        peer = await self.connect()
         data = await self.prepare_event(event)
         if not isinstance(data, dict):
             raise ValueError('Event preparation failed')
@@ -55,7 +58,6 @@ class Bridge:
         self.routes.add(route)
         if event.message_id:
             self.received.add((route, str(event.message_id)))
-        peer = await self.connect()
         self.dispatch_inflight += 1
         try:
             result = await peer.call('dispatch', {'event': data, 'owner': self.owner})
