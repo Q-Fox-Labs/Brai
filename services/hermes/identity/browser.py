@@ -32,7 +32,7 @@ def browser_unit(profile, *, chrome_root, instance='dev'):
         'Environment=HOME=' + home, 'Environment=TMPDIR=' + browser + '/tmp',
         'Environment=XDG_CACHE_HOME=' + browser + '/cache',
         'ExecStart=' + chrome + ' --headless=new --remote-debugging-address=127.0.0.1'
-        ' --remote-debugging-port=19364 --user-data-dir=' + browser + '/profile'
+        ' --force-prefers-reduced-motion --remote-debugging-port=19364 --user-data-dir=' + browser + '/profile'
         ' --no-first-run --no-default-browser-check --disable-background-networking'
         ' --disable-component-update --disable-sync --proxy-server=http://127.0.0.1:18080'
         ' --proxy-bypass-list=<-loopback> about:blank',
