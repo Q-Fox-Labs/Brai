@@ -311,7 +311,17 @@
     {
       "name": "health",
       "summary": "Проверить готовность runner и привязку; только подтверждённому UID ingress.",
-      "params": [],
+      "params": [
+        {
+          "name": "require_tools",
+          "required": false,
+          "schema": {
+            "type": "boolean",
+            "default": false
+          },
+          "description": "После активации Auth также загрузить MCP и проверить инструмент входа."
+        }
+      ],
       "result": {
         "name": "status",
         "schema": {
