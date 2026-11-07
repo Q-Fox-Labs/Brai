@@ -32,7 +32,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
     async def test_non_private_updates_are_ignored_before_broker_or_notice(self):
         for chat_type, chat_id in [('group', -10), ('supergroup', -100), ('channel', -100),
                                    ('private', 456), (None, 123)]:
-            for text in ['hello', '/start invite_abcdefghijklmnop']:
+            for text in ['hello', '/start invite_abcdefghijklmnop', '/link', '/unlink', '/start link_' + 'a' * 43]:
                 with self.subTest(chat_type=chat_type, text=text):
                     update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text=text),
                                 effective_user=NS(id=123, is_bot=False),
@@ -56,6 +56,44 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 broker.assert_not_awaited()
                 self.assertEqual(resolver.turns, {})
 
+    async def test_link_commands_are_private_transport_operations_without_agent_dispatch(self):
+        for text, method, result in [('/start link_' + 'a' * 43, 'identity.link-redeem', {'user': {'id': 'owner'}}),
+                                     ('/unlink', 'identity.unlink', {'unlinked': True})]:
+            with self.subTest(command=method):
+                update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text=text),
+                            effective_user=NS(id=456, is_bot=False), effective_chat=NS(id=456, type='private'))
+                adapter = NS(send=AsyncMock())
+                with patch.object(runtime, 'broker_call', AsyncMock(return_value=result)) as broker:
+                    self.assertFalse(await runtime.admit_update(update, adapter))
+                self.assertEqual(broker.await_count, 1)
+                self.assertEqual(broker.await_args.args[0], method)
+                self.assertEqual(broker.await_args.args[1]['telegramId'], '456')
+                adapter.send.assert_awaited_once()
+
+    async def test_malformed_link_secrets_never_reach_broker_or_agent(self):
+        for secret in ['short', 'a' * 44, 'a' * 43 + '\nextra']:
+            update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text='/start link_' + secret),
+                        effective_user=NS(id=456, is_bot=False), effective_chat=NS(id=456, type='private'))
+            adapter = NS(send=AsyncMock())
+            with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
+                self.assertFalse(await runtime.admit_update(update, adapter))
+            broker.assert_not_awaited()
+            self.assertNotIn(secret, adapter.send.await_args.args[1])
+
+    async def test_linked_accounts_share_worker_but_keep_separate_bridges(self):
+        resolver = runtime.Resolver(NS())
+        primary = {**profile(), 'primaryTelegramId': '123'}
+        alias = {**primary, 'telegramId': '456'}
+        with patch.object(runtime, 'broker_call', AsyncMock(side_effect=[primary, alias])):
+            first = await resolver(NS(user_id='123'))
+            second = await resolver(NS(user_id='456'))
+        self.assertEqual(first.worker_uid, second.worker_uid)
+        self.assertEqual(first.owner, second.owner)
+        self.assertEqual(second.worker_telegram_id, '123')
+        self.assertIs(first, second)
+        self.assertEqual(first.telegram_ids, {'123', '456'})
+        self.assertEqual(len(resolver.bridges), 1)
+
     async def test_dm_admission_registers_private_context(self):
         resolver = runtime.Resolver(NS())
         calls = []
@@ -69,6 +107,16 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         admission = next(params for method, params in calls if method == 'ingress.admit')
         self.assertIs(admission['privateChat'], True)
         self.assertEqual(admission['telegramId'], '123')
+
+    async def test_confirmation_flag_comes_from_trusted_current_user_text(self):
+        for text, expected in [('Подтверждаю привязку моего второго аккаунта', True), ('Да, подтверждаю', False), ('да', False), ('нет', False), ('В архиве было: да', False)]:
+            with self.subTest(text=text):
+                incoming = event()
+                incoming.text = text
+                broker = AsyncMock(side_effect=[{}, {'paths': ['/user/a']}])
+                with patch.object(runtime, 'broker_call', broker):
+                    await runtime.Resolver(NS()).prepare(profile(), incoming)
+                self.assertIs(broker.await_args_list[0].args[1]['linkConsent'], expected)
 
     async def test_dm_topic_is_passed_only_from_trusted_source(self):
         incoming = event()
@@ -90,6 +138,16 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
             result = await resolver.prepare(profile(), event())
         self.assertEqual(result['media_urls'], ['/user/a'])
         self.assertEqual(result['identity_inputs'], [{'path':'/user/a','itemId':'55:0','caption':'hello','groupId':'album'}])
+
+    async def test_response_cannot_cross_to_another_account_of_same_owner(self):
+        adapter = NS(send=AsyncMock())
+        resolver = runtime.Resolver(adapter)
+        resolver.turns[101] = {'id': 'current', 'route': ('456', '')}
+        with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
+            with self.assertRaisesRegex(PermissionError, 'outside current conversation'):
+                await resolver.deliver(profile(), 'owner', 'send', {'chat_id': '123', 'content': 'wrong chat'})
+        broker.assert_not_awaited()
+        adapter.send.assert_not_awaited()
 
     async def test_wrong_owner_is_rejected(self):
         resolver = runtime.Resolver(NS())

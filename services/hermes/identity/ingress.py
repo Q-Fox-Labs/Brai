@@ -11,11 +11,15 @@ _FILES = {'send_image_file', 'send_document', 'send_video', 'send_voice'}
 
 class Bridge:
     """Доверенный мост одного владельца к единственному системному UID."""
-    def __init__(self, owner, telegram_id, worker_uid, socket_path, deliver, prepare_event, on_turn_end=None, on_turn_start=None):
+    def __init__(self, owner, telegram_id, worker_uid, socket_path, deliver, prepare_event, on_turn_end=None, on_turn_start=None, worker_telegram_id=None):
         if not isinstance(owner, str) or not owner or not str(telegram_id).isdecimal() or type(worker_uid) is not int:
             raise ValueError('invalid worker binding')
         self.owner, self.telegram_id, self.worker_uid = owner, str(telegram_id), worker_uid
         self.socket_path, self.deliver, self.prepare_event = socket_path, deliver, prepare_event
+        self.telegram_ids = {str(telegram_id)}
+        self.worker_telegram_id = str(worker_telegram_id or telegram_id)
+        if not self.worker_telegram_id.isdecimal():
+            raise ValueError('invalid worker Telegram identity')
         self.on_turn_end = on_turn_end
         self.on_turn_start = on_turn_start
         self.known_turns, self.early_ends = set(), set()
@@ -43,7 +47,7 @@ class Bridge:
     async def dispatch(self, event):
         """Отправить ранее допущенное событие без общего transcript/history."""
         source = event.source
-        if source.platform.value != 'telegram' or str(source.user_id) != self.telegram_id or source.is_bot:
+        if source.platform.value != 'telegram' or str(source.user_id) not in self.telegram_ids or source.is_bot:
             raise PermissionError('Event owner mismatch')
         # Отказ подключения не должен занимать беседу или допускать input,
         # который worker заведомо не сможет получить.
@@ -52,6 +56,9 @@ class Bridge:
         if not isinstance(data, dict):
             raise ValueError('Event preparation failed')
         data['source'] = source.to_dict()
+        # AIDEV-NOTE: Внутри профиля автор канонический; исходный личный chat_id
+        # сохраняет Telegram-аккаунт и отдельную native session. Права задаёт Auth.
+        data['source']['user_id'] = self.worker_telegram_id
         # Не переносить текст другого пользователя или общий групповой контекст.
         data.pop('reply_to_text', None)
         route = (str(source.chat_id), str(source.thread_id or ''))

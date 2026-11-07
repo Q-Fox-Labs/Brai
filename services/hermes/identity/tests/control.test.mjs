@@ -47,6 +47,37 @@ test('login sends only to bound private owner and returns no secret', async () =
   assert.match(calls[2].message, /123456789ABC/);
 });
 
+test('linked account receives its own login code after Auth confirms canonical owner', async () => {
+  const { control, calls } = setup();
+  assert.deepEqual(await control.sendLogin({ uid: 1001, telegramId: '84', privateChat: true, requestId: 'alias' }), { status: 'sent' });
+  assert.equal(calls[2].telegramId, '84');
+  const foreign = setup({ authCall: async () => ({ user: { id: 'other', profileId: 'other', telegramId: '84', status: 'active' } }) });
+  assert.deepEqual(await foreign.control.sendLogin({ uid: 1001, telegramId: '84', privateChat: true, requestId: 'foreign' }), { status: 'denied' });
+  assert.equal(foreign.calls.length, 0);
+});
+
+test('account link warning precedes issue and secret is delivered only to source account', async () => {
+  const calls = [], delivered = [], secret = 'a'.repeat(43);
+  const authCall = async (operation, input) => {
+    calls.push(operation);
+    if (operation === 'telegram-resolve') return { user: { id: 'u1', profileId: 'p1', telegramId: '42', status: 'active' } };
+    if (operation === 'telegram-link-issue') return { code: secret, expiresAt: 'later' };
+  };
+  const { control } = setup({ authCall, telegramSend: async value => { delivered.push(value); return { ok: true }; } });
+  const input = { uid: 1001, telegramId: '84', threadId: 7 };
+  assert.deepEqual(await control.sendAccountLink({ ...input, phase: 'offer' }), { status: 'sent' });
+  assert.deepEqual(calls, ['telegram-resolve']);
+  assert.match(delivered[0].message, /всей вашей памяти/);
+  assert.match(delivered[0].message, /другому человеку/);
+  assert.match(delivered[0].message, /Подтверждаете/);
+  const result = await control.sendAccountLink({ ...input, phase: 'command' });
+  assert.deepEqual(result, { status: 'sent' });
+  assert.equal(JSON.stringify(result).includes(secret), false);
+  assert.equal(delivered[1].telegramId, '84');
+  assert.equal(delivered[1].threadId, 7);
+  assert.match(delivered[1].message, new RegExp('/start link_' + secret));
+});
+
 test('login preserves trusted DM topic and rejects invalid topics before issuing a code', async () => {
   for (const threadId of [0, -1, true, '73', null, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     const { control, calls } = setup();

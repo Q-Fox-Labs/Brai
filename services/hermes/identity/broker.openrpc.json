@@ -201,6 +201,23 @@
             "maximum": 9007199254740991,
             "description": "Тема исходного личного Telegram запроса; задаётся только доверенным ingress."
           }
+        },
+        {
+          "name": "linkConsent",
+          "required": false,
+          "description": "Computed only from the trusted new user message; never accepted from the model. Broker requires a pending delivered warning for that account and topic.",
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "name": "expectedUid",
+          "required": false,
+          "description": "Trusted ingress pins the resolved worker UID before admission; alias rebinding must fail before reserving another owner turn.",
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       ],
       "result": {
@@ -918,6 +935,143 @@
           "properties": {
             "status": {
               "type": "string"
+            },
+            "suppressFinal": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "identity.link-redeem",
+      "description": "Trusted ingress only. Personal Telegram account linking; never available to the model. No automatic mutation retry.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "code",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/TelegramResolveResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "identity.unlink",
+      "description": "Trusted ingress only. Personal Telegram account linking; never available to the model. No automatic mutation retry.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/TelegramUnlinkResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "telegram.link",
+      "description": "Agent account-link workflow. First send the full warning; require a new trusted confirmation in the same private account before command issuance. Secrets never enter worker. Unknown delivery is not retried.",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "status",
+            "phase",
+            "suppressFinal"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "sent",
+                "failed",
+                "unknown"
+              ]
+            },
+            "phase": {
+              "enum": [
+                "offer",
+                "command"
+              ]
             },
             "suppressFinal": {
               "type": "boolean"

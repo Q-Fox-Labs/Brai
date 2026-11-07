@@ -72,6 +72,29 @@ async def admit_update(update, adapter):
     telegram = str(getattr(user, 'id', ''))
     if not re.fullmatch(r'[1-9][0-9]{0,19}', telegram):
         return False
+    raw = (getattr(message, 'text', '') or '').strip()
+    link = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+link_(.*)', raw, flags=re.DOTALL)
+    if link:
+        if not re.fullmatch(r'[A-Za-z0-9_-]{43}', link[1]):
+            await adapter.send(telegram, 'Команда привязки неполная или неверная. Попросите агента подключить второй аккаунт и получите новую команду.')
+            return False
+        try:
+            result = await broker_call('identity.link-redeem', {'telegramId': telegram, 'code': link[1]})
+            text = ('Аккаунт подключён к вашему профилю. Память и файлы общие, беседа отдельная.'
+                    if result.get('user') else 'Не удалось привязать аккаунт. Код истёк, использован или аккаунт уже принадлежит другому профилю.')
+        except Exception:
+            text = 'Результат привязки не подтверждён. Напишите обычное сообщение, чтобы проверить доступ.'
+        await adapter.send(telegram, text)
+        return False
+    if re.fullmatch(r'/unlink(?:@[A-Za-z0-9_]+)?', raw):
+        try:
+            result = await broker_call('identity.unlink', {'telegramId': telegram})
+            text = ('Этот аккаунт отключён от профиля. Память и файлы сохранены; входы на сайт отозваны.'
+                    if result.get('unlinked') else 'Основной аккаунт отключить этой командой нельзя; доступ и данные сохранены.')
+        except Exception:
+            text = 'Результат отключения неизвестен. Проверьте доступ обычным сообщением.'
+        await adapter.send(telegram, text)
+        return False
     try:
         await broker_call('identity.resolve', {'telegramId': telegram})
         return True
@@ -115,7 +138,7 @@ class Resolver:
         uid = profile['uid']
         if uid not in self.bridges:
             async def prepare(event):
-                return await self.prepare(profile, event)
+                return await self.prepare({**profile, 'telegramId': str(event.source.user_id)}, event)
             async def deliver(owner, action, payload):
                 return await self.deliver(profile, owner, action, payload)
             async def started(turn_id):
@@ -125,13 +148,17 @@ class Resolver:
                 current['workerTurnId'] = turn_id
             async def ended(turn_id):
                 await self.end(profile, turn_id)
-            bridge = Bridge(profile['userId'], profile['telegramId'], uid, profile['workerSocket'],
-                            deliver, prepare, on_turn_start=started, on_turn_end=ended)
+            bridge = Bridge(profile['userId'], profile.get('primaryTelegramId', profile['telegramId']), uid, profile['workerSocket'],
+                            deliver, prepare, on_turn_start=started, on_turn_end=ended,
+                            worker_telegram_id=profile.get('primaryTelegramId', profile['telegramId']))
+            bridge.profile_id = profile.get('profileId')
             self.bridges[uid] = bridge
         bridge = self.bridges[uid]
-        if (bridge.owner != profile['userId'] or bridge.telegram_id != str(profile['telegramId'])
-                or bridge.worker_uid != uid or bridge.socket_path != profile['workerSocket']):
+        if (bridge.owner != profile['userId'] or bridge.profile_id != profile.get('profileId')
+                or bridge.worker_uid != uid or bridge.socket_path != profile['workerSocket']
+                or bridge.worker_telegram_id != str(profile.get('primaryTelegramId', profile['telegramId']))):
             raise PermissionError('Worker identity changed')
+        bridge.telegram_ids.add(str(profile['telegramId']))
         return bridge
 
     async def prepare(self, profile, event):
@@ -155,8 +182,10 @@ class Resolver:
                              for item in inputs]}
         input_id = hashlib.sha256(json.dumps(origin, ensure_ascii=False, sort_keys=True,
                                             separators=(',', ':')).encode()).hexdigest()
-        await broker_call('ingress.admit', {'inputId': input_id, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
+        await broker_call('ingress.admit', {'inputId': input_id, 'expectedUid': uid, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
             'privateChat': getattr(event.source, 'chat_type', '') == 'dm', 'turnId': turn['id'],
+            'linkConsent': (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!') in
+                ('подтверждаю привязку моего второго аккаунта',),
             **({'threadId': int(route[1])} if route[1] else {})})
         fields = ('text', 'user_name', 'message_id', 'media_urls', 'media_types',
                   'media_text_inlined', 'reply_to_message_id', 'reply_expected')
@@ -185,6 +214,11 @@ class Resolver:
         uid = profile['uid']
         if owner != profile['userId'] or uid not in self.turns:
             raise PermissionError('No active owner turn')
+        metadata = payload.get('metadata') or {}
+        route = (str(payload.get('chat_id') or ''),
+                 str(metadata.get('thread_id') or metadata.get('message_thread_id') or ''))
+        if route != self.turns[uid]['route']:
+            raise PermissionError('Delivery outside current conversation')
         state = await broker_call('ingress.status', {'uid': uid, 'turnId': self.turns[uid]['id']})
         if state.get('suppressFinal'):
             return {'success': True}

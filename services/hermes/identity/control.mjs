@@ -187,6 +187,29 @@ export class Control {
     return runtime.callTool(name, args, signal);
   }
 
+  /** Доставить неизменяемое предупреждение либо подтверждённую команду, не возвращая секрет модели. */
+  async sendAccountLink({ uid, telegramId, phase, threadId }) {
+    if (!Number.isSafeInteger(uid) || uid <= 0 || !/^[1-9][0-9]{0,19}$/.test(telegramId ?? '') ||
+        !['offer','command'].includes(phase) || typeof this.telegramSend !== 'function' ||
+        threadId !== undefined && (!Number.isSafeInteger(threadId) || threadId <= 0)) return { status: 'denied' };
+    try {
+      const data = await this.registry(), profile = data?.version === 1 && data.profiles?.[String(uid)];
+      const resolved = await this.authCall('telegram-resolve', { telegramId });
+      const user = resolved?.user;
+      if (!profile || profile.status !== 'active' || user?.status !== 'active' || user.id !== profile.userId ||
+          user.profileId !== profile.profileId || String(user.telegramId) !== String(profile.telegramId)) return { status: 'denied' };
+      let message = 'Можно подключить ваш второй личный Telegram-аккаунт к этому профилю. Он получит доступ ко всей вашей памяти, файлам и другим данным. Если передать команду другому человеку, он получит такой же доступ. Беседы останутся отдельными. Подтверждаете привязку своего личного второго аккаунта? Для подтверждения ответьте «Подтверждаю привязку моего второго аккаунта». Для отказа — «Нет».';
+      if (phase === 'command') {
+        const issued = await this.authCall('telegram-link-issue', { telegramId });
+        if (!/^[A-Za-z0-9_-]{43}$/.test(issued?.code ?? '')) return { status: 'unavailable' };
+        message = 'Отправьте эту команду этому же боту из своего второго личного Telegram-аккаунта:\n/start link_' + issued.code +
+          '\nКоманда действует 10 минут. Не передавайте её другим людям: выполнивший её получит доступ ко всей вашей памяти, файлам и данным.';
+      }
+      const receipt = await this.telegramSend({ telegramId, message, ...(threadId === undefined ? {} : { threadId }) });
+      return { status: receipt?.ok === true ? 'sent' : receipt?.ok === false ? 'failed' : 'unknown' };
+    } catch { return { status: 'unknown' }; }
+  }
+
   /** Выдать код для UID и личного события, проверенных доверенным ingress. */
   async sendLogin({ uid, telegramId, privateChat, requestId, threadId }) {
     if (!Number.isSafeInteger(uid) || uid <= 0 || !/^\d+$/.test(String(telegramId)) || privateChat !== true || !text(requestId) || typeof this.telegramSend !== 'function') return { status: 'denied' };
@@ -194,10 +217,10 @@ export class Control {
     try {
       const registry = await this.registry();
       const profile = registry?.version === 1 && registry.profiles?.[String(uid)];
-      if (!profile || profile.status !== 'active' || String(profile.telegramId) !== String(telegramId) || !text(profile.userId) || !text(profile.profileId)) return { status: 'denied' };
+      if (!profile || profile.status !== 'active' || !text(profile.userId) || !text(profile.profileId)) return { status: 'denied' };
       const resolved = await this.authCall('telegram-resolve', { telegramId: String(telegramId) });
       const user = resolved?.user;
-      if (!user || user.id !== profile.userId || user.profileId !== profile.profileId || user.status !== 'active' || String(user.telegramId) !== String(telegramId)) return { status: 'denied' };
+      if (!user || user.id !== profile.userId || user.profileId !== profile.profileId || user.status !== 'active' || String(user.telegramId) !== String(profile.telegramId)) return { status: 'denied' };
       const issued = await this.authCall('telegram-code-issue', { telegramId: String(telegramId), requestId });
       if (!/^[0-9A-HJKMNP-TV-Z]{12}$/.test(issued?.code ?? '') || issued.origin !== this.origin || !issued.expiresAt) return { status: 'unavailable' };
       const message = `Для входа откройте ${this.origin} и введите код: ${issued.code}. Код действует 120 секунд.`;
@@ -479,6 +502,13 @@ export async function startControl(config, adapters = {}) {
 export async function privateCall(runtime, method, params) {
   if (!object(params)) throw new Error('INVALID_ARGUMENT');
   const { control, authCall, registry } = runtime;
+  if (['identity.link-redeem','identity.unlink'].includes(method)) {
+    const fields = method === 'identity.link-redeem' ? ['telegramId','code'] : ['telegramId'];
+    if (Object.keys(params).some(key=>!fields.includes(key)) || !/^[1-9][0-9]{0,19}$/.test(params.telegramId ?? '') ||
+        method === 'identity.link-redeem' && !/^[A-Za-z0-9_-]{43}$/.test(params.code ?? '')) throw new Error('INVALID_ARGUMENT');
+    const operation = {'identity.link-redeem':'telegram-link-redeem','identity.unlink':'telegram-unlink'}[method];
+    return authCall(operation,params);
+  }
   if (method === 'identity.resolve') return authCall('telegram-resolve', { telegramId: params.telegramId });
   if (method === 'identity.invite-redeem') return authCall('invite-redeem', { telegramId: params.telegramId, code: params.code, ...(params.name === undefined ? {} : { name: params.name }) });
   if (method === 'identity.profile-ready') {
@@ -486,6 +516,10 @@ export async function privateCall(runtime, method, params) {
     return authCall('profile-ready',{userId:params.userId,profileId:params.profileId});
   }
   if (method === 'login.send') return control.sendLogin(params);
+  if (method === 'telegram.link') {
+    if (Object.keys(params).some(key=>!['uid','telegramId','phase','threadId'].includes(key))) throw new Error('INVALID_ARGUMENT');
+    return control.sendAccountLink(params);
+  }
   if (method === 'tools.call') return control.invokeTool(params.uid, params.name, params.args);
   if (method === 'tools.list') {
     const user = await privateCall(runtime, 'authorize', { uid: params.uid });

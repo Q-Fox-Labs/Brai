@@ -37,6 +37,7 @@ export async function adminAction(pool:Pool,secret:string,actor:string,operation
     if(count.rows[0].count<=1){await client.query("COMMIT");return {status:409,body:{code:"LAST_ADMIN"}};}
    }
    await client.query("UPDATE brai_identity SET role=$2,status=$3 WHERE user_id=$1",[target,nextRole,nextStatus]);
+   if(nextStatus!=="active")await client.query("DELETE FROM sys_telegram_link WHERE user_id=$1",[target]);
   }
   if(operation==="sessions-revoke")await client.query('DELETE FROM "session" WHERE "userId"=$1',[target]);
   if(operation==="invite-create"){

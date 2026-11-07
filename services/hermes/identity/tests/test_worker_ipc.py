@@ -224,6 +224,36 @@ class IngressInstallTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             await adapter._brai_identity_dispatch(event)
 
+class TelegramAccountsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_canonical_owner_and_original_account_routes_cross_ipc(self):
+        calls = []
+        async def prepare(event):
+            return {'text': 'hello', 'message_id': event.message_id}
+        class PeerStub:
+            async def call(self, method, params):
+                calls.append(params['event']['source'])
+                return {'accepted': True, 'turn_id': None}
+        class Source:
+            platform = SimpleNamespace(value='telegram')
+            is_bot, thread_id = False, None
+            def __init__(self, account):
+                self.user_id = self.chat_id = account
+            def to_dict(self):
+                return {'platform': 'telegram', 'user_id': self.user_id, 'chat_id': self.chat_id, 'chat_type': 'dm'}
+        bridges = []
+        for account in ['123', '456']:
+            bridge = Bridge('owner', account, 99, '/unused', None, prepare, worker_telegram_id='123')
+            async def connect():
+                return PeerStub()
+            bridge.connect = connect
+            await bridge.dispatch(SimpleNamespace(source=Source(account), message_id='1'))
+            bridges.append(bridge)
+        self.assertEqual([source['user_id'] for source in calls], ['123', '123'])
+        self.assertEqual([source['chat_id'] for source in calls], ['123', '456'])
+        with self.assertRaises(RpcError):
+            await bridges[0].send('send', {'chat_id': '456', 'content': 'wrong account'})
+
+
 class EndTurnTest(unittest.IsolatedAsyncioTestCase):
     async def test_early_completion_waits_for_known_turn(self):
         done = []

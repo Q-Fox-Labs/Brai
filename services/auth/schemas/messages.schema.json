@@ -227,6 +227,66 @@
     "AdminRoleRequest": {"type":"object","additionalProperties":false,"required":["headers","body"],"properties":{"headers":{"$ref":"#/definitions/Headers"},"body":{"type":"object","additionalProperties":false,"required":["userId","role"],"properties":{"userId":{"type":"string","minLength":1,"maxLength":128},"role":{"enum":["admin","user"]}}}}},
     "AdminStatusRequest": {"type":"object","additionalProperties":false,"required":["headers","body"],"properties":{"headers":{"$ref":"#/definitions/Headers"},"body":{"type":"object","additionalProperties":false,"required":["userId","status"],"properties":{"userId":{"type":"string","minLength":1,"maxLength":128},"status":{"enum":["provisioning","active","blocked"]}}}}},
     "AdminInviteRequest": {"type":"object","additionalProperties":false,"required":["headers","body"],"properties":{"headers":{"$ref":"#/definitions/Headers"},"body":{"type":"object","additionalProperties":false,"required":["inviteId"],"properties":{"inviteId":{"type":"string","minLength":1,"maxLength":128}}}}},
-    "AdminAuditRequest": {"type":"object","additionalProperties":false,"required":["headers","body"],"properties":{"headers":{"$ref":"#/definitions/Headers"},"body":{"type":"object","additionalProperties":false,"required":["userId","action"],"properties":{"userId":{"type":"string","minLength":1,"maxLength":128},"action":{"enum":["memory.list","memory.read","chats.list","chats.read","artifacts.list","artifacts.read"]}}}}}
+    "AdminAuditRequest": {"type":"object","additionalProperties":false,"required":["headers","body"],"properties":{"headers":{"$ref":"#/definitions/Headers"},"body":{"type":"object","additionalProperties":false,"required":["userId","action"],"properties":{"userId":{"type":"string","minLength":1,"maxLength":128},"action":{"enum":["memory.list","memory.read","chats.list","chats.read","artifacts.list","artifacts.read"]}}}}},
+    "TelegramLinkIssueRequest": {
+      "$ref": "#/definitions/TelegramResolveRequest"
+    },
+    "TelegramLinkRedeemRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "telegramId",
+        "code"
+      ],
+      "properties": {
+        "telegramId": {
+          "type": "string",
+          "pattern": "^[0-9]{1,20}$"
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        }
+      }
+    },
+    "TelegramUnlinkRequest": {
+      "$ref": "#/definitions/TelegramResolveRequest"
+    },
+    "TelegramLinkIssueResponse": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "expiresAt"
+          ],
+          "properties": {
+            "code": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{43}$"
+            },
+            "expiresAt": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "TelegramUnlinkResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unlinked"
+      ],
+      "properties": {
+        "unlinked": {
+          "type": "boolean"
+        }
+      }
+    }
   }
 }

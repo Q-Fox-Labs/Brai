@@ -5,7 +5,7 @@ import type { Pool } from "pg";
 import type { Config } from "./config.js";
 import { adminAction } from "./admin.js";
 import { issueCode } from "./login-code.js";
-import { profileReady, provision, redeemInvite, resolveTelegram } from "./identity.js";
+import { issueTelegramLink, profileReady, provision, redeemInvite, redeemTelegramLink, resolveTelegram, unlinkTelegram } from "./identity.js";
 
 const id=z.string().min(1).max(128);
 const telegramId=z.string().regex(/^[0-9]{1,20}$/);
@@ -13,6 +13,9 @@ const role=z.enum(["admin","user"]), status=z.enum(["provisioning","active","blo
 const headersSchema=z.strictObject({cookie:z.string().max(16384).optional(),origin:z.string().max(16384).optional(),"user-agent":z.string().max(16384).optional(),"x-forwarded-for":z.string().max(16384).optional(),"sec-fetch-site":z.string().max(16384).optional()});
 const trusted={
  "telegram-resolve":z.strictObject({telegramId}),
+ "telegram-link-issue":z.strictObject({telegramId}),
+ "telegram-link-redeem":z.strictObject({telegramId,code:z.string().regex(/^[A-Za-z0-9_-]{43}$/)}),
+ "telegram-unlink":z.strictObject({telegramId}),
  "telegram-code-issue":z.strictObject({telegramId,requestId:id}),
  "identity-provision":z.strictObject({requestId:id,telegramId,name:z.string().min(1).max(200).optional(),role,userId:id.optional(),profileId:id.optional(),status}),
  "profile-ready":z.strictObject({userId:id,profileId:id}),
@@ -40,6 +43,9 @@ export async function sessionIdentity(pool:Pool,cfg:Config,handler:Handler,heade
 /** Исполняет валидированный запрос; секреты не попадают в ошибки транспорта. */
 export async function v2(operation:string,input:unknown,cfg:Config,pool:Pool,handler:Handler) {
  if(cfg.identityMode!=="telegram")throw new Error("Invalid identity mode");
+ if(operation==="telegram-link-issue"){const data=parse(trusted[operation],input);return issueTelegramLink(pool,cfg.secret,data.telegramId);}
+ if(operation==="telegram-link-redeem"){const data=parse(trusted[operation],input);return {user:await redeemTelegramLink(pool,cfg.secret,data.telegramId,data.code)};}
+ if(operation==="telegram-unlink"){const data=parse(trusted[operation],input);return {unlinked:await unlinkTelegram(pool,data.telegramId)};}
  if(operation==="telegram-resolve"){const data=parse(trusted[operation],input);return {user:await resolveTelegram(pool,data.telegramId)};}
  if(operation==="telegram-code-issue"){const data=parse(trusted[operation],input);const code=await issueCode(pool,cfg.secret,data.telegramId);if(!code)throw new Error("Invalid request");return {...code,origin:cfg.origin};}
  if(operation==="identity-provision"){const data=parse(trusted[operation],input);if(data.status==="active"&&!data.profileId)throw new Error("Invalid request");return {user:await provision(pool,cfg.secret,data)};}

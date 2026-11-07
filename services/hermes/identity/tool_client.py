@@ -58,9 +58,11 @@ def handle(method, params):
         if not isinstance(result, dict) or not isinstance(result.get('tools'), list):
             raise RuntimeError('Broker tools unavailable')
         tools = result['tools']
-        if any(not isinstance(item, dict) or item.get('name') in ('brai_login', 'publish_file', 'fetch_file') for item in tools):
+        if any(not isinstance(item, dict) or item.get('name') in ('brai_login', 'brai_telegram_link_account', 'publish_file', 'fetch_file') for item in tools):
             raise RuntimeError('Invalid tool catalog')
         return {'tools': [*tools,
+                {'name': 'brai_telegram_link_account', 'description': 'Подключить второй личный Telegram-аккаунт владельца к этому профилю. Первый вызов отправляет объяснение: другой аккаунт получит всю память, файлы и данные; передача команды постороннему даст ему полный доступ. Запрашивает подтверждение пользователя. После нового явного подтверждения в этой личке вызови инструмент снова: одноразовая команда придёт отдельным сообщением. Не проси пользователя выполнять команды в основном аккаунте. Не выдавай команду до подтверждения; не повторяй отправку при неизвестном исходе. Беседы отдельные, память и файлы общие. После успешной доставки не добавляй ответ.',
+                 'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
                 {'name': 'brai_login', 'description': 'Вход в веб-интерфейс этой установки Brai (наш сайт). Только по явной просьбе владельца о входе в личном чате Telegram отправить одноразовый код и адрес сайта отдельным сообщением. Не ищи код на сайте и не проси искать кнопку. Код не показывается инструменту. После подтверждённой отправки не добавляй ответ.',
                  'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
                 {'name': 'publish_file', 'description': 'Опубликовать собственный готовый файл и получить ссылку.',
@@ -71,6 +73,15 @@ def handle(method, params):
         name, arguments = params.get('name'), params.get('arguments', {})
         if not isinstance(name, str) or not isinstance(arguments, dict):
             raise ValueError('Invalid tool call')
+        if name == 'brai_telegram_link_account':
+            if arguments:
+                raise ValueError('Account linking does not accept arguments')
+            response = broker_call('telegram.link', {})
+            if not isinstance(response, dict) or response.get('status') != 'sent' or response.get('suppressFinal') is not True:
+                return {'isError': True, 'content': [{'type': 'text', 'text': 'Доставка привязки не подтверждена. Не повторяй автоматически.'}]}
+            text = ('Предупреждение и вопрос о подтверждении уже отправлены. Дождись нового ответа пользователя.'
+                    if response.get('phase') == 'offer' else 'Одноразовая команда отправлена в исходную личку.')
+            return {'content': [{'type': 'text', 'text': text + ' Не отправляй дополнительный ответ.'}]}
         if name == 'brai_login':
             if arguments:
                 raise ValueError('Login does not accept arguments')

@@ -37,6 +37,10 @@ test("quarantine is an audit-only target for an active administrator",async()=>{
 
 test("published DTO schemas accept valid requests and reject extra fields",()=>{
  validate("TelegramResolveRequest",{telegramId:"123"});
+ validate("TelegramLinkRedeemRequest",{telegramId:"123",code:"a".repeat(43)});
+ validate("TelegramLinkIssueResponse",{code:"a".repeat(43),expiresAt:"2030-01-01"});
+ validate("TelegramUnlinkResponse",{unlinked:true});
+ assert.throws(()=>validate("TelegramLinkRedeemRequest",{telegramId:"123",code:"a".repeat(43),userId:"foreign"}),/Invalid/);
  validate("AdminEmptyRequest",{headers:{origin:cfg.origin},body:{}});
  validate("AdminRoleRequest",{headers:{origin:cfg.origin},body:{userId:"u1",role:"admin"}});
  assert.throws(()=>validate("TelegramResolveRequest",{telegramId:"123",role:"admin"}),/Invalid/);

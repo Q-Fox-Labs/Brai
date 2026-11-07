@@ -14,13 +14,15 @@ import { createAuth } from "../../dist/auth.js";
 import { migrateIdentity } from "../../dist/identity-schema.js";
 import { issueCode, consumeCode } from "../../dist/login-code.js";
 import { adminAction } from "../../dist/admin.js";
-import { provision, profileReady, redeemInvite } from "../../dist/identity.js";
+import { provision, profileReady, redeemInvite, resolveTelegram, issueTelegramLink, redeemTelegramLink, unlinkTelegram } from "../../dist/identity.js";
 
 const value=process.env.AUTH_TEST_OWNER_URL;
 if(!value)throw new Error("Explicit AUTH_TEST_OWNER_URL required");
 const url=new URL(value);
-if(url.pathname!=="/brai_auth_test"||url.hostname!=="127.0.0.1"||url.port!=="15459")throw new Error("Refusing non-fixture database");
+if(url.pathname!=="/brai_auth_test"||url.hostname!=="127.0.0.1"||!["15459","15463"].includes(url.port))throw new Error("Refusing non-fixture database");
 const pool=new Pool({connectionString:value});
+const appURL=new URL(value);appURL.username="auth_app";appURL.password="fixture-app";
+const runtime=new Pool({connectionString:appURL.href});
 const secret="fixture-auth-secret-32-characters-long";
 const cfg={origin:"https://fixture.example",trustedOrigins:["https://fixture.example"],secret,resendKey:"",emailFrom:"fixture@example.com"};
 test("registry, codes, invitations and last admin survive concurrent requests",async()=>{
@@ -33,6 +35,7 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
  try{
   await (await getMigrations(createAuth(cfg,pool).options)).runMigrations();
   await migrateIdentity(pool);await migrateIdentity(pool);
+  await run(process.execPath,[new URL("../../dist/migrate.js",import.meta.url).pathname],{env:{...process.env,AUTH_DATABASE_URL:value,AUTH_OWNER_ROLE:"auth_owner",AUTH_APP_ROLE:"auth_app",AUTH_SECRET:secret,AUTH_ORIGIN:cfg.origin,AUTH_IDENTITY_MODE:"telegram"},timeout:30000});
   const owner=randomUUID(),name="Fixture owner";
   await pool.query('INSERT INTO "user"(id,name,email,"emailVerified","createdAt","updatedAt") VALUES($1,$2,$3,false,now(),now())',[owner,name,owner+"@fixture.example"]);
   const bootstrap={userId:owner,telegramId:'10001',name:'Different name'};
@@ -56,6 +59,48 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   assert.equal(results.filter(value=>value===user.id).length,1);
   assert.equal((await issueCode(pool,secret,"10002"))!==null,true);
   assert.equal(await issueCode(pool,secret,"10002"),null);
+  const multi=await provision(runtime,secret,{requestId:randomUUID(),telegramId:'10005',name:'Multiple accounts',role:'user',status:'active',profileId:'fixture-multiple'});
+  assert.equal(await issueTelegramLink(runtime,secret,'99999'),null);
+  const link=await issueTelegramLink(runtime,secret,'10005');
+  assert.match(link.code,/^[A-Za-z0-9_-]{43}$/);
+  assert.equal((await pool.query('SELECT digest FROM sys_telegram_link WHERE user_id=$1',[multi.id])).rows[0].digest.includes(link.code),false);
+  assert.equal(await redeemTelegramLink(runtime,secret,'10002',link.code),null);
+  assert.equal((await resolveTelegram(pool,'10002')).id,user.id);
+  const linked=await Promise.all(['20002','20003'].map(id=>redeemTelegramLink(runtime,secret,id,link.code)));
+  assert.equal(linked.filter(Boolean).length,1);
+  const alias=linked[0]?'20002':'20003';
+  assert.deepEqual(await resolveTelegram(pool,alias),multi);
+  assert.deepEqual(await redeemTelegramLink(runtime,secret,alias,link.code),multi);
+  assert.equal((await pool.query('SELECT count(*) FROM sys_telegram_account WHERE user_id=$1',[multi.id])).rows[0].count,'2');
+  await migrateIdentity(pool);
+  assert.deepEqual(await resolveTelegram(pool,alias),multi);
+  const aliasCode=await issueCode(runtime,secret,alias);
+  assert.equal(await consumeCode(pool,secret,aliasCode.code,'alias-client'),multi.id);
+  assert.ok(await issueCode(runtime,secret,'10005'));
+  assert.ok(await issueCode(runtime,secret,alias));
+  assert.equal(await issueCode(runtime,secret,'10005'),null);
+  assert.equal(await unlinkTelegram(runtime,'10005'),false);
+  await pool.query('INSERT INTO "session"(id,token,"userId","expiresAt","createdAt","updatedAt") VALUES($1,$2,$3,now()+interval \'1 hour\',now(),now())',[randomUUID(),'alias-session-fixture',multi.id]);
+  assert.equal(await unlinkTelegram(runtime,alias),true);
+  assert.equal(await resolveTelegram(pool,alias),null);
+  assert.equal(await redeemTelegramLink(runtime,secret,alias,link.code),null);
+  assert.equal((await pool.query('SELECT count(*) FROM "session" WHERE "userId"=$1',[multi.id])).rows[0].count,'0');
+  assert.equal((await pool.query('SELECT count(*) FROM brai_login_code WHERE user_id=$1',[multi.id])).rows[0].count,'0');
+  assert.deepEqual(await resolveTelegram(pool,'10005'),multi);
+  const expired=await issueTelegramLink(runtime,secret,'10005');
+  await pool.query("UPDATE sys_telegram_link SET expires_at=now()-interval '1 second' WHERE user_id=$1",[multi.id]);
+  assert.equal(await redeemTelegramLink(runtime,secret,'20004',expired.code),null);
+  const current=await issueTelegramLink(runtime,secret,'10005');
+  assert.equal(await redeemTelegramLink(runtime,secret,'20004',expired.code),null);
+  assert.ok(await redeemTelegramLink(runtime,secret,'20004',current.code));
+  assert.equal(await issueTelegramLink(runtime,secret,'10005'),null);
+  await adminAction(pool,secret,owner,"status-set",{userId:multi.id,status:"blocked"});
+  assert.equal(await issueTelegramLink(runtime,secret,'20004'),null);
+  assert.equal(await issueCode(pool,secret,'20004'),null);
+  assert.equal(await redeemTelegramLink(runtime,secret,'20004',current.code),null);
+  assert.equal((await resolveTelegram(pool,'20004')).status,'blocked');
+  await adminAction(pool,secret,owner,'status-set',{userId:multi.id,status:'active'});
+  assert.equal(await redeemTelegramLink(runtime,secret,'20004',current.code),null);
   const last=await Promise.all([
    adminAction(pool,secret,owner,"role-set",{userId:owner,role:"user"}),
    adminAction(pool,secret,owner,"status-set",{userId:owner,status:"blocked"})
@@ -97,5 +142,5 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   assert.equal((await pool.query('SELECT count(*) FROM "session" WHERE token=$1',[token])).rows[0].count,'1');
   assert.equal((await pool.query('SELECT count(*) FROM "verification" WHERE value=$1',[verifyValue])).rows[0].count,'1');
   await assert.rejects(()=>cutover());
- }finally{await pool.end();await rm(dir,{recursive:true,force:true});}
+ }finally{await runtime.end();await pool.end();await rm(dir,{recursive:true,force:true});}
 });

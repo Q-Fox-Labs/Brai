@@ -583,6 +583,143 @@
           "$ref": "#/components/errors/InvalidParams"
         }
       ]
+    },
+    {
+      "name": "identity.link-redeem",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "code",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/TelegramResolveResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ],
+      "description": "Trusted ingress only. Personal Telegram account linking; never available to the model. No automatic mutation retry."
+    },
+    {
+      "name": "identity.unlink",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/TelegramUnlinkResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ],
+      "description": "Trusted ingress only. Personal Telegram account linking; never available to the model. No automatic mutation retry."
+    },
+    {
+      "name": "telegram.link",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "phase",
+          "required": true,
+          "schema": {
+            "enum": [
+              "offer",
+              "command"
+            ]
+          }
+        },
+        {
+          "name": "threadId",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "sent",
+                "failed",
+                "unknown",
+                "unavailable",
+                "denied"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ],
+      "description": "Agent account-link workflow. First send the full warning; require a new trusted confirmation in the same private account before command issuance. Secrets never enter worker. Unknown delivery is not retried."
     }
   ],
   "components": {

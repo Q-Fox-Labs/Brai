@@ -56,6 +56,21 @@ class ToolClientTest(unittest.TestCase):
         self.assertFalse(login['inputSchema']['properties'])
         self.assertFalse(login['inputSchema']['additionalProperties'])
 
+    def test_account_link_tool_requires_no_model_supplied_confirmation_or_owner(self):
+        with patch.object(tool_client, 'broker_call', return_value={'tools': []}):
+            catalog = tool_client.handle('tools/list', {})['tools']
+        tool = next(item for item in catalog if item['name'] == 'brai_telegram_link_account')
+        self.assertIn('полный доступ', tool['description'])
+        self.assertFalse(tool['inputSchema']['properties'])
+        for phase in ['offer', 'command']:
+            with patch.object(tool_client, 'broker_call', return_value={
+                    'status': 'sent', 'phase': phase, 'suppressFinal': True, 'code': 'private-secret'}) as call:
+                result = tool_client.handle('tools/call', {'name': tool['name'], 'arguments': {}})
+            call.assert_called_once_with('telegram.link', {})
+            self.assertNotIn('private-secret', json.dumps(result))
+        with self.assertRaises(ValueError):
+            tool_client.handle('tools/call', {'name': tool['name'], 'arguments': {'confirmed': True}})
+
     def test_login_never_exposes_broker_payload(self):
         with patch.object(tool_client, 'broker_call', return_value={'status':'sent', 'suppressFinal':True, 'code':'secret'}):
             result = tool_client.handle('tools/call', {'name':'brai_login', 'arguments':{}})

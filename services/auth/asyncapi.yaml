@@ -72,6 +72,33 @@ channels:
     messages:
       request:
         $ref: "#/components/messages/SsoRedeemRequest"
+  telegramLinkIssue:
+    address: brai.auth.v2.telegram-link-issue
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramLinkIssueRequest"
+  telegramLinkRedeem:
+    address: brai.auth.v2.telegram-link-redeem
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramLinkRedeemRequest"
+  telegramUnlink:
+    address: brai.auth.v2.telegram-unlink
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramUnlinkRequest"
   telegramResolve:
     address: brai.auth.v2.telegram-resolve
     bindings:
@@ -210,6 +237,12 @@ channels:
   v2Replies:
     address: null
     messages:
+      linkIssued:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramLinkIssueResponse"
+      unlinked:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/TelegramUnlinkResponse"
       identity:
         payload:
           $ref: "./schemas/messages.schema.json#/definitions/TelegramResolveResponse"
@@ -304,6 +337,45 @@ operations:
         $ref: "#/channels/replies"
       messages:
         - $ref: "#/channels/replies/messages/response"
+  telegramLinkIssue:
+    action: receive
+    channel:
+      $ref: "#/channels/telegramLinkIssue"
+    messages:
+      - $ref: "#/channels/telegramLinkIssue/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/linkIssued"
+  telegramLinkRedeem:
+    action: receive
+    channel:
+      $ref: "#/channels/telegramLinkRedeem"
+    messages:
+      - $ref: "#/channels/telegramLinkRedeem/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/identity"
+  telegramUnlink:
+    action: receive
+    channel:
+      $ref: "#/channels/telegramUnlink"
+    messages:
+      - $ref: "#/channels/telegramUnlink/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/unlinked"
   telegramResolve:
     action: receive
     channel:
