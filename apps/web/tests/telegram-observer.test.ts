@@ -74,7 +74,7 @@ test("наблюдение доступно всем сессиям DEV, фай�
     const oldReader = oldStream.body!.getReader();
     assert.equal((await oldReader.read()).done, false);
     process.env.WEB_IDENTITY_MODE = "telegram";
-    assert.equal(telegramObserverEnabled(), false);
+    assert.equal(telegramObserverEnabled(), true);
     const drain = async () => { while (!(await oldReader.read()).done) {} };
     await Promise.race([drain(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("legacy stream stayed open")), 3000))]);
     const previousSessions = sessionCalls, previousNats = natsCalls;

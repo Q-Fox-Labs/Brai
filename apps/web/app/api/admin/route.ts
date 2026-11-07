@@ -18,13 +18,18 @@ async function handle(request: Request) {
   if (request.method !== "GET") checkOrigin(request);
   const value = request.method === "GET" ? Object.fromEntries(new URL(request.url).searchParams) : await readBoundedJson(request, 4096, 5000);
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new GatewayError(400, "INVALID_ARGUMENT");
-  const { operation, ...input } = value as Record<string, unknown>;
+  const { operation, preview, ...input } = value as Record<string, unknown>;
   if (typeof operation !== "string" || !(request.method === "GET" ? reads : writes).has(operation)) throw new GatewayError(404, "NOT_FOUND");
   if (request.method !== "GET" && input.userId === "__quarantine__") throw new GatewayError(400, "INVALID_ARGUMENT");
   const headers = Object.fromEntries(["cookie", "origin"].flatMap(name => { const item = request.headers.get(name); return item ? [[name, item]] : []; }));
   if (!headers.origin && request.method === "GET") headers.origin = new URL(process.env.WEB_ORIGIN ?? request.url).origin;
   const bridge = operation.startsWith("admin-");
   if (bridge && (typeof input.userId !== "string" || !input.userId)) throw new GatewayError(400, "INVALID_ARGUMENT");
+  if (preview !== undefined && (operation !== "admin-artifacts-download" || preview !== "1")) throw new GatewayError(400, "INVALID_ARGUMENT");
+  if (bridge && typeof input.limit === "string") {
+    if (!/^(?:[1-9][0-9]?|100)$/.test(input.limit)) throw new GatewayError(400, "INVALID_ARGUMENT");
+    input.limit = Number(input.limit);
+  }
   const nc = await natsConnection();
   if (operation === "admin-personal-get") return Response.json(await readAdminPersonal(nc, headers, input));
   const reply = await nc.request(`${bridge ? "brai.hermes.identity.v1" : "brai.auth.v2"}.${operation}`, Buffer.from(JSON.stringify(bridge ? { ...input, headers } : { headers, body: input })), { timeout: 10000 });
@@ -37,7 +42,7 @@ async function handle(request: Request) {
   if (operation === "admin-artifacts-download" && reply.data.byteLength > 710000) throw new Error("BAD_REPLY");
   const result = JSON.parse(Buffer.from(reply.data).toString()) as { status: number; body: unknown; setCookies: string[] };
   if (!Number.isInteger(result.status) || result.status < 200 || result.status > 599 || !Array.isArray(result.setCookies) || !result.setCookies.every(item => typeof item === "string" && !/[\r\n]/.test(item))) throw new Error("BAD_REPLY");
-  if (operation === "admin-artifacts-download" && result.status === 200) return await adminDownload(result.body, input.artifactId, request.signal);
+  if (operation === "admin-artifacts-download" && result.status === 200) return await adminDownload(result.body, input.artifactId, request.signal, preview === "1");
   return authResponse(result);
  } catch (error) { return failure(error instanceof GatewayError ? error : new GatewayError(503, "ADMIN_UNAVAILABLE")); }
 }
