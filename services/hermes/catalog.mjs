@@ -72,6 +72,7 @@ for (const [operation, request, response] of [
   ['operationsGet', 'OperationGetRequest', 'InstallOperation'], ['modelsConfigure', 'ConfigureRequest', 'ConfiguredResponse'],
   ['modelsLoad', 'ModelRevisionRequest', 'ModelMutationResponse'], ['modelsUnload', 'ModelRevisionRequest', 'ModelMutationResponse'],
   ['modelsRemove', 'ModelRevisionRequest', 'ModelMutationResponse'], ['invokeEmbed', 'EmbedRequest', 'EmbedResponse'],
+  ['invokeTranscribe', 'TranscribeRequest', 'TranscribeResponse'],
   ['invokeSynthesize', 'SynthesizeRequest', 'SynthesizeResponse'],
   ['cancel', 'CancelRequest', 'CancelResponse'], ['status', 'StatusRequest', 'StatusResponse']]) {
   const words = operation.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
