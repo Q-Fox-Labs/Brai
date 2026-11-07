@@ -26,6 +26,7 @@
     "services/hermes/identity/runtime.mjs",
     "services/hermes/identity/parent_runner.py",
     "services/hermes/identity/tool_client.py",
+    "services/hermes/identity/transcribe.py",
     "services/hermes/identity/network.py"
   ],
   "inputs": {
@@ -232,6 +233,7 @@
       "services/hermes/identity/README.md",
       "services/hermes/identity/worker.openrpc.json",
       "services/hermes/identity/tool_client.py",
+      "services/hermes/identity/transcribe.py",
       "services/hermes/identity/ipc.py",
       "services/hermes/identity/broker.py",
       "services/hermes/identity/network.py",
@@ -596,6 +598,7 @@
       "services/hermes/identity/README.md",
       "services/hermes/identity/worker.openrpc.json",
       "services/hermes/identity/tool_client.py",
+      "services/hermes/identity/transcribe.py",
       "services/hermes/identity/ipc.py",
       "services/hermes/identity/broker.py",
       "services/hermes/identity/network.py",
@@ -636,6 +639,7 @@
       "services/hermes/identity/runtime.mjs",
       "services/hermes/identity/parent_runner.py",
       "services/hermes/identity/tool_client.py",
+      "services/hermes/identity/transcribe.py",
       "services/hermes/identity/network.py"
     ],
     "smokeImports": [

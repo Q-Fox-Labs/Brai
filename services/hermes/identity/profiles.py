@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import PurePosixPath
 import re
+import shlex
 import uuid
 
 CUBES = ['main', 'life_work', 'life_society', 'life_systems', 'life_body',
@@ -100,7 +101,23 @@ def registry(plan, accounts, *, active=False):
     return {'version': 1, 'profiles': result}
 
 
-def native_profile(profile, *, relay_port=18080, instructions_root, model):
+def stt_config(model):
+    """Подключить явную модель через личный broker; без selector отключить STT."""
+    if model is None:
+        return {'enabled': False}
+    if (not isinstance(model, dict) or set(model) != {'modelId', 'revision', 'profileId'}
+            or any(not isinstance(value, str) or not value.strip() for value in model.values())):
+        raise ValueError('Explicit STT model selector required')
+    command = '/opt/brai-profile/python/bin/python3 -B -m identity.transcribe'
+    for flag, key in [('model-id', 'modelId'), ('revision', 'revision'), ('profile-id', 'profileId')]:
+        command += ' --' + flag + ' ' + shlex.quote(model[key])
+    command += ' --input {input_path} --output {output_path}'
+    return {'enabled': True, 'provider': 'brai_local_ai', 'providers': {
+        'brai_local_ai': {'type': 'command', 'command': command,
+                          'output_format': 'txt', 'normalize': False, 'timeout': 200}}}
+
+
+def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_model=None):
     """Создать нейтральную конфигурацию без bot token и общих credentials."""
     _path(instructions_root)
     if not isinstance(model, str) or not model or len(model) > 200 or any(ord(c) < 32 for c in model):
@@ -112,6 +129,7 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model):
             'base_url': 'http://127.0.0.1:' + str(relay_port) + '/model/v1',
             'transport': 'codex_responses'}},
         'browser': {'backend': 'browser-use'},
+        'stt': stt_config(stt_model),
         'terminal': {'cwd': home + '/workspace'},
         'gateway': {'multiplex_profiles': False, 'profile_routes': [],
                     'auto_multiplex_migration': False,
