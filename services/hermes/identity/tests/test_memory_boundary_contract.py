@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from unittest.mock import patch
 import socket
 import threading
 import time
@@ -68,7 +69,9 @@ class FakeClient:
         type(self).calls.append((path, body))
         if path == "/product/memory_capabilities":
             return {"code": 200, "data": dict(type(self).capabilities)}
-        if path in {"/product/delete_memory", "/product/search", "/product/add"}:
+        if path == "/product/add":
+            return {"code": 200, "data": [{"cube_id": self.cube, "memory_id": "committed-id"}]}
+        if path in {"/product/delete_memory", "/product/search"}:
             return {"code": 200, "data": {}}
         raise AssertionError("unexpected upstream path: " + path)
 
@@ -243,7 +246,7 @@ class MemoryGatewayBoundaryTests(unittest.TestCase):
         self.registry[B_UID] = {**PROFILE_B, 'cubes': ['main']}
         for uid, name in ((A_UID, 'profile-a__main'), (B_UID, 'profile-b__main')):
             FakeClient.calls = []
-            self.call({'writable_cube_ids': ['main'], 'messages': [{'role': 'user', 'content': 'test'}],
+            result = self.call({'writable_cube_ids': ['main'], 'messages': [{'role': 'user', 'content': 'test'}],
                        'info': {'hermes_primary_cube': 'main'}},
                       uid=uid, path='/product/add')
             payload = next(call[1] for call in FakeClient.calls if call[0] == '/product/add')
@@ -251,6 +254,20 @@ class MemoryGatewayBoundaryTests(unittest.TestCase):
             self.assertEqual(payload['info']['hermes_cube'], name)
             self.assertEqual(payload['info']['hermes_memberships'], [name])
             self.assertEqual(payload['info']['hermes_primary_cube'], name)
+            self.assertEqual(result['data'], [{'cube_id': 'main', 'memory_id': 'committed-id'}])
+
+    def test_add_rejects_foreign_or_incomplete_receipts(self):
+        body = {'writable_cube_ids': ['main'], 'messages': [{'role': 'user', 'content': 'test'}]}
+        for data in (None, {}, [], [None],
+                     [{'cube_id': 'profile-b__main', 'memory_id': 'foreign'}],
+                     [{'cube_id': 'main', 'memory_id': 'unqualified'}],
+                     [{'cube_id': 'profile-a__main', 'memory_id': ''}],
+                     [{'cube_id': 'profile-a__main', 'memory_id': 123}],
+                     [{'cube_id': 'profile-a__main', 'memory_id': 'own'},
+                      {'cube_id': 'profile-b__main', 'memory_id': 'foreign'}]):
+            with self.subTest(data=data), patch.object(FakeClient, 'request', return_value={'code': 200, 'data': data}):
+                with self.assertRaisesRegex(Denied, 'UPSTREAM_SCOPE_MISMATCH'):
+                    self.call(body, path='/product/add')
 
     def test_shared_logical_reads_stay_in_physical_profile(self):
         self.registry[B_UID] = {**PROFILE_B, 'cubes': ['main']}
