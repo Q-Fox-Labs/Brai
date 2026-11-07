@@ -38,6 +38,15 @@ class WorkerConfigTest(unittest.TestCase):
 
 
 class ToolClientTest(unittest.TestCase):
+    def test_native_sdk_null_params_are_supported(self):
+        with patch.object(tool_client, 'broker_call', return_value={'tools': []}):
+            result = tool_client.handle('tools/list', None)
+        self.assertTrue(any(item['name'] == 'brai_login' for item in result['tools']))
+        self.assertEqual(tool_client.handle('ping', None), {})
+        for bad in ([], 'bad', 1, False):
+            with self.assertRaises(ValueError):
+                tool_client.handle('tools/list', bad)
+
     def test_login_catalog_requires_explicit_request_in_private_telegram(self):
         with patch.object(tool_client, 'broker_call', return_value={'tools': []}):
             result = tool_client.handle('tools/list', {})

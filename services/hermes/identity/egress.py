@@ -75,6 +75,31 @@ async def _dial(host, port, tls, denied):
     raise Rejected(502)
 
 
+def _browser_denied(host, port, config, denied):
+    """Разрешить только публичный HTTPS вход установки, сохранив запрет внутренних адресов."""
+    origins = config.get("publicWebOrigins", [])
+    if not isinstance(origins, list) or len(origins) > 8:
+        raise Rejected(503)
+    allowed = False
+    for origin in origins:
+        if not isinstance(origin, str):
+            raise Rejected(503)
+        parsed = urlsplit(origin)
+        if (parsed.scheme != "https" or not parsed.hostname
+                or parsed.netloc not in (parsed.hostname, parsed.hostname + ":443")
+                or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+            raise Rejected(503)
+        try:
+            ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            pass
+        else:
+            raise Rejected(503)
+        allowed = allowed or (host == parsed.hostname and port == 443)
+    # _dial всё равно отклоняет private/link-local/mixed DNS даже при этом разрешении.
+    return set() if allowed else denied
+
+
 def _authority(value, default_port=None):
     if not value or any(ord(c) <= 32 or ord(c) >= 127 for c in value) or any(c in value for c in "/@?#\\"):
         raise Rejected()
@@ -391,7 +416,7 @@ async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_
             host, port = _authority(target)
             if port != 443 or body:
                 raise Rejected(403)
-            source, upstream = await dial(host, port, False, denied)
+            source, upstream = await dial(host, port, False, _browser_denied(host, port, config, denied))
             writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await writer.drain()
             response_started = True

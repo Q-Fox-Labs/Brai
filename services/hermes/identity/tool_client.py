@@ -40,6 +40,9 @@ def broker_call(method, params, *, path=None, timeout=120):
 
 def handle(method, params):
     """Предоставить только MCP initialize и ограниченный каталог инструментов."""
+    # Native MCP SDK передаёт params:null для tools/list и ping.
+    if params is None:
+        params = {}
     if not isinstance(params, dict):
         raise ValueError('Invalid params')
     if method == 'initialize':
@@ -58,7 +61,7 @@ def handle(method, params):
         if any(not isinstance(item, dict) or item.get('name') in ('brai_login', 'publish_file', 'fetch_file') for item in tools):
             raise RuntimeError('Invalid tool catalog')
         return {'tools': [*tools,
-                {'name': 'brai_login', 'description': 'Только по явной просьбе владельца о входе в личном чате Telegram отправить одноразовый код и адрес сайта отдельным сообщением. Код не показывается инструменту. После подтверждённой отправки не добавляй ответ.',
+                {'name': 'brai_login', 'description': 'Вход в веб-интерфейс этой установки Brai (наш сайт). Только по явной просьбе владельца о входе в личном чате Telegram отправить одноразовый код и адрес сайта отдельным сообщением. Не ищи код на сайте и не проси искать кнопку. Код не показывается инструменту. После подтверждённой отправки не добавляй ответ.',
                  'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
                 {'name': 'publish_file', 'description': 'Опубликовать собственный готовый файл и получить ссылку.',
                  'inputSchema': {'type':'object', 'properties':{'path':{'type':'string'}, 'requestId':{'type':'string'}}, 'required':['path'], 'additionalProperties':False}},

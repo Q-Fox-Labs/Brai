@@ -376,6 +376,23 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             remote.close()
             await asyncio.gather(relay.wait_closed(), server.wait_closed(), remote.wait_closed())
 
+    async def test_public_web_origin_is_exact_and_keeps_private_dns_denied(self):
+        denied = {'8.8.4.4'}
+        config = {'publicWebOrigins': ['https://dev.brai.one']}
+        allowed = egress._browser_denied('dev.brai.one', 443, config, denied)
+        self.assertTrue(egress._public('8.8.4.4', allowed))
+        self.assertFalse(egress._public('127.0.0.1', allowed))
+        for host, port in [('other.test', 443), ('dev.brai.one', 80),
+                           ('dev.brai.one.evil.test', 443)]:
+            self.assertEqual(egress._browser_denied(host, port, config, denied), denied)
+        self.assertEqual(egress._browser_denied('dev.brai.one', 443, {}, denied), denied)
+        for origin in ['http://dev.brai.one', 'https://8.8.4.4',
+                       'https://dev.brai.one:22', 'https://u@dev.brai.one',
+                       'https://dev.brai.one/path']:
+            with self.assertRaises(egress.Rejected):
+                egress._browser_denied('dev.brai.one', 443,
+                                       {'publicWebOrigins': [origin]}, denied)
+
     async def test_address_policy_and_dns_rebinding(self):
         for address in ("127.0.0.1", "10.0.0.1", "::1", "::ffff:8.8.8.8",
                         "169.254.1.1", "192.0.2.1", "224.0.0.1", "8.8.4.4"):

@@ -136,11 +136,15 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
                     'media_delivery_allow_dirs': [home + '/workspace', home + '/results', home + '/media/downloads']},
         'updates': {'check': False},
         'mcp_servers': {'brai': {'command': '/usr/bin/python3',
-                               'args': [instructions_root + '/services/hermes/identity/tool_client.py']}},
+                               'args': [instructions_root + '/services/hermes/identity/tool_client.py'],
+                               'env': {'BRAI_IDENTITY_BROKER': '/run/brai-profile/control.sock'}}},
         'memory': {'provider': 'memos-rest'},
         'plugins': {'enabled': ['memos-rest']},
         'agent': {'system_prompt': 'Ты — Brai, личный помощник пользователя. '
-                                  'Работай только в разрешённой области своего профиля.'},
+                                  'Работай только в разрешённой области своего профиля. '
+                                  'По просьбе войти на наш сайт Brai вызови mcp__brai__brai_login: '
+                                  'сервис сам пришлёт одноразовый код и точный адрес в личный Telegram. '
+                                  'Для выдачи кода не требуется открывать сайт, искать письмо или кнопку.'},
     }
 
 
