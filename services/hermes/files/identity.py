@@ -151,7 +151,10 @@ class OwnerFiles:
         for key in ('readRoots', 'temporaryRoots', 'serviceRoots', 'legacyRoots'):
             roots = value.get(key, [])
             if not isinstance(roots, list) or any(not isinstance(p, str) or not Path(p).is_absolute()
-                    or '..' in Path(p).parts or not Path(p).is_relative_to(home) for p in roots):
+                    or '..' in Path(p).parts or (not Path(p).is_relative_to(home) and
+                    (key != 'serviceRoots' or p not in (
+                        '/opt/brai-profile/engine', '/opt/brai-profile/runtime',
+                        '/opt/brai-profile/instructions'))) for p in roots):
                 raise PermissionError('Foreign file root')
         return value
 
