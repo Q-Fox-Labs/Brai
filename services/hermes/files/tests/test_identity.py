@@ -173,6 +173,32 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             port.runtime(self.uid, profile)
 
+    async def test_configuration_allows_only_fixed_readonly_service_roots(self):
+        value = {'ownerId': 'owner', 'stateRoot': str(self.home / 'workspace/files'),
+                 'resultRoot': str(self.home / 'results'),
+                 'serviceRoots': ['/opt/brai-profile/instructions', '/opt/brai-profile/engine',
+                                  '/opt/brai-profile/runtime', str(self.home / 'usercustom/instructions')]}
+
+        async def configuration(method, args):
+            self.assertEqual(method, 'files.configuration')
+            return value
+
+        self.control.call = configuration
+        self.assertEqual(await self.port.configuration(self.uid, self.profile), value)
+        for field, path in [('serviceRoots', '/etc'),
+                            ('serviceRoots', str(self.root / 'another-user')),
+                            ('serviceRoots', '/opt/brai-profile/instructions-extra'),
+                            ('serviceRoots', '/opt/brai-profile/instructions/../engine'),
+                            ('readRoots', '/opt/brai-profile/instructions'),
+                            ('temporaryRoots', '/opt/brai-profile/instructions'),
+                            ('legacyRoots', '/opt/brai-profile/instructions')]:
+            original = dict(value)
+            value[field] = [path]
+            with self.subTest(field=field, path=path), self.assertRaises(PermissionError):
+                await self.port.configuration(self.uid, self.profile)
+            value.clear()
+            value.update(original)
+
     async def test_transport_preserves_original_ids_without_file_access(self):
         source = SimpleNamespace(platform='telegram', chat_id='1', thread_id='', user_id='2', profile='')
         first = SimpleNamespace(source=source, message_id='10', text='caption 1', media_urls=['/missing/1'],
