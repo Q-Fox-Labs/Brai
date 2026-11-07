@@ -51,7 +51,12 @@ LLM маршрутизирует по предмету, назначению и 
 
 ## Router / bridge
 
-Параметры `router`: `base_url`, `model`, `env_file`, `api_key_env`, `timeout`.
+Параметры `router`: `base_url`, `model`, `env_file`, `api_key_env`, `timeout`, `transport`.
+По умолчанию `transport: chat_completions` сохраняет прежний API. Личные профили
+с подписочным proxy используют `codex_responses`: явную модель, `/v1/responses`,
+`store: false`, строгую JSON schema и SSE. Принимается только завершённый ответ;
+обрыв, отказ или незавершённая генерация возвращают ошибку без частичного результата.
+Транспорт выбирает оператор; ошибка не переключает его автоматически.
 
 Локально read-only проверены `/health` и authenticated `/v1/models`: модель `gpt-6-luna`. Связанный env-файл — `/etc/.secrets/memos/codex-bridge.env`, имя переменной `MEMOS_BRIDGE_TOKEN`; значение читается программно, не выводится и не хранится в JSON. Без `model` router использует первый advertised `/v1/models` ID. `/v1/chat/completions` — единственный генеративный endpoint. Ошибки sanitised, proxy для локальных запросов отключён.
 
