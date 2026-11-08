@@ -150,7 +150,7 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
                                'args': [instructions_root + '/services/hermes/identity/tool_client.py'],
                                'env': {'BRAI_IDENTITY_BROKER': '/run/brai-profile/control.sock'}}},
         'memory': {'provider': 'memos-rest'},
-        'plugins': {'enabled': ['codex-cli-search', 'memos-rest', 'telegram-business', 'groq-voice']},
+        'plugins': {'enabled': ['codex-cli-search', 'memos-rest', 'telegram-business', 'groq-voice', 'brai-telegram']},
         'agent': {'system_prompt': 'Ты — Brai, личный помощник пользователя. '
                                   'Работай только в разрешённой области своего профиля. '
                                   'По просьбе войти на наш сайт Brai вызови mcp__brai__brai_login: '

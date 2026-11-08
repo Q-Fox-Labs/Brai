@@ -126,8 +126,8 @@ class Worker:
     def _install_telegram_profile(self):
         """Установить несекретный профиль до любого native plugin discovery."""
         os.environ['BRAI_IDENTITY_TELEGRAM_ID'] = self.telegram_id
-        sys.modules['_brai_identity_human'] = SimpleNamespace(
-            telegram_id=self.telegram_id, game_core_enabled=False, attach=None)
+        sys.modules.setdefault('_brai_identity_human', SimpleNamespace(
+            telegram_id=self.telegram_id, game_core_enabled=False, attach=None))
 
     async def _startup_gate(self, runner):
         """Provisioning даёт только bootstrap; tools и recovery требуют active."""
@@ -466,7 +466,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     args = parser.parse_args()
-    asyncio.run(run(args.config))
+    try:
+        asyncio.run(run(args.config))
+    except SystemExit as error:
+        exit_code = 0 if error.code is None else error.code if type(error.code) is int else 1
+    else:
+        exit_code = 0
+    if 'gateway.run' in sys.modules:
+        sys.modules['gateway.run']._exit_after_graceful_shutdown(exit_code)
+    raise SystemExit(exit_code)
 
 
 if __name__ == '__main__':

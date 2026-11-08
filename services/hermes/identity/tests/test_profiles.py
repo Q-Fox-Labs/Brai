@@ -24,6 +24,11 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(len(self.profile()['homeScope']), 64)
         self.assertEqual(len(self.profile()['memoryEpoch']), 64)
 
+    def test_native_worker_enables_its_telegram_plugin(self):
+        value = native_profile(self.profile(), instructions_root='/software/instructions',
+                               model='fixture-model')
+        self.assertIn('brai-telegram', value['plugins']['enabled'])
+
     def test_model_routes_responses_to_named_local_provider(self):
         value = native_profile(self.profile(), instructions_root='/software/instructions',
                                model='fixture-model')

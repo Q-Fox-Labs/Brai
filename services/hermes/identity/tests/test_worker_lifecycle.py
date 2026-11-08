@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from identity.worker import Worker
+from identity.worker import Worker, main
 from identity.ipc import Peer, RpcError
 
 
@@ -94,6 +94,29 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.calls.append('active_auth')
         return active
 
+    def test_native_exit_funnel_preserves_stop_failure_and_restart_codes(self):
+        for outcome, expected in [(None, 0), (SystemExit(None), 0),
+                                  (SystemExit(1), 1), (SystemExit(75), 75)]:
+            with self.subTest(code=expected), patch.object(sys, 'argv',
+                    ['worker', '--config', '/unused/worker.json']), patch(
+                    'identity.worker.run', lambda _: None), patch(
+                    'identity.worker.asyncio.run', side_effect=outcome), patch.object(
+                    sys.modules['gateway.run'], '_exit_after_graceful_shutdown', create=True) as finish:
+                with self.assertRaises(SystemExit) as stopped:
+                    main()
+                self.assertEqual(stopped.exception.code, expected)
+                finish.assert_called_once_with(expected)
+
+    def test_bootstrap_exit_without_native_import_preserves_failure(self):
+        with patch.dict(sys.modules), patch.object(sys, 'argv',
+                ['worker', '--config', '/unused/worker.json']), patch(
+                'identity.worker.run', lambda _: None), patch(
+                'identity.worker.asyncio.run', side_effect=SystemExit(1)):
+            sys.modules.pop('gateway.run', None)
+            with self.assertRaises(SystemExit) as stopped:
+                main()
+            self.assertEqual(stopped.exception.code, 1)
+
     async def test_bootstrap_probe_eof_keeps_worker_available_for_ingress(self):
         worker = await self.worker()
         await asyncio.sleep(0)
@@ -101,6 +124,23 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(worker.exited.is_set())
         self.assertIsNone(worker.exit_code)
         self.assertNotIn('gate', self.calls)
+
+    async def test_reconnect_keeps_cached_plugin_attachment_for_new_adapter(self):
+        worker = await self.worker()
+        try:
+            with patch.dict(sys.modules), patch.dict(os.environ, {
+                    'BRAI_IDENTITY_MODE': 'worker', 'BRAI_DIALOGUES_REQUIRED': '0'}):
+                sys.modules.pop('_brai_identity_human', None)
+                worker._install_telegram_profile()
+                attach = AsyncMock()
+                sys.modules['_brai_identity_human'].attach = attach
+                worker.adapter = NS()
+                worker._install_telegram_profile()
+                await worker._operational_ready(worker.runner)
+                attach.assert_awaited_once_with(worker.adapter)
+                self.assertTrue(worker.operational.is_set())
+        finally:
+            await worker.stop_runtime()
 
     async def test_bootstrap_does_not_start_tools_or_recovery(self):
         worker = await self.worker()
