@@ -1,108 +1,168 @@
 "use client";
-// ABOUTME: Показывает архив Дневника, создание записей и загрузку оригиналов.
-// ABOUTME: Незавершённая загрузка сохраняет ключи повтора; обсуждений и удаления нет.
-import { useCallback,useEffect,useRef,useState } from "react";
-import { BookOpen,Download,FileText,Plus,Upload } from "lucide-react";
+// ABOUTME: Принимает аудиодневники и показывает обработанные записи в общей оболочке.
+// ABOUTME: Повтор загрузки сохраняет ключ; принятый файл обрабатывается без браузера.
+import {useCallback, useEffect, useRef, useState} from "react";
+import {BookOpen, RefreshCw, Upload} from "lucide-react";
 import WorkspaceFrame from "../shell/workspace-frame";
-import { Button } from "@/components/ui/button";
-import type { DiaryEntry,DiaryMaterial,DiarySummary } from "./types";
+import {Button} from "@/components/ui/button";
+import type {DiaryEntry, DiaryState, DiarySummary} from "./types";
 import "./styles.css";
-type UploadItem={key:string;file:File;role:string;saved:boolean};
-const roles:Record<string,string>={original:"Оригинал",transcript:"Расшифровка",correction:"Исправление"};
-function dateLabel(value:string|null):string {return value?new Date(value+"T12:00:00").toLocaleDateString("ru-RU",{day:"numeric",month:"long",year:"numeric"}):"Дата не указана";}
-function size(value:number|null):string{return value===null?"":value<1024?value+" Б":value<1048576?(value/1024).toFixed(1)+" КБ":(value/1048576).toFixed(1)+" МБ";}
-function fileUrl(entryId:string,materialId:string,userId:string){return "/api/diary/file?entry="+entryId+"&material="+materialId+"&account="+encodeURIComponent(userId);}
-/** Читает безопасный текст вложения; исходник остаётся доступным для скачивания. */
-function TextMaterial({url}:{url:string}){
- const [text,setText]=useState<string|null>(null),[failed,setFailed]=useState(false);
- useEffect(()=>{const control=new AbortController();void fetch(url,{cache:"no-store",signal:control.signal}).then(async response=>{if(!response.ok)throw new Error();const value=await response.text();if(!control.signal.aborted)setText(value);}).catch(()=>{if(!control.signal.aborted)setFailed(true);});return()=>control.abort();},[url]);
- return <pre className="diary-text">{failed?"Не удалось прочитать материал. Попробуйте открыть его снова.":text??"Читаем материал…"}</pre>;
+
+type Props = {userId: string; onUnauthorized: () => void};
+type UploadInput = {requestId: string; filename: string; mimeType: string; recordedAt: string | null; timezone: string};
+const stage: Record<DiaryState, string> = {
+  awaiting_upload: "Ожидает загрузки", transcribing: "Расшифровывается",
+  correcting: "Подготавливается текст", ready: "Готово", needs_attention: "Нужно внимание",
+};
+const active = (state: DiaryState) => ["awaiting_upload", "transcribing", "correcting"].includes(state);
+/** Показывает календарную дату без перевода между часовыми поясами. */
+export function diaryDate(value: string | null): string {
+  return value ? new Date(value + "T12:00:00").toLocaleDateString("ru-RU", {day: "numeric", month: "long", year: "numeric"}) : "Дата не определена";
 }
-/** Показывает сохранённый оригинал подходящим безопасным проигрывателем. */
-function Material({item,entryId,userId}:{item:DiaryMaterial;entryId:string;userId:string}){
- const url=fileUrl(entryId,item.id,userId);
- return <section className="diary-material">
-  <header><div><strong>{item.filename}</strong><span>{roles[item.role]??"Материал"} · {size(item.sizeBytes)}</span></div><a href={url+"&download=1"} aria-label={"Скачать "+item.filename}><Download size={17}/></a></header>
-  {["image/png","image/jpeg","image/webp","image/gif"].includes(item.mimeType)?<a href={url} target="_blank" rel="noreferrer"><img src={url} alt={item.filename} loading="lazy"/></a>
-   :["audio/ogg","audio/opus","audio/mpeg","audio/mp4","audio/x-m4a","audio/webm","audio/wav"].includes(item.mimeType)?<audio controls preload="none" src={url}/>
-   :["video/mp4","video/webm"].includes(item.mimeType)?<video controls preload="metadata" src={url}/>
-   :["text/plain","text/markdown","application/json"].includes(item.mimeType)&&(item.sizeBytes??Infinity)<=16*1024*1024?<details><summary>Читать материал</summary><TextMaterial url={url}/></details>
-   :<a className="diary-file-link" href={url+"&download=1"}><FileText size={18}/> Открыть файл</a>}
- </section>;
+function message(code?: string): string {
+  if (code === "UPLOAD_INTERRUPTED") return "Загрузка прервалась. Выберите тот же файл ещё раз, чтобы повторить её.";
+  if (code === "TRANSCRIPT_LOST") return "Не удалось сохранить расшифровку. Исходное аудио остаётся в Дневнике.";
+  if (code?.startsWith("LUNA_")) return "Подготовка текста остановилась. Исходная расшифровка сохранена; автоматического повтора нет.";
+  if (code === "USER_REVOKED") return "Доступ к обработке этой записи изменился.";
+  return "Обработка остановилась. Уже принятые материалы сохранены.";
 }
-/** Держит форму внутри аккаунта и читает записи без запуска агента. */
-export default function DiaryScreen({userId,onUnauthorized}:{userId:string;onUnauthorized:()=>void}){
- const [entries,setEntries]=useState<DiarySummary[]>([]),[total,setTotal]=useState(0),[selected,setSelected]=useState<string|null>(null),[entry,setEntry]=useState<DiaryEntry|null>(null);
- const [loading,setLoading]=useState(true),[reading,setReading]=useState(false),[error,setError]=useState(""),[notice,setNotice]=useState(""),[creating,setCreating]=useState(false),[busy,setBusy]=useState(false);
- const [title,setTitle]=useState(""),[date,setDate]=useState(""),[text,setText]=useState(""),[uploads,setUploads]=useState<UploadItem[]>([]),[createdId,setCreatedId]=useState<string|null>(null);
- const requestId=useRef(""),readEpoch=useRef(0),alive=useRef(true),locked=useRef(false);
- useEffect(()=>{alive.current=true;return()=>{alive.current=false;readEpoch.current++;};},[]);
- const api=useCallback(async(path:string,options:RequestInit={}):Promise<Record<string,unknown>>=>{
-  const response=await fetch("/api/diary"+path,{...options,cache:"no-store",headers:{"x-brai-user":userId,...options.headers}});
-  if(response.status===401){onUnauthorized();throw new Error("Войдите снова, чтобы открыть Дневник.");}
-  if(!response.ok){const body=await response.json().catch(()=>({}));throw new Error(body.code==="CONTENT_CONFLICT"||body.code==="CONFLICT"?"Этот ключ уже связан с другими данными. Сохранённые материалы не изменены.":body.code==="TOO_LARGE"||response.status===413?"Материал превышает допустимый размер.":body.code==="NOT_CONFIGURED"?"Дневник ещё не подключён к хранилищу.":"Не удалось подтвердить действие. Уже сохранённые материалы остаются в Дневнике. Повторите попытку.");}
-  return response.json() as Promise<Record<string,unknown>>;
- },[userId,onUnauthorized]);
- const loadList=useCallback(async(append=false)=>{
-  const data=await api("?offset="+(append?entries.length:0));
-  if(!alive.current)return;
-  const rows=data.entries as DiarySummary[];
-  setEntries(old=>append?[...old,...rows.filter(item=>!old.some(x=>x.id===item.id))]:rows);setTotal(data.total as number);
- },[api,entries.length]);
- useEffect(()=>{void api("").then(data=>{if(alive.current){setEntries(data.entries as DiarySummary[]);setTotal(data.total as number);}}).catch(e=>{if(alive.current)setError(e.message);}).finally(()=>{if(alive.current)setLoading(false);});},[api]);
- const open=useCallback(async(id:string,append=false)=>{
-  const epoch=++readEpoch.current;setSelected(id);setCreating(false);setReading(true);setError("");
-  if(!append)setEntry(null);
-  try{const data=await api("/entry?id="+id+(append?"&offset="+(entry?.materials.length??0):""));if(!alive.current||epoch!==readEpoch.current)return;const next=data.entry as DiaryEntry;setEntry(old=>append&&old?.id===id?{...next,materials:[...old.materials,...next.materials.filter(item=>!old.materials.some(x=>x.id===item.id))]}:next);}
-  catch(e){if(alive.current&&epoch===readEpoch.current)setError((e as Error).message);}
-  finally{if(alive.current&&epoch===readEpoch.current)setReading(false);}
- },[api,entry?.materials.length]);
- function fresh(){
-  readEpoch.current++;setCreating(true);setSelected(null);setEntry(null);setCreatedId(null);setTitle("");setDate("");setText("");setUploads([]);requestId.current=crypto.randomUUID();setError("");setNotice("");
- }
- async function save(){
-  if(locked.current)return;locked.current=true;setBusy(true);setError("");setNotice("");
-  let id=createdId;
-  try{
-   if(!requestId.current)requestId.current=crypto.randomUUID();
-   if(!id){const data=await api("",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requestId:requestId.current,title:title.trim()||"Новая запись",date:date||null,text})});id=(data.entry as DiarySummary).id;if(!alive.current)return;setCreatedId(id);}
-   // AIDEV-NOTE: Принятые файлы не отправляются повторно с новыми ключами при частичном отказе.
-   for(const item of uploads.filter(x=>!x.saved)){
-    setNotice("Сохраняем "+item.file.name+"…");
-    const data=await api("/materials?entry="+id,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({requestId:item.key,filename:item.file.name,mimeType:item.file.type||"application/octet-stream",role:item.role})});
-    const material=data.material as DiaryMaterial;
-    await api("/upload?entry="+id+"&material="+material.id,{method:"PUT",headers:{"Content-Type":"application/octet-stream","x-content-size":String(item.file.size)},body:item.file});
-    if(!alive.current)return;
-    setUploads(current=>current.map(x=>x.key===item.key?{...x,saved:true}:x));
-   }
-   if(!alive.current)return;
-   setNotice("Запись и все материалы сохранены.");setUploads([]);setCreatedId(null);setText("");setTitle("");setDate("");await loadList();await open(id);
-  }catch(e){if(alive.current){setError((e as Error).message);setNotice(id?"Запись сохранена. Загрузку оставшихся файлов можно повторить.":"");if(id)void loadList().catch(()=>{});}}
-  finally{locked.current=false;if(alive.current)setBusy(false);}
- }
- const rail=<div className="diary-rail">
-  <Button onClick={fresh} disabled={busy}><Plus size={16}/> Новая запись</Button>
-  {loading?<p role="status">Открываем Дневник…</p>:!entries.length?<p>Сохранённые записи появятся здесь.</p>:<nav aria-label="Записи Дневника">{entries.map(item=><button key={item.id} type="button" className={selected===item.id?"selected":""} onClick={()=>void open(item.id)} disabled={busy} aria-current={selected===item.id?"page":undefined}><strong>{item.title}</strong><span>{dateLabel(item.date)}</span></button>)}</nav>}
-  {entries.length<total&&<Button variant="outline" onClick={()=>{void loadList(true).catch(e=>setError(e.message));}}>Ещё записи</Button>}
- </div>;
- return <WorkspaceFrame section="diary" userId={userId} title="Дневник" railTitle="Записи" rail={rail}>
-  <div className="diary-screen">
-   {error&&<div className="diary-message diary-error" role="alert">{error}<Button variant="outline" disabled={busy} onClick={()=>{void (selected?open(selected):loadList()).catch(e=>setError(e.message));}}>Обновить</Button></div>}
-   {notice&&<p className="diary-message" role="status">{notice}</p>}
-   {creating?<form className="diary-compose" onSubmit={event=>{event.preventDefault();void save();}}>
-    <h1>{createdId?"Добавить материалы":"Новая запись"}</h1><p className="diary-muted">Сохраним текст и оригинальные файлы. Дату можно оставить пустой.</p>
-    <label>Заголовок<input value={title} maxLength={512} disabled={busy||!!createdId} onChange={event=>{setTitle(event.target.value);requestId.current=crypto.randomUUID();}} placeholder="О чём эта запись"/></label>
-    <label>Дата записи<input type="date" value={date} disabled={busy||!!createdId} onChange={event=>{setDate(event.target.value);requestId.current=crypto.randomUUID();}}/></label>
-    <label>Текст<textarea value={text} disabled={busy||!!createdId} onChange={event=>{setText(event.target.value);requestId.current=crypto.randomUUID();}} rows={12} placeholder="Можно оставить только файлы"/></label>
-    <label className="diary-upload"><Upload size={18}/> Добавить материалы<input type="file" multiple disabled={busy} onChange={event=>{const files=Array.from(event.target.files??[]);if(files.some(file=>file.size===0||file.size>2147483648)){setError("Файл должен быть непустым и не больше 2 ГБ.");return;}setUploads(current=>[...current,...files.map(file=>({key:crypto.randomUUID(),file,role:"original",saved:false}))]);event.target.value="";}}/></label>
-    {uploads.length>0&&<ul className="diary-upload-list">{uploads.map(item=><li key={item.key}><span>{item.file.name}<small>{size(item.file.size)}{item.saved?" · Сохранён":""}</small></span><select aria-label={"Тип материала "+item.file.name} value={item.role} disabled={busy||item.saved} onChange={event=>setUploads(current=>current.map(x=>x.key===item.key?{...x,role:event.target.value}:x))}>{Object.entries(roles).map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></li>)}</ul>}
-    <Button type="submit" disabled={busy||(!text.trim()&&!uploads.length&&!createdId)}>{busy?"Сохраняем…":createdId?"Сохранить материалы":"Сохранить запись"}</Button>
-   </form>:reading&&!entry?<p role="status">Читаем запись…</p>:entry?<article className="diary-entry">
-    <header><Button variant="outline" onClick={()=>{setCreatedId(entry.id);setTitle(entry.title);setDate(entry.date??"");setText(entry.text);setUploads([]);setCreating(true);setError("");setNotice("");}}>Добавить материалы</Button><p className="diary-date">{dateLabel(entry.date)}</p><h1>{entry.title}</h1><p className="diary-muted">Сохранено {new Date(entry.createdAt).toLocaleString("ru-RU")}</p></header>
-    {entry.text&&<div className="diary-text">{entry.text}</div>}
-    {entry.materials.length>0&&<div className="diary-materials"><h2>Материалы</h2>{entry.materials.map(item=><Material key={item.id} item={item} entryId={entry.id} userId={userId}/>)}</div>}
-    {entry.materials.length<entry.materialsTotal&&<Button variant="outline" disabled={reading} onClick={()=>void open(entry.id,true)}>Ещё материалы</Button>}
-   </article>:<div className="diary-empty"><BookOpen size={36} strokeWidth={1.3}/><h1>Место для твоих записей</h1><p>Тексты, фотографии, аудио и другие материалы.<br/>Открой запись слева или сохрани новую.</p><Button onClick={fresh}><Plus size={16}/> Новая запись</Button></div>}
-  </div>
- </WorkspaceFrame>;
+/** Читает полный текст как текст: Markdown и инструкции дневника не исполняются. */
+export function DiaryRecord({entry, userId}: {entry: DiaryEntry; userId: string}) {
+  return <article className="diary-entry">
+    <header><p className="diary-date">{diaryDate(entry.eventDate)}</p><h1>{entry.title}</h1>
+      <p className="diary-muted">{stage[entry.state]}</p>
+    </header>
+    {active(entry.state) && <p className="diary-processing" role="status">{entry.state === "awaiting_upload" ? "Файл ещё загружается. Если передача прервалась, выберите его снова." : "Файл принят. Обработку можно дождаться позже — она продолжится на сервере."}</p>}
+    {entry.state === "needs_attention" && <p className="diary-message diary-error" role="alert">{message(entry.errorCode ?? undefined)}</p>}
+    {entry.state === "ready" && entry.eventDate === null && <p className="diary-processing">В записи не удалось однозначно определить дату события.</p>}
+    {entry.correctedText !== null && <div className="diary-text">{entry.correctedText}</div>}
+    {entry.rawText !== null && <details className="diary-original"><summary>Исходная расшифровка</summary><div className="diary-text">{entry.rawText}</div></details>}
+    {entry.dateEvidence && <details className="diary-original"><summary>Основание даты</summary><p>{entry.dateEvidence}</p></details>}
+    {entry.source === "audio" && entry.audioArtifactId && <div className="diary-audio"><h2>Аудиозапись</h2><audio controls preload="none" src={"/api/diary/file?id=" + encodeURIComponent(entry.id) + "&account=" + encodeURIComponent(userId)}/></div>}
+    <p className="diary-received">Добавлено {new Date(entry.createdAt).toLocaleString("ru-RU")}</p>
+  </article>;
+}
+/** Новый аккаунт получает отдельный экземпляр экрана и прекращает прежние запросы. */
+export default function DiaryScreen(props: Props) { return <DiaryAccount key={props.userId} {...props}/>; }
+
+function DiaryAccount({userId, onUnauthorized}: Props) {
+  const [entries, setEntries] = useState<DiarySummary[]>([]), [selected, setSelected] = useState<string | null>(null);
+  const [entry, setEntry] = useState<DiaryEntry | null>(null), [loading, setLoading] = useState(true);
+  const [reading, setReading] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false), [progress, setProgress] = useState<number | null>(null);
+  const [hasMore, setHasMore] = useState(false), [paging, setPaging] = useState(false);
+  const alive = useRef(true), lifetime = useRef<AbortController | null>(null), locked = useRef(false);
+  const readEpoch = useRef(0), input = useRef<HTMLInputElement>(null), unauthorized = useRef(onUnauthorized);
+  const attempts = useRef(new Map<string, UploadInput>()), latestEntry = useRef(entry);
+  latestEntry.current = entry;
+  if (lifetime.current === null) lifetime.current = new AbortController();
+  unauthorized.current = onUnauthorized;
+  useEffect(() => { const controller = new AbortController(); lifetime.current = controller; alive.current = true; return () => {alive.current = false; controller.abort(); readEpoch.current++;}; }, []);
+  const api = useCallback(async (path: string, options: RequestInit = {}) => {
+    const signal = lifetime.current!.signal;
+    const response = await fetch("/api/diary" + path, {...options, cache: "no-store", signal,
+      headers: {"x-brai-user": userId, ...options.headers}});
+    if (response.status === 401) {unauthorized.current(); throw new Error("Войдите снова, чтобы открыть Дневник.");}
+    if (!response.ok) {
+      const value = await response.json().catch(() => ({}));
+      throw new Error(response.status === 413 ? "Файл превышает допустимый размер." : value.code === "IDEMPOTENCY_CONFLICT" ? "Для этой попытки уже принят другой файл. Выберите исходный файл." : "Не удалось подтвердить действие. Обновите запись перед повтором.");
+    }
+    const value = await response.json();
+    if (signal.aborted) throw new DOMException("Request stopped", "AbortError");
+    return value;
+  }, [userId]);
+  const refresh = useCallback(async () => {
+    const data = await api("?offset=0");
+    if (!alive.current) return;
+    setEntries(data.entries); setHasMore(data.entries.length === 50);
+  }, [api]);
+  useEffect(() => {void refresh().catch(e => {if (alive.current && e.name !== "AbortError") setError(e.message);}).finally(() => {if (alive.current) setLoading(false);});}, [refresh]);
+  const open = useCallback(async (id: string, quiet = false) => {
+    const epoch = ++readEpoch.current;
+    if (!quiet) {setSelected(id); setEntry(null); setReading(true); setError("");}
+    try {
+      const data = await api("/entry?id=" + encodeURIComponent(id));
+      if (alive.current && epoch === readEpoch.current) setEntry(data.entry);
+    } catch (e) {if (alive.current && epoch === readEpoch.current) setError((e as Error).message);}
+    finally {if (alive.current && epoch === readEpoch.current) setReading(false);}
+  }, [api]);
+  // AIDEV-NOTE: Только чтение статуса; polling никогда не запускает повтор обработки.
+  useEffect(() => {
+    if (!entries.some(item => active(item.state))) return;
+    let timer: ReturnType<typeof setTimeout>, stopped = false;
+    const poll = async () => {
+      try {await refresh(); if (!stopped && selected && (!latestEntry.current || active(latestEntry.current.state))) await open(selected, true);} catch { /* Сохранённый список остаётся доступным при обрыве. */ }
+      if (!stopped && alive.current) timer = setTimeout(() => void poll(), 4000);
+    };
+    timer = setTimeout(() => void poll(), 4000); return () => {stopped = true; clearTimeout(timer);};
+  }, [entries.some(item => active(item.state)), refresh, selected, open]);
+
+  function uploadInput(file: File): UploadInput {
+    const fingerprint = JSON.stringify([file.name, file.size, file.lastModified]);
+    const key = "brai.diary.upload:" + userId + ":" + fingerprint;
+    let prior = attempts.current.get(key);
+    try {
+      const stored = JSON.parse(localStorage.getItem(key) ?? "null");
+      if (!prior && stored && typeof stored.requestId === "string" && /^[0-9a-f-]{36}$/i.test(stored.requestId)
+        && stored.filename === file.name && typeof stored.mimeType === "string"
+        && (stored.recordedAt === null || typeof stored.recordedAt === "string") && typeof stored.timezone === "string") prior = stored;
+    } catch { /* Работа продолжается с ключом в памяти, если storage недоступен. */ }
+    if (!prior) prior = {requestId: crypto.randomUUID(), filename: file.name, mimeType: mime(file), recordedAt: null, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"};
+    attempts.current.set(key, prior);
+    try {localStorage.setItem(key, JSON.stringify(prior));} catch { /* Отказ хранения не теряет текущий ключ. */ }
+    return prior;
+  }
+  function mime(file: File): string {
+    const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+    const known: Record<string, string> = {mp3: "audio/mpeg", m4a: "audio/mp4", mp4: "audio/mp4", wav: "audio/wav", ogg: "audio/ogg", opus: "audio/opus", webm: "audio/webm", flac: "audio/flac", aac: "audio/aac"};
+    return file.type.startsWith("audio/") ? file.type : known[extension] ?? "";
+  }
+  function put(id: string, file: File): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest(), signal = lifetime.current!.signal;
+      const stop = () => xhr.abort();
+      const done = () => signal.removeEventListener("abort", stop);
+      xhr.open("PUT", "/api/diary/upload?entry=" + encodeURIComponent(id));
+      xhr.setRequestHeader("x-brai-user", userId); xhr.setRequestHeader("x-content-size", String(file.size)); xhr.timeout = 30 * 60 * 1000;
+      xhr.upload.onprogress = event => {if (alive.current && event.lengthComputable) setProgress(Math.round(event.loaded / event.total * 100));};
+      xhr.onload = () => {done(); if (xhr.status === 401) unauthorized.current(); xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error("Не удалось подтвердить загрузку. Выберите тот же файл для проверки и повтора."));};
+      xhr.onerror = xhr.ontimeout = xhr.onabort = () => {done(); reject(new Error("Соединение прервалось. Выберите тот же файл, чтобы повторить загрузку."));};
+      signal.addEventListener("abort", stop, {once: true});
+      if (signal.aborted) {done(); reject(new Error("Запрос остановлен.")); return;}
+      xhr.send(file);
+    });
+  }
+  async function upload(files: File[]) {
+    if (locked.current || !files.length) return;
+    locked.current = true; setBusy(true); setError(""); setNotice("");
+    try {
+      for (const file of files) {
+        if (!file.size || file.size > 2147483648 || !mime(file)) throw new Error("Выберите непустую аудиозапись размером до 2 ГБ.");
+        const metadata = uploadInput(file);
+        setNotice("Загружаем " + file.name); setProgress(0);
+        const prepared = await api("/materials", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(metadata)});
+        if (!alive.current) return;
+        const id = prepared.entry.id as string;
+        if (!prepared.ready) await put(id, file);
+        if (!alive.current) return;
+        setNotice("Файл принят. Можно закрыть страницу: обработка продолжится на сервере."); setProgress(null);
+        await refresh(); await open(id);
+      }
+    } catch (e) {if (alive.current) {setNotice(""); setError((e as Error).message); void refresh().catch(() => {});}}
+    finally {locked.current = false; if (alive.current) {setBusy(false); setProgress(null);}}
+  }
+  const rail = <div className="diary-rail">
+    <Button onClick={() => input.current?.click()} disabled={busy}><Upload size={16}/> Загрузить аудио</Button>
+    {loading ? <p role="status">Открываем Дневник…</p> : !entries.length ? <p>Сохранённые записи появятся здесь.</p> : <nav aria-label="Записи Дневника">{entries.map(item => <button key={item.id} type="button" className={selected === item.id ? "selected" : ""} onClick={() => void open(item.id)} aria-current={selected === item.id ? "page" : undefined}><strong>{item.title}</strong><span>{diaryDate(item.eventDate)}</span><small>{stage[item.state]}</small></button>)}</nav>}
+    {hasMore && <Button variant="outline" disabled={paging} onClick={() => {setPaging(true); void api("?offset=" + entries.length).then(data => {if (alive.current) {setEntries(old => [...old, ...data.entries.filter((row: DiarySummary) => !old.some(x => x.id === row.id))]); setHasMore(data.entries.length === 50);}}).catch(e => {if (alive.current) setError(e.message);}).finally(() => {if (alive.current) setPaging(false);});}}>Ещё записи</Button>}
+  </div>;
+  return <WorkspaceFrame section="diary" userId={userId} title="Дневник" railTitle="Записи" rail={rail}>
+    <input className="diary-file-input" ref={input} type="file" multiple accept="audio/*,.mp3,.m4a,.wav,.ogg,.opus,.webm,.flac,.aac" aria-label="Выбрать аудиодневники" disabled={busy} onChange={event => {const files = Array.from(event.target.files ?? []); event.target.value = ""; void upload(files);}}/>
+    <div className="diary-screen">
+      <div className="diary-toolbar"><p>Голосовые записи и тексты дневника</p><Button variant="outline" disabled={busy} onClick={() => {setError(""); void refresh().then(() => selected ? open(selected, true) : undefined).catch(e => {if (alive.current) setError(e.message);});}} aria-label="Обновить Дневник"><RefreshCw size={16}/></Button></div>
+      {error && <p className="diary-message diary-error" role="alert">{error}</p>}
+      {notice && <div className="diary-message" role="status"><p>{notice}</p>{progress !== null && <><progress value={progress} max={100}/><span>{progress}%</span><small>Не закрывайте страницу до окончания загрузки.</small></>}</div>}
+      {reading && !entry ? <p role="status">Читаем запись…</p> : entry ? <DiaryRecord entry={entry} userId={userId}/> : <div className="diary-empty"><BookOpen size={36} strokeWidth={1.3}/><h1>Сохрани свой день</h1><p>Загрузи аудиозапись. Мы расшифруем её,<br/>подготовим текст и определим дату событий.</p><Button onClick={() => input.current?.click()} disabled={busy}><Upload size={16}/> Загрузить аудио</Button></div>}
+    </div>
+  </WorkspaceFrame>;
 }
