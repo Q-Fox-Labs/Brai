@@ -102,7 +102,12 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
    const runtime=await startLimited(tools);
    return {
     async listTools(){return (await runtime.listTools()).filter(tool=>!['publish_file','fetch_file'].includes(tool.name));},
-    async callTool(name,args,signal){if(['publish_file','fetch_file'].includes(name))invalid();return runtime.call(name,args,signal);},
+    async callTool(name,args,signal){
+     if(['publish_file','fetch_file'].includes(name))invalid();
+     // Личный broker принимает тот же короткий голосовой ввод, что и MCP.
+     return name==='local_ai_invoke_synthesize'
+      ? runtime.synthesizeVoice(args,signal) : runtime.call(name,args,signal);
+    },
     async filesConfiguration(){return checkedFiles(entry,tools);},
     async publishSnapshot(path,requestId){verifySnapshot(path,entry.stagingRoot);return runtime.call('publish_file',{path,requestId});},
     async fetchArtifact(artifactId){return runtime.call('fetch_file',{artifactId});},

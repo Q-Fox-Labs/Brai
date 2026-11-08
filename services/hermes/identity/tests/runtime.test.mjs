@@ -14,6 +14,7 @@ function fixture(){
  }
  const start=async config=>({async listTools(){return [{name:'history_list'},{name:'publish_file'},{name:'fetch_file'},{name:'timer_snapshot_get'}];},
   async call(name,args){calls.push([config.ownerId,name,args]);return {name,owner:config.ownerId};},
+  async synthesizeVoice(args,signal){signal?.throwIfAborted();calls.push([config.ownerId,'voice',args,signal]);return {artifactId:'voice-'+config.ownerId};},
   async filesConfiguration(){const home='/home/'+config.ownerId;return {ownerId:config.ownerId,stateRoot:home+'/workspace/files',resultRoot:home+'/results',readRoots:[home+'/workspace',home+'/media',home+'/results']};},
   async close(){closes.push(config.ownerId);}});
  records['/profiles']=profiles;
@@ -37,6 +38,19 @@ test('factory binds owner and staging to UID and separates history and publisher
  f.records['/profiles']['1001']=removed;
  await f.adapters.onIdentityChanged({userId:'u1'});assert.deepEqual(f.closes,['u1']);await f.adapters.close();assert.deepEqual(f.closes.sort(),['u1','u2']);
 });
+test('personal voice uses the short-input adapter for each owner and forwards cancellation',async()=>{
+ const f=fixture(),a=await f.adapters.perUserRuntime(f.profile('1001')),b=await f.adapters.perUserRuntime(f.profile('1002'));
+ const args={text:'Проверка голоса.'},controller=new AbortController();
+ try{
+  assert.deepEqual(await a.callTool('local_ai_invoke_synthesize',args,controller.signal),{artifactId:'voice-u1'});
+  assert.deepEqual(await b.callTool('local_ai_invoke_synthesize',args),{artifactId:'voice-u2'});
+  assert.deepEqual(f.calls,[['u1','voice',args,controller.signal],['u2','voice',args,undefined]]);
+  controller.abort();
+  await assert.rejects(a.callTool('local_ai_invoke_synthesize',args,controller.signal),{name:'AbortError'});
+  assert.equal(f.calls.length,2);
+ }finally{await f.adapters.close();}
+});
+
 test('factory refuses shared publisher and unverified MCP bearer',async()=>{
  const f=fixture();
  f.records['/cfg/1'].gameCore={enabled:true,url:'http://example',ownerId:'u1',token:'shared'};
