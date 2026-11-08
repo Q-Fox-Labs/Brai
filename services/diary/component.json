@@ -1,0 +1,102 @@
+{
+  "formatVersion": 1,
+  "id": "diary",
+  "type": "container",
+  "status": "active",
+  "environments": [
+    "dev"
+  ],
+  "executableSources": [
+    "services/diary/src/main.mjs",
+    "services/diary/src/migrate.mjs",
+    "services/diary/src/stdio-proxy.mjs"
+  ],
+  "inputs": {
+    "build": [],
+    "runtime": [
+      "services/diary/package.json",
+      "services/diary/CONTRACT.md",
+      "services/diary/contracts/http.openapi.json",
+      "services/diary/contracts/mcp.json",
+      "services/diary/migrations/001.sql",
+      "services/diary/src/main.mjs",
+      "services/diary/src/migrate.mjs",
+      "services/diary/src/stdio-proxy.mjs",
+      "services/diary/src/domain.mjs",
+      "services/diary/src/luna.mjs",
+      "services/diary/src/adapters.mjs",
+      "services/diary/src/store.mjs",
+      "services/diary/src/http.mjs"
+    ],
+    "checks": [
+      "services/diary/tests/domain.test.mjs",
+      "services/diary/tests/postgres.integration.test.mjs",
+      "services/diary/tests/proxy.test.mjs"
+    ]
+  },
+  "dependencies": [
+    {
+      "id": "auth",
+      "inputs": [
+        "services/auth/contracts/**"
+      ],
+      "delivery": [
+        "services/auth/contracts/service-data-scope.mjs"
+      ]
+    },
+    {
+      "id": "artifacts",
+      "inputs": [
+        "services/artifacts/CONTRACT.md"
+      ],
+      "delivery": []
+    },
+    {
+      "id": "transcription",
+      "inputs": [
+        "services/transcription/CONTRACT.md"
+      ],
+      "delivery": []
+    }
+  ],
+  "commands": {
+    "build": "npm run build",
+    "check": "node --test tests/*.test.mjs"
+  },
+  "delivery": {
+    "kind": "oci-context",
+    "files": [
+      "services/diary/package.json",
+      "services/diary/CONTRACT.md",
+      "services/diary/contracts",
+      "services/diary/migrations",
+      "services/diary/src"
+    ],
+    "entrypoints": [
+      "services/diary/src/main.mjs",
+      "services/diary/src/migrate.mjs",
+      "services/diary/src/stdio-proxy.mjs"
+    ],
+    "smokeImports": [
+      "services/diary/src/domain.mjs"
+    ],
+    "systemRequirements": [
+      "Node.js 24.22.1"
+    ]
+  },
+  "deploy": {
+    "units": [
+      "diary",
+      "diary-migrate"
+    ],
+    "migrations": [
+      "services/diary/migrations/001.sql"
+    ],
+    "health": "HTTP GET /health returns ready; authenticated list verifies database and Auth separately"
+  },
+  "npm": {
+    "workspaces": [
+      "services/diary"
+    ]
+  }
+}

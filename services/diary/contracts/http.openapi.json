@@ -1,0 +1,620 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Brai Diary HTTP",
+    "version": "1.0.0",
+    "description": "Нормативные гарантии, пределы в UTF-8 байтах и правила доступа определены ../CONTRACT.md. Длина JSON Schema не заменяет байтовые пределы."
+  },
+  "security": [
+    {
+      "sessionCookie": []
+    },
+    {
+      "personalBearer": []
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Listener готов; модели, Auth и БД проверяются отдельно."
+          }
+        }
+      }
+    },
+    "/v1/entries": {
+      "get": {
+        "operationId": "listEntries",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "offset",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "До 50 собственных записей",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Failure"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createText",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TextInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Новая запись либо точный replay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Failure"
+          }
+        }
+      }
+    },
+    "/v1/audio": {
+      "post": {
+        "operationId": "prepareAudio",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AudioInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Устойчивое намерение и готовность оригинала",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrepareResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Failure"
+          }
+        }
+      }
+    },
+    "/v1/entry/{id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getEntry",
+        "responses": {
+          "200": {
+            "description": "Собственная полная запись",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryResult"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Failure"
+          }
+        }
+      }
+    },
+    "/v1/upload/{id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      ],
+      "put": {
+        "operationId": "uploadAudio",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-content-size",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483648
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Принятый проверенный оригинал; обработка продолжается независимо от HTTP",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Accepted"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Failure"
+          }
+        }
+      }
+    },
+    "/v1/file/{id}": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        {
+          "in": "header",
+          "name": "Range",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "readOriginal",
+        "responses": {
+          "200": {
+            "description": "Приватные байты оригинала"
+          },
+          "206": {
+            "description": "Диапазон оригинала"
+          },
+          "default": {
+            "$ref": "#/components/responses/Failure"
+          }
+        }
+      },
+      "head": {
+        "operationId": "headOriginal",
+        "responses": {
+          "200": {
+            "description": "Метаданные без байтов"
+          },
+          "206": {
+            "description": "Диапазон без байтов"
+          },
+          "default": {
+            "$ref": "#/components/responses/Failure"
+          }
+        }
+      }
+    },
+    "/mcp": {
+      "post": {
+        "operationId": "mcp",
+        "description": "Stateless Streamable HTTP MCP. Операции и inputSchema в mcp.json; cookie или персональная bearer-привязка.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON-RPC MCP result/error. Ошибка инструмента: isError с безопасным code."
+          },
+          "default": {
+            "$ref": "#/components/responses/Failure"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Cookie",
+        "description": "Cookie принадлежат Auth и передаются целиком. Дополнительно нужен x-brai-user; мутации требуют canonical Origin."
+      },
+      "personalBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Токен привязан оператором к одному активному user/profile."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "TextInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1048576
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "eventDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          }
+        },
+        "required": [
+          "requestId",
+          "text"
+        ]
+      },
+      "AudioInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "filename": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "mimeType": {
+            "type": "string",
+            "pattern": "^audio/"
+          },
+          "recordedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "timezone": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "requestId",
+          "filename",
+          "mimeType"
+        ]
+      },
+      "Entry": {
+        "type": "object",
+        "required": [
+          "id",
+          "ownerId",
+          "profileId",
+          "requestId",
+          "title",
+          "source",
+          "createdAt",
+          "state",
+          "eventDate",
+          "dateStatus",
+          "dateEvidence",
+          "rawText",
+          "correctedText",
+          "transcription",
+          "correction",
+          "audioArtifactId",
+          "errorCode"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ownerId": {
+            "type": "string"
+          },
+          "profileId": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "audio",
+              "text"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "state": {
+            "enum": [
+              "awaiting_upload",
+              "transcribing",
+              "correcting",
+              "ready",
+              "needs_attention"
+            ]
+          },
+          "eventDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "dateStatus": {
+            "enum": [
+              "provided",
+              "identified",
+              "needs_clarification"
+            ]
+          },
+          "dateEvidence": {
+            "type": "string"
+          },
+          "rawText": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "correctedText": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "audioArtifactId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "errorCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "transcription": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "requestId": {
+                "type": "string"
+              },
+              "actualModel": {},
+              "receivedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          },
+          "correction": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "model": {
+                "const": "gpt-6-luna"
+              },
+              "promptVersion": {
+                "const": "diary-v1"
+              },
+              "rawResponse": {
+                "type": "string"
+              },
+              "completedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      },
+      "Summary": {
+        "type": "object",
+        "description": "Entry без rawText, correctedText, correction и audioInput. Полная запись читается отдельным get.",
+        "required": [
+          "id",
+          "title",
+          "state",
+          "eventDate",
+          "dateStatus",
+          "createdAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/Entry/properties/state"
+          },
+          "eventDate": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date"
+          },
+          "dateStatus": {
+            "$ref": "#/components/schemas/Entry/properties/dateStatus"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "EntryResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "entry": {
+            "$ref": "#/components/schemas/Entry"
+          }
+        },
+        "required": [
+          "entry"
+        ]
+      },
+      "ListResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "entries": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/Summary"
+            }
+          }
+        },
+        "required": [
+          "entries"
+        ]
+      },
+      "PrepareResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "entry": {
+            "$ref": "#/components/schemas/Entry"
+          },
+          "ready": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "entry",
+          "ready"
+        ]
+      },
+      "Accepted": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "entryId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "const": "accepted"
+          }
+        },
+        "required": [
+          "entryId",
+          "status"
+        ]
+      }
+    },
+    "responses": {
+      "Failure": {
+        "description": "Ошибка 400/401/403/404/409/413/429/502/503. Условия и коды определены CONTRACT.md.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}

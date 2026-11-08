@@ -270,7 +270,6 @@
       "apps/web/app/diary/screen.tsx",
       "apps/web/app/diary/styles.css",
       "apps/web/app/diary/types.ts",
-      "apps/web/server/diary-core.ts",
       "apps/web/server/diary-http.ts",
       "apps/web/app/agent/admin-chats.tsx",
       "apps/web/app/agent/admin-chat-client.ts",
@@ -330,12 +329,12 @@
       "apps/web/tests/workspace-link.test.ts",
       "apps/web/tests/telegram-display.test.ts",
       "apps/web/tests/telegram-observer.test.ts",
-      "apps/web/tests/diary.test.ts",
       "apps/web/tests/game-core-identity.test.ts",
       "apps/web/tests/admin-chat-client.test.ts",
       "apps/web/tests/admin-auth.test.ts",
       "apps/web/tests/admin-download.test.ts",
-      "apps/web/tests/admin-chats-render.test.ts"
+      "apps/web/tests/admin-chats-render.test.ts",
+      "apps/web/tests/diary-render.test.ts"
     ]
   },
   "dependencies": [
@@ -398,6 +397,13 @@
       "delivery": [
         "services/alerts/schemas"
       ]
+    },
+    {
+      "id": "diary",
+      "inputs": [
+        "services/diary/contracts/**"
+      ],
+      "delivery": []
     }
   ],
   "commands": {
