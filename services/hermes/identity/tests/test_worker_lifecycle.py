@@ -363,6 +363,32 @@ def patch_hunks(text, wanted):
 
 @unittest.skipUnless(os.environ.get('HERMES_TEST_ENGINE'), 'Pinned public engine required')
 class NativeHooksTest(unittest.TestCase):
+    def test_hosted_room_database_stays_inside_independent_os_home(self):
+        engine = Path(os.environ['HERMES_TEST_ENGINE'])
+        source = (engine / 'gateway/hosted_rooms.py').read_text()
+        text = (Path(__file__).resolve().parents[2] / 'files/native.patch').read_text()
+        for name, old, new in patch_hunks(text, {'gateway/hosted_rooms.py'}):
+            self.assertEqual(source.count(old), 1)
+            source = source.replace(old, new, 1)
+        tree = ast.parse(source)
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                        and node.name == 'default_db_path')
+        module = ast.Module(body=[function], type_ignores=[])
+        scope = {'Path': Path}
+        exec(compile(ast.fix_missing_locations(module), 'hosted room path', 'exec'), scope)
+        constants = ModuleType('hermes_constants')
+        home = Path('/var/lib/brai-identity/dev/profiles/personal')
+        constants.get_hermes_home = lambda: home
+        with patch.dict(sys.modules, {'hermes_constants': constants}):
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker'}):
+                self.assertEqual(scope['default_db_path'](), home / 'shared-state.db')
+            with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'telegram'}):
+                self.assertEqual(scope['default_db_path'](), home.parent.parent / 'shared-state.db')
+            with patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(scope['default_db_path'](), home.parent.parent / 'shared-state.db')
+                home = Path('/tmp/standalone-hermes')
+                self.assertEqual(scope['default_db_path'](), home / 'shared-state.db')
+
     def test_native_patch_reconstructs_base_and_preserves_owner_scope(self):
         engine = Path(os.environ['HERMES_TEST_ENGINE'])
         native_patch = (Path(__file__).resolve().parents[1] / 'native.patch').read_text()
