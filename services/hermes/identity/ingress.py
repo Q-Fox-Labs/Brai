@@ -59,15 +59,11 @@ class Bridge:
         return self
 
     @asynccontextmanager
-    async def _dispatch_scope(self, event):
-        source = event.source
-        if source.platform.value != 'telegram' or str(source.user_id) not in self.telegram_ids or source.is_bot:
-            raise PermissionError('Event owner mismatch')
-        peer = await self.connect()
+    async def _dispatch_scope(self):
         self.dispatch_inflight += 1
         scope = {'turn_id': None}
         try:
-            yield peer, scope
+            yield scope
         finally:
             self.dispatch_inflight -= 1
             if self.dispatch_inflight == 0:
@@ -78,13 +74,18 @@ class Bridge:
                     await self.on_turn_end(None)
 
     async def dispatch(self, event):
-        """Передать событие внутри fence до подготовки, сохранив исходную квитанцию."""
-        async with self._dispatch_scope(event) as (peer, scope):
-            return await self._dispatch(event, peer, scope)
-
-    async def _dispatch(self, event, peer, scope):
         """Отправить ранее допущенное событие без общего transcript/history."""
         source = event.source
+        if source.platform.value != 'telegram' or str(source.user_id) not in self.telegram_ids or source.is_bot:
+            raise PermissionError('Event owner mismatch')
+        # Отказ подключения не должен занимать беседу или допускать input,
+        # который worker заведомо не сможет получить.
+        peer = await self.connect()
+        async with self._dispatch_scope() as scope:
+            return await self._dispatch(event, source, peer, scope)
+
+    async def _dispatch(self, event, source, peer, scope):
+        """Подготовить и передать допущенное событие внутри dispatch fence."""
         data = await self.prepare_event(event)
         if not isinstance(data, dict):
             raise ValueError('Event preparation failed')
