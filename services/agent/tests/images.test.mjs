@@ -244,15 +244,16 @@ test('unresolved new exact clientId is unavailable rather than legacy, and not-s
 });
 test('slow multiattachment NATS reads share one model phase budget and never reserve/send late', async () => {
   const f = fixture(); f.config.artifacts.timeoutMs = 100; const command = f.restart(); await f.create();
-  const timeouts = [], transport = createArtifactsPort({ request: async (subject, raw, options) => {
-    const value = JSON.parse(Buffer.from(raw).toString()); const delay = subject === artifactSubjects.get ? 45 : 0;
+  // AIDEV-NOTE: Первый read тратит больше половины бюджета; второй проверяет остаток без хрупкого ожидания третьего.
+  const timeouts = [], readDelay = 70, transport = createArtifactsPort({ request: async (subject, raw, options) => {
+    const value = JSON.parse(Buffer.from(raw).toString()); const delay = subject === artifactSubjects.get ? readDelay : 0;
     timeouts.push(options.timeout);
     await new Promise((resolve, reject) => setTimeout(() => options.timeout < delay ? reject(Object.assign(new Error('TIMEOUT'), { code: 'TIMEOUT' })) : resolve(), Math.min(delay, options.timeout)));
     return { data: Buffer.from(JSON.stringify(await f.artifactPort.originalRequest(subject, value))) };
   } }, 100);
   f.artifactPort.originalRequest = f.artifactPort.request; f.artifactPort.request = transport.request;
   const start = performance.now(); await assert.rejects(f.app.request({ ...command, attachments: Array(8).fill(pair) }), e => e.outcome === 'not-sent');
-  assert.ok(performance.now() - start < 220); assert.ok(timeouts.at(-1) < 45); assert.equal(f.refs.size, 0);
+  assert.ok(performance.now() - start < 220); assert.ok(timeouts.at(-1) < readDelay, JSON.stringify(timeouts)); assert.equal(f.refs.size, 0);
   await new Promise(resolve => setTimeout(resolve, 60)); assert.equal(f.calls.filter(call => call.method === 'turn/start').length, 0); f.app.close();
 });
 test('stalled HTTP body uses remaining phase budget; late metadata/generation cannot send', async () => {
