@@ -583,6 +583,328 @@
           "$ref": "#/components/errors/InvalidParams"
         }
       ]
+    },
+    {
+      "name": "identity.link-redeem",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "code",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/TelegramResolveResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ],
+      "description": "Trusted ingress only. Personal Telegram account linking; never available to the model. No automatic mutation retry."
+    },
+    {
+      "name": "telegram.link",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "phase",
+          "required": true,
+          "schema": {
+            "enum": [
+              "offer",
+              "command"
+            ]
+          }
+        },
+        {
+          "name": "threadId",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "sent",
+                "failed",
+                "unknown",
+                "unavailable",
+                "denied"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ],
+      "description": "Agent account-link workflow. First send the full warning; require a new trusted confirmation in the same private account before command issuance. Secrets never enter worker. Unknown delivery is not retried."
+    },
+    {
+      "name": "telegram.unlink",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "threadId",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        {
+          "name": "target",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "current",
+              "other"
+            ]
+          }
+        },
+        {
+          "name": "phase",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "offer",
+              "confirm"
+            ]
+          }
+        },
+        {
+          "name": "targetTelegramId",
+          "required": false,
+          "description": "Pinned by broker after delivered offer; required for confirm.",
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "sent",
+                "failed",
+                "unknown",
+                "unavailable",
+                "denied"
+              ]
+            },
+            "reason": {
+              "enum": [
+                "admin-last-channel",
+                "account-unavailable"
+              ]
+            },
+            "targetTelegramId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,19}$"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ],
+      "description": "Agent-only unlink workflow. Fresh delivered warning and new trusted confirmation pin the exact account and origin for five minutes. Equal accounts; admin retains at least one contact channel, other users may remove all. No automatic mutation retry."
+    },
+    {
+      "name": "identity.lifecycle-claim",
+      "description": "Только root broker. Постоянная операция Auth, lease и поколение проверяются Auth.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "workerId",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleClaimRequest/properties/workerId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleClaimResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "identity.lifecycle-renew",
+      "description": "Только root broker. Постоянная операция Auth, lease и поколение проверяются Auth.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleRenewRequest/properties/operationId"
+          }
+        },
+        {
+          "name": "leaseToken",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleRenewRequest/properties/leaseToken"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleAcceptedResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "identity.lifecycle-complete",
+      "description": "Только root broker. Постоянная операция Auth, lease и поколение проверяются Auth.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteRequest/properties/operationId"
+          }
+        },
+        {
+          "name": "leaseToken",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteRequest/properties/leaseToken"
+          }
+        },
+        {
+          "name": "success",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteRequest/properties/success"
+          }
+        },
+        {
+          "name": "errorCode",
+          "required": false,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteRequest/properties/errorCode"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
     }
   ],
   "components": {

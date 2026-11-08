@@ -258,7 +258,8 @@
       "services/hermes/identity/schemas/control.schema.json",
       "services/hermes/identity/parent_runner.py",
       "services/hermes/identity/control.openrpc.json",
-      "services/hermes/identity/asyncapi.yaml"
+      "services/hermes/identity/asyncapi.yaml",
+      "services/hermes/identity/lifecycle.py"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
@@ -310,7 +311,8 @@
       "services/hermes/identity/tests/memory_spool.test.mjs",
       "services/hermes/identity/tests/test_memory_spool.py",
       "services/hermes/tests/dialogues-port.test.mjs",
-      "services/hermes/tests/dialogues-summary.test.mjs"
+      "services/hermes/tests/dialogues-summary.test.mjs",
+      "services/hermes/identity/tests/test_lifecycle.py"
     ]
   },
   "dependencies": [
@@ -630,7 +632,8 @@
       "services/hermes/identity/control.openrpc.json",
       "services/hermes/identity/asyncapi.yaml",
       "services/hermes/extensions/scripts/context_gif.py",
-      "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md"
+      "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md",
+      "services/hermes/identity/lifecycle.py"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",

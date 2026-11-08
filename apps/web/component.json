@@ -259,7 +259,11 @@
       "apps/web/app/agent/telegram-observer.css",
       "apps/web/app/api/telegram-observer/[...path]/route.ts",
       "apps/web/app/api/telegram-observer/file-auth/route.ts",
-      "apps/web/server/telegram-observer.ts"
+      "apps/web/server/telegram-observer.ts",
+      "apps/web/app/agent/admin-chats.tsx",
+      "apps/web/app/agent/admin-chat-client.ts",
+      "apps/web/app/api/admin/route.ts",
+      "apps/web/server/admin-download.ts"
     ],
     "checks": [
       "apps/web/tests/account-render.test.ts",
@@ -314,7 +318,11 @@
       "apps/web/tests/workspace-link.test.ts",
       "apps/web/tests/telegram-display.test.ts",
       "apps/web/tests/telegram-observer.test.ts",
-      "apps/web/tests/game-core-identity.test.ts"
+      "apps/web/tests/game-core-identity.test.ts",
+      "apps/web/tests/admin-chat-client.test.ts",
+      "apps/web/tests/admin-auth.test.ts",
+      "apps/web/tests/admin-download.test.ts",
+      "apps/web/tests/admin-chats-render.test.ts"
     ]
   },
   "dependencies": [

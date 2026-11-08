@@ -73,7 +73,8 @@ test('service replies carry only permitted NATS errors', () => {
 test('OpenRPC inventory and references match private methods', async () => {
   assert.equal(rpc.openrpc, '1.3.2');
   assert.deepEqual(rpc.methods.map(item => item.name).sort(), [
-    'identity.resolve','identity.invite-redeem','identity.profile-ready','authorize','identity.revalidate','login.send',
+    'identity.lifecycle-claim','identity.lifecycle-renew','identity.lifecycle-complete',
+    'identity.resolve','telegram.link','telegram.unlink','identity.link-redeem','identity.invite-redeem','identity.profile-ready','authorize','identity.revalidate','login.send',
     'tools.list','tools.call','files.configuration','files.get','files.list','files.prepare','artifacts.publish','artifacts.fetch'
   ].sort());
   const visit = async (node, base, document) => {

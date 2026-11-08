@@ -9,7 +9,7 @@ import ts from "typescript";
 const path = new URL("../server/admin-download.ts", import.meta.url), require = createRequire(path);
 const output = ts.transpileModule(readFileSync(path, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
 class GatewayError extends Error { constructor(_status: number, code: string) { super(code); } }
-const mod = { exports: {} as { adminDownload: (value: unknown, id: string, signal: AbortSignal) => Promise<Response> } };
+const mod = { exports: {} as { adminDownload: (value: unknown, id: string, signal: AbortSignal, preview?: boolean) => Promise<Response> } };
 new Function("require", "module", "exports", output)((name: string) => name === "./gateway" ? { GatewayError } : require(name), mod, mod.exports);
 const id = "11111111-1111-4111-8111-111111111111";
 test("64 MiB download streams bounded chunks with exact target and digest", async () => {
@@ -43,5 +43,20 @@ test("digest failures break the stream and cancellation reaches the source", asy
   const response = await mod.exports.adminDownload(descriptor, id, new AbortController().signal);
   const reader = response.body!.getReader(); await reader.read(); await reader.cancel();
   assert.equal(cancelled, true);
+ } finally { globalThis.fetch = previousFetch; if (previousBase === undefined) delete process.env.WEB_ADMIN_ARTIFACTS_BASE_URL; else process.env.WEB_ADMIN_ARTIFACTS_BASE_URL = previousBase; }
+});
+
+test("preview permits only passive media MIME and keeps active documents as downloads", async () => {
+ const previousFetch = globalThis.fetch, previousBase = process.env.WEB_ADMIN_ARTIFACTS_BASE_URL;
+ const bytes = new Uint8Array([1, 2, 3]), sha256 = createHash("sha256").update(bytes).digest("hex");
+ try {
+  process.env.WEB_ADMIN_ARTIFACTS_BASE_URL = "http://artifacts.test";
+  globalThis.fetch = (async () => new Response(bytes)) as typeof fetch;
+  for (const [mimeType, inline] of [["image/png", true], ["audio/mpeg", true], ["text/html", false], ["image/svg+xml", false]] as const) {
+   const response = await mod.exports.adminDownload({artifactId:id,filename:"test",mimeType,sizeBytes:3,sha256}, id, new AbortController().signal, true);
+   assert.equal(response.headers.get("content-type"), inline ? mimeType : "application/octet-stream");
+   assert.match(response.headers.get("content-disposition")!, inline ? /^inline;/ : /^attachment;/);
+   assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes);
+  }
  } finally { globalThis.fetch = previousFetch; if (previousBase === undefined) delete process.env.WEB_ADMIN_ARTIFACTS_BASE_URL; else process.env.WEB_ADMIN_ARTIFACTS_BASE_URL = previousBase; }
 });
