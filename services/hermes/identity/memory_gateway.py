@@ -285,6 +285,43 @@ class Boundary:
             if data.get('memory_stream') != 1 or data.get('recall_index') != 1:
                 raise Denied('SECURE_MEMORY_UNAVAILABLE')
             return {'code': 200, 'data': {'memory_stream': 1, 'recall_index': 1}}
+        parsed = urllib.parse.urlsplit(path)
+        if parsed.path == '/product/scheduler/status':
+            if method != 'GET' or body or parsed.scheme or parsed.netloc or parsed.fragment or len(path) > 2048:
+                raise Denied('INVALID_STATUS_REQUEST')
+            try:
+                pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+            except ValueError:
+                raise Denied('INVALID_STATUS_REQUEST') from None
+            query = dict(pairs)
+            if len(query) != len(pairs) or set(query) - {'user_id', 'task_id'}:
+                raise Denied('INVALID_STATUS_REQUEST')
+            if 'user_id' in query and query['user_id'] != profile['userId']:
+                raise Denied('OWNER_DENIED')
+            task = query.get('task_id')
+            if task is not None and not re.fullmatch(r'[A-Za-z0-9._:-]{1,256}', task):
+                raise Denied('INVALID_STATUS_REQUEST')
+            selected = {'user_id': profile['userId']}
+            if task is not None:
+                selected['task_id'] = task
+            value = self.client(profile, profile['cubes'][0]).request(
+                '/product/scheduler/status?' + urllib.parse.urlencode(selected),
+                timeout=10, max_response_bytes=262144)
+            if (not isinstance(value, dict) or set(value) != {'code', 'message', 'data'}
+                    or value.get('code') != 200 or not isinstance(value.get('data'), list)):
+                raise Denied('INVALID_STATUS_RESPONSE')
+            seen = set()
+            items = []
+            for item in value['data']:
+                if (not isinstance(item, dict) or set(item) != {'task_id', 'status'}
+                        or not isinstance(item.get('task_id'), str)
+                        or not re.fullmatch(r'[A-Za-z0-9._:-]{1,256}', item['task_id'])
+                        or item['task_id'] in seen or task is not None and item['task_id'] != task
+                        or item.get('status') not in ('waiting', 'in_progress', 'completed', 'failed', 'cancelled')):
+                    raise Denied('INVALID_STATUS_RESPONSE')
+                seen.add(item['task_id'])
+                items.append({'task_id':item['task_id'], 'status':item['status']})
+            return {'code':200, 'message':'Memory get status successfully', 'data':items}
         if method != 'POST':
             raise Denied('METHOD_DENIED')
         if path in ('/product/get_memory', '/product/get_memory_stream'):

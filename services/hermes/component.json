@@ -303,6 +303,7 @@
       "services/hermes/identity/tests/test_worker_interactive.py",
       "services/hermes/identity/tests/test_delivery_routes.py",
       "services/hermes/identity/tests/test_shared_search.py",
+      "services/hermes/identity/tests/test_memory_status.py",
       "services/hermes/extensions/tests/test_shared_codex_search.py",
       "services/hermes/identity/tests/history.test.mjs",
       "services/hermes/identity/tests/transcription.test.mjs",

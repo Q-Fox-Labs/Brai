@@ -147,6 +147,9 @@ class MemoryStandaloneTests(unittest.TestCase):
                 if outer.redirect:
                     self.send_response(302); self.send_header('Location', 'http://127.0.0.1:1/private-secret')
                     self.end_headers(); return
+                if self.path.startswith('/product/scheduler/status?'):
+                    self.reply({'code':200,'message':'Memory get status successfully','data':[{'task_id':'task-own','status':'completed'}]})
+                    return
                 self.reply({'code': 200, 'data': {'memory_stream': 1, 'recall_index': 1}})
             def reply(self, value, kind='application/json'):
                 self.send_response(200); self.send_header('Content-Type', kind); self.end_headers()
@@ -233,16 +236,23 @@ sys.exit(m.main())
         self.assertFalse(self.requests[-1][2]['auto_cleanup_working'])
         self.assertNotEqual(self.cli('add', '--text', 'secret', '--session', 's', config=self.config | {'frozen': True}).returncode, 0)
 
+    def test_status_uses_the_real_scoped_unix_sdk(self):
+        result=self.success('status','--task-id','task-own')
+        self.assertEqual(result['data'],[{'task_id':'task-own','status':'completed'}])
+        self.assertEqual(self.requests,[('GET','/product/scheduler/status?user_id=owner&task_id=task-own',None)])
+        self.assertNotEqual(self.cli('--user','foreign','status').returncode,0)
+        self.assertEqual(len(self.requests),1)
+
     def test_explicit_owner_endpoint_and_unsupported_operations_fail_before_io(self):
         for args in [('--user', 'root', 'health'), ('--base-url', 'http://localhost', 'health'),
-                     ('status',), ('feedback', '--text', 'secret', '--id', 'one', '--session', 's')]:
+                     ('feedback', '--text', 'secret', '--id', 'one', '--session', 's')]:
             with self.subTest(args=args):
                 before = len(self.requests)
                 result = self.cli(*args)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(len(self.requests), before)
                 self.assertNotIn('secret', result.stderr)
-        self.assertIn('UNSUPPORTED', self.cli('status').stderr)
+        self.assertIn('UNSUPPORTED', self.cli('feedback','--text','secret','--id','one','--session','s').stderr)
 
     def test_foreign_rows_and_redirects_fail_without_content_or_network_fallback(self):
         self.foreign = True

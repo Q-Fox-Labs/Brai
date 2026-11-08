@@ -22,7 +22,7 @@ def build_request(a):
     if a.command == 'health':
         return '/health', None
     if a.command == 'status':
-        return '/product/scheduler/status?' + urllib.parse.urlencode(scope), None
+        return '/product/scheduler/status?' + urllib.parse.urlencode({**scope, **({'task_id': a.task_id} if getattr(a, 'task_id', None) is not None else {})}), None
     if a.command == 'search':
         return '/product/search', dict(scope, readable_cube_ids=[a.cube], query=a.query,
             mode='fast', top_k=a.top_k, relativity=0, rerank=False, dedup='no',
@@ -105,12 +105,15 @@ def private_request(a, config):
         raise ValueError('PRIVATE_MEMORY_CUBE_INVALID')
     if not math.isfinite(a.timeout) or not 0 < a.timeout <= 300:
         raise ValueError('PRIVATE_MEMORY_TIMEOUT_INVALID')
-    if a.command in {'status', 'feedback'}:
+    if a.command == 'feedback':
         raise ValueError('PRIVATE_MEMORY_' + a.command.upper() + '_UNSUPPORTED')
     if a.command in {'add', 'delete'} and config.get('frozen') is not False:
         raise ValueError('PRIVATE_MEMORY_WRITES_FROZEN')
     a.user, a.cube = config['user_id'], cube
     api = worker_client({**config, 'cube_id': cube, 'request_timeout': a.timeout})
+    if a.command == 'status':
+        path, _ = build_request(a)
+        return api.request(path, timeout=min(a.timeout, 10), max_response_bytes=262144)
     if a.command == 'health':
         return api.health()
     if a.command == 'search':
@@ -153,7 +156,7 @@ def main():
     p.add_argument('--timeout', type=float, default=240)
     sub = p.add_subparsers(dest='command', required=True)
     sub.add_parser('health')
-    sub.add_parser('status')
+    sub.add_parser('status').add_argument('--task-id')
     s = sub.add_parser('search')
     s.add_argument('--query', required=True)
     s.add_argument('--top-k', type=int, default=5)

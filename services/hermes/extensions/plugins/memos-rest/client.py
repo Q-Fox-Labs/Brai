@@ -223,7 +223,7 @@ class Client:
             handlers.extend((UnixHTTPHandler(socket_path), NoRedirect()))
         self.opener = urllib.request.build_opener(*handlers)
 
-    def request(self, path, body=None, *, timeout=None, allow_missing=False):
+    def request(self, path, body=None, *, timeout=None, allow_missing=False, max_response_bytes=None):
         """Выполнить scoped API без повтора записи при потере ответа."""
         if (path == '/product/get_memory' and isinstance(body, dict)
                 and not set(body) - {'mem_cube_id', 'user_id', 'filter', 'include_preference',
@@ -231,9 +231,11 @@ class Client:
                 and all(body.get(flag) is False for flag in
                         ('include_preference', 'include_tool_memory', 'include_skill_memory'))):
             return self._memory_read(body, timeout)
-        return self._request_json(path, body, timeout=timeout, allow_missing=allow_missing)
+        return self._request_json(path, body, timeout=timeout, allow_missing=allow_missing, max_response_bytes=max_response_bytes)
 
-    def _request_json(self, path, body=None, *, timeout=None, allow_missing=False):
+    def _request_json(self, path, body=None, *, timeout=None, allow_missing=False, max_response_bytes=None):
+        if max_response_bytes is not None and (type(max_response_bytes) is not int or not 1 <= max_response_bytes <= 1048576):
+            raise ValueError('Invalid response byte limit')
         request = urllib.request.Request(
             self.base_url + path,
             data=None if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -241,7 +243,13 @@ class Client:
         )
         try:
             with self.opener.open(request, timeout=remaining_timeout(timeout or self.timeout)) as response:
-                result = json.load(response)
+                if max_response_bytes is None:
+                    result = json.load(response)
+                else:
+                    raw = response.read(max_response_bytes + 1)
+                    if len(raw) > max_response_bytes:
+                        raise MemOSError('MemOS bounded response too large')
+                    result = json.loads(raw.decode('utf-8', errors='strict'))
         except urllib.error.HTTPError as exc:
             exc.close()
             if allow_missing and exc.code == 404:
