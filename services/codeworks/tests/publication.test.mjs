@@ -4,9 +4,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {verifyPublication,recheckPublication} from '../src/publication.mjs';
 
-function fixture({remote='source',receiptValid=true,pending=false,writer=false,delivered=true,dirty=false,head='source',deliveryStatus='succeeded',legTarget='dev',legMerged=true,legSha='installed',legEvidence='evidence'}={}){
+function fixture({remote='source',receiptValid=true,pending=false,writer=false,delivered=true,dirty=false,head='source',deliveryStatus='succeeded',legTarget='dev',legMerged=true,legSha='installed',legEvidence='evidence',selection}={}){
   const project={id:'p'},workspace={id:'w',project_id:'p',kind:'feature'},composition={components:[]};
-  const row={requested_sha:'source',closed_at:'2026-01-01',state:'failed',original_status:'failed',installed_operation_id:'rollout',commit_sha:'installed',target:'dev',project_id:'p',composition_digest:'digest',composition,receipt:{operation_id:'rollout',project_id:'p',target:'dev',commit_sha:'installed',composition_digest:'digest',composition,verified:receiptValid},rollout_status:'succeeded',evidence_id:'evidence',evidence_at:'2026-01-02',delivery_release_id:'release-b',delivery_release_state:'succeeded',delivery_operation_status:deliveryStatus,delivery_release_details:{primary:{target:legTarget,merged:legMerged,merge_sha:legSha,deployment_evidence_id:legEvidence}}};
+  const row={requested_sha:'source',closed_at:'2026-01-01',state:'failed',original_status:'failed',installed_operation_id:'rollout',commit_sha:'installed',target:'dev',project_id:'p',composition_digest:'digest',composition,receipt:{operation_id:'rollout',project_id:'p',target:'dev',commit_sha:'installed',composition_digest:'digest',composition,verified:receiptValid,...(selection?{selection}:{})},rollout_status:'succeeded',evidence_id:'evidence',evidence_at:'2026-01-02',delivery_release_id:'release-b',delivery_release_state:'succeeded',delivery_operation_status:deliveryStatus,delivery_release_details:{primary:{target:legTarget,merged:legMerged,merge_sha:legSha,deployment_evidence_id:legEvidence}}};
   const db={query:async sql=>{
     if(sql.includes('SELECT r.operation_id,r.requested_sha'))return {rows:[{operation_id:'attempt-a',requested_sha:'source'}]};
     if(sql.includes('SELECT d.operation_id,d.release_operation_id'))return {rows:[{operation_id:'rollout',release_operation_id:'release-b',commit_sha:'installed',evidence_id:'evidence'}]};
@@ -51,4 +51,10 @@ test('the locked proof query uses the helper for trusted tables and locks remain
   assert.equal(await recheckPublication(db,{id:'p'},{id:'w',project_id:'p',kind:'feature'},proof,{lock:true}),false);
   assert.match(calls[2].sql,/FOR SHARE OF a,ao,d,ro,b,bo/);
   assert.doesNotMatch(calls[2].sql,/FOR SHARE OF[^\n]*(?:,i|,de)/);
+});
+
+test('selective delivery never proves another workspace or another accepted head',async()=>{
+ assert.equal(await fixture({selection:{workspace_id:'another',accepted_sha:'source'}})(),null);
+ assert.equal(await fixture({selection:{workspace_id:'w',accepted_sha:'another'}})(),null);
+ assert.ok(await fixture({selection:{workspace_id:'w',accepted_sha:'source'}})());
 });

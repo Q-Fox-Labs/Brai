@@ -52,8 +52,27 @@ export function createDeploymentAdapter(configFile=process.env.CODEWORKS_DEPLOYM
   }
   return adapter;
 }
+/** DEV selection сохраняет соседей из предыдущего доверенного installed, а не из caller proof. */
+export function selectedInstalledComposition(composition,receipt,previous) {
+  const selection=receipt.selection,selected=selection?.components;
+  const fail=()=>{throw Error('INSTALLED_SELECTION_INVALID');};
+  if(composition.target!=='dev'||selection?.version!==1||!Array.isArray(selected)||!selected.length
+    ||new Set(selected).size!==selected.length||!previous||selection.previous_operation_id!==previous.operation_id
+    ||!Array.isArray(previous.composition?.components)||!Array.isArray(receipt.installed_components)
+    ||!Array.isArray(receipt.inactive)||receipt.inactive.length)fail();
+  const trusted=new Map(composition.components.map(item=>[item.id,item]));
+  if(selected.some(id=>typeof id!=='string'||!trusted.has(id)))fail();
+  const retained=previous.composition.components.filter(item=>!selected.includes(item.id));
+  const expected=[...composition.components.filter(item=>selected.includes(item.id)),...retained];
+  if(new Set(expected.map(item=>item.id)).size!==expected.length
+    ||!equal(receipt.installed_components,expected)
+    ||!equal(Object.keys(selection.origins??{}).sort(),retained.map(item=>item.id).sort())
+    ||Object.values(selection.origins??{}).some(id=>typeof id!=='string'||!/^[0-9a-f-]{36}$/.test(id)))fail();
+  return {...composition,components:expected};
+}
 /** Binds the actual active subset to exact owner-verified component objects; disabled refs stay provenance only. */
-export function installedComposition(composition,receipt) {
+export function installedComposition(composition,receipt,previous) {
+  if(receipt.selection!==undefined)return selectedInstalledComposition(composition,receipt,previous);
   if(receipt.installed_components===undefined&&receipt.inactive===undefined)return composition;
   const active=receipt.installed_components,inactive=receipt.inactive;
   if(!Array.isArray(active)||!Array.isArray(inactive))throw Error('INSTALLED_SUBSET_INVALID');
@@ -82,9 +101,18 @@ export async function advanceDeployment(db,op,adapter) {
   }
   const r=result.receipt;
   if(result.status!=='succeeded'||r?.operation_id!==op.id||r.project_id!==d.project_id||r.target!==d.target||r.commit_sha!==d.commit_sha||r.composition_digest!==d.composition_digest||!equal(r.composition,d.composition)||r.verified!==true)throw Error('DEPLOYMENT_RECEIPT_MISMATCH');
-  const installed=installedComposition(d.composition,r);
   await db.query('BEGIN');
   try {
+    let previous;
+    if(r.selection){
+      // AIDEV-NOTE: Тот же порядок, что publication: deployment перед installed.
+      const pinned=(await db.query('SELECT receipt FROM codeworks.deployments WHERE operation_id=$1 FOR UPDATE',[op.id])).rows[0];
+      const current=(await db.query('SELECT * FROM codeworks.installed WHERE project_id=$1 AND target=$2 FOR UPDATE',[d.project_id,d.target])).rows[0];
+      previous=current?.operation_id===op.id
+        ?equal(pinned?.receipt,r)&&current.previous_composition&&{operation_id:r.selection.previous_operation_id,composition:current.previous_composition}
+        :current;
+    }
+    const installed=installedComposition(d.composition,r,previous);
     await db.query('UPDATE codeworks.deployments SET receipt=$2 WHERE operation_id=$1',[op.id,r]);
     await db.query('INSERT INTO codeworks.installed(project_id,target,operation_id,composition) VALUES($1,$2,$3,$4) ON CONFLICT(project_id,target) DO UPDATE SET previous_composition=codeworks.installed.composition,composition=excluded.composition,operation_id=excluded.operation_id,updated_at=clock_timestamp() WHERE codeworks.installed.operation_id<>excluded.operation_id',[d.project_id,d.target,op.id,installed]);
     await db.query('INSERT INTO codeworks.deployment_evidence(id,project_id,target,commit_sha,evidence_url) VALUES($1,$2,$3,$4,$5) ON CONFLICT(project_id,target,evidence_url) DO NOTHING',[randomUUID(),d.project_id,d.target,d.commit_sha,r.evidence_url]);
