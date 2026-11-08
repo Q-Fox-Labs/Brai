@@ -1,6 +1,8 @@
 # ABOUTME: Подключает личные процессы к штатной Telegram factory Hermes.
 # ABOUTME: Доверенная фабрика задаётся оператором; при её отсутствии вход закрыт.
 """Плагин не запускает polling и не создаёт пользовательский agent в ingress."""
+import asyncio
+import logging
 from contextvars import ContextVar
 from .ingress import install
 
@@ -36,6 +38,20 @@ def register(ctx, *, build_resolver=None, admit_update=None):
     if admit_update is None:
         from .telegram_runtime import admit_update
     installed = []
+    closing = set()
+
+    def closed(task):
+        closing.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logging.getLogger(__name__).warning('BRAI_IDENTITY_INGRESS_CLOSE_FAILED')
+
+    def schedule_close(close, loop):
+        def start():
+            task = loop.create_task(close())
+            closing.add(task)
+            task.add_done_callback(closed)
+        if loop.is_running():
+            loop.call_soon_threadsafe(start)
 
     def factory(app, adapter):
         runner = getattr(adapter, 'gateway_runner', None)
@@ -48,6 +64,20 @@ def register(ctx, *, build_resolver=None, admit_update=None):
         from telegram.ext import ApplicationHandlerStop, TypeHandler
         async def guard(update, context):
             _admitted_message.set(None)
+            if getattr(update, 'callback_query', None) is not None or getattr(update, 'inline_query', None) is not None:
+                # AIDEV-NOTE: Сообщение callback отправлено ботом; Root проверяет
+                # нажавшего, owner сообщения и свежий Auth до личной обработки.
+                admit = getattr(adapter, '_brai_identity_interactive_admit', None)
+                dispatch = getattr(adapter, '_brai_identity_interactive', None)
+                if not callable(admit) or not callable(dispatch):
+                    raise ApplicationHandlerStop
+                try:
+                    if await admit(update) is not True:
+                        raise ApplicationHandlerStop
+                    await dispatch(update)
+                except Exception:
+                    raise ApplicationHandlerStop from None
+                raise ApplicationHandlerStop
             message = getattr(update, 'effective_message', None)
             identity = _message_identity(message)
             if identity is None:
@@ -62,21 +92,31 @@ def register(ctx, *, build_resolver=None, admit_update=None):
         handler = TypeHandler(Update, guard)
         app.add_handler(handler, group=-100)
         original = getattr(adapter, '_brai_identity_dispatch', None)
+        interactive_original = tuple(getattr(adapter, name, None) for name in (
+            '_brai_identity_interactive_admit', '_brai_identity_interactive'))
         try:
             forward = install(runner, adapter, resolver)
         except Exception:
             app.remove_handler(handler, group=-100)
             raise
         adapter._brai_identity_ingress_ready = True
-        installed.append((adapter, original, forward, app, handler))
+        installed.append((adapter, original, forward, app, handler, asyncio.get_running_loop(), interactive_original))
 
     def close():
-        for adapter, original, forward, app, handler in reversed(installed):
+        for adapter, original, forward, app, handler, loop, interactive_original in reversed(installed):
             app.remove_handler(handler, group=-100)
             if getattr(adapter, '_brai_identity_dispatch', None) is forward:
                 adapter._brai_identity_dispatch = original
                 adapter._brai_identity_ingress_ready = False
+                for name, value in zip(('_brai_identity_interactive_admit', '_brai_identity_interactive'), interactive_original):
+                    setattr(adapter, name, value)
             forward._brai_restore_authorize()
+            retire_resolver = getattr(forward, '_brai_retire_resolver', None)
+            if callable(retire_resolver):
+                retire_resolver()
+            close_resolver = getattr(forward, '_brai_close_resolver', None)
+            if callable(close_resolver):
+                schedule_close(close_resolver, loop)
         installed.clear()
 
     ctx.register_telegram_handler(factory)

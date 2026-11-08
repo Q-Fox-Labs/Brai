@@ -55,7 +55,7 @@
     },
     {
       "name": "identity.resolve",
-      "description": "Trusted ingress-only Telegram identity → active UID/profile; never available to workers.",
+      "description": "Только trusted ingress. telegramId в результате — фактический связанный аккаунт запроса; authorTelegramId — стабильный автор UID-профиля. Отвязанный аккаунт не проходит свежий Auth.",
       "paramStructure": "by-name",
       "params": [
         {
@@ -582,6 +582,100 @@
         "name": "result",
         "schema": {
           "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "ingress.profiles",
+      "paramStructure": "by-name",
+      "description": "Only trusted ingress UID; returns active registry profiles after fresh Auth authorization, without transcripts or credentials. Used for persistent worker supervision.",
+      "params": [],
+      "result": {
+        "name": "profiles",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "profiles"
+          ],
+          "properties": {
+            "profiles": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "uid",
+                  "userId",
+                  "profileId",
+                  "telegramId",
+                  "status",
+                  "home"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "ingress.delivery-artifact",
+      "description": "Только trusted ingress. Свежий Auth проверяет стабильного владельца UID; выдача owner-bound bytes для отдельно проверенного маршрута proactive/UI доставки, без требования входящего turn.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "artifactId",
+          "required": true,
+          "schema": {
+            "$ref": "../trusted.openrpc.json#/components/schemas/Uuid"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
         }
       },
       "errors": [

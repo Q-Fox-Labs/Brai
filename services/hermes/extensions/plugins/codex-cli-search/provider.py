@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -125,6 +126,93 @@ def _run_search(binary, model, query, limit, timeout):
                     stream.close()
 
 
+def _shared_search(query, limit):
+    """В личном UID отправлять только query/limit в существующий trusted egress."""
+    from tools.interrupt import is_interrupted
+    body = json.dumps({'query': query, 'limit': limit}, ensure_ascii=False).encode()
+    if len(query.encode('utf-8')) > 16384:
+        return {'success': False, 'error': 'Search query is too large.'}
+    connection = None
+    try:
+        connection = socket.create_connection(('127.0.0.1', 18080), timeout=2)
+        connection.settimeout(0.2)
+        wire = (b'POST /search/v1/query HTTP/1.1\r\nHost: localhost\r\n'
+                b'Content-Type: application/json\r\nConnection: close\r\nContent-Length: '
+                + str(len(body)).encode() + b'\r\n\r\n' + body)
+        connection.sendall(wire)
+        deadline = time.monotonic() + 95
+        received, expected, header_end = bytearray(), None, None
+        while True:
+            if is_interrupted():
+                return {'success': False, 'error': 'Interrupted'}
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Search timed out')
+            try:
+                part = connection.recv(65536)
+            except socket.timeout:
+                continue
+            if not part:
+                raise ConnectionError('Search response incomplete')
+            received.extend(part)
+            if len(received) > 1024 * 1024 + 32768:
+                raise ValueError('Search response too large')
+            if header_end is None:
+                boundary = received.find(b'\r\n\r\n')
+                if boundary < 0:
+                    if len(received) > 32768:
+                        raise ValueError('Search headers too large')
+                    continue
+                if boundary > 32768:
+                    raise ValueError('Search headers too large')
+                header_end = boundary + 4
+                lines = bytes(received[:boundary]).split(b'\r\n')
+                if lines[0] != b'HTTP/1.1 200 OK':
+                    raise ValueError('Search rejected')
+                headers = {}
+                for line in lines[1:]:
+                    key, value = line.split(b':', 1)
+                    key = key.strip().lower()
+                    if key in headers:
+                        raise ValueError('Duplicate search header')
+                    headers[key] = value.strip()
+                if b'transfer-encoding' in headers:
+                    raise ValueError('Invalid search framing')
+                raw_length = headers.get(b'content-length', b'')
+                if not raw_length.isdigit():
+                    raise ValueError('Invalid search length')
+                expected = int(raw_length)
+                if not 0 < expected <= 1024 * 1024:
+                    raise ValueError('Search response too large')
+            if len(received) - header_end >= expected:
+                if len(received) - header_end != expected:
+                    raise ValueError('Unexpected search response')
+                result = json.loads(bytes(received[header_end:]))
+                if not isinstance(result, dict) or type(result.get('success')) is not bool:
+                    raise ValueError('Invalid search receipt')
+                if result['success']:
+                    rows = result.get('data', {}).get('web')
+                    if not isinstance(rows, list) or not 1 <= len(rows) <= limit:
+                        raise ValueError('Invalid search receipt')
+                    for row in rows:
+                        if (not isinstance(row, dict)
+                                or any(not isinstance(row.get(key), str)
+                                       for key in ('title', 'url', 'description'))
+                                or urlparse(row['url']).scheme not in {'http', 'https'}):
+                            raise ValueError('Invalid search receipt')
+                    return {'success': True, 'data': {'web': rows}}
+                return {'success': False, 'error': 'Codex web search unavailable or outcome unknown.'}
+    except (OSError, ValueError, TypeError, AttributeError, UnicodeError):
+        return {'success': False, 'error': 'Codex web search unavailable or outcome unknown.'}
+    finally:
+        if connection is not None:
+            # EOF отменяет trusted CLI task; повтор в другой backend не выполняется.
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+
+
 class CodexCLIWebSearchProvider(WebSearchProvider):
     @property
     def name(self):
@@ -135,6 +223,8 @@ class CodexCLIWebSearchProvider(WebSearchProvider):
         return "Codex built-in search (official CLI)"
 
     def is_available(self):
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            return str(os.environ.get('BRAI_IDENTITY_EGRESS', '')).startswith('/')
         return bool(shutil.which("codex"))
 
     def get_setup_schema(self):
@@ -143,6 +233,12 @@ class CodexCLIWebSearchProvider(WebSearchProvider):
     def search(self, query, limit=5):
         if not isinstance(query, str) or not query.strip():
             return {"success": False, "error": "A nonempty search query is required."}
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            try:
+                bounded_limit = max(1, min(int(limit), 20))
+                return _shared_search(query, bounded_limit)
+            except (TypeError, ValueError, UnicodeError, OverflowError):
+                return {'success': False, 'error': 'Invalid search query or limit.'}
         settings = _settings()
         binary = shutil.which(str(settings.get("binary", "codex")))
         if not binary:

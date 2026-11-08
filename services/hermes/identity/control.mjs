@@ -177,13 +177,13 @@ export class Control {
     if (!user || user.id !== profile.userId || user.profileId !== profile.profileId || user.status !== 'active' || String(user.telegramId) !== String(profile.telegramId)) throw new Error('FORBIDDEN');
     signal?.throwIfAborted();
     if (typeof this.perUserRuntime !== 'function') throw new Error('SOURCE_UNAVAILABLE');
-    const runtime = await this.perUserRuntime({ ...profile, workerUid: uid });
+    const runtime = await this.perUserRuntime({ ...profile, workerUid: uid, role: user.role });
     if (typeof runtime?.callTool !== 'function' || typeof runtime?.listTools !== 'function') throw new Error('SOURCE_UNAVAILABLE');
     const catalog = await runtime.listTools();
     if (!Array.isArray(catalog) || !catalog.some(tool => tool.name === name && permittedTool(tool, user.role))) throw new Error('FORBIDDEN');
     if (name.startsWith('history_')) {
       if (typeof this.historyCall !== 'function') throw new Error('SOURCE_UNAVAILABLE');
-      return this.historyCall({ ...profile, workerUid: uid }, name, args, signal);
+      return this.historyCall({ ...profile, workerUid: uid, role: user.role }, name, args, signal);
     }
     return runtime.callTool(name, args, signal);
   }
@@ -646,7 +646,7 @@ export async function privateCall(runtime, method, params) {
     const data = await registry();
     const profile = data?.profiles?.[String(params.uid)];
     if (!profile || profile.userId !== user.userId || profile.status !== 'active' || typeof control.perUserRuntime !== 'function') throw new Error('FORBIDDEN');
-    const ownerRuntime = await control.perUserRuntime({ ...profile, workerUid: params.uid });
+    const ownerRuntime = await control.perUserRuntime({ ...profile, workerUid: params.uid, role: user.role });
     if (typeof ownerRuntime?.listTools !== 'function') throw new Error('SOURCE_UNAVAILABLE');
     const tools = await ownerRuntime.listTools();
     if (!Array.isArray(tools)) throw new Error('SOURCE_UNAVAILABLE');
@@ -666,7 +666,7 @@ export async function privateCall(runtime, method, params) {
     const user=await privateCall(runtime,'authorize',{uid:params.uid});
     const data=await registry(), profile=data?.profiles?.[String(params.uid)];
     if(!profile||profile.userId!==user.userId||profile.profileId!==user.profileId||profile.status!=='active'||typeof control.perUserRuntime!=='function')throw new Error('FORBIDDEN');
-    const ownerRuntime=await control.perUserRuntime({...profile,workerUid:params.uid});
+    const ownerRuntime=await control.perUserRuntime({...profile,workerUid:params.uid,role:user.role});
     if(!needsArgs && typeof ownerRuntime?.filesConfiguration==='function')return ownerRuntime.filesConfiguration();
     if(needsArgs && typeof ownerRuntime?.callTool==='function')return ownerRuntime.callTool(method.replace('.','_'),params.args);
     throw new Error('SOURCE_UNAVAILABLE');

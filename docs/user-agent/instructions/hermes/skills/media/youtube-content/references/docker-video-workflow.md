@@ -1,4 +1,12 @@
-# Machine-specific yt-dlp workflow and official references
+# yt-dlp в личном профиле и прежнем однопользовательском окружении
+
+## Личный профиль
+
+При `BRAI_IDENTITY_MODE=worker` helper вызывает readonly wrapper `/opt/brai-profile/instructions/bin/yt-dlp`. Установщик задаёт в нём native Python и путь принятого SDK; потеря `PYTHONPATH` у вызывающего terminal не переключает helper на другое окружение. Он сохраняет `--ignore-config`, `--no-exec`, `--no-playlist` и отдельную проверку live status. Системный Docker wrapper, `/opt/yt-dlp/downloads` и контейнерный `/downloads` в этом режиме не используются.
+
+Загрузка создаёт новый каталог `$HERMES_HOME/workspace/downloads/workflow-UUID` с режимом 0700. Выходной шаблон и возвращаемые пути относятся к этому личному каталогу без преобразования в пути контейнера. Ссылки вместо workspace/downloads отклоняются. Общих cookies и секретов helper не подключает. Readonly каталог навыков содержит код, а результаты остаются в личном HOME. FFmpeg/ffprobe обрабатывают файлы в том же пространстве путей.
+
+## Прежнее окружение
 
 Verified 2026-10-08 on the active default profile. Do not copy to another machine without rediscovery.
 

@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { methodMap, schemas } from '#transcription-contracts';
+import { methodMap, schemas, validateDto } from '#transcription-contracts';
 import { encodeBoundedJson } from '../../runtime/stdio-rpc.js';
 import type { CoordinatorRuntimeConfig } from '../config.js';
 import { errorStatus, safeError, type PublicGateway } from './boundary.js';
@@ -155,6 +155,14 @@ export async function startHttpTransport(config: CoordinatorRuntimeConfig['http'
       }, config.requestTimeoutMs);
       const body = await readBody(req, config.requestBytes);
       if (res.destroyed || res.writableEnded) return;
+      if (req.url === '/internal/identity/transcription') {
+        if (!validateDto('IdentityDelegateParams', body)) throw { errorCode: 'INVALID_ARGUMENT' };
+        const delegated = body as { method: string; params: unknown; principal: unknown };
+        const trusted = gateway.delegate(req.headers.authorization, delegated.principal);
+        if (typeof delegated.method !== 'string' || !Object.hasOwn(methodMap.public, delegated.method)) throw { errorCode: 'INVALID_ARGUMENT' };
+        send(res, 200, await gateway.invoke(delegated.method, delegated.params, trusted), config.responseBytes);
+        return;
+      }
       if (req.url === '/mcp') {
         if (req.headers['mcp-session-id'] || !mcpRequest(body)) throw { errorCode: 'INVALID_ARGUMENT' };
         await handleMcp(body, res, gateway, principal, config.responseBytes, (stop) => { stopMcp = stop; });

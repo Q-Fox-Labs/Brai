@@ -451,6 +451,38 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
                 await self.broker.publish(WORKER_UID, self.profile, params)
         self.assertFalse(any(method == "artifacts.publish" for method, _params, _timeout in self.control.calls[before:]))
 
+    async def test_profile_inventory_is_ingress_only_and_keeps_stable_owner(self):
+        with self.assertRaises(PermissionError):
+            await self.broker.call(WORKER_UID, 'ingress.profiles', {})
+        inventory = await self.broker.call(INGRESS_UID, 'ingress.profiles', {})
+        self.assertEqual(inventory['profiles'], [{'uid': WORKER_UID, **self.profile}])
+        self.control.aliases['333444'] = self.profile['telegramId']
+        actual = await self.broker.resolve('333444')
+        self.assertEqual(actual['telegramId'], '333444')
+        self.assertEqual(actual['authorTelegramId'], self.profile['telegramId'])
+        self.assertEqual((await self.broker.call(INGRESS_UID, 'ingress.profiles', {}))['profiles'],
+                         [{'uid': WORKER_UID, **self.profile}])
+        self.profile['status'] = 'blocked'
+        self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.profiles', {}), {'profiles': []})
+
+    async def test_proactive_artifact_fetch_is_ingress_only_and_owner_checked(self):
+        artifact = '6aad00bf-f419-4dda-a61c-7cab79c8c9b0'
+        with mock.patch.object(self.broker.files, 'fetch', mock.AsyncMock(
+                return_value={'artifactId': artifact, 'localPath': '/verified/file'})) as fetch:
+            with self.assertRaises(PermissionError):
+                await self.broker.call(WORKER_UID, 'ingress.delivery-artifact',
+                                       {'uid': WORKER_UID, 'artifactId': artifact})
+            self.assertEqual(await self.broker.call(INGRESS_UID, 'ingress.delivery-artifact',
+                {'uid': WORKER_UID, 'artifactId': artifact}),
+                {'artifactId': artifact, 'localPath': '/verified/file'})
+            fetch.assert_awaited_once_with(WORKER_UID, self.profile,
+                                           {'artifactId': artifact}, ingress=True)
+            self.profile['status'] = 'blocked'
+            with self.assertRaises(PermissionError):
+                await self.broker.call(INGRESS_UID, 'ingress.delivery-artifact',
+                                       {'uid': WORKER_UID, 'artifactId': artifact})
+            self.assertEqual(fetch.await_count, 1)
+
     async def test_publish_rejects_nofollow_symlinks_hardlinks_and_foreign_owners(self):
         root, source, staging_uid, fake_lstat = self._publish_fixture()
         try:

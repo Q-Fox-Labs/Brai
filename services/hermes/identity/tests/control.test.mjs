@@ -31,6 +31,44 @@ test('audit precedes read and cursor is bound to target', async () => {
   assert.notEqual(bad.status, 200);
 });
 
+test('fresh role reaches each private runtime and history after canonical Telegram unlink', async () => {
+  const roles = [];
+  let role = 'admin';
+  const owner = { userId: 'u1', profileId: 'p1', telegramId: '42', status: 'active' };
+  const registry = async () => ({ version: 1, profiles: { '1001': owner } });
+  const authCall = async (method, args) => {
+    assert.equal(method, 'identity-get');
+    assert.deepEqual(args, { userId: 'u1' });
+    return { user: { id: 'u1', profileId: 'p1', telegramId: '42', status: 'active', role },
+             telegramIds: ['84'] };
+  };
+  const catalog = [{ name: 'timer_snapshot_get' }, { name: 'history_categories_list' },
+                   { name: 'transcription_settings_set' }];
+  const control = new Control({ origin: 'https://example.test', cursorKey: 'x'.repeat(32),
+    registry, authCall,
+    perUserRuntime: async profile => {
+      roles.push(profile.role);
+      return { listTools: async () => catalog, callTool: async () => ({ ok: true }),
+               filesConfiguration: async () => ({ ownerId: profile.userId }) };
+    },
+    historyCall: async (profile, name) => {
+      assert.equal(profile.role, role);
+      assert.equal(profile.telegramId, '42');
+      return { name };
+    } });
+  const { privateCall } = await import('../control.mjs');
+  const runtime = { control, registry, authCall };
+  await control.invokeTool(1001, 'timer_snapshot_get', {});
+  await control.invokeTool(1001, 'history_categories_list', {});
+  assert.equal((await privateCall(runtime, 'tools.list', { uid: 1001 })).tools.length, 3);
+  await privateCall(runtime, 'files.configuration', { uid: 1001 });
+  role = 'user';
+  const listed = await privateCall(runtime, 'tools.list', { uid: 1001 });
+  assert.equal(listed.tools.some(tool => tool.name === 'transcription_settings_set'), false);
+  await assert.rejects(control.invokeTool(1001, 'transcription_settings_set', {}), /FORBIDDEN/);
+  assert.deepEqual(roles, ['admin', 'admin', 'admin', 'admin', 'user', 'user']);
+});
+
 test('denied session or audit does not read', async () => {
   let read = false;
   const { control } = setup({ authCall: async op => op === 'session' ? { status: 200, body: { user: { role: 'user', status: 'active' }, session: {} } } : { status: 200 }, memoryRead: async () => { read = true; } });

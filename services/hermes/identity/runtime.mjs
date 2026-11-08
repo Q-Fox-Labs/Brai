@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { validateConfig } from '../config.mjs';
 import { serviceDataScope } from '../../auth/contracts/service-data-scope.mjs';
-import { startBraiTools } from '../runtime.mjs';
+import { createBraiTools, connectPorts } from '../runtime.mjs';
+import { createHistoryCatalog } from './history.mjs';
+import { createOwnerTranscription } from './transcription.mjs';
 import { fileConfiguration } from '../files/configuration.mjs';
 import { readProtectedJSON, runStdio as runControl } from './control.mjs';
 
@@ -29,15 +31,15 @@ function checkSnapshot(path,root) {
  if(!stat.isFile()||stat.uid!==0||(stat.mode&0o022)||stat.nlink!==1||stat.size>67108864)invalid();
 }
 /** Собирает порты только из root-owned конфигураций, закреплённых за профилем. */
-export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,start=startBraiTools,verifyDirectory=rootDirectory,verifySnapshot=checkSnapshot,readFiles=fileConfiguration}={}) {
+export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,start,openPorts=connectPorts,transcriptionFactory=createOwnerTranscription,verifyDirectory=rootDirectory,verifySnapshot=checkSnapshot,readFiles=fileConfiguration}={}) {
  const cache=new Map();
  let booting=0,stopped=false;const waiting=[];
  // AIDEV-NOTE: Холодная сборка MCP компилирует схемы; массовый старт не должен задерживать обратный Auth.
- async function startLimited(tools){
+ async function startLimited(build){
   if(stopped)invalid();
   if(booting<2)booting++;
   else{if(waiting.length>=32)invalid();await new Promise((resolve,reject)=>waiting.push({resolve,reject}));}
-  try{if(stopped)invalid();return await start(tools);}
+  try{if(stopped)invalid();return await build();}
   finally{const next=waiting.shift();if(next)next.resolve();else booting--;}
  }
  function loadEntries(){
@@ -83,7 +85,14 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
    const otherPublisher=readProtected(otherTools.publisher.configPath);
    if(typeof otherPublisher?.resultRoot!=='string'||overlaps(otherPublisher.resultRoot,publisher.resultRoot))invalid();
   }
-  return {uid,entry,tools,publisher};
+  let shared = null;
+  if(entry.sharedServicesConfigPath!==undefined){
+   const path=entry.sharedServicesConfigPath;
+   if(typeof path!=='string'||!isAbsolute(path)||normalize(path)!==path)invalid();
+   shared=readProtected(path);
+   if(!object(shared))invalid();
+  }
+  return {uid,entry,tools,publisher,shared};
  }
  async function checkedFiles(entry,tools){
   const value=await readFiles(tools,invalid);
@@ -94,12 +103,40 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
  }
  async function perUserRuntime(profile) {
   if(stopped)invalid();
-  const {uid,entry,tools,publisher}=validateProfile(profile,'active');
-  const signature=JSON.stringify([entry,tools,publisher]), existing=cache.get(uid);
+  const {uid,entry,tools,publisher,shared}=validateProfile(profile,'active');
+  const signature=JSON.stringify([entry,tools,publisher,shared,profile.role]), existing=cache.get(uid);
   if(existing?.signature===signature)return existing.promise;
   if(existing){cache.delete(uid);const old=await existing.promise.catch(()=>null);await old?.close();}
   const promise=(async()=>{
-   const runtime=await startLimited(tools);
+   const runtime=await startLimited(async()=>{
+   if(start)return start(tools);
+   let runtime;
+   {
+    const ports=await openPorts(tools);
+    try{
+    const history=createHistoryCatalog(ports.request.bind(ports));
+    const endpoint=shared?.transcription;
+    const transcription=endpoint&&endpoint.enabled!==false
+     ? transcriptionFactory({userId:entry.userId,profileId:entry.profileId},endpoint,
+        {isAdmin:async()=>profile.role==='admin'}) : null;
+     runtime=await createBraiTools({...tools,history:{enabled:true},
+      ...(transcription?{transcription:{enabled:true}}:{})},{
+      ...ports,
+      async list(name){
+       if(name==='history')return history.list();
+       if(name==='transcription'&&transcription)return transcription.list();
+       return ports.list(name);
+      },
+      async mcp(endpoint,name,args,signal){
+       if(endpoint==='history')return history.call(name,args,signal);
+       if(endpoint==='transcription'&&transcription)return transcription.call(name,args,signal);
+       return ports.mcp(endpoint,name,args,signal);
+      },
+     });
+    }catch(error){await ports.close();throw error;}
+   }
+   return runtime;
+   });
    return {
     async listTools(){return (await runtime.listTools()).filter(tool=>!['publish_file','fetch_file'].includes(tool.name));},
     async callTool(name,args,signal){
@@ -121,7 +158,7 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
   perUserRuntime,
   async bootstrapFilesConfiguration(profile){const {entry,tools}=validateProfile(profile,'provisioning');return checkedFiles(entry,tools);},
   async historyCall(profile,name,args,signal){
-   if(!['history_list','history_get'].includes(name))invalid();
+   if(!['history_list','history_get','history_categories_list','history_types_list','history_type_get'].includes(name))invalid();
    const runtime=await perUserRuntime(profile);return runtime.callTool(name,args,signal);
   },
   async onIdentityChanged({userId}){

@@ -1,5 +1,13 @@
 # Локальный REST API MemOS
 
+## Личный Unix gateway
+
+В `BRAI_IDENTITY_MODE=worker` helper читает root-owned конфигурацию `$HERMES_HOME/memos-rest.json`, сверяет её `user_id` с `BRAI_IDENTITY_USER_ID` и использует только `/run/brai-profile/memory.sock`. Авторитетная граница доступа — SO_PEERCRED и актуальный Auth на gateway; локальная сверка конфигурации дополняет её. Переопределение HTTP endpoint и чужого user запрещено. `--cube` означает логический куб; gateway проверяет его по каталогу профиля. Физические кубы и общие credentials не передаются.
+
+Поиск использует `/product/recall_index`, проверенные scope/epoch/author и полноту ответа SDK; `--top-k` ограничивает показ с явными `returned_count` и `truncated`. `list/get` читают проверенный versioned stream; страницы формируются после полной проверки, без передачи неподдержанных page/include полей backend. `add/delete` проходят существующие owner-операции gateway; frozen-конфиг запрещает запись. Запись после неизвестного исхода не повторяется автоматически.
+
+Личный `status` получает только scheduler status своего Auth user: GET `/product/scheduler/status`, необязательный `--task-id`. Чужой user и глобальные очереди запрещены; ответ ограничен 256 КиБ, превышение даёт явную ошибку без усечения. Это отдельная диагностика, не native `memos_status` с локальным outbox и health. Старый `/product/search` в личном gateway недоступен: поиск использует scoped recall index. `/product/feedback` поддержан для явных собственных IDs через обязательную backend-границу targets/home/epoch/author/visibility; общий HTTP endpoint не используется. Остальная REST-справка ниже относится к прежнему однопользовательскому транспорту и не расширяет API личного gateway.
+
 Фактическая схема: ${MEMOS_API_URL}/openapi.json. Для нового payload перечитай её: публичные старые примеры могут содержать deprecated поля. Клиент scripts/memos_client.py покрывает только простой безопасный subset; не выдавай его defaults за defaults провайдера.
 
 ## Search — POST /product/search
@@ -38,6 +46,12 @@ GET /product/get_memory/{memory_id} и POST /product/get_memory_by_ids (масс
 /product/get_all принимает user_id, memory_type=text_mem|act_mem|param_mem|para_mem, mem_cube_ids, optional search_query/search_type. /product/get_memory_dashboard имеет pagination; выбирай минимальную область, не полный экспорт в чат.
 
 ## Feedback — POST /product/feedback
+В личном worker: `python scripts/memos_client.py feedback --id MEMORY_ID --text "Исправленный факт" --session SESSION`. Допускаются 1–32 уникальных ID из одного логического куба, только sync mode и corrected_answer=false; owner и область принудительно определяет Root. Нельзя менять frozen/suspended память, чужого автора/эпоху или business_private записи. Обычные canonical fast facts поддержаны; original native LLM judgement/semantic update сохраняются. HTTP 200 с пустым record означает отсутствие принятой коррекции, а не доказательство изменения.
+
+Root проверяет все targets до модели, а затем перечитывает новые/изменённые/удалённые IDs. Backend возвращает 409 для недоступного target/недопустимой ветки, 429 при занятой очереди feedback, 503 для storage/deadline/readback/FEEDBACK_OUTCOME_UNKNOWN. Составные chunked facts (FEEDBACK_CHUNKED_FACT_UNSUPPORTED), внешние связи (FEEDBACK_EXTERNAL_EDGE_UNSUPPORTED), version/reorganization/rawfile и неизвестные bulk-порты отклоняются до изменения данных. При неизвестном исходе не повторяй запрос: сначала прочитай точные исходные/new IDs и тематический recall. Если текст стал многочастным, используй отдельную проверенную процедуру add/read-back/delete, не обходи отказ feedback.
+
+Следующие расширенные поля относятся к прежнему однопользовательскому REST; личный gateway принимает только описанный выше closed envelope.
+
 Обязательные user_id, history, feedback_content. Дополнительно writable_cube_ids, retrieved_memory_ids, session_id, task_id, async_mode=sync|async, corrected_answer, info, feedback_time. Для коррекции укажи точные ID и релевантный контекст; corrected_answer=false при чистом управлении памятью. Это LLM-операция, не детерминированная замена одного поля. Read-back старого/нового IDs и тематический recall обязательны; feedback ещё не испытан данным скиллом на локальных пользовательских записях.
 
 ## Delete / recovery

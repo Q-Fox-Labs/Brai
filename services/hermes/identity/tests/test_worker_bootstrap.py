@@ -102,8 +102,8 @@ class ToolClientTest(unittest.TestCase):
             tool_client.handle('tools/call', {'name':'test', 'arguments':{'value':1}, 'uid':0})
         call.assert_called_once_with('tools.call', {'name':'test', 'args':{'value':1}})
 
-class NativeFactoryTest(unittest.TestCase):
-    def test_register_factory_wires_and_unloads(self):
+class NativeFactoryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_register_factory_wires_and_unloads(self):
         from types import SimpleNamespace, ModuleType
         from identity import native_ingress
         class Context:
@@ -236,4 +236,4 @@ class HealthTest(unittest.IsolatedAsyncioTestCase):
             await worker.health()
         worker.runner = object()
         worker.adapter = object()
-        self.assertEqual(await worker.health(), {'ready':True, 'userId':'owner', 'telegramId':'123'})
+        self.assertEqual(await worker.health(), {'ready':True, 'operational':False, 'userId':'owner', 'telegramId':'123'})

@@ -69,23 +69,28 @@ def gif_frames(raw):
 def api_generate(home, prompt, config):
     """Сгенерировать GIF через отдельный API-ключ, не меняя провайдер диалога."""
     import httpx
-    path = Path(config.get('key_file', ''))
-    if not path.is_absolute() or path.is_symlink():
-        raise GifError('GIF_API_KEY_FILE_REQUIRED')
-    meta = path.stat()
-    if (not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0, os.geteuid())
-            or meta.st_mode & 0o077 or not 0 < meta.st_size <= 4096):
-        raise GifError('GIF_API_KEY_FILE_UNSAFE')
-    key = path.read_text().strip()
-    if not key or any(char.isspace() for char in key):
-        raise GifError('GIF_API_KEY_INVALID')
+    if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+        endpoint = 'http://127.0.0.1:18080/gif/v1/images/generations'
+        headers = {'Content-Type': 'application/json'}
+    else:
+        path = Path(config.get('key_file', ''))
+        if not path.is_absolute() or path.is_symlink():
+            raise GifError('GIF_API_KEY_FILE_REQUIRED')
+        meta = path.stat()
+        if (not stat.S_ISREG(meta.st_mode) or meta.st_uid not in (0, os.geteuid())
+                or meta.st_mode & 0o077 or not 0 < meta.st_size <= 4096):
+            raise GifError('GIF_API_KEY_FILE_UNSAFE')
+        key = path.read_text().strip()
+        if not key or any(char.isspace() for char in key):
+            raise GifError('GIF_API_KEY_INVALID')
+        endpoint = 'https://api.openai.com/v1/images/generations'
+        headers = {'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'}
     model = 'gpt-image-2.6-flare'
     body = {'model': model, 'prompt': prompt, 'size': 'auto', 'quality': 'low',
             'complexity': 'low', 'n': 1, 'output_format': 'gif',
             'frame_count': 9, 'frame_duration_ms': 200}
-    headers = {'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'}
     with httpx.Client(timeout=httpx.Timeout(180, connect=30), headers=headers) as client:
-        with client.stream('POST', 'https://api.openai.com/v1/images/generations', json=body) as response:
+        with client.stream('POST', endpoint, json=body) as response:
             response.raise_for_status()
             chunks, total = [], 0
             for chunk in response.iter_bytes():
@@ -108,6 +113,10 @@ def api_generate(home, prompt, config):
 
 def native_generate(home, prompt):
     """Выбрать только явно заданный GIF-маршрут; не переключаться при ошибке."""
+    if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+        # AIDEV-NOTE: Общий GIF-маршрут проверяет UID и добавляет ключ вне личного процесса.
+        # Личные предпочтения по-прежнему обрабатывает run(); смены provider при отказе нет.
+        return api_generate(home, prompt, {})
     settings = home / 'context-gifs.json'
     config = json.loads(settings.read_text()) if settings.exists() else {'provider': 'openai-codex'}
     if config.get('provider') == 'openai':

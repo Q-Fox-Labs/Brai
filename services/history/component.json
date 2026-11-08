@@ -50,7 +50,8 @@
       "services/history/tests/integration/personal-transfer.test.mjs",
       "services/history/tests/integration/storage.test.mjs",
       "services/history/tests/load.test.mjs",
-      "services/history/tests/nats-runtime.test.mjs"
+      "services/history/tests/nats-runtime.test.mjs",
+      "services/history/tests/nats-catalog.test.mjs"
     ]
   },
   "dependencies": [],
