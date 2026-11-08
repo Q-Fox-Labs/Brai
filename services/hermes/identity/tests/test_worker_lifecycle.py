@@ -3,6 +3,7 @@
 import ast
 import asyncio
 import inspect
+import tempfile
 import os
 from pathlib import Path
 import sys
@@ -12,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity.worker import Worker
-from identity.ipc import RpcError
+from identity.ipc import Peer, RpcError
 
 
 class LifecycleTest(unittest.IsolatedAsyncioTestCase):
@@ -119,6 +120,66 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.calls.count('native_start'), 1)
         finally:
             await worker.stop_runtime()
+
+    async def test_secondary_operator_health_preserves_the_active_ingress_and_runtime(self):
+        worker = await self.worker()
+        primary = NS(closed=False)
+        worker.peer = primary
+        try:
+            with tempfile.TemporaryDirectory() as directory, patch(
+                    'identity.worker.peer_uid', return_value=worker.ingress_uid):
+                server = await asyncio.start_unix_server(worker.serve_connection,
+                                                         path=directory + '/worker.sock')
+                try:
+                    reader, writer = await asyncio.open_unix_connection(directory + '/worker.sock')
+                    client = Peer(reader, writer, {})
+                    reading = asyncio.create_task(client.run())
+                    receipt = await client.call('health', {}, timeout=2)
+                    self.assertTrue(receipt['ready'])
+                    self.assertFalse(receipt['operational'])
+                    with self.assertRaises(RpcError) as denied:
+                        await client.call('dispatch', {}, timeout=2)
+                    self.assertEqual(denied.exception.code, -32601)
+                    with self.assertRaises(RpcError):
+                        await client.call('health', {'require_tools': True}, timeout=2)
+                    writer.close()
+                    await reading
+                    self.assertIs(worker.peer, primary)
+                    self.assertIsNotNone(worker.runner)
+                    self.assertFalse(worker.exited.is_set())
+                    self.assertNotIn('stop', self.calls)
+                    self.assertFalse(worker.activation.is_set())
+                finally:
+                    server.close()
+                    await server.wait_closed()
+        finally:
+            await worker.stop_runtime()
+
+    async def test_native_detached_task_drops_only_the_expiring_turn_scope(self):
+        from identity.scope import delivery_scope
+        patch_text = (Path(__file__).resolve().parents[1] / 'native.patch').read_text()
+        name, old, new = next(patch_hunks(patch_text, {'gateway/slash_commands.py'}))
+        import textwrap
+        method = ast.parse(textwrap.dedent(new)).body[0]
+        scope = {'asyncio': asyncio, 'os': os}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])),
+                     name, 'exec'), scope)
+        owner = NS(_background_tasks=set())
+        async def observed():
+            return delivery_scope.get()
+        token = delivery_scope.set('active-turn')
+        try:
+            with patch.dict(os.environ, BRAI_IDENTITY_MODE='worker'):
+                scope['_track_background_task'](owner, observed())
+            task = next(iter(owner._background_tasks))
+            self.assertIsNone(await task)
+            self.assertEqual(delivery_scope.get(), 'active-turn')
+            with patch.dict(os.environ, BRAI_IDENTITY_MODE='ordinary'):
+                scope['_track_background_task'](owner, observed())
+            task = next(iter(owner._background_tasks))
+            self.assertEqual(await task, 'active-turn')
+        finally:
+            delivery_scope.reset(token)
 
     async def test_startup_failure_never_becomes_operational(self):
         worker = await self.worker()
@@ -259,7 +320,7 @@ class NativeHooksTest(unittest.TestCase):
         native_patch = (Path(__file__).resolve().parents[1] / 'native.patch').read_text()
         marker = '\n--- a/gateway/run.py\n+++ b/gateway/run.py\n@@ -1607,'
         previous = native_patch.split(marker, 1)[0] + '\n'
-        wanted = {'gateway/run.py', 'gateway/run_adapters.py'}
+        wanted = {'gateway/run.py', 'gateway/run_adapters.py', 'gateway/slash_commands.py'}
         installed = {name: (engine / name).read_text() for name in wanted}
         base = dict(installed)
         for name, old, new in reversed(list(patch_hunks(previous, wanted))):

@@ -213,6 +213,7 @@
               "send",
               "edit_message",
               "send_typing",
+              "send_draft",
               "send_file_set",
               "send_image",
               "send_animation",
@@ -226,7 +227,7 @@
         {
           "name": "payload",
           "required": true,
-          "description": "Файловые действия принимают artifact descriptor владельца. send_voice дополнительно принимает необязательный is_voice:boolean; true сохраняет голосовую подачу до native transport. Неподтверждённая доставка не возвращает успешную квитанцию.",
+          "description": "send_draft принимает chat_id, ненулевой integer draft_id, строку content до 65536 символов и metadata; native Root renderer отправляет временный preview в личный чат владельца без message_id. Файловые действия принимают artifact descriptor владельца. send_voice дополнительно принимает необязательный is_voice:boolean; true сохраняет голосовую подачу до native transport. Неподтверждённая доставка не возвращает успешную квитанцию.",
           "schema": {
             "type": "object"
           }

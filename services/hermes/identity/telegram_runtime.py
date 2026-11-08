@@ -305,6 +305,12 @@ class Resolver:
         route, metadata, turn, current, suppress = await self.delivery_context(profile, owner, payload)
         if suppress:
             return {'success': True}
+        if action == 'send_draft':
+            if route[0] != str(profile['telegramId']):
+                raise PermissionError('Drafts require owner private chat')
+            supports = getattr(self.adapter, 'supports_draft_streaming', None)
+            if not callable(supports) or not supports('dm', metadata):
+                return {'success': False, 'error': 'Draft transport unavailable'}
         file_actions = ('send_image_file', 'send_document', 'send_video', 'send_voice', 'send_animation')
         if action == 'send_file_set' or action in file_actions:
             from files.native import telegram_sender, validate_telegram, presentation

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity import telegram_runtime as runtime
 from identity.ingress import Bridge
+from identity.ipc import RpcError
 
 
 def profile():
@@ -201,3 +202,82 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await resolver(source)
             with self.assertRaises(PermissionError):
                 await resolver(source)
+
+
+class DraftDeliveryTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.native = NS(send_draft=AsyncMock(return_value={'success': True, 'message_id': None}),
+                         supports_draft_streaming=lambda *args: True)
+        self.resolver = runtime.Resolver(self.native)
+        self.owner = {**profile(), 'profileId': 'profile'}
+        self.route = ('123', '73')
+        self.metadata = {'thread_id': '73', 'telegram_reply_to_message_id': 55,
+                         'telegram_dm_topic_reply_fallback': True}
+        self.resolver.ledger.admit(self.owner, self.route, self.metadata, '55')
+        self.resolver.turns[101] = {'id': 'turn', 'route': self.route, 'metadata': self.metadata}
+        self.bridge = Bridge('owner', '123', 101, '/unused',
+            lambda owner, action, payload: self.resolver.deliver(self.owner, owner, action, payload), None,
+            authorize_delivery=lambda action, payload: self.resolver.authorize_delivery(self.owner, action, payload),
+            require_scope=True)
+        self.addAsyncCleanup(self.resolver.close)
+
+    def draft(self, **fields):
+        return {'chat_id': '123', 'draft_id': 17, 'content': 'Partial answer',
+                'metadata': {'thread_id': '73', 'direct_messages_topic_id': 999}, **fields}
+
+    async def test_native_draft_keeps_trusted_topic_and_has_no_delivered_message_id(self):
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={'suppressFinal': False})):
+            receipt = await self.bridge.send('send_draft', self.draft(), scope_id='turn')
+        self.assertTrue(receipt['success'])
+        self.assertIsNone(receipt['message_id'])
+        self.native.send_draft.assert_awaited_once_with(chat_id='123', draft_id=17,
+            content='Partial answer', metadata=self.metadata)
+        self.assertEqual(self.bridge.sent, set())
+        self.assertEqual(self.resolver.ledger.db.execute('SELECT COUNT(*) FROM messages WHERE outgoing=1').fetchone()[0], 0)
+
+    async def test_late_draft_cannot_become_proactive_or_switch_conversation(self):
+        with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
+            with self.assertRaises(PermissionError):
+                await self.bridge.send('send_draft', self.draft(), scope_id='expired')
+            with self.assertRaises(PermissionError):
+                await self.bridge.send('send_draft', self.draft(chat_id='999'), scope_id='turn')
+        self.native.send_draft.assert_not_awaited()
+        broker.assert_not_awaited()
+
+    async def test_group_drafts_stay_disabled_even_for_known_owner_route(self):
+        route = ('-55', '73')
+        self.resolver.ledger.admit(self.owner, route, {'thread_id': '73'}, '56')
+        self.resolver.turns[101] = {'id': 'turn', 'route': route}
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={})):
+            with self.assertRaisesRegex(PermissionError, 'owner private chat'):
+                await self.bridge.send('send_draft', self.draft(chat_id='-55'), scope_id='turn')
+        self.native.send_draft.assert_not_awaited()
+
+    async def test_invalid_draft_or_raw_api_fields_never_reach_native(self):
+        for fields in ({'draft_id': 0}, {'draft_id': True}, {'draft_id': '17'},
+                       {'content': None}, {'content': 'x' * 65537}, {'api_kwargs': {}}, {'reply_markup': {}}):
+            with self.subTest(fields=tuple(fields)):
+                with self.assertRaises(RpcError):
+                    await self.bridge.send('send_draft', self.draft(**fields), scope_id='turn')
+        self.native.send_draft.assert_not_awaited()
+
+    async def test_unavailable_native_api_returns_failure_for_stream_consumer_fallback(self):
+        self.native.supports_draft_streaming = lambda *args: False
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={})):
+            receipt = await self.bridge.send('send_draft', self.draft(), scope_id='turn')
+        self.assertFalse(receipt['success'])
+        self.native.send_draft.assert_not_awaited()
+
+    async def test_proactive_draft_rechecks_auth_and_preserves_unknown_outcome(self):
+        self.resolver.turns.clear()
+        self.native.send_draft.return_value = {'success': False, 'error': 'Outcome unknown'}
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value=self.owner)) as broker:
+            receipt = await self.bridge.send('send_draft', self.draft(), scope_id=None)
+        self.assertFalse(receipt['success'])
+        broker.assert_awaited_once_with('identity.resolve', {'telegramId': '123'})
+        self.assertEqual(self.bridge.sent, set())
+        self.native.send_draft.reset_mock()
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={**self.owner, 'userId': 'other'})):
+            with self.assertRaises(PermissionError):
+                await self.bridge.send('send_draft', self.draft(), scope_id=None)
+        self.native.send_draft.assert_not_awaited()

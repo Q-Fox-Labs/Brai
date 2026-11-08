@@ -397,3 +397,20 @@
              self._drop_from_reconnect_queue(platform, "no bot credential on queued config")
              return
          logger.info("Reconnecting %s (attempt %d)...", platform.value, attempt)
+--- a/gateway/slash_commands.py
++++ b/gateway/slash_commands.py
+@@ -815,5 +815,13 @@
+     def _track_background_task(self, coro) -> None:
+         """Fire-and-forget *coro*, keeping a strong ref in ``_background_tasks`` until it finishes."""
+-        task = asyncio.create_task(coro)
++        if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++            from identity.scope import delivery_scope
++            token = delivery_scope.set(None)
++            try:
++                task = asyncio.create_task(coro)
++            finally:
++                delivery_scope.reset(token)
++        else:
++            task = asyncio.create_task(coro)
+         self._background_tasks.add(task)
+         task.add_done_callback(self._background_tasks.discard)

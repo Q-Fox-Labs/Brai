@@ -42,9 +42,21 @@ class Worker:
 
     async def serve_connection(self, reader, writer):
         """Читать duplex RPC до startup sends; не допускать второй native runtime."""
-        if self.peer is not None or peer_uid(writer) != self.ingress_uid:
+        if peer_uid(writer) != self.ingress_uid:
             writer.close()
             await writer.wait_closed()
+            return
+        if self.peer is not None:
+            # Операторская health-проверка не забирает основной duplex канал
+            # и не останавливает работающий native lifecycle при своём EOF.
+            async def inspect_health(require_tools=False):
+                if require_tools:
+                    raise RpcError(-32602, 'Operational health requires the active ingress channel')
+                return await self.health()
+            try:
+                await asyncio.wait_for(Peer(reader, writer, {'health': inspect_health}).run(), 15)
+            except (TimeoutError, ConnectionError):
+                pass
             return
         peer = Peer(reader, writer, {'dispatch': self.dispatch, 'cancel': self.cancel,
                     'health': self.health, 'interactive': self.interactive})

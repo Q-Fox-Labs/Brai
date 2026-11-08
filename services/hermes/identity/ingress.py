@@ -6,7 +6,7 @@ from contextvars import ContextVar
 from .ipc import MAX_FRAME, Peer, RpcError, peer_uid
 from .scope import UNSCOPED, request_scope
 
-_ACTIONS = {'send_file_set', 'send', 'edit_message', 'send_typing', 'send_image', 'send_animation', 'send_image_file', 'send_document', 'send_video', 'send_voice'}
+_ACTIONS = {'send_file_set', 'send', 'edit_message', 'send_draft', 'send_typing', 'send_image', 'send_animation', 'send_image_file', 'send_document', 'send_video', 'send_voice'}
 _FILES = {'send_image_file', 'send_document', 'send_video', 'send_voice', 'send_animation'}
 
 
@@ -140,6 +140,7 @@ class Bridge:
             'send': {'chat_id', 'content', 'reply_to', 'metadata'},
             'edit_message': {'chat_id', 'message_id', 'content', 'finalize', 'metadata'},
             'send_typing': {'chat_id', 'metadata'},
+            'send_draft': {'chat_id', 'draft_id', 'content', 'metadata'},
             'send_file_set': {'chat_id', 'items', 'kind', 'fallback', 'metadata'},
             'send_image': {'chat_id', 'image_url', 'caption', 'reply_to', 'metadata'},
             'send_animation': {'chat_id', 'animation_url', 'caption', 'reply_to', 'metadata'},
@@ -152,6 +153,9 @@ class Bridge:
             raise RpcError(-32602, 'Invalid voice flag')
         if set(payload) - allowed_keys[action]:
             raise RpcError(-32602, 'Unexpected delivery fields')
+        if action == 'send_draft' and (type(payload.get('draft_id')) is not int or payload['draft_id'] == 0
+                or not isinstance(payload.get('content'), str) or len(payload['content']) > 65536):
+            raise RpcError(-32602, 'Invalid draft')
         if action == 'send_file_set':
             items = payload.get('items')
             if (payload.get('kind') not in ('single', 'album') or type(payload.get('fallback')) is not bool

@@ -129,6 +129,9 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
             'base_url': 'http://127.0.0.1:' + str(relay_port) + '/model/v1',
             'transport': 'codex_responses'}},
         'browser': {'backend': 'browser-use'},
+        'streaming': {'enabled': True, 'transport': 'auto'},
+        'display': {'streaming': True, 'platforms': {'telegram': {
+            'streaming': True, 'interim_assistant_messages': True}}},
         'stt': stt_config(stt_model),
         'tts': {'provider': 'silero', 'providers': {'silero': {
             'type': 'command',

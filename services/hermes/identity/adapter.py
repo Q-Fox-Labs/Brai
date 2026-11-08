@@ -14,7 +14,6 @@ def make_adapter(config, platform, peer, publish_file):
 
     class IpcAdapter(TelegramAdapter):
         """Сохранить native вызовы и вернуть только фактический результат ingress."""
-        supports_async_delivery = False
         # AIDEV-NOTE: Личный процесс передаёт файлы ingress и не содержит Telegram bot.
         file_delivery_via_ipc = True
 
@@ -94,6 +93,15 @@ def make_adapter(config, platform, peer, publish_file):
 
         async def edit_message(self, chat_id, message_id, content, *, finalize=False, metadata=None):
             return await self._action('edit_message', dict(chat_id=chat_id, message_id=message_id, content=content, finalize=finalize, metadata=metadata))
+
+        def supports_draft_streaming(self, chat_type=None, metadata=None):
+            """Сохранить native draft в личном чате; Root проверяет доступность API."""
+            return self._bot is not None and (chat_type or '').lower() in {'dm', 'private'}
+
+        async def send_draft(self, chat_id, draft_id, content, metadata=None):
+            """Передать preview штатному Root renderer без отдельного Bot API порта."""
+            return await self._action('send_draft', dict(chat_id=chat_id, draft_id=draft_id,
+                                                       content=content, metadata=metadata))
 
         async def send_typing(self, chat_id, metadata=None):
             result = await self._action('send_typing', dict(chat_id=chat_id, metadata=metadata))

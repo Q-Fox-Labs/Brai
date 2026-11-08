@@ -170,6 +170,9 @@ class SystemTests(unittest.TestCase):
     def test_native_profile_separates_system_and_personal_skills_and_routes_tts(self):
         profile = {'home': '/profiles/one'}
         config = native_profile(profile, instructions_root='/opt/brai-profile/runtime', model='model')
+        self.assertTrue(config['streaming']['enabled'])
+        self.assertTrue(config['display']['platforms']['telegram']['streaming'])
+        self.assertTrue(config['display']['platforms']['telegram']['interim_assistant_messages'])
         self.assertEqual(config['skills']['external_dirs'], ['/opt/brai-profile/skills'])
         self.assertEqual(config['skills']['create_dir'], '/profiles/one/usercustom/userdata/skills')
         provider = config['tts']['providers']['silero']

@@ -87,6 +87,40 @@ def telegram_modules():
 
 
 class ProxyTest(unittest.IsolatedAsyncioTestCase):
+    async def test_draft_uses_high_level_ipc_and_preserves_native_async_delivery(self):
+        class Native:
+            supports_async_delivery = True
+            def __init__(self, config):
+                self.config = config
+            def _mark_disconnected(self):
+                pass
+        native_module = ModuleType('plugins.platforms.telegram.adapter')
+        native_module.TelegramAdapter = Native
+        base = ModuleType('gateway.platforms.base')
+        base.SendResult = NS
+        peer = NS(call=AsyncMock(return_value={'success': True, 'message_id': None}))
+        token = delivery_scope.set('draft-turn')
+        try:
+            with patch.dict(sys.modules, {'plugins.platforms.telegram.adapter': native_module,
+                                         'gateway.platforms.base': base}):
+                adapter = make_adapter(NS(), 'telegram', peer, AsyncMock())
+                self.assertTrue(adapter.supports_async_delivery)
+                for chat_type in ('dm', 'private'):
+                    self.assertTrue(adapter.supports_draft_streaming(chat_type))
+                for chat_type in ('group', 'supergroup', '', None):
+                    self.assertFalse(adapter.supports_draft_streaming(chat_type))
+                receipt = await adapter.send_draft('123', 17, 'Partial', {'thread_id': '73'})
+                self.assertTrue(receipt.success)
+                self.assertIsNone(receipt.message_id)
+                peer.call.assert_awaited_once_with('send', {'action': 'send_draft',
+                    'payload': {'chat_id': '123', 'draft_id': 17, 'content': 'Partial',
+                                'metadata': {'thread_id': '73'}}, 'scope_id': 'draft-turn'})
+                self.assertFalse(hasattr(adapter._bot, 'send_message_draft'))
+                await adapter.disconnect()
+                self.assertFalse(adapter.supports_draft_streaming('private'))
+        finally:
+            delivery_scope.reset(token)
+
     async def test_scope_receipt_markup_and_no_token_or_generic_api(self):
         peer = NS(call=AsyncMock(return_value={'message_id': 41, 'date': 1,
             'chat': {'id': -55, 'type': 'supergroup'}, 'text': 'Question'}))
@@ -382,3 +416,36 @@ class NativeInteractiveTest(unittest.IsolatedAsyncioTestCase):
         await self.adapter.disconnect()
         self.assertFalse(self.adapter._running)
         self.assertIsNone(self.adapter._bot)
+
+
+@unittest.skipUnless(os.environ.get('HERMES_TEST_ENGINE'), 'Native public source fixture not configured')
+class NativeDraftRenderingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_pinned_root_renderer_formats_preview_and_never_retries_unknown_outcome(self):
+        path = Path(os.environ['HERMES_TEST_ENGINE']) / 'plugins/platforms/telegram/adapter.py'
+        tree = ast.parse(path.read_text())
+        adapter = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'TelegramAdapter')
+        method = next(node for node in adapter.body if isinstance(node, ast.AsyncFunctionDef) and node.name == 'send_draft')
+        module = ast.Module(body=[ast.ImportFrom(module='__future__', names=[ast.alias(name='annotations')], level=0), method], type_ignores=[])
+        async def bounded(operation, **kwargs):
+            return await operation
+        scope = {'SendResult': NS, 'ParseMode': NS(MARKDOWN_V2='MarkdownV2'),
+                 'normalize_telegram_chat_id': int, '_await_with_thread_deadline': bounded,
+                 '_TEXT_SEND_DEADLINE': 15, 'logger': logging.getLogger(__name__),
+                 '_redact_telegram_error_text': str}
+        exec(compile(ast.fix_missing_locations(module), str(path), 'exec'), scope)
+        send = AsyncMock(return_value=True)
+        native = NS(_bot=NS(send_message_draft=send), name='telegram', MAX_MESSAGE_LENGTH=4096,
+                    strip_media_directives_for_display=lambda text: text,
+                    _should_attempt_rich_draft=lambda text: False,
+                    format_message=lambda text: 'formatted:' + text,
+                    _thread_kwargs_for_draft=lambda chat, metadata: {'message_thread_id': int(metadata['thread_id'])})
+        result = await scope['send_draft'](native, '123', 17, '*Preview*', {'thread_id': '73'})
+        self.assertTrue(result.success)
+        self.assertIsNone(result.message_id)
+        send.assert_awaited_once_with(chat_id=123, draft_id=17, text='formatted:*Preview*',
+                                      parse_mode='MarkdownV2', message_thread_id=73)
+        send.reset_mock(side_effect=True)
+        send.side_effect = TimeoutError('Unknown draft outcome')
+        result = await scope['send_draft'](native, '123', 17, '*Preview*', {'thread_id': '73'})
+        self.assertFalse(result.success)
+        self.assertEqual(send.await_count, 1)
