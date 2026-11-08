@@ -311,7 +311,6 @@ class Boundary:
                     or value.get('code') != 200 or not isinstance(value.get('data'), list)):
                 raise Denied('INVALID_STATUS_RESPONSE')
             seen = set()
-            items = []
             for item in value['data']:
                 if (not isinstance(item, dict) or set(item) != {'task_id', 'status'}
                         or not isinstance(item.get('task_id'), str)
@@ -320,8 +319,7 @@ class Boundary:
                         or item.get('status') not in ('waiting', 'in_progress', 'completed', 'failed', 'cancelled')):
                     raise Denied('INVALID_STATUS_RESPONSE')
                 seen.add(item['task_id'])
-                items.append({'task_id':item['task_id'], 'status':item['status']})
-            return {'code':200, 'message':'Memory get status successfully', 'data':items}
+            return {'code':200, 'message':'Memory get status successfully', 'data':value['data']}
         if method != 'POST':
             raise Denied('METHOD_DENIED')
         if path in ('/product/get_memory', '/product/get_memory_stream'):

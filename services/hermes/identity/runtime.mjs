@@ -33,6 +33,15 @@ function checkSnapshot(path,root) {
 /** Собирает порты только из root-owned конфигураций, закреплённых за профилем. */
 export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,start,openPorts=connectPorts,transcriptionFactory=createOwnerTranscription,verifyDirectory=rootDirectory,verifySnapshot=checkSnapshot,readFiles=fileConfiguration}={}) {
  const cache=new Map();
+ let booting=0,stopped=false;const waiting=[];
+ // AIDEV-NOTE: Холодная сборка MCP компилирует схемы; массовый старт не должен задерживать обратный Auth.
+ async function startLimited(build){
+  if(stopped)invalid();
+  if(booting<2)booting++;
+  else{if(waiting.length>=32)invalid();await new Promise((resolve,reject)=>waiting.push({resolve,reject}));}
+  try{if(stopped)invalid();return await build();}
+  finally{const next=waiting.shift();if(next)next.resolve();else booting--;}
+ }
  function loadEntries(){
   const entries=config?.runtimeProfilesPath?readProtected(config.runtimeProfilesPath):config?.runtimeProfiles;
   if(!object(entries))invalid();
@@ -63,6 +72,7 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
   const sourceTools=validateConfig(readProtected(entry.toolsConfigPath),entry.userId);
   if(sourceTools.serviceDataScope!==undefined&&sourceTools.serviceDataScope!==scope)invalid();
   const tools={...sourceTools,serviceDataScope:scope};
+  if(tools.dialogues?.enabled===true&&(tools.dialogues.userId!==entry.userId||tools.dialogues.profileId!==entry.profileId))invalid();
   // AIDEV-NOTE: Bearer MCP должен быть проверенно привязан сервисом к owner; до этого доступ закрыт.
   if(['gameCore','history','transcription'].some(name=>tools[name]?.enabled!==false||Object.keys(tools[name]).some(key=>key!=='enabled')))invalid();
   const publisher=readProtected(tools.publisher.configPath);
@@ -92,14 +102,16 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
   return {...value,moduleRoot:'/opt/brai-profile/runtime/services/hermes/files'};
  }
  async function perUserRuntime(profile) {
+  if(stopped)invalid();
   const {uid,entry,tools,publisher,shared}=validateProfile(profile,'active');
   const signature=JSON.stringify([entry,tools,publisher,shared,profile.role]), existing=cache.get(uid);
   if(existing?.signature===signature)return existing.promise;
   if(existing){cache.delete(uid);const old=await existing.promise.catch(()=>null);await old?.close();}
   const promise=(async()=>{
+   const runtime=await startLimited(async()=>{
+   if(start)return start(tools);
    let runtime;
-   if(start)runtime=await start(tools);
-   else{
+   {
     const ports=await openPorts(tools);
     try{
     const history=createHistoryCatalog(ports.request.bind(ports));
@@ -123,6 +135,8 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
      });
     }catch(error){await ports.close();throw error;}
    }
+   return runtime;
+   });
    return {
     async listTools(){return (await runtime.listTools()).filter(tool=>!['publish_file','fetch_file'].includes(tool.name));},
     async callTool(name,args,signal){
@@ -152,7 +166,7 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
    if(!item)return;
    cache.delete(uid);const runtime=await item.promise.catch(()=>null);await runtime?.close();
   },
-  async close(){const current=[...cache.values()];cache.clear();await Promise.allSettled(current.map(async item=>(await item.promise).close()));}
+  async close(){stopped=true;for(const item of waiting.splice(0))item.reject(new Error('SOURCE_CLOSED'));const current=[...cache.values()];cache.clear();await Promise.allSettled(current.map(async item=>(await item.promise).close()));}
  };
 }
 /** Запускает закрытый control через stdio с персональными портами. */

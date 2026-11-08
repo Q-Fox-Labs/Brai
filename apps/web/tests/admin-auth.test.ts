@@ -23,6 +23,19 @@ test("admin operations reject users and bad origin before publishing", async () 
  assert.equal((await mod.exports.POST(new Request("https://brai.test/api/admin", { method: "POST", body: JSON.stringify({ operation: "invite-create" }) }))).status, 403);
  assert.equal(sent, 0);
 });
+test("access operations preserve request IDs and require an active administrator and origin", async () => {
+ role = "admin"; sent = 0;
+ for (const [operation, input] of [["users-add", { telegramId: "123" }], ["users-revoke", { userId: "target" }]] as const) {
+  const body = { operation, requestId: "request-id", ...input };
+  const response = await mod.exports.POST(new Request("https://brai.test/api/admin", { method: "POST", headers: { origin: "https://brai.test", "content-type": "application/json" }, body: JSON.stringify(body) }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload, { headers: { origin: "https://brai.test" }, body: { requestId: "request-id", ...input } });
+ }
+ const response = await mod.exports.GET(new Request("https://brai.test/api/admin?operation=users-operation-get&requestId=request-id"));
+ assert.equal(response.status, 200);
+ assert.deepEqual(payload, { headers: { origin: "https://brai.test" }, body: { requestId: "request-id" } });
+ assert.equal(sent, 3);
+});
 test("admin data reads require an explicit target and keep the actor cookie", async () => {
  role = "admin"; sent = 0;
  assert.equal((await mod.exports.GET(new Request("https://brai.test/api/admin?operation=admin-memory-list"))).status, 400);
@@ -58,4 +71,14 @@ test("archive permits admin reads but rejects user-management writes", async () 
   assert.equal((await mod.exports.POST(request)).status, 400);
  }
  assert.equal(sent, 1);
+});
+
+test("chat tail parameters reach the existing owner API and numeric limits stay numeric", async () => {
+ role = "admin"; serviceStatus = ""; responseBody = { messages: [], nextCursor: null };
+ const response = await mod.exports.GET(new Request("https://brai.test/api/admin?operation=admin-chats-get&userId=target&chatId=chat&order=desc&limit=50"));
+ assert.equal(response.status, 200);
+ assert.deepEqual(payload, {userId:"target",chatId:"chat",order:"desc",limit:50,headers:{origin:"https://brai.test"}});
+ const count = sent;
+ for (const limit of ["0", "101", "50x"]) assert.equal((await mod.exports.GET(new Request("https://brai.test/api/admin?operation=admin-chats-get&userId=target&chatId=c&limit=" + limit))).status, 400);
+ assert.equal(sent,count);
 });

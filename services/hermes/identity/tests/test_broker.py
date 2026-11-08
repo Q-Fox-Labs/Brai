@@ -1,6 +1,7 @@
 # ABOUTME: Проверяет UID-bound JSON-RPC broker и привилегированные файловые границы.
 # ABOUTME: Использует временные fixtures без модели, сети и live-профилей.
 import asyncio
+import json
 from contextlib import suppress
 from pathlib import Path
 import os
@@ -85,6 +86,46 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.broker.login_state = broker_module.LoginDeliveryState(':memory:')
         self.addCleanup(self.broker.login_state.close)
         self.broker.profiles = lambda: {WORKER_UID: self.profile}
+
+    async def test_invitation_waits_for_queued_installation_beyond_three_minutes(self):
+        self.config['accessCommand'] = ['/synthetic/access']
+        user = {'id': 'user-a', 'profileId': 'profile-a', 'telegramId': '111222'}
+        polls = 0
+        async def control(method, params, timeout=35):
+            nonlocal polls
+            self.control.calls.append((method, dict(params), timeout))
+            if method == 'identity.invite-redeem':
+                return {'user': {**user, 'status': 'provisioning'}}
+            self.assertEqual(method, 'identity.resolve')
+            polls += 1
+            return {'user': {**user, 'status': 'active' if polls > 100 else 'provisioning'}}
+        self.control.call = control
+        with mock.patch.object(broker_module.asyncio, 'sleep', new_callable=mock.AsyncMock) as sleep, \
+             mock.patch.object(broker_module.asyncio, 'create_subprocess_exec', side_effect=AssertionError('direct install')):
+            result = await self.broker.call(INGRESS_UID, 'identity.invite-redeem',
+                {'telegramId': '111222', 'code': 'synthetic'})
+        self.assertEqual(result['uid'], WORKER_UID)
+        self.assertEqual(sleep.await_count, 100)
+        self.assertTrue(all(call.args == (2,) for call in sleep.await_args_list))
+
+    async def test_invitation_revocation_during_queued_installation_denies_access(self):
+        self.config['accessCommand'] = ['/synthetic/access']
+        user = {'id': 'user-a', 'profileId': 'profile-a', 'telegramId': '111222'}
+        polls = 0
+        async def control(method, params, timeout=35):
+            nonlocal polls
+            if method == 'identity.invite-redeem':
+                return {'user': {**user, 'status': 'provisioning'}}
+            self.assertEqual(method, 'identity.resolve')
+            polls += 1
+            return {'user': {**user, 'status': 'blocked' if polls == 101 else 'provisioning'}}
+        self.control.call = control
+        with mock.patch.object(broker_module.asyncio, 'sleep', new_callable=mock.AsyncMock), \
+             mock.patch.object(broker_module.asyncio, 'create_subprocess_exec', side_effect=AssertionError('direct install')):
+            with self.assertRaisesRegex(PermissionError, 'Invitation unavailable'):
+                await self.broker.call(INGRESS_UID, 'identity.invite-redeem',
+                    {'telegramId': '111222', 'code': 'synthetic'})
+        self.assertEqual(polls, 101)
 
     async def test_account_rebinding_race_is_denied_before_registering_wrong_worker(self):
         with self.assertRaises(PermissionError):
@@ -736,6 +777,49 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.profile['status'] = 'blocked'
         with self.assertRaises(PermissionError):
             await self.broker.call(WORKER_UID, 'files.configuration', {})
+
+    async def test_large_unicode_crosses_real_private_control_without_ascii_expansion(self):
+        node = shutil.which('node')
+        self.assertIsNotNone(node)
+        source = (Path(__file__).resolve().parents[1] / 'control.mjs').as_uri()
+        program = ("import {servePrivateRpc} from " + json.dumps(source) + ";"
+            "const control={invokeTool:async(uid,name,args)=>({bytes:Buffer.byteLength(args.text)})};"
+            "await servePrivateRpc({control},process.stdin,process.stdout);")
+        port = broker_module.ControlPort([node, '--input-type=module', '-e', program], '/unused')
+        await port.start()
+        try:
+            for text in ('a' * 400000, 'я' * 400000, '🧠' * 200000):
+                result = await port.call('tools.call', {'uid': WORKER_UID,
+                    'name': 'dialogues_exchange', 'args': {'text': text}})
+                self.assertEqual(result, {'bytes': len(text.encode())})
+        finally:
+            await port.close()
+
+    async def test_control_reserves_authorization_capacity_when_tool_calls_are_full(self):
+        control = broker_module.ControlPort([], '/unused')
+        class Input:
+            def write(self, _payload):
+                pass
+            async def drain(self):
+                pass
+        control.process = SimpleNamespace(returncode=None, stdin=Input())
+        tools = [asyncio.create_task(control.call('tools.call', {'uid': i})) for i in range(32)]
+        await asyncio.sleep(0)
+        try:
+            self.assertEqual(len(control.pending), 32)
+            with self.assertRaises(ConnectionError):
+                await control.call('tools.call', {})
+            authorization = asyncio.create_task(control.call('authorize', {'uid': WORKER_UID}))
+            await asyncio.sleep(0)
+            self.assertEqual(len(control.pending), 33)
+            control.pending[control.counter].set_result({'allowed': True})
+            self.assertEqual(await authorization, {'allowed': True})
+            self.assertEqual(control.pending_budgets[True], 0)
+        finally:
+            for task in tools:
+                task.cancel()
+            await asyncio.gather(*tools, return_exceptions=True)
+        self.assertEqual(control.pending_budgets, {False: 0, True: 0})
 
     async def test_late_control_response_does_not_break_current_request(self):
         control = broker_module.ControlPort([], '/unused')

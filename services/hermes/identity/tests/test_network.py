@@ -159,6 +159,37 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
             writer.close()
             secret.assert_not_called()
 
+    async def test_native_image_transport_emits_separate_http_headers(self):
+        self.release.set()
+        body = json.dumps({'model': 'gpt-image-2', 'prompt': 'Луна', 'size': 'auto',
+            'quality': 'low', 'n': 1, 'background': 'opaque'}).encode()
+        claims = base64.urlsafe_b64encode(json.dumps({'https://api.openai.com/auth': {
+            'chatgpt_data_residency': 'eu'}}).encode()).decode().rstrip('=')
+        key = 'test.' + claims + '.signature'
+        self.server.close()
+        await self.server.wait_closed()
+        public = egress._public
+        async def dial(*args):
+            return await asyncio.open_connection('127.0.0.1', self.remote_port)
+        with patch.object(egress, '_public', side_effect=lambda host, denied: host == 'chatgpt.com' or public(host, denied)):
+            self.server = await egress.start_server(self.path, lambda: self.registry,
+                lambda: self.config, self.authorize, dial,
+                resolve_provider=AsyncMock(return_value=({'codexSubscription': True,
+                    'provider': {'apiKey': key}}, 'account')))
+            reader, writer = await self.request(
+                b'POST /image/images/generations HTTP/1.1\r\nHost: localhost\r\nContent-Length: '
+                + str(len(body)).encode() + b'\r\n\r\n' + body)
+            self.assertIn(b'200 OK', await asyncio.wait_for(reader.read(), 2))
+            writer.close()
+        head, sent = self.received[-1]
+        headers = dict(line.split(b': ', 1) for line in head.split(b'\r\n')[1:] if line)
+        self.assertEqual(headers[b'User-Agent'], b'HermesAgent/Brai')
+        self.assertEqual(headers[b'originator'], b'hermes-agent')
+        self.assertEqual(headers[b'x-openai-internal-codex-residency'], b'eu')
+        self.assertIn(b'x-codex-image-turn-id', headers)
+        self.assertNotIn(b'\\r\\n', head)
+        self.assertEqual(sent, body)
+
     async def test_native_images_keep_subscription_and_never_use_gif_key(self):
         body = {'model': 'gpt-image-2', 'prompt': 'Луна', 'size': '1024x1024',
                 'quality': 'medium', 'n': 1, 'background': 'opaque'}

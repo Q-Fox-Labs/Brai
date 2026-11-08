@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { GatewayError } from "./gateway";
 type Descriptor = { artifactId: string; filename: string; mimeType: string; sizeBytes: number; sha256: string };
 /** Проверяет descriptor и ограничивает поток размером и контрольной суммой владельца. */
-export async function adminDownload(value: unknown, artifactId: unknown, signal: AbortSignal): Promise<Response> {
+export async function adminDownload(value: unknown, artifactId: unknown, signal: AbortSignal, preview = false): Promise<Response> {
  const file = value as Partial<Descriptor> | null;
  if (!file || typeof artifactId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(artifactId) || file.artifactId !== artifactId || typeof file.filename !== "string" || typeof file.mimeType !== "string" || !Number.isSafeInteger(file.sizeBytes) || file.sizeBytes! < 0 || file.sizeBytes! > 2 * 1024 ** 3 || typeof file.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(file.sha256)) throw new GatewayError(502, "BAD_REPLY");
  let base: URL;
@@ -32,5 +32,6 @@ export async function adminDownload(value: unknown, artifactId: unknown, signal:
  });
  const name = file.filename.replace(/[\u0000-\u001f\u007f/\\]/g, "_").slice(0, 180).toWellFormed() || "download";
  const encoded = encodeURIComponent(name).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
- return new Response(body, { headers: { "Content-Type": "application/octet-stream", "Content-Disposition": `attachment; filename="download"; filename*=UTF-8''${encoded}`, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Cross-Origin-Resource-Policy": "same-origin" } });
+ const inline = preview && ["image/png", "image/jpeg", "image/webp", "image/gif", "audio/ogg", "audio/mpeg", "audio/mp4", "audio/webm", "audio/wav", "video/mp4", "video/webm"].includes(file.mimeType);
+ return new Response(body, { headers: { "Content-Type": inline ? file.mimeType : "application/octet-stream", "Content-Disposition": `${inline ? "inline" : "attachment"}; filename="download"; filename*=UTF-8''${encoded}`, "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Cross-Origin-Resource-Policy": "same-origin" } });
 }

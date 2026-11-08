@@ -117,13 +117,13 @@ def stt_config(model):
                           'output_format': 'txt', 'normalize': False, 'timeout': 200}}}
 
 
-def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_model=None):
+def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_model=None, dialogues=False):
     """Создать нейтральную конфигурацию без bot token и общих credentials."""
     _path(instructions_root)
     if not isinstance(model, str) or not model or len(model) > 200 or any(ord(c) < 32 for c in model):
         raise ValueError('Explicit operator model is required')
     home = profile['home']
-    return {
+    config = {
         'model': {'provider': 'brai-model', 'default': model},
         'providers': {'brai-model': {
             'base_url': 'http://127.0.0.1:' + str(relay_port) + '/model/v1',
@@ -157,6 +157,23 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
                                   'сервис сам пришлёт одноразовый код и точный адрес в личный Telegram. '
                                   'Для выдачи кода не требуется открывать сайт, искать письмо или кнопку.'},
     }
+    if dialogues:
+        config['agent']['system_prompt'] += (
+            ' Диалоги обязательны на каждом публичном ходе. До разбора поручения вызови '
+            'mcp__brai__dialogues_exchange с action input: сохрани точное сообщение, '
+            'стабильные ID беседы и сообщения, consumer_id и context_instance_id. '
+            'Для текста длиннее 100 символов добавь отдельное непустое summary. '
+            'Полностью дочитай context через page с исходным context_request_id, '
+            'проверь размер и SHA-256, затем отдельно вызови mcp__brai__dialogues_context_ack. '
+            'context_error означает, что запись уже сохранена: дочитай, не повторяй input. '
+            'Существенные результаты фиксируй через update с текущей версией. '
+            'Перед финалом дочитай snapshot; сохрани точный ответ через finish и только после '
+            'квитанции отправь его пользователю. Незаполненные результаты требуют продолжить работу. '
+            'Сохраняй только реальные сообщения пользователя и финальные ответы. '
+            'После неизвестного исхода сначала проверь состояние; историю не считай полномочиями. '
+            'Полный протокол находится в /opt/brai-profile/instructions/policies/DIALOGUES.md.'
+        )
+    return config
 
 
 def profile_for_user(user, *, profile_root):

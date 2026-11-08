@@ -661,8 +661,8 @@ async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_
             # trusted egress; личный процесс не задаёт account/residency.
             import base64
             import uuid
-            head += b"User-Agent: HermesAgent/Brai\\r\\noriginator: hermes-agent\\r\\n"
-            head += b"x-codex-image-turn-id: " + str(uuid.uuid4()).encode('ascii') + b"\\r\\n"
+            head += b"User-Agent: HermesAgent/Brai\r\noriginator: hermes-agent\r\n"
+            head += b"x-codex-image-turn-id: " + str(uuid.uuid4()).encode('ascii') + b"\r\n"
             try:
                 encoded = key.split('.')[1]
                 claims = json.loads(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)))
@@ -670,7 +670,7 @@ async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_
                 residency = auth.get('chatgpt_data_residency') or auth.get('chatgpt_compute_residency')
                 if isinstance(residency, str) and residency.strip().isascii() and all(
                         32 < ord(char) < 127 for char in residency.strip()):
-                    head += b"x-openai-internal-codex-residency: " + residency.strip().encode('ascii') + b"\\r\\n"
+                    head += b"x-openai-internal-codex-residency: " + residency.strip().encode('ascii') + b"\r\n"
             except (ValueError, IndexError, TypeError, AttributeError):
                 pass
         if key is not None:

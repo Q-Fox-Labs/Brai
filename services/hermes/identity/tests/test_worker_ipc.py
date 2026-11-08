@@ -2,6 +2,7 @@
 # ABOUTME: Тесты не обращаются к настоящему Telegram и пользовательской памяти.
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -66,6 +67,30 @@ class IpcTest(unittest.IsolatedAsyncioTestCase):
 
 
 class BoundaryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_operational_start_requires_personal_dialogues_tools_and_instruction(self):
+        from unittest.mock import Mock, patch
+        import types
+        config = types.ModuleType('hermes_cli.config')
+        prompt = {'agent': {'system_prompt': 'incomplete'}}
+        config.load_config_readonly = lambda: prompt
+        registry = types.ModuleType('tools.registry')
+        registry.registry = SimpleNamespace(get_entry=Mock(return_value=object()))
+        worker = Worker(os.getuid() + 1, 'owner', '123', None)
+        with patch.dict(sys.modules, {'hermes_cli.config': config, 'tools.registry': registry}), patch.dict(
+                os.environ, {'BRAI_DIALOGUES_REQUIRED': '1', 'BRAI_IDENTITY_MODE': ''}):
+            with self.assertRaisesRegex(RpcError, 'instruction unavailable'):
+                await worker._operational_ready(None)
+            self.assertFalse(worker.operational.is_set())
+            prompt['agent']['system_prompt'] = (
+                'mcp__brai__dialogues_exchange mcp__brai__dialogues_context_ack context_request_id finish')
+            registry.registry.get_entry.side_effect = lambda name: None if name.endswith('context_ack') else object()
+            with self.assertRaisesRegex(RpcError, 'Dialogues tool unavailable'):
+                await worker._operational_ready(None)
+            self.assertFalse(worker.operational.is_set())
+            registry.registry.get_entry.side_effect = None
+            await worker._operational_ready(None)
+            self.assertTrue(worker.operational.is_set())
+
     async def test_send_rejects_foreign_destination_and_edit(self):
         delivered = []
         async def deliver(owner, action, payload):
@@ -168,6 +193,9 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
         }
         from unittest.mock import AsyncMock, Mock
         discovery = AsyncMock()
+        modules['hermes_cli'] = types.ModuleType('hermes_cli')
+        modules['hermes_cli.config'] = types.ModuleType('hermes_cli.config')
+        modules['hermes_cli.config'].load_config_readonly = lambda: json.loads((Path(os.environ['HERMES_HOME']) / 'config.yaml').read_text())
         modules['gateway.run']._discover_gateway_mcp_tools = discovery
         async def start_gateway(config=None, *, runner_factory, startup_gate, operational_ready):
             runner = runner_factory(config)
