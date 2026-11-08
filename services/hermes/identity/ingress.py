@@ -180,7 +180,7 @@ def install(runner, adapter, resolve_bridge):
         bridge = await resolve_bridge(source)
         if bridge is None:
             return
-        if not isinstance(bridge, Bridge) or bridge.telegram_id != sender:
+        if not isinstance(bridge, Bridge) or sender not in bridge.telegram_ids:
             raise PermissionError('No owner binding')
         token = _authorized_telegram.set(sender)
         try:

@@ -225,6 +225,57 @@ class IngressInstallTest(unittest.IsolatedAsyncioTestCase):
             await adapter._brai_identity_dispatch(event)
 
 class TelegramAccountsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_resolved_accounts_pass_native_guard_and_preserve_separate_routes(self):
+        from unittest.mock import AsyncMock, patch
+        from identity import telegram_runtime as runtime
+        from identity.ingress import install
+        accounts = {'123', '456'}
+        payloads = []
+        class Source:
+            platform = SimpleNamespace(value='telegram')
+            is_bot, thread_id, chat_type = False, None, 'dm'
+            def __init__(self, account):
+                self.user_id = self.chat_id = account
+            def to_dict(self):
+                return {'platform': 'telegram', 'user_id': self.user_id, 'chat_id': self.chat_id, 'chat_type': 'dm'}
+        class Runner:
+            def _is_user_authorized_for_source(self, source, **kwargs):
+                return False
+            async def _hm_admit_event(self, incoming):
+                self.authorized = self._is_user_authorized_for_source(incoming.source)
+                assert self.authorized
+                return incoming, incoming.source, False
+        class PeerStub:
+            async def call(self, method, params):
+                payloads.append(params['event']['source'])
+                return {'accepted': True, 'turn_id': None}
+        async def broker(method, params, **kwargs):
+            if method == 'identity.resolve':
+                if params['telegramId'] not in accounts:
+                    raise PermissionError('Account detached')
+                return {'uid': 99, 'userId': 'owner', 'profileId': 'profile', 'telegramId': params['telegramId'],
+                        'authorTelegramId': '123', 'workerSocket': '/unused'}
+            if method == 'ingress.prepare':
+                return {'paths': []}
+            return {}
+        adapter = SimpleNamespace()
+        resolver = runtime.Resolver(adapter)
+        forward = install(Runner(), adapter, resolver)
+        with patch.object(runtime, 'broker_call', broker), patch.object(Bridge, 'connect', AsyncMock(return_value=PeerStub())):
+            for index, account in enumerate(['123', '456']):
+                event = SimpleNamespace(source=Source(account), text='hello', message_id=str(index + 1),
+                                        message_type=SimpleNamespace(value='text'), timestamp=None)
+                await forward(event)
+                self.assertTrue(event._gateway_accepted)
+            accounts.remove('123')
+            await forward(SimpleNamespace(source=Source('456'), text='after detach', message_id='3',
+                                          message_type=SimpleNamespace(value='text'), timestamp=None))
+            with self.assertRaises(PermissionError):
+                await forward(SimpleNamespace(source=Source('123'), message_id='4'))
+        self.assertEqual(len(resolver.bridges), 1)
+        self.assertEqual([p['user_id'] for p in payloads], ['123', '123', '123'])
+        self.assertEqual([p['chat_id'] for p in payloads], ['123', '456', '456'])
+
     async def test_canonical_owner_and_original_account_routes_cross_ipc(self):
         calls = []
         async def prepare(event):

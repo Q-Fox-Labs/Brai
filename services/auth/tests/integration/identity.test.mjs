@@ -142,6 +142,40 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   assert.equal((await getIdentity(runtime,owner)).telegramIds.length,1);
   assert.equal(await unlinkTelegram(runtime,adminAccount,adminAccount),false);
   assert.ok(await issueCode(runtime,secret,adminAccount));
+  for(const [index,issue] of [issueCode,issueTelegramLink].entries()){
+   const telegramId=String(48001+index),application="fixture-issuance-"+index;
+   const raceUser=await provision(runtime,secret,{requestId:randomUUID(),telegramId,role:'user',status:'active',profileId:'fixture-issuance-'+index});
+   const issuing=new Pool({connectionString:appURL.href,application_name:application});
+   let release,locked,pid,issuer,revocation;
+   const gate=new Promise(resolve=>{release=resolve;});
+   const reached=new Promise(resolve=>{locked=resolve;});
+   const paused={async connect(){
+    const client=await runtime.connect();pid=(await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+    return {release:()=>client.release(),async query(sql,params){
+     const result=await client.query(sql,params);
+     if(sql.includes("JOIN sys_telegram_account")&&sql.includes("FOR UPDATE OF i")){locked();await gate;}
+     return result;
+    }};
+   }};
+   try{
+    revocation=unlinkTelegram(paused,telegramId,telegramId);
+    await reached;
+    issuer=issue(issuing,secret,telegramId);
+    let blocked=false;
+    for(let attempt=0;attempt<100&&!blocked;attempt++){
+     blocked=(await pool.query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND $2=ANY(pg_blocking_pids(pid))) AS blocked",[application,pid])).rows[0].blocked;
+     if(!blocked)await new Promise(resolve=>setTimeout(resolve,10));
+    }
+    assert.equal(blocked,true,"Issuance must actually wait on the revoking transaction");
+    release();
+    assert.equal(await revocation,true);
+    assert.equal(await issuer,null,"A detached account must not obtain a new credential after waiting");
+    assert.equal(await resolveTelegram(runtime,telegramId),null);
+    assert.deepEqual((await getIdentity(runtime,raceUser.id)).telegramIds,[]);
+   }finally{
+    release();await Promise.allSettled([revocation,issuer].filter(Boolean));await issuing.end();
+   }
+  }
   const last=await Promise.all([
    adminAction(pool,secret,owner,"role-set",{userId:owner,role:"user"}),
    adminAction(pool,secret,owner,"status-set",{userId:owner,status:"blocked"})

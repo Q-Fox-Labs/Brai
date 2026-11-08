@@ -97,8 +97,10 @@ export async function issueTelegramLink(pool:Pool,secret:string,telegramId:strin
   await client.query("BEGIN");
   const found=await client.query(selectUser+" JOIN sys_telegram_account a ON a.user_id=i.user_id WHERE a.telegram_id=$1 AND i.status='active' FOR UPDATE OF i",[telegramId]);
   const user:IdentityUser|undefined=found.rows[0];
+  // AIDEV-NOTE: Отвязка могла закончиться за время ожидания i-lock; нужен новый statement snapshot аккаунта.
+  const account=user?await client.query("SELECT 1 FROM sys_telegram_account WHERE telegram_id=$1 AND user_id=$2",[telegramId,user.id]):null;
   const count=user?(await client.query("SELECT count(*)::integer AS count FROM sys_telegram_account WHERE user_id=$1",[user.id])).rows[0].count:0;
-  if(!user?.profileId||count>=2||!await authLimit(client,secret,`telegram-link-issue:${user.id}`,3)){await client.query("COMMIT");return null;}
+  if(!user?.profileId||!account?.rowCount||count>=2||!await authLimit(client,secret,`telegram-link-issue:${user.id}`,3)){await client.query("COMMIT");return null;}
   const code=randomBytes(32).toString("base64url"),digest=createHmac("sha256",secret).update("telegram-link:"+code).digest("hex");
   const saved=await client.query(`INSERT INTO sys_telegram_link(user_id,digest,expires_at) VALUES($1,$2,now()+interval '10 minutes')
    ON CONFLICT(user_id) DO UPDATE SET digest=EXCLUDED.digest,expires_at=EXCLUDED.expires_at,consumed_by=NULL,consumed_at=NULL RETURNING expires_at`,[user.id,digest]);

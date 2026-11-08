@@ -25,6 +25,9 @@ export async function issueCode(pool:Pool,secret:string,telegramId:string) {
   const user=await client.query("SELECT i.user_id FROM brai_identity i JOIN sys_telegram_account a ON a.user_id=i.user_id WHERE a.telegram_id=$1 AND i.status='active' FOR UPDATE OF i",[telegramId]);
   if(!user.rowCount){await client.query("COMMIT");return null;}
   const id:string=user.rows[0].user_id;
+  // AIDEV-NOTE: FOR UPDATE OF i мог ждать отвязку; её DELETE аккаунта не обновляет строку i.
+  const account=await client.query("SELECT 1 FROM sys_telegram_account WHERE telegram_id=$1 AND user_id=$2",[telegramId,id]);
+  if(!account.rowCount){await client.query("COMMIT");return null;}
   if(!await authLimit(client,secret,`issue:${id}`,3)){await client.query("COMMIT");return null;}
   const code=Array.from(randomBytes(12),byte=>alphabet[byte&31]).join("");
   const saved=await client.query(`INSERT INTO brai_login_code(user_id,digest,expires_at) VALUES($1,$2,now()+interval '120 seconds')
