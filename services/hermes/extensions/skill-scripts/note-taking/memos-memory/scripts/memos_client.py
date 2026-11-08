@@ -105,9 +105,7 @@ def private_request(a, config):
         raise ValueError('PRIVATE_MEMORY_CUBE_INVALID')
     if not math.isfinite(a.timeout) or not 0 < a.timeout <= 300:
         raise ValueError('PRIVATE_MEMORY_TIMEOUT_INVALID')
-    if a.command == 'feedback':
-        raise ValueError('PRIVATE_MEMORY_' + a.command.upper() + '_UNSUPPORTED')
-    if a.command in {'add', 'delete'} and config.get('frozen') is not False:
+    if a.command in {'add', 'delete', 'feedback'} and config.get('frozen') is not False:
         raise ValueError('PRIVATE_MEMORY_WRITES_FROZEN')
     a.user, a.cube = config['user_id'], cube
     api = worker_client({**config, 'cube_id': cube, 'request_timeout': a.timeout})

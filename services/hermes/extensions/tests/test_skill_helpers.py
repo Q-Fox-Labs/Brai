@@ -167,6 +167,8 @@ class MemoryStandaloneTests(unittest.TestCase):
                     frames += [{'type': 'memory', 'memory': row} for row in rows]
                     frames += [{'type': 'end', 'count': len(rows)}]
                     self.reply(b''.join(json.dumps(frame).encode()+b'\n' for frame in frames), 'application/x-ndjson')
+                elif self.path == '/product/feedback':
+                    self.reply({'code':200,'message':'Scoped feedback evaluated','data':{'record':{'add':[],'update':[{'id':'one','text':'corrected fixture','source_doc_id':None,'archived_id':'one','origin_memory':'old fixture'}]},'readback':{'checked_ids':['one'],'deleted_ids':[]}}})
                 elif self.path == '/product/recall_index':
                     self.reply({'code': 200, 'data': {'version': 1, 'complete': True,
                         'physical_count': 2, 'logical_count': 2, 'matched_count': 2, 'memories': rows}})
@@ -243,16 +245,30 @@ sys.exit(m.main())
         self.assertNotEqual(self.cli('--user','foreign','status').returncode,0)
         self.assertEqual(len(self.requests),1)
 
+    def test_feedback_uses_unix_sdk_and_rejects_frozen_or_foreign_owner_before_io(self):
+        result=self.success('feedback','--text','correct fixture','--id','one','--session','fixture')
+        self.assertEqual(result['data']['record']['update'][0]['id'],'one')
+        self.assertEqual(self.requests,[('POST','/product/feedback',{
+            'user_id':'owner','writable_cube_ids':['main'],'session_id':'fixture',
+            'async_mode':'sync','history':[],'feedback_content':'correct fixture',
+            'retrieved_memory_ids':['one'],'corrected_answer':False})])
+        before=len(self.requests)
+        for args,config in [(('feedback','--text','secret','--id','one','--session','fixture'),self.config|{'frozen':True}),
+                            (('--user','foreign','feedback','--text','secret','--id','one','--session','fixture'),self.config)]:
+            result=self.cli(*args,config=config)
+            self.assertNotEqual(result.returncode,0)
+            self.assertNotIn('secret',result.stderr)
+            self.assertEqual(len(self.requests),before)
+
     def test_explicit_owner_endpoint_and_unsupported_operations_fail_before_io(self):
         for args in [('--user', 'root', 'health'), ('--base-url', 'http://localhost', 'health'),
-                     ('feedback', '--text', 'secret', '--id', 'one', '--session', 's')]:
+                     ]:
             with self.subTest(args=args):
                 before = len(self.requests)
                 result = self.cli(*args)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(len(self.requests), before)
                 self.assertNotIn('secret', result.stderr)
-        self.assertIn('UNSUPPORTED', self.cli('feedback','--text','secret','--id','one','--session','s').stderr)
 
     def test_foreign_rows_and_redirects_fail_without_content_or_network_fallback(self):
         self.foreign = True
