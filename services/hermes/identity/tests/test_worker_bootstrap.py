@@ -61,7 +61,8 @@ class ToolClientTest(unittest.TestCase):
             catalog = tool_client.handle('tools/list', {})['tools']
         tool = next(item for item in catalog if item['name'] == 'brai_telegram_link_account')
         self.assertIn('полный доступ', tool['description'])
-        self.assertFalse(tool['inputSchema']['properties'])
+        self.assertEqual(set(tool['inputSchema']['properties']), {'message'})
+        self.assertFalse(tool['inputSchema'].get('required'))
         for phase in ['offer', 'command']:
             with patch.object(tool_client, 'broker_call', return_value={
                     'status': 'sent', 'phase': phase, 'suppressFinal': True, 'code': 'private-secret'}) as call:
@@ -79,10 +80,11 @@ class ToolClientTest(unittest.TestCase):
         for args in [{'target': '123'}, {'target': 'current', 'confirmed': True}, {}]:
             with self.assertRaises(ValueError):
                 tool_client.handle('tools/call', {'name': tool['name'], 'arguments': args})
-        with patch.object(tool_client, 'broker_call', return_value={'status': 'sent', 'phase': 'offer', 'suppressFinal': True}) as call:
+        with patch.object(tool_client, 'broker_call', return_value={'status': 'needs_consent', 'phase': 'offer', 'suppressFinal': False}) as call:
             result = tool_client.handle('tools/call', {'name': tool['name'], 'arguments': {'target': 'other'}})
         call.assert_called_once_with('telegram.unlink', {'target': 'other'})
-        self.assertIn('подтверждении', result['content'][0]['text'])
+        self.assertIn('needs_consent', result['content'][0]['text'])
+        self.assertIn('ясного согласия', result['content'][0]['text'])
 
     def test_login_never_exposes_broker_payload(self):
         with patch.object(tool_client, 'broker_call', return_value={'status':'sent', 'suppressFinal':True, 'code':'secret'}):

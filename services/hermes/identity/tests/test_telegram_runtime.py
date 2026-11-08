@@ -193,15 +193,31 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(admission['privateChat'], True)
         self.assertEqual(admission['telegramId'], '123')
 
-    async def test_confirmation_flag_comes_from_trusted_current_user_text(self):
-        for text, expected in [('Подтверждаю привязку моего второго аккаунта', True), ('Да, подтверждаю', False), ('да', False), ('нет', False), ('В архиве было: да', False)]:
+    async def test_confirmation_uses_natural_current_human_text_without_quotes_conditions_or_negation(self):
+        positive = ["Подтверждаю", "Да, подтверждаю!", "Согласен.", "Согласна",
+                    "Подтверждаю привязку моего второго аккаунта"]
+        negative = ["Не подтверждаю", "Не согласен", "Нет", "Отмена",
+                    "«Подтверждаю»", '"подтверждаю"', "Он сказал: подтверждаю",
+                    "Подтверждаю, если это бесплатно", "Согласен при условии, что данные не общие",
+                    "В архиве было: да"]
+        for text, expected in [(text, True) for text in positive] + [(text, False) for text in negative]:
             with self.subTest(text=text):
                 incoming = event()
                 incoming.text = text
-                broker = AsyncMock(side_effect=[{}, {'paths': ['/user/a']}])
-                with patch.object(runtime, 'broker_call', broker):
+                broker = AsyncMock(side_effect=[{}, {"paths": ["/user/a"]}])
+                with patch.object(runtime, "broker_call", broker):
                     await runtime.Resolver(NS()).prepare(profile(), incoming)
-                self.assertIs(broker.await_args_list[0].args[1]['linkConsent'], expected)
+                self.assertIs(broker.await_args_list[0].args[1]["linkConsent"], expected)
+
+    async def test_explicit_account_refusal_is_taken_from_current_text_only(self):
+        for text in ["Нет", "Нет!", "Не подтверждаю", "Отмена"]:
+            with self.subTest(text=text):
+                incoming = event()
+                incoming.text = text
+                broker = AsyncMock(side_effect=[{}, {"paths": ["/user/a"]}])
+                with patch.object(runtime, "broker_call", broker):
+                    await runtime.Resolver(NS()).prepare(profile(), incoming)
+                self.assertIs(broker.await_args_list[0].args[1]["accountRefused"], True)
 
     async def test_dm_topic_is_passed_only_from_trusted_source(self):
         incoming = event()
@@ -285,3 +301,98 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await resolver(source)
             with self.assertRaises(PermissionError):
                 await resolver(source)
+
+    async def test_machine_link_ack_uses_real_labels_and_unlink_hint_without_profile_ids_or_agent_dispatch(self):
+        labels = [{"name": "Анна Тест", "username": "anna"}, {"name": "Борис", "username": "boris"}]
+        update = NS(effective_message=NS(sender_chat=None, business_connection_id=None,
+                    text="/start link_" + "a" * 43, message_thread_id=73),
+                    effective_user=NS(id=456, is_bot=False), effective_chat=NS(id=456, type="private"))
+        adapter = NS(send=AsyncMock(return_value={"success": True, "message_id": "700"}))
+        result = {"user": {"id": "private-owner", "profileId": "private-profile"}, "accounts": labels}
+        with patch.object(runtime, "broker_call", AsyncMock(return_value=result)) as broker:
+            self.assertFalse(await runtime.admit_update(update, adapter))
+        broker.assert_awaited_once()
+        adapter.send.assert_awaited_once()
+        text = adapter.send.await_args.args[1]
+        for label in ["Анна Тест", "@anna", "Борис", "@boris"]:
+            self.assertIn(label, text)
+        self.assertIn("отвяз", text.casefold())
+        for hidden in ["private-owner", "private-profile", "бесед", "a" * 43]:
+            self.assertNotIn(hidden, text.casefold())
+        self.assertEqual(adapter.send.await_args.kwargs, {"metadata": {"message_thread_id": 73}})
+
+    async def test_missing_telegram_labels_do_not_undo_or_repeat_successful_redemption(self):
+        update = NS(effective_message=NS(sender_chat=None, business_connection_id=None,
+                    text="/start link_" + "b" * 43), effective_user=NS(id=456, is_bot=False),
+                    effective_chat=NS(id=456, type="private"))
+        adapter = NS(send=AsyncMock(return_value={"success": True}))
+        with patch.object(runtime, "broker_call", AsyncMock(return_value={
+                "user": {"id": "private-owner", "profileId": "private-profile"},
+                "accounts": [{"name": None, "username": None}, {"name": None, "username": None}]})) as broker:
+            self.assertFalse(await runtime.admit_update(update, adapter))
+        broker.assert_awaited_once()
+        adapter.send.assert_awaited_once()
+        text = adapter.send.await_args.args[1]
+        self.assertIn("подключ", text.casefold())
+        for hidden in ["private-owner", "private-profile", "None", "бесед", "b" * 43]:
+            self.assertNotIn(hidden, text)
+
+    async def test_only_confirmed_final_question_delivery_is_reported_to_broker_on_end(self):
+        cases = [
+            ("send", {}, {}, NS(success=True, message_id="200"), True, "200"),
+            ("send", {}, {}, {"success": True, "message_id": "200", "continuation_message_ids": ["201", "202"]}, True, "202"),
+            ("send", {}, {}, NS(success=True, message_id="200", raw_response={"message_ids": ["200", "201", "202"]}), True, "202"),
+            ("edit_message", {"message_id": "190", "finalize": True}, {}, {"success": True, "message_id": "190"}, True, "190"),
+            ("send", {}, {"_interim_send": True}, {"success": True, "message_id": "200"}, True, None),
+            ("edit_message", {"message_id": "190", "finalize": False}, {}, {"success": True, "message_id": "190"}, True, None),
+            ("send", {}, {}, {"success": False, "message_id": "200"}, True, None),
+            ("send", {}, {}, {"success": True}, True, None),
+            ("send", {}, {}, {"success": True, "message_id": "200"}, False, None),
+            ("send_typing", {}, {}, None, True, None),
+        ]
+        for action, extra, metadata, receipt, needed, expected in cases:
+            with self.subTest(action=action, extra=extra, metadata=metadata, needed=needed, expected=expected):
+                adapter = NS(**{action: AsyncMock(return_value=receipt)})
+                resolver = runtime.Resolver(adapter)
+                resolver.turns[101] = {"id": "offer", "route": ("123", ""), "workerTurnId": "worker"}
+                async def broker(method, params, **kwargs):
+                    if method == "ingress.status":
+                        return {"suppressFinal": False, "needsAccountConsent": needed}
+                    self.assertEqual(method, "ingress.close")
+                    return {"closed": True}
+                with patch.object(runtime, "broker_call", AsyncMock(side_effect=broker)) as calls:
+                    await resolver.deliver(profile(), "owner", action,
+                        {"chat_id": "123", "content": "Предупреждение и вопрос", "metadata": metadata, **extra})
+                    await resolver.end(profile(), "worker")
+                close = [call.args[1] for call in calls.await_args_list if call.args[0] == "ingress.close"]
+                self.assertEqual(len(close), 1)
+                if expected is None:
+                    self.assertNotIn("questionMessageId", close[0])
+                else:
+                    self.assertEqual(close[0]["questionMessageId"], expected)
+
+    async def test_failed_final_question_send_cannot_leave_a_delivery_confirmation(self):
+        adapter = NS(send=AsyncMock(side_effect=RuntimeError("synthetic send refusal")))
+        resolver = runtime.Resolver(adapter)
+        resolver.turns[101] = {"id": "offer", "route": ("123", ""), "workerTurnId": "worker"}
+        calls = []
+        async def broker(method, params, **kwargs):
+            calls.append((method, params))
+            return {"suppressFinal": False, "needsAccountConsent": True} if method == "ingress.status" else {"closed": True}
+        with patch.object(runtime, "broker_call", broker):
+            with self.assertRaises(RuntimeError):
+                await resolver.deliver(profile(), "owner", "send", {"chat_id": "123", "content": "Вопрос"})
+            await resolver.end(profile(), "worker")
+        self.assertNotIn("questionMessageId", calls[-1][1])
+
+    async def test_native_multipart_receipt_exposes_only_valid_ids_not_raw_response_content(self):
+        normalized = runtime._receipt(NS(success=True, message_id="200",
+            raw_response={"message_ids": ["200", "201", True, "0", "not-an-id"],
+                          "text": "synthetic-private-raw-content", "other": {"secret": "never-forward"}}))
+        self.assertNotIn("raw_response", normalized)
+        self.assertNotIn("synthetic-private-raw-content", repr(normalized))
+        self.assertNotIn("never-forward", repr(normalized))
+        ids = normalized.get("continuation_message_ids", [])
+        self.assertIn("201", ids)
+        self.assertTrue(all(isinstance(value, str) and value.isascii() and value.isdigit()
+                            and 0 < int(value) and len(value) <= 20 for value in ids))

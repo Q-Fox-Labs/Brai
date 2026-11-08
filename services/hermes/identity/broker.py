@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import socket
 import sqlite3
@@ -457,7 +458,7 @@ class Broker:
                         return profile
                 receipt = {'requestId': request_id, 'outcome': outcome}
                 offer = self.link_offers.get(profile['uid'])
-                consent = bool(private and params.get('linkConsent') is True and offer
+                consent = bool(private and params.get('linkConsent') is True and offer and offer.get('delivered')
                     and offer['expires'] > time.monotonic() and offer['telegramId'] == profile['telegramId']
                     and offer['chatId'] == str(params.get('chatId')) and offer.get('threadId') == thread_id
                     and offer['inputId'] != input_id
@@ -466,8 +467,9 @@ class Broker:
                 if offer and not consent:
                     self.link_offers.pop(profile['uid'], None)
                 unlink_offer = self.unlink_offers.get(profile['uid'])
-                unlink_consent = bool(private and unlink_offer
-                    and params.get('unlinkConsent') == unlink_offer['targetTelegramId']
+                unlink_consent = bool(private and unlink_offer and unlink_offer.get('delivered')
+                    and (params.get('unlinkConsent') == unlink_offer['targetTelegramId'] or
+                         params.get('linkConsent') is True and not params.get('unlinkConsent'))
                     and unlink_offer['expires'] > time.monotonic() and unlink_offer['telegramId'] == profile['telegramId']
                     and unlink_offer['chatId'] == str(params.get('chatId')) and unlink_offer.get('threadId') == thread_id
                     and unlink_offer['inputId'] != input_id
@@ -479,6 +481,7 @@ class Broker:
                     'telegramId': profile['telegramId'], 'inputId': input_id, 'messageId': params.get('messageId'), 'threadId': thread_id,
                     'requestId': receipt['requestId'], 'loginRecord': receipt,
                     'suppressFinal': receipt['outcome'] == 'sent', 'linkConsent': consent,
+                    'accountRefused': params.get('accountRefused') is True,
                     'unlinkTarget': unlink_offer['targetTelegramId'] if unlink_consent else None,
                     'unlinkMode': unlink_offer['target'] if unlink_consent else None}
                 return profile
@@ -487,6 +490,15 @@ class Broker:
             if not turn or turn['turnId'] != params.get('turnId'):
                 raise PermissionError('Turn unavailable')
             if method == 'ingress.close':
+                question_id = params.get('questionMessageId')
+                if question_id is not None and (not isinstance(question_id, str) or
+                        not re.fullmatch(r'[1-9][0-9]{0,19}', question_id)):
+                    raise ValueError('Invalid question delivery')
+                for offers in (self.link_offers, self.unlink_offers):
+                    offer = offers.get(uid)
+                    if offer and offer['inputId'] == turn['inputId'] and question_id:
+                        offer.update(delivered=True, messageId=str(max(int(question_id), int(offer.get('messageId') or 0))),
+                                     expires=time.monotonic() + 300)
                 self.turns.pop(uid, None)
                 return {'closed': True}
             profile = await self.authorize(uid)
@@ -501,7 +513,8 @@ class Broker:
                 if set(params) != {'uid', 'turnId', 'artifactId'}:
                     raise ValueError('Invalid ingress artifact')
                 return await self.files.fetch(uid, profile, {'artifactId': params['artifactId']}, ingress=True)
-            return {'suppressFinal': turn['suppressFinal']}
+            return {'suppressFinal': turn['suppressFinal'], 'needsAccountConsent': any(
+                offers.get(uid, {}).get('inputId') == turn['inputId'] for offers in (self.link_offers, self.unlink_offers))}
         if trusted or ingress:
             raise PermissionError('Method unavailable')
         if method == 'files.configuration' and not params:
@@ -529,8 +542,8 @@ class Broker:
             return await self.control.call(method, {'uid': peer_uid, 'args': params}, timeout=1800)
         if method == 'telegram.unlink' and set(params) == {'target'} and params['target'] in ('current', 'other'):
             return await self.send_account_unlink(peer_uid, profile, params['target'])
-        if method == 'telegram.link' and not params:
-            return await self.send_account_link(peer_uid, profile)
+        if method == 'telegram.link' and set(params) <= {'message'}:
+            return await self.send_account_link(peer_uid, profile, params.get('message'))
         if method == 'login.send' and not params:
             turn = self.turns.get(peer_uid)
             if not turn or not turn['privateChat']:
@@ -564,8 +577,8 @@ class Broker:
         raise PermissionError('Method unavailable')
 
 
-    async def send_account_link(self, uid, profile):
-        """Сначала доставить предупреждение, после нового подтверждения — одноразовую команду."""
+    async def send_account_link(self, uid, profile, message=None):
+        """Готовить вопрос без отправки; после нового согласия доставить вступление и команду."""
         self.unlink_offers.pop(uid, None)
         turn = self.turns.get(uid)
         if not turn or not turn['privateChat']:
@@ -573,33 +586,44 @@ class Broker:
         origin = await self.resolve(str(turn['telegramId']))
         if origin['uid'] != uid or origin['profileId'] != profile['profileId']:
             raise PermissionError('Telegram account binding changed')
+        if turn.get('accountRefused'):
+            return {'status': 'denied', 'phase': 'offer', 'suppressFinal': False, 'reason': 'consent-refused'}
         lock = self.login_locks.setdefault(uid, asyncio.Lock())
         async with lock:
             phase = turn.setdefault('linkPhase', 'command' if turn.get('linkConsent') else 'offer')
-            key = 'telegram-link-' + phase + ':' + login_request_id(uid, profile, turn['chatId'], turn['inputId'])
+            if phase == 'offer':
+                if 'linkOfferResult' not in turn:
+                    result = await self.control.call('telegram.link', {'uid': uid, 'telegramId': turn['telegramId'], 'phase': 'offer'})
+                    details = {key: result[key] for key in ('status', 'botUrl', 'accounts', 'reason') if key in result}
+                    turn['linkOfferResult'] = {**details, 'phase': 'offer', 'suppressFinal': False}
+                    if result.get('status') == 'needs_consent':
+                        self.link_offers[uid] = {'telegramId': turn['telegramId'], 'chatId': turn['chatId'],
+                            'threadId': turn.get('threadId'), 'inputId': turn['inputId'], 'messageId': turn.get('messageId'),
+                            'expires': time.monotonic() + 300, 'delivered': False}
+                return turn['linkOfferResult']
+            if (not isinstance(message, str) or not message.strip() or len(message) > 2000
+                    or re.search(r'(?:https?:|t\.me/|@[A-Za-z0-9_]|/start\b)', message, re.IGNORECASE)):
+                return {'status': 'needs_instruction', 'phase': phase, 'suppressFinal': False}
+            key = 'telegram-link-command:' + login_request_id(uid, profile, turn['chatId'], turn['inputId'])
             claimed, outcome = self.delivery_state().claim(key)
             if claimed:
-                if phase == 'command':
-                    self.link_offers.pop(uid, None)
+                self.link_offers.pop(uid, None)
                 try:
                     result = await self.control.call('telegram.link', {'uid': uid, 'telegramId': turn['telegramId'],
-                        'phase': phase, **({'threadId': turn['threadId']} if turn.get('threadId') is not None else {})})
+                        'phase': 'command', 'message': message,
+                        **({'threadId': turn['threadId']} if turn.get('threadId') is not None else {})})
                     status = result.get('status') if isinstance(result, dict) else None
                     outcome = status if status in ('sent', 'failed', 'unknown') else 'failed'
                 except Exception:
                     outcome = 'unknown'
                 self.delivery_state().finish(key, outcome)
-                if phase == 'offer' and outcome == 'sent':
-                    self.link_offers[uid] = {'telegramId': turn['telegramId'], 'chatId': turn['chatId'],
-                        'threadId': turn.get('threadId'), 'inputId': turn['inputId'], 'messageId': turn.get('messageId'), 'expires': time.monotonic() + 300}
             current = self.turns.get(uid) is turn
             if current and outcome == 'sent':
                 turn['suppressFinal'] = True
             return {'status': outcome, 'phase': phase, 'suppressFinal': current and outcome == 'sent'}
 
-
     async def send_account_unlink(self, uid, profile, target):
-        """Доставить предупреждение; отозвать только зафиксированный аккаунт после нового согласия."""
+        """Подготовить именованную цель для вопроса; выполнить только её после нового согласия."""
         self.link_offers.pop(uid, None)
         turn = self.turns.get(uid)
         if not turn or not turn['privateChat']:
@@ -607,28 +631,37 @@ class Broker:
         origin = await self.resolve(str(turn['telegramId']))
         if origin['uid'] != uid or origin['profileId'] != profile['profileId']:
             raise PermissionError('Telegram account binding changed')
+        if turn.get('accountRefused'):
+            return {'status': 'denied', 'phase': 'offer', 'suppressFinal': False, 'reason': 'consent-refused'}
         lock = self.login_locks.setdefault(uid, asyncio.Lock())
         async with lock:
             phase = turn.setdefault('unlinkPhase:' + target,
                 'confirm' if turn.get('unlinkTarget') and turn.get('unlinkMode') == target else 'offer')
-            key = 'telegram-unlink-' + target + '-' + phase + ':' + login_request_id(uid, profile, turn['chatId'], turn['inputId'])
+            if phase == 'offer':
+                cached = turn.setdefault('unlinkOfferResults', {})
+                if target not in cached:
+                    result = await self.control.call('telegram.unlink', {'uid': uid, 'telegramId': turn['telegramId'],
+                        'phase': 'offer', 'target': target})
+                    details = {key: result[key] for key in ('status', 'account', 'lastChannel', 'reason') if key in result}
+                    cached[target] = {**details, 'phase': 'offer', 'suppressFinal': False}
+                    selected = result.get('targetTelegramId')
+                    if result.get('status') == 'needs_consent' and isinstance(selected, str) and selected.isascii() and selected.isdigit():
+                        self.unlink_offers[uid] = {'telegramId': turn['telegramId'], 'chatId': turn['chatId'],
+                            'threadId': turn.get('threadId'), 'inputId': turn['inputId'], 'messageId': turn.get('messageId'),
+                            'expires': time.monotonic() + 300, 'delivered': False, 'target': target, 'targetTelegramId': selected}
+                return cached[target]
+            key = 'telegram-unlink-' + target + '-confirm:' + login_request_id(uid, profile, turn['chatId'], turn['inputId'])
             claimed, outcome = self.delivery_state().claim(key)
             reason = None
             if claimed:
                 self.unlink_offers.pop(uid, None)
                 try:
                     result = await self.control.call('telegram.unlink', {'uid': uid, 'telegramId': turn['telegramId'],
-                        'phase': phase, 'target': target,
-                        **({'targetTelegramId': turn['unlinkTarget']} if phase == 'confirm' else {}),
+                        'phase': 'confirm', 'target': target, 'targetTelegramId': turn['unlinkTarget'],
                         **({'threadId': turn['threadId']} if turn.get('threadId') is not None else {})})
                     status = result.get('status') if isinstance(result, dict) else None
                     outcome = status if status in ('sent', 'failed', 'unknown') else 'failed'
                     reason = result.get('reason') if isinstance(result, dict) else None
-                    selected = result.get('targetTelegramId') if isinstance(result, dict) else None
-                    if phase == 'offer' and outcome == 'sent' and isinstance(selected, str) and selected.isascii() and selected.isdigit():
-                        self.unlink_offers[uid] = {'telegramId': turn['telegramId'], 'chatId': turn['chatId'],
-                            'threadId': turn.get('threadId'), 'inputId': turn['inputId'], 'messageId': turn.get('messageId'), 'expires': time.monotonic() + 300,
-                            'target': target, 'targetTelegramId': selected}
                 except Exception:
                     outcome = 'unknown'
                 self.delivery_state().finish(key, outcome)
@@ -646,9 +679,9 @@ PARAMETERS = {
     'identity.resolve': ({'telegramId'}, set()),
     'identity.link-redeem': ({'telegramId', 'code'}, set()),
     'identity.invite-redeem': ({'telegramId', 'code'}, {'name'}),
-    'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId', 'threadId', 'messageId', 'linkConsent', 'unlinkConsent', 'expectedUid'}),
+    'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId', 'threadId', 'messageId', 'linkConsent', 'unlinkConsent', 'expectedUid', 'accountRefused'}),
     'ingress.status': ({'uid', 'turnId'}, set()),
-    'ingress.close': ({'uid', 'turnId'}, set()),
+    'ingress.close': ({'uid', 'turnId'}, {'questionMessageId'}),
     'ingress.prepare': ({'uid', 'turnId', 'paths'}, set()),
     'ingress.artifact': ({'uid', 'turnId', 'artifactId'}, set()),
     'tools.list': (set(), set()),
@@ -662,7 +695,7 @@ PARAMETERS = {
     'files.list': (set(), {'limit', 'offset'}),
     'files.prepare': ({'mode', 'items'}, set()),
     'login.send': (set(), set()),
-    'telegram.link': (set(), set()),
+    'telegram.link': (set(), {'message'}),
     'telegram.unlink': ({'target'}, set()),
 }
 

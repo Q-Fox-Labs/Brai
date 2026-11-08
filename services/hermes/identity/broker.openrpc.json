@@ -222,7 +222,7 @@
         {
           "name": "unlinkConsent",
           "required": false,
-          "description": "Exact account ID parsed from the trusted new user confirmation, never supplied by worker/model.",
+          "description": "Legacy exact target parsed from trusted human text. Contextual short explicit consent uses linkConsent for the pinned unlink offer as well.",
           "schema": {
             "type": "string",
             "pattern": "^([1-9][0-9]{0,19})?$"
@@ -235,6 +235,14 @@
           "schema": {
             "type": "string",
             "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "accountRefused",
+          "required": false,
+          "description": "Trusted ingress recognizes an explicit refusal in the actual new message; never accepted from model.",
+          "schema": {
+            "type": "boolean"
           }
         }
       ],
@@ -294,6 +302,9 @@
           "properties": {
             "suppressFinal": {
               "type": "boolean"
+            },
+            "needsAccountConsent": {
+              "type": "boolean"
             }
           },
           "additionalProperties": false
@@ -336,6 +347,15 @@
           "schema": {
             "type": "string",
             "minLength": 1
+          }
+        },
+        {
+          "name": "questionMessageId",
+          "required": false,
+          "description": "Trusted ingress receipt of fully delivered final agent question; maximum of all split message IDs. Broker also retains original human ID as a lower bound.",
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
           }
         }
       ],
@@ -1004,7 +1024,7 @@
       "result": {
         "name": "result",
         "schema": {
-          "$ref": "../../auth/schemas/messages.schema.json#/definitions/TelegramResolveResponse"
+          "$ref": "./control.openrpc.json#/components/schemas/TelegramLinkRedeemed"
         }
       },
       "errors": [
@@ -1027,9 +1047,20 @@
     },
     {
       "name": "telegram.link",
-      "description": "Agent account-link workflow. First send the full warning; require a new trusted confirmation in the same private account before command issuance. Secrets never enter worker. Unknown delivery is not retried.",
+      "description": "Agent writes its own warning and question in a final delivered reply. Fresh same-account/topic human consent is required; model cannot assert consent. No automatic mutation retry. Names are untrusted display data; secrets stay outside the model.",
       "paramStructure": "by-name",
-      "params": [],
+      "params": [
+        {
+          "name": "message",
+          "required": false,
+          "description": "Agent introduction after fresh consent; plain text without links, mentions or /start. Delivery appends the verified current bot URL.",
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        }
+      ],
       "result": {
         "name": "result",
         "schema": {
@@ -1044,7 +1075,12 @@
               "enum": [
                 "sent",
                 "failed",
-                "unknown"
+                "unknown",
+                "unavailable",
+                "denied",
+                "needs_consent",
+                "needs_instruction",
+                "limit_reached"
               ]
             },
             "phase": {
@@ -1055,6 +1091,22 @@
             },
             "suppressFinal": {
               "type": "boolean"
+            },
+            "botUrl": {
+              "type": "string",
+              "pattern": "^https://t\\.me/[A-Za-z0-9_]{1,32}$"
+            },
+            "accounts": {
+              "type": "array",
+              "maxItems": 2,
+              "items": {
+                "$ref": "./control.openrpc.json#/components/schemas/TelegramAccountLabel"
+              }
+            },
+            "reason": {
+              "enum": [
+                "consent-refused"
+              ]
             }
           },
           "additionalProperties": false
@@ -1080,7 +1132,7 @@
     },
     {
       "name": "telegram.unlink",
-      "description": "Agent-only unlink workflow. Fresh delivered warning and new trusted confirmation pin the exact account and origin for five minutes. Equal accounts; admin retains at least one contact channel, other users may remove all. No automatic mutation retry.",
+      "description": "Agent writes its own warning and question in a final delivered reply. Fresh same-account/topic human consent is required; model cannot assert consent. No automatic mutation retry. Names are untrusted display data; secrets stay outside the model.",
       "paramStructure": "by-name",
       "params": [
         {
@@ -1109,7 +1161,10 @@
               "enum": [
                 "sent",
                 "failed",
-                "unknown"
+                "unknown",
+                "unavailable",
+                "denied",
+                "needs_consent"
               ]
             },
             "phase": {
@@ -1124,8 +1179,15 @@
             "reason": {
               "enum": [
                 "admin-last-channel",
-                "account-unavailable"
+                "account-unavailable",
+                "consent-refused"
               ]
+            },
+            "account": {
+              "$ref": "./control.openrpc.json#/components/schemas/TelegramAccountLabel"
+            },
+            "lastChannel": {
+              "type": "boolean"
             }
           },
           "additionalProperties": false
