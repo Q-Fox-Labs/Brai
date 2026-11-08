@@ -1,5 +1,13 @@
 # Локальный REST API MemOS
 
+## Личный Unix gateway
+
+В `BRAI_IDENTITY_MODE=worker` helper читает root-owned конфигурацию `$HERMES_HOME/memos-rest.json`, сверяет её `user_id` с `BRAI_IDENTITY_USER_ID` и использует только `/run/brai-profile/memory.sock`. Авторитетная граница доступа — SO_PEERCRED и актуальный Auth на gateway; локальная сверка конфигурации дополняет её. Переопределение HTTP endpoint и чужого user запрещено. `--cube` означает логический куб; gateway проверяет его по каталогу профиля. Физические кубы и общие credentials не передаются.
+
+Поиск использует `/product/recall_index`, проверенные scope/epoch/author и полноту ответа SDK; `--top-k` ограничивает показ с явными `returned_count` и `truncated`. `list/get` читают проверенный versioned stream; страницы формируются после полной проверки, без передачи неподдержанных page/include полей backend. `add/delete` проходят существующие owner-операции gateway; frozen-конфиг запрещает запись. Запись после неизвестного исхода не повторяется автоматически.
+
+Старые `/product/search`, scheduler/status и `/product/feedback` в личном gateway недоступны. Helper явно отклоняет команды `status` и `feedback`; обход через общий HTTP не допускается. Эти две функции не восстановлены данным изменением. Остальная REST-справка ниже относится к прежнему однопользовательскому транспорту и не расширяет API личного gateway.
+
 Фактическая схема: ${MEMOS_API_URL}/openapi.json. Для нового payload перечитай её: публичные старые примеры могут содержать deprecated поля. Клиент scripts/memos_client.py покрывает только простой безопасный subset; не выдавай его defaults за defaults провайдера.
 
 ## Search — POST /product/search

@@ -64,6 +64,8 @@ class ProfileTests(unittest.TestCase):
         runtime = Path(environment['BH_RUNTIME_DIR'])
         self.assertEqual(runtime.parent, Path('/tmp'))
         self.assertEqual(environment['BH_RUNTIME_DIR_SHARED'], '1')
+        self.assertTrue(environment['PATH'].startswith('/opt/brai-profile/instructions/bin:'))
+        self.assertEqual(environment['HERMES_MEDIA_DOWNLOAD_ROOT'], self.profile()['home'] + '/workspace/downloads')
         sockets = [str(runtime / ('bu-' + name + '.sock')) for name in ('default', 'a' * 64, 'b' * 64)]
         self.assertEqual(len(set(sockets)), 3)
         self.assertTrue(all(len(path.encode()) < 104 for path in sockets))

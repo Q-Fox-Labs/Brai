@@ -28,6 +28,7 @@
     "services/hermes/identity/tool_client.py",
     "services/hermes/identity/transcribe.py",
     "services/hermes/identity/synthesize.py",
+    "services/hermes/identity/media.py",
     "services/hermes/identity/network.py",
     "services/hermes/identity/search.py"
   ],
@@ -251,6 +252,7 @@
       "services/hermes/identity/transcribe.py",
       "services/hermes/identity/skills.py",
       "services/hermes/identity/synthesize.py",
+      "services/hermes/identity/media.py",
       "services/hermes/identity/instructions.py",
       "services/hermes/identity/images.py",
       "services/hermes/identity/permissions.py",
@@ -644,6 +646,7 @@
       "services/hermes/identity/transcribe.py",
       "services/hermes/identity/skills.py",
       "services/hermes/identity/synthesize.py",
+      "services/hermes/identity/media.py",
       "services/hermes/identity/instructions.py",
       "services/hermes/identity/images.py",
       "services/hermes/identity/permissions.py",
@@ -689,6 +692,7 @@
       "services/hermes/identity/tool_client.py",
       "services/hermes/identity/transcribe.py",
       "services/hermes/identity/synthesize.py",
+      "services/hermes/identity/media.py",
       "services/hermes/identity/network.py",
       "services/hermes/identity/search.py"
     ],

@@ -22,11 +22,20 @@ def catalog_files(bundled, instructions):
             if total > 64 * 1024 * 1024:
                 raise ValueError('SYSTEM_SKILLS_TOO_LARGE')
             result[str(source.relative_to(bundled))] = raw
-    for source in sorted(instructions.rglob('SKILL.md')):
+    for source in sorted(instructions.rglob('*')):
         if source.is_symlink():
             raise ValueError('SYSTEM_SKILL_LINK')
+        if not source.is_file():
+            continue
         relative = source.relative_to(instructions)
-        text = source.read_text(encoding='utf-8')
+        raw = source.read_bytes()
+        total += len(raw)
+        if total > 64 * 1024 * 1024:
+            raise ValueError('SYSTEM_SKILLS_TOO_LARGE')
+        if source.name != 'SKILL.md':
+            result[str(relative)] = raw
+            continue
+        text = raw.decode('utf-8')
         front = re.match(r'\A---\n.*?\n---\n', text, re.S)
         if not front or not re.search(r'^name:\s*\S+', front.group(), re.M):
             raise ValueError('SYSTEM_SKILL_METADATA')

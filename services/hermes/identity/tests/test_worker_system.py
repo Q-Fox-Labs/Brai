@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from identity import instructions, images
 from identity.skills import catalog_files
 from identity.synthesize import synthesize_file
+from identity.media import command as media_command
 from identity.profiles import native_profile
 from files import native
 from files.tests.test_files import Backend
@@ -29,7 +30,10 @@ class SystemTests(unittest.TestCase):
         for root, relative, raw in [
             (bundled, 'creative/context-gifs/SKILL.md', b'---\nname: context-gifs\n---\nOld skill'),
             (bundled, 'research/arxiv/scripts/search.py', b'print("shared")'),
-            (product, 'creative/context-gifs/SKILL.md', b'---\nname: context-gifs\n---\nCanonical skill')]:
+            (product, 'creative/context-gifs/SKILL.md', b'---\nname: context-gifs\n---\nCanonical skill'),
+            (product, 'brai-task-workflows/SKILL.md', b'---\nname: brai-task-workflows\n---\nWorkflow'),
+            (product, 'brai-task-workflows/references/work.md', b'Canonical reference'),
+            (product, 'media/youtube-content/scripts/video_workflow.py', b'private downloads')]:
             path = root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(raw)
@@ -38,6 +42,9 @@ class SystemTests(unittest.TestCase):
         self.assertIn(b'/opt/brai-profile/instructions/skills/creative/context-gifs/SKILL.md',
                       files['creative/context-gifs/SKILL.md'])
         self.assertNotIn(b'Old skill', files['creative/context-gifs/SKILL.md'])
+        self.assertIn('brai-task-workflows/SKILL.md', files)
+        self.assertEqual(files['brai-task-workflows/references/work.md'], b'Canonical reference')
+        self.assertEqual(files['media/youtube-content/scripts/video_workflow.py'], b'private downloads')
         self.assertFalse(any('personal' in key for key in files))
 
     def test_catalog_rejects_links_to_personal_files(self):
@@ -71,11 +78,12 @@ class SystemTests(unittest.TestCase):
             with patch.dict(os.environ, BRAI_IDENTITY_MODE='worker'), patch.object(
                     instructions, 'system_context', side_effect=lambda: instructions.read_context(shared)):
                 with native.conversation(agent, 'hello'):
+                    self.assertIn('Required context.md', agent.ephemeral_system_prompt)
                     self.assertIn('Required BASE.md', agent.ephemeral_system_prompt)
                     self.assertIn('Required INDEX.md', agent.ephemeral_system_prompt)
                     self.assertIn('Personal preference', agent.ephemeral_system_prompt)
             self.assertEqual(agent.ephemeral_system_prompt, 'Personal preference')
-        (shared / 'BASE.md').unlink()
+        (shared / 'context.md').unlink()
         with patch.dict(os.environ, BRAI_IDENTITY_MODE='worker'), patch.object(
                 instructions, 'system_context', side_effect=lambda: instructions.read_context(shared)):
             with self.assertRaises(FileNotFoundError):
@@ -124,6 +132,18 @@ class SystemTests(unittest.TestCase):
             instructions.personal_context(home)
         with self.assertRaisesRegex(ValueError, 'PERSONAL_HOME_REQUIRED'):
             instructions.personal_context('relative')
+
+    def test_media_launchers_use_sdk_and_only_personal_download_paths(self):
+        argv = media_command('yt-dlp', ['-o', '/downloads/%(id)s.mp4', '--', 'https://youtu.be/x'],
+                             home='/profiles/one', python='/sdk/python')
+        self.assertEqual(argv[:4], ['/sdk/python', '-B', '-m', 'yt_dlp'])
+        self.assertIn('--ignore-config', argv)
+        self.assertIn('/profiles/one/workspace/downloads/%(id)s.mp4', argv)
+        self.assertNotIn('/downloads/%(id)s.mp4', argv)
+        self.assertEqual(media_command('instaloader', ['--help'], home='/profiles/two', python='/sdk/python'),
+                         ['/sdk/python', '-B', '-m', 'instaloader', '--help'])
+        with self.assertRaises(ValueError):
+            media_command('other', [], home='/profiles/one', python='/sdk/python')
 
     def test_native_tts_uses_one_owner_bound_call_and_verifies_bytes(self):
         source, output, audio = self.root / 'text.txt', self.root / 'out.ogg', self.root / 'generated.ogg'
