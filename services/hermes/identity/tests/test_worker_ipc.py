@@ -67,6 +67,30 @@ class IpcTest(unittest.IsolatedAsyncioTestCase):
 
 
 class BoundaryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_operational_start_requires_personal_dialogues_tools_and_instruction(self):
+        from unittest.mock import Mock, patch
+        import types
+        config = types.ModuleType('hermes_cli.config')
+        prompt = {'agent': {'system_prompt': 'incomplete'}}
+        config.load_config_readonly = lambda: prompt
+        registry = types.ModuleType('tools.registry')
+        registry.registry = SimpleNamespace(get_entry=Mock(return_value=object()))
+        worker = Worker(os.getuid() + 1, 'owner', '123', None)
+        with patch.dict(sys.modules, {'hermes_cli.config': config, 'tools.registry': registry}), patch.dict(
+                os.environ, {'BRAI_DIALOGUES_REQUIRED': '1', 'BRAI_IDENTITY_MODE': ''}):
+            with self.assertRaisesRegex(RpcError, 'instruction unavailable'):
+                await worker._operational_ready(None)
+            self.assertFalse(worker.operational.is_set())
+            prompt['agent']['system_prompt'] = (
+                'mcp__brai__dialogues_exchange mcp__brai__dialogues_context_ack context_request_id finish')
+            registry.registry.get_entry.side_effect = lambda name: None if name.endswith('context_ack') else object()
+            with self.assertRaisesRegex(RpcError, 'Dialogues tool unavailable'):
+                await worker._operational_ready(None)
+            self.assertFalse(worker.operational.is_set())
+            registry.registry.get_entry.side_effect = None
+            await worker._operational_ready(None)
+            self.assertTrue(worker.operational.is_set())
+
     async def test_send_rejects_foreign_destination_and_edit(self):
         delivered = []
         async def deliver(owner, action, payload):
@@ -110,6 +134,7 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self, user_id):
                 self.user_id, self.platform, self.is_bot = user_id, Platform.TELEGRAM, False
                 self.chat_id, self.chat_name, self.chat_type = 'x', None, 'dm'
+                self.thread_id = None
             @classmethod
             def from_dict(cls, value):
                 return cls(value['user_id'])
@@ -122,6 +147,7 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
                 self._gateway_accepted = False
         class Base:
             def __init__(self, config, platform):
+                self.config = config
                 self._session_tasks = {}
             async def handle_message(self, event):
                 event._gateway_accepted = True
@@ -136,6 +162,15 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
                 self.config = SimpleNamespace(multiplex_profiles=False)
                 self.adapters = {}
                 self.delivery_router = SimpleNamespace(adapters={})
+                self.shutdown = asyncio.Event()
+                self.exit_code = None
+            async def stop(self):
+                self.shutdown.set()
+                for adapter in self.adapters.values():
+                    tasks = list(adapter._session_tasks.values())
+                    for task in tasks:
+                        task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
             def _wire_adapter_handlers(self, adapter, **kwargs):
                 self.wired = True
             def _publish_primary_adapter(self, platform, adapter):
@@ -143,6 +178,7 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
         async def publish(path):
             return {'artifact_id': 'a'}
         class Rpc:
+            closed = False
             async def call(self, method, params):
                 return {'success':True, 'message_id':'42'}
         modules = {
@@ -153,6 +189,7 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
             'gateway.platforms.base': types.ModuleType('gateway.platforms.base'),
             'gateway.platforms.event': types.ModuleType('gateway.platforms.event'),
             'gateway.session': types.ModuleType('gateway.session'),
+            'plugins.platforms.telegram.adapter': types.ModuleType('plugins.platforms.telegram.adapter'),
         }
         from unittest.mock import AsyncMock, Mock
         discovery = AsyncMock()
@@ -160,41 +197,63 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
         modules['hermes_cli.config'] = types.ModuleType('hermes_cli.config')
         modules['hermes_cli.config'].load_config_readonly = lambda: json.loads((Path(os.environ['HERMES_HOME']) / 'config.yaml').read_text())
         modules['gateway.run']._discover_gateway_mcp_tools = discovery
+        async def start_gateway(config=None, *, runner_factory, startup_gate, operational_ready):
+            runner = runner_factory(config)
+            await startup_gate(runner)
+            try:
+                await discovery(runner.config)
+                adapter = runner._instantiate_adapter(Platform.TELEGRAM, None)
+                runner._wire_adapter_handlers(adapter)
+                await adapter.connect()
+                runner._publish_primary_adapter(Platform.TELEGRAM, adapter)
+                await operational_ready(runner)
+                await runner.shutdown.wait()
+                return True
+            finally:
+                await runner.stop()
+        modules['gateway.run'].start_gateway = start_gateway
+        async def active_gate(worker, runner):
+            await worker.activation.wait()
         modules['tools.registry'] = types.ModuleType('tools.registry')
         entry = Mock(return_value=object())
         modules['tools.registry'].registry = SimpleNamespace(get_entry=entry)
         modules['gateway.run'].GatewayRunner = Runner
         modules['gateway.config'].Platform = Platform
         modules['gateway.config'].PlatformConfig = type('Config', (), {})
+        class TelegramAdapter(Base):
+            def __init__(self, config):
+                super().__init__(config, Platform.TELEGRAM)
+            def _mark_connected(self):
+                self._running = True
+            def _mark_disconnected(self):
+                self._running = False
+        modules['plugins.platforms.telegram.adapter'].TelegramAdapter = TelegramAdapter
         modules['gateway.platforms.base'].BasePlatformAdapter = Base
         modules['gateway.platforms.base'].SendResult = lambda **kwargs: SimpleNamespace(**kwargs)
         modules['gateway.platforms.event'].MessageEvent = Event
         modules['gateway.platforms.event'].MessageType = MessageType
         modules['gateway.session'].SessionSource = Source
-        with patch.dict(sys.modules, modules):
+        with patch.dict(sys.modules, modules), patch.object(Worker, '_startup_gate', active_gate), patch.dict(
+                os.environ, {'BRAI_IDENTITY_MODE': ''}):
             worker = Worker(os.getuid() + 1, 'owner', '123', publish)
             entry.return_value = None
             await worker.start(Rpc())
             self.assertTrue((await worker.health())['ready'])
             discovery.assert_not_awaited()
-            with self.assertRaisesRegex(RpcError, 'login tool unavailable'):
+            with self.assertRaisesRegex(RpcError, 'startup unavailable'):
                 await worker.health(require_tools=True)
+            self.assertIn('login tool unavailable', str(worker.lifecycle_error))
             source = {'user_id':'123', 'platform':'telegram', 'chat_id':'x'}
-            with self.assertRaisesRegex(RpcError, 'login tool unavailable'):
+            with self.assertRaisesRegex(RpcError, 'startup unavailable'):
                 await worker.dispatch({'source':source, 'text':'hello', 'message_id':'0'}, 'owner')
             self.assertEqual(worker.adapter._session_tasks, {})
+            await worker.stop_runtime()
             entry.return_value = object()
-            with tempfile.TemporaryDirectory() as profile_home, patch.dict(os.environ, {'BRAI_DIALOGUES_REQUIRED': '1', 'HERMES_HOME': profile_home}):
-                path = Path(profile_home) / 'config.yaml'
-                path.write_text(json.dumps({'agent': {'system_prompt': 'incomplete'}}))
-                with self.assertRaisesRegex(RpcError, 'instruction unavailable'):
-                    await worker.health(require_tools=True)
-                path.write_text(json.dumps({'agent': {'system_prompt':
-                    'mcp__brai__dialogues_exchange mcp__brai__dialogues_context_ack context_request_id finish'}}))
-                self.assertTrue((await worker.health(require_tools=True))['ready'])
-            self.assertTrue((await worker.health(require_tools=True))['ready'])
-            self.assertEqual(discovery.await_count, 4)
-            self.assertIn(unittest.mock.call('mcp__brai__brai_login'), entry.call_args_list)
+            worker = Worker(os.getuid() + 1, 'owner', '123', publish)
+            await worker.start(Rpc())
+            self.assertTrue((await worker.health(require_tools=True))['operational'])
+            self.assertEqual(discovery.await_count, 2)
+            entry.assert_called_with('mcp__brai__brai_login')
             started = await worker.dispatch({'source':source, 'text':'hello', 'message_id':'1'}, 'owner')
             self.assertTrue(started['accepted'])
             self.assertTrue((await worker.dispatch({'source':source, 'text':'steer', 'message_id':'2'}, 'owner'))['accepted'])
@@ -202,9 +261,10 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await worker.cancel(started['turn_id'], 'owner'))['state'], 'stopped')
             receipt = await worker.adapter.send('x', 'text')
             self.assertTrue(receipt.success)
-            self.assertEqual(discovery.await_count, 4)
+            self.assertEqual(discovery.await_count, 2)
             with self.assertRaises(RpcError):
                 await worker.dispatch({'source':dict(source, user_id='999'), 'text':'bad', 'message_id':'3'}, 'owner')
+            await worker.stop_runtime()
 
 class IngressInstallTest(unittest.IsolatedAsyncioTestCase):
     async def test_native_admission_precedes_bridge_and_internal_denied(self):

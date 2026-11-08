@@ -146,6 +146,40 @@ def ptb_stubs():
 class PluginTests(unittest.IsolatedAsyncioTestCase):
     """Проверяет авторизацию, publication и весь callback lifecycle."""
 
+    async def test_identity_registration_keeps_native_hooks_and_disabled_workflow_without_legacy_credentials(self):
+        port = NS(telegram_id='123', game_core_enabled=False, attach=None)
+        tools, hooks = [], []
+        ctx = NS(inject_message=self.inject,
+                 register_telegram_handler=lambda *args: self.fail('worker must use tokenless attach'),
+                 register_hook=lambda *args: hooks.append(args),
+                 register_tool=lambda **kw: tools.append(kw['name']), on_unload=lambda *args: None)
+        modules = {'_brai_identity_human': port,
+                   'hermes_cli.plugins': NS(get_plugin_manager=lambda: NS(has_gateway_message_injector=True))}
+        original_file_port = sys.modules.get('_brai_hermes_file_port')
+        with patch.dict(os.environ, {'BRAI_IDENTITY_MODE': 'worker', 'BRAI_IDENTITY_TELEGRAM_ID': '123',
+                                     'HERMES_HOME': self.tmp.name}), patch.dict(sys.modules, modules):
+            with patch.object(mod.Config, 'from_env', side_effect=AssertionError('legacy config used')):
+                mod.register(ctx)
+            plugin = port.attach.__self__
+            self.addCleanup(plugin.close)
+            self.assertEqual(plugin.config.owner, '123')
+            self.assertTrue(plugin.config.identity_worker)
+            self.assertEqual(plugin.config.entry, '')
+            self.assertEqual(plugin.config.state_dir, Path(self.tmp.name) / 'brai-telegram')
+            self.assertEqual(tools, [])
+            self.assertIn('pre_gateway_dispatch', {name for name, handler in hooks})
+            self.assertFalse(plugin.config.game_core_enabled)
+            self.assertEqual(sys.modules.get('_brai_hermes_file_port'), original_file_port)
+            self.adapter._bot = self.bot
+            self.adapter.gateway_runner = NS(session_store=self.store)
+            self.adapter._brai_chats = {GROUP: {'type': 'supergroup'}}
+            await port.attach(self.adapter)
+            self.assertFalse(hasattr(self.adapter, '_brai_human_callback'))
+            self.assertTrue(plugin._route_matches(GROUP, 'supergroup', '123'))
+            self.assertFalse(plugin._route_matches('-100999', 'supergroup', '123'))
+            self.assertFalse(plugin._route_matches(GROUP, 'supergroup', '999'))
+            self.assertIs(plugin.session_store, self.store)
+
     async def test_operator_resume_uses_native_session_once_without_game_core(self):
         """Restart после постановки не дублирует работу, отрицательный ответ тоже видим."""
         self.plugin.config = replace(self.config, game_core_enabled=False)

@@ -23,13 +23,15 @@ python "$SKILL_DIR/scripts/memos_client.py" health
 python "$SKILL_DIR/scripts/memos_client.py" search --query 'нужный факт' --top-k 5
 python "$SKILL_DIR/scripts/memos_client.py" get --id 'UUID'
 python "$SKILL_DIR/scripts/memos_client.py" list --page 1 --page-size 20
-python "$SKILL_DIR/scripts/memos_client.py" status
 python "$SKILL_DIR/scripts/memos_client.py" add --text 'Подтверждённый факт; источник ...' --session 'точная-сессия' --info '{"source_type":"manual","speaker":"автор","project":"проект"}'
-python "$SKILL_DIR/scripts/memos_client.py" feedback --text 'Актуальное уточнение от автора ...' --id 'UUID' --session 'точная-сессия'
 python "$SKILL_DIR/scripts/memos_client.py" delete --id 'UUID' --confirm-delete
 ```
 
-Клиент — не полный SDK: search использует диагностический fast-путь с relativity=0, rerank=false и отключёнными дополнительными preference/tool/skill поисками; add — sync-fast; feedback передаёт history=[]. Для контекстной коррекции, расширенного поиска или async-записи сформируй payload по живому OpenAPI и процедуре в справочнике, не выдавай эти параметры клиента за настройки фонового провайдера.
+В личном worker endpoint и owner берутся только из проверенного `memos-rest.json`; значения `root/main` не служат глобальными defaults. `--user=root` и `--base-url` отклоняются. Поиск использует scoped recall index; list/get — проверенный поток с локальной pagination. Результат `health` не подтверждает работу планировщика или feedback.
+
+`status` и `feedback` через helper доступны только в прежнем однопользовательском окружении. В личном worker обе команды возвращают явную ошибку unsupported; общим endpoint их не обходят. Расширение gateway для них — отдельная работа.
+
+Клиент — не полный SDK: вне worker search использует диагностический fast-путь с relativity=0, rerank=false и отключёнными дополнительными preference/tool/skill поисками; add — sync-fast; feedback передаёт history=[]. Для контекстной коррекции, расширенного поиска или async-записи сформируй payload по живому OpenAPI и процедуре в справочнике, не выдавай эти параметры клиента за настройки фонового провайдера.
 
 ## Procedure
 1. **Определи тип запроса.** Объяснение, read-only диагностика или конкретное изменение; граница полномочий установлена до действий. Проверь, нет ли параллельного владельца интеграции, и раздели области изменений до записи.

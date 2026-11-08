@@ -390,6 +390,23 @@ class Broker:
             raise ValueError('Invalid params')
         ingress = peer_uid == self.config['ingressUid']
         trusted = peer_uid == 0
+        if method == 'ingress.delivery-artifact' and ingress:
+            if set(params) != {'uid', 'artifactId'}:
+                raise ValueError('Invalid delivery artifact')
+            uid = params['uid']
+            profile = await self.authorize(uid)
+            return await self.files.fetch(uid, profile, {'artifactId': params['artifactId']}, ingress=True)
+        if method == 'ingress.profiles' and ingress and not params:
+            profiles = []
+            for uid, candidate in self.profiles().items():
+                if candidate['status'] != 'active':
+                    continue
+                try:
+                    profile = await self.authorize(uid)
+                except PermissionError:
+                    continue
+                profiles.append({'uid': uid, **profile})
+            return {'profiles': profiles}
         if method == 'dialogues.authorize':
             if params:
                 raise ValueError('Service authorization has no arguments')
@@ -653,6 +670,8 @@ PARAMETERS = {
     'ingress.artifact': ({'uid', 'turnId', 'artifactId'}, set()),
     'tools.list': (set(), set()),
     'tools.call': ({'name', 'args'}, set()),
+    'ingress.profiles': (set(), set()),
+    'ingress.delivery-artifact': ({'uid', 'artifactId'}, set()),
     'files.configuration': (set(), set()),
     'files.publish': ({'path', 'requestId'}, set()),
     'artifacts.publish': ({'path', 'requestId'}, set()),

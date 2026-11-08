@@ -285,6 +285,41 @@ class Boundary:
             if data.get('memory_stream') != 1 or data.get('recall_index') != 1:
                 raise Denied('SECURE_MEMORY_UNAVAILABLE')
             return {'code': 200, 'data': {'memory_stream': 1, 'recall_index': 1}}
+        parsed = urllib.parse.urlsplit(path)
+        if parsed.path == '/product/scheduler/status':
+            if method != 'GET' or body or parsed.scheme or parsed.netloc or parsed.fragment or len(path) > 2048:
+                raise Denied('INVALID_STATUS_REQUEST')
+            try:
+                pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+            except ValueError:
+                raise Denied('INVALID_STATUS_REQUEST') from None
+            query = dict(pairs)
+            if len(query) != len(pairs) or set(query) - {'user_id', 'task_id'}:
+                raise Denied('INVALID_STATUS_REQUEST')
+            if 'user_id' in query and query['user_id'] != profile['userId']:
+                raise Denied('OWNER_DENIED')
+            task = query.get('task_id')
+            if task is not None and not re.fullmatch(r'[A-Za-z0-9._:-]{1,256}', task):
+                raise Denied('INVALID_STATUS_REQUEST')
+            selected = {'user_id': profile['userId']}
+            if task is not None:
+                selected['task_id'] = task
+            value = self.client(profile, profile['cubes'][0]).request(
+                '/product/scheduler/status?' + urllib.parse.urlencode(selected),
+                timeout=10, max_response_bytes=262144)
+            if (not isinstance(value, dict) or set(value) != {'code', 'message', 'data'}
+                    or value.get('code') != 200 or not isinstance(value.get('data'), list)):
+                raise Denied('INVALID_STATUS_RESPONSE')
+            seen = set()
+            for item in value['data']:
+                if (not isinstance(item, dict) or set(item) != {'task_id', 'status'}
+                        or not isinstance(item.get('task_id'), str)
+                        or not re.fullmatch(r'[A-Za-z0-9._:-]{1,256}', item['task_id'])
+                        or item['task_id'] in seen or task is not None and item['task_id'] != task
+                        or item.get('status') not in ('waiting', 'in_progress', 'completed', 'failed', 'cancelled')):
+                    raise Denied('INVALID_STATUS_RESPONSE')
+                seen.add(item['task_id'])
+            return {'code':200, 'message':'Memory get status successfully', 'data':value['data']}
         if method != 'POST':
             raise Denied('METHOD_DENIED')
         if path in ('/product/get_memory', '/product/get_memory_stream'):
@@ -383,6 +418,90 @@ class Boundary:
             # Вернуть тот же логический куб, который был разрешён на входе.
             # Physical IDs остаются за границей личного шлюза.
             return {**result, 'data': [{**row, 'cube_id': cube} for row in rows]}
+        if path == '/product/feedback':
+            allowed={'user_id','writable_cube_ids','retrieved_memory_ids','history',
+                     'feedback_content','session_id','async_mode','corrected_answer'}
+            if (set(body)-allowed or body.get('async_mode') != 'sync'
+                    or body.get('corrected_answer',False) is not False):
+                raise Denied('INVALID_FEEDBACK')
+            cubes=body.get('writable_cube_ids'); ids=body.get('retrieved_memory_ids')
+            if not isinstance(cubes,list) or len(cubes)!=1:
+                raise Denied('CUBE_DENIED')
+            cube=cubes[0]
+            self.client(profile,cube)
+            if (not isinstance(ids,list) or not 1<=len(ids)<=32
+                    or any(not isinstance(i,str) or not 0<len(i)<=128 for i in ids)
+                    or len(set(ids))!=len(ids)):
+                raise Denied('INVALID_FEEDBACK_TARGETS')
+            content=body.get('feedback_content'); session=body.get('session_id')
+            history=body.get('history')
+            if (not isinstance(content,str) or not content.strip() or len(content)>16000
+                    or not isinstance(session,str) or not 0<len(session)<=255
+                    or not isinstance(history,list) or len(history)>16
+                    or any(not isinstance(item,dict) or set(item)!={'role','content'}
+                           or item['role'] not in ('user','assistant')
+                           or not isinstance(item['content'],str) or len(item['content'])>16000
+                           for item in history)):
+                raise Denied('INVALID_FEEDBACK')
+            try:
+                from ..files.identity import open_directory
+            except ImportError:
+                from files.identity import open_directory
+            directory=open_directory(profile['home'],uid)
+            try:
+                fd=os.open('memos-rest.json',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+                with os.fdopen(fd,'rb') as source:
+                    meta=os.fstat(source.fileno())
+                    if (not stat.S_ISREG(meta.st_mode) or meta.st_uid!=0 or meta.st_nlink!=1
+                            or meta.st_mode&0o022 or meta.st_size>1048576):
+                        raise Denied('PRIVATE_MEMORY_CONFIG_INVALID')
+                    raw=source.read(1048577)
+                if len(raw)>1048576: raise Denied('PRIVATE_MEMORY_CONFIG_INVALID')
+                policy=json.loads(raw)
+            finally:
+                os.close(directory)
+            if (not isinstance(policy,dict) or policy.get('user_id')!=profile['userId']
+                    or policy.get('memory_epoch')!=profile['memoryEpoch']
+                    or policy.get('enabled') is not True
+                    or policy.get('frozen') is not False or policy.get('suspended') is True):
+                raise Denied('PRIVATE_MEMORY_WRITES_FROZEN')
+            with self.lock:
+                for identifier in ids:
+                    found=self.rows(profile,cube,{'id':identifier})
+                    if len(found)!=1 or found[0]['id']!=identifier:
+                        raise Denied('MEMORY_NOT_FOUND')
+                payload={'scope':{'user_id':profile['userId'],'cube_id':physical_cube(profile,cube),
+                    'home_scope':profile['homeScope'],'memory_epoch':profile['memoryEpoch'],
+                    'author_id':profile['authorId'],'target_ids':ids},
+                    'feedback_content':content,'history':history,'session_id':session}
+                result=self.client(profile,cube).request('/product/feedback_scoped',payload,
+                    timeout=120,max_response_bytes=1048576)
+                data=result.get('data') if isinstance(result,dict) else None
+                if (not isinstance(data,dict) or set(data)!={'record','readback'}
+                        or not isinstance(data['record'],dict) or set(data['record'])!={'add','update'}
+                        or not isinstance(data['readback'],dict)
+                        or set(data['readback'])!={'checked_ids','deleted_ids'}):
+                    raise Denied('FEEDBACK_READBACK_FAILED')
+                checked=data['readback']['checked_ids']; deleted=data['readback']['deleted_ids']
+                if (not isinstance(checked,list) or not isinstance(deleted,list)
+                        or len(checked)>96 or len(deleted)>96
+                        or any(not isinstance(i,str) or not 0<len(i)<=128 for i in checked+deleted)
+                        or len(set(checked+deleted))!=len(checked+deleted)
+                        or not set(ids)<=set(checked+deleted)):
+                    raise Denied('FEEDBACK_READBACK_FAILED')
+                for identifier in checked:
+                    found=self.rows(profile,cube,{'id':identifier})
+                    if len(found)!=1 or found[0]['id']!=identifier:
+                        raise Denied('FEEDBACK_READBACK_FAILED')
+                for identifier in deleted:
+                    if self.rows(profile,cube,{'id':identifier}):
+                        raise Denied('FEEDBACK_READBACK_FAILED')
+                record=data['record']
+                if (any(not isinstance(record[key],list) for key in ('add','update'))
+                        or any(not isinstance(item,dict) or item.get('id') not in checked
+                               for item in record['add']+record['update'])):
+                    raise Denied('FEEDBACK_READBACK_FAILED')
+                return result
         if path == '/product/delete_memory':
             if set(body) - {'user_id', 'mem_cube_id', 'memory_ids', 'writable_cube_ids', 'auto_cleanup_working'} or body.get('auto_cleanup_working', False) is not False:
                 raise Denied('INVALID_DELETE')

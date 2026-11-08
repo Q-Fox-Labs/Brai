@@ -90,3 +90,13 @@ alerts.observe принимает закрытые ключи storage, local_ai,
 При недоступном helper общие события удерживаются в ограниченной памяти (до семи ключей) и отправляются напрямую с прежним ID; после восстановления этот же ID закрепляется helper. Потеря процесса до сохранения требует внешнего мониторинга. Fallback повторяется с задержкой 1–30 секунд. Отказ доставки не порождает рекурсивных уведомлений. Runtime status содержит alertsAvailable отдельно от вычислительного исхода.
 
 Внутренний helper health дополнительно возвращает capacityAvailable и historyRejected. Они отличают заполнение очередей от постоянного отказа истории; исчезновение failed backlog и освобождение capacity закрывают соответствующий эпизод без сообщения. Публичные DTO запросов не изменены.
+
+## Делегирование личного principal из Identity Root
+
+Закрытый HTTP POST `/internal/identity/transcription` принимает `IdentityDelegateParams` из owner schemas: `{method,params,principal}`. method — одна из семи публичных операций; params проверяются по прежней публичной схеме этой операции. Ответ и ошибки используют её прежние DTO. Публичные HTTP/MCP и NATS не принимают делегированный principal и не меняют семантику. Текст результата остаётся HTTP, нового NATS subject нет.
+
+Делегирование выключено по умолчанию. Оператор явно добавляет отдельное поле `permissions:["identity:delegate"]` к выбранному binding в защищённом `TRANSCRIPTION_AUTH_BINDINGS_JSON`. Это полномочие транспорта, оно не входит в TrustedPrincipal и не передаётся helper. Нужны существующий bearer binding и это явное полномочие; обычный bearer, включая settings writer, не разрешает делегирование.
+
+Identity Root хранит bearer вне worker и строит principal только из проверенного профиля: `scopeType:user`, `scopeId:serviceDataScope(profileId)`, `ownerId:userId`, `permissions:["transcription:use"]`. Worker не выбирает principal, область или права. Делегирование system scope запрещено. Для settings.set Root дополнительно проверяет свежую роль Auth admin и только тогда добавляет `transcription:settings:write`; binding делегатора также должен иметь это прикладное право. Настройки остаются общей политикой сервиса, requests и текст результата остаются личными.
+
+Маршрут использует прежние Host/Origin, JSON, byte, deadline и shared capacity ограничения HTTP. При неизвестном исходе запись не повторяется автоматически. Ответы no-store; bearer, текст и исходные exceptions не журналируются. Доступность маршрута в сети сама по себе не даёт полномочий: доверенная роль Root определяется отдельным opt-in binding.

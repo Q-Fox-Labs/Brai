@@ -2,6 +2,7 @@
 # ABOUTME: Использует временный профиль, подмену HTTP и генератора без сети и ключей.
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -150,6 +151,15 @@ class ContextGifTests(unittest.TestCase):
         self.assertEqual((body['output_format'], body['quality'], body['complexity']), ('gif', 'low', 'low'))
         self.assertEqual(Path(result['image']).read_bytes(), animation())
         self.assertEqual(self.client_options['headers']['Authorization'], 'Bearer not-a-real-key')
+
+    def test_personal_worker_uses_shared_route_without_reading_a_key(self):
+        with patch.dict(os.environ, BRAI_IDENTITY_MODE='worker'):
+            result = self.native()
+        self.assertEqual(result['provider'], 'openai')
+        self.assertEqual(self.requests[0][0][1], 'http://127.0.0.1:18080/gif/v1/images/generations')
+        self.assertNotIn('Authorization', self.client_options['headers'])
+        self.assertFalse((self.home / 'context-gifs.json').exists())
+        self.assertEqual(Path(result['image']).read_bytes(), animation())
 
     def test_api_error_does_not_fall_back_to_subscription(self):
         self.api_settings()

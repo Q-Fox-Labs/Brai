@@ -15,6 +15,8 @@ import time
 import uuid
 
 from .ingress import Bridge
+from .routes import RouteLedger
+from .scope import UNSCOPED, request_scope
 
 MAX_FRAME = 2 * 1024 * 1024
 _resolvers = {}
@@ -109,7 +111,6 @@ async def admit_update(update, adapter):
         await _notice(adapter, telegram, 'Для доступа нужно приглашение владельца. Попросите прислать приглашение и отправьте полученную команду в этот чат.')
     return False
 
-
 def _receipt(value):
     if isinstance(value, dict):
         data = value
@@ -122,13 +123,86 @@ def _receipt(value):
 
 class Resolver:
     """Хранит только транспорт и проверенные связи без общего transcript."""
-    def __init__(self, adapter):
-        self.adapter = adapter
+    def __init__(self, adapter, runner=None, ledger=None):
+        self.adapter, self.runner = adapter, runner
         self.bridges, self.turns = {}, {}
+        self.ledger = ledger if ledger is not None else RouteLedger()
+        self.interactive_scopes = {}
+        self.supervisor = None
+        self.closed = False
+        self.retired = False
+
+    def retire(self):
+        """Исключить старый resolver из синхронной перезагрузки plugin."""
+        self.retired = True
+
+    def start(self):
+        """Держать native lifetime всех active профилей без нового сообщения."""
+        if not self.closed and self.supervisor is None:
+            self.supervisor = asyncio.create_task(self._supervise())
+
+    async def close(self):
+        """Закрыть только каналы этого ingress instance."""
+        if self.closed:
+            return
+        self.closed = True
+        if _resolvers.get(id(self.adapter)) is self:
+            _resolvers.pop(id(self.adapter))
+        if self.supervisor is not None:
+            self.supervisor.cancel()
+            await asyncio.gather(self.supervisor, return_exceptions=True)
+            self.supervisor = None
+        for bridge in self.bridges.values():
+            if bridge.task is not None:
+                bridge.task.cancel()
+        await asyncio.gather(*(bridge.task for bridge in self.bridges.values()
+                               if bridge.task is not None), return_exceptions=True)
+        self.ledger.close()
+
+    async def _supervise(self):
+        """Обрыв одного worker не отключает расписания соседних владельцев."""
+        semaphore = asyncio.Semaphore(8)
+        async def ready(profile):
+            async with semaphore:
+                try:
+                    bridge = self._bridge(profile)
+                    peer = await bridge.connect()
+                    await peer.call('health', {'require_tools': True}, timeout=240)
+                except (Exception, asyncio.CancelledError) as error:
+                    if isinstance(error, asyncio.CancelledError):
+                        raise
+        while True:
+            try:
+                response = await broker_call('ingress.profiles', {})
+                profiles = response.get('profiles') if isinstance(response, dict) else None
+                if not isinstance(profiles, list) or len(profiles) > 10000:
+                    raise ValueError('Invalid active profiles')
+                await asyncio.gather(*(ready(profile) for profile in profiles))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep(10)
 
     async def __call__(self, source):
         """Выбрать worker по актуальному Auth, не по параметрам модели."""
         profile = await broker_call('identity.resolve', {'telegramId': str(source.user_id)})
+        return self._bridge(profile)
+
+    def _bridge(self, profile):
+        """Настроить scope/UI delivery общего account-bound транспорта."""
+        bridge = self._account_bridge(profile)
+        if not bridge.require_scope:
+            author = str(profile.get('authorTelegramId', profile['telegramId']))
+            binding = {**profile, 'telegramId': author, 'authorTelegramId': author}
+            bridge.configure_delivery(
+                authorize_delivery=lambda action, payload: self.authorize_delivery(binding, action, payload),
+                telegram_api=lambda owner, method, payload, scope_id: self.telegram_api(binding, owner, method, payload, scope_id),
+                require_scope=True)
+        return bridge
+
+    def _account_bridge(self, profile):
+        """Закрепить единственный канал worker за стабильным владельцем UID."""
         uid = profile['uid']
         if uid not in self.bridges:
             async def prepare(event):
@@ -137,8 +211,10 @@ class Resolver:
                 return await self.deliver(profile, owner, action, payload)
             async def started(turn_id):
                 current = self.turns.get(uid)
-                if current is None or current.get('workerTurnId') not in (None, turn_id):
+                if current is None:
                     raise PermissionError('Unexpected worker turn')
+                # Завершение предыдущей task может прийти во время следующего dispatch.
+                # Старый end не закрывает новый native ход того же доверенного маршрута.
                 current['workerTurnId'] = turn_id
             async def ended(turn_id):
                 await self.end(profile, turn_id)
@@ -155,6 +231,16 @@ class Resolver:
         bridge.telegram_ids.add(str(profile['telegramId']))
         return bridge
 
+    async def _account(self, profile, telegram_id):
+        """Проверить фактический канал через Auth, сохранив стабильного автора."""
+        if not re.fullmatch(r'[1-9][0-9]{0,19}', str(telegram_id)):
+            raise PermissionError('Only private Telegram chats are supported')
+        active = await broker_call('identity.resolve', {'telegramId': str(telegram_id)})
+        if (str(active['telegramId']) != str(telegram_id)
+                or self.ledger.owner(active) != self.ledger.owner(profile)):
+            raise PermissionError('Owner binding changed')
+        return active
+
     async def prepare(self, profile, event):
         """Допустить только личный чат владельца и скопировать его media в профиль."""
         if (getattr(event.source, 'chat_type', '') != 'dm'
@@ -168,6 +254,9 @@ class Resolver:
         if not turn:
             turn = {'id': uuid.uuid4().hex, 'route': route}
             self.turns[uid] = turn
+        route_metadata = getattr(self.runner, '_thread_metadata_for_source', None)
+        turn['metadata'] = (dict(route_metadata(event.source, event.message_id) or {}) if callable(route_metadata)
+                            else ({'thread_id': route[1]} if route[1] else {}))
         inputs = getattr(event, '_brai_identity_inputs', []) or []
         if not isinstance(inputs, list) or len(inputs) > 10 or any(not isinstance(i, dict) for i in inputs):
             raise ValueError('Invalid media inputs')
@@ -184,9 +273,11 @@ class Resolver:
             'linkConsent': (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!') in
                 ('подтверждаю привязку моего второго аккаунта',),
             **({'threadId': int(route[1])} if route[1] else {})})
+        self.ledger.admit(profile, route, turn['metadata'], str(event.message_id))
         fields = ('text', 'user_name', 'message_id', 'media_urls', 'media_types',
                   'media_text_inlined', 'reply_to_message_id', 'reply_expected')
         data = {key: getattr(event, key) for key in fields if getattr(event, key, None) is not None}
+        data['delivery_scope'] = turn['id']
         data['message_type'] = getattr(event.message_type, 'value', event.message_type)
         timestamp = getattr(event, 'timestamp', None)
         if timestamp is not None:
@@ -206,8 +297,30 @@ class Resolver:
             data['identity_inputs'] = [{**item, 'path': replacements[item['path']]} for item in inputs]
         return data
 
-    async def deliver(self, profile, owner, action, payload):
-        """Доставить только проверенные сообщения и артефакты текущего владельца."""
+    def authorize_delivery(self, profile, action, payload):
+        """Подтвердить маршрут и принадлежность reply/edit по доверенному журналу."""
+        metadata = payload.get('metadata') or {}
+        if not isinstance(metadata, dict):
+            raise ValueError('Invalid metadata')
+        route = (str(payload.get('chat_id') or ''),
+                 str(metadata.get('thread_id') or metadata.get('message_thread_id') or ''))
+        known = self.ledger.metadata(profile, route)
+        if known is None and (route[1] or not re.fullmatch(r'[1-9][0-9]{0,19}', route[0])):
+            raise PermissionError('Unknown owner conversation')
+        if payload.get('reply_to') and not self.ledger.owns(profile, route, payload['reply_to']):
+            raise PermissionError('Unauthorized owner reply')
+        if action == 'edit_message' and not self.ledger.owns(profile, route, payload.get('message_id'), outgoing=True):
+            raise PermissionError('Unauthorized owner edit')
+        return route, known or {}
+
+    async def delivery_context(self, profile, owner, payload):
+        """Различить native turn, callback и намеренную фоновую доставку."""
+        scope_id = request_scope.get()
+        turn = self.turns.get(profile['uid'])
+        if not isinstance(payload.get('metadata') or {}, dict):
+            raise ValueError('Invalid metadata')
+        if scope_id is not UNSCOPED and not (turn is not None and scope_id == turn['id']):
+            return await self._background_delivery_context(profile, owner, payload, scope_id)
         uid = profile['uid']
         if owner != profile['userId'] or uid not in self.turns:
             raise PermissionError('No active owner turn')
@@ -217,29 +330,267 @@ class Resolver:
         if route != self.turns[uid]['route']:
             raise PermissionError('Delivery outside current conversation')
         state = await broker_call('ingress.status', {'uid': uid, 'turnId': self.turns[uid]['id']})
-        if state.get('suppressFinal'):
+        metadata = dict(turn.get('metadata') or ({'thread_id': route[1]} if route[1] else {}))
+        def current():
+            if self.turns.get(uid) is not turn:
+                raise PermissionError('Owner turn changed')
+        current()
+        return route, metadata, turn, current, bool(state.get('suppressFinal'))
+
+    async def _background_delivery_context(self, profile, owner, payload, scope_id):
+        """Проверить callback/proactive маршрут без истекающего native хода."""
+        if owner != profile['userId']:
+            raise PermissionError('Owner mismatch')
+        supplied = payload.get('metadata') or {}
+        route = (str(payload.get('chat_id') or ''),
+                 str(supplied.get('thread_id') or supplied.get('message_thread_id') or ''))
+        grant = self.interactive_scopes.get(scope_id) if isinstance(scope_id, str) else None
+        if scope_id is not None and (not grant or grant['owner'] != self.ledger.owner(profile)
+                or grant['expires'] <= time.monotonic() or grant['route'] != route):
+            raise PermissionError('Expired or foreign delivery scope')
+        checked_route, metadata = self.authorize_delivery(profile, 'send', payload)
+        await self._account(profile, route[0])
+        def current():
+            if grant is not None and (self.interactive_scopes.get(scope_id) is not grant
+                    or grant['expires'] <= time.monotonic()):
+                raise PermissionError('Interactive delivery expired')
+        return checked_route, metadata, None, current, False
+
+    async def deliver(self, profile, owner, action, payload):
+        """Доставить только проверенные сообщения и артефакты текущего владельца и маршрута."""
+        route, metadata, turn, current, suppress = await self.delivery_context(profile, owner, payload)
+        if suppress:
             return {'success': True}
-        values = dict(payload)
-        if action in ('send_image_file', 'send_document', 'send_video', 'send_voice'):
-            descriptor = values.pop('artifact')
-            artifact = await broker_call('ingress.artifact', {'uid': uid, 'turnId': self.turns[uid]['id'],
-                'artifactId': descriptor['artifact_id']}, timeout=120)
-            path = artifact.get('localPath')
-            if not isinstance(path, str) or not path.startswith('/'):
-                raise ValueError('Invalid artifact')
-            field = {'send_image_file': 'image_path', 'send_document': 'file_path',
-                     'send_video': 'video_path', 'send_voice': 'audio_path'}[action]
-            values[field] = path
-        if action in ('send_image', 'send_animation'):
-            # Произвольные URL могут заставить привилегированный ingress читать внутренний адрес.
+        if action == 'send_draft':
+            if not re.fullmatch(r'[1-9][0-9]{0,19}', route[0]):
+                raise PermissionError('Drafts require owner private chat')
+            supports = getattr(self.adapter, 'supports_draft_streaming', None)
+            if not callable(supports) or not supports('dm', metadata):
+                return {'success': False, 'error': 'Draft transport unavailable'}
+        uid = profile['uid']
+        file_actions = ('send_image_file', 'send_document', 'send_video', 'send_voice', 'send_animation')
+        if action == 'send_file_set' or action in file_actions:
+            from files.native import telegram_sender, validate_telegram, presentation
+            if action == 'send_file_set':
+                items, kind, fallback = payload['items'], payload['kind'], payload['fallback']
+            else:
+                items = [{'artifact': payload['artifact'], 'caption': payload.get('caption') or ''}]
+                kind, fallback = 'single', False
+            prepared, converted = [], []
+            try:
+                for item in items:
+                    artifact = await broker_call('ingress.artifact' if turn else 'ingress.delivery-artifact',
+                        {'uid': uid, **({'turnId': turn['id']} if turn else {}),
+                         'artifactId': item['artifact']['artifact_id']}, timeout=120)
+                    current()
+                    path = artifact.get('localPath')
+                    if not isinstance(path, str) or not path.startswith('/'):
+                        raise ValueError('Invalid artifact')
+                    view = item.get('presentation') or presentation(artifact)
+                    if action == 'send_document':
+                        view = 'document'
+                    elif action == 'send_animation':
+                        view = 'animation'
+                    elif action == 'send_voice' and payload.get('is_voice'):
+                        view = 'voice'
+                        if artifact['mimeType'] not in ('audio/ogg', 'audio/opus', 'audio/mpeg', 'audio/mp4'):
+                            from gateway.platforms.base import transcode_to_ogg_opus
+                            converted_path = await asyncio.to_thread(transcode_to_ogg_opus, path)
+                            if not converted_path or converted_path == path:
+                                raise ValueError('Voice conversion unavailable')
+                            converted.append(converted_path)
+                            path = converted_path
+                            artifact = {**artifact, 'mimeType': 'audio/ogg', 'sizeBytes': Path(path).stat().st_size}
+                    prepared.append({'localPath': path, 'file': artifact,
+                        'caption': item['caption'], 'presentation': view})
+                validate_telegram(prepared)
+                current()
+                # Только media API receipt означает доставку файла. Native text fallback
+                # после ошибки не может превратиться в успешный голосовой ответ.
+                ids = await telegram_sender(self.adapter, payload['chat_id'], metadata, kind, prepared,
+                                            fallback, reply_to=payload.get('reply_to'))
+                if (not isinstance(ids, list) or len(ids) != len(prepared)
+                        or any(type(value) not in (int, str) or not str(value).isdecimal()
+                               or int(value) <= 0 for value in ids)):
+                    raise ValueError('Incomplete file delivery receipt')
+                ids = [str(value) for value in ids]
+                for message_id in ids:
+                    self.ledger.record(profile, route, message_id)
+                return {'success': True, 'message_id': ids[-1], 'continuation_message_ids': ids[:-1],
+                        'raw_response': {'message_ids': ids}}
+            finally:
+                for path in converted:
+                    Path(path).unlink(missing_ok=True)
+        if action == 'send_image':
             raise PermissionError('Publish local media first')
+        values = {**payload, 'metadata': metadata}
         method = getattr(self.adapter, action, None)
         if not callable(method):
             raise ValueError('Native delivery unavailable')
+        current()
         result = await method(**values)
         if action == 'send_typing' and result is None:
             return {'success': True}
-        return _receipt(result)
+        receipt = _receipt(result)
+        if receipt.get('success'):
+            for message_id in [receipt.get('message_id'), *(receipt.get('continuation_message_ids') or [])]:
+                if message_id:
+                    self.ledger.record(profile, route, message_id)
+        return receipt
+
+    async def interactive_binding(self, update):
+        """Проверить настоящего clicker и точное сообщение его личного worker."""
+        user = getattr(update, 'effective_user', None)
+        telegram = str(getattr(user, 'id', '') or '')
+        if not re.fullmatch(r'[1-9][0-9]{0,19}', telegram) or getattr(user, 'is_bot', True):
+            raise PermissionError('Invalid interactive sender')
+        query = getattr(update, 'callback_query', None)
+        inline = getattr(update, 'inline_query', None)
+        if query is not None and inline is None:
+            message = getattr(query, 'message', None)
+            if (message is None or getattr(message, 'sender_chat', None)
+                    or getattr(message, 'business_connection_id', None)):
+                raise PermissionError('Invalid callback message')
+            chat_info = getattr(message, 'chat', None)
+            chat = str(getattr(chat_info, 'id', '') or '')
+            if getattr(chat_info, 'type', None) != 'private' or chat != telegram:
+                raise PermissionError('Only private Telegram callbacks are supported')
+            profile = await broker_call('identity.resolve', {'telegramId': telegram})
+            resolve_thread = getattr(self.adapter, '_effective_message_thread_id', None)
+            thread = resolve_thread(message) if callable(resolve_thread) else getattr(message, 'message_thread_id', None)
+            route = (chat, str(thread or ''))
+            if not self.ledger.owns(profile, route, str(getattr(message, 'message_id', '')), outgoing=True):
+                raise PermissionError('Callback belongs to another owner')
+            query_id = str(getattr(query, 'id', '') or '')
+            kind = 'callback'
+        elif inline is not None and query is None:
+            profile = await broker_call('identity.resolve', {'telegramId': telegram})
+            route = (telegram, '')
+            query_id = str(getattr(inline, 'id', '') or '')
+            kind = 'inline'
+        else:
+            raise PermissionError('Unsupported interactive update')
+        if not query_id or len(query_id) > 256:
+            raise PermissionError('Invalid interactive query')
+        return profile, route, query_id, kind
+
+    async def interactive_admit(self, update):
+        """Guard не отправляет callback в общий native gateway."""
+        await self.interactive_binding(update)
+        return True
+
+    async def interactive(self, update):
+        """Отправить подлинный callback только его UID-bound worker."""
+        profile, route, query_id, kind = await self.interactive_binding(update)
+        now = time.monotonic()
+        self.interactive_scopes = {key: value for key, value in self.interactive_scopes.items()
+                                   if value['expires'] > now}
+        if len(self.interactive_scopes) >= 4096:
+            raise PermissionError('Too many interactive scopes')
+        scope_id = uuid.uuid4().hex
+        self.interactive_scopes[scope_id] = {'owner': self.ledger.owner(profile),
+            'route': route, 'actorTelegramId': str(profile['telegramId']),
+            'queryId': query_id, 'kind': kind, 'expires': now + 300}
+        from types import SimpleNamespace
+        bridge = await self(SimpleNamespace(user_id=str(profile['telegramId'])))
+        peer = await bridge.connect()
+        result = await peer.call('interactive', {'update': update.to_dict(),
+                                'owner': profile['userId'], 'scope_id': scope_id,
+                                'actor_telegram_id': str(profile['telegramId'])})
+        if not isinstance(result, dict) or result.get('accepted') is not True:
+            raise PermissionError('Interactive dispatch unconfirmed')
+        return result
+
+    async def telegram_api(self, profile, owner, method, payload, scope_id):
+        """Исполнять только ограниченные UI операции с проверенным owner/route."""
+        if owner != profile['userId'] or not isinstance(payload, dict):
+            raise PermissionError('Invalid UI owner')
+        payload = {key: value for key, value in payload.items() if value is not None}
+        allowed = {
+            'send_message': {'chat_id', 'text', 'parse_mode', 'entities', 'disable_web_page_preview',
+                'link_preview_options', 'disable_notification', 'protect_content', 'reply_markup',
+                'reply_to_message_id', 'allow_sending_without_reply', 'reply_parameters',
+                'message_thread_id', 'direct_messages_topic_id'},
+            'edit_message_text': {'chat_id', 'message_id', 'text', 'parse_mode', 'entities',
+                'disable_web_page_preview', 'link_preview_options', 'reply_markup'},
+            'edit_message_reply_markup': {'chat_id', 'message_id', 'reply_markup'},
+            'delete_message': {'chat_id', 'message_id'},
+            'answer_callback_query': {'callback_query_id', 'text', 'show_alert', 'cache_time'},
+            'answer_inline_query': {'inline_query_id', 'results', 'cache_time', 'is_personal', 'next_offset'},
+        }
+        timeouts = {'connect_timeout', 'read_timeout', 'write_timeout', 'pool_timeout'}
+        if method not in allowed or set(payload) - allowed[method] - timeouts:
+            raise PermissionError('Telegram UI method or fields denied')
+        values = {key: value for key, value in payload.items()
+                  if value is not None and key not in timeouts}
+        values.update(connect_timeout=5, read_timeout=15, write_timeout=15, pool_timeout=5)
+        grant = self.interactive_scopes.get(scope_id) if isinstance(scope_id, str) else None
+        if method.startswith('answer_'):
+            kind = 'callback' if method == 'answer_callback_query' else 'inline'
+            key = 'callback_query_id' if kind == 'callback' else 'inline_query_id'
+            if (not grant or grant['owner'] != self.ledger.owner(profile) or grant['kind'] != kind
+                    or grant['expires'] <= time.monotonic() or values.get(key) != grant['queryId']):
+                raise PermissionError('Foreign interactive query')
+            await self._account(profile, grant.get('actorTelegramId', grant['route'][0]))
+            if kind == 'inline':
+                values['is_personal'] = True
+                values['cache_time'] = 0
+                results = values.get('results')
+                if not isinstance(results, list) or len(results) > 50 or any(
+                        not isinstance(item, dict) or item.get('type') != 'article'
+                        or not isinstance(item.get('input_message_content'), dict)
+                        or not isinstance(item['input_message_content'].get('message_text'), str)
+                        for item in results):
+                    raise ValueError('Unsupported inline result')
+            route = None
+        else:
+            chat = str(values.get('chat_id') or '')
+            thread = str(values.get('message_thread_id') or values.get('direct_messages_topic_id') or '')
+            # Native edits identify the original message, without a thread parameter.
+            if not thread and grant and grant['route'][0] == chat:
+                thread = grant['route'][1]
+            elif not thread:
+                turn = self.turns.get(profile['uid'])
+                if turn and scope_id == turn['id'] and turn['route'][0] == chat:
+                    thread = turn['route'][1]
+            request = {'chat_id': chat, 'metadata': {'thread_id': thread}}
+            token = request_scope.set(scope_id)
+            try:
+                route, metadata, _, current, _ = await self.delivery_context(profile, owner, request)
+            finally:
+                request_scope.reset(token)
+            if method != 'send_message' and not self.ledger.owns(profile, route, values.get('message_id'), outgoing=True):
+                raise PermissionError('Foreign UI message')
+            reply = values.get('reply_to_message_id')
+            if values.get('reply_parameters'):
+                params = values['reply_parameters']
+                if not isinstance(params, dict) or set(params) - {'message_id', 'allow_sending_without_reply'}:
+                    raise PermissionError('Unsupported reply parameters')
+                reply = params.get('message_id')
+            if reply and not self.ledger.owns(profile, route, reply):
+                raise PermissionError('Foreign UI reply')
+            values['chat_id'] = int(chat)
+            if method == 'send_message':
+                values.pop('message_thread_id', None)
+                values.pop('direct_messages_topic_id', None)
+                routing = getattr(self.adapter, '_thread_kwargs_for_send', None)
+                values.update(routing(chat, route[1] or None, metadata) if callable(routing)
+                              else ({'message_thread_id': int(route[1])} if route[1] else {}))
+            current()
+        bot = getattr(self.adapter, '_bot', None)
+        operation = getattr(bot, method, None)
+        if not callable(operation):
+            raise RuntimeError('Trusted Telegram UI unavailable')
+        result = await operation(**values)
+        if method.startswith('answer_') or method == 'delete_message':
+            if result is not True:
+                raise ValueError('Unconfirmed Telegram UI operation')
+            return True
+        raw = result.to_dict() if callable(getattr(result, 'to_dict', None)) else result
+        if not isinstance(raw, dict) or not str(raw.get('message_id', '')).isdecimal():
+            raise ValueError('Missing Telegram UI message receipt')
+        self.ledger.record(profile, route, raw['message_id'])
+        return raw
 
     async def end(self, profile, worker_turn):
         """Погасить доверенное право входа после завершения соответствующего хода."""
@@ -253,6 +604,7 @@ class Resolver:
 def create_resolver(adapter, runner):
     """Создать один резолвер на экземпляр native Telegram adapter."""
     key = id(adapter)
-    if key not in _resolvers:
-        _resolvers[key] = Resolver(adapter)
+    if key not in _resolvers or _resolvers[key].retired:
+        home = Path(os.environ['HERMES_HOME'])
+        _resolvers[key] = Resolver(adapter, runner, RouteLedger(home / 'identity-delivery.sqlite'))
     return _resolvers[key]

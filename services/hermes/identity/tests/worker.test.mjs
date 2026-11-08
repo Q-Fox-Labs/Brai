@@ -31,3 +31,12 @@ test('Hermes Telegram ingress', () => {
   const result = spawnSync(process.env.PYTHON || 'python3', ['-B', '-m', 'unittest', 'discover', '-s', here, '-p', 'test_telegram_runtime.py', '-v'], { encoding: 'utf8', timeout: 30000 });
   assert.equal(result.status, 0, result.stderr || result.error?.message || 'Telegram tests failed');
 });
+
+for (const pattern of ['test_shared_search.py', 'test_delivery_routes.py', 'test_memory_status.py', 'test_memory_feedback.py']) {
+  test('Hermes owner boundary: ' + pattern, () => {
+    const result = spawnSync(process.env.PYTHON || 'python3',
+      ['-B', '-m', 'unittest', 'discover', '-s', here, '-p', pattern, '-v'],
+      { encoding: 'utf8', timeout: 30000 });
+    assert.equal(result.status, 0, result.stderr || result.error?.message || 'Boundary tests failed');
+  });
+}

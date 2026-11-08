@@ -6,6 +6,7 @@ import asyncio
 import errno
 import json
 import os
+import re
 import signal
 import socket
 import stat
@@ -29,81 +30,209 @@ class Worker:
         self.runner_factory = runner_factory
         self.peer = self.runner = self.adapter = None
         self.active = {}
+        self.typing = {}
+        self.turn_scopes = {}
         self.tools_ready = False
         self.tools_lock = asyncio.Lock()
+        self.operational = asyncio.Event()
+        self.lifecycle_task = None
+        self.activation = asyncio.Event()
+        self.exited = asyncio.Event()
+        self.exit_code = None
+        self.lifecycle_error = None
 
     async def serve_connection(self, reader, writer):
-        """Проверить SO_PEERCRED и обслуживать один ingress; остальные отклонить."""
-        if self.peer is not None or peer_uid(writer) != self.ingress_uid:
+        """Читать duplex RPC до startup sends; не допускать второй native runtime."""
+        if peer_uid(writer) != self.ingress_uid:
             writer.close()
             await writer.wait_closed()
             return
-        peer = Peer(reader, writer, {'dispatch': self.dispatch, 'cancel': self.cancel, 'health': self.health})
+        if self.peer is not None:
+            # Операторская health-проверка не забирает основной duplex канал
+            # и не останавливает работающий native lifecycle при своём EOF.
+            async def inspect_health(require_tools=False):
+                if require_tools:
+                    raise RpcError(-32602, 'Operational health requires the active ingress channel')
+                return await self.health()
+            try:
+                await asyncio.wait_for(Peer(reader, writer, {'health': inspect_health}).run(), 15)
+            except (TimeoutError, ConnectionError):
+                pass
+            return
+        peer = Peer(reader, writer, {'dispatch': self.dispatch, 'cancel': self.cancel,
+                    'health': self.health, 'interactive': self.interactive})
         self.peer = peer
+        reading = asyncio.create_task(peer.run())
         try:
             await self.start(peer)
-            await peer.run()
+            await asyncio.wait((reading, self.lifecycle_task), return_when=asyncio.FIRST_COMPLETED)
+        except Exception as error:
+            self.lifecycle_error = error
+            self.exit_code = 1
+            self.exited.set()
         finally:
-            # До нового подключения остановить старые session tasks и потомков.
-            # Иначе два runner одной личности разделили бы profile state.
             try:
-                if self.runner:
-                    await self.runner.stop()
+                await self.stop_runtime()
             finally:
+                writer.close()
+                if not reading.done():
+                    reading.cancel()
+                await asyncio.gather(reading, return_exceptions=True)
+                for task in list(self.typing.values()):
+                    task.cancel()
+                await asyncio.gather(*self.typing.values(), return_exceptions=True)
+                self.typing.clear()
+                self.active.clear()
+                self.turn_scopes.clear()
+                self.operational.clear()
                 self.adapter = self.runner = self.peer = None
 
     async def start(self, peer):
-        """Создать изолированный runner и native IPC adapter без polling Telegram."""
+        """Подготовить bootstrap; полный native startup ждёт active Auth."""
+        os.environ['HERMES_EXEC_ASK'] = '1'
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            self._install_telegram_profile()
         from gateway.run import GatewayRunner
         from gateway.config import Platform, PlatformConfig
         self.runner = self.runner_factory() if self.runner_factory else GatewayRunner()
         if getattr(self.runner.config, 'multiplex_profiles', False):
             raise RuntimeError('worker cannot multiplex profiles')
         self.tools_ready = False
-        self.adapter = make_adapter(PlatformConfig(), Platform.TELEGRAM, peer, self.publish_file)
+        self.operational.clear()
+        self.activation.clear()
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            from .images import install_shared_provider
+            install_shared_provider()
+        configured = getattr(self.runner.config, 'platforms', {})
+        config = configured.get(Platform.TELEGRAM) or PlatformConfig()
+        config.enabled = True
+        self.runner.config.platforms = {Platform.TELEGRAM: config}
+        self.adapter = make_adapter(config, Platform.TELEGRAM, peer, self.publish_file)
         self.adapter.gateway_runner = self.runner
-        # Только вход, проверенный SO_PEERCRED и привязкой Telegram ID в dispatch.
         self.runner._is_user_authorized_for_source = lambda source, **kwargs: (
-            source.platform == Platform.TELEGRAM and str(source.user_id) == self.telegram_id)
-        self.runner._wire_adapter_handlers(self.adapter, authorization_check=lambda *args, **kwargs: True)
-        if not await self.adapter.connect():
-            raise RuntimeError('worker adapter unavailable')
-        self.runner._publish_primary_adapter(Platform.TELEGRAM, self.adapter)
-        self.runner.delivery_router.adapters = self.runner.adapters
+            source.platform == Platform.TELEGRAM and str(source.user_id) == self.telegram_id
+            and not source.is_bot)
+        self.runner._make_adapter_auth_check = lambda platform, profile_name=None: (
+            lambda user_id, *args, **kwargs: platform == Platform.TELEGRAM
+            and (str(user_id) == self.telegram_id or self.adapter.is_interactive_actor(user_id)))
+        # AIDEV-NOTE: Native сохраняет wiring/connect/recovery. Подменяется только transport.
+        def adapter_factory(platform, platform_config):
+            if platform != Platform.TELEGRAM or peer.closed:
+                raise RuntimeError('Worker transport unavailable')
+            return self.adapter
+        self.runner._instantiate_adapter = adapter_factory
+        self.lifecycle_task = asyncio.create_task(self._run_lifecycle())
+
+    def _install_telegram_profile(self):
+        """Установить несекретный профиль до любого native plugin discovery."""
+        os.environ['BRAI_IDENTITY_TELEGRAM_ID'] = self.telegram_id
+        sys.modules['_brai_identity_human'] = SimpleNamespace(
+            telegram_id=self.telegram_id, game_core_enabled=False, attach=None)
+
+    async def _startup_gate(self, runner):
+        """Provisioning даёт только bootstrap; tools и recovery требуют active."""
+        await self.activation.wait()
+        from .tool_client import broker_call
+        await asyncio.to_thread(broker_call, 'tools.list', {})
+
+    async def _operational_ready(self, runner):
+        """Подтвердить native startup вместе с MCP и scheduler."""
+        from tools.registry import registry
+        if registry.get_entry('mcp__brai__brai_login') is None:
+            raise RpcError(-32603, 'Worker login tool unavailable')
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            human = sys.modules.get('_brai_identity_human')
+            attach = getattr(human, 'attach', None)
+            if not callable(attach):
+                raise RpcError(-32603, 'Worker human plugin unavailable')
+            await attach(self.adapter)
+        if os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1':
+            # Проверяется установленный файл профиля, который читает native GatewayRunner.
+            from hermes_cli.config import load_config_readonly
+            prompt = load_config_readonly().get('agent', {}).get('system_prompt', '')
+            if not all(value in prompt for value in ('mcp__brai__dialogues_exchange',
+                    'mcp__brai__dialogues_context_ack', 'context_request_id', 'finish')):
+                raise RpcError(-32603, 'Worker Dialogues instruction unavailable')
+            for name in ('mcp__brai__dialogues_exchange', 'mcp__brai__dialogues_context_ack'):
+                if registry.get_entry(name) is None:
+                    raise RpcError(-32603, 'Worker Dialogues tool unavailable')
+        self.tools_ready = True
+        self.operational.set()
+
+    async def _run_lifecycle(self):
+        """Выполнить native daemon lifecycle и сохранить service restart verdict."""
+        try:
+            from gateway.run import start_gateway
+            result = await start_gateway(
+                runner_factory=lambda config: self.runner,
+                startup_gate=self._startup_gate,
+                operational_ready=self._operational_ready)
+            self.exit_code = getattr(self.runner, 'exit_code', None)
+            if self.exit_code is None:
+                self.exit_code = 0 if result else 1
+        except SystemExit as error:
+            self.exit_code = error.code if type(error.code) is int else 1
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.lifecycle_error = error
+            self.exit_code = 1
+        finally:
+            self.operational.clear()
+            self.exited.set()
+
+    async def stop_runtime(self):
+        """Дождаться native drain и внешней обвязки до освобождения peer."""
+        task = self.lifecycle_task
+        if task is not None and not self.activation.is_set() and not task.done():
+            task.cancel()
+        if self.runner is not None:
+            await self.runner.stop()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
 
     async def ensure_tools(self):
-        """Загрузить инструменты после Auth-активации и до первого принятого сообщения."""
-        if self.runner_factory is not None:
-            return
+        """Однократно активировать полный startup и дождаться operational-ready."""
         async with self.tools_lock:
-            if self.tools_ready:
+            if self.operational.is_set():
                 return
-            from gateway.run import _discover_gateway_mcp_tools
-            await _discover_gateway_mcp_tools(self.runner.config)
-            from tools.registry import registry
-            if registry.get_entry('mcp__brai__brai_login') is None:
-                raise RpcError(-32603, 'Worker login tool unavailable')
-            if os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1':
-                # Проверяется установленный файл профиля, который читает native GatewayRunner.
-                from hermes_cli.config import load_config_readonly
-                prompt = load_config_readonly().get('agent', {}).get('system_prompt', '')
-                if not all(value in prompt for value in ('mcp__brai__dialogues_exchange',
-                        'mcp__brai__dialogues_context_ack', 'context_request_id', 'finish')):
-                    raise RpcError(-32603, 'Worker Dialogues instruction unavailable')
-                for name in ('mcp__brai__dialogues_exchange', 'mcp__brai__dialogues_context_ack'):
-                    if registry.get_entry(name) is None:
-                        raise RpcError(-32603, 'Worker Dialogues tool unavailable')
-            self.tools_ready = True
+            if self.lifecycle_task is None or self.lifecycle_task.done():
+                raise RpcError(-32603, 'Worker startup unavailable')
+            self.activation.set()
+            ready = asyncio.create_task(self.operational.wait())
+            try:
+                await asyncio.wait((ready, self.lifecycle_task), return_when=asyncio.FIRST_COMPLETED)
+                if not self.operational.is_set():
+                    raise RpcError(-32603, 'Worker startup unavailable')
+            finally:
+                ready.cancel()
+                await asyncio.gather(ready, return_exceptions=True)
 
     async def health(self, require_tools=False):
-        """Подтвердить готовность и привязку после полного запуска runner."""
+        """Различить доступный bootstrap и полный operational lifecycle."""
         if type(require_tools) is not bool:
             raise RpcError(-32602, 'Invalid health check')
         if self.runner is None or self.adapter is None:
             raise RpcError(-32603, 'Worker not ready')
         if require_tools:
             await self.ensure_tools()
-        return {'ready': True, 'userId': self.user_id, 'telegramId': self.telegram_id}
+        return {'ready': True, 'operational': self.operational.is_set(),
+                'userId': self.user_id, 'telegramId': self.telegram_id}
+
+    async def interactive(self, update, owner, scope_id, actor_telegram_id):
+        """Передать проверенное интерактивное событие owner-bound адаптеру."""
+        if (owner != self.user_id or not isinstance(update, dict)
+                or not isinstance(scope_id, str) or not 1 <= len(scope_id) <= 128
+                or not isinstance(actor_telegram_id, str) or not re.fullmatch(r'[1-9][0-9]{0,19}', actor_telegram_id)):
+            raise RpcError(-32602, 'Invalid interactive event')
+        await self.ensure_tools()
+        from .scope import delivery_scope
+        token = delivery_scope.set(scope_id)
+        try:
+            await self.adapter.handle_interactive(update, telegram_id=actor_telegram_id)
+            return {'accepted': True}
+        finally:
+            delivery_scope.reset(token)
 
     async def dispatch(self, event, owner):
         """Принять только событие привязанного владельца, не доверяя его metadata."""
@@ -115,7 +244,7 @@ class Worker:
         if source.platform.value != 'telegram' or str(source.user_id) != self.telegram_id or source.is_bot:
             raise RpcError(-32602, 'Invalid source')
         allowed = {'text', 'user_id', 'user_name', 'message_id', 'media_urls', 'media_types', 'media_text_inlined', 'reply_to_message_id', 'reply_to_text', 'timestamp', 'reply_expected'}
-        if set(event) - allowed - {'source', 'message_type', 'identity_inputs'}:
+        if set(event) - allowed - {'source', 'message_type', 'identity_inputs', 'delivery_scope'}:
             raise RpcError(-32602, 'Unsupported event fields')
         fields = {key: event[key] for key in allowed if key in event}
         if 'timestamp' in fields:
@@ -138,23 +267,56 @@ class Worker:
         message._brai_identity_inputs = inputs
         if not isinstance(message.message_id, str) or not message.message_id:
             raise RpcError(-32602, 'Message ID required')
-        key = self.adapter._event_session_key(message)
-        before = self.adapter._session_tasks.get(key)
-        await self.ensure_tools()
-        await self.adapter.handle_message(message)
-        task = self.adapter._session_tasks.get(key)
-        token = None
-        if message._gateway_accepted and task is not None and task is not before:
-            token = uuid.uuid4().hex
-            self.active[token] = (key, task, source.to_dict())
-            task.add_done_callback(lambda done: self._turn_finished(token, done))
-        return {'accepted': bool(message._gateway_accepted), 'turn_id': token}
+        scope_id = event.get('delivery_scope')
+        if (os.environ.get('BRAI_IDENTITY_MODE') == 'worker'
+                and (not isinstance(scope_id, str) or not 1 <= len(scope_id) <= 128)):
+            raise RpcError(-32602, 'Delivery scope required')
+        from .scope import delivery_scope
+        scope_token = delivery_scope.set(scope_id)
+        typing = None
+        try:
+            key = self.adapter._event_session_key(message)
+            before = self.adapter._session_tasks.get(key)
+            typing = self.adapter.start_turn_typing(message)
+            await self.ensure_tools()
+            await self.adapter.handle_message(message)
+            task = self.adapter._session_tasks.get(key)
+            token = None
+            if message._gateway_accepted and task is not None and task is not before:
+                # Native переносит pending follow-up в новую drain task того же session key.
+                # Один живой допуск ingress покрывает всю цепочку до освобождения сессии.
+                token = next((value for value, record in self.active.items() if record[0] == key), None)
+                previous = self.active.get(token)
+                token = token or uuid.uuid4().hex
+                self.active[token] = (key, task, source.to_dict())
+                self.turn_scopes[token] = scope_id
+                if typing is not None and token not in self.typing:
+                    self.typing[token] = typing
+                    typing = None
+                if previous is None or previous[1] is not task:
+                    task.add_done_callback(lambda done: self._turn_finished(token, done))
+            return {'accepted': bool(message._gateway_accepted), 'turn_id': token}
+        finally:
+            delivery_scope.reset(scope_token)
+            if typing is not None:
+                typing.cancel()
+                await asyncio.gather(typing, return_exceptions=True)
 
     def _turn_finished(self, token, done):
         """Сообщить ingress точный завершённый ход без повторной доставки."""
         if self.active.get(token, (None, None))[1] is not done:
             return
+        key, _, source = self.active[token]
+        replacement = self.adapter._session_tasks.get(key) if self.adapter is not None else None
+        if replacement is not None and replacement is not done and not replacement.done():
+            self.active[token] = (key, replacement, source)
+            replacement.add_done_callback(lambda next_done: self._turn_finished(token, next_done))
+            return
         self.active.pop(token, None)
+        self.turn_scopes.pop(token, None)
+        typing = self.typing.pop(token, None)
+        if typing is not None:
+            typing.cancel()
         peer = self.peer
         if peer is not None and not peer.closed:
             async def notify():
@@ -172,10 +334,16 @@ class Worker:
         if record is None:
             return {'state': 'not_running'}
         key, task, source = record
+        replacement = self.adapter._session_tasks.get(key)
+        if replacement is not None and replacement is not task and not replacement.done():
+            task = replacement
+            self.active[turn_id] = (key, task, source)
+            task.add_done_callback(lambda done: self._turn_finished(turn_id, done))
         if task.done() or self.adapter._session_tasks.get(key) is not task:
             return {'state': 'not_running'}
         await self.dispatch({'text': '/stop', 'source': source, 'message_type': 'command',
-                             'message_id': 'cancel:' + turn_id}, owner)
+                             'message_id': 'cancel:' + turn_id,
+                             'delivery_scope': self.turn_scopes.get(turn_id)}, owner)
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=5)
         except asyncio.TimeoutError:
@@ -274,11 +442,20 @@ async def run(config_path):
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signum, stop.set)
+    serving = asyncio.create_task(serve(path, worker, stop))
+    exited = asyncio.create_task(worker.exited.wait())
     try:
-        await serve(path, worker, stop)
+        await asyncio.wait((serving, exited), return_when=asyncio.FIRST_COMPLETED)
+        stop.set()
+        await worker.stop_runtime()
+        await serving
     finally:
+        exited.cancel()
+        await asyncio.gather(exited, return_exceptions=True)
         relay.close()
         await relay.wait_closed()
+    if worker.exit_code:
+        raise SystemExit(worker.exit_code)
 
 
 def main():

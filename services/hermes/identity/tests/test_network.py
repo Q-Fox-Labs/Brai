@@ -13,7 +13,7 @@ import time
 import socket
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from identity import egress, network
 
@@ -45,10 +45,10 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         def registry():
             return self.registry
 
+        self.config = {"provider": {"baseUrl": "https://8.8.8.8/v1", "apiKey": "secret"},
+                       "deniedAddresses": ["8.8.4.4"]}
         self.server = await egress.start_server(
-            self.path, registry,
-            lambda: {"provider": {"baseUrl": "https://8.8.8.8/v1", "apiKey": "secret"},
-                     "deniedAddresses": ["8.8.4.4"]}, self.authorize, dial)
+            self.path, registry, lambda: self.config, self.authorize, dial)
         self.relay = await network.start_relay(self.path, 0)
         self.port = self.relay.sockets[0].getsockname()[1]
 
@@ -123,6 +123,96 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         reader, writer = await self.request(b"GET http://8.8.8.8/ HTTP/1.1\r\nHost: x\r\n\r\n")
         self.assertIn(b"403", await reader.read())
         writer.close()
+
+    async def test_gif_uses_separate_protected_key_through_real_uid_gate(self):
+        self.config['gifProvider'] = {'credentialsFile': '/trusted/gif.json'}
+        body = {'model': 'gpt-image-2.6-flare', 'prompt': 'Луна', 'size': 'auto',
+                'quality': 'low', 'complexity': 'low', 'n': 1, 'output_format': 'gif',
+                'frame_count': 9, 'frame_duration_ms': 200}
+        self.release.set()
+        public = egress._public
+        with patch.object(egress, '_root_directory'), patch.object(egress, '_protected_json',
+                return_value={'apiKey': 'gif-only-secret'}) as secret, patch.object(
+                egress, '_resolve_provider', new_callable=AsyncMock) as chat_provider, patch.object(
+                egress, '_public', side_effect=lambda address, denied: address == 'api.openai.com' or public(address, denied)):
+            raw = json.dumps(body).encode()
+            reader, writer = await self.request(
+                b'POST /gif/v1/images/generations HTTP/1.1\r\nHost: localhost\r\n'
+                b'Authorization: Bearer client-value\r\nContent-Length: '
+                + str(len(raw)).encode() + b'\r\n\r\n' + raw)
+            self.assertIn(b'200 OK', await reader.read())
+            writer.close()
+            secret.assert_called_once_with(Path('/trusted/gif.json'))
+            chat_provider.assert_not_awaited()
+            head, sent = self.received[-1]
+            self.assertIn(b'Authorization: Bearer gif-only-secret', head)
+            self.assertNotIn(b'client-value', head)
+            self.assertEqual(json.loads(sent), body)
+            self.assertEqual(self.config['provider']['apiKey'], 'secret')
+            secret.reset_mock()
+            body['model'] = 'unapproved-model'
+            raw = json.dumps(body).encode()
+            reader, writer = await self.request(
+                b'POST /gif/v1/images/generations HTTP/1.1\r\nHost: localhost\r\nContent-Length: '
+                + str(len(raw)).encode() + b'\r\n\r\n' + raw)
+            self.assertIn(b'403', await reader.read())
+            writer.close()
+            secret.assert_not_called()
+
+    async def test_native_image_transport_emits_separate_http_headers(self):
+        self.release.set()
+        body = json.dumps({'model': 'gpt-image-2', 'prompt': 'Луна', 'size': 'auto',
+            'quality': 'low', 'n': 1, 'background': 'opaque'}).encode()
+        claims = base64.urlsafe_b64encode(json.dumps({'https://api.openai.com/auth': {
+            'chatgpt_data_residency': 'eu'}}).encode()).decode().rstrip('=')
+        key = 'test.' + claims + '.signature'
+        self.server.close()
+        await self.server.wait_closed()
+        public = egress._public
+        async def dial(*args):
+            return await asyncio.open_connection('127.0.0.1', self.remote_port)
+        with patch.object(egress, '_public', side_effect=lambda host, denied: host == 'chatgpt.com' or public(host, denied)):
+            self.server = await egress.start_server(self.path, lambda: self.registry,
+                lambda: self.config, self.authorize, dial,
+                resolve_provider=AsyncMock(return_value=({'codexSubscription': True,
+                    'provider': {'apiKey': key}}, 'account')))
+            reader, writer = await self.request(
+                b'POST /image/images/generations HTTP/1.1\r\nHost: localhost\r\nContent-Length: '
+                + str(len(body)).encode() + b'\r\n\r\n' + body)
+            self.assertIn(b'200 OK', await asyncio.wait_for(reader.read(), 2))
+            writer.close()
+        head, sent = self.received[-1]
+        headers = dict(line.split(b': ', 1) for line in head.split(b'\r\n')[1:] if line)
+        self.assertEqual(headers[b'User-Agent'], b'HermesAgent/Brai')
+        self.assertEqual(headers[b'originator'], b'hermes-agent')
+        self.assertEqual(headers[b'x-openai-internal-codex-residency'], b'eu')
+        self.assertIn(b'x-codex-image-turn-id', headers)
+        self.assertNotIn(b'\\r\\n', head)
+        self.assertEqual(sent, body)
+
+    async def test_native_images_keep_subscription_and_never_use_gif_key(self):
+        body = {'model': 'gpt-image-2', 'prompt': 'Луна', 'size': '1024x1024',
+                'quality': 'medium', 'n': 1, 'background': 'opaque'}
+        resolver = AsyncMock(return_value=({'codexSubscription': True,
+            'provider': {'apiKey': 'subscription-secret'}}, 'account'))
+        target = await egress._image_target('POST', '/image/images/generations',
+                                            self.config, json.dumps(body).encode(), resolver)
+        self.assertEqual(target[:3], ('chatgpt.com', 443, '/backend-api/codex/images/generations'))
+        self.assertEqual(target[4:], ('subscription-secret', 'account'))
+        resolver.reset_mock()
+        for patch_value in [{'model': 'unapproved'}, {'n': 2}, {'images': [{'image_url': 'http://localhost/secret'}]}]:
+            invalid = {**body, **patch_value}
+            with self.assertRaises(egress.Rejected):
+                await egress._image_target('POST', '/image/images/generations',
+                                           self.config, json.dumps(invalid).encode(), resolver)
+        resolver.assert_not_awaited()
+        editing = {**body, 'images': [{'image_url': 'data:image/png;base64,AAAA'}]}
+        target = await egress._image_target('POST', '/image/images/edits',
+                                            self.config, json.dumps(editing).encode(), resolver)
+        self.assertTrue(target[2].endswith('/images/edits'))
+        with self.assertRaises(egress.Rejected):
+            await egress._image_target('POST', '/image/images/generations', self.config,
+                json.dumps(body).encode(), AsyncMock(return_value=(self.config, None)))
 
     async def test_auth_revocation_closes_live_stream(self):
         reader, writer = await self.request(b"GET http://8.8.8.8/ HTTP/1.1\r\nHost: x\r\n\r\n")

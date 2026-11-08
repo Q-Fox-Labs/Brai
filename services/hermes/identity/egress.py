@@ -21,6 +21,7 @@ BODY_LIMIT = 8 * 1024 * 1024
 IDLE_TIMEOUT = 120
 CONNECT_TIMEOUT = 10
 CREDENTIAL_TIMEOUT = 20
+SEARCH_CONCURRENCY = 2
 MAX_CONNECTIONS = 128
 TOKEN = re.compile(rb"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 MODEL_PATHS = {"/v1/chat/completions", "/v1/responses", "/v1/embeddings",
@@ -221,6 +222,73 @@ def _model_target(method, target, config, body):
     return host, port, prefix + (path[3:] if config.get("codexSubscription") else path), body, key
 
 
+async def _image_target(method, target, config, body, resolve_provider):
+    """Сохранить native images/edits по подписке, не возвращая credential пользователю."""
+    if method != 'POST' or target not in ('/image/images/generations', '/image/images/edits'):
+        raise Rejected(403)
+    try:
+        value = json.loads(body)
+    except (ValueError, UnicodeError):
+        raise Rejected(400) from None
+    editing = target.endswith('/edits')
+    fields = {'prompt', 'model', 'n', 'quality', 'size', 'background'} | ({'images'} if editing else set())
+    if (not isinstance(value, dict) or set(value) != fields or value.get('model') != 'gpt-image-2'
+            or type(value.get('n')) is not int or value['n'] != 1 or value.get('background') != 'opaque'
+            or value.get('quality') not in ('low', 'medium', 'high')
+            or not isinstance(value.get('size'), str)
+            or not re.fullmatch(r'(?:auto|[1-9][0-9]{2,4}x[1-9][0-9]{2,4})', value['size'])
+            or not isinstance(value.get('prompt'), str) or not value['prompt'].strip()
+            or len(value['prompt'].encode('utf-8')) > 65536):
+        raise Rejected(403)
+    if editing:
+        images = value['images']
+        if (not isinstance(images, list) or not 1 <= len(images) <= 16
+                or any(not isinstance(image, dict) or set(image) != {'image_url'}
+                    or not isinstance(image['image_url'], str)
+                    or not re.fullmatch(r'data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+',
+                                        image['image_url']) for image in images)):
+            raise Rejected(403)
+    resolved, account = await resolve_provider(config)
+    key = (resolved.get('provider') or {}).get('apiKey')
+    if not resolved.get('codexSubscription') or not isinstance(key, str) or not key:
+        raise Rejected(503)
+    path = '/backend-api/codex/' + target[len('/image/'):]
+    return 'chatgpt.com', 443, path, body, key, account
+
+
+def _gif_target(method, target, config, body):
+    """Разрешить только принятый GIF-запрос; отдельный ключ остаётся в root gateway."""
+    if method != 'POST' or target != '/gif/v1/images/generations':
+        raise Rejected(403)
+    try:
+        value = json.loads(body)
+    except (ValueError, UnicodeError):
+        raise Rejected(400) from None
+    fixed = {'model': 'gpt-image-2.6-flare', 'size': 'auto', 'quality': 'low',
+             'complexity': 'low', 'n': 1, 'output_format': 'gif',
+             'frame_count': 9, 'frame_duration_ms': 200}
+    if (not isinstance(value, dict) or set(value) != set(fixed) | {'prompt'}
+            or any(type(value[k]) is not type(v) or value[k] != v for k, v in fixed.items())
+            or not isinstance(value['prompt'], str) or not value['prompt'].strip()
+            or len(value['prompt'].encode('utf-8')) > 16384):
+        raise Rejected(403)
+    provider = config.get('gifProvider')
+    if not isinstance(provider, dict) or set(provider) != {'credentialsFile'}:
+        raise Rejected(503)
+    try:
+        path = Path(provider['credentialsFile'])
+        _root_directory(path.parent)
+        credentials = _protected_json(path)
+        key = credentials.get('apiKey')
+        if (set(credentials) != {'apiKey'} or not isinstance(key, str)
+                or not 0 < len(key) <= 4096 or not key.isascii() or any(c.isspace() for c in key)):
+            raise ValueError()
+    except (OSError, ValueError, TypeError, AttributeError):
+        raise Rejected(503) from None
+    return _model_target('POST', '/model/v1/images/generations',
+        {'provider': {'baseUrl': 'https://api.openai.com/v1', 'apiKey': key}}, body)
+
+
 def _root_directory(path):
     """Проверить canonical Root каталог программы и всех его предков."""
     path = Path(path)
@@ -400,7 +468,112 @@ async def _resolve_provider(config):
                          "apiKey": access}}, account
 
 
-async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_provider):
+async def _stop_search(process):
+    """Погасить всю группу; прочитать pipe, чтобы paused stdout не блокировал wait."""
+    async def discard():
+        try:
+            while await process.stdout.read(65536):
+                pass
+        except (OSError, ValueError):
+            pass
+    draining = asyncio.create_task(discard())
+    try:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(process.wait(), 2)
+        except asyncio.TimeoutError:
+            pass
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await asyncio.wait_for(process.wait(), 2)
+    finally:
+        draining.cancel()
+        await asyncio.gather(draining, return_exceptions=True)
+
+
+async def _shared_search(config, body):
+    """Использовать существующие accepted provider paths без выдачи credential."""
+    from .search import request, SEARCH_TIMEOUT, OUTPUT_LIMIT
+    try:
+        value = request(body)
+    except (ValueError, TypeError, UnicodeError):
+        raise Rejected(400) from None
+    provider = config.get('provider')
+    if not isinstance(provider, dict) or provider.get('type') != 'codex-cli':
+        raise Rejected(503)
+    uid, gid = _codex_parameters(provider)
+    helper = str(Path(__file__).with_name('search.py'))
+    _root_file(helper)
+    parameters = {key: provider[key] for key in (
+        'helperPath', 'helperSha256', 'ownerHome', 'codexHome', 'codex')}
+    parameters['request'] = value
+    env = {'HOME': provider['ownerHome'], 'CODEX_HOME': provider['codexHome'],
+           'PATH': str(Path(provider['node']).parent) + ':/usr/bin:/bin',
+           'LANG': 'C.UTF-8', 'SSL_CERT_FILE': '/etc/ssl/certs/ca-certificates.crt',
+           'PYTHONNOUSERSITE': '1', 'PYTHONDONTWRITEBYTECODE': '1'}
+    process = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            provider['python'], '-I', '-S', '-B', helper,
+            cwd=provider['workerDir'], env=env, user=uid, group=gid, extra_groups=[],
+            start_new_session=True, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            limit=OUTPUT_LIMIT + 1)
+        async def collect():
+            process.stdin.write(json.dumps(parameters, ensure_ascii=False).encode() + b'\n')
+            await process.stdin.drain()
+            process.stdin.close()
+            raw = await process.stdout.readuntil(b'\n')
+            if len(raw) > OUTPUT_LIMIT:
+                raise ValueError('Search output too large')
+            status = await process.wait()
+            result = json.loads(raw)
+            if status != 0 or not isinstance(result, dict) or type(result.get('success')) is not bool:
+                raise ValueError('Invalid search receipt')
+            return result
+        return await asyncio.wait_for(collect(), SEARCH_TIMEOUT + 2)
+    except (OSError, ValueError, TypeError, UnicodeError, asyncio.TimeoutError,
+            asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+        raise Rejected(502) from None
+    finally:
+        if process is not None:
+            cleanup = asyncio.create_task(_stop_search(process))
+            interrupted = False
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    interrupted = True
+            await cleanup
+            if interrupted:
+                raise asyncio.CancelledError
+
+
+async def _search_response(reader, writer, uid, config, body, search):
+    """Отмена клиента прерывает CLI; одна выдача не запускает повтор запроса."""
+    operation = asyncio.create_task(search(uid, config, body))
+    disconnected = asyncio.create_task(reader.read(1))
+    try:
+        done, _ = await asyncio.wait((operation, disconnected), return_when=asyncio.FIRST_COMPLETED)
+        if disconnected in done:
+            return
+        result = await operation
+        raw = json.dumps(result, ensure_ascii=False, separators=(',', ':')).encode()
+        writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: '
+                     + str(len(raw)).encode() + b'\r\n\r\n' + raw)
+        await writer.drain()
+    finally:
+        operation.cancel()
+        disconnected.cancel()
+        await asyncio.gather(operation, disconnected, return_exceptions=True)
+
+
+async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_provider, search):
     upstream = None
     response_started = False
     try:
@@ -431,7 +604,24 @@ async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_
             model_target = None
         key = None
         account = None
-        if model_target is not None:
+        request_path = target if target.startswith('/') else (
+            parsed.path + (('?' + parsed.query) if parsed.query else '')
+            if parsed.scheme == 'http' and parsed.hostname in ('127.0.0.1', 'localhost') else '')
+        if request_path.startswith('/search/'):
+            if request_path != '/search/v1/query':
+                raise Rejected(403)
+            if method != 'POST':
+                raise Rejected(405)
+            await _search_response(reader, writer, uid, config, body, search)
+            return
+        if request_path.startswith('/gif/'):
+            host, port, path, body, key = _gif_target(method, request_path, config, body)
+            tls = True
+        elif request_path.startswith('/image/'):
+            host, port, path, body, key, account = await _image_target(
+                method, request_path, config, body, resolve_provider)
+            tls = True
+        elif model_target is not None:
             provider = config.get("provider")
             if (isinstance(provider, dict) and provider.get("type") == "codex-cli"
                     and (method != "POST" or model_target != "/model/v1/responses")):
@@ -466,6 +656,23 @@ async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_
         for name, value in headers:
             if name not in excluded and (key is None or name in {b"accept", b"content-type"}):
                 head += name + b": " + value + b"\r\n"
+        if request_path.startswith('/image/'):
+            # Подписочный backend требует идентичность harness. Заголовки создаёт
+            # trusted egress; личный процесс не задаёт account/residency.
+            import base64
+            import uuid
+            head += b"User-Agent: HermesAgent/Brai\r\noriginator: hermes-agent\r\n"
+            head += b"x-codex-image-turn-id: " + str(uuid.uuid4()).encode('ascii') + b"\r\n"
+            try:
+                encoded = key.split('.')[1]
+                claims = json.loads(base64.urlsafe_b64decode(encoded + '=' * (-len(encoded) % 4)))
+                auth = claims.get('https://api.openai.com/auth', {})
+                residency = auth.get('chatgpt_data_residency') or auth.get('chatgpt_compute_residency')
+                if isinstance(residency, str) and residency.strip().isascii() and all(
+                        32 < ord(char) < 127 for char in residency.strip()):
+                    head += b"x-openai-internal-codex-residency: " + residency.strip().encode('ascii') + b"\r\n"
+            except (ValueError, IndexError, TypeError, AttributeError):
+                pass
         if key is not None:
             head += b"Authorization: Bearer " + key.encode("ascii") + b"\r\n"
             if account is not None:
@@ -528,6 +735,17 @@ async def start_server(socket_path, registry_loader, config_loader, authorize, d
     """Открыть UDS; доступ к каждому потоку регулярно подтверждает Auth."""
     semaphore = asyncio.Semaphore(MAX_CONNECTIONS)
     active = set()
+    searching = set()
+    search_slots = asyncio.Semaphore(SEARCH_CONCURRENCY)
+    async def search(uid, config, body):
+        if uid in searching or search_slots.locked():
+            raise Rejected(429)
+        searching.add(uid)
+        try:
+            async with search_slots:
+                return await _shared_search(config, body)
+        finally:
+            searching.discard(uid)
     if resolve_provider is None:
         resolve_provider = _resolve_provider
 
@@ -545,7 +763,7 @@ async def start_server(socket_path, registry_loader, config_loader, authorize, d
                     writer.write(b"HTTP/1.1 403 Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
                     await writer.drain()
                     return
-                operation = asyncio.create_task(_handle(reader, writer, registry_loader, config_loader, dial, resolve_provider))
+                operation = asyncio.create_task(_handle(reader, writer, registry_loader, config_loader, dial, resolve_provider, search))
                 watcher = asyncio.create_task(_watch_access(uid, registry_loader, authorize))
                 await asyncio.wait((operation, watcher), return_when=asyncio.FIRST_COMPLETED)
         except (OSError, ValueError, TypeError):
