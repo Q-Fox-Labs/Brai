@@ -141,6 +141,21 @@ test("new documents distinguish expired or revoked sessions from temporary auth 
   assert.deepEqual(await load(headers), { status: "unavailable" });
 });
 
+test("server-confirmed role survives document bootstrap when the web identity setting is absent", async () => {
+  const previous = process.env.WEB_IDENTITY_MODE;
+  delete process.env.WEB_IDENTITY_MODE;
+  try {
+    const load = accountSession.loadAccountSession as (headers: Headers) => Promise<{ status: string; user: { role?: string; status?: string } }>;
+    const headers = new Headers({ cookie: "session=fake" });
+    for (const role of ["admin", "user"] as const) {
+      ownerReply = reply(200, { ...session(), user: { id: "user-1", name: "Имя", role, status: "active" } });
+      const result = await load(headers);
+      assert.equal(result.user.role, role);
+      assert.equal(result.user.status, "active");
+    }
+  } finally { if (previous === undefined) delete process.env.WEB_IDENTITY_MODE; else process.env.WEB_IDENTITY_MODE = previous; }
+});
+
 test("Telegram identity rejects blocked users and redeems a code once through v2", async () => {
   const previous = process.env.WEB_IDENTITY_MODE;
   process.env.WEB_IDENTITY_MODE = "telegram";
