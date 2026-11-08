@@ -286,6 +286,7 @@
       "services/hermes/memos/embedding/adapter.test.mjs",
       "services/hermes/memos/tests/**",
       "services/hermes/telegram/tests/test_plugin.py",
+      "services/hermes/tests/telegram-route.test.mjs",
       "services/hermes/tests/confirmation.test.mjs",
       "services/hermes/tests/tools.test.mjs",
       "services/hermes/tests/transcribe.test.mjs",
