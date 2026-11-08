@@ -78,6 +78,7 @@ class Bridge:
                     await self.on_turn_end(None)
 
     async def dispatch(self, event):
+        """Передать событие внутри fence до подготовки, сохранив исходную квитанцию."""
         async with self._dispatch_scope(event) as (peer, scope):
             return await self._dispatch(event, peer, scope)
 
