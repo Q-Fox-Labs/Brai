@@ -175,67 +175,163 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
             params["questionMessageId"] = question
         await self.broker.call(INGRESS_UID, "ingress.close", params)
 
-    async def test_account_link_waits_for_the_delivered_agent_question_and_new_confirmation(self):
+    async def _answer_question(self, original, *, text="Подтверждаю", turn="confirm",
+                               message="103", digit="b", **changes):
+        current = {**original, "turnId": turn, "inputId": digit * 64,
+                   "messageId": message, "accountAnswer": text, **changes}
+        await self.broker.call(INGRESS_UID, "ingress.admit", current)
+        return current
+
+    def _account_mutations(self):
+        return [(method, params) for method, params, _ in self.control.calls
+                if method in ("telegram.link", "telegram.unlink") and params["phase"] != "offer"]
+
+    async def test_account_link_waits_for_delivered_question_and_exact_full_new_answer(self):
+        answer = " Да, я понимаю общий доступ к памяти и файлам. Подключите мой второй личный аккаунт.\n"
         original, first = await self._account_offer()
         self.assertEqual(first["botUrl"], "https://t.me/brai_test_bot")
         self.assertNotIn("code", first)
         await self._close_question(original)
-        await self.broker.call(INGRESS_UID, "ingress.admit", {**original,
-            "turnId": "confirm", "inputId": "b" * 64, "messageId": "103", "linkConsent": True})
-        final = await self.broker.call(WORKER_UID, "telegram.link", {"message": "Перейдите во второй аккаунт."})
+        await self._answer_question(original, text=answer)
+        args = {"message": "Перейдите во второй аккаунт.", "confirmation": answer}
+        final = await self.broker.call(WORKER_UID, "telegram.link", args)
         self.assertEqual(final, {"status": "sent", "phase": "command", "suppressFinal": True})
         self.assertNotIn("synthetic-secret", json.dumps(final))
-        await self.broker.call(WORKER_UID, "telegram.link", {"message": "Перейдите во второй аккаунт."})
-        commands = [params for method, params, _ in self.control.calls
-                    if method == "telegram.link" and params["phase"] == "command"]
-        self.assertEqual(len(commands), 1)
-        self.assertEqual(commands[0]["message"], "Перейдите во второй аккаунт.")
+        await self.broker.call(WORKER_UID, "telegram.link", args)
+        self.assertEqual(len(self._account_mutations()), 1)
+        self.assertEqual(self._account_mutations()[0][1]["message"], args["message"])
+        self.assertNotIn("confirmation", self._account_mutations()[0][1])
         self.assertFalse(self.broker.link_offers)
 
-    async def test_link_confirmation_rejects_undelivered_question_wrong_context_refusal_and_old_messages(self):
+    async def test_link_confirmation_rejects_undelivered_wrong_context_refusal_and_old_messages(self):
         self.control.aliases["333444"] = "111222"
-        variants = ["undelivered", "account", "topic", "expired", "no", "refused", "replayed", "edited", "before-question"]
+        variants = ["undelivered", "account", "topic", "expired", "no-answer", "refused",
+                    "replayed", "edited", "before-question", "chat"]
         for index, changed in enumerate(variants):
             with self.subTest(changed=changed):
                 self.broker.turns.clear()
                 self.broker.link_offers.clear()
-                digit = format(index + 1, "x")
-                original, _ = await self._account_offer(turn=changed, digit=digit, message="201")
+                original, _ = await self._account_offer(turn=changed, digit=format(index + 1, "x"), message="201")
                 await self._close_question(original, None if changed == "undelivered" else "202")
                 if changed == "expired":
                     self.broker.link_offers[WORKER_UID]["expires"] = 0
                 account = "333444" if changed == "account" else "111222"
-                await self.broker.call(INGRESS_UID, "ingress.admit", {**original,
-                    "telegramId": account, "chatId": account, "turnId": changed + "-next",
-                    "threadId": 7 if changed == "topic" else None,
-                    "inputId": original["inputId"] if changed == "replayed" else "f" * 64,
-                    "messageId": "201" if changed == "edited" else "202" if changed == "before-question" else "203",
-                    "linkConsent": changed != "no", "accountRefused": changed == "refused"})
-                result = await self.broker.call(WORKER_UID, "telegram.link", {"message": "Вступление"})
-                self.assertEqual(result["status"], "denied" if changed == "refused" else "needs_consent")
-                self.assertEqual(result["phase"], "offer")
-        self.assertFalse(any(method == "telegram.link" and params["phase"] == "command"
-                             for method, params, _ in self.control.calls))
+                await self._answer_question(original, text="" if changed == "no-answer" else "Разрешаю подключить второй аккаунт",
+                    turn=changed + "-next", message="201" if changed == "edited" else "202" if changed == "before-question" else "203",
+                    telegramId=account, chatId="333444" if changed == "chat" else account,
+                    threadId=7 if changed == "topic" else None,
+                    inputId=original["inputId"] if changed == "replayed" else "f" * 64,
+                    accountRefused=changed == "refused")
+                if changed == "chat":
+                    with self.assertRaisesRegex(PermissionError, "Private Telegram turn required"):
+                        await self.broker.call(WORKER_UID, "telegram.link",
+                            {"message": "Вступление", "confirmation": "Разрешаю подключить второй аккаунт"})
+                    continue
+                result = await self.broker.call(WORKER_UID, "telegram.link",
+                    {"message": "Вступление", "confirmation": "Разрешаю подключить второй аккаунт"})
+                self.assertEqual(result["status"], "denied")
+                self.assertEqual(result["reason"], "consent-refused" if changed == "refused" else "confirmation-unavailable")
+        self.assertFalse(self._account_mutations())
+
+    async def test_confirmation_must_equal_whole_trusted_text_without_normalization_or_substring(self):
+        answer = " Да, разрешаю.\n"
+        original, _ = await self._account_offer()
+        await self._close_question(original)
+        await self._answer_question(original, text=answer)
+        for supplied in ["Да, разрешаю.", "разрешаю", answer.upper(), answer + "ещё", "Подтверждаю"]:
+            with self.subTest(supplied=supplied):
+                before = [call for call in self.control.calls if call[0] == "telegram.link"]
+                denied = await self.broker.call(WORKER_UID, "telegram.link",
+                    {"message": "Вступление", "confirmation": supplied})
+                self.assertEqual(denied["reason"], "confirmation-mismatch")
+                self.assertEqual([call for call in self.control.calls if call[0] == "telegram.link"], before)
+        self.assertFalse(self._account_mutations())
+        self.assertEqual((await self.broker.call(WORKER_UID, "telegram.link",
+            {"message": "Вступление", "confirmation": answer}))["status"], "sent")
+
+    async def test_provenance_does_not_classify_answer_or_execute_without_agent_confirmation(self):
+        # Эти формы агент обязан семантически отвергнуть; broker не является классификатором.
+        for index, answer in enumerate(["Да, но только если данные не будут общими",
+                                        "Он сказал: «подтверждаю»", "Нужно ли мне подтвердить?"]):
+            with self.subTest(answer=answer):
+                self.broker.turns.clear()
+                self.broker.link_offers.clear()
+                original, _ = await self._account_offer(turn="semantic-" + str(index), digit=str(index + 1))
+                await self._close_question(original)
+                await self._answer_question(original, text=answer, turn="semantic-answer-" + str(index))
+                self.assertEqual(self.broker.turns[WORKER_UID]["accountAnswer"], answer)
+                self.assertEqual(self.broker.turns[WORKER_UID]["accountAction"], "link")
+                self.assertFalse(self._account_mutations())
+                # Повторный read-only offer отменяет candidate, даже с тем же новым ответом.
+                offered = await self.broker.call(WORKER_UID, "telegram.link", {})
+                self.assertEqual(offered["status"], "needs_consent")
+                denied = await self.broker.call(WORKER_UID, "telegram.link",
+                    {"message": "Вступление", "confirmation": answer})
+                self.assertEqual(denied["reason"], "confirmation-unavailable")
+                self.assertFalse(self._account_mutations())
+
+    async def test_new_human_input_consumes_pending_offer_and_candidate_cannot_move_to_later_input(self):
+        original, _ = await self._account_offer()
+        await self._close_question(original)
+        first = await self._answer_question(original, text="А какие данные?", turn="question")
+        self.assertFalse(self.broker.link_offers)
+        await self._close_question(first, None)
+        await self._answer_question(original, text="Да, подключайте", turn="later", message="105", digit="c")
+        denied = await self.broker.call(WORKER_UID, "telegram.link",
+            {"message": "Вступление", "confirmation": "Да, подключайте"})
+        self.assertEqual(denied["reason"], "confirmation-unavailable")
+        self.assertFalse(self._account_mutations())
+
+    async def test_empty_media_input_consumes_pending_offer_without_confirming(self):
+        original, _ = await self._account_offer()
+        await self._close_question(original)
+        media = await self._answer_question(original, text="", turn="media")
+        self.assertFalse(self.broker.link_offers)
+        await self._close_question(media, None)
+        await self._answer_question(original, text="Подтверждаю", turn="later", message="106", digit="c")
+        self.assertEqual((await self.broker.call(WORKER_UID, "telegram.link",
+            {"message": "Вступление", "confirmation": "Подтверждаю"}))["reason"], "confirmation-unavailable")
+        self.assertFalse(self._account_mutations())
+
+    async def test_offer_without_confirmation_rechecks_control_and_cancels_previous_candidate(self):
+        original, _ = await self._account_offer()
+        await self._close_question(original)
+        await self._answer_question(original, text="Подключайте мой второй аккаунт")
+        for _ in range(2):
+            self.assertEqual((await self.broker.call(WORKER_UID, "telegram.link", {}))["status"], "needs_consent")
+        self.assertEqual(sum(m == "telegram.link" and p["phase"] == "offer" for m, p, _ in self.control.calls), 3)
+        denied = await self.broker.call(WORKER_UID, "telegram.link",
+            {"message": "Вступление", "confirmation": "Подключайте мой второй аккаунт"})
+        self.assertEqual(denied["reason"], "confirmation-unavailable")
+        self.assertFalse(self._account_mutations())
+
+    async def test_candidate_expiry_is_checked_again_at_execution(self):
+        original, _ = await self._account_offer()
+        await self._close_question(original)
+        await self._answer_question(original)
+        self.broker.turns[WORKER_UID]["accountExpires"] = 0
+        before = [call for call in self.control.calls if call[0] == "telegram.link"]
+        result = await self.broker.call(WORKER_UID, "telegram.link",
+            {"message": "Вступление", "confirmation": "Подтверждаю"})
+        self.assertEqual(result["reason"], "confirmation-unavailable")
+        self.assertEqual([call for call in self.control.calls if call[0] == "telegram.link"], before)
 
     async def test_unknown_command_delivery_does_not_repeat_or_authorize_another_command(self):
         original, _ = await self._account_offer(turn="unknown-offer", digit="1", message="301")
         await self._close_question(original, "302")
-        current = {**original, "turnId": "unknown-command", "inputId": "2" * 64,
-                   "messageId": "303", "linkConsent": True}
-        await self.broker.call(INGRESS_UID, "ingress.admit", current)
+        current = await self._answer_question(original, turn="unknown-command", message="303", digit="2")
         self.control.link_status = "unknown"
-        result = await self.broker.call(WORKER_UID, "telegram.link", {"message": "Вступление"})
+        args = {"message": "Вступление", "confirmation": "Подтверждаю"}
+        result = await self.broker.call(WORKER_UID, "telegram.link", args)
         self.assertEqual(result["status"], "unknown")
-        await self.broker.call(WORKER_UID, "telegram.link", {"message": "Вступление"})
-        self.assertEqual(sum(method == "telegram.link" and params["phase"] == "command"
-                             for method, params, _ in self.control.calls), 1)
+        await self.broker.call(WORKER_UID, "telegram.link", args)
+        self.assertEqual(len(self._account_mutations()), 1)
         await self._close_question(current, None)
         self.control.link_status = "sent"
-        await self.broker.call(INGRESS_UID, "ingress.admit", {**current,
-            "turnId": "after-unknown", "inputId": "3" * 64, "messageId": "304"})
-        self.assertEqual((await self.broker.call(WORKER_UID, "telegram.link", {}))["status"], "needs_consent")
+        await self._answer_question(current, turn="after-unknown", message="304", digit="3")
+        self.assertEqual((await self.broker.call(WORKER_UID, "telegram.link", args))["reason"], "confirmation-unavailable")
 
-    async def test_editing_original_human_input_cannot_confirm_a_question_edited_in_an_older_bot_message(self):
+    async def test_editing_original_human_input_cannot_confirm_question_edited_in_older_bot_message(self):
         for index, (human_id, confirmed) in enumerate([("801", False), ("803", True)]):
             with self.subTest(human_id=human_id):
                 self.broker.turns.clear()
@@ -243,63 +339,73 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
                 original, _ = await self._account_offer(turn="older-bot-" + str(index),
                     digit=format(index + 9, "x"), message="801")
                 await self._close_question(original, "800")
-                await self.broker.call(INGRESS_UID, "ingress.admit", {**original,
-                    "turnId": "older-bot-confirm-" + str(index), "inputId": format(index + 11, "x") * 64,
-                    "messageId": human_id, "linkConsent": True})
-                result = await self.broker.call(WORKER_UID, "telegram.link", {"message": "Откройте второй аккаунт."})
-                self.assertEqual(result["status"], "sent" if confirmed else "needs_consent")
-                self.assertEqual(result["phase"], "command" if confirmed else "offer")
+                await self._answer_question(original, turn="older-bot-confirm-" + str(index),
+                    digit=format(index + 11, "x"), message=human_id)
+                result = await self.broker.call(WORKER_UID, "telegram.link",
+                    {"message": "Откройте второй аккаунт.", "confirmation": "Подтверждаю"})
+                self.assertEqual(result["status"], "sent" if confirmed else "denied")
+                if not confirmed:
+                    self.assertEqual(result["reason"], "confirmation-unavailable")
 
-    async def test_question_delivery_metadata_requires_a_positive_real_message_id_from_ingress(self):
+    async def test_question_delivery_metadata_requires_positive_real_message_id_from_ingress(self):
         original, _ = await self._account_offer(turn="invalid-question", digit="9", message="901")
         for question_id in [True, 902, "0", "-1", "bad", "9" * 21]:
-            with self.subTest(question_id=question_id):
-                with self.assertRaises((ValueError, TypeError)):
-                    await self._close_question(original, question_id)
+            with self.subTest(question_id=question_id), self.assertRaises((ValueError, TypeError)):
+                await self._close_question(original, question_id)
         self.assertFalse(self.broker.link_offers[WORKER_UID].get("delivered", False))
         with self.assertRaises(PermissionError):
             await self.broker.call(WORKER_UID, "ingress.close",
                 {"uid": WORKER_UID, "turnId": original["turnId"], "questionMessageId": "902"})
 
-    async def test_invalid_introduction_does_not_claim_or_consume_a_confirmed_command_delivery(self):
+    async def test_invalid_introduction_does_not_claim_or_consume_confirmed_delivery(self):
         original, _ = await self._account_offer(turn="bad-intro", digit="7", message="701")
         await self._close_question(original, "702")
-        await self.broker.call(INGRESS_UID, "ingress.admit", {**original,
-            "turnId": "bad-intro-confirm", "inputId": "8" * 64, "messageId": "703", "linkConsent": True})
-        denied = await self.broker.call(WORKER_UID, "telegram.link", {"message": "https://t.me/another_bot"})
-        self.assertEqual(denied["status"], "needs_instruction")
-        self.assertFalse(any(method == "telegram.link" and params["phase"] == "command"
-                             for method, params, _ in self.control.calls))
-        sent = await self.broker.call(WORKER_UID, "telegram.link", {"message": "Откройте второй аккаунт."})
+        await self._answer_question(original, turn="bad-intro-confirm", digit="8", message="703")
+        for message in ["https://t.me/another_bot", "@another_bot", "/start", ""]:
+            result = await self.broker.call(WORKER_UID, "telegram.link",
+                {"message": message, "confirmation": "Подтверждаю"})
+            self.assertEqual(result["status"], "needs_instruction")
+        self.assertFalse(self._account_mutations())
+        sent = await self.broker.call(WORKER_UID, "telegram.link",
+            {"message": "Откройте второй аккаунт.", "confirmation": "Подтверждаю"})
         self.assertEqual(sent["status"], "sent")
-        self.assertEqual(sum(method == "telegram.link" and params["phase"] == "command"
-                             for method, params, _ in self.control.calls), 1)
+        self.assertEqual(len(self._account_mutations()), 1)
 
     async def test_account_link_rejects_forged_tool_confirmation_arguments(self):
         with self.assertRaises(PermissionError):
             await self.broker.call(WORKER_UID, "telegram.link", {"confirmed": True})
+        await self.broker.call(INGRESS_UID, "ingress.admit",
+            {"telegramId": "111222", "chatId": "111222", "privateChat": True, "turnId": "no-offer"})
+        result = await self.broker.call(WORKER_UID, "telegram.link",
+            {"message": "Вступление", "confirmation": "Разрешаю"})
+        self.assertEqual(result["reason"], "confirmation-unavailable")
         self.assertFalse(any(method == "telegram.link" for method, _, _ in self.control.calls))
 
-    async def test_unlink_pins_the_id_and_accepts_generic_human_consent_only_after_question_delivery(self):
-        for index, consent in enumerate([{"linkConsent": True}, {"unlinkConsent": "333444"}]):
-            with self.subTest(consent=consent):
+    async def test_unlink_pins_id_and_accepts_exact_full_answer_after_question_delivery(self):
+        for index, answer in enumerate(["Да, отвяжите именно второй аккаунт. Я понимаю последствия.",
+                                         "Подтверждаю отвязку Telegram-аккаунта 333444"]):
+            with self.subTest(answer=answer):
                 self.broker.turns.clear()
                 self.broker.unlink_offers.clear()
                 original, _ = await self._account_offer("telegram.unlink", turn="unlink-" + str(index),
                     digit=str(index + 4), message="401")
                 await self._close_question(original, "402")
-                await self.broker.call(INGRESS_UID, "ingress.admit", {**original,
-                    "turnId": "unlink-confirm-" + str(index), "inputId": str(index + 6) * 64,
-                    "messageId": "403", **consent})
-                result = await self.broker.call(WORKER_UID, "telegram.unlink", {"target": "other"})
+                await self._answer_question(original, text=answer, turn="unlink-confirm-" + str(index),
+                    digit=str(index + 6), message="403")
+                args = {"target": "other", "confirmation": answer}
+                result = await self.broker.call(WORKER_UID, "telegram.unlink", args)
                 self.assertEqual(result, {"status": "sent", "phase": "confirm", "suppressFinal": True})
-                params = [p for m, p, _ in self.control.calls if m == "telegram.unlink" and p["phase"] == "confirm"][-1]
+                params = self._account_mutations()[-1][1]
                 self.assertEqual(params["targetTelegramId"], "333444")
+                self.assertNotIn("confirmation", params)
                 self.assertFalse(self.broker.unlink_offers)
+                await self.broker.call(WORKER_UID, "telegram.unlink", args)
+                self.assertEqual(sum(m == "telegram.unlink" and p["phase"] == "confirm"
+                                     for m, p, _ in self.control.calls), index + 1)
 
-    async def test_unlink_rejects_wrong_id_account_topic_expiry_refusal_replay_and_missing_question(self):
+    async def test_unlink_rejects_target_switch_context_expiry_refusal_replay_and_missing_question(self):
         self.control.aliases["333444"] = "111222"
-        variants = ["id", "account", "topic", "expired", "no", "refused", "replayed", "undelivered", "edited", "before-question"]
+        variants = ["target", "account", "topic", "expired", "no-answer", "refused", "replayed", "undelivered", "edited", "before-question"]
         for index, changed in enumerate(variants):
             with self.subTest(changed=changed):
                 self.broker.turns.clear()
@@ -310,40 +416,120 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
                 if changed == "expired":
                     self.broker.unlink_offers[WORKER_UID]["expires"] = 0
                 account = "333444" if changed == "account" else "111222"
-                await self.broker.call(INGRESS_UID, "ingress.admit", {**original,
-                    "telegramId": account, "chatId": account, "turnId": changed + "-next",
-                    "inputId": original["inputId"] if changed == "replayed" else "e" * 64,
-                    "threadId": 7 if changed == "topic" else None,
-                    "messageId": "501" if changed == "edited" else "502" if changed == "before-question" else "503",
-                    "unlinkConsent": "999999" if changed == "id" else "" if changed in ("no", "refused") else "111222",
-                    "accountRefused": changed == "refused"})
-                result = await self.broker.call(WORKER_UID, "telegram.unlink", {"target": "current"})
-                self.assertEqual(result["status"], "denied" if changed == "refused" else "needs_consent")
-        self.assertFalse(any(method == "telegram.unlink" and params["phase"] == "confirm"
-                             for method, params, _ in self.control.calls))
+                await self._answer_question(original, text="" if changed == "no-answer" else "Отвяжите этот аккаунт",
+                    turn=changed + "-next", telegramId=account, chatId=account,
+                    inputId=original["inputId"] if changed == "replayed" else "e" * 64,
+                    threadId=7 if changed == "topic" else None,
+                    message="501" if changed == "edited" else "502" if changed == "before-question" else "503",
+                    accountRefused=changed == "refused")
+                result = await self.broker.call(WORKER_UID, "telegram.unlink",
+                    {"target": "other" if changed == "target" else "current", "confirmation": "Отвяжите этот аккаунт"})
+                self.assertEqual(result["status"], "denied")
+                self.assertEqual(result["reason"], "consent-refused" if changed == "refused" else "confirmation-unavailable")
+        self.assertFalse(self._account_mutations())
 
-    async def test_a_new_account_action_cancels_the_other_offer_and_cannot_reuse_its_question(self):
+    async def test_new_account_action_cancels_other_offer_and_cannot_reuse_its_answer(self):
         original, _ = await self._account_offer(turn="switch-action", digit="1", message="601")
         result = await self.broker.call(WORKER_UID, "telegram.unlink", {"target": "other"})
         self.assertEqual(result["status"], "needs_consent")
         await self._close_question(original, "602")
-        await self.broker.call(INGRESS_UID, "ingress.admit", {**original,
-            "turnId": "switch-confirm", "inputId": "2" * 64, "messageId": "603", "linkConsent": True})
-        result = await self.broker.call(WORKER_UID, "telegram.link", {"message": "Вступление"})
-        self.assertEqual(result["status"], "needs_consent")
-        self.assertFalse(any(method == "telegram.link" and params["phase"] == "command"
-                             for method, params, _ in self.control.calls))
+        await self._answer_question(original, turn="switch-confirm", digit="2", message="603")
+        result = await self.broker.call(WORKER_UID, "telegram.link",
+            {"message": "Вступление", "confirmation": "Подтверждаю"})
+        self.assertEqual(result["reason"], "confirmation-unavailable")
+        # Новый вопрос другого действия отменяет и полученный unlink candidate.
+        await self.broker.call(WORKER_UID, "telegram.link", {})
+        result = await self.broker.call(WORKER_UID, "telegram.unlink",
+            {"target": "other", "confirmation": "Подтверждаю"})
+        self.assertEqual(result["reason"], "confirmation-unavailable")
+        self.assertFalse(self._account_mutations())
 
-    async def test_unlink_cannot_be_called_by_ingress_or_with_model_confirmation(self):
+    async def test_unlink_cannot_be_called_by_ingress_or_with_foreign_owner_or_legacy_boolean(self):
         for actor, method, params in [
-            (INGRESS_UID, 'identity.unlink', {'telegramId': '111222'}),
-            (INGRESS_UID, 'telegram.unlink', {'target': 'current'}),
-            (WORKER_UID, 'telegram.unlink', {'target': 'current', 'confirmed': True}),
-            (WORKER_UID, 'telegram.unlink', {'target': '999999'}),
+            (INGRESS_UID, "identity.unlink", {"telegramId": "111222"}),
+            (INGRESS_UID, "telegram.unlink", {"target": "current"}),
+            (WORKER_UID, "telegram.unlink", {"target": "current", "confirmed": True}),
+            (WORKER_UID, "telegram.unlink", {"target": "999999"}),
         ]:
             with self.assertRaises(PermissionError):
                 await self.broker.call(actor, method, params)
-        self.assertFalse(any(m == 'telegram.unlink' for m, _, _ in self.control.calls))
+        self.assertFalse(any(m == "telegram.unlink" for m, _, _ in self.control.calls))
+
+    def test_account_confirmation_rpc_contract_rejects_oversize_nonstrings_and_legacy_flags(self):
+        for value in [True, 123, [], {}, None, "x" * 8193]:
+            for method, base, key in [
+                ("ingress.admit", {"telegramId": "111222", "chatId": "111222", "privateChat": True, "turnId": "a"}, "accountAnswer"),
+                ("telegram.link", {}, "confirmation"),
+                ("telegram.unlink", {"target": "current"}, "confirmation")]:
+                with self.subTest(method=method, value_type=type(value).__name__), self.assertRaises(ValueError):
+                    broker_module.validate_params(method, {**base, key: value})
+        for flag in ["linkConsent", "unlinkConsent"]:
+            with self.assertRaises(ValueError):
+                broker_module.validate_params("ingress.admit",
+                    {"telegramId": "111222", "chatId": "111222", "privateChat": True, "turnId": "a", flag: True})
+
+    async def test_waiting_confirmation_cannot_execute_after_turn_closed_or_replaced(self):
+        for method in ["telegram.link", "telegram.unlink"]:
+            for replacement in [False, True]:
+                with self.subTest(method=method, replacement=replacement):
+                    self.broker.turns.clear()
+                    self.broker.link_offers.clear()
+                    self.broker.unlink_offers.clear()
+                    original, _ = await self._account_offer(method, turn="locked-offer")
+                    await self._close_question(original)
+                    current = await self._answer_question(original, turn="locked-answer")
+                    args = {"confirmation": "Подтверждаю", **(
+                        {"message": "Откройте второй аккаунт."} if method == "telegram.link" else {"target": "other"})}
+                    lock = self.broker.login_locks.setdefault(WORKER_UID, asyncio.Lock())
+                    await lock.acquire()
+                    task = asyncio.create_task(self.broker.call(WORKER_UID, method, args))
+                    try:
+                        await asyncio.sleep(0)
+                        self.assertFalse(task.done())
+                        await self._close_question(current, None)
+                        if replacement:
+                            await self._answer_question(original, text="Нет", turn="new-refusal",
+                                message="105", digit="c", accountRefused=True)
+                    finally:
+                        lock.release()
+                    with self.assertRaisesRegex(PermissionError, "Owner turn changed"):
+                        await task
+                    self.assertFalse(self._account_mutations())
+
+    async def test_offer_result_cannot_install_pending_question_after_awaited_turn_changed(self):
+        original_call = self.control.call
+        for method in ["telegram.link", "telegram.unlink"]:
+            with self.subTest(method=method):
+                self.broker.turns.clear()
+                self.broker.link_offers.clear()
+                self.broker.unlink_offers.clear()
+                original = {"telegramId": "111222", "chatId": "111222", "privateChat": True,
+                    "turnId": "delayed-offer", "inputId": "a" * 64, "messageId": "101"}
+                await self.broker.call(INGRESS_UID, "ingress.admit", original)
+                entered, release = asyncio.Event(), asyncio.Event()
+                async def delayed(operation, params, timeout=35):
+                    if operation == method and params.get("phase") == "offer":
+                        entered.set()
+                        await release.wait()
+                    return await original_call(operation, params, timeout)
+                self.control.call = delayed
+                task = asyncio.create_task(self.broker.call(WORKER_UID, method,
+                    {"target": "other"} if method == "telegram.unlink" else {}))
+                try:
+                    await asyncio.wait_for(entered.wait(), 1)
+                    await self._close_question(original, None)
+                    await self._answer_question(original, text="Нет", turn="after-delayed-offer",
+                        message="103", digit="b", accountRefused=True)
+                finally:
+                    release.set()
+                try:
+                    with self.assertRaisesRegex(PermissionError, "Owner turn changed"):
+                        await task
+                finally:
+                    self.control.call = original_call
+                self.assertFalse(self.broker.link_offers)
+                self.assertFalse(self.broker.unlink_offers)
+                self.assertFalse(self._account_mutations())
 
     async def test_worker_cannot_manage_telegram_account_bindings(self):
         for method in ['identity.link-issue', 'identity.link-redeem', 'identity.unlink']:

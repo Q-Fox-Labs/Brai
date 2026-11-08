@@ -145,17 +145,21 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         broker.assert_not_awaited()
         self.assertIn('подтверждение', adapter.send.await_args.args[1])
 
-    async def test_unlink_consent_contains_only_exact_human_confirmed_account_id(self):
-        for text, expected in [('Подтверждаю отвязку Telegram-аккаунта 123', '123'),
-                               ('Подтверждаю отвязку Telegram-аккаунта 456!', '456'),
-                               ('Да', ''), ('Отвяжи аккаунт 123', ''),
-                               ('В архиве: Подтверждаю отвязку Telegram-аккаунта 123', '')]:
-            incoming = event()
-            incoming.text = text
-            broker = AsyncMock(side_effect=[{}, {'paths': ['/user/a']}])
-            with patch.object(runtime, 'broker_call', broker):
-                await runtime.Resolver(NS()).prepare(profile(), incoming)
-            self.assertEqual(broker.await_args_list[0].args[1]['unlinkConsent'], expected)
+    async def test_full_human_answer_is_forwarded_without_parsing_or_normalization(self):
+        for text in ["Подтверждаю отвязку Telegram-аккаунта 123",
+                     " Да, это мой второй личный аккаунт. Все риски понимаю.\n",
+                     "Да", "Отвяжи аккаунт 123", "В архиве: подтверждаю", "Подтверждаю, если…",
+                     "Не подтверждаю", ""]:
+            with self.subTest(text=text):
+                incoming = event()
+                incoming.text = text
+                broker = AsyncMock(side_effect=[{}, {"paths": ["/user/a"]}])
+                with patch.object(runtime, "broker_call", broker):
+                    await runtime.Resolver(NS()).prepare(profile(), incoming)
+                admission = broker.await_args_list[0].args[1]
+                self.assertEqual(admission["accountAnswer"], text)
+                self.assertNotIn("linkConsent", admission)
+                self.assertNotIn("unlinkConsent", admission)
 
     async def test_malformed_link_secrets_never_reach_broker_or_agent(self):
         for secret in ['short', 'a' * 44, 'a' * 43 + '\nextra']:
@@ -195,21 +199,18 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(admission['privateChat'], True)
         self.assertEqual(admission['telegramId'], '123')
 
-    async def test_confirmation_uses_natural_current_human_text_without_quotes_conditions_or_negation(self):
-        positive = ["Подтверждаю", "Да, подтверждаю!", "Согласен.", "Согласна",
-                    "Подтверждаю привязку моего второго аккаунта"]
-        negative = ["Не подтверждаю", "Не согласен", "Нет", "Отмена",
-                    "«Подтверждаю»", '"подтверждаю"', "Он сказал: подтверждаю",
-                    "Подтверждаю, если это бесплатно", "Согласен при условии, что данные не общие",
-                    "В архиве было: да"]
-        for text, expected in [(text, True) for text in positive] + [(text, False) for text in negative]:
-            with self.subTest(text=text):
+    async def test_answer_limit_keeps_full_text_or_empty_and_never_truncates(self):
+        for text, expected in [("x" * 8192, "x" * 8192), ("x" * 8193, ""), (None, "")]:
+            with self.subTest(size=len(text) if isinstance(text, str) else None):
                 incoming = event()
                 incoming.text = text
                 broker = AsyncMock(side_effect=[{}, {"paths": ["/user/a"]}])
                 with patch.object(runtime, "broker_call", broker):
                     await runtime.Resolver(NS()).prepare(profile(), incoming)
-                self.assertIs(broker.await_args_list[0].args[1]["linkConsent"], expected)
+                admission = broker.await_args_list[0].args[1]
+                self.assertEqual(admission["accountAnswer"], expected)
+                self.assertNotIn("linkConsent", admission)
+                self.assertNotIn("unlinkConsent", admission)
 
     async def test_explicit_account_refusal_is_taken_from_current_text_only(self):
         for text in ["Нет", "Нет!", "Не подтверждаю", "Отмена"]:

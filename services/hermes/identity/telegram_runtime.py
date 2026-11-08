@@ -85,15 +85,6 @@ async def _notice(adapter, chat, message, text):
         _notices[key] = now
 
 
-def _account_consent(text):
-    """Распознать короткое прямое согласие; не принимать цитаты, условия и вопросы."""
-    value = ' '.join((text or '').strip().casefold().rstrip('.!').split())
-    return value in ('да', 'да, подтверждаю', 'подтверждаю', 'да, разрешаю', 'разрешаю',
-                     'согласен', 'согласна', 'да, согласен', 'да, согласна', 'давай',
-                     'подключай', 'отвязывай', 'yes', 'approve',
-                     'подтверждаю привязку моего второго аккаунта')
-
-
 def _linked_accounts_text(accounts):
     """Показать только имена и usernames из Telegram, без внутренних идентификаторов."""
     if not isinstance(accounts, list) or not accounts:
@@ -330,12 +321,10 @@ class Resolver:
                              for item in inputs]}
         input_id = hashlib.sha256(json.dumps(origin, ensure_ascii=False, sort_keys=True,
                                             separators=(',', ':')).encode()).hexdigest()
-        unlink = re.fullmatch(r'подтверждаю отвязку telegram-аккаунта ([1-9][0-9]{0,19})',
-                              (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!'))
+        answer = getattr(event, 'text', '') or ''
         await broker_call('ingress.admit', {'inputId': input_id, 'messageId': str(event.message_id), 'expectedUid': uid, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
             'privateChat': getattr(event.source, 'chat_type', '') == 'dm', 'turnId': turn['id'],
-            'unlinkConsent': unlink[1] if unlink else '',
-            'linkConsent': _account_consent(getattr(event, 'text', '') or ''),
+            'accountAnswer': answer if isinstance(answer, str) and len(answer) <= 8192 else '',
             'accountRefused': (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!') in
                 ('нет', 'отмена', 'не подтверждаю', 'не разрешаю', 'не подключай', 'не отвязывай'),
             **({'threadId': int(route[1])} if route[1] else {})})

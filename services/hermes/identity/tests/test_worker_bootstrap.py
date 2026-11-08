@@ -56,35 +56,64 @@ class ToolClientTest(unittest.TestCase):
         self.assertFalse(login['inputSchema']['properties'])
         self.assertFalse(login['inputSchema']['additionalProperties'])
 
-    def test_account_link_tool_requires_no_model_supplied_confirmation_or_owner(self):
-        with patch.object(tool_client, 'broker_call', return_value={'tools': []}):
-            catalog = tool_client.handle('tools/list', {})['tools']
-        tool = next(item for item in catalog if item['name'] == 'brai_telegram_link_account')
-        self.assertIn('полный доступ', tool['description'])
-        self.assertEqual(set(tool['inputSchema']['properties']), {'message'})
-        self.assertFalse(tool['inputSchema'].get('required'))
-        for phase in ['offer', 'command']:
-            with patch.object(tool_client, 'broker_call', return_value={
-                    'status': 'sent', 'phase': phase, 'suppressFinal': True, 'code': 'private-secret'}) as call:
-                result = tool_client.handle('tools/call', {'name': tool['name'], 'arguments': {}})
-            call.assert_called_once_with('telegram.link', {})
-            self.assertNotIn('private-secret', json.dumps(result))
-        with self.assertRaises(ValueError):
-            tool_client.handle('tools/call', {'name': tool['name'], 'arguments': {'confirmed': True}})
+    def test_account_tools_accept_only_full_text_confirmation_without_model_selected_owner(self):
+        with patch.object(tool_client, "broker_call", return_value={"tools": []}):
+            catalog = tool_client.handle("tools/list", {})["tools"]
+        link = next(t for t in catalog if t["name"] == "brai_telegram_link_account")
+        unlink = next(t for t in catalog if t["name"] == "brai_telegram_unlink_account")
+        self.assertIn("полный доступ", link["description"])
+        self.assertEqual(set(link["inputSchema"]["properties"]), {"message", "confirmation"})
+        self.assertFalse(link["inputSchema"].get("required"))
+        self.assertEqual(set(unlink["inputSchema"]["properties"]), {"target", "confirmation"})
+        self.assertEqual(unlink["inputSchema"]["properties"]["target"]["enum"], ["current", "other"])
+        self.assertEqual(unlink["inputSchema"]["required"], ["target"])
+        for tool in [link, unlink]:
+            self.assertFalse(tool["inputSchema"]["additionalProperties"])
+            self.assertEqual(tool["inputSchema"]["properties"]["confirmation"],
+                             {"type": "string", "minLength": 1, "maxLength": 8192})
+            self.assertIn("точн", tool["description"])
+            self.assertIn("цитата", tool["description"])
+            self.assertIn("условие", tool["description"])
+            self.assertIn("вопрос", tool["description"])
+            base = {} if tool is link else {"target": "other"}
+            for extra in [{"confirmed": True}, {"uid": 0}, {"telegramId": "123"},
+                          {"confirmation": True}, {"confirmation": ""}, {"confirmation": "x" * 8193}]:
+                with self.subTest(tool=tool["name"], extra_type=next(iter(extra))), self.assertRaises(ValueError):
+                    tool_client.handle("tools/call", {"name": tool["name"], "arguments": {**base, **extra}})
 
-    def test_unlink_tool_never_accepts_model_confirmation_or_foreign_id(self):
-        with patch.object(tool_client, 'broker_call', return_value={'tools': []}):
-            tools = tool_client.handle('tools/list', {})['tools']
-        tool = next(t for t in tools if t['name'] == 'brai_telegram_unlink_account')
-        self.assertEqual(tool['inputSchema']['properties']['target']['enum'], ['current', 'other'])
-        for args in [{'target': '123'}, {'target': 'current', 'confirmed': True}, {}]:
-            with self.assertRaises(ValueError):
-                tool_client.handle('tools/call', {'name': tool['name'], 'arguments': args})
-        with patch.object(tool_client, 'broker_call', return_value={'status': 'needs_consent', 'phase': 'offer', 'suppressFinal': False}) as call:
-            result = tool_client.handle('tools/call', {'name': tool['name'], 'arguments': {'target': 'other'}})
-        call.assert_called_once_with('telegram.unlink', {'target': 'other'})
-        self.assertIn('needs_consent', result['content'][0]['text'])
-        self.assertIn('ясного согласия', result['content'][0]['text'])
+        answer = " Да, разрешаю подключить мой второй аккаунт.\n"
+        for tool, operation, args in [
+            (link, "telegram.link", {"message": "Откройте второй аккаунт.", "confirmation": answer}),
+            (unlink, "telegram.unlink", {"target": "other", "confirmation": answer}),
+        ]:
+            with patch.object(tool_client, "broker_call", return_value={
+                    "status": "sent", "phase": "command", "suppressFinal": True, "code": "private-secret"}) as call:
+                result = tool_client.handle("tools/call", {"name": tool["name"], "arguments": args})
+            call.assert_called_once_with(operation, args)
+            self.assertNotIn("private-secret", json.dumps(result))
+
+    def test_unlink_offer_hides_id_and_requests_agent_authored_question_without_magic_phrase(self):
+        args = {"target": "other"}
+        with patch.object(tool_client, "broker_call", return_value={
+                "status": "needs_consent", "phase": "offer", "suppressFinal": False,
+                "targetTelegramId": "123456789", "profileId": "internal-profile",
+                "account": {"name": "Synthetic", "username": "synthetic"}, "lastChannel": False}) as call:
+            result = tool_client.handle("tools/call", {"name": "brai_telegram_unlink_account", "arguments": args})
+        call.assert_called_once_with("telegram.unlink", args)
+        value = result["content"][0]["text"]
+        self.assertIn("needs_consent", value)
+        self.assertIn("ясного согласия", value)
+        self.assertNotIn("123456789", value)
+        self.assertNotIn("internal-profile", value)
+
+    def test_account_tool_reports_provenance_denial_without_inventing_confirmation(self):
+        for reason, expected in [("confirmation-unavailable", "Нет нового ответа"),
+                                 ("confirmation-mismatch", "не совпал")]:
+            with patch.object(tool_client, "broker_call", return_value={"status": "denied", "reason": reason}):
+                result = tool_client.handle("tools/call", {"name": "brai_telegram_link_account",
+                    "arguments": {"confirmation": "Согласен", "message": "Вступление"}})
+            self.assertTrue(result["isError"])
+            self.assertIn(expected, result["content"][0]["text"])
 
     def test_login_never_exposes_broker_payload(self):
         with patch.object(tool_client, 'broker_call', return_value={'status':'sent', 'suppressFinal':True, 'code':'secret'}):
