@@ -502,6 +502,11 @@ export async function startControl(config, adapters = {}) {
 export async function privateCall(runtime, method, params) {
   if (!object(params)) throw new Error('INVALID_ARGUMENT');
   const { control, authCall, registry } = runtime;
+  if (['identity.lifecycle-claim', 'identity.lifecycle-renew', 'identity.lifecycle-complete'].includes(method)) {
+    // AIDEV-NOTE: Эти методы доступны только stdin root broker, не Unix API worker.
+    const operation = method.slice('identity.'.length);
+    return authCall(operation, params);
+  }
   if (method === 'identity.resolve') return authCall('telegram-resolve', { telegramId: params.telegramId });
   if (method === 'identity.invite-redeem') return authCall('invite-redeem', { telegramId: params.telegramId, code: params.code, ...(params.name === undefined ? {} : { name: params.name }) });
   if (method === 'identity.profile-ready') {

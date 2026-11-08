@@ -31,15 +31,20 @@ export async function issueCode(pool:Pool,secret:string,telegramId:string) {
   await client.query("COMMIT");return {code,expiresAt:(saved.rows[0].expires_at as Date).toISOString()};
  } catch(error){await client.query("ROLLBACK");throw error;} finally{client.release();}
 }
-/** Однократно возвращает ID активного пользователя; лимиты не зависят от кода. */
-export async function consumeCode(pool:Pool,secret:string,input:string,clientKey:string):Promise<string|null> {
+/** Погашает код и возвращает поколение доступа, к которому относится вход. */
+export async function consumeCodeGrant(pool:Pool,secret:string,input:string,clientKey:string):Promise<{userId:string;generation:number}|null> {
  const client=await pool.connect();
  try {
   await client.query("BEGIN");
   const global=await limit(client,secret,"redeem:global",300);
   const local=await limit(client,secret,`redeem:client:${clientKey}`,10);
-  const code=normalizeCode(input);let id:string|null=null;
-  if(global&&local&&code){const row=await client.query(`DELETE FROM brai_login_code c USING brai_identity i WHERE c.user_id=i.user_id AND i.status='active' AND c.digest=$1 AND c.expires_at>now() RETURNING c.user_id`,[digest(secret,`code:${code}`)]);id=row.rows[0]?.user_id??null;}
-  await client.query("COMMIT");return id;
+  const code=normalizeCode(input);let grant:{userId:string;generation:number}|null=null;
+  if(global&&local&&code){const row=await client.query(`DELETE FROM brai_login_code c USING brai_identity i WHERE c.user_id=i.user_id AND i.status='active' AND c.digest=$1 AND c.expires_at>now() RETURNING c.user_id,i.lifecycle_generation`,[digest(secret,`code:${code}`)]);grant=row.rows[0]?{userId:row.rows[0].user_id,generation:row.rows[0].lifecycle_generation}:null;}
+  await client.query("COMMIT");return grant;
  } catch(error){await client.query("ROLLBACK");throw error;} finally{client.release();}
+}
+
+/** Сохраняет прежний интерфейс однократного чтения ID для операторских проверок. */
+export async function consumeCode(pool:Pool,secret:string,input:string,clientKey:string):Promise<string|null> {
+ return (await consumeCodeGrant(pool,secret,input,clientKey))?.userId??null;
 }

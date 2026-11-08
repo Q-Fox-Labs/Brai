@@ -13,6 +13,7 @@ import { getMigrations } from "better-auth/db/migration";
 import { createAuth } from "../../dist/auth.js";
 import { migrateIdentity } from "../../dist/identity-schema.js";
 import { issueCode, consumeCode } from "../../dist/login-code.js";
+import { lifecycleWorker } from "../../dist/lifecycle.js";
 import { adminAction } from "../../dist/admin.js";
 import { provision, profileReady, redeemInvite } from "../../dist/identity.js";
 
@@ -72,6 +73,9 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   const retry=await redeemInvite(pool,secret,winner.telegramId,code);
   assert.equal(retry.id,winner.id);
   assert.equal(retry.profileId,winner.profileId);
+  const invitedOperation=(await lifecycleWorker(pool,"claim",{workerId:"identity-invite"})).operation;
+  assert.equal(invitedOperation.userId,winner.id);
+  assert.equal((await lifecycleWorker(pool,"complete",{operationId:invitedOperation.id,leaseToken:invitedOperation.leaseToken,success:true})).accepted,true);
   assert.equal((await pool.query("SELECT digest FROM brai_invite WHERE id=$1",[created.body.invite.id])).rows[0].digest.includes(code),false);
   const audit=await adminAction(pool,secret,owner,"admin-audit",{userId:user.id,action:"memory.read"});
   assert.equal(audit.status,200);assert.ok(audit.body.auditId);

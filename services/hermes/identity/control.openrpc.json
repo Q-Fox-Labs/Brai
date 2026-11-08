@@ -583,6 +583,118 @@
           "$ref": "#/components/errors/InvalidParams"
         }
       ]
+    },
+    {
+      "name": "identity.lifecycle-claim",
+      "description": "Только root broker. Постоянная операция Auth, lease и поколение проверяются Auth.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "workerId",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleClaimRequest/properties/workerId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleClaimResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "identity.lifecycle-renew",
+      "description": "Только root broker. Постоянная операция Auth, lease и поколение проверяются Auth.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleRenewRequest/properties/operationId"
+          }
+        },
+        {
+          "name": "leaseToken",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleRenewRequest/properties/leaseToken"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleAcceptedResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "identity.lifecycle-complete",
+      "description": "Только root broker. Постоянная операция Auth, lease и поколение проверяются Auth.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteRequest/properties/operationId"
+          }
+        },
+        {
+          "name": "leaseToken",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteRequest/properties/leaseToken"
+          }
+        },
+        {
+          "name": "success",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteRequest/properties/success"
+          }
+        },
+        {
+          "name": "errorCode",
+          "required": false,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteRequest/properties/errorCode"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
     }
   ],
   "components": {

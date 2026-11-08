@@ -218,3 +218,5 @@ npm test --workspace=@brai/hermes
 подписочный proxy. Формат выбирается явным `router.transport: codex_responses`;
 [параметры и ошибки транспорта](extensions/plugins/memos-rest/docs/routing.md)
 описаны у провайдера. Общие credentials в личный профиль не передаются.
+
+Администратор может выдать доступ по Telegram ID и отозвать его через «Админку» Web. Постоянная операция Auth исполняется существующим root broker через установленный Ansible lifecycle; повторная выдача сохраняет идентичность и данные. [Контракт доступа](identity/CONTROL.md#административная-выдача-и-отзыв-доступа).
