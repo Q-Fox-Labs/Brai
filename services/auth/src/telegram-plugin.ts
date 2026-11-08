@@ -5,6 +5,7 @@ import { setSessionCookie } from "better-auth/cookies";
 import { z } from "zod";
 import type { Pool } from "pg";
 import { consumeCodeGrant } from "./login-code.js";
+import { lifecycleLock } from "./lifecycle.js";
 
 /** Возвращает штатное расширение Better Auth для входа по коду. */
 export function telegramPlugin(pool:Pool,secret:string) {
@@ -18,8 +19,15 @@ export function telegramPlugin(pool:Pool,secret:string) {
   if(!session)throw ctx.error("INTERNAL_SERVER_ERROR",{message:"Session unavailable"});
   // AIDEV-NOTE: Код мог быть погашен до revoke, а сессия создана после него.
   // Эпоха хранится на сессии: восстановление учётной записи не оживляет старый вход.
-  const stamped=await pool.query('UPDATE "session" s SET brai_generation=$3 FROM brai_identity i WHERE s.id=$1 AND s."userId"=$2 AND i.user_id=s."userId" AND i.status=\'active\' AND i.lifecycle_generation=$3 RETURNING s.id',[session.id,user.id,grant.generation]);
-  if(!stamped.rowCount){await pool.query('DELETE FROM "session" WHERE id=$1 AND "userId"=$2',[session.id,user.id]);throw ctx.error("UNAUTHORIZED",{message:"Invalid code"});}
+  const client=await pool.connect();let valid=false;
+  try{
+   await client.query("BEGIN");await lifecycleLock(client);
+   const stamped=await client.query('UPDATE "session" s SET brai_generation=$3 FROM brai_identity i WHERE s.id=$1 AND s."userId"=$2 AND i.user_id=s."userId" AND i.status=\'active\' AND i.lifecycle_generation=$3 RETURNING s.id',[session.id,user.id,grant.generation]);
+   valid=!!stamped.rowCount;
+   if(!valid)await client.query('DELETE FROM "session" WHERE id=$1 AND "userId"=$2',[session.id,user.id]);
+   await client.query("COMMIT");
+  }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
+  if(!valid)throw ctx.error("UNAUTHORIZED",{message:"Invalid code"});
   await setSessionCookie(ctx,{session,user});
   return ctx.json({success:true});
  })}};

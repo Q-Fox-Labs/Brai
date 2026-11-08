@@ -72,6 +72,7 @@ test('Telegram mode disables email and issues cookie without a JSON token',async
  const client={async query(sql){
   if(sql.includes('INSERT INTO brai_auth_limit'))return {rows:[{count:1}]};
   if(sql.includes('DELETE FROM brai_login_code')){if(consumed)return {rows:[]};consumed=true;return {rows:[{user_id:'user1',lifecycle_generation:0}]};}
+  if(sql.startsWith('UPDATE "session" s SET brai_generation='))return {rowCount:1,rows:[{id:'session'}]};
   return {rows:[]};
  },release(){}};
  const configured=createAuth({...cfg,identityMode:'telegram'},{connect:async()=>client,query:async()=>({rowCount:1,rows:[{id:'session'}]})});

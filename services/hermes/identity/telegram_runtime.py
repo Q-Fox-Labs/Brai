@@ -66,10 +66,28 @@ async def admit_update(update, adapter):
     user = getattr(update, 'effective_user', None)
     chat = getattr(update, 'effective_chat', None)
     if (message is None or user is None or chat is None or getattr(user, 'is_bot', False)
+            or getattr(chat, 'type', None) != 'private' or str(chat.id) != str(user.id)
             or getattr(message, 'sender_chat', None) or getattr(message, 'business_connection_id', None)):
         return False
     telegram = str(getattr(user, 'id', ''))
     if not re.fullmatch(r'[1-9][0-9]{0,19}', telegram):
+        return False
+    raw = (getattr(message, 'text', '') or '').strip()
+    link = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+link_(.*)', raw, flags=re.DOTALL)
+    if link:
+        if not re.fullmatch(r'[A-Za-z0-9_-]{43}', link[1]):
+            await adapter.send(telegram, 'Команда привязки неполная или неверная. Попросите агента подключить второй аккаунт и получите новую команду.')
+            return False
+        try:
+            result = await broker_call('identity.link-redeem', {'telegramId': telegram, 'code': link[1]})
+            text = ('Аккаунт подключён к вашему профилю. Память и файлы общие, беседа отдельная.'
+                    if result.get('user') else 'Не удалось привязать аккаунт. Код истёк, использован или аккаунт уже принадлежит другому профилю.')
+        except Exception:
+            text = 'Результат привязки не подтверждён. Напишите обычное сообщение, чтобы проверить доступ.'
+        await adapter.send(telegram, text)
+        return False
+    if re.fullmatch(r'/unlink(?:@[A-Za-z0-9_]+)?', raw):
+        await adapter.send(telegram, 'Попросите агента отвязать этот или другой ваш аккаунт. Он объяснит последствия и запросит подтверждение.')
         return False
     try:
         await broker_call('identity.resolve', {'telegramId': telegram})
@@ -114,7 +132,7 @@ class Resolver:
         uid = profile['uid']
         if uid not in self.bridges:
             async def prepare(event):
-                return await self.prepare(profile, event)
+                return await self.prepare({**profile, 'telegramId': str(event.source.user_id)}, event)
             async def deliver(owner, action, payload):
                 return await self.deliver(profile, owner, action, payload)
             async def started(turn_id):
@@ -124,17 +142,24 @@ class Resolver:
                 current['workerTurnId'] = turn_id
             async def ended(turn_id):
                 await self.end(profile, turn_id)
-            bridge = Bridge(profile['userId'], profile['telegramId'], uid, profile['workerSocket'],
-                            deliver, prepare, on_turn_start=started, on_turn_end=ended)
+            bridge = Bridge(profile['userId'], profile.get('authorTelegramId', profile['telegramId']), uid, profile['workerSocket'],
+                            deliver, prepare, on_turn_start=started, on_turn_end=ended,
+                            worker_telegram_id=profile.get('authorTelegramId', profile['telegramId']))
+            bridge.profile_id = profile.get('profileId')
             self.bridges[uid] = bridge
         bridge = self.bridges[uid]
-        if (bridge.owner != profile['userId'] or bridge.telegram_id != str(profile['telegramId'])
-                or bridge.worker_uid != uid or bridge.socket_path != profile['workerSocket']):
+        if (bridge.owner != profile['userId'] or bridge.profile_id != profile.get('profileId')
+                or bridge.worker_uid != uid or bridge.socket_path != profile['workerSocket']
+                or bridge.worker_telegram_id != str(profile.get('authorTelegramId', profile['telegramId']))):
             raise PermissionError('Worker identity changed')
+        bridge.telegram_ids.add(str(profile['telegramId']))
         return bridge
 
     async def prepare(self, profile, event):
-        """Скопировать media в личный профиль и исключить общий reply-контекст."""
+        """Допустить только личный чат владельца и скопировать его media в профиль."""
+        if (getattr(event.source, 'chat_type', '') != 'dm'
+                or str(event.source.chat_id) != str(profile['telegramId'])):
+            raise PermissionError('Only private Telegram chats are supported')
         uid = profile['uid']
         route = (str(event.source.chat_id), str(event.source.thread_id or ''))
         turn = self.turns.get(uid)
@@ -151,8 +176,13 @@ class Resolver:
                              for item in inputs]}
         input_id = hashlib.sha256(json.dumps(origin, ensure_ascii=False, sort_keys=True,
                                             separators=(',', ':')).encode()).hexdigest()
-        await broker_call('ingress.admit', {'inputId': input_id, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
+        unlink = re.fullmatch(r'подтверждаю отвязку telegram-аккаунта ([1-9][0-9]{0,19})',
+                              (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!'))
+        await broker_call('ingress.admit', {'inputId': input_id, 'messageId': str(event.message_id), 'expectedUid': uid, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
             'privateChat': getattr(event.source, 'chat_type', '') == 'dm', 'turnId': turn['id'],
+            'unlinkConsent': unlink[1] if unlink else '',
+            'linkConsent': (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!') in
+                ('подтверждаю привязку моего второго аккаунта',),
             **({'threadId': int(route[1])} if route[1] else {})})
         fields = ('text', 'user_name', 'message_id', 'media_urls', 'media_types',
                   'media_text_inlined', 'reply_to_message_id', 'reply_expected')
@@ -181,6 +211,11 @@ class Resolver:
         uid = profile['uid']
         if owner != profile['userId'] or uid not in self.turns:
             raise PermissionError('No active owner turn')
+        metadata = payload.get('metadata') or {}
+        route = (str(payload.get('chat_id') or ''),
+                 str(metadata.get('thread_id') or metadata.get('message_thread_id') or ''))
+        if route != self.turns[uid]['route']:
+            raise PermissionError('Delivery outside current conversation')
         state = await broker_call('ingress.status', {'uid': uid, 'turnId': self.turns[uid]['id']})
         if state.get('suppressFinal'):
             return {'success': True}

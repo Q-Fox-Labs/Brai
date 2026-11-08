@@ -13,6 +13,7 @@ import socket
 import sqlite3
 import stat
 import struct
+import time
 import uuid
 
 from .memory_registry import load_registry
@@ -205,6 +206,8 @@ class Broker:
     def __init__(self, config, control):
         self.config, self.control = config, control
         self.turns, self.locks = {}, {}
+        self.link_offers = {}
+        self.unlink_offers = {}
         self.login_locks, self.login_state = {}, None
         self.files = OwnerFiles(config, control, protected_json)
 
@@ -242,11 +245,11 @@ class Broker:
             raise PermissionError('Invitation required')
         matches = [(uid, p) for uid, p in self.profiles().items()
                    if p['userId'] == user.get('id') and p['profileId'] == user.get('profileId')
-                   and str(p['telegramId']) == telegram_id and p['status'] == 'active']
+                   and str(p['telegramId']) == str(user.get('telegramId')) and p['status'] == 'active']
         if len(matches) != 1:
             raise PermissionError('Profile unavailable')
         uid, profile = matches[0]
-        return {'uid': uid, **profile}
+        return {'uid': uid, **profile, 'authorTelegramId': str(profile['telegramId']), 'telegramId': telegram_id}
 
     async def publish(self, uid, profile, params):
         """Сохранить внутренний порт публикации через owner-bound snapshot."""
@@ -266,6 +269,11 @@ class Broker:
                 return {'allowed': False}
         if method == 'identity.resolve' and ingress:
             return await self.resolve(params.get('telegramId'))
+        if method == 'identity.link-redeem' and ingress:
+            allowed = {'telegramId', 'code'}
+            if set(params) != allowed:
+                raise ValueError('Invalid Telegram account request')
+            return await self.control.call(method, params)
         if method == 'identity.invite-redeem' and ingress:
             if set(params) - {'telegramId', 'code', 'name'}:
                 raise ValueError('Invalid invitation')
@@ -281,17 +289,19 @@ class Broker:
                 # Прямой subprocess после ожидания lock мог запускать уже отозванный профиль.
                 for _ in range(90):
                     current = (await self.control.call('identity.resolve', {
-                        'telegramId': str(user['telegramId'])})).get('user')
+                        'telegramId': str(params['telegramId'])})).get('user')
                     if (not isinstance(current, dict) or current.get('id') != user['id']
                             or current.get('status') == 'blocked'):
                         raise PermissionError('Invitation unavailable')
                     if current.get('status') == 'active':
-                        return await self.resolve(str(user['telegramId']))
+                        return await self.resolve(str(params['telegramId']))
                     await asyncio.sleep(2)
                 raise TimeoutError('Invitation provisioning pending')
         if method in ('ingress.admit', 'ingress.status', 'ingress.close', 'ingress.prepare', 'ingress.artifact') and ingress:
             if method == 'ingress.admit':
                 profile = await self.resolve(params.get('telegramId'))
+                if params.get('expectedUid', profile['uid']) != profile['uid']:
+                    raise PermissionError('Telegram account binding changed')
                 turn_id = params.get('turnId')
                 if not isinstance(turn_id, str) or len(turn_id) > 128 or not turn_id:
                     raise ValueError('Invalid turn')
@@ -313,10 +323,31 @@ class Broker:
                         # Повтор старого input не отменяет более новое живое уточнение.
                         return profile
                 receipt = {'requestId': request_id, 'outcome': outcome}
+                offer = self.link_offers.get(profile['uid'])
+                consent = bool(private and params.get('linkConsent') is True and offer
+                    and offer['expires'] > time.monotonic() and offer['telegramId'] == profile['telegramId']
+                    and offer['chatId'] == str(params.get('chatId')) and offer.get('threadId') == thread_id
+                    and offer['inputId'] != input_id
+                    and params.get('messageId') and offer.get('messageId')
+                    and int(params['messageId']) > int(offer['messageId']))
+                if offer and not consent:
+                    self.link_offers.pop(profile['uid'], None)
+                unlink_offer = self.unlink_offers.get(profile['uid'])
+                unlink_consent = bool(private and unlink_offer
+                    and params.get('unlinkConsent') == unlink_offer['targetTelegramId']
+                    and unlink_offer['expires'] > time.monotonic() and unlink_offer['telegramId'] == profile['telegramId']
+                    and unlink_offer['chatId'] == str(params.get('chatId')) and unlink_offer.get('threadId') == thread_id
+                    and unlink_offer['inputId'] != input_id
+                    and params.get('messageId') and unlink_offer.get('messageId')
+                    and int(params['messageId']) > int(unlink_offer['messageId']))
+                if unlink_offer and not unlink_consent:
+                    self.unlink_offers.pop(profile['uid'], None)
                 self.turns[profile['uid']] = {'turnId': turn_id, 'privateChat': private, 'chatId': str(params.get('chatId')),
-                    'telegramId': profile['telegramId'], 'inputId': input_id, 'threadId': thread_id,
+                    'telegramId': profile['telegramId'], 'inputId': input_id, 'messageId': params.get('messageId'), 'threadId': thread_id,
                     'requestId': receipt['requestId'], 'loginRecord': receipt,
-                    'suppressFinal': receipt['outcome'] == 'sent'}
+                    'suppressFinal': receipt['outcome'] == 'sent', 'linkConsent': consent,
+                    'unlinkTarget': unlink_offer['targetTelegramId'] if unlink_consent else None,
+                    'unlinkMode': unlink_offer['target'] if unlink_consent else None}
                 return profile
             uid = params.get('uid')
             turn = self.turns.get(uid)
@@ -326,6 +357,9 @@ class Broker:
                 self.turns.pop(uid, None)
                 return {'closed': True}
             profile = await self.authorize(uid)
+            origin = await self.resolve(str(turn['telegramId']))
+            if origin['uid'] != uid or origin['profileId'] != profile['profileId']:
+                raise PermissionError('Telegram account binding changed')
             if method == 'ingress.prepare':
                 if set(params) != {'uid', 'turnId', 'paths'}:
                     raise ValueError('Invalid ingress preparation')
@@ -360,6 +394,10 @@ class Broker:
             return await self.files.fetch(peer_uid, profile, params)
         if method in ('files.get', 'files.list', 'files.prepare'):
             return await self.control.call(method, {'uid': peer_uid, 'args': params}, timeout=1800)
+        if method == 'telegram.unlink' and set(params) == {'target'} and params['target'] in ('current', 'other'):
+            return await self.send_account_unlink(peer_uid, profile, params['target'])
+        if method == 'telegram.link' and not params:
+            return await self.send_account_link(peer_uid, profile)
         if method == 'login.send' and not params:
             turn = self.turns.get(peer_uid)
             if not turn or not turn['privateChat']:
@@ -393,12 +431,88 @@ class Broker:
         raise PermissionError('Method unavailable')
 
 
+    async def send_account_link(self, uid, profile):
+        """Сначала доставить предупреждение, после нового подтверждения — одноразовую команду."""
+        self.unlink_offers.pop(uid, None)
+        turn = self.turns.get(uid)
+        if not turn or not turn['privateChat']:
+            raise PermissionError('Private Telegram turn required')
+        origin = await self.resolve(str(turn['telegramId']))
+        if origin['uid'] != uid or origin['profileId'] != profile['profileId']:
+            raise PermissionError('Telegram account binding changed')
+        lock = self.login_locks.setdefault(uid, asyncio.Lock())
+        async with lock:
+            phase = turn.setdefault('linkPhase', 'command' if turn.get('linkConsent') else 'offer')
+            key = 'telegram-link-' + phase + ':' + login_request_id(uid, profile, turn['chatId'], turn['inputId'])
+            claimed, outcome = self.delivery_state().claim(key)
+            if claimed:
+                if phase == 'command':
+                    self.link_offers.pop(uid, None)
+                try:
+                    result = await self.control.call('telegram.link', {'uid': uid, 'telegramId': turn['telegramId'],
+                        'phase': phase, **({'threadId': turn['threadId']} if turn.get('threadId') is not None else {})})
+                    status = result.get('status') if isinstance(result, dict) else None
+                    outcome = status if status in ('sent', 'failed', 'unknown') else 'failed'
+                except Exception:
+                    outcome = 'unknown'
+                self.delivery_state().finish(key, outcome)
+                if phase == 'offer' and outcome == 'sent':
+                    self.link_offers[uid] = {'telegramId': turn['telegramId'], 'chatId': turn['chatId'],
+                        'threadId': turn.get('threadId'), 'inputId': turn['inputId'], 'messageId': turn.get('messageId'), 'expires': time.monotonic() + 300}
+            current = self.turns.get(uid) is turn
+            if current and outcome == 'sent':
+                turn['suppressFinal'] = True
+            return {'status': outcome, 'phase': phase, 'suppressFinal': current and outcome == 'sent'}
+
+
+    async def send_account_unlink(self, uid, profile, target):
+        """Доставить предупреждение; отозвать только зафиксированный аккаунт после нового согласия."""
+        self.link_offers.pop(uid, None)
+        turn = self.turns.get(uid)
+        if not turn or not turn['privateChat']:
+            raise PermissionError('Private Telegram turn required')
+        origin = await self.resolve(str(turn['telegramId']))
+        if origin['uid'] != uid or origin['profileId'] != profile['profileId']:
+            raise PermissionError('Telegram account binding changed')
+        lock = self.login_locks.setdefault(uid, asyncio.Lock())
+        async with lock:
+            phase = turn.setdefault('unlinkPhase:' + target,
+                'confirm' if turn.get('unlinkTarget') and turn.get('unlinkMode') == target else 'offer')
+            key = 'telegram-unlink-' + target + '-' + phase + ':' + login_request_id(uid, profile, turn['chatId'], turn['inputId'])
+            claimed, outcome = self.delivery_state().claim(key)
+            reason = None
+            if claimed:
+                self.unlink_offers.pop(uid, None)
+                try:
+                    result = await self.control.call('telegram.unlink', {'uid': uid, 'telegramId': turn['telegramId'],
+                        'phase': phase, 'target': target,
+                        **({'targetTelegramId': turn['unlinkTarget']} if phase == 'confirm' else {}),
+                        **({'threadId': turn['threadId']} if turn.get('threadId') is not None else {})})
+                    status = result.get('status') if isinstance(result, dict) else None
+                    outcome = status if status in ('sent', 'failed', 'unknown') else 'failed'
+                    reason = result.get('reason') if isinstance(result, dict) else None
+                    selected = result.get('targetTelegramId') if isinstance(result, dict) else None
+                    if phase == 'offer' and outcome == 'sent' and isinstance(selected, str) and selected.isascii() and selected.isdigit():
+                        self.unlink_offers[uid] = {'telegramId': turn['telegramId'], 'chatId': turn['chatId'],
+                            'threadId': turn.get('threadId'), 'inputId': turn['inputId'], 'messageId': turn.get('messageId'), 'expires': time.monotonic() + 300,
+                            'target': target, 'targetTelegramId': selected}
+                except Exception:
+                    outcome = 'unknown'
+                self.delivery_state().finish(key, outcome)
+            current = self.turns.get(uid) is turn
+            if current and outcome == 'sent':
+                turn['suppressFinal'] = True
+            return {'status': outcome, 'phase': phase, 'suppressFinal': current and outcome == 'sent',
+                    **({'reason': reason} if reason in ('admin-last-channel', 'account-unavailable') else {})}
+
+
 # Только именованные параметры; worker никогда не передаёт свой UID или owner.
 PARAMETERS = {
     'authorize': ({'uid'}, set()),
     'identity.resolve': ({'telegramId'}, set()),
+    'identity.link-redeem': ({'telegramId', 'code'}, set()),
     'identity.invite-redeem': ({'telegramId', 'code'}, {'name'}),
-    'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId', 'threadId'}),
+    'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId', 'threadId', 'messageId', 'linkConsent', 'unlinkConsent', 'expectedUid'}),
     'ingress.status': ({'uid', 'turnId'}, set()),
     'ingress.close': ({'uid', 'turnId'}, set()),
     'ingress.prepare': ({'uid', 'turnId', 'paths'}, set()),
@@ -414,6 +528,8 @@ PARAMETERS = {
     'files.list': (set(), {'limit', 'offset'}),
     'files.prepare': ({'mode', 'items'}, set()),
     'login.send': (set(), set()),
+    'telegram.link': (set(), set()),
+    'telegram.unlink': ({'target'}, set()),
 }
 
 
@@ -430,9 +546,19 @@ def validate_params(method, params):
     for key in ('turnId', 'requestId', 'path', 'name', 'code', 'telegramId'):
         if key in params and (not isinstance(params[key], str) or not params[key]):
             raise ValueError('Invalid string')
-    for key in ('uid', 'limit', 'offset'):
+    for key in ('uid', 'expectedUid', 'limit', 'offset'):
         if key in params and (type(params[key]) is not int or params[key] < (0 if key == 'offset' else 1)):
             raise ValueError('Invalid integer')
+    if 'messageId' in params and (not isinstance(params['messageId'], str) or not params['messageId'].isascii()
+            or not params['messageId'].isdigit() or not 1 <= len(params['messageId']) <= 20 or int(params['messageId']) <= 0):
+        raise ValueError('Invalid message identity')
+    if 'unlinkConsent' in params and (not isinstance(params['unlinkConsent'], str)
+            or params['unlinkConsent'] and (not params['unlinkConsent'].isascii() or not params['unlinkConsent'].isdigit() or len(params['unlinkConsent']) > 20)):
+        raise ValueError('Invalid unlink consent')
+    if 'target' in params and params['target'] not in ('current', 'other'):
+        raise ValueError('Invalid account target')
+    if 'linkConsent' in params and type(params['linkConsent']) is not bool:
+        raise ValueError('Invalid link consent')
     if 'privateChat' in params and type(params['privateChat']) is not bool:
         raise ValueError('Invalid boolean')
     if 'chatId' in params and type(params['chatId']) not in (str, int):

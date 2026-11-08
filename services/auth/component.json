@@ -34,6 +34,7 @@
       "services/auth/src/health.ts",
       "services/auth/src/identity-schema.ts",
       "services/auth/src/identity-types.ts",
+      "services/auth/src/identity-record.ts",
       "services/auth/src/identity.ts",
       "services/auth/src/import-identities.ts",
       "services/auth/src/login-code.ts",
@@ -68,7 +69,8 @@
       "services/auth/tests/service-data-scope.test.mjs",
       "services/auth/tests/lifecycle.test.mjs",
       "services/auth/tests/integration/lifecycle.test.mjs",
-      "services/auth/tests/integration/invite-lifecycle.test.mjs"
+      "services/auth/tests/integration/invite-lifecycle.test.mjs",
+      "services/auth/tests/integration/telegram-lifecycle.test.mjs"
     ]
   },
   "dependencies": [],

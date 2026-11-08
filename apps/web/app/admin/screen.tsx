@@ -10,8 +10,8 @@ import { mergeChatPage } from "./chat-pages";
 import { loadMemoryDetail } from "./memory-detail";
 import "./styles.css";
 type Operation = { id: string; requestId: string; kind: "prepare" | "stop"; state: "pending" | "running" | "succeeded" | "failed" | "cancelled"; errorCode?: string | null };
-type User = { id: string; name: string; role: "admin" | "user"; status: "active" | "blocked" | "provisioning"; telegramId: string | null; profileId: string | null; lifecycle?: Operation | null };
-type RequestRecord = { requestId: string; operation: "users-add" | "users-revoke"; telegramId?: string; userId?: string };
+type User = { id: string; name: string; role: "admin" | "user"; status: "active" | "blocked" | "provisioning"; telegramId: string | null; telegramIds?: string[]; profileId: string | null; lifecycle?: Operation | null };
+type RequestRecord = { requestId: string; operation: "users-add" | "users-revoke" | "status-set"; telegramId?: string; userId?: string; status?: "active" };
 const REQUESTS_KEY = "brai-admin-access-requests";
 const inProgress = (operation?: Operation | null) => operation?.state === "pending" || operation?.state === "running";
 function userStatus(user: User) {
@@ -25,7 +25,7 @@ type Invite = { id: string; expiresAt: string; revokedAt: string | null; consume
 async function call(operation: string, input: Record<string, string> = {}, write = false) {
  const response = await fetch(write ? "/api/admin" : `/api/admin?${new URLSearchParams({ operation, ...input })}`, write ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operation, ...input }) } : { cache: "no-store" });
  const body = await response.json();
- if (!response.ok) throw new Error(body.code === "LAST_ADMIN" ? "Нельзя понизить последнего администратора или отозвать его доступ." : write ? "Результат изменения не подтверждён. Проверьте текущее состояние перед повтором." : "Не удалось загрузить данные. Проверьте доступ и повторите.");
+ if (!response.ok) throw new Error(body.code === "LAST_ADMIN" ? "Нельзя понизить последнего администратора или отозвать его доступ." : body.code === "CONTACT_REQUIRED" ? "Нельзя оставить администратора без канала связи. Сначала подключите Telegram-аккаунт." : write ? "Результат изменения не подтверждён. Проверьте текущее состояние перед повтором." : "Не удалось загрузить данные. Проверьте доступ и повторите.");
  return body;
 }
 /** Управляет аккаунтами; выбранная цель всегда передаётся явно. */
@@ -79,7 +79,7 @@ export default function AdminScreen() {
   } catch { setAccessError({ requestId: record.requestId, message: "Результат запроса не подтверждён. Проверяем текущее состояние." }); }
   finally { setBusy(false); }
  }
- async function access(operation: RequestRecord["operation"], input: { telegramId?: string; userId?: string }) {
+ async function access(operation: RequestRecord["operation"], input: { telegramId?: string; userId?: string; status?: "active" }) {
   if (busy) return;
   if (operation === "users-add" && (!input.telegramId || !/^[1-9][0-9]{0,19}$/.test(input.telegramId))) { setError("Введите положительный Telegram ID: до 20 цифр, без ведущих нулей."); return; }
   if (requestsRef.current.some(item => item.operation === operation && (input.telegramId ? item.telegramId === input.telegramId : item.userId === input.userId))) { setError("Результат предыдущего запроса ещё не подтверждён. Дождитесь проверки."); return; }
@@ -109,12 +109,12 @@ export default function AdminScreen() {
  const chatCursor = view === "admin-chats-get" && detail && typeof detail === "object" && "nextCursor" in detail && typeof detail.nextCursor === "string" ? detail.nextCursor : null;
  const page = rawPage?.items ? { nextCursor: rawPage.nextCursor, items: rawPage.items.map(item => ({ ...item, id: item.id || item.artifactId || "", title: item.title || item.filename })) } : null;
  const visibleUsers = users.filter(user => user.id !== ARCHIVE_TARGET);
- function userCard(user: User) { return <article key={user.id} className="rounded-lg border p-4 space-y-2">
-  <p><strong>{user.name || "Пользователь"}</strong> · Telegram: {user.telegramId ?? "—"} · Профиль: {user.profileId ?? "—"}</p><p>Роль: {user.role === "admin" ? "администратор" : "пользователь"} · Статус: {userStatus(user)}</p>
+ function userCard(user: User) { const contacts = user.telegramIds ?? (user.telegramId ? [user.telegramId] : []); return <article key={user.id} className="rounded-lg border p-4 space-y-2">
+  <p><strong>{user.name || "Пользователь"}</strong> · Telegram: {contacts.length ? contacts.join(", ") : "нет подключённых аккаунтов"} · Профиль: {user.profileId ?? "—"}</p><p>Роль: {user.role === "admin" ? "администратор" : "пользователь"} · Статус: {userStatus(user)}</p>
   <div className="flex flex-wrap gap-3"><button type="button" aria-pressed={selected === user.id} onClick={() => { selection.current++; setSelected(user.id); setDetail(null); }}>{selected === user.id ? "Выбран" : "Выбрать"}</button>
    <button type="button" onClick={() => void mutate("role-set", { userId: user.id, role: user.role === "admin" ? "user" : "admin" })}>{user.role === "admin" ? "Сделать пользователем" : "Сделать администратором"}</button>
-   {user.status === "blocked" ? user.telegramId && <button type="button" disabled={busy || inProgress(user.lifecycle)} onClick={() => void access("users-add", { telegramId: user.telegramId! })}>Восстановить доступ</button> : <button type="button" disabled={busy} onClick={() => { if (window.confirm("Доступ к боту и сайту будет закрыт. Переписка, память и файлы сохранятся")) void access("users-revoke", { userId: user.id }); }}>Отозвать доступ</button>}
-   {user.lifecycle?.kind === "prepare" && user.lifecycle.state === "failed" && user.telegramId && <button type="button" disabled={busy} onClick={() => void access("users-add", { telegramId: user.telegramId! })}>Повторить подготовку</button>}
+   {user.status === "blocked" ? <button type="button" disabled={busy || inProgress(user.lifecycle)} onClick={() => void access("status-set", { userId: user.id, status: "active" })}>Восстановить доступ</button> : <button type="button" disabled={busy} onClick={() => { if (window.confirm("Доступ к боту и сайту будет закрыт. Переписка, память и файлы сохранятся")) void access("users-revoke", { userId: user.id }); }}>Отозвать доступ</button>}
+   {user.lifecycle?.kind === "prepare" && user.lifecycle.state === "failed" && <button type="button" disabled={busy} onClick={() => void access("status-set", { userId: user.id, status: "active" })}>Повторить подготовку</button>}
    {user.lifecycle?.kind === "stop" && user.lifecycle.state === "failed" && <button type="button" disabled={busy} onClick={() => { if (window.confirm("Доступ к боту и сайту будет закрыт. Переписка, память и файлы сохранятся")) void access("users-revoke", { userId: user.id }); }}>Повторить отзыв</button>}
    <button type="button" onClick={() => void mutate("sessions-revoke", { userId: user.id })}>Завершить сессии</button></div></article>; }
  return <main className="admin-screen"><a className="admin-back" href="/">← Назад в Brai</a><header className="admin-heading"><div><h1>Админка</h1><p>Пользователи, приглашения и доступ к данным</p></div></header>
