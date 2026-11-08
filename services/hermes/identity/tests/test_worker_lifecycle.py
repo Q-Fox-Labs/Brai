@@ -94,6 +94,14 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.calls.append('active_auth')
         return active
 
+    async def test_bootstrap_probe_eof_keeps_worker_available_for_ingress(self):
+        worker = await self.worker()
+        await asyncio.sleep(0)
+        await worker.stop_runtime()
+        self.assertFalse(worker.exited.is_set())
+        self.assertIsNone(worker.exit_code)
+        self.assertNotIn('gate', self.calls)
+
     async def test_bootstrap_does_not_start_tools_or_recovery(self):
         worker = await self.worker()
         try:

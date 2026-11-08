@@ -161,6 +161,9 @@ class Worker:
 
     async def _run_lifecycle(self):
         """Выполнить native daemon lifecycle и сохранить service restart verdict."""
+        # Bootstrap health EOF не завершает ещё не активированный native daemon.
+        # Отмена до try оставляет listener для будущего постоянного ingress.
+        await self.activation.wait()
         try:
             from gateway.run import start_gateway
             result = await start_gateway(
