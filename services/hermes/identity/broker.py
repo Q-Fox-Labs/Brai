@@ -265,6 +265,12 @@ class Broker:
                 return {'allowed': False}
         if method == 'identity.resolve' and ingress:
             return await self.resolve(params.get('telegramId'))
+        if method == 'ingress.delivery-artifact' and ingress:
+            if set(params) != {'uid', 'artifactId'}:
+                raise ValueError('Invalid delivery artifact')
+            uid = params['uid']
+            profile = await self.authorize(uid)
+            return await self.files.fetch(uid, profile, {'artifactId': params['artifactId']}, ingress=True)
         if method == 'ingress.profiles' and ingress and not params:
             profiles = []
             for uid, candidate in self.profiles().items():
@@ -296,12 +302,6 @@ class Broker:
                     raise PermissionError('Provisioning failed')
                 await self.control.call('identity.profile-ready', {'userId': user['id'], 'profileId': user['profileId']})
                 return await self.resolve(str(user['telegramId']))
-        if method == 'ingress.delivery-artifact' and ingress:
-            if set(params) != {'uid', 'artifactId'}:
-                raise ValueError('Invalid delivery artifact')
-            uid = params['uid']
-            profile = await self.authorize(uid)
-            return await self.files.fetch(uid, profile, {'artifactId': params['artifactId']}, ingress=True)
         if method in ('ingress.admit', 'ingress.status', 'ingress.close', 'ingress.prepare', 'ingress.artifact') and ingress:
             if method == 'ingress.admit':
                 profile = await self.resolve(params.get('telegramId'))
