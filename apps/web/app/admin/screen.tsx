@@ -35,8 +35,14 @@ export default function AdminScreen() {
  const [detail, setDetail] = useState<unknown>(null), [error, setError] = useState(""), [code, setCode] = useState("");
  const [telegramId, setTelegramId] = useState(""), [requests, setRequests] = useState<RequestRecord[]>([]), [busy, setBusy] = useState(false);
  const requestsRef = useRef<RequestRecord[]>([]);
+ const [accessError, setAccessError] = useState<{ requestId: string; message: string } | null>(null);
+ const [loadError, setLoadError] = useState("");
  function saveRequests(next: RequestRecord[]) { requestsRef.current = next; setRequests(next); sessionStorage.setItem(REQUESTS_KEY, JSON.stringify(next)); }
- async function load() { try { const [u, i] = await Promise.all([call("users-list"), call("invite-list")]); setUsers(u.users); setInvites(i.invites); setError(previous => previous === "Не удалось загрузить данные. Проверьте доступ и повторите." ? "" : previous); } catch (e) { setError(e instanceof Error ? e.message : "Ошибка загрузки"); } }
+ function settleRequest(requestId: string) {
+  saveRequests(requestsRef.current.filter(item => item.requestId !== requestId));
+  setAccessError(previous => previous?.requestId === requestId ? null : previous);
+ }
+ async function load() { try { const [u, i] = await Promise.all([call("users-list"), call("invite-list")]); setUsers(u.users); setInvites(i.invites); setLoadError(""); } catch (e) { setLoadError(e instanceof Error ? e.message : "Ошибка загрузки"); } }
  useEffect(() => {
   try { const saved = JSON.parse(sessionStorage.getItem(REQUESTS_KEY) || "[]"); if (Array.isArray(saved)) { requestsRef.current = saved; setRequests(saved); } } catch { sessionStorage.removeItem(REQUESTS_KEY); }
   void load();
@@ -46,7 +52,7 @@ export default function AdminScreen() {
    try {
     const result = await call("users-operation-get", { requestId: record.requestId });
     if (result.user && result.operation && !inProgress(result.operation) && requestsRef.current.some(item => item.requestId === record.requestId)) { selection.current++; setSelected(result.user.id); }
-    if (result.operation && !inProgress(result.operation)) saveRequests(requestsRef.current.filter(item => item.requestId !== record.requestId));
+    if (result.operation && !inProgress(result.operation)) settleRequest(record.requestId);
    } catch { /* Неизвестный результат остаётся для следующей проверки. */ }
   }
   await load();
@@ -68,9 +74,9 @@ export default function AdminScreen() {
    const { operation, ...input } = record;
    const result = await call(operation, input as Record<string, string>, true);
    if (result.user) { selection.current++; setSelected(result.user.id); setDetail(null); }
-   if (!result.operation || !inProgress(result.operation)) saveRequests(requestsRef.current.filter(item => item.requestId !== record.requestId));
+   if (!result.operation || !inProgress(result.operation)) settleRequest(record.requestId);
    await load();
-  } catch { setError("Результат запроса не подтверждён. Проверьте соединение и повторите проверку."); }
+  } catch { setAccessError({ requestId: record.requestId, message: "Результат запроса не подтверждён. Проверяем текущее состояние." }); }
   finally { setBusy(false); }
  }
  async function access(operation: RequestRecord["operation"], input: { telegramId?: string; userId?: string }) {
@@ -82,11 +88,11 @@ export default function AdminScreen() {
   try {
    const value = await call(operation, { requestId: record.requestId, ...input } as Record<string, string>, true);
    if (value.user) { selection.current++; setSelected(value.user.id); setDetail(null); }
-   if (!value.operation || !inProgress(value.operation)) saveRequests(requestsRef.current.filter(item => item.requestId !== record.requestId));
+   if (!value.operation || !inProgress(value.operation)) settleRequest(record.requestId);
    setTelegramId(""); await load();
   } catch (e) {
-   if (e instanceof Error && e.message.startsWith("Нельзя")) saveRequests(requestsRef.current.filter(item => item.requestId !== record.requestId));
-   setError(e instanceof Error ? e.message : "Результат не подтверждён.");
+   if (e instanceof Error && e.message.startsWith("Нельзя")) { settleRequest(record.requestId); setError(e.message); }
+   else setAccessError({ requestId: record.requestId, message: "Результат запроса не подтверждён. Проверяем текущее состояние." });
    await reconcile([record]);
   } finally { setBusy(false); }
  }
@@ -113,6 +119,8 @@ export default function AdminScreen() {
    <button type="button" onClick={() => void mutate("sessions-revoke", { userId: user.id })}>Завершить сессии</button></div></article>; }
  return <main className="admin-screen"><a className="admin-back" href="/">← Назад в Brai</a><header className="admin-heading"><div><h1>Админка</h1><p>Пользователи, приглашения и доступ к данным</p></div></header>
   {error && <p role="alert">{error}</p>}
+  {loadError && <p role="alert">{loadError}</p>}
+  {accessError && <p role="alert">{accessError.message}</p>}
   <section className="space-y-3"><h2>Пользователи</h2>
    <form className="admin-add-user" onSubmit={event => { event.preventDefault(); void access("users-add", { telegramId }); }}><label htmlFor="telegram-id">Telegram ID</label><div><input id="telegram-id" inputMode="numeric" value={telegramId} onChange={event => setTelegramId(event.target.value)} maxLength={20} autoComplete="off" /><button type="submit" disabled={busy}>Дать доступ</button></div></form>
    <div className="admin-user-filters" role="group" aria-label="Фильтр пользователей"><button type="button" aria-pressed={userFilter === "all"} onClick={() => setUserFilter("all")}>Все</button><button type="button" aria-pressed={userFilter === "available"} onClick={() => setUserFilter("available")}>С доступом</button><button type="button" aria-pressed={userFilter === "revoked"} onClick={() => setUserFilter("revoked")}>Доступ отозван</button></div>
