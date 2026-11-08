@@ -1,7 +1,7 @@
 // ABOUTME: Читает PR и проверки точного SHA, создаёт PR через установленный GitHub CLI.
 // ABOUTME: Не сливает через REST без target guard, не создаёт статусы CI и не меняет защиту веток.
 import { command } from './git.mjs';
-import {executionFetch} from './execution-context.mjs';
+import {executionFetch,executionContext} from './execution-context.mjs';
 import { Fault } from './errors.mjs';
 import { verifyCI,downloadProof } from './ci-verifier.mjs';
 import { createRegistry } from '../ci/registry.mjs';
@@ -13,6 +13,17 @@ const transientReadFailure=stderr=>{
 };
 /** Подключает gh с существующей operator auth; stdout/stderr с секретами наружу не передаются. */
 export function createGitHub({run=command,registryFactory=createRegistry,evidenceStore,catalogKeyFile=process.env.CODEWORKS_REUSE_PRIVATE_KEY_FILE}={}) {
+  // One operation owns this adapter. Cache only content addressed reads, never live CI state.
+  const immutableReads=new Map(),publishedCatalogs=new Set();
+  const immutable=async(key,read)=>{
+    if(!immutableReads.has(key)) {
+      if(immutableReads.size>=1024)return read();
+      const pending=Promise.resolve().then(read);
+      immutableReads.set(key,pending);
+      pending.catch(()=>immutableReads.delete(key));
+    }
+    return structuredClone(await immutableReads.get(key));
+  };
   async function api(project,endpoint,{method='GET',body}={}) {
     const args=['api','--method',method,'-H','Accept: application/vnd.github+json','repos/'+project.github.repository+'/'+endpoint];
     if(body)args.push('--input','-');
@@ -80,18 +91,26 @@ export function createGitHub({run=command,registryFactory=createRegistry,evidenc
           rows=checks.map(c=>({name:c.name,app_id:c.app?.id,sha:c.head_sha,status:c.status,conclusion:c.conclusion}));
           // AIDEV-NOTE: Токен остаётся в памяти owner process; не аргумент команды и не часть результата.
           const auth=await run('gh',['auth','token']);
-          const registry=registryFactory({repository:project.github.repository,username:project.github.repository.split('/')[0],token:auth.stdout.trim(),fetcher:executionFetch});
-          const files=new Map(),read=endpoint=>{
+          const rawRegistry=registryFactory({repository:project.github.repository,username:project.github.repository.split('/')[0],token:auth.stdout.trim(),fetcher:executionFetch});
+          const scope=project.github.repository;
+          const registry={...rawRegistry,
+            lookup:(id,ref)=>/^sha256:[0-9a-f]{64}$/.test(ref)?immutable(JSON.stringify([scope,'lookup',id,ref]),()=>rawRegistry.lookup(id,ref)):rawRegistry.lookup(id,ref),
+            readJSON:(id,digest,name)=>immutable(JSON.stringify([scope,'json',id,digest,name]),()=>rawRegistry.readJSON(id,digest,name)),
+          };
+          const read=endpoint=>{
             if(!/^contents\/.+\?ref=[0-9a-f]{40}$/.test(endpoint))return api(project,endpoint);
-            if(!files.has(endpoint))files.set(endpoint,api(project,endpoint));
-            return files.get(endpoint);
+            return immutable(JSON.stringify([scope,'contents',endpoint]),()=>api(project,endpoint));
           };
           verification=await verifyCI(project,sha,checks,{api:read,registry,readProof:artifact=>downloadProof({repository:project.github.repository,token:auth.stdout.trim()},artifact,{fetcher:executionFetch}),readVerified:(id,attempt)=>evidenceStore?.read(project,id,attempt)??null,saveVerified:proof=>evidenceStore?.save(project,proof)});
           if(verification.verified&&evidenceStore&&project.github.ci.reuse_public_key) {
-            const key=readCatalogKey(catalogKeyFile,project.github.ci.reuse_public_key);
-            await publishCatalog(project,evidenceStore,registry,key);
+            const identity=JSON.stringify([project.id,scope,project.github.ci,verification.evidence]);
+            if(!publishedCatalogs.has(identity)) {
+              const key=readCatalogKey(catalogKeyFile,project.github.ci.reuse_public_key);
+              await publishCatalog(project,evidenceStore,registry,key);
+              publishedCatalogs.add(identity);
+            }
           }
-        }catch{verification={verified:false,state:'CI_VERIFICATION_UNAVAILABLE'};}
+        }catch{executionContext()?.signal?.throwIfAborted();verification={verified:false,state:'CI_VERIFICATION_UNAVAILABLE'};}
         const policy=project.github.ci;
         for(const row of rows)if(row.name===policy.check_name&&row.app_id===policy.app_id) {
           row.ci_verified=verification.verified;row.ci_state=verification.state;
