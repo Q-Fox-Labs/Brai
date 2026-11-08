@@ -140,3 +140,43 @@ test('owner-pinned signed catalog verifies reused digests and rejects a substitu
   f.ports.registry.readJSON=async id=>id==='catalog-v1'?signCatalog(doc.catalog,foreign.privateKey):structuredClone(f.composition);
   assert.equal((await f.verify()).state,'CI_CATALOG_UNTRUSTED');
 });
+
+
+test('repeated gates reuse immutable reads but re-read live CI and reject a new failed attempt',async()=>{
+  const f=fixture(),counts={contents:0,objects:0,checks:0,runs:0};let saved=structuredClone(f.proof);
+  let transient=true;
+  const adapter=createGitHub({evidenceStore:{read:async()=>saved,save:async(_p,proof)=>{saved=structuredClone(proof);}},registryFactory:()=>({
+    ...f.ports.registry,lookup:async(id,ref)=>{if(ref.startsWith('sha256:'))counts.objects++;return f.ports.registry.lookup(id,ref);},
+  }),run:async(_exe,args)=>{
+    if(args[0]==='auth')return {stdout:'fixture'};
+    const endpoint=args.at(-1).slice(('repos/'+f.project.github.repository+'/').length);
+    if(endpoint.startsWith('commits/')){counts.checks++;return {stdout:JSON.stringify({total_count:1,check_runs:[f.check]})};}
+    if(endpoint.startsWith('contents/')){counts.contents++;if(transient){transient=false;throw Error('temporary read failure');}}
+    if(endpoint.startsWith('actions/runs/'))counts.runs++;
+    return {stdout:JSON.stringify(await f.ports.api(endpoint))};
+  }});
+  assert.equal((await adapter.checks(f.project,f.sha))[0].ci_verified,false);
+  assert.equal((await adapter.checks(f.project,f.sha))[0].ci_verified,true);
+  const cold={...counts};assert(cold.contents>1);assert(cold.objects>0);
+  assert.equal((await adapter.checks(f.project,f.sha))[0].ci_verified,true);
+  assert.equal(counts.contents,cold.contents);assert.equal(counts.objects,cold.objects);
+  assert.equal(counts.checks,3);assert(counts.runs>cold.runs);
+  f.check.status='queued';f.check.conclusion=null;
+  assert.equal((await adapter.checks(f.project,f.sha))[0].ci_verified,false);
+  f.check.status='completed';f.check.conclusion='failure';
+  assert.equal((await adapter.checks(f.project,f.sha))[0].ci_verified,false);
+  f.check.conclusion='success';f.run.run_attempt=2;
+  assert.equal((await adapter.checks(f.project,f.sha))[0].ci_verified,false);
+  f.run.run_attempt=1;f.project.github.ci.recipe_sha256='0'.repeat(64);
+  assert.equal((await adapter.checks(f.project,f.sha))[0].ci_verified,false);
+});
+
+test('activity cancellation propagates instead of becoming unavailable CI',async()=>{
+  const {withExecutionContext}=await import('../src/execution-context.mjs');
+  const f=fixture(),controller=new AbortController(),reason=Error('activity deadline');
+  const adapter=createGitHub({run:async(_exe,args)=>{
+    if(args[0]==='auth'){controller.abort(reason);throw reason;}
+    return {stdout:JSON.stringify({total_count:1,check_runs:[f.check]})};
+  }});
+  await assert.rejects(withExecutionContext({signal:controller.signal},()=>adapter.checks(f.project,f.sha)),error=>error===reason);
+});

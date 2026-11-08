@@ -49,7 +49,7 @@ test('write and authentication failures remain single attempts',async()=>{
   const rows=await adapter.checks({github:{...project.github,ci:{check_name:'check',app_id:42}}},sha);
   assert.equal(auth,1);assert.equal(rows[0].ci_state,'CI_VERIFICATION_UNAVAILABLE');
 });
-test('same-SHA contents are read once per verification while run/check identity stays fresh',async()=>{
+test('same-SHA contents are read once per operation while run/check identity stays fresh',async()=>{
   const root=new URL('../../../',import.meta.url),workflow='.github/workflows/codeworks.yml',calls=[];
   const check={id:17,name:'check',app:{id:42},head_sha:sha,status:'completed',conclusion:'success',details_url:'https://github.com/fixture/repository/actions/runs/123/job/9'};
   const run={head_sha:sha,path:workflow,event:'push',status:'completed',conclusion:'success',run_attempt:1,repository:{full_name:project.github.repository}};
@@ -66,8 +66,8 @@ test('same-SHA contents are read once per verification while run/check identity 
     return {code:0,stdout:JSON.stringify(value)};
   }});
   for(let i=0;i<2;i++)assert.equal((await adapter.checks(pinned,sha))[0].ci_state,'CI_RECIPE_UNTRUSTED');
-  assert.equal(calls.filter(c=>c===`contents/${workflow}?ref=${sha}`).length,2);
-  assert.equal(calls.filter(c=>c.startsWith('contents/')).length,recipeFiles.length*2);
+  assert.equal(calls.filter(c=>c===`contents/${workflow}?ref=${sha}`).length,1);
+  assert.equal(calls.filter(c=>c.startsWith('contents/')).length,recipeFiles.length);
   assert.equal(calls.filter(c=>c.startsWith('commits/')).length,2);
   assert.equal(calls.filter(c=>c==='actions/runs/123').length,2);
   assert.equal(calls.filter(c=>c.includes('/jobs?')).length,2);
