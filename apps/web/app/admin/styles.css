@@ -1,5 +1,6 @@
 /* ABOUTME: Оформляет административный экран в цветах рабочей оболочки Brai. */
 /* ABOUTME: Не меняет общие стили и сохраняет доступность на узком экране. */
+.workspace-admin { overflow-y: auto; overscroll-behavior: contain; }
 .admin-screen { max-width: 1440px; margin: 0 auto; padding: 32px; display: grid; gap: 28px; }
 .admin-back { width: fit-content; color: var(--muted-foreground); font-size: 14px; }
 .admin-back:hover { color: var(--foreground); }

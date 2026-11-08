@@ -131,7 +131,7 @@ function AccountScreens({ view, user, agentMode, telegramBotUsername, telegramOb
  const props = { userId: user.id, email: user.name || user.email || "Пользователь", onLogout, onUnauthorized, accountMessage };
  // AIDEV-NOTE: Базовые состояния Agent и Timer подключены после входа; hidden сохраняет клиентов.
  return <>
-  <div className="workspace-screen" hidden={view !== "admin"}>{view === "admin" && user.role === "admin" && user.status === "active" && <AdminScreen />}</div>
+  <div className="workspace-screen workspace-admin" hidden={view !== "admin"}>{view === "admin" && user.role === "admin" && user.status === "active" && <AdminScreen />}</div>
   <div className="workspace-screen" hidden={view !== "focus" && view !== "goals"}>{(visitedGoals || view === "focus" || view === "goals") && <GoalsScreen userId={user.id} mode={view === "focus" ? "focus" : "goals"} active={view === "focus" || view === "goals"} onUnauthorized={onUnauthorized} />}</div>
   <div className="workspace-screen" hidden={view !== "game-core"}>{view === "game-core" && <WorkspaceFrame section="game-core" userId={user.id} title="Элементы"><GameCoreScreen userId={user.id} disabled={Boolean(user.profileId)} /></WorkspaceFrame>}</div>
   <div className="workspace-screen" hidden={view !== "alerts"}><WorkspaceFrame section="alerts" userId={user.id} title="Уведомления"><AlertsScreen active={view === "alerts"} /></WorkspaceFrame></div>
