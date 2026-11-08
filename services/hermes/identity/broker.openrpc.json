@@ -282,6 +282,15 @@
             "type": "string",
             "minLength": 1
           }
+        },
+        {
+          "name": "inputId",
+          "required": false,
+          "description": "Trusted current input identity. Any change rejects a stale status/close; required to grant delivered consent.",
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
         }
       ],
       "result": {
@@ -297,6 +306,10 @@
             },
             "needsAccountConsent": {
               "type": "boolean"
+            },
+            "accountOfferId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{32}$"
             }
           },
           "additionalProperties": false
@@ -348,6 +361,24 @@
           "schema": {
             "type": "string",
             "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "inputId",
+          "required": false,
+          "description": "Trusted current input identity. Any change rejects a stale status/close; required to grant delivered consent.",
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        {
+          "name": "accountOfferId",
+          "required": false,
+          "description": "Opaque root-issued offer from ingress.status; required together with inputId to bind question delivery to that exact offer. Stale receipts close without granting consent.",
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$"
           }
         }
       ],

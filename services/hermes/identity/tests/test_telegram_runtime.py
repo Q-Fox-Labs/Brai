@@ -1,5 +1,6 @@
 # ABOUTME: Проверяет связку Telegram ingress с брокером личного процесса.
 # ABOUTME: Все сетевые вызовы заменены локальными подставными ответами.
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -352,15 +353,17 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
             ("send", {}, {}, {"success": True}, True, None),
             ("send", {}, {}, {"success": True, "message_id": "200"}, False, None),
             ("send_typing", {}, {}, None, True, None),
+            ("send", {}, {}, {"success": True, "message_id": "200"}, "legacy-status-without-offer", None),
         ]
         for action, extra, metadata, receipt, needed, expected in cases:
             with self.subTest(action=action, extra=extra, metadata=metadata, needed=needed, expected=expected):
                 adapter = NS(**{action: AsyncMock(return_value=receipt)})
                 resolver = runtime.Resolver(adapter)
-                resolver.turns[101] = {"id": "offer", "route": ("123", ""), "workerTurnId": "worker"}
+                resolver.turns[101] = {"id": "offer", "route": ("123", ""), "workerTurnId": "worker", "inputId": "a" * 64}
                 async def broker(method, params, **kwargs):
                     if method == "ingress.status":
-                        return {"suppressFinal": False, "needsAccountConsent": needed}
+                        return {"suppressFinal": False, "needsAccountConsent": bool(needed),
+                                **({"accountOfferId": "b" * 32} if needed is True else {})}
                     self.assertEqual(method, "ingress.close")
                     return {"closed": True}
                 with patch.object(runtime, "broker_call", AsyncMock(side_effect=broker)) as calls:
@@ -373,20 +376,83 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("questionMessageId", close[0])
                 else:
                     self.assertEqual(close[0]["questionMessageId"], expected)
+                    self.assertEqual(close[0]["inputId"], "a" * 64)
+                    self.assertEqual(close[0]["accountOfferId"], "b" * 32)
 
     async def test_failed_final_question_send_cannot_leave_a_delivery_confirmation(self):
         adapter = NS(send=AsyncMock(side_effect=RuntimeError("synthetic send refusal")))
         resolver = runtime.Resolver(adapter)
-        resolver.turns[101] = {"id": "offer", "route": ("123", ""), "workerTurnId": "worker"}
+        resolver.turns[101] = {"id": "offer", "route": ("123", ""), "workerTurnId": "worker", "inputId": "a" * 64}
         calls = []
         async def broker(method, params, **kwargs):
             calls.append((method, params))
-            return {"suppressFinal": False, "needsAccountConsent": True} if method == "ingress.status" else {"closed": True}
+            return {"suppressFinal": False, "needsAccountConsent": True, "accountOfferId": "b" * 32} if method == "ingress.status" else {"closed": True}
         with patch.object(runtime, "broker_call", broker):
             with self.assertRaises(RuntimeError):
                 await resolver.deliver(profile(), "owner", "send", {"chat_id": "123", "content": "Вопрос"})
             await resolver.end(profile(), "worker")
         self.assertNotIn("questionMessageId", calls[-1][1])
+
+    async def test_old_question_success_then_new_input_failed_final_cannot_confirm_new_offer(self):
+        adapter = NS(send=AsyncMock(side_effect=[{"success": True, "message_id": "200"},
+                                                 {"success": False, "message_id": "201"}]))
+        resolver = runtime.Resolver(adapter)
+        offer_id, calls = "a" * 32, []
+        async def broker(method, params, **kwargs):
+            calls.append((method, params))
+            if method == "ingress.status":
+                return {"suppressFinal": False, "needsAccountConsent": True, "accountOfferId": offer_id}
+            return {"closed": True}
+        incoming = event()
+        incoming.media_urls, incoming._brai_identity_inputs = [], []
+        with patch.object(runtime, "broker_call", broker):
+            await resolver.prepare(profile(), incoming)
+            await resolver.deliver(profile(), "owner", "send", {"chat_id": "123", "text": "Вопрос A"})
+            self.assertIn("questionReceipt", resolver.turns[101])
+            incoming.text, incoming.message_id = "Другой запрос B", "56"
+            offer_id = "b" * 32
+            await resolver.prepare(profile(), incoming)
+            self.assertNotIn("questionReceipt", resolver.turns[101])
+            await resolver.deliver(profile(), "owner", "send", {"chat_id": "123", "text": "Вопрос B"})
+            await resolver.end(profile(), None)
+        close = [params for method, params in calls if method == "ingress.close"][-1]
+        self.assertIn("inputId", close)
+        self.assertNotIn("questionMessageId", close)
+        self.assertNotIn("accountOfferId", close)
+
+    async def test_delayed_old_send_cannot_confirm_replaced_offer_even_with_same_input(self):
+        for change_input in [False, True]:
+            with self.subTest(change_input=change_input):
+                entered, release = asyncio.Event(), asyncio.Event()
+                async def delayed_send(**kwargs):
+                    entered.set()
+                    await release.wait()
+                    return {"success": True, "message_id": "200"}
+                adapter = NS(send=delayed_send)
+                resolver = runtime.Resolver(adapter)
+                offer_id, calls = "a" * 32, []
+                async def broker(method, params, **kwargs):
+                    calls.append((method, params))
+                    if method == "ingress.status":
+                        return {"suppressFinal": False, "needsAccountConsent": True, "accountOfferId": offer_id}
+                    return {"closed": True}
+                incoming = event()
+                incoming.media_urls, incoming._brai_identity_inputs = [], []
+                with patch.object(runtime, "broker_call", broker):
+                    await resolver.prepare(profile(), incoming)
+                    task = asyncio.create_task(resolver.deliver(profile(), "owner", "send",
+                        {"chat_id": "123", "text": "Вопрос A"}))
+                    await asyncio.wait_for(entered.wait(), 1)
+                    offer_id = "b" * 32
+                    if change_input:
+                        incoming.text, incoming.message_id = "Новый запрос B", "56"
+                        await resolver.prepare(profile(), incoming)
+                    release.set()
+                    await task
+                    await resolver.end(profile(), None)
+                close = [params for method, params in calls if method == "ingress.close"][-1]
+                self.assertNotIn("questionMessageId", close)
+                self.assertNotIn("accountOfferId", close)
 
     async def test_native_multipart_receipt_exposes_only_valid_ids_not_raw_response_content(self):
         normalized = runtime._receipt(NS(success=True, message_id="200",

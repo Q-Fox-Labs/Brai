@@ -322,6 +322,9 @@ class Resolver:
         input_id = hashlib.sha256(json.dumps(origin, ensure_ascii=False, sort_keys=True,
                                             separators=(',', ':')).encode()).hexdigest()
         answer = getattr(event, 'text', '') or ''
+        turn['inputId'] = input_id
+        turn.pop('questionReceipt', None)
+        turn.pop('accountOfferId', None)
         await broker_call('ingress.admit', {'inputId': input_id, 'messageId': str(event.message_id), 'expectedUid': uid, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
             'privateChat': getattr(event.source, 'chat_type', '') == 'dm', 'turnId': turn['id'],
             'accountAnswer': answer if isinstance(answer, str) and len(answer) <= 8192 else '',
@@ -384,16 +387,18 @@ class Resolver:
                  str(metadata.get('thread_id') or metadata.get('message_thread_id') or ''))
         if route != self.turns[uid]['route']:
             raise PermissionError('Delivery outside current conversation')
-        state = await broker_call('ingress.status', {'uid': uid, 'turnId': self.turns[uid]['id']})
-        turn['needsAccountConsent'] = state.get('needsAccountConsent') is True
+        input_id = turn.get('inputId')
+        def current():
+            if self.turns.get(uid) is not turn or turn.get('inputId') != input_id:
+                raise PermissionError('Owner turn changed')
+        state = await broker_call('ingress.status', {'uid': uid, 'turnId': turn['id'],
+            **({'inputId': input_id} if input_id else {})})
+        current()
+        turn['accountOfferId'] = state.get('accountOfferId') if state.get('needsAccountConsent') is True else None
         interim = metadata.get('_interim_send') is True
         metadata = dict(turn.get('metadata') or ({'thread_id': route[1]} if route[1] else {}))
         if interim:
             metadata['_interim_send'] = True
-        def current():
-            if self.turns.get(uid) is not turn:
-                raise PermissionError('Owner turn changed')
-        current()
         return route, metadata, turn, current, bool(state.get('suppressFinal'))
 
     async def _background_delivery_context(self, profile, owner, payload, scope_id):
@@ -427,6 +432,8 @@ class Resolver:
             if not callable(supports) or not supports('dm', metadata):
                 return {'success': False, 'error': 'Draft transport unavailable'}
         uid = profile['uid']
+        input_id = turn.get('inputId') if turn else None
+        offer_id = turn.get('accountOfferId') if turn else None
         file_actions = ('send_image_file', 'send_document', 'send_video', 'send_voice', 'send_animation')
         if action == 'send_file_set' or action in file_actions:
             from files.native import telegram_sender, validate_telegram, presentation
@@ -493,13 +500,33 @@ class Resolver:
         receipt = _receipt(result)
         final = (action == 'send' and not metadata.get('_interim_send') or
                  action == 'edit_message' and payload.get('finalize') is True)
-        if final and turn is not None and turn.get('needsAccountConsent'):
+        if final and turn is not None and input_id and offer_id:
             ids = [receipt.get('message_id') or payload.get('message_id')]
             continuations = receipt.get('continuation_message_ids', [])
             if isinstance(continuations, list):
                 ids.extend(continuations)
             valid = [int(value) for value in ids if re.fullmatch(r'[1-9][0-9]{0,19}', str(value or ''))]
-            self.turns[uid]['questionMessageId'] = (str(max(valid)) if receipt.get('success') is True and valid else None)
+            if self.turns.get(uid) is turn and turn.get('inputId') == input_id:
+                if receipt.get('success') is True and valid:
+                    try:
+                        fresh = await broker_call('ingress.status', {'uid': uid, 'turnId': turn['id'], 'inputId': input_id})
+                    except Exception:
+                        fresh = {}
+                    if (self.turns.get(uid) is turn and turn.get('inputId') == input_id
+                            and fresh.get('accountOfferId') == offer_id and fresh.get('needsAccountConsent') is True):
+                        previous = turn.get('questionReceipt') or {}
+                        if previous.get('inputId') == input_id and previous.get('accountOfferId') == offer_id:
+                            valid.append(int(previous['questionMessageId']))
+                        turn['questionReceipt'] = {'inputId': input_id, 'accountOfferId': offer_id,
+                                                   'questionMessageId': str(max(valid))}
+                    else:
+                        previous = turn.get('questionReceipt') or {}
+                        if previous.get('inputId') == input_id and previous.get('accountOfferId') == offer_id:
+                            turn.pop('questionReceipt', None)
+                else:
+                    previous = turn.get('questionReceipt') or {}
+                    if previous.get('inputId') == input_id and previous.get('accountOfferId') == offer_id:
+                        turn.pop('questionReceipt', None)
 
         if receipt.get('success'):
             for message_id in [receipt.get('message_id'), *(receipt.get('continuation_message_ids') or [])]:
@@ -667,8 +694,10 @@ class Resolver:
         turn = self.turns.get(uid)
         if turn and turn.get('workerTurnId') == worker_turn:
             self.turns.pop(uid, None)
+            receipt = turn.get('questionReceipt') or {}
             await broker_call('ingress.close', {'uid': uid, 'turnId': turn['id'],
-                **({'questionMessageId': turn['questionMessageId']} if turn.get('questionMessageId') else {})})
+                **({'inputId': turn['inputId']} if turn.get('inputId') else {}),
+                **(receipt if receipt.get('inputId') == turn.get('inputId') else {})})
 
 
 def create_resolver(adapter, runner):

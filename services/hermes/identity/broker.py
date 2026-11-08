@@ -389,6 +389,8 @@ class Broker:
         """Принять один запрос; worker никогда не выбирает собственный UID или owner."""
         if not isinstance(params, dict):
             raise ValueError('Invalid params')
+        # Вызов закрепляется до первой авторизации/ожидания, не по более позднему turn.
+        request_turn = self.turns.get(peer_uid)
         ingress = peer_uid == self.config['ingressUid']
         trusted = peer_uid == 0
         if method == 'ingress.delivery-artifact' and ingress:
@@ -503,6 +505,8 @@ class Broker:
             turn = self.turns.get(uid)
             if not turn or turn['turnId'] != params.get('turnId'):
                 raise PermissionError('Turn unavailable')
+            if 'inputId' in params and params['inputId'] != turn['inputId']:
+                raise PermissionError('Owner input changed')
             if method == 'ingress.close':
                 question_id = params.get('questionMessageId')
                 if question_id is not None and (not isinstance(question_id, str) or
@@ -510,7 +514,9 @@ class Broker:
                     raise ValueError('Invalid question delivery')
                 for offers in (self.link_offers, self.unlink_offers):
                     offer = offers.get(uid)
-                    if offer and offer['inputId'] == turn['inputId'] and question_id:
+                    if (offer and offer['inputId'] == turn['inputId'] and question_id
+                            and params.get('inputId') == turn['inputId']
+                            and params.get('accountOfferId') == offer['id']):
                         offer.update(delivered=True, messageId=str(max(int(question_id), int(offer.get('messageId') or 0))),
                                      expires=time.monotonic() + 300)
                 self.turns.pop(uid, None)
@@ -527,8 +533,10 @@ class Broker:
                 if set(params) != {'uid', 'turnId', 'artifactId'}:
                     raise ValueError('Invalid ingress artifact')
                 return await self.files.fetch(uid, profile, {'artifactId': params['artifactId']}, ingress=True)
-            return {'suppressFinal': turn['suppressFinal'], 'needsAccountConsent': any(
-                offers.get(uid, {}).get('inputId') == turn['inputId'] for offers in (self.link_offers, self.unlink_offers))}
+            offers = [items[uid] for items in (self.link_offers, self.unlink_offers)
+                      if uid in items and items[uid]['inputId'] == turn['inputId']]
+            return {'suppressFinal': turn['suppressFinal'], 'needsAccountConsent': len(offers) == 1,
+                    **({'accountOfferId': offers[0]['id']} if len(offers) == 1 else {})}
         if trusted or ingress:
             raise PermissionError('Method unavailable')
         if method == 'files.configuration' and not params:
@@ -538,6 +546,8 @@ class Broker:
                 # конфигурация своего профиля; данные и инструменты требуют active Auth.
                 return await self.files.configuration(peer_uid, bootstrap)
         profile = await self.authorize(peer_uid)
+        if method in ('telegram.link', 'telegram.unlink') and (request_turn is None or self.turns.get(peer_uid) is not request_turn):
+            raise PermissionError('Owner turn changed')
         if method == 'tools.list' and not params:
             return await self.control.call(method, {'uid': peer_uid})
         if method == 'tools.call':
@@ -631,7 +641,7 @@ class Broker:
                     raise PermissionError('Owner turn changed')
                 details = {key: result[key] for key in ('status', 'botUrl', 'accounts', 'reason') if key in result}
                 if result.get('status') == 'needs_consent':
-                    self.link_offers[uid] = {'telegramId': turn['telegramId'], 'chatId': turn['chatId'],
+                    self.link_offers[uid] = {'id': uuid.uuid4().hex, 'telegramId': turn['telegramId'], 'chatId': turn['chatId'],
                         'threadId': turn.get('threadId'), 'inputId': turn['inputId'], 'messageId': turn.get('messageId'),
                         'expires': time.monotonic() + 300, 'delivered': False}
                 return {**details, 'phase': 'offer', 'suppressFinal': False}
@@ -683,7 +693,7 @@ class Broker:
                 details = {key: result[key] for key in ('status', 'account', 'lastChannel', 'reason') if key in result}
                 selected = result.get('targetTelegramId')
                 if result.get('status') == 'needs_consent' and isinstance(selected, str) and re.fullmatch(r'[1-9][0-9]{0,19}', selected):
-                    self.unlink_offers[uid] = {'telegramId': turn['telegramId'], 'chatId': turn['chatId'],
+                    self.unlink_offers[uid] = {'id': uuid.uuid4().hex, 'telegramId': turn['telegramId'], 'chatId': turn['chatId'],
                         'threadId': turn.get('threadId'), 'inputId': turn['inputId'], 'messageId': turn.get('messageId'),
                         'expires': time.monotonic() + 300, 'delivered': False, 'target': target, 'targetTelegramId': selected}
                 return {**details, 'phase': 'offer', 'suppressFinal': False}
@@ -719,8 +729,8 @@ PARAMETERS = {
     'identity.link-redeem': ({'telegramId', 'code'}, set()),
     'identity.invite-redeem': ({'telegramId', 'code'}, {'name'}),
     'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId', 'threadId', 'messageId', 'accountAnswer', 'expectedUid', 'accountRefused'}),
-    'ingress.status': ({'uid', 'turnId'}, set()),
-    'ingress.close': ({'uid', 'turnId'}, {'questionMessageId'}),
+    'ingress.status': ({'uid', 'turnId'}, {'inputId'}),
+    'ingress.close': ({'uid', 'turnId'}, {'questionMessageId', 'inputId', 'accountOfferId'}),
     'ingress.prepare': ({'uid', 'turnId', 'paths'}, set()),
     'ingress.artifact': ({'uid', 'turnId', 'artifactId'}, set()),
     'tools.list': (set(), set()),
@@ -764,6 +774,9 @@ def validate_params(method, params):
         if key in params and (not isinstance(params[key], str) or len(params[key]) > 8192
                 or key == 'confirmation' and not params[key]):
             raise ValueError('Invalid account answer')
+    if 'accountOfferId' in params and (not isinstance(params['accountOfferId'], str)
+            or not re.fullmatch(r'[0-9a-f]{32}', params['accountOfferId'])):
+        raise ValueError('Invalid account offer')
     if 'target' in params and params['target'] not in ('current', 'other'):
         raise ValueError('Invalid account target')
     if 'accountRefused' in params and type(params['accountRefused']) is not bool:
