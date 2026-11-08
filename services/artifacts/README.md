@@ -18,6 +18,8 @@ const core = createArtifactsCore({store, files, config});
 | --- | --- |
 | `execute(operation, request)` | Локальные имена `prepare`, `get`, `update`, `list`, `stats`, `delete`, `relationAdd`, `relationRemove`, `relationList`, `referenceReserve`, `referenceGet`, `referenceConfirm`, `referenceList`, `referenceUpdateState`, `outputBind`, `outputList`, `linkCreate`, `linkRevoke`; запросы и ответы из внешнего контракта |
 | `upload(token, source, signal?)` | `AsyncIterable<Uint8Array>`; после сохранения возвращает ready `Artifact` |
+| `uploadStatus(token)` | Подтверждённая позиция; [дозагрузка](CONTRACT.md#дозагрузка) |
+| `uploadChunk(token,{offset,totalBytes,chain},source,signal?)` | Добавляет одну проверенную часть |
 | `downloadable(artifactId)` | Проверяет готовность, возвращает `Artifact`; содержимое читает входной адаптер |
 | `shared(token)` | Проверяет разрешение, срок, отзыв и готовность; возвращает `Artifact` |
 | `reconcile()` | Возвращает счётчики `{ready, failed, deleted, temps}`; занятую загрузкой запись пропускает |

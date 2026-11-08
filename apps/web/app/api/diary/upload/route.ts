@@ -4,3 +4,6 @@ import { diaryUpload } from "@/server/diary-http";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const PUT = diaryUpload;
+
+export const GET = diaryUpload;
+export const PATCH = diaryUpload;

@@ -71,6 +71,25 @@ export function createDiaryServer(cfg,store,ports){
     res.writeHead(upstream.status,output);if(upstream.body)Readable.fromWeb(upstream.body).on('error',()=>res.destroy()).pipe(res);else res.end();return;
    }
    if(match[1]==='entry'&&req.method==='GET'){send(res,200,{entry});return;}
+   if(match[1]==='upload'&&['GET','PATCH'].includes(req.method)&&entry.source==='audio'){
+    const prepared=await ports.prepared(entry),abort=new AbortController();
+    const interrupted=()=>abort.abort();req.once('aborted',interrupted);if(req.aborted)interrupted();
+    try{
+      const headers={};
+      if(req.method==='PATCH'){
+        const declared=Number(req.headers['x-content-size']);
+        if(!Number.isSafeInteger(declared)||declared<=0||declared>cfg.maxAudioBytes)throw new DiaryFault('TOO_LARGE',413);
+        headers['upload-length']=String(declared);headers['upload-offset']=req.headers['upload-offset']??'';headers['upload-chain']=req.headers['upload-chain']??'';
+      }
+      const result=await fetch(prepared.uploadUrl,{method:req.method==='GET'?'HEAD':'PATCH',headers,...(req.method==='PATCH'?{body:Readable.toWeb(req),duplex:'half'}:{}),redirect:'error',signal:AbortSignal.any([abort.signal,AbortSignal.timeout(30*60*1000)])});
+      await result.body?.cancel();
+      if(!result.ok)throw new DiaryFault(result.status===409?'UPLOAD_CONFLICT':'UPLOAD_UNCONFIRMED',result.status===409?409:503);
+      const offset=Number(result.headers.get('upload-offset')),total=result.headers.get('upload-length'),chain=result.headers.get('upload-chain'),chunkBytes=Number(result.headers.get('upload-chunk-size')),ready=result.headers.get('upload-complete')==='true';
+      if(!result.headers.has('upload-offset')||!Number.isSafeInteger(offset)||offset<0||!chain||!/^[0-9a-f]{64}$/.test(chain)||chunkBytes!==1048576||(total!==''&&(!Number.isSafeInteger(Number(total))||Number(total)<offset)))throw new DiaryFault('BAD_REPLY',502);
+      if(ready&&req.method==='PATCH')await store.uploaded(user.id,entry.id);
+      send(res,200,{entryId:entry.id,offset,totalBytes:total===''?null:Number(total),chain,chunkBytes,ready});return;
+    }finally{req.off('aborted',interrupted);}
+   }
    if(match[1]!=='upload'||req.method!=='PUT'||entry.source!=='audio')throw new DiaryFault('NOT_FOUND',404);
    const declared=Number(req.headers['x-content-size']);
    if(!Number.isSafeInteger(declared)||declared<=0||declared>cfg.maxAudioBytes)throw new DiaryFault('TOO_LARGE',413);

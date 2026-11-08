@@ -19,12 +19,23 @@ export function startArtifactsHttp(cfg:Config,core:ArtifactsCore,pool:Pool,nc:Na
   if(url.pathname==='/health'&&req.method==='GET'){let status:{status:'ready'|'not-ready'};try{status=await bounded(artifactsReadiness(pool,nc,cfg.dataDir),cfg.requestTimeoutMs);}catch{status={status:'not-ready'};}res.writeHead(status.status==='ready'?200:503,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(status));return;}
   const match=tokenPath.exec(url.pathname);if(!match){send(res,404,'NOT_FOUND');return;}
   if(match[1]==='upload'){
-   if(req.method!=='PUT'){rejectBody(req,res,405,'METHOD_NOT_ALLOWED');return;}
+   if(req.method==='HEAD'){
+    const state=await core.uploadStatus(match[2]);
+    res.writeHead(200,{'Upload-Offset':String(state.offset),'Upload-Length':state.totalBytes===null?'':String(state.totalBytes),'Upload-Chain':state.chain,'Upload-Chunk-Size':String(state.chunkBytes),'Upload-Complete':String(state.ready),'Cache-Control':'no-store','Content-Length':'0'});res.end();return;
+   }
+   if(req.method!=='PUT'&&req.method!=='PATCH'){rejectBody(req,res,405,'METHOD_NOT_ALLOWED');return;}
    if(activeUploads>=cfg.maxConcurrentUploads){rejectBody(req,res,429,'OVERLOADED');return;}
    const declared=req.headers['content-length'];if(declared!==undefined&&(!/^\d+$/.test(declared)||Number(declared)>cfg.maxUploadBytes)){rejectBody(req,res,413,'PAYLOAD_TOO_LARGE');return;}
    activeUploads++;const started=Date.now();const abort=new AbortController();uploads.add(abort);let complete=false;
    const cancel=()=>{if(!complete)abort.abort();};const deadline=setTimeout(cancel,cfg.uploadTimeoutMs);deadline.unref();req.once('aborted',cancel);req.setTimeout(cfg.receiveTimeoutMs,cancel);res.once('close',()=>{if(!res.writableEnded)cancel();});
-   try{const artifact=await core.upload(match[2],streamBody(req),abort.signal);complete=true;
+   try{
+    if(req.method==='PATCH'){
+      const offset=req.headers['upload-offset'],total=req.headers['upload-length'],chain=req.headers['upload-chain'];
+      if(typeof offset!=='string'||!/^\d+$/.test(offset)||typeof total!=='string'||!/^\d+$/.test(total)||typeof chain!=='string')throw new ArtifactError('INVALID_ARGUMENT');
+      const state=await core.uploadChunk(match[2],{offset:Number(offset),totalBytes:Number(total),chain},streamBody(req),abort.signal);complete=true;
+      res.writeHead(state.ready?201:204,{'Upload-Offset':String(state.offset),'Upload-Length':String(state.totalBytes),'Upload-Chain':state.chain,'Upload-Chunk-Size':String(state.chunkBytes),'Upload-Complete':String(state.ready),'Cache-Control':'no-store','Content-Length':'0'});res.end();return;
+    }
+    const artifact=await core.upload(match[2],streamBody(req),abort.signal);complete=true;
     if(res.destroyed)return;
     res.writeHead(201,{'X-Artifact-Id':artifact.artifactId,'X-Artifact-State':'ready','X-Artifact-Size':String(artifact.sizeBytes),'X-Artifact-SHA256':artifact.sha256!,'Location':artifact.internalUrl!,'Content-Length':'0','Cache-Control':'no-store'});res.end();
     console.info(JSON.stringify({requestId:artifact.requestId,operationId:artifact.requestId,endpoint:'http.upload',result:'success',durationMs:Date.now()-started,executor:'http'}));

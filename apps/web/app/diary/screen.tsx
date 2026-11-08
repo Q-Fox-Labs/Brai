@@ -7,6 +7,7 @@ import WorkspaceFrame from "../shell/workspace-frame";
 import {Button} from "@/components/ui/button";
 import type {DiaryEntry, DiaryState, DiarySummary} from "./types";
 import "./styles.css";
+import {resumeUpload, uploadBytes, type UploadState} from "./upload";
 
 type Props = {userId: string; onUnauthorized: () => void};
 type UploadInput = {requestId: string; filename: string; mimeType: string; recordedAt: string | null; timezone: string};
@@ -20,7 +21,7 @@ export function diaryDate(value: string | null): string {
   return value ? new Date(value + "T12:00:00").toLocaleDateString("ru-RU", {day: "numeric", month: "long", year: "numeric"}) : "Дата не определена";
 }
 function message(code?: string): string {
-  if (code === "UPLOAD_INTERRUPTED") return "Загрузка прервалась. Выберите тот же файл ещё раз, чтобы повторить её.";
+  if (code === "UPLOAD_INTERRUPTED") return "Загрузка прервалась. Выберите тот же файл ещё раз, чтобы продолжить её.";
   if (code === "TRANSCRIPT_LOST") return "Не удалось сохранить расшифровку. Исходное аудио остаётся в Дневнике.";
   if (code?.startsWith("LUNA_")) return "Подготовка текста остановилась. Исходная расшифровка сохранена; автоматического повтора нет.";
   if (code === "USER_REVOKED") return "Доступ к обработке этой записи изменился.";
@@ -50,6 +51,7 @@ function DiaryAccount({userId, onUnauthorized}: Props) {
   const [entry, setEntry] = useState<DiaryEntry | null>(null), [loading, setLoading] = useState(true);
   const [reading, setReading] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false), [progress, setProgress] = useState<number | null>(null);
+  const [uploadSize, setUploadSize] = useState<{loaded: number; total: number} | null>(null);
   const [hasMore, setHasMore] = useState(false), [paging, setPaging] = useState(false);
   const alive = useRef(true), lifetime = useRef<AbortController | null>(null), locked = useRef(false);
   const readEpoch = useRef(0), input = useRef<HTMLInputElement>(null), unauthorized = useRef(onUnauthorized);
@@ -65,7 +67,7 @@ function DiaryAccount({userId, onUnauthorized}: Props) {
     if (response.status === 401) {unauthorized.current(); throw new Error("Войдите снова, чтобы открыть Дневник.");}
     if (!response.ok) {
       const value = await response.json().catch(() => ({}));
-      throw new Error(response.status === 413 ? "Файл превышает допустимый размер." : value.code === "IDEMPOTENCY_CONFLICT" ? "Для этой попытки уже принят другой файл. Выберите исходный файл." : "Не удалось подтвердить действие. Обновите запись перед повтором.");
+      throw Object.assign(new Error(response.status === 413 ? "Файл превышает допустимый размер." : value.code === "IDEMPOTENCY_CONFLICT" ? "Для этой попытки уже принят другой файл. Выберите исходный файл." : "Не удалось подтвердить действие. Обновите запись перед повтором."), {status: response.status});
     }
     const value = await response.json();
     if (signal.aborted) throw new DOMException("Request stopped", "AbortError");
@@ -118,18 +120,31 @@ function DiaryAccount({userId, onUnauthorized}: Props) {
     return file.type.startsWith("audio/") ? file.type : known[extension] ?? "";
   }
   function put(id: string, file: File): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest(), signal = lifetime.current!.signal;
-      const stop = () => xhr.abort();
-      const done = () => signal.removeEventListener("abort", stop);
-      xhr.open("PUT", "/api/diary/upload?entry=" + encodeURIComponent(id));
-      xhr.setRequestHeader("x-brai-user", userId); xhr.setRequestHeader("x-content-size", String(file.size)); xhr.timeout = 30 * 60 * 1000;
-      xhr.upload.onprogress = event => {if (alive.current && event.lengthComputable) setProgress(Math.round(event.loaded / event.total * 100));};
-      xhr.onload = () => {done(); if (xhr.status === 401) unauthorized.current(); xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error("Не удалось подтвердить загрузку. Выберите тот же файл для проверки и повтора."));};
-      xhr.onerror = xhr.ontimeout = xhr.onabort = () => {done(); reject(new Error("Соединение прервалось. Выберите тот же файл, чтобы повторить загрузку."));};
-      signal.addEventListener("abort", stop, {once: true});
-      if (signal.aborted) {done(); reject(new Error("Запрос остановлен.")); return;}
-      xhr.send(file);
+    const signal = lifetime.current!.signal;
+    return resumeUpload(file, {
+      signal,
+      read: () => api("/upload?entry=" + encodeURIComponent(id)) as Promise<UploadState>,
+      progress: (loaded, total) => {if (alive.current) {setProgress(Math.round(loaded / total * 100)); setUploadSize({loaded, total});}},
+      waiting: () => {if (alive.current) setNotice("Связь прервалась. Продолжим загрузку после восстановления соединения…");},
+      send: (part, offset, chain) => new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const stop = () => xhr.abort(), done = () => signal.removeEventListener("abort", stop);
+        xhr.open("PATCH", "/api/diary/upload?entry=" + encodeURIComponent(id));
+        xhr.setRequestHeader("x-brai-user", userId); xhr.setRequestHeader("x-content-size", String(file.size));
+        xhr.setRequestHeader("upload-offset", String(offset)); xhr.setRequestHeader("upload-chain", chain); xhr.timeout = 30 * 60 * 1000;
+        xhr.upload.onprogress = event => {if (alive.current && event.lengthComputable) {
+          const loaded = Math.min(file.size, offset + event.loaded);
+          setProgress(Math.round(loaded / file.size * 100)); setUploadSize({loaded, total: file.size});
+        }};
+        xhr.onload = () => {done(); if (xhr.status === 401) unauthorized.current();
+          if (xhr.status >= 200 && xhr.status < 300) {if (alive.current) setNotice("Загружаем " + file.name); resolve();}
+          else reject(Object.assign(new Error("Не удалось подтвердить часть файла."), {status: xhr.status}));
+        };
+        xhr.onerror = xhr.ontimeout = xhr.onabort = () => {done(); reject(new Error("Соединение прервалось."));};
+        signal.addEventListener("abort", stop, {once: true});
+        if (signal.aborted) {done(); reject(new DOMException("Остановлено", "AbortError")); return;}
+        xhr.send(part);
+      }),
     });
   }
   async function upload(files: File[]) {
@@ -139,7 +154,7 @@ function DiaryAccount({userId, onUnauthorized}: Props) {
       for (const file of files) {
         if (!file.size || file.size > 2147483648 || !mime(file)) throw new Error("Выберите непустую аудиозапись размером до 2 ГБ.");
         const metadata = uploadInput(file);
-        setNotice("Загружаем " + file.name); setProgress(0);
+        setNotice("Загружаем " + file.name); setProgress(0); setUploadSize({loaded: 0, total: file.size});
         const prepared = await api("/materials", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(metadata)});
         if (!alive.current) return;
         const id = prepared.entry.id as string;
@@ -149,7 +164,7 @@ function DiaryAccount({userId, onUnauthorized}: Props) {
         await refresh(); await open(id);
       }
     } catch (e) {if (alive.current) {setNotice(""); setError((e as Error).message); void refresh().catch(() => {});}}
-    finally {locked.current = false; if (alive.current) {setBusy(false); setProgress(null);}}
+    finally {locked.current = false; if (alive.current) {setBusy(false); setProgress(null); setUploadSize(null);}}
   }
   const rail = <div className="diary-rail">
     <Button onClick={() => input.current?.click()} disabled={busy}><Upload size={16}/> Загрузить аудио</Button>
@@ -161,7 +176,7 @@ function DiaryAccount({userId, onUnauthorized}: Props) {
     <div className="diary-screen">
       <div className="diary-toolbar"><p>Голосовые записи и тексты дневника</p><Button variant="outline" disabled={busy} onClick={() => {setError(""); void refresh().then(() => selected ? open(selected, true) : undefined).catch(e => {if (alive.current) setError(e.message);});}} aria-label="Обновить Дневник"><RefreshCw size={16}/></Button></div>
       {error && <p className="diary-message diary-error" role="alert">{error}</p>}
-      {notice && <div className="diary-message" role="status"><p>{notice}</p>{progress !== null && <><progress value={progress} max={100}/><span>{progress}%</span><small>Не закрывайте страницу до окончания загрузки.</small></>}</div>}
+      {notice && <div className="diary-message" role="status"><p>{notice}</p>{progress !== null && <><progress value={progress} max={100}/><span>{progress}%</span>{uploadSize && <small>{uploadBytes(uploadSize.loaded)} из {uploadBytes(uploadSize.total)}</small>}<small>Не закрывайте страницу до окончания загрузки.</small></>}</div>}
       {reading && !entry ? <p role="status">Читаем запись…</p> : entry ? <DiaryRecord entry={entry} userId={userId}/> : <div className="diary-empty"><BookOpen size={36} strokeWidth={1.3}/><h1>Сохрани свой день</h1><p>Загрузи аудиозапись. Мы расшифруем её,<br/>подготовим текст и определим дату событий.</p><Button onClick={() => input.current?.click()} disabled={busy}><Upload size={16}/> Загрузить аудио</Button></div>}
     </div>
   </WorkspaceFrame>;

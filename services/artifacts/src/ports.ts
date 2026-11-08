@@ -3,7 +3,7 @@
 import type {Artifact, ArtifactReference, ReferenceScope, ReferenceQueryScope, ArtifactOutputBinding, OutputQueryScope} from "../contracts/index.mjs";
 export type Metadata = Pick<Artifact,"title"|"filename"|"extension"|"mimeType"|"source"|"geotag"|"materialCreatedAt"|"details">;
 export type Publication = {tempName:string; sizeBytes:number; sha256:string};
-export type ArtifactRecord = {artifact:Artifact; prepareInput:{ownerId:string;kind:Artifact["kind"];metadata:Metadata}; uploadToken:string; publication?:Publication};
+export type ArtifactRecord = {artifact:Artifact; prepareInput:{ownerId:string;kind:Artifact["kind"];metadata:Metadata}; uploadToken:string; publication?:Publication; resumable?:{tempName:string;totalBytes:number;offset:number;chain:string}};
 export type Relation = {modelArtifactId:string;originalArtifactId:string;createdAt:string};
 export type Link = {linkId:string;artifactId:string;url:string;expiresAt:string|null;revokedAt:string|null};
 export type LinkRecord = {link:Link;requestId:string;expiresInput:string|null;token:string};
@@ -45,6 +45,10 @@ export interface ArtifactsStore {
 /** Файловый порт использует только ID; write ограничивает память и очищает свой temp при ошибке. */
 export interface ArtifactFiles {
   write(artifactId:string,source:AsyncIterable<Uint8Array>,maxBytes:number,signal?:AbortSignal):Promise<Publication>;
+  /** Дописывает ровно одну часть к подтверждённому offset; незавершённый хвост откатывается. */
+  append(tempName:string,source:AsyncIterable<Uint8Array>,offset:number,length:number,signal?:AbortSignal):Promise<string>;
+  /** Читает размер и SHA-256 приватного временного файла перед публикацией. */
+  inspectTemp(tempName:string):Promise<{sizeBytes:number;sha256:string}>;
   publish(artifactId:string,publication:Publication):Promise<void>;
   inspect(artifactId:string):Promise<{sizeBytes:number;sha256:string}|undefined>;
   remove(artifactId:string):Promise<void>;

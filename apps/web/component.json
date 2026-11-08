@@ -274,7 +274,8 @@
       "apps/web/app/agent/admin-chats.tsx",
       "apps/web/app/agent/admin-chat-client.ts",
       "apps/web/app/api/admin/route.ts",
-      "apps/web/server/admin-download.ts"
+      "apps/web/server/admin-download.ts",
+      "apps/web/app/diary/upload.ts"
     ],
     "checks": [
       "apps/web/tests/account-render.test.ts",
@@ -334,7 +335,8 @@
       "apps/web/tests/admin-auth.test.ts",
       "apps/web/tests/admin-download.test.ts",
       "apps/web/tests/admin-chats-render.test.ts",
-      "apps/web/tests/diary-render.test.ts"
+      "apps/web/tests/diary-render.test.ts",
+      "apps/web/tests/diary-upload.test.ts"
     ]
   },
   "dependencies": [

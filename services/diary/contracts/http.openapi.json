@@ -198,6 +198,84 @@
             "$ref": "#/components/responses/Failure"
           }
         }
+      },
+      "get": {
+        "operationId": "getUploadState",
+        "responses": {
+          "200": {
+            "description": "Подтверждённая позиция; ready означает принятый оригинал",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadState"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Failure"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "uploadAudioPart",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-content-size",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483648
+            }
+          },
+          {
+            "in": "header",
+            "name": "upload-offset",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "in": "header",
+            "name": "upload-chain",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary",
+                "description": "1 MiB, последняя часть короче"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Подтверждённая позиция; ready означает принятый оригинал",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadState"
+                }
+              }
+            }
+          },
+          "default": {
+            "$ref": "#/components/responses/Failure"
+          }
+        }
       }
     },
     "/v1/file/{id}": {
@@ -602,6 +680,47 @@
           "entryId",
           "status"
         ]
+      },
+      "UploadState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "entryId",
+          "offset",
+          "totalBytes",
+          "chain",
+          "chunkBytes",
+          "ready"
+        ],
+        "properties": {
+          "entryId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483648
+          },
+          "totalBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 2147483648
+          },
+          "chain": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "chunkBytes": {
+            "const": 1048576
+          },
+          "ready": {
+            "type": "boolean"
+          }
+        }
       }
     },
     "responses": {

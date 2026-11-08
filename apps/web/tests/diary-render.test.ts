@@ -12,6 +12,7 @@ const file = new URL("../app/diary/screen.tsx", import.meta.url), require = crea
 const output = ts.transpileModule(readFileSync(file, "utf8"), {compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX}}).outputText;
 const mod = {exports: {} as {DiaryRecord: ComponentType<{entry: DiaryEntry; userId: string}>; default: ComponentType<{userId: string; onUnauthorized: () => void}>}};
 new Function("require", "module", "exports", output)((name: string) => {
+  if (name === "./upload") return {};
   if (name.endsWith(".css")) return {};
   if (name === "../shell/workspace-frame") return {default: ({children, rail}: {children: ReactNode; rail: ReactNode}) => createElement("main", null, rail, children)};
   if (name === "@/components/ui/button") return {Button: (props: object) => createElement("button", props)};
