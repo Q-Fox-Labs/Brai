@@ -1,7 +1,6 @@
 /* ABOUTME: Оформляет административный экран в цветах рабочей оболочки Brai. */
 /* ABOUTME: Не меняет общие стили и сохраняет доступность на узком экране. */
-.workspace-admin { overflow-y: auto; overscroll-behavior: contain; }
-.admin-screen { max-width: 1440px; margin: 0 auto; padding: 32px; display: grid; gap: 28px; }
+.admin-screen { max-width: 1100px; margin: 0 auto; padding: 32px; display: grid; align-content: start; gap: 24px; }
 .admin-back { width: fit-content; color: var(--muted-foreground); font-size: 14px; }
 .admin-back:hover { color: var(--foreground); }
 .admin-heading { border-bottom: 1px solid var(--border); padding-bottom: 22px; }
@@ -39,9 +38,10 @@
 .admin-screen { gap: 24px; padding: 40px clamp(20px, 4vw, 56px) 80px; }
 .admin-heading { border: 0; padding: 0; }
 .admin-heading h1 { font-size: 30px; font-weight: 600; letter-spacing: 0; }
-.admin-section-nav { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
-.admin-section-nav button { border: 0; border-radius: 0; padding: 12px 16px; color: var(--muted-foreground); background: transparent; border-bottom: 2px solid transparent; }
-.admin-section-nav button[aria-pressed="true"] { color: var(--foreground); border-bottom-color: var(--foreground); }
+.workspace-frame-rail .admin-section-nav { display: grid; height: auto; gap: 4px; padding: 12px; }
+.workspace-frame-rail .admin-section-nav button { width: 100%; min-height: 40px; padding: 8px 12px; border: 0; border-radius: 7px; background: transparent; color: var(--frame-text); text-align: left; cursor: pointer; }
+.admin-section-nav button:hover, .admin-section-nav button[aria-current] { background: var(--frame-hover); }
+.admin-section-nav button:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 .admin-section { display: grid; align-content: start; gap: 24px; max-width: 1050px; }
 .admin-section-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }
 .admin-section-heading h2 { font-size: 20px; font-weight: 600; }
@@ -53,4 +53,4 @@
 .admin-source-list { display: flex; gap: 8px; flex-wrap: wrap; }
 .admin-source-list button[aria-pressed="true"] { background: var(--accent); border-color: var(--foreground); }
 .admin-screen [role="alert"] { color: var(--destructive); }
-@media (max-width: 600px) { .admin-screen { padding: 24px 16px 100px; } .admin-section-nav { overflow-x: auto; } .admin-section-nav button { white-space: nowrap; } }
+@media (max-width: 600px) { .admin-screen { padding: 24px 16px 100px; } }

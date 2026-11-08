@@ -2,6 +2,7 @@
 // ABOUTME: Показывает управление пользователями и приглашениями администратора.
 // ABOUTME: Данные памяти и чатов запрашиваются только после выбора пользователя.
 import { useEffect, useRef, useState } from "react";
+import WorkspaceFrame from "../shell/workspace-frame";
 import { AdminDetail } from "./detail";
 import { AdminPersonalSection } from "./personal";
 import { ArchiveTarget, ARCHIVE_TARGET } from "./archive-target";
@@ -29,7 +30,7 @@ async function call(operation: string, input: Record<string, string> = {}, write
  return body;
 }
 /** Управляет аккаунтами; выбранная цель всегда передаётся явно. */
-export default function AdminScreen() {
+export default function AdminScreen({ userId }: { userId: string }) {
  const [users, setUsers] = useState<User[]>([]), [invites, setInvites] = useState<Invite[]>([]), [selected, setSelected] = useState<string | null>(null);
  const [section, setSection] = useState<"users" | "data" | "invites">("users");
  const [userFilter, setUserFilter] = useState<"all" | "available" | "revoked">("available");
@@ -118,8 +119,7 @@ export default function AdminScreen() {
    {user.lifecycle?.kind === "prepare" && user.lifecycle.state === "failed" && <button type="button" disabled={busy} onClick={() => void access("status-set", { userId: user.id, status: "active" })}>Повторить подготовку</button>}
    {user.lifecycle?.kind === "stop" && user.lifecycle.state === "failed" && <button type="button" disabled={busy} onClick={() => { if (window.confirm("Доступ к боту и сайту будет закрыт. Переписка, память и файлы сохранятся")) void access("users-revoke", { userId: user.id }); }}>Повторить отзыв</button>}
    <button type="button" onClick={() => void mutate("sessions-revoke", { userId: user.id })}>Завершить сессии</button></div></article>; }
- return <main className="admin-screen"><header className="admin-heading"><div><h1>Админка</h1><p>Пользователи, приглашения и доступ к данным</p></div></header>
-  <nav className="admin-section-nav" aria-label="Разделы админки"><button type="button" aria-pressed={section === "users"} onClick={() => setSection("users")}>Пользователи</button><button type="button" aria-pressed={section === "data"} onClick={() => setSection("data")}>Данные</button><button type="button" aria-pressed={section === "invites"} onClick={() => setSection("invites")}>Приглашения</button></nav>
+ return <WorkspaceFrame section="admin" userId={userId} title={{ users: "Пользователи", data: "Данные", invites: "Приглашения" }[section]} railTitle="Админка" rail={<nav className="admin-section-nav" aria-label="Разделы админки"><button type="button" data-frame-close-rail aria-current={section === "users" ? "page" : undefined} onClick={() => setSection("users")}>Пользователи</button><button type="button" data-frame-close-rail aria-current={section === "data" ? "page" : undefined} onClick={() => setSection("data")}>Данные</button><button type="button" data-frame-close-rail aria-current={section === "invites" ? "page" : undefined} onClick={() => setSection("invites")}>Приглашения</button></nav>}><main className="admin-screen">
   {error && <p role="alert">{error}</p>}
   {loadError && <p role="alert">{loadError}</p>}
   {accessError && <p role="alert">{accessError.message}</p>}
@@ -139,5 +139,5 @@ export default function AdminScreen() {
   </div>}
   {section === "invites" && <section className="admin-section"><div className="admin-section-heading"><div><h2>Приглашения</h2><p>Создание и отзыв приглашений</p></div></div><button type="button" onClick={() => void mutate("invite-create")}>Создать приглашение</button>{code && <InviteCommand key={code} code={code} />}
    {invites.map(invite => <p key={invite.id}>{invite.id} · до {invite.expiresAt} · {invite.revokedAt ? "отозвано" : invite.consumedAt ? "использовано" : "действует"} {!invite.revokedAt && !invite.consumedAt && <button type="button" onClick={() => void mutate("invite-revoke", { inviteId: invite.id })}>Отозвать</button>}</p>)}</section>}
- </main>;
+ </main></WorkspaceFrame>;
 }
