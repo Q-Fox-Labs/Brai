@@ -3,17 +3,53 @@
 """Создание адаптера отложено до загрузки закреплённого Hermes."""
 import asyncio
 from .ipc import RpcError
+from .scope import delivery_scope
+from .telegram_proxy import BotProxy
 
 
 def make_adapter(config, platform, peer, publish_file):
     """Создать native adapter, отправляющий действия по двустороннему RPC."""
-    from gateway.platforms.base import BasePlatformAdapter, SendResult
+    from gateway.platforms.base import SendResult
+    from plugins.platforms.telegram.adapter import TelegramAdapter
 
-    class IpcAdapter(BasePlatformAdapter):
+    class IpcAdapter(TelegramAdapter):
         """Сохранить native вызовы и вернуть только фактический результат ingress."""
         supports_async_delivery = False
         # AIDEV-NOTE: Личный процесс передаёт файлы ingress и не содержит Telegram bot.
         file_delivery_via_ipc = True
+
+        def __init__(self, config):
+            super().__init__(config)
+            self._bot = BotProxy(peer)
+
+        async def handle_interactive(self, update, *, telegram_id):
+            """Исполнить native callback только для подтверждённого владельца worker."""
+            from telegram import Update
+            if not isinstance(update, dict):
+                raise PermissionError('Invalid interactive update')
+            callback, inline = update.get('callback_query'), update.get('inline_query')
+            if bool(callback) == bool(inline):
+                raise PermissionError('Invalid interactive update')
+            incoming = callback or inline
+            user = incoming.get('from') if isinstance(incoming, dict) else None
+            if (not isinstance(user, dict) or user.get('is_bot') is not False
+                    or str(user.get('id', '')) != str(telegram_id)):
+                raise PermissionError('Interactive owner mismatch')
+            native = Update.de_json(update, self._bot)
+            if callback:
+                message = getattr(native.callback_query, 'message', None)
+                if message is None or not getattr(message, 'message_id', None):
+                    raise PermissionError('Callback message required')
+                if str(getattr(native.callback_query, 'data', '') or '').startswith('brai:'):
+                    handler = getattr(self, '_brai_human_callback', None)
+                    if not callable(handler):
+                        raise PermissionError('Human callback unavailable')
+                    await handler(native, None)
+                else:
+                    await self._handle_callback_query(native, None)
+            else:
+                await self._handle_inline_query(native, None)
+            return {'accepted': True}
 
         def bind_source(self, source):
             """Запомнить только подтверждённый ingress контекст текущего пользователя."""
@@ -29,14 +65,23 @@ def make_adapter(config, platform, peer, publish_file):
             return dict(info)
 
         async def connect(self, *, is_reconnect=False):
+            """Пометить IPC adapter готовым без HTTP, token и polling."""
+            self._bot = BotProxy(peer)
+            self._mark_connected()
             return True
 
         async def disconnect(self):
-            return None
+            """Остановить фоновые UI задачи и снять признак готовности."""
+            self._mark_disconnected()
+            tasks = tuple(getattr(self, '_background_tasks', ()))
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._bot = None
 
         async def _action(self, name, payload):
             try:
-                value = await peer.call('send', {'action': name, 'payload': payload})
+                value = await peer.call('send', {'action': name, 'payload': payload, 'scope_id': delivery_scope.get()})
                 if not isinstance(value, dict) or type(value.get('success')) is not bool:
                     raise ValueError('invalid send result')
                 fields = ('success', 'message_id', 'error', 'raw_response', 'retryable', 'retry_after', 'continuation_message_ids', 'error_kind')
@@ -80,12 +125,26 @@ def make_adapter(config, platform, peer, publish_file):
 
         async def _file(self, action, chat_id, path, caption, reply_to, metadata, **kwargs):
             try:
-                descriptor = await publish_file(path)
+                from files.native import local_path
+                descriptor = await publish_file(local_path(path))
                 if not isinstance(descriptor, dict) or not descriptor.get('artifact_id'):
                     raise ValueError('missing artifact')
             except Exception:
                 return SendResult(success=False, error='File publication failed')
             return await self._action(action, dict(chat_id=chat_id, artifact=descriptor, caption=caption, reply_to=reply_to, metadata=metadata, **kwargs))
+
+        async def send_file_set(self, chat_id, items, kind, fallback, metadata=None):
+            """Передать один проверенный batch через owner-bound descriptors, сохранив receipts."""
+            payload = [{'artifact': {'artifact_id': item['file']['artifactId']},
+                        'caption': item.get('caption', ''), 'presentation': item['presentation']}
+                       for item in items]
+            result = await self._action('send_file_set', dict(chat_id=chat_id, items=payload,
+                kind=kind, fallback=fallback, metadata=metadata))
+            ids = (getattr(result, 'raw_response', None) or {}).get('message_ids')
+            if (not result.success or not isinstance(ids, list) or len(ids) != len(items)
+                    or any(not isinstance(value, str) or not value for value in ids)):
+                raise RuntimeError('File set delivery unavailable or outcome unknown')
+            return ids
 
         async def send_image_file(self, chat_id, image_path, caption=None, reply_to=None, metadata=None, **kwargs):
             return await self._file('send_image_file', chat_id, image_path, caption, reply_to, metadata)
@@ -101,9 +160,9 @@ def make_adapter(config, platform, peer, publish_file):
                                     is_voice=bool(kwargs.get('is_voice')))
 
         async def send_image(self, chat_id, image_url, caption=None, reply_to=None, metadata=None):
-            return await self._action('send_image', dict(chat_id=chat_id, image_url=image_url, caption=caption, reply_to=reply_to, metadata=metadata))
+            return await self.send_image_file(chat_id, image_url, caption, reply_to, metadata)
 
         async def send_animation(self, chat_id, animation_url, caption=None, reply_to=None, metadata=None):
-            return await self._action('send_animation', dict(chat_id=chat_id, animation_url=animation_url, caption=caption, reply_to=reply_to, metadata=metadata))
+            return await self._file('send_animation', chat_id, animation_url, caption, reply_to, metadata)
 
-    return IpcAdapter(config, platform)
+    return IpcAdapter(config)

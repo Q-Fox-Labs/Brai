@@ -24,7 +24,8 @@
             "type": "object",
             "required": [
               "source",
-              "message_id"
+              "message_id",
+              "delivery_scope"
             ],
             "properties": {
               "source": {
@@ -125,6 +126,11 @@
                   },
                   "additionalProperties": false
                 }
+              },
+              "delivery_scope": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
               }
             },
             "additionalProperties": false
@@ -207,6 +213,7 @@
               "send",
               "edit_message",
               "send_typing",
+              "send_file_set",
               "send_image",
               "send_animation",
               "send_image_file",
@@ -222,6 +229,18 @@
           "description": "Файловые действия принимают artifact descriptor владельца. send_voice дополнительно принимает необязательный is_voice:boolean; true сохраняет голосовую подачу до native transport. Неподтверждённая доставка не возвращает успешную квитанцию.",
           "schema": {
             "type": "object"
+          }
+        },
+        {
+          "name": "scope_id",
+          "required": true,
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 128
           }
         }
       ],
@@ -311,7 +330,7 @@
     },
     {
       "name": "health",
-      "summary": "Проверить готовность runner и привязку; только подтверждённому UID ingress.",
+      "summary": "Раздельно проверить транспортный bootstrap и полный native запуск профиля.",
       "params": [
         {
           "name": "require_tools",
@@ -320,7 +339,7 @@
             "type": "boolean",
             "default": false
           },
-          "description": "После активации Auth также загрузить MCP и проверить инструмент входа."
+          "description": "После active Auth дождаться полного native startup, MCP, scheduler и private plugin."
         }
       ],
       "result": {
@@ -330,7 +349,8 @@
           "required": [
             "ready",
             "userId",
-            "telegramId"
+            "telegramId",
+            "operational"
           ],
           "properties": {
             "ready": {
@@ -341,9 +361,113 @@
             },
             "telegramId": {
               "type": "string"
+            },
+            "operational": {
+              "type": "boolean"
             }
           },
           "additionalProperties": false
+        }
+      }
+    },
+    {
+      "name": "interactive",
+      "summary": "Передать подлинный owner-bound callback/inline update из ingress в private native adapter.",
+      "params": [
+        {
+          "name": "owner",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "name": "update",
+          "required": true,
+          "schema": {
+            "type": "object"
+          }
+        },
+        {
+          "name": "scope_id",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      ],
+      "result": {
+        "name": "receipt",
+        "schema": {
+          "type": "object",
+          "required": [
+            "accepted"
+          ],
+          "properties": {
+            "accepted": {
+              "const": true
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "name": "telegram_api",
+      "summary": "Tokenless native UI; назначение, сообщение и query проверяет ingress.",
+      "params": [
+        {
+          "name": "method",
+          "required": true,
+          "schema": {
+            "enum": [
+              "send_message",
+              "edit_message_text",
+              "edit_message_reply_markup",
+              "delete_message",
+              "answer_callback_query",
+              "answer_inline_query"
+            ]
+          }
+        },
+        {
+          "name": "payload",
+          "required": true,
+          "schema": {
+            "type": "object"
+          }
+        },
+        {
+          "name": "scope_id",
+          "required": true,
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      ],
+      "result": {
+        "name": "telegramReceipt",
+        "schema": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "message_id",
+                "chat"
+              ]
+            },
+            {
+              "const": true
+            }
+          ]
         }
       }
     }

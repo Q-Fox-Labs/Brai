@@ -943,6 +943,55 @@
           "$ref": "#/components/errors/Unavailable"
         }
       ]
+    },
+    {
+      "name": "ingress.profiles",
+      "paramStructure": "by-name",
+      "description": "Only trusted ingress UID; returns active registry profiles after fresh Auth authorization, without transcripts or credentials. Used for persistent worker supervision.",
+      "params": [],
+      "result": {
+        "name": "profiles",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "profiles"
+          ],
+          "properties": {
+            "profiles": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "uid",
+                  "userId",
+                  "profileId",
+                  "telegramId",
+                  "status",
+                  "home"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
     }
   ],
   "components": {

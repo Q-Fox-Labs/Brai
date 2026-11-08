@@ -1,7 +1,7 @@
 --- a/plugins/platforms/telegram/adapter.py
 +++ b/plugins/platforms/telegram/adapter.py
 @@ -2881,6 +2881,13 @@
- 
+
      async def handle_message(self, event: MessageEvent) -> None:
          self._accept_update()
 +        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
@@ -12,7 +12,7 @@
 +            await dispatch(event)
 +            return
          await super().handle_message(event)
- 
+
      def _register_handlers(self, app) -> None:
 @@ -3075,7 +3082,13 @@
                      self._bot = self._app.bot
@@ -65,7 +65,7 @@
 --- a/plugins/platforms/telegram/adapter.py
 +++ b/plugins/platforms/telegram/adapter.py
 @@ -944,6 +944,9 @@
- 
+
          Only rejects when it can make the same context-aware decision the runner would; unknown DMs pass through when
          there is no allowlist or pairing is the unauthorized-DM behavior."""
 +        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
@@ -77,7 +77,7 @@
 --- a/plugins/platforms/telegram/adapter.py
 +++ b/plugins/platforms/telegram/adapter.py
 @@ -5766,6 +5766,8 @@
- 
+
      def _telegram_observe_unmentioned_group_messages(self) -> bool:
          """Store skipped unmentioned group messages as context (observe chatter, dispatch only when addressed)."""
 +        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
@@ -100,7 +100,7 @@
              self._attach_cached(
 @@ -6544,6 +6552,22 @@
          await self.handle_message(self._apply_telegram_group_observe_attribution(event))
- 
+
      # -- Text message aggregation (handles Telegram client-side splits) --
 +
 +    @staticmethod
@@ -118,7 +118,7 @@
 +        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
 +            return key + ":brai-user:" + self._brai_identity_batch_scope(source)[0]
 +        return key
- 
+
      def _text_batch_key(self, event: MessageEvent) -> str:
          """Session-scoped batching key; topic recovery first so DM-topic batches coalesce on the recovered lane."""
 @@ -6651,6 +6675,9 @@
@@ -150,7 +150,7 @@
 +            return
          from gateway.run import _startup_restore_drain_timeout_secs
          claimed = await self._claim_pending_obligations()
- 
+
 @@ -348,6 +350,8 @@
          take (#91969). Flood-refused rows adopted inside their wait come back flagged ``adopted``: their
          flags are cleared here too, and ``_redeliver_claimed_obligations`` leaves them to the timer.
@@ -188,7 +188,7 @@
              _AGENT_PENDING_SENTINEL, _auto_continue_freshness_window, _is_fresh_gateway_interruption,
          )
 @@ -1140,6 +1150,8 @@
- 
+
      async def _start_recover_previous_run(self) -> None:
          """Plugins, relay, hooks, then crash/clean-exit recovery of processes and sessions."""
 +        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
@@ -197,7 +197,7 @@
          self._start_register_plugins_relay_hooks()
          # Plugins that load later (force re-discovery, install/enable nudge) re-wire live adapters (#87770).
 @@ -1511,6 +1523,9 @@
- 
+
      async def _start_finish_wiring(self, connected_count: int) -> None:
          """Post-connect wiring: services, boot notifications, startup restore, recovered watchers."""
 +        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
@@ -207,7 +207,7 @@
          from gateway.shutdown_flush import recover_gateway_pending
          await self._start_post_connect_services(connected_count)
 @@ -1570,6 +1585,9 @@
- 
+
      def _start_spawn_background_watchers(self) -> None:
          """Spawn the long-lived supervised background watchers."""
 +        if os.environ.get("BRAI_IDENTITY_MODE") == "telegram":
@@ -305,3 +305,95 @@
 +            return
      with contextlib.suppress(OSError):
          os.chmod(parent, 0o700)
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -1607,16 +1607,20 @@
+ def _cron_tick_profile_homes(config: object) -> list[tuple[str, "Path"]]:
+     """Profile homes the in-process ticker visits: the served set PLUS the process-active
+     profile: ``profiles_to_serve`` lists default + every live named profile, but a ``--profile
+     <name>`` gateway's own profile may sit outside ``profiles/`` (custom HERMES_HOME). One host
+     process ticks all of them regardless of ``gateway.multiplex_profiles``. Adapter startup
+     already skips ``active``."""
+     from hermes_cli.profiles import get_active_profile_name, get_profile_dir
+
++    if os.environ.get("BRAI_IDENTITY_MODE") == "worker":
++        # Личный UID исполняет расписание только своего HOME.
++        from hermes_constants import get_process_hermes_home
++        return [(get_active_profile_name() or "default", Path(get_process_hermes_home()))]
+     homes = _multiplex_profile_homes(config)
+     active = get_active_profile_name() or "default"  # launch profile, pre-identity (ticker boot)
+     if any(name == active for name, _home in homes):
+         return homes
+     try:
+         return homes + [(active, get_profile_dir(active))]
+     except Exception:
+         return homes
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -5723,3 +5723,4 @@
+ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False,
+-                        verbosity: Optional[int] = 0, force: bool = False) -> bool:
++                        verbosity: Optional[int] = 0, force: bool = False, *, runner_factory=None,
++                        startup_gate=None, operational_ready=None) -> bool:
+     """Start the gateway and run until interrupted; False if it failed to start (non-zero exit so
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -5772,10 +5772,12 @@
+-    runner = GatewayRunner(config)
++    runner = (runner_factory or GatewayRunner)(config)
++    if startup_gate is not None:
++        await startup_gate(runner)
+     # Multiplex: swap the launch-home file handlers for per-profile routers so each profile's records
+     # land in its own logs/. Must run after the runner resolved (possibly None) config and setup_logging.
+     # See #82936.
+     _enable_multiplex_log_routing(runner.config)
+     # ``--replace`` is explicit startup authority, not a durable reconnect policy: GatewayRunner scopes
+     # it to cold adapter connects and clears it before the background reconnect watcher starts.
+     runner._platform_lock_takeover_on_start = bool(replace)
+
+     # Unexpected signals exit non-zero so service managers revive us; planned stops write a marker first.
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -5895,14 +5895,18 @@
+     cron_stop, cron_provider, cron_thread, housekeeping_thread = (
+         _start_gateway_start_cron_and_housekeeping(runner))
+
+-    # READY only once adapters, cron and housekeeping run; missing systemd state just disables watchdog.
+-    runner._start_systemd_watchdog()
+-
+-    await runner.wait_for_shutdown()
+-
+-    return await _start_gateway_shutdown_tail(
+-        runner, _control_server, cron_stop, cron_provider, cron_thread, housekeeping_thread,
+-        _planned_stop_watcher_stop, _planned_stop_watcher_thread, _signal_initiated_shutdown)
++    # Готовность включает scheduler; теперь можно принимать входящие ходы.
++    try:
++        runner._start_systemd_watchdog()
++        if operational_ready is not None:
++            await operational_ready(runner)
++        await runner.wait_for_shutdown()
++    finally:
++        await runner.stop()
++        verdict = await _start_gateway_shutdown_tail(
++            runner, _control_server, cron_stop, cron_provider, cron_thread, housekeeping_thread,
++            _planned_stop_watcher_stop, _planned_stop_watcher_thread, _signal_initiated_shutdown)
++    return verdict
+
+
+ def _guard_corrupt_user_config() -> None:
+--- a/gateway/run_adapters.py
++++ b/gateway/run_adapters.py
+@@ -803,10 +803,12 @@
+             return  # not time yet
+         platform_config = info["config"]
+         attempt = info["attempts"] + 1
+         # Empty-token primary configs can never reconnect; drop them so multiplex setups
+         # where a secondary profile owns the bot do not spin forever.
+         # See #64674.
+-        if not _platform_has_bot_credential(platform, platform_config):
++        ipc_worker = (os.environ.get("BRAI_IDENTITY_MODE") == "worker"
++                      and platform == Platform.TELEGRAM)
++        if not ipc_worker and not _platform_has_bot_credential(platform, platform_config):
+             self._drop_from_reconnect_queue(platform, "no bot credential on queued config")
+             return
+         logger.info("Reconnecting %s (attempt %d)...", platform.value, attempt)

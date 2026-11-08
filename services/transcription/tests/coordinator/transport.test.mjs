@@ -32,7 +32,9 @@ const outputs = {
 async function listener(t, overrides = {}, invoke) {
   const calls = [];
   const gateway = createPublicGateway({ maxConcurrent: overrides.maxConcurrent ?? 4,
-    bindings: [{ token: 'test-use', principal }, { token: 'test-write', principal: { ...principal, permissions: ['transcription:use', 'transcription:settings:write'] } }],
+    bindings: [{ token: 'test-delegate', principal, permissions: ['identity:delegate'] },
+      { token: 'test-delegate-admin', principal: { ...principal, permissions: ['transcription:use', 'transcription:settings:write'] }, permissions: ['identity:delegate'] },
+      { token: 'test-use', principal }, { token: 'test-write', principal: { ...principal, permissions: ['transcription:use', 'transcription:settings:write'] } }],
     invoke: invoke ?? (async (method, params, trusted) => { calls.push({ method, params, trusted }); return outputs[method]; }),
   });
   const allowedHosts = ['transcription.test'];
@@ -196,4 +198,32 @@ test('public bounded JSON budget excludes newline, counts UTF8/escaping and reje
   for (const invalid of [{ value: undefined }, new Date(), { value: BigInt(1) }]) assert.throws(() => encodeBoundedJson(invalid, 1000));
   const cyclic = {}; cyclic.self = cyclic;
   assert.throws(() => encodeBoundedJson(cyclic, 1000));
+});
+
+test('Root delegation is opt-in, closed and preserves private principal with HTTP result text', async (t) => {
+  const h = await listener(t);
+  const scoped = {...principal, scopeId:'private-profile-two', ownerId:'owner-two'};
+  const delegated = (method, p = scoped, args = inputs[method]) => ({method, params:args, principal:p});
+  const send = (body, token = 'test-delegate') => h.send('', body, {authorization:'Bearer ' + token}, '/internal/identity/transcription');
+  for (const token of ['test-use', 'test-write']) assert.equal((await send(delegated('request.get'), token)).response.status, 403);
+  assert.equal((await send(delegated('result.get'), 'invalid')).response.status, 401);
+  for (const body of [
+    {...delegated('request.get'), ownerId:'extra'},
+    {...delegated('request.get'), principal:{...scoped, permissions:['identity:delegate']}},
+    delegated('request.get', scoped, {...inputs['request.get'], ownerId:'extra'}),
+    delegated('unknown'),
+  ]) assert.equal((await send(body)).response.status, 400);
+  assert.equal((await send(delegated('request.get', {...scoped, scopeType:'system'}))).response.status, 403);
+  const admin = {...scoped, permissions:['transcription:use','transcription:settings:write']};
+  assert.equal((await send(delegated('settings.set', admin))).response.status, 403);
+  assert.equal((await send(delegated('settings.set', scoped), 'test-delegate-admin')).response.status, 403);
+  assert.equal(h.calls.length, 0);
+  const result = await send(delegated('result.get'));
+  assert.equal(result.response.status, 200);
+  assert.deepEqual(result.body, outputs['result.get']);
+  assert.deepEqual(h.calls[0].trusted, scoped);
+  assert.ok(Object.isFrozen(h.calls[0].trusted.permissions));
+  assert.equal((await send(delegated('settings.set', admin), 'test-delegate-admin')).response.status, 200);
+  // Public DTOs remain closed, even when the caller holds a Root token.
+  assert.equal((await h.send('request.get', delegated('request.get'), {authorization:'Bearer test-delegate'})).response.status, 400);
 });

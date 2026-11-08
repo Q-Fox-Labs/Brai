@@ -19,12 +19,12 @@ description: Уместные GIF в разговоре, объясняющие 
 
 Получай scope из доверенной идентичности текущего собеседника: например, telegram:user:<user_id>. Для одного пользователя сохраняй один scope в разных сессиях. Если идентичность неизвестна, не генерируй автоматически и не меняй чужую настройку.
 
-Используй установленный scripts/context_gif.py из профиля Hermes. status, off и rare работают без движка и генератора:
+Используй общий scripts/context_gif.py из HERMESCUSTOM_ROOT. В личном профиле отсутствие собственного скрипта или context-gifs.json не означает, что GIF недоступны: скрипт и маршрут общие, предпочтения собеседника личные. status, off и rare работают без движка и генератора:
 
 ```sh
-python3 "$HERMES_HOME/scripts/context_gif.py" status --scope '<scope>'
-python3 "$HERMES_HOME/scripts/context_gif.py" off --scope '<scope>'
-python3 "$HERMES_HOME/scripts/context_gif.py" rare --scope '<scope>'
+python3 "$HERMESCUSTOM_ROOT/scripts/context_gif.py" status --scope '<scope>'
+python3 "$HERMESCUSTOM_ROOT/scripts/context_gif.py" off --scope '<scope>'
+python3 "$HERMESCUSTOM_ROOT/scripts/context_gif.py" rare --scope '<scope>'
 ```
 
 - «Выключи гифки», «без мемов и анимаций» → off. Подтверди после успешной записи. Это запрет самостоятельных GIF, не запрет явно запрошенных.
@@ -37,12 +37,13 @@ python3 "$HERMES_HOME/scripts/context_gif.py" rare --scope '<scope>'
 Выбери Python установленного движка Hermes и фактический engine-root текущего экземпляра по его конфигурации. Не угадывай путь и не читай .env/credentials. Передай действующий HERMES_HOME. Пример с заполнителями:
 
 ```sh
-<python-Hermes> "$HERMES_HOME/scripts/context_gif.py" once --scope '<scope>' --engine-root '<engine-root>' --prompt 'Кот поднимает лапы, радуясь завершённой задаче; мягкая короткая петля'
+hermes_python="$(python3 -c 'import os,sys; from pathlib import Path; root=Path(os.environ["HERMES_ROOT"]); sys.path.insert(0,str(root)); from pm.environments import committed_venv,project_python; assert committed_venv(root) is not None; print(project_python(root))')"
+"$hermes_python" "$HERMESCUSTOM_ROOT/scripts/context_gif.py" once --scope '<scope>' --engine-root "$HERMES_ROOT" --prompt 'Кот поднимает лапы, радуясь завершённой задаче; мягкая короткая петля'
 ```
 
-Для самостоятельной вставки используй auto вместо once. Маршрут выбирается отдельно в HERMES_HOME/context-gifs.json. При provider=openai готовую GIF создаёт Flare 2.6 через API: девять кадров по 200 мс, low quality и low complexity. Ключ берётся только из отдельного защищённого key_file. Это оплачиваемый API-маршрут, явно подключённый владельцем для GIF; модель диалога и штатный image_generate продолжают использовать свои настройки.
+Для самостоятельной вставки используй auto вместо once. В личных Unix-профилях скрипт обращается к общему защищённому шлюзу GIF: тот проверяет пользователя и добавляет отдельный API-ключ. Ключ не нужен внутри профиля. В одиночном режиме маршрут выбирается отдельно в HERMES_HOME/context-gifs.json. При provider=openai готовую GIF создаёт Flare 2.6 через API: девять кадров по 200 мс, low quality и low complexity. Ключ берётся только из отдельного защищённого key_file. Это оплачиваемый API-маршрут, явно подключённый владельцем для GIF; модель диалога и штатный image_generate продолжают использовать свои настройки.
 
-Без этого файла сохраняется подписочный provider=openai-codex. Этот режим пока может отвечать «GIF output is not enabled for this request». Не меняй config.yaml, ключи и маршрут при отказе; не заменяй GIF сборкой кадров. Настройки off/rare и разовый once работают одинаково для обоих режимов. Установка ключа и выбор provider — дело оператора; просьба «выключи гифки» меняет только предпочтение собеседника.
+В одиночном режиме без этого файла сохраняется подписочный provider=openai-codex. Этот режим пока может отвечать «GIF output is not enabled for this request». Не меняй config.yaml, ключи и маршрут при отказе; не заменяй GIF сборкой кадров. Настройки off/rare и разовый once работают одинаково для обоих режимов. Установка ключа и выбор provider — дело оператора; просьба «выключи гифки» меняет только предпочтение собеседника.
 
 Если содержание результата не соответствует запросу, не отправляй его автоматически. Готовую GIF опубликуй через Brai publish_file и используй точный возвращённый дескриптор. published:false означает, что сборка ещё не опубликовала результат. Не используй MEDIA с локальным путём вместо публикации.
 

@@ -1,0 +1,178 @@
+# ABOUTME: Проверяет общие навыки, обязательный контекст и native TTS личного профиля.
+# ABOUTME: Использует только временные данные и подставной broker без генерации или Telegram.
+import hashlib
+import os
+from pathlib import Path
+import sys
+import tempfile
+from types import ModuleType, SimpleNamespace as NS
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from identity import instructions, images
+from identity.skills import catalog_files
+from identity.synthesize import synthesize_file
+from identity.profiles import native_profile
+from files import native
+from files.tests.test_files import Backend
+
+
+class SystemTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_system_catalog_retains_bundled_assets_and_product_routes(self):
+        bundled, product = self.root / 'bundled', self.root / 'instructions/skills'
+        for root, relative, raw in [
+            (bundled, 'creative/context-gifs/SKILL.md', b'---\nname: context-gifs\n---\nOld skill'),
+            (bundled, 'research/arxiv/scripts/search.py', b'print("shared")'),
+            (product, 'creative/context-gifs/SKILL.md', b'---\nname: context-gifs\n---\nCanonical skill')]:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(raw)
+        files = catalog_files(bundled, product)
+        self.assertEqual(files['research/arxiv/scripts/search.py'], b'print("shared")')
+        self.assertIn(b'/opt/brai-profile/instructions/skills/creative/context-gifs/SKILL.md',
+                      files['creative/context-gifs/SKILL.md'])
+        self.assertNotIn(b'Old skill', files['creative/context-gifs/SKILL.md'])
+        self.assertFalse(any('personal' in key for key in files))
+
+    def test_catalog_rejects_links_to_personal_files(self):
+        bundled, product = self.root / 'bundled', self.root / 'instructions'
+        bundled.mkdir()
+        product.mkdir()
+        private = self.root / 'private'
+        private.write_text('personal')
+        (bundled / 'SKILL.md').symlink_to(private)
+        with self.assertRaisesRegex(ValueError, 'SYSTEM_SKILL_LINK'):
+            catalog_files(bundled, product)
+
+    def test_mandatory_context_survives_deleted_personal_prompts(self):
+        shared = self.root / 'shared'
+        for relative in instructions.FILES:
+            path = shared / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('Required ' + relative)
+        user = self.root / 'user'
+        user.mkdir()
+        for name in ['USER.md', 'SOUL.md']:
+            path = user / name
+            path.write_text('personal override')
+            path.unlink()
+        backend = Backend(self.root / 'cache')
+        native.configure({'ownerId': 'owner', 'account': 'test',
+            'stateRoot': str(self.root / 'state'), 'resultRoot': str(self.root / 'cache'),
+            'readRoots': [str(user)]}, backend)
+        agent = NS(session_id='personal', ephemeral_system_prompt='Personal preference')
+        for _ in range(2):
+            with patch.dict(os.environ, BRAI_IDENTITY_MODE='worker'), patch.object(
+                    instructions, 'system_context', side_effect=lambda: instructions.read_context(shared)):
+                with native.conversation(agent, 'hello'):
+                    self.assertIn('Required BASE.md', agent.ephemeral_system_prompt)
+                    self.assertIn('Required INDEX.md', agent.ephemeral_system_prompt)
+                    self.assertIn('Personal preference', agent.ephemeral_system_prompt)
+            self.assertEqual(agent.ephemeral_system_prompt, 'Personal preference')
+        (shared / 'BASE.md').unlink()
+        with patch.dict(os.environ, BRAI_IDENTITY_MODE='worker'), patch.object(
+                instructions, 'system_context', side_effect=lambda: instructions.read_context(shared)):
+            with self.assertRaises(FileNotFoundError):
+                with native.conversation(agent, 'hello'):
+                    self.fail('Missing mandatory context must stop the turn')
+        self.assertEqual(agent.ephemeral_system_prompt, 'Personal preference')
+
+    def test_personal_prompts_are_read_fresh_and_deletion_is_optional(self):
+        first, second = self.root / 'first', self.root / 'second'
+        first.mkdir()
+        second.mkdir()
+        (first / 'USER.md').write_text('Первый пользователь')
+        (first / 'SOUL.md').write_text('Спокойный стиль')
+        (second / 'USER.md').write_text('Второй пользователь')
+        context = instructions.personal_context(first)
+        self.assertIn('Первый пользователь', context)
+        self.assertIn('Спокойный стиль', context)
+        self.assertNotIn('Второй пользователь', context)
+        (first / 'USER.md').write_text('Новые предпочтения')
+        self.assertIn('Новые предпочтения', instructions.personal_context(first))
+        self.assertNotIn('Первый пользователь', instructions.personal_context(first))
+        (first / 'USER.md').unlink()
+        (first / 'SOUL.md').write_text('')
+        self.assertEqual(instructions.personal_context(first), '')
+
+    def test_personal_prompts_reject_links_large_files_and_special_files(self):
+        home = self.root / 'home'
+        home.mkdir()
+        source = self.root / 'other'
+        source.write_text('Другой профиль')
+        target = home / 'USER.md'
+        target.symlink_to(source)
+        with self.assertRaises(OSError):
+            instructions.personal_context(home)
+        target.unlink()
+        os.link(source, target)
+        with self.assertRaisesRegex(PermissionError, 'PERSONAL_PROMPT_UNTRUSTED'):
+            instructions.personal_context(home)
+        target.unlink()
+        target.write_bytes(b'x' * 65537)
+        with self.assertRaisesRegex(PermissionError, 'PERSONAL_PROMPT_UNTRUSTED'):
+            instructions.personal_context(home)
+        target.unlink()
+        os.mkfifo(target)
+        with self.assertRaisesRegex(PermissionError, 'PERSONAL_PROMPT_UNTRUSTED'):
+            instructions.personal_context(home)
+        with self.assertRaisesRegex(ValueError, 'PERSONAL_HOME_REQUIRED'):
+            instructions.personal_context('relative')
+
+    def test_native_tts_uses_one_owner_bound_call_and_verifies_bytes(self):
+        source, output, audio = self.root / 'text.txt', self.root / 'out.ogg', self.root / 'generated.ogg'
+        source.write_text('Привет')
+        raw = b'OggS voice bytes'
+        audio.write_bytes(raw)
+        calls = []
+        def broker(method, params, **kwargs):
+            calls.append((method, params))
+            if method == 'tools.call':
+                self.assertEqual(params, {'name': 'local_ai_invoke_synthesize', 'args': {'text': 'Привет'}})
+                return {'audioArtifactId': 'owned'}
+            return {'artifactId': 'owned', 'localPath': str(audio), 'mimeType': 'audio/ogg',
+                    'sizeBytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+        synthesize_file(str(source), str(output), call=broker)
+        self.assertEqual(output.read_bytes(), raw)
+        self.assertEqual([method for method, _ in calls], ['tools.call', 'files.fetch'])
+        with self.assertRaisesRegex(ValueError, 'OUTPUT_EXISTS'):
+            synthesize_file(str(source), str(output), call=broker)
+        self.assertEqual(len(calls), 2)
+
+    def test_native_tts_rejects_foreign_or_corrupt_artifact_without_output(self):
+        source, output = self.root / 'text.txt', self.root / 'out.ogg'
+        source.write_text('Привет')
+        def broker(method, params, **kwargs):
+            if method == 'tools.call':
+                return {'audioArtifactId': 'owned'}
+            return {'artifactId': 'foreign', 'mimeType': 'audio/ogg'}
+        with self.assertRaisesRegex(ValueError, 'INVALID_AUDIO_ARTIFACT'):
+            synthesize_file(str(source), str(output), call=broker)
+        self.assertFalse(output.exists())
+
+    def test_native_image_provider_receives_only_public_relay_binding(self):
+        tool = ModuleType('tools.image_generation_tool')
+        tool._get_plugin_provider = lambda name: NS()
+        provider_module = NS(_read_codex_credential=lambda: self.fail('Shared credential read in worker'))
+        with patch.dict(sys.modules, {'tools.image_generation_tool': tool}), patch.object(
+                images.importlib, 'import_module', return_value=provider_module):
+            images.install_shared_provider()
+        token, endpoint = provider_module._read_codex_credential()
+        self.assertEqual(token, 'profile-image-proxy-not-a-secret')
+        self.assertEqual(endpoint, 'http://127.0.0.1:18080/image')
+
+    def test_native_profile_separates_system_and_personal_skills_and_routes_tts(self):
+        profile = {'home': '/profiles/one'}
+        config = native_profile(profile, instructions_root='/opt/brai-profile/runtime', model='model')
+        self.assertEqual(config['skills']['external_dirs'], ['/opt/brai-profile/skills'])
+        self.assertEqual(config['skills']['create_dir'], '/profiles/one/usercustom/userdata/skills')
+        provider = config['tts']['providers']['silero']
+        self.assertIn('-m identity.synthesize', provider['command'])
+        self.assertNotIn('key', provider)
+        self.assertIs(provider['voice_compatible'], True)

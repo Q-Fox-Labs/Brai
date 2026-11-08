@@ -265,6 +265,17 @@ class Broker:
                 return {'allowed': False}
         if method == 'identity.resolve' and ingress:
             return await self.resolve(params.get('telegramId'))
+        if method == 'ingress.profiles' and ingress and not params:
+            profiles = []
+            for uid, candidate in self.profiles().items():
+                if candidate['status'] != 'active':
+                    continue
+                try:
+                    profile = await self.authorize(uid)
+                except PermissionError:
+                    continue
+                profiles.append({'uid': uid, **profile})
+            return {'profiles': profiles}
         if method == 'identity.invite-redeem' and ingress:
             if set(params) - {'telegramId', 'code', 'name'}:
                 raise ValueError('Invalid invitation')
@@ -285,6 +296,12 @@ class Broker:
                     raise PermissionError('Provisioning failed')
                 await self.control.call('identity.profile-ready', {'userId': user['id'], 'profileId': user['profileId']})
                 return await self.resolve(str(user['telegramId']))
+        if method == 'ingress.delivery-artifact' and ingress:
+            if set(params) != {'uid', 'artifactId'}:
+                raise ValueError('Invalid delivery artifact')
+            uid = params['uid']
+            profile = await self.authorize(uid)
+            return await self.files.fetch(uid, profile, {'artifactId': params['artifactId']}, ingress=True)
         if method in ('ingress.admit', 'ingress.status', 'ingress.close', 'ingress.prepare', 'ingress.artifact') and ingress:
             if method == 'ingress.admit':
                 profile = await self.resolve(params.get('telegramId'))
@@ -393,12 +410,14 @@ class Broker:
 PARAMETERS = {
     'authorize': ({'uid'}, set()),
     'identity.resolve': ({'telegramId'}, set()),
+    'ingress.profiles': (set(), set()),
     'identity.invite-redeem': ({'telegramId', 'code'}, {'name'}),
     'ingress.admit': ({'telegramId', 'turnId', 'chatId', 'privateChat'}, {'inputId', 'threadId'}),
     'ingress.status': ({'uid', 'turnId'}, set()),
     'ingress.close': ({'uid', 'turnId'}, set()),
     'ingress.prepare': ({'uid', 'turnId', 'paths'}, set()),
     'ingress.artifact': ({'uid', 'turnId', 'artifactId'}, set()),
+    'ingress.delivery-artifact': ({'uid', 'artifactId'}, set()),
     'tools.list': (set(), set()),
     'tools.call': ({'name', 'args'}, set()),
     'files.configuration': (set(), set()),

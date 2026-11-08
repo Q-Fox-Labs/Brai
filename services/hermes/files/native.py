@@ -10,6 +10,7 @@ import logging
 import shutil
 import shlex
 import json
+import os
 import mimetypes
 from pathlib import Path
 import re
@@ -742,8 +743,12 @@ def conversation(agent, user_message, task_id=None):
     admission_token = source_token = None
     previous_prompt = getattr(agent, 'ephemeral_system_prompt', None)
     try:
+        shared_context = ''
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            from identity.instructions import system_context
+            shared_context = system_context()
         # API-only context: keep the user's persisted text and the shared process environment unchanged.
-        agent.ephemeral_system_prompt = (previous_prompt or '') + (
+        agent.ephemeral_system_prompt = shared_context + (previous_prompt or '') + (
             '\n\n[Trusted file runtime for this turn] Your temporary working and output directory is '
             + agent._brai_workspace + '. Use relative output paths, or this exact directory. '
             'For terminal omit workdir or use this directory; TMPDIR is set there by the runtime. '
@@ -1019,14 +1024,20 @@ def telegram_format(adapter, text):
     return formatter(text)
 
 
-async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback):
+async def telegram_sender(adapter, chat_id, metadata, kind, items, fallback, reply_to=None):
     """Один Bot API вызов на группу; без retry/downgrade после неизвестного ответа."""
     from telegram import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
     from contextlib import ExitStack
     bot, target = adapter._bot, {'chat_id': int(chat_id)}
-    thread = (metadata or {}).get('thread_id') or (metadata or {}).get('message_thread_id')
-    if thread is not None:
-        target['message_thread_id'] = int(thread)
+    routing = getattr(adapter, '_media_send_kwargs', None)
+    if callable(routing):
+        _, target = routing(chat_id, reply_to, metadata)
+    else:
+        thread = (metadata or {}).get('thread_id') or (metadata or {}).get('message_thread_id')
+        if thread is not None:
+            target['message_thread_id'] = int(thread)
+        if reply_to:
+            target['reply_to_message_id'] = int(reply_to)
     if fallback:
         notice = await bot.send_message(**target, text='Этот набор нельзя отправить одним альбомом. Файлы идут отдельно в исходном порядке.')
         if not getattr(notice, 'message_id', None):
@@ -1093,7 +1104,9 @@ async def send_set(adapter, chat_id, items, mode, metadata=None, identity=None):
         nonlocal announced
         explain = (fallback or platform != 'telegram' and kind == 'album') and not announced
         announced = announced or explain
-        if platform == 'telegram' and not getattr(adapter, 'file_delivery_via_ipc', False):
+        if platform == 'telegram':
+            if getattr(adapter, 'file_delivery_via_ipc', False):
+                return await adapter.send_file_set(chat_id, prepared, kind, explain, metadata)
             return await telegram_sender(adapter, chat_id, metadata, kind, prepared, explain)
         if explain:
             notice = await adapter.send(chat_id, 'Файлы набора будут отправлены отдельно в исходном порядке.', metadata=metadata)
@@ -1282,7 +1295,6 @@ def install_adapter(adapter):
                 if field == 'file_path':
                     items = [{**item, 'presentation': 'document'} for item in items]
                 return await send_set(adapter, data['chat_id'], items, mode, data.get('metadata'))
-            wrapped._brai_file_transport = original
             return wrapped
         setattr(adapter, name, wrap(original, field))
 

@@ -27,7 +27,9 @@
     "services/hermes/identity/parent_runner.py",
     "services/hermes/identity/tool_client.py",
     "services/hermes/identity/transcribe.py",
-    "services/hermes/identity/network.py"
+    "services/hermes/identity/synthesize.py",
+    "services/hermes/identity/network.py",
+    "services/hermes/identity/search.py"
   ],
   "inputs": {
     "build": [],
@@ -234,6 +236,10 @@
       "services/hermes/identity/worker.openrpc.json",
       "services/hermes/identity/tool_client.py",
       "services/hermes/identity/transcribe.py",
+      "services/hermes/identity/skills.py",
+      "services/hermes/identity/synthesize.py",
+      "services/hermes/identity/instructions.py",
+      "services/hermes/identity/images.py",
       "services/hermes/identity/permissions.py",
       "services/hermes/identity/ipc.py",
       "services/hermes/identity/broker.py",
@@ -257,7 +263,20 @@
       "services/hermes/identity/schemas/control.schema.json",
       "services/hermes/identity/parent_runner.py",
       "services/hermes/identity/control.openrpc.json",
-      "services/hermes/identity/asyncapi.yaml"
+      "services/hermes/identity/asyncapi.yaml",
+      "services/hermes/identity/routes.py",
+      "services/hermes/identity/scope.py",
+      "services/hermes/identity/telegram_proxy.py",
+      "services/hermes/identity/search.py",
+      "services/hermes/identity/history.mjs",
+      "services/hermes/identity/transcription.mjs",
+      "services/history/schemas/tools.schema.json",
+      "services/history/schemas/common.schema.json",
+      "services/history/schemas/messages.schema.json",
+      "services/transcription/contracts/index.mjs",
+      "services/transcription/contracts/methods.json",
+      "services/transcription/schemas/messages.schema.json",
+      "services/alerts/schemas/messages.schema.json"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
@@ -279,6 +298,7 @@
       "services/hermes/identity/tests/memory_client.test.mjs",
       "services/hermes/identity/tests/test_worker_ipc.py",
       "services/hermes/identity/tests/test_worker_delivery.py",
+      "services/hermes/identity/tests/test_worker_system.py",
       "services/hermes/identity/tests/test_worker_permissions.py",
       "services/hermes/identity/tests/test_telegram_runtime.py",
       "services/hermes/identity/tests/test_login.py",
@@ -307,7 +327,14 @@
       "services/hermes/identity/tests/control_memory_detail.test.mjs",
       "services/hermes/identity/tests/memory_author.test.mjs",
       "services/hermes/identity/tests/memory_spool.test.mjs",
-      "services/hermes/identity/tests/test_memory_spool.py"
+      "services/hermes/identity/tests/test_memory_spool.py",
+      "services/hermes/identity/tests/test_worker_lifecycle.py",
+      "services/hermes/identity/tests/test_worker_interactive.py",
+      "services/hermes/identity/tests/test_delivery_routes.py",
+      "services/hermes/identity/tests/test_shared_search.py",
+      "services/hermes/extensions/tests/test_shared_codex_search.py",
+      "services/hermes/identity/tests/history.test.mjs",
+      "services/hermes/identity/tests/transcription.test.mjs"
     ]
   },
   "dependencies": [
@@ -602,6 +629,10 @@
       "services/hermes/identity/worker.openrpc.json",
       "services/hermes/identity/tool_client.py",
       "services/hermes/identity/transcribe.py",
+      "services/hermes/identity/skills.py",
+      "services/hermes/identity/synthesize.py",
+      "services/hermes/identity/instructions.py",
+      "services/hermes/identity/images.py",
       "services/hermes/identity/permissions.py",
       "services/hermes/identity/ipc.py",
       "services/hermes/identity/broker.py",
@@ -626,7 +657,20 @@
       "services/hermes/identity/control.openrpc.json",
       "services/hermes/identity/asyncapi.yaml",
       "services/hermes/extensions/scripts/context_gif.py",
-      "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md"
+      "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md",
+      "services/hermes/identity/routes.py",
+      "services/hermes/identity/scope.py",
+      "services/hermes/identity/telegram_proxy.py",
+      "services/hermes/identity/search.py",
+      "services/hermes/identity/history.mjs",
+      "services/hermes/identity/transcription.mjs",
+      "services/history/schemas/tools.schema.json",
+      "services/history/schemas/common.schema.json",
+      "services/history/schemas/messages.schema.json",
+      "services/transcription/contracts/index.mjs",
+      "services/transcription/contracts/methods.json",
+      "services/transcription/schemas/messages.schema.json",
+      "services/alerts/schemas/messages.schema.json"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",
@@ -644,7 +688,9 @@
       "services/hermes/identity/parent_runner.py",
       "services/hermes/identity/tool_client.py",
       "services/hermes/identity/transcribe.py",
-      "services/hermes/identity/network.py"
+      "services/hermes/identity/synthesize.py",
+      "services/hermes/identity/network.py",
+      "services/hermes/identity/search.py"
     ],
     "smokeImports": [
       "services/hermes/catalog.mjs",

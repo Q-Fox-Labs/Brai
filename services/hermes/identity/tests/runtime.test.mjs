@@ -30,8 +30,8 @@ test('factory binds owner and staging to UID and separates history and publisher
  await assert.rejects(a.callTool('publish_file',{path:'/etc/passwd'}),/CONFIG_NOT_READY/);
  await assert.rejects(a.publishSnapshot('/stage/1002/file','r'),/bad snapshot/);
  await a.publishSnapshot('/stage/1001/file','r');await b.fetchArtifact('artifact');
- await f.adapters.historyCall(f.profile('1001'),'history_list',{});await assert.rejects(f.adapters.historyCall(f.profile('1001'),'history_categories_list',{}),/CONFIG_NOT_READY/);
- assert.deepEqual(f.calls.map(row=>row.slice(0,2)),[['u1','publish_file'],['u2','fetch_file'],['u1','history_list']]);
+ await f.adapters.historyCall(f.profile('1001'),'history_list',{});await f.adapters.historyCall(f.profile('1001'),'history_categories_list',{});await assert.rejects(f.adapters.historyCall(f.profile('1001'),'history_delete',{}),/CONFIG_NOT_READY/);
+ assert.deepEqual(f.calls.map(row=>row.slice(0,2)),[['u1','publish_file'],['u2','fetch_file'],['u1','history_list'],['u1','history_categories_list']]);
  await assert.rejects(f.adapters.perUserRuntime({...f.profile('1001'),userId:'u2'}),/CONFIG_NOT_READY/);
  const removed=f.profile('1001');delete f.records['/profiles']['1001'];
  await assert.rejects(f.adapters.perUserRuntime(removed),/CONFIG_NOT_READY/);
@@ -103,4 +103,49 @@ test('factory derives scope from registry profile and refuses protected aliases 
  delete f.profiles['1001'].serviceDataScope;f.records['/cfg/1'].serviceDataScope=serviceDataScope('p2');
  await assert.rejects(adapters.perUserRuntime(f.profile('1001')),/CONFIG_NOT_READY/);
  await adapters.close();
+});
+
+test('production factory restores catalog and transcription with private scope and role changes',async()=>{
+ const {createOwnerTranscription}=await import('../transcription.mjs');
+ const {serviceDataScope}=await import('../../../auth/contracts/service-data-scope.mjs');
+ const f=fixture(),sent=[],nats=[],closed=[];
+ const requestId='22222222-2222-4222-8222-222222222222';
+ const settings={defaultLocalModel:null,allowReplacement:false,policyVersion:2};
+ for(const entry of Object.values(f.profiles))entry.sharedServicesConfigPath='/shared';
+ f.records['/shared']={transcription:{url:'http://transcription.test/mcp',token:'root-fixture'}};
+ const adapters=createRuntimeAdapters({runtimeProfiles:f.profiles},{
+  readProtected:path=>structuredClone(f.records[path]),verifyDirectory:()=>{},
+  openPorts:async config=>({
+   list:async()=>[],mcp:async()=>{throw Error('Legacy bearer used');},
+   request:async(subject,args)=>{nats.push([config.ownerId,subject,args]);return {items:[],next_cursor:null};},
+   publish:async()=>{},close:async()=>closed.push(config.ownerId),
+  }),
+  transcriptionFactory:(profile,endpoint,options)=>createOwnerTranscription(profile,endpoint,{...options,
+   fetchImpl:async(_url,request)=>{
+    const body=JSON.parse(request.body);sent.push(body);
+    return Response.json(body.method==='settings.set'?{settings,revision:2}:
+     {state:'available',result:{requestId,text:profile.userId,segments:null,
+      actualModel:{modelId:'whisper',revision:'v1',profileId:'cpu'}}});
+   }}),
+ });
+ try{
+  const a=await adapters.perUserRuntime({...f.profile('1001'),role:'admin'});
+  const b=await adapters.perUserRuntime({...f.profile('1002'),role:'user'});
+  const names=(await a.listTools()).map(tool=>tool.name);
+  for(const name of ['history_categories_list','history_types_list','history_type_get','transcription_result_get'])
+   assert.equal(names.includes(name),true,name);
+  assert.equal(names.some(name=>name.startsWith('game_core_')),false);
+  await adapters.historyCall({...f.profile('1001'),role:'admin'},'history_categories_list',{limit:1});
+  assert.deepEqual(nats.at(-1),['u1','brai.history.v1.query.categories-list',{limit:1}]);
+  await a.callTool('transcription_result_get',{requestId});
+  await b.callTool('transcription_result_get',{requestId});
+  assert.deepEqual(sent.map(row=>[row.principal.ownerId,row.principal.scopeId]),
+   [['u1',serviceDataScope('p1')],['u2',serviceDataScope('p2')]]);
+  await a.callTool('transcription_settings_set',{settings,expectedRevision:1});
+  assert.equal(sent.at(-1).principal.permissions.includes('transcription:settings:write'),true);
+  const downgraded=await adapters.perUserRuntime({...f.profile('1001'),role:'user'});
+  await assert.rejects(downgraded.callTool('transcription_settings_set',{settings,expectedRevision:2}),{code:'FORBIDDEN'});
+  assert.equal(sent.length,3);
+  assert.deepEqual(closed,['u1']);
+ }finally{await adapters.close();await f.adapters.close();}
 });

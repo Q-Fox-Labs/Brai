@@ -80,8 +80,9 @@ export function loadCoordinatorConfig(env: NodeJS.ProcessEnv = process.env): Coo
   let bindings: unknown;
   try { bindings = JSON.parse(required(env, 'TRANSCRIPTION_AUTH_BINDINGS_JSON')); } catch { invalid(); }
   if (!Array.isArray(bindings) || !bindings.length || bindings.some((binding) => !binding || typeof binding !== 'object' ||
-    Object.keys(binding).some((key) => !['token', 'principal'].includes(key)) || typeof binding.token !== 'string' || !binding.token ||
-    /\s/.test(binding.token) || !validateDto('TrustedPrincipal', binding.principal))) invalid();
+    Object.keys(binding).some((key) => !['token', 'principal', 'permissions'].includes(key)) || typeof binding.token !== 'string' || !binding.token ||
+    /\s/.test(binding.token) || !validateDto('TrustedPrincipal', binding.principal) ||
+    binding.permissions !== undefined && (!Array.isArray(binding.permissions) || binding.permissions.some((permission: unknown) => permission !== 'identity:delegate')))) invalid();
   if (new Set(bindings.map((binding) => binding.token)).size !== bindings.length) invalid();
   const host = required(env, 'TRANSCRIPTION_HTTP_HOST');
   const port = p('HTTP_PORT');

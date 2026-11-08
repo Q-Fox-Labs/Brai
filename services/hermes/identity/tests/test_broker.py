@@ -80,6 +80,12 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.broker.login_state.close)
         self.broker.profiles = lambda: {WORKER_UID: self.profile}
 
+    async def test_profile_inventory_is_ingress_only(self):
+        with self.assertRaises(PermissionError):
+            await self.broker.call(WORKER_UID, 'ingress.profiles', {})
+        inventory = await self.broker.call(INGRESS_UID, 'ingress.profiles', {})
+        self.assertEqual(inventory['profiles'], [{'uid': WORKER_UID, **self.profile}])
+
     async def test_worker_cannot_choose_uid_or_call_root_and_ingress_methods(self):
         before = len(self.control.calls)
         with self.assertRaises((PermissionError, ValueError)):
