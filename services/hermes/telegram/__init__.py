@@ -80,6 +80,7 @@ class Config:
     chat_id: str = ""
     allowed_users: tuple[str, ...] = ()
     game_core_enabled: bool = True
+    identity_worker: bool = False
 
     def allows(self, user_id):
         """Разрешить владельца и назначенных участников общего группового профиля."""
@@ -119,6 +120,21 @@ class Config:
             if type(game_core_enabled) is not bool:
                 raise ValueError('BRAI_TELEGRAM_CONFIG_INVALID')
         return cls(owner, state, entry, node, root, chat, users, game_core_enabled)
+
+    @classmethod
+    def from_identity(cls):
+        """Взять несекретную привязку своего worker без общего owner и bot token."""
+        port = sys.modules.get('_brai_identity_human')
+        owner = getattr(port, 'telegram_id', '')
+        home = Path(os.environ.get('HERMES_HOME', ''))
+        game_core_enabled = getattr(port, 'game_core_enabled', False)
+        if (type(game_core_enabled) is not bool or not re.fullmatch(r'[1-9][0-9]*', str(owner))
+                or str(owner) != os.environ.get('BRAI_IDENTITY_TELEGRAM_ID')
+                or not home.is_absolute()):
+            raise ValueError('BRAI_TELEGRAM_IDENTITY_INVALID')
+        # AIDEV-NOTE: Bootstrap сохраняет принятый оператором disabled GameCore; UID не включает его сам.
+        return cls(str(owner), home / 'brai-telegram', '', '', str(home / 'results'),
+                   game_core_enabled=game_core_enabled, identity_worker=True)
 
 
 class Bridge:
@@ -522,12 +538,13 @@ def _uuid(value):
 class TelegramPlugin:
     """Собирает native hooks, private RPC и локальное состояние подтверждений."""
 
-    def __init__(self, config, bridge=None, inject_message=None):
+    def __init__(self, config, bridge=None, inject_message=None, injection_ready=None):
         """Создать порт и хранилище; сеть Telegram подключает только native factory."""
         self.config = config
         self.bridge = bridge or Bridge(config)
         self.tokens = Tokens(config.state_dir)
         self.inject_message = inject_message
+        self.injection_ready = injection_ready or (lambda: True)
         self.session_store = None
         self.loop = self.bot = self.adapter = None
         self._stop_outgoing_observer = None
@@ -556,6 +573,21 @@ class TelegramPlugin:
             + r'|(?m:^[ \t]*MEDIA:(?:"(?P<quoted>[^"\r\n]+)"|(?P<bare>/[^\r\n]+?))[ \t]*$)')
         self.result_path = re.compile(re.escape(config.result_root.rstrip("/"))
                                       + r"/(?P<id>" + UUID + r")/(?P<name>[^/\r\n]+)")
+
+    async def attach_identity_worker(self, adapter):
+        """Подключить human UI к tokenless адаптеру после native startup."""
+        from types import SimpleNamespace
+        if self.adapter is adapter and self.loop is asyncio.get_running_loop():
+            return
+        bot = getattr(adapter, '_bot', None)
+        if bot is None:
+            raise RuntimeError('BRAI_TELEGRAM_IDENTITY_BOT_UNAVAILABLE')
+        app = SimpleNamespace(bot=bot, add_handler=lambda *args, **kwargs: None,
+                              remove_handler=lambda *args, **kwargs: None)
+        self.session_store = getattr(getattr(adapter, 'gateway_runner', None), 'session_store', None)
+        self.factory(app, adapter)
+        if self.config.game_core_enabled:
+            adapter._brai_human_callback = self.callback
 
     def factory(self, app, adapter):
         """Поставить owner/route guard до всех native handlers; сохранить scoped callback."""
@@ -634,7 +666,8 @@ class TelegramPlugin:
             if (not stat.S_ISREG(info.st_mode) or info.st_uid not in {0, os.geteuid()}
                     or info.st_nlink != 1 or info.st_mode & 0o077 or info.st_size > 16000):
                 raise BridgeError('OPERATOR_RESUME_INVALID')
-            value = json.loads(path.read_text())
+            raw = path.read_text()
+            value = json.loads(raw)
             if value.get('status') != 'pending':
                 return
             if (set(value) != {'requestId', 'status', 'sessionKey', 'content'}
@@ -643,6 +676,18 @@ class TelegramPlugin:
                     or not isinstance(value['content'], str) or not value['content'].strip()
                     or len(value['content']) > 12000 or not callable(self.inject_message)):
                 raise BridgeError('OPERATOR_RESUME_INVALID')
+            # AIDEV-NOTE: PTB factory вызывается до публикации native gateway host.
+            # Ожидаем только готовность; inject не пробуем и не повторяем в этом цикле.
+            for _ in range(180):
+                if self.closed:
+                    return
+                if self.injection_ready():
+                    break
+                await asyncio.sleep(1)
+            else:
+                raise BridgeError('OPERATOR_RESUME_HOST_NOT_READY')
+            if path.read_text() != raw:
+                return
             def save(status):
                 """Атомарно записать свой статус перед единственным внешним действием."""
                 temporary = path.with_name('operator-resume.' + value['requestId'] + '.tmp')
@@ -777,7 +822,8 @@ class TelegramPlugin:
 
     def _saved_route_matches(self, chat_id):
         """Проверить сохранённый групповой или личный маршрут текущего списка доступа."""
-        return str(chat_id) == self.config.chat or self.config.allows(chat_id)
+        known = getattr(self.adapter, '_brai_chats', {}).get(str(chat_id)) if self.config.identity_worker else None
+        return known is not None or str(chat_id) == self.config.chat or self.config.allows(chat_id)
 
     def _route_matches(self, chat_id, chat_type, user_id):
         """Разрешить заданную группу либо личный чат самого разрешённого отправителя."""
@@ -786,6 +832,10 @@ class TelegramPlugin:
             return False
         if chat_type in {"private", "dm"}:
             return chat_id == user_id
+        if self.config.identity_worker:
+            # AIDEV-NOTE: IpcAdapter запоминает этот exact маршрут только из Root-admitted source.
+            known = getattr(self.adapter, '_brai_chats', {}).get(chat_id)
+            return known is not None and known.get('type') == chat_type and chat_type in {"group", "supergroup", "forum"}
         return (self.config.chat.startswith("-") and chat_id == self.config.chat
                 and chat_type in {"group", "supergroup", "forum"})
 
@@ -819,6 +869,10 @@ class TelegramPlugin:
             except Exception:
                 # Ошибка наблюдения не меняет Telegram dispatch; диагностируется без содержимого.
                 logging.getLogger(__name__).warning("BRAI_TELEGRAM_OBSERVER_WRITE_FAILED")
+        if original is not None and getattr(update, "edited_message", None) is not None:
+            files = sys.modules.get("brai_files")
+            if files is None or not files.active_telegram_edit(self.adapter, original):
+                raise ApplicationHandlerStop
         if original is not None and not any(getattr(original, field, None) for field in
                 ("text", "photo", "document", "video", "audio", "voice", "sticker", "location", "venue")):
             kind = next((field for field in ("animation", "video_note", "contact", "poll", "dice", "game", "story", "paid_media")
@@ -1799,10 +1853,22 @@ def file_rpc(method, params, timeout):
 
 def register(ctx):
     """Подключить плагин через публичный API закреплённого Hermes."""
+    if os.environ.get('BRAI_IDENTITY_MODE') == 'telegram':
+        from identity.native_ingress import register as register_identity
+        register_identity(ctx)
+        return
     from types import SimpleNamespace
-    sys.modules['_brai_hermes_file_port'] = SimpleNamespace(call=file_rpc)
-    plugin = TelegramPlugin(Config.from_env(), inject_message=getattr(ctx, "inject_message", None))
-    ctx.register_telegram_handler(plugin.factory)
+    from hermes_cli.plugins import get_plugin_manager
+    manager = get_plugin_manager()
+    worker = os.environ.get('BRAI_IDENTITY_MODE') == 'worker'
+    if not worker:
+        sys.modules['_brai_hermes_file_port'] = SimpleNamespace(call=file_rpc)
+    plugin = TelegramPlugin(Config.from_identity() if worker else Config.from_env(), inject_message=getattr(ctx, "inject_message", None),
+                            injection_ready=lambda: manager.has_gateway_message_injector)
+    if worker:
+        sys.modules['_brai_identity_human'].attach = plugin.attach_identity_worker
+    else:
+        ctx.register_telegram_handler(plugin.factory)
     ctx.register_hook("pre_gateway_dispatch", plugin.incoming)
     ctx.register_hook("transform_llm_output", plugin.outgoing)
     ctx.register_hook("transform_tool_result", plugin.tool_result)

@@ -1,0 +1,228 @@
+// ABOUTME: Проверяет конкурентные операции идентичности Auth на временной PostgreSQL.
+// ABOUTME: Работает только с явным локальным тестовым стендом и синтетическими данными.
+import test from "node:test";
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Pool } from "pg";
+import { getMigrations } from "better-auth/db/migration";
+import { createAuth } from "../../dist/auth.js";
+import { migrateIdentity } from "../../dist/identity-schema.js";
+import { issueCode, consumeCode } from "../../dist/login-code.js";
+import { lifecycleWorker } from "../../dist/lifecycle.js";
+import { adminAction } from "../../dist/admin.js";
+import { provision, profileReady, redeemInvite, resolveTelegram, getIdentity, issueTelegramLink, redeemTelegramLink, unlinkTelegram } from "../../dist/identity.js";
+
+const value=process.env.AUTH_TEST_OWNER_URL;
+if(!value)throw new Error("Explicit AUTH_TEST_OWNER_URL required");
+const url=new URL(value);
+if(url.pathname!=="/brai_auth_test"||url.hostname!=="127.0.0.1"||!["15459","15463"].includes(url.port))throw new Error("Refusing non-fixture database");
+const pool=new Pool({connectionString:value});
+const appURL=new URL(value);appURL.username="auth_app";appURL.password="fixture-app";
+const runtime=new Pool({connectionString:appURL.href});
+const secret="fixture-auth-secret-32-characters-long";
+const cfg={origin:"https://fixture.example",trustedOrigins:["https://fixture.example"],secret,resendKey:"",emailFrom:"fixture@example.com"};
+test("registry, codes, invitations and last admin survive concurrent requests",async()=>{
+ const dir=await mkdtemp(join(tmpdir(),"auth-owner-test-"));
+ const run=promisify(execFile);
+ const invoke=async(script,key,data)=>{
+  const file=join(dir,key+'.json');await writeFile(file,JSON.stringify(data),{mode:0o600});
+  return run(process.execPath,[new URL('../../dist/'+script,import.meta.url).pathname],{env:{...process.env,AUTH_DATABASE_URL:value,AUTH_OWNER_ROLE:'auth_owner',AUTH_SECRET:secret,[key]:file},timeout:30000});
+ };
+ try{
+  await (await getMigrations(createAuth(cfg,pool).options)).runMigrations();
+  await migrateIdentity(pool);await migrateIdentity(pool);
+  await run(process.execPath,[new URL("../../dist/migrate.js",import.meta.url).pathname],{env:{...process.env,AUTH_DATABASE_URL:value,AUTH_OWNER_ROLE:"auth_owner",AUTH_APP_ROLE:"auth_app",AUTH_SECRET:secret,AUTH_ORIGIN:cfg.origin,AUTH_IDENTITY_MODE:"telegram"},timeout:30000});
+  const owner=randomUUID(),name="Fixture owner";
+  await pool.query('INSERT INTO "user"(id,name,email,"emailVerified","createdAt","updatedAt") VALUES($1,$2,$3,false,now(),now())',[owner,name,owner+"@fixture.example"]);
+  const bootstrap={userId:owner,telegramId:'10001',name:'Different name'};
+  await invoke('bootstrap.js','AUTH_BOOTSTRAP_FILE',bootstrap);await invoke('bootstrap.js','AUTH_BOOTSTRAP_FILE',bootstrap);
+  assert.equal((await pool.query('SELECT name FROM "user" WHERE id=$1',[owner])).rows[0].name,name);
+  const request={requestId:randomUUID(),userId:randomUUID(),profileId:'fixture-user',telegramId:"10002",role:"user",status:"provisioning",name:"Fixture user"};
+  await invoke('provision-identities.js','AUTH_PROVISION_FILE',[request]);await invoke('provision-identities.js','AUTH_PROVISION_FILE',[request]);
+  const user=await provision(pool,secret,request);
+  assert.deepEqual(await provision(pool,secret,request),user);
+  await assert.rejects(()=>provision(pool,secret,{...request,name:"Changed"}));
+  const accounts={version:1,originalBraiOwnerId:owner,originalTelegramOwnerId:'10001',accounts:[
+   {userId:owner,telegramId:'10001',profileId:'fixture-owner',role:'admin',status:'provisioning'},
+   {userId:user.id,telegramId:'10002',profileId:'fixture-user',role:'user',status:'provisioning'}]};
+  await invoke('verify-provision.js','AUTH_ACCOUNTS_FILE',accounts);
+  await invoke('ready-profiles.js','AUTH_READY_FILE',[{userId:owner,profileId:'fixture-owner'},{userId:user.id,profileId:'fixture-user'}]);
+  assert.equal((await profileReady(pool,user.id,"fixture-user")).status,"active");
+  const first=await issueCode(pool,secret,"10002");assert.match(first.code,/^[0-9A-HJKMNP-TV-Z]{12}$/);
+  const second=await issueCode(pool,secret,"10002");
+  assert.equal(await consumeCode(pool,secret,first.code,"fixture-client"),null);
+  const results=await Promise.all(Array.from({length:8},()=>consumeCode(pool,secret,second.code,"fixture-client")));
+  assert.equal(results.filter(value=>value===user.id).length,1);
+  assert.equal((await issueCode(pool,secret,"10002"))!==null,true);
+  assert.equal(await issueCode(pool,secret,"10002"),null);
+  const multi=await provision(runtime,secret,{requestId:randomUUID(),telegramId:'10005',name:'Multiple accounts',role:'user',status:'active',profileId:'fixture-multiple'});
+  assert.equal(await issueTelegramLink(runtime,secret,'99999'),null);
+  const link=await issueTelegramLink(runtime,secret,'10005');
+  assert.match(link.code,/^[A-Za-z0-9_-]{43}$/);
+  assert.equal((await pool.query('SELECT digest FROM sys_telegram_link WHERE user_id=$1',[multi.id])).rows[0].digest.includes(link.code),false);
+  assert.equal(await redeemTelegramLink(runtime,secret,'10002',link.code),null);
+  assert.equal((await resolveTelegram(pool,'10002')).id,user.id);
+  const linked=await Promise.all(['20002','20003'].map(id=>redeemTelegramLink(runtime,secret,id,link.code)));
+  assert.equal(linked.filter(Boolean).length,1);
+  const alias=linked[0]?'20002':'20003';
+  assert.deepEqual(await resolveTelegram(pool,alias),multi);
+  assert.deepEqual(await redeemTelegramLink(runtime,secret,alias,link.code),multi);
+  assert.equal((await pool.query('SELECT count(*) FROM sys_telegram_account WHERE user_id=$1',[multi.id])).rows[0].count,'2');
+  await migrateIdentity(pool);
+  assert.deepEqual(await resolveTelegram(pool,alias),multi);
+  assert.deepEqual(await provision(runtime,secret,{requestId:randomUUID(),telegramId:alias,userId:multi.id,profileId:multi.profileId,role:'user',status:'active'}),multi);
+  const aliasCode=await issueCode(runtime,secret,alias);
+  assert.equal(await consumeCode(pool,secret,aliasCode.code,'alias-client'),multi.id);
+  assert.ok(await issueCode(runtime,secret,'10005'));
+  assert.ok(await issueCode(runtime,secret,alias));
+  assert.equal(await issueCode(runtime,secret,'10005'),null);
+  assert.equal(await unlinkTelegram(runtime,'10005','10002'),false);
+  await pool.query('INSERT INTO "session"(id,token,"userId","expiresAt","createdAt","updatedAt") VALUES($1,$2,$3,now()+interval \'1 hour\',now(),now())',[randomUUID(),'alias-session-fixture',multi.id]);
+  assert.equal(await unlinkTelegram(runtime,alias,alias),true);
+  assert.equal(await resolveTelegram(pool,alias),null);
+  assert.equal(await redeemTelegramLink(runtime,secret,alias,link.code),null);
+  assert.equal((await pool.query('SELECT count(*) FROM "session" WHERE "userId"=$1',[multi.id])).rows[0].count,'0');
+  assert.equal((await pool.query('SELECT count(*) FROM brai_login_code WHERE user_id=$1',[multi.id])).rows[0].count,'0');
+  assert.deepEqual(await resolveTelegram(pool,'10005'),multi);
+  const expired=await issueTelegramLink(runtime,secret,'10005');
+  await pool.query("UPDATE sys_telegram_link SET expires_at=now()-interval '1 second' WHERE user_id=$1",[multi.id]);
+  assert.equal(await redeemTelegramLink(runtime,secret,'20004',expired.code),null);
+  const current=await issueTelegramLink(runtime,secret,'10005');
+  assert.equal(await redeemTelegramLink(runtime,secret,'20004',expired.code),null);
+  assert.ok(await redeemTelegramLink(runtime,secret,'20004',current.code));
+  assert.equal(await issueTelegramLink(runtime,secret,'10005'),null);
+  await adminAction(pool,secret,owner,"status-set",{userId:multi.id,status:"blocked"});
+  assert.equal(await issueTelegramLink(runtime,secret,'20004'),null);
+  assert.equal(await issueCode(pool,secret,'20004'),null);
+  assert.equal(await redeemTelegramLink(runtime,secret,'20004',current.code),null);
+  assert.equal((await resolveTelegram(pool,'20004')).status,'blocked');
+  await adminAction(pool,secret,owner,'status-set',{userId:multi.id,status:'active'});
+  const restored=(await lifecycleWorker(pool,"claim",{workerId:"identity-restore"})).operation;
+  assert.equal(restored.userId,multi.id);
+  assert.equal((await lifecycleWorker(pool,"complete",{operationId:restored.id,leaseToken:restored.leaseToken,success:true})).accepted,true);
+  assert.equal(await redeemTelegramLink(runtime,secret,'20004',current.code),null);
+  const equal=await provision(runtime,secret,{requestId:randomUUID(),telegramId:'30001',role:'user',status:'active',profileId:'fixture-equal'});
+  const equalLink=await issueTelegramLink(runtime,secret,'30001');
+  assert.ok(await redeemTelegramLink(runtime,secret,'30002',equalLink.code));
+  assert.equal(await issueTelegramLink(runtime,secret,'30002'),null);
+  // Просроченная по состоянию, но ещё непогашенная команда не обходит заполненный лимит.
+  await pool.query("UPDATE sys_telegram_link SET consumed_by=NULL,consumed_at=NULL WHERE user_id=$1",[equal.id]);
+  assert.equal(await redeemTelegramLink(runtime,secret,'30003',equalLink.code),null);
+  assert.equal(await unlinkTelegram(runtime,'30002','30001'),true);
+  assert.equal(await resolveTelegram(runtime,'30001'),null);
+  assert.deepEqual(await resolveTelegram(runtime,'30002'),equal);
+  await migrateIdentity(pool);await migrateIdentity(pool);
+  assert.equal(await resolveTelegram(runtime,'30001'),null);
+  assert.ok(await issueCode(runtime,secret,'30002'));
+  const detachedLink=await issueTelegramLink(runtime,secret,'30002');
+  assert.equal(await unlinkTelegram(runtime,'30002','30002'),true);
+  assert.deepEqual(await getIdentity(runtime,equal.id),{user:equal,telegramIds:[]});
+  assert.equal(await resolveTelegram(runtime,'30002'),null);
+  assert.equal(await redeemTelegramLink(runtime,secret,'30003',detachedLink.code),null);
+  await migrateIdentity(pool);
+  assert.deepEqual((await getIdentity(runtime,equal.id)).telegramIds,[]);
+  const reused=await provision(runtime,secret,{requestId:randomUUID(),telegramId:'30001',role:'user',status:'active',profileId:'fixture-reused-account'});
+  assert.notEqual(reused.id,equal.id);
+  assert.notEqual(reused.telegramId,equal.telegramId);
+  assert.deepEqual(await resolveTelegram(runtime,'30001'),reused);
+  assert.deepEqual((await getIdentity(runtime,reused.id)).telegramIds,['30001']);
+  await migrateIdentity(pool);
+  assert.deepEqual((await getIdentity(runtime,equal.id)).telegramIds,[]);
+  assert.deepEqual(await resolveTelegram(runtime,'30001'),reused);
+  assert.equal((await adminAction(runtime,secret,owner,'role-set',{userId:equal.id,role:'admin'})).body.code,'CONTACT_REQUIRED');
+  assert.equal(await unlinkTelegram(runtime,'10001','10001'),false);
+  const adminLink=await issueTelegramLink(runtime,secret,'10001');
+  assert.ok(await redeemTelegramLink(runtime,secret,'40001',adminLink.code));
+  const removals=await Promise.all([
+   unlinkTelegram(runtime,'40001','10001'),unlinkTelegram(runtime,'10001','40001')
+  ]);
+  assert.equal(removals.filter(Boolean).length,1);
+  const adminAccount=(await getIdentity(runtime,owner)).telegramIds[0];
+  assert.equal((await getIdentity(runtime,owner)).telegramIds.length,1);
+  assert.equal(await unlinkTelegram(runtime,adminAccount,adminAccount),false);
+  assert.ok(await issueCode(runtime,secret,adminAccount));
+  for(const [index,issue] of [issueCode,issueTelegramLink].entries()){
+   const telegramId=String(48001+index),application="fixture-issuance-"+index;
+   const raceUser=await provision(runtime,secret,{requestId:randomUUID(),telegramId,role:'user',status:'active',profileId:'fixture-issuance-'+index});
+   const issuing=new Pool({connectionString:appURL.href,application_name:application});
+   let release,locked,pid,issuer,revocation;
+   const gate=new Promise(resolve=>{release=resolve;});
+   const reached=new Promise(resolve=>{locked=resolve;});
+   const paused={async connect(){
+    const client=await runtime.connect();pid=(await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+    return {release:()=>client.release(),async query(sql,params){
+     const result=await client.query(sql,params);
+     if(sql.includes("JOIN sys_telegram_account")&&sql.includes("FOR UPDATE OF i")){locked();await gate;}
+     return result;
+    }};
+   }};
+   try{
+    revocation=unlinkTelegram(paused,telegramId,telegramId);
+    await reached;
+    issuer=issue(issuing,secret,telegramId);
+    let blocked=false;
+    for(let attempt=0;attempt<100&&!blocked;attempt++){
+     blocked=(await pool.query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND $2=ANY(pg_blocking_pids(pid))) AS blocked",[application,pid])).rows[0].blocked;
+     if(!blocked)await new Promise(resolve=>setTimeout(resolve,10));
+    }
+    assert.equal(blocked,true,"Issuance must actually wait on the revoking transaction");
+    release();
+    assert.equal(await revocation,true);
+    assert.equal(await issuer,null,"A detached account must not obtain a new credential after waiting");
+    assert.equal(await resolveTelegram(runtime,telegramId),null);
+    assert.deepEqual((await getIdentity(runtime,raceUser.id)).telegramIds,[]);
+   }finally{
+    release();await Promise.allSettled([revocation,issuer].filter(Boolean));await issuing.end();
+   }
+  }
+  const last=await Promise.all([
+   adminAction(pool,secret,owner,"role-set",{userId:owner,role:"user"}),
+   adminAction(pool,secret,owner,"status-set",{userId:owner,status:"blocked"})
+  ]);
+  assert.deepEqual(last.map(item=>item.body.code),["LAST_ADMIN","LAST_ADMIN"]);
+  const denied=await adminAction(pool,secret,user.id,"role-set",{userId:user.id,role:"admin"});
+  assert.equal(denied.status,403);
+  const created=await adminAction(pool,secret,owner,"invite-create",{});
+  const code=created.body.invite.code;
+  const invited=await Promise.all([redeemInvite(pool,secret,"10003",code),redeemInvite(pool,secret,"10004",code)]);
+  assert.equal(invited.filter(Boolean).length,1);
+  const winner=invited.find(Boolean);
+  assert.match(winner.profileId,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  const retry=await redeemInvite(pool,secret,winner.telegramId,code);
+  assert.equal(retry.id,winner.id);
+  assert.equal(retry.profileId,winner.profileId);
+  const invitedOperation=(await lifecycleWorker(pool,"claim",{workerId:"identity-invite"})).operation;
+  assert.equal(invitedOperation.userId,winner.id);
+  assert.equal((await lifecycleWorker(pool,"complete",{operationId:invitedOperation.id,leaseToken:invitedOperation.leaseToken,success:true})).accepted,true);
+  assert.equal((await pool.query("SELECT digest FROM brai_invite WHERE id=$1",[created.body.invite.id])).rows[0].digest.includes(code),false);
+  const audit=await adminAction(pool,secret,owner,"admin-audit",{userId:user.id,action:"memory.read"});
+  assert.equal(audit.status,200);assert.ok(audit.body.auditId);
+  assert.equal((await pool.query("SELECT actor_id,target_id,action FROM brai_identity_audit WHERE id=$1",[audit.body.auditId])).rows[0].actor_id,owner);
+  const cutoverId='fixture-'+randomUUID(),token='fixture-secret-token',verifyValue='fixture-verification';
+  await pool.query('INSERT INTO "session"(id,token,"userId","expiresAt","createdAt","updatedAt") VALUES($1,$2,$3,now()+interval \'1 hour\',now(),now())',[randomUUID(),token,owner]);
+  await pool.query('INSERT INTO "verification"(id,identifier,value,"expiresAt","createdAt","updatedAt") VALUES($1,$2,$3,now()+interval \'1 hour\',now(),now())',[randomUUID(),'fixture-identifier',verifyValue]);
+  const privateAccess=await pool.query("SELECT has_schema_privilege('auth_app','auth_identity_owner','USAGE') AS schema_access,has_table_privilege('auth_app','auth_identity_owner.snapshot','SELECT') AS table_access");
+  assert.deepEqual(privateAccess.rows[0],{schema_access:false,table_access:false});
+  const cutover=async(action='revoke')=>{
+   const result=await run(process.execPath,[new URL('../../dist/revoke-legacy.js',import.meta.url).pathname],{env:{...process.env,AUTH_DATABASE_URL:value,AUTH_OWNER_ROLE:'auth_owner',AUTH_APP_ROLE:'auth_app',AUTH_REVOKE_REQUEST_ID:cutoverId,AUTH_CUTOVER_ACTION:action,...(action==='restore'?{AUTH_ROLLBACK_PREOPEN:'1'}:{})},timeout:30000});
+   assert.equal(result.stdout.includes(token),false);assert.equal(result.stdout.includes(verifyValue),false);return JSON.parse(result.stdout);
+  };
+  const revoked=await cutover();assert.ok(revoked.sessionsRevoked>=1);assert.ok(revoked.verificationsRevoked>=1);
+  assert.equal((await pool.query('SELECT count(*) FROM "session"')).rows[0].count,'0');
+  const replay=await cutover();assert.equal(replay.replayed,true);assert.equal(replay.sessionsRevoked,revoked.sessionsRevoked);
+  const newId=randomUUID();
+  await pool.query('INSERT INTO "session"(id,token,"userId","expiresAt","createdAt","updatedAt") VALUES($1,$2,$3,now()+interval \'1 hour\',now(),now())',[newId,'fixture-new-token',owner]);
+  await assert.rejects(()=>cutover('restore'));
+  assert.equal((await pool.query('SELECT count(*) FROM "session" WHERE id=$1',[newId])).rows[0].count,'1');
+  await pool.query('DELETE FROM "session" WHERE id=$1',[newId]);
+  await cutover('restore');
+  assert.equal((await pool.query('SELECT count(*) FROM "session" WHERE token=$1',[token])).rows[0].count,'1');
+  assert.equal((await pool.query('SELECT count(*) FROM "verification" WHERE value=$1',[verifyValue])).rows[0].count,'1');
+  await assert.rejects(()=>cutover());
+ }finally{await runtime.end();await pool.end();await rm(dir,{recursive:true,force:true});}
+});

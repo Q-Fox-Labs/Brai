@@ -1,6 +1,6 @@
 // ABOUTME: Проверяет HTTP границу уведомлений и доверенную сессию перед NATS.
 // ABOUTME: Мутации принимают пустой JSON; ключ записи задаёт URL, владельца задаёт Auth.
-import { checkOrigin, requireSession } from "./auth";
+import { personalDataScope, checkOrigin, requireSession } from "./auth";
 import { GatewayError } from "./gateway";
 import { failure } from "./http";
 import { alertsRequest, getAlert, listAlerts } from "./alerts";
@@ -25,9 +25,9 @@ export async function alertsHttp(request: Request, operation: "list" | "get" | "
    const body = await readBoundedJson(request, 2048, 10000);
    if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length) throw new GatewayError(400, "INVALID_ARGUMENT");
   }
-  const result = operation === "list" ? await listAlerts(session.user.id, query)
-   : operation === "get" ? await getAlert(session.user.id, key!.service, key!.id)
-   : await alertsRequest(operation, { user_id: session.user.id, ...(key ? { service_id: key.service, id: key.id } : {}) });
+  const result = operation === "list" ? await listAlerts(personalDataScope(session), query)
+   : operation === "get" ? await getAlert(personalDataScope(session), key!.service, key!.id)
+   : await alertsRequest(operation, { user_id: personalDataScope(session), ...(key ? { service_id: key.service, id: key.id } : {}) });
   return Response.json(result, { headers: { "Cache-Control": "no-store" } });
  } catch (error) { return failure(error instanceof RequestBodyFailure ? new GatewayError(error.status, error.code) : error); }
 }

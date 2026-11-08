@@ -11,7 +11,10 @@
     "services/dialogues/src/migrate.ts",
     "services/dialogues/src/health.ts",
     "services/dialogues/src/stdio-proxy.ts",
-    "services/dialogues/src/import.ts"
+    "services/dialogues/src/import.ts",
+    "services/dialogues/src/backfill.ts",
+    "services/dialogues/src/isolation-cli.ts",
+    "services/dialogues/src/summary-worker.ts"
   ],
   "inputs": {
     "build": [
@@ -23,27 +26,56 @@
       "services/dialogues/migrations/001.sql",
       "services/dialogues/migrations/002_live.sql",
       "services/dialogues/src/api.ts",
+      "services/dialogues/src/validate.ts",
       "services/dialogues/src/domain.ts",
       "services/dialogues/src/store.ts",
       "services/dialogues/src/mcp.ts",
       "services/dialogues/src/main.ts",
       "services/dialogues/src/migrate.ts",
       "services/dialogues/src/health.ts",
+      "services/dialogues/src/personal-auth.ts",
+      "services/dialogues/src/isolation.ts",
+      "services/dialogues/migrations/006_owner_isolation.sql",
       "services/dialogues/src/stdio-proxy.ts",
       "services/dialogues/src/import.ts",
+      "services/dialogues/src/backfill.ts",
+      "services/dialogues/src/fence-http.ts",
       "services/dialogues/migrations/003_context_jobs.sql",
+      "services/dialogues/migrations/004_managed_turns.sql",
+      "services/dialogues/migrations/005_context_exchange.sql",
+      "services/dialogues/src/turns.ts",
+      "services/dialogues/src/turn-domain.ts",
+      "services/dialogues/src/openrpc.ts",
+      "services/dialogues/src/proxy-recovery.ts",
       "services/dialogues/src/context.ts",
+      "services/dialogues/src/exchange.ts",
       "services/dialogues/src/jobs.ts",
-      "services/dialogues/src/luna.ts"
+      "services/dialogues/src/luna.ts",
+      "services/dialogues/src/isolation-cli.ts",
+      "services/dialogues/src/summary-worker.ts",
+      "services/dialogues/src/personal-summary.ts",
+      "services/dialogues/src/personal-summary-stream.ts"
     ],
     "checks": [
       "services/dialogues/tests/domain.test.mjs",
       "services/dialogues/tests/mcp.test.mjs",
+      "services/dialogues/tests/rejection-recovery.test.mjs",
       "services/dialogues/tests/postgres.integration.test.mjs",
+      "services/dialogues/tests/isolation.integration.test.mjs",
+      "services/dialogues/tests/personal-auth.test.mjs",
+      "services/dialogues/tests/personal-mcp.test.mjs",
       "services/dialogues/tests/import.test.mjs",
       "services/dialogues/tests/v02-fixture.mjs",
+      "services/dialogues/tests/turn-fixture.mjs",
+      "services/dialogues/tests/turn-domain.test.mjs",
+      "services/dialogues/tests/openrpc.test.mjs",
+      "services/dialogues/tests/proxy-recovery.test.mjs",
       "services/dialogues/tests/luna.test.mjs",
-      "services/dialogues/tests/context-pages.test.mjs"
+      "services/dialogues/tests/context-pages.test.mjs",
+      "services/dialogues/tests/fence-http.test.mjs",
+      "services/dialogues/tests/personal-summary.test.mjs",
+      "services/dialogues/tests/personal-stack.integration.test.mjs",
+      "services/dialogues/tests/personal-summary-stream.test.mjs"
     ]
   },
   "dependencies": [],
@@ -64,7 +96,10 @@
       "services/dialogues/dist/migrate.js",
       "services/dialogues/dist/health.js",
       "services/dialogues/dist/stdio-proxy.js",
-      "services/dialogues/dist/import.js"
+      "services/dialogues/dist/import.js",
+      "services/dialogues/dist/backfill.js",
+      "services/dialogues/dist/isolation-cli.js",
+      "services/dialogues/dist/summary-worker.js"
     ],
     "smokeImports": [],
     "systemRequirements": [
@@ -78,7 +113,9 @@
     ],
     "migrations": [
       "services/dialogues/migrations/002_live.sql",
-      "services/dialogues/migrations/003_context_jobs.sql"
+      "services/dialogues/migrations/003_context_jobs.sql",
+      "services/dialogues/migrations/004_managed_turns.sql",
+      "services/dialogues/migrations/005_context_exchange.sql"
     ],
     "health": "node services/dialogues/dist/health.js"
   },

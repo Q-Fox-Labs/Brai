@@ -20,7 +20,7 @@ from agent.memory_provider import MemoryProvider, RecallStatus, is_trivial_promp
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write, read_json_or_empty
 
-from .client import Client, MemOSError, public_memory, internal_dialogue
+from .client import Client, MemOSError, public_memory, internal_dialogue, recall_budget
 from .outbox import Outbox
 from .schemas import TOOLS, ROUTED_TOOLS
 
@@ -29,7 +29,7 @@ DEFAULTS = {
     "base_url": "http://127.0.0.1:8001", "user_id": "root", "cube_id": "main",
     "relativity": 0.45, "excerpt_chars": 1400,
     "request_timeout": 30, "tool_write_timeout": 10, "flush_timeout": 10,
-    "prefetch_timeout_seconds": 60,
+    "prefetch_timeout_seconds": 180,
 }
 
 
@@ -158,7 +158,29 @@ def telegram_author(home, session_id, rows, config=None):
                 if isinstance(content, str) and same_user_text(scrub(content), text)]
         chat, thread = str(session[1]), str(session[2] or '')
         thread = '' if thread == '1' else thread
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            expected = os.environ.get('BRAI_IDENTITY_TELEGRAM_ID', '')
+            owner = os.environ.get('BRAI_IDENTITY_USER_ID', '')
+            worker_home = os.environ.get('HERMES_HOME', '')
+            initial = json.loads(session[3] or '{}')
+            if not isinstance(initial, dict):
+                return None
+            initial_thread = str(initial.get('thread_id') or '')
+            initial_thread = '' if initial_thread == '1' else initial_thread
+            if (not expected.isascii() or not expected.isdecimal() or not owner or not worker_home.startswith('/')
+                    or Path(worker_home).resolve() != home or (config or {}).get('user_id') != owner
+                    or (config or {}).get('socket_path') != '/run/brai-profile/memory.sock'
+                    or (config or {}).get('routing_enabled') is not True or not (config or {}).get('memory_epoch')
+                    or str(initial.get('chat_id') or '') != chat or initial_thread != thread
+                    or str(initial.get('user_id') or '') != expected or initial.get('is_bot') is True):
+                return None
         origin, envelope_body = gateway_origin(text)
+        if (os.environ.get('BRAI_IDENTITY_MODE') == 'worker' and origin is not None
+                and (origin.get('platform') != 'telegram' or str(origin.get('chat_id') or '') != chat
+                     or ('' if str(origin.get('thread_id') or '') == '1' else str(origin.get('thread_id') or '')) != thread
+                     or str(origin.get('user_id') or '') != os.environ.get('BRAI_IDENTITY_TELEGRAM_ID', '')
+                     or origin.get('is_bot') is True)):
+            return None
         identities = []
         for mid, content, platform, uid in matches:
             claimed = None
@@ -200,6 +222,19 @@ def telegram_author(home, session_id, rows, config=None):
                 if (str(initial.get('chat_id')) == chat and str(initial.get('message_id')) == platform
                         and str(initial.get('user_id') or '').isdecimal()):
                     actor, name, method = str(initial['user_id']), str(initial.get('user_name') or ''), 'native_initial_message'
+            if not actor and os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+                source_matches = True
+                if origin is not None:
+                    origin_thread = str(origin.get('thread_id') or '')
+                    origin_thread = '' if origin_thread == '1' else origin_thread
+                    source_matches = (source_matches and origin.get('platform') == 'telegram'
+                                      and str(origin.get('chat_id') or '') == chat and origin_thread == thread
+                                      and str(origin.get('user_id') or '') == expected
+                                      and origin.get('is_bot') is not True)
+                if source_matches and matches:
+                    actor, name, method = expected, str(initial.get('user_name') or expected), 'isolated_profile'
+            if actor and os.environ.get('BRAI_IDENTITY_MODE') == 'worker' and actor != os.environ.get('BRAI_IDENTITY_TELEGRAM_ID', ''):
+                continue
             if actor:
                 identities.append({'id': actor, 'name': name or actor, 'is_bot': False,
                     'evidence': {'method': method, 'chat_id': chat, 'thread_id': thread,
@@ -261,7 +296,8 @@ class MemOSProvider(MemoryProvider):
 
     def is_available(self):
         raw = read_json_or_empty(get_hermes_home() / "memos-rest.json")
-        if not all(raw.get(key) for key in ("base_url", "user_id", "cube_id")):
+        if (not (raw.get("socket_path") or raw.get("base_url"))
+                or not all(raw.get(key) for key in ("user_id", "cube_id"))):
             return False
         try:
             self._validate({**DEFAULTS, **raw})
@@ -310,7 +346,7 @@ class MemOSProvider(MemoryProvider):
 
     def identity_signature(self):
         config = self._config(get_hermes_home())
-        return {"memos-rest": {key: config[key] for key in ("base_url", "user_id", "cube_id")}}
+        return {"memos-rest": {key: config.get(key) for key in ("base_url", "socket_path", "user_id", "cube_id")}}
 
     def system_prompt_block(self):
         return ("MemOS is the external persistent memory provider. Completed user/assistant dialogue is archived "
@@ -491,6 +527,10 @@ class MemOSProvider(MemoryProvider):
             self._cache.clear()
 
     def _search(self, query, sid, top_k):
+        with recall_budget(self.prefetch_timeout_seconds):
+            return self._search_with_budget(query, sid, top_k)
+
+    def _search_with_budget(self, query, sid, top_k):
         if self.routing:
             return self.routing.search(scrub(query), sid, top_k, expand_sources=True,
                                        context=self.recent_dialogue)
@@ -520,6 +560,12 @@ class MemOSProvider(MemoryProvider):
                 digest(self.routing.catalog.data) if self.routing else '')
 
     def prefetch(self, query, *, session_id=""):
+        """Прочитать память до общего срока, оставив Hermes время на завершение."""
+        seconds = self.prefetch_timeout_seconds
+        with recall_budget(seconds - min(1, seconds / 10)):
+            return self._prefetch_with_budget(query, session_id=session_id)
+
+    def _prefetch_with_budget(self, query, *, session_id=""):
         with self._lock:
             self._recall = None
         if is_trivial_prompt(query) or len(query.strip()) < 3:
@@ -529,7 +575,7 @@ class MemOSProvider(MemoryProvider):
         if key is None:
             return ""
         with self._lock:
-            cached = self._cache.get(key)
+            cached = None if self.routing else self._cache.get(key)
         try:
             rows = cached[1] if cached and time.monotonic() - cached[0] < 30 else self._search(query, sid, None)
             if self._recall_key(sid, query) != key:
@@ -676,9 +722,10 @@ class MemOSProvider(MemoryProvider):
                 raise ValueError('Legacy top_k must be a positive integer; omit it for complete recall')
             # AIDEV-NOTE: Старые сессии ещё могут прислать прежний top_k.
             # Он не должен снова обрезать ответ инструмента модели.
-            rows = (self.routing.search(query, sid, None, args.get('project'), args.get('cubes'),
-                                        bool(args.get('include_archive', False)), bool(args.get('all_cubes', False)))
-                    if self.routing else self._search(query, sid, None))
+            with recall_budget(self.prefetch_timeout_seconds):
+                rows = (self.routing.search(query, sid, None, args.get('project'), args.get('cubes'),
+                                            bool(args.get('include_archive', False)), bool(args.get('all_cubes', False)))
+                        if self.routing else self._search(query, sid, None))
             return {"status": "ok", "memories": [public_memory(row) for row in rows],
                     "returned": len(rows), "scanned": getattr(rows, 'scanned', None),
                     "result_limit_applied": False,
@@ -737,6 +784,7 @@ class MemOSProvider(MemoryProvider):
     def get_config_schema(self):
         return [
             {"key": "base_url", "description": "Existing local MemOS REST API URL", "default": DEFAULTS["base_url"], "required": True},
+            {"key": "socket_path", "description": "Local MemOS Unix socket path", "default": "", "required": False},
             {"key": "user_id", "description": "Existing MemOS owner ID", "default": DEFAULTS["user_id"], "required": True},
             {"key": "cube_id", "description": "Existing main MemCube ID", "default": DEFAULTS["cube_id"], "required": True},
         ]

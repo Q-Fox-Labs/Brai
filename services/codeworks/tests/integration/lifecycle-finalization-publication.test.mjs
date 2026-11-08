@@ -14,6 +14,7 @@ import {createFlowGit} from '../../src/git-flow.mjs';
 import {createActivityGit,localGitStep} from '../../src/git-steps.mjs';
 import {createStore} from '../../src/storage.mjs';
 import {createHandlers} from '../../src/domain.mjs';
+import {runCleanupObligation} from '../../src/worker.mjs';
 import {createActivities,deliverCommands} from '../../src/temporal.mjs';
 import {reconcileProjectLedger} from '../../src/reconciler.mjs';
 import {acquireTarget,releaseTarget} from '../../src/lifecycle.mjs';
@@ -32,7 +33,7 @@ test('explicit cleanup preserves failed A after a later verified B contains its 
   let entered=false,releaseStep,localRefsRemoved=false;const gate=new Promise(resolve=>{releaseStep=resolve;});t.after(()=>releaseStep());
   // Local child steps use real Git under flock; the parent verifies/deletes the disposable bare remote.
   const adapters=createActivityGit({flowGit,step:async(method,p,workspace,args)=>{if(method==='cleanupStep'&&args[1]==='worktree'){entered=true;await gate;}const result=await localGitStep(method,{...p,github:undefined},workspace,args);if(method==='cleanupStep'&&args[1]==='local_refs')localRefsRemoved=true;return result;}});
-  const handlers=createHandlers(createStore(f.app),git,{allowedRepositories:[project.repo_path],flowGit});
+  const store=createStore(f.app),handlers=createHandlers(store,git,{allowedRepositories:[project.repo_path],flowGit});
   const prepared=await prepareWith(handlers.call,{project_id:project.id,workspace_key:'published-result',request_key:'prepare-publication'});
   await f.worker(project,prepared.operation_id);
   const w=(await f.app.query('SELECT * FROM codeworks.workspaces WHERE id=$1',[prepared.workspace_id])).rows[0];
@@ -123,13 +124,119 @@ test('explicit cleanup preserves failed A after a later verified B contains its 
   await f.owner.query("INSERT INTO codeworks.release_queue(project_id,target,operation_id,state) VALUES($1,'dev',$2,'held')",[project.id,holder]);
   connection=await Connection.connect({address,connectTimeout:'5 seconds'});client=new Client({connection,namespace});native=await NativeConnection.connect({address});ids.add(workflow);
   const bundle=await bundleWorkflowCode({workflowsPath:fileURLToPath(new URL('../../src/workflows.cjs',import.meta.url))});
-  const actualIndex=createCodeIndex(f.app);let altered=false;
-  const codeIndex={...actualIndex,inspect:async(...args)=>{const result=await actualIndex.inspect(...args);if(localRefsRemoved&&!altered){altered=true;await f.owner.query("UPDATE codeworks.deployments SET receipt=jsonb_set(receipt,'{verified}','false') WHERE operation_id=$1",[rollout]);}return result;}};
+  const actualIndex=createCodeIndex(f.app);let altered=false,activeRollout=rollout,activeReceipt=receipt;
+  const codeIndex={...actualIndex,inspect:async(...args)=>{const result=await actualIndex.inspect(...args);if(localRefsRemoved&&!altered){altered=true;await f.owner.query("UPDATE codeworks.deployments SET receipt=jsonb_set(receipt,'{verified}','false') WHERE operation_id=$1",[activeRollout]);}return result;}};
+  // До старта Temporal проверяем admission без гонки фонового polling с тестовыми изменениями.
+  const acceptedCleanup=await cleanup('explicit-cleanup');
+  const saved=(await f.app.query('SELECT * FROM codeworks.cleanup_obligations WHERE workspace_id=$1',[w.id])).rows[0];
+  const advance=()=>runCleanupObligation(f.app,saved.id,workflow,{git:adapters.git,flowGit,codeIndex,allowedRepositories:[project.repo_path]});
+  assert.equal((await advance()).blocker,'DEV_TARGET_BUSY');
+  await access(w.path);assert.equal(await flowGit.remote(project,w.branch),accepted,'held DEV lane prevents deletion');
+  await repo('commit','--allow-empty','-m','subsequent verified DEV');
+  const laterSHA=(await repo('rev-parse','HEAD')).stdout;await repo('push','origin','dev');
+  const laterDelivery=randomUUID(),laterRollout=randomUUID(),laterEvidence=randomUUID(),laterComposition={source:laterSHA,components:[]},laterURL=url+'/later';
+  const laterDetails={primary:{merged:true,target:'dev',merge_sha:laterSHA,deployment_evidence_id:laterEvidence}};
+  const laterReceipt={...receipt,operation_id:laterRollout,commit_sha:laterSHA,composition:laterComposition,evidence_url:laterURL};
+  await f.owner.query("INSERT INTO codeworks.operations(id,project_id,workspace_id,executor_id,kind,status,step,request,archived) VALUES($1,$2,$3,'codex','release','succeeded','done','{}',true)",[laterDelivery,project.id,other]);
+  await f.owner.query("INSERT INTO codeworks.releases(id,workspace_id,operation_id,target,requested_sha,state,details) VALUES($1,$2,$3,'dev',$4,'succeeded',$5)",[randomUUID(),other,laterDelivery,laterSHA,laterDetails]);
+  await f.owner.query("INSERT INTO codeworks.operations(id,project_id,executor_id,kind,status,step,request,archived) VALUES($1,$2,'codeworks_owner','rollout','succeeded','done','{}',true)",[laterRollout,project.id]);
+  await f.owner.query("INSERT INTO codeworks.deployments(operation_id,project_id,target,commit_sha,run_id,attempt,composition_digest,composition,receipt,release_operation_id) VALUES($1,$2,'dev',$3,'later','1',$4,$5,$6,$7)",[laterRollout,project.id,laterSHA,digest,laterComposition,laterReceipt,laterDelivery]);
+  await f.owner.query("INSERT INTO codeworks.deployment_evidence(id,project_id,target,commit_sha,evidence_url) VALUES($1,$2,'dev',$3,$4)",[laterEvidence,project.id,laterSHA,laterURL]);
+  // Уже завершённые trusted fixtures не регистрируют дополнительные Temporal workflows.
+  await f.owner.query('UPDATE codeworks.operations SET archived=false WHERE id=ANY($1::uuid[])',[[laterDelivery,laterRollout]]);
+  await f.owner.query("UPDATE codeworks.installed SET operation_id=$2,composition=$3 WHERE project_id=$1 AND target='dev'",[project.id,laterRollout,laterComposition]);
+  activeRollout=laterRollout;activeReceipt=laterReceipt;
+  await f.owner.query("UPDATE codeworks.release_queue SET state='closed' WHERE operation_id=$1",[holder]);
+  await f.owner.query("UPDATE codeworks.cleanup_obligations SET state='pending',next_attempt_at=NULL WHERE id=$1",[saved.id]);
+  assert.equal((await advance()).blocker,'DELIVERY_PROOF_CHANGED');
+  const stale=(await f.app.query('SELECT * FROM codeworks.cleanup_obligations WHERE id=$1',[saved.id])).rows[0];
+  assert.equal(stale.state,'waiting_decision');assert.equal(stale.step,'inspect');assert.deepEqual(stale.expected,{});
+  assert.deepEqual(stale.evidence.publication,saved.evidence.publication);
+  const registry=(await f.app.query('SELECT * FROM codeworks.workflow_registry WHERE workspace_id=$1',[w.id])).rows[0];
+  const originalOperation=(await f.app.query('SELECT status,step,error,result FROM codeworks.operations WHERE id=$1',[acceptedCleanup.operation_id])).rows[0];
+  const originalAttempt=(await f.app.query('SELECT * FROM codeworks.releases WHERE operation_id=$1',[attempt])).rows[0];
+  const restore=async()=>{
+    await f.owner.query('UPDATE codeworks.cleanup_obligations SET epoch=$2,state=$3,step=$4,blocker=$5,evidence=$6,expected=$7,source_operation_id=$8,owner_workflow_id=$9,updated_at=$10 WHERE id=$1',[stale.id,stale.epoch,stale.state,stale.step,stale.blocker,stale.evidence,stale.expected,stale.source_operation_id,stale.owner_workflow_id,stale.updated_at]);
+    await f.owner.query('UPDATE codeworks.workflow_registry SET generation=$2 WHERE workspace_id=$1',[w.id,registry.generation]);
+  };
+  const candidate=(key,{before,query,ports=git}={})=>createHandlers({...store,transaction:async(id,work)=>{
+    await before?.();
+    return store.transaction(id,db=>work({...db,query:(sql,args)=>query?query(sql,args,db.query):db.query(sql,args)}));
+  }},ports,{allowedRepositories:[project.repo_path],flowGit}).call('cleanup',{project_id:project.id,workspace_id:w.id,request_key:key},'codex');
+  const denied=async(key,options={},code='CONFLICT')=>{
+    try{
+      await assert.rejects(candidate(key,options),{code});
+      const rejected=(await f.app.query('SELECT * FROM codeworks.cleanup_obligations WHERE id=$1',[stale.id])).rows[0];
+      if(!options.before)assert.deepEqual(rejected,stale);
+      assert.deepEqual(rejected.evidence.publication,stale.evidence.publication);assert.equal(rejected.evidence.publication_history,undefined);assert.equal(rejected.source_operation_id,stale.source_operation_id);
+    }finally{await restore();}
+    assert.deepEqual((await f.app.query('SELECT * FROM codeworks.cleanup_obligations WHERE id=$1',[stale.id])).rows[0],stale,'rejected refresh preserves the entire saved obligation');
+    assert.equal((await f.app.query('SELECT count(*)::int AS n FROM codeworks.requests WHERE project_id=$1 AND idempotency_key=$2',[project.id,key])).rows[0].n,0);
+    assert.deepEqual((await f.app.query('SELECT status,step,error,result FROM codeworks.operations WHERE id=$1',[acceptedCleanup.operation_id])).rows[0],originalOperation);
+    assert.deepEqual((await f.app.query('SELECT * FROM codeworks.releases WHERE operation_id=$1',[attempt])).rows[0],originalAttempt);
+  };
+  await writeFile(w.path+'/hello.txt','dirty\n');await denied('refresh-dirty');await local('checkout','--','hello.txt');
+  await local('commit','--allow-empty','-m','new HEAD');await denied('refresh-head');await local('reset','--hard',accepted);
+  await denied('refresh-unknown-remote',{ports:{...git,inspectResources:async(...args)=>({...await git.inspectResources(...args),remote:{known:false}})}});
+  await f.owner.query("UPDATE codeworks.deployments SET receipt=jsonb_set(receipt,'{verified}','false') WHERE operation_id=$1",[laterRollout]);
+  await denied('refresh-unverified');await f.owner.query('UPDATE codeworks.deployments SET receipt=$2 WHERE operation_id=$1',[laterRollout,laterReceipt]);
+  const pendingOperation=prepared.operation_id;
+  await f.owner.query("UPDATE codeworks.operations SET status='pending' WHERE id=$1",[pendingOperation]);
+  await denied('refresh-pending');await f.owner.query("UPDATE codeworks.operations SET status='succeeded' WHERE id=$1",[pendingOperation]);
+  const writerState=(await f.app.query('SELECT state FROM codeworks.write_calls WHERE id=$1',[call.write_call_id])).rows[0].state;
+  for(const state of ['preparing','in_flight','uncertain']){
+    await f.owner.query('UPDATE codeworks.write_calls SET state=$2 WHERE id=$1',[call.write_call_id,state]);
+    await denied('refresh-writer-'+state);
+  }
+  await f.owner.query('UPDATE codeworks.write_calls SET state=$2 WHERE id=$1',[call.write_call_id,writerState]);
+  const execution=await f.app.connect();
+  try{
+    await execution.query('SELECT pg_advisory_lock(hashtextextended($1,0))',['execution:workspace:'+w.id]);
+    await denied('refresh-busy',{},'BUSY');
+  }finally{await execution.query('SELECT pg_advisory_unlock(hashtextextended($1,0))',['execution:workspace:'+w.id]);execution.release();}
+  await denied('refresh-lock-denied',{query:(sql,args,next)=>sql.startsWith('SELECT codeworks.lock_publication_evidence')?{rows:[{locked:false}]}:next(sql,args)});
+  await denied('refresh-helper-denied',{query:(sql,args,next)=>{if(sql.startsWith('SELECT codeworks.lock_publication_evidence'))throw Object.assign(Error('fixture helper denied'),{code:'42501'});return next(sql,args);}},'42501');
+  for(const [label,sql] of [
+    ['epoch',"UPDATE codeworks.cleanup_obligations SET epoch=epoch+1 WHERE id=$1"],
+    ['state',"UPDATE codeworks.cleanup_obligations SET state='pending' WHERE id=$1"],
+    ['step',"UPDATE codeworks.cleanup_obligations SET step='remote' WHERE id=$1"],
+    ['expected',"UPDATE codeworks.cleanup_obligations SET expected='{\"remote\":{}}' WHERE id=$1"],
+    ['route',"UPDATE codeworks.cleanup_obligations SET evidence=jsonb_set(evidence,'{route_pending}','true') WHERE id=$1"],
+    ['owner',"UPDATE codeworks.cleanup_obligations SET owner_workflow_id='changed' WHERE id=$1"],
+  ])await denied('refresh-race-'+label,{before:()=>f.owner.query(sql,[stale.id])});
+  await denied('refresh-race-generation',{before:()=>f.owner.query('UPDATE codeworks.workflow_registry SET generation=generation+1 WHERE workspace_id=$1',[w.id])});
+  await denied('refresh-race-installed',{before:()=>f.owner.query("UPDATE codeworks.installed SET operation_id=$2,composition=$3 WHERE project_id=$1 AND target='dev'",[project.id,rollout,composition])});
+  await f.owner.query("UPDATE codeworks.installed SET operation_id=$2,composition=$3 WHERE project_id=$1 AND target='dev'",[project.id,laterRollout,laterComposition]);
+  // Другие маршруты допускают прежний retry, но не замену publication.
+  for(const [label,sql] of [
+    ['expected',"UPDATE codeworks.cleanup_obligations SET expected='{\"remote\":{}}' WHERE id=$1"],
+    ['removed',"UPDATE codeworks.cleanup_obligations SET step='worktree' WHERE id=$1"],
+    ['manifest',"UPDATE codeworks.cleanup_obligations SET evidence=jsonb_set(evidence,'{manifest}','{}') WHERE id=$1"],
+    ['route',"UPDATE codeworks.cleanup_obligations SET evidence=jsonb_set(evidence,'{route_pending}','true') WHERE id=$1"],
+  ]){
+    await f.owner.query(sql,[stale.id]);let checked=false;
+    await candidate('unchanged-'+label,{ports:{...git,inspectResources:()=>assert.fail('ineligible cleanup must not obtain a new proof')},query:(sql,args,next)=>{checked||=sql.startsWith('SELECT codeworks.lock_publication_evidence');return next(sql,args);}});
+    const unchanged=(await f.app.query('SELECT epoch,evidence,source_operation_id FROM codeworks.cleanup_obligations WHERE id=$1',[stale.id])).rows[0];
+    assert.equal(checked,false);assert.equal(unchanged.epoch,stale.epoch);assert.deepEqual(unchanged.evidence.publication,stale.evidence.publication);assert.equal(unchanged.source_operation_id,stale.source_operation_id);
+    await restore();
+  }
+  const refreshed=await cleanup('refresh-current-dev');
+  assert.deepEqual(await cleanup('refresh-current-dev'),refreshed);
+  const refreshedObligation=(await f.app.query('SELECT * FROM codeworks.cleanup_obligations WHERE id=$1',[stale.id])).rows[0];
+  assert.equal(Number(refreshedObligation.epoch),Number(stale.epoch)+1);assert.equal(refreshedObligation.state,'pending');assert.equal(refreshedObligation.blocker,null);assert.equal(refreshedObligation.next_attempt_at,null);
+  assert.equal(refreshedObligation.source_operation_id,refreshed.operation_id);
+  assert.deepEqual((await f.app.query('SELECT * FROM codeworks.releases WHERE operation_id=$1',[attempt])).rows[0],originalAttempt);
+  assert.equal(refreshedObligation.evidence.publication.installed_commit,laterSHA);
+  assert.equal(refreshedObligation.evidence.publication.deployment_operation_id,laterRollout);
+  assert.deepEqual(refreshedObligation.evidence.publication_history,[{source_operation_id:acceptedCleanup.operation_id,publication:stale.evidence.publication}]);
+  assert.deepEqual((await f.app.query('SELECT status,step FROM codeworks.operations WHERE id=$1',[acceptedCleanup.operation_id])).rows[0],{status:'failed',step:'PUBLICATION_SUPERSEDED'});
+  assert.equal((await f.app.query('SELECT state FROM codeworks.commands WHERE operation_id=$1',[acceptedCleanup.operation_id])).rows[0].state,'done');
+  await f.owner.query("UPDATE codeworks.release_queue SET state='held' WHERE operation_id=$1",[holder]);
   const worker=await Worker.create({connection:native,namespace,taskQueue,workflowBundle:bundle,activities:createActivities(f.app,{allowedRepositories:[project.repo_path],adapters,codeIndex}),maxConcurrentActivityTaskExecutions:4});
   await worker.runUntil(async()=>{
-    const acceptedCleanup=await cleanup('explicit-cleanup');await deliverCommands(f.app,client,{taskQueue});
+    await deliverCommands(f.app,client,{taskQueue});
     await until(async()=>(await f.app.query('SELECT blocker FROM codeworks.cleanup_obligations WHERE workspace_id=$1',[w.id])).rows[0]?.blocker==='DEV_TARGET_BUSY');
-    await access(w.path);assert.equal(await flowGit.remote(project,w.branch),accepted,'held DEV lane prevents deletion');
+    await access(w.path);assert.equal(await flowGit.remote(project,w.branch),accepted,'refresh does not bypass the held DEV lane');
     await f.owner.query("UPDATE codeworks.release_queue SET state='closed' WHERE operation_id=$1",[holder]);
     await f.owner.query("UPDATE codeworks.cleanup_obligations SET state='pending',next_attempt_at=NULL WHERE workspace_id=$1",[w.id]);
     await client.workflow.getHandle(workflow).signal('commandsAvailable');await until(()=>entered,30000);
@@ -141,7 +248,11 @@ test('explicit cleanup preserves failed A after a later verified B contains its 
     }finally{releaseStep();lane.release();}
     await until(async()=>(await f.app.query('SELECT blocker FROM codeworks.cleanup_obligations WHERE workspace_id=$1',[w.id])).rows[0]?.blocker==='DELIVERY_PROOF_CHANGED');
     assert.equal((await f.app.query('SELECT removed_at FROM codeworks.workspaces WHERE id=$1',[w.id])).rows[0].removed_at,null,'changed receipt cannot finalize');
-    await f.owner.query('UPDATE codeworks.deployments SET receipt=$2 WHERE operation_id=$1',[rollout,receipt]);
+    const partial=(await f.app.query('SELECT epoch,evidence FROM codeworks.cleanup_obligations WHERE id=$1',[stale.id])).rows[0];
+    assert.notEqual((await f.app.query('SELECT step FROM codeworks.cleanup_obligations WHERE id=$1',[stale.id])).rows[0].step,'inspect');
+    await cleanup('partial-cleanup-retry');
+    assert.deepEqual((await f.app.query('SELECT epoch,evidence FROM codeworks.cleanup_obligations WHERE id=$1',[stale.id])).rows[0],partial,'deletion already started: public retry cannot refresh proof');
+    await f.owner.query('UPDATE codeworks.deployments SET receipt=$2 WHERE operation_id=$1',[activeRollout,activeReceipt]);
     await f.owner.query("UPDATE codeworks.cleanup_obligations SET state='pending',blocker=NULL,next_attempt_at=NULL WHERE workspace_id=$1",[w.id]);
     await client.workflow.getHandle(workflow).signal('commandsAvailable');
     await until(async()=>{
@@ -149,9 +260,13 @@ test('explicit cleanup preserves failed A after a later verified B contains its 
       if(obligation?.state==='waiting_decision')throw Error('PUBLICATION_BLOCKED '+JSON.stringify(obligation));
       return (await f.app.query('SELECT removed_at FROM codeworks.workspaces WHERE id=$1',[w.id])).rows[0]?.removed_at;
     });
-    assert.equal((await f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[acceptedCleanup.operation_id])).rows[0].status,'succeeded');
+    assert.equal((await f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[refreshed.operation_id])).rows[0].status,'succeeded');
     const obligation=(await f.app.query('SELECT state,outcome,evidence FROM codeworks.cleanup_obligations WHERE workspace_id=$1',[w.id])).rows[0];
     assert.equal(obligation.state,'done');assert.equal(obligation.outcome,'released');assert.equal(obligation.evidence.publication.original_attempt_id,attempt);assert.equal(obligation.evidence.publication.source_accepted_sha,accepted);
+    await until(async()=>(await f.app.query('SELECT state FROM codeworks.workflow_registry WHERE workspace_id=$1',[w.id])).rows[0].state==='completed');
+    const terminal=await handlers.call('lifecycle.status',{project_id:project.id,workspace_id:w.id},'codex');
+    assert.equal(terminal.task_status,'removed');assert.equal(terminal.cleanup.state,'done');assert.equal(terminal.workflow.status,'completed');
+    assert.deepEqual(await cleanup('refresh-current-dev'),refreshed);
   });
   assert.equal((await f.app.query('SELECT status FROM codeworks.operations WHERE id=$1',[attempt])).rows[0].status,'failed');
   assert.equal((await f.app.query('SELECT state FROM codeworks.releases WHERE operation_id=$1',[attempt])).rows[0].state,'failed');

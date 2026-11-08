@@ -2,6 +2,8 @@
 # ABOUTME: Основание — цитаты и цель разговора; правила по ключевым словам не используются.
 """Semantic extraction and independent review, with exact source grounding."""
 import hashlib
+import logging
+import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -12,7 +14,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from .client import MemOSError, document_references
+from .client import MemOSError, document_references, remaining_timeout, context_map
+
+logger = logging.getLogger(__name__)
 
 STATUSES = {'idea', 'plan', 'decision', 'reported_done', 'verified_done', 'observation', 'preference', 'unknown'}
 QUALITY_VERSION = 'grounded-facts-v4'
@@ -59,6 +63,49 @@ def evidence_context(messages, facts, budget=80000):
         if used + len(text) <= budget:
             selected.append(text); used += len(text)
     return selected
+
+
+def responses_result(response, budget):
+    """Прочитать завершённый Responses SSE; частичный вывод не является результатом."""
+    data, size = [], 0
+    for raw in response:
+        remaining_timeout(budget)
+        size += len(raw)
+        if size > 16 * 1024 * 1024:
+            raise MemOSError('Semantic router response too large')
+        line = raw.decode('utf-8').rstrip('\r\n')
+        if line.startswith('data:'):
+            data.append(line[5:].lstrip(' '))
+        elif not line and data:
+            event = json.loads('\n'.join(data))
+            data = []
+            if not isinstance(event, dict):
+                raise ValueError('Invalid response event')
+            kind = event.get('type')
+            if kind in ('error', 'response.failed', 'response.incomplete'):
+                raise MemOSError('Semantic router response failed or incomplete')
+            if kind == 'response.completed':
+                result = event.get('response', {})
+                if not isinstance(result, dict) or result.get('status') != 'completed' or result.get('error'):
+                    raise MemOSError('Semantic router response failed or incomplete')
+                return result
+    raise MemOSError('Semantic router response stream ended before completion')
+
+
+def responses_text(result):
+    """Взять только итоговый текст assistant, отклонив отказ модели."""
+    texts = []
+    for item in result.get('output', []):
+        if item.get('type') != 'message' or item.get('role') != 'assistant':
+            continue
+        for part in item.get('content', []):
+            if part.get('type') == 'refusal':
+                raise MemOSError('Semantic router response refused')
+            if part.get('type') == 'output_text':
+                texts.append(part['text'])
+    if not texts:
+        raise MemOSError('Semantic router returned no output text')
+    return ''.join(texts)
 
 
 class Catalog:
@@ -235,26 +282,66 @@ class SemanticRouter:
         if key:
             headers['Authorization'] = 'Bearer ' + key
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        transport = self.config.get('transport', 'chat_completions')
+        if transport not in ('chat_completions', 'codex_responses'):
+            raise MemOSError('Unsupported semantic router transport')
+        data = json.loads(payload[-1]['content'])
+        stage = ('plan' if 'recall_goal_query' in data else 'rank' if 'recall_candidates' in data
+                 else 'review' if 'candidates' in data else 'extract')
         def request(path, body=None):
-            req = urllib.request.Request(base + path, headers=headers,
+            budget = remaining_timeout(float(self.config.get('timeout', 90)))
+            request_headers = {**headers, 'X-Memos-Timeout-Seconds': str(budget), 'X-Memos-Stage': stage}
+            req = urllib.request.Request(base + path, headers=request_headers,
                 data=None if body is None else json.dumps(body, ensure_ascii=False).encode())
+            started = time.monotonic()
+            outcome = 'ok'
             try:
-                with opener.open(req, timeout=float(self.config.get('timeout', 90))) as response:
-                    return json.load(response)
-            except (OSError, ValueError):
-                raise MemOSError('Semantic router request failed') from None
+                with opener.open(req, timeout=budget) as response:
+                    result = (responses_result(response, budget) if transport == 'codex_responses'
+                              else json.load(response))
+                remaining_timeout(budget)
+                return result
+            except MemOSError as exc:
+                outcome = 'deadline' if 'deadline' in str(exc).lower() else 'response_error'
+                raise
+            except urllib.error.HTTPError as exc:
+                outcome = 'http_' + str(exc.code)
+                exc.close()
+                raise MemOSError(f'Semantic router {stage}: HTTP {exc.code}') from None
+            except (TimeoutError, OSError, ValueError) as exc:
+                outcome = ('timeout' if isinstance(exc, TimeoutError) or
+                           isinstance(getattr(exc, 'reason', None), TimeoutError)
+                           else 'invalid_json' if isinstance(exc, ValueError) else 'connection')
+                raise MemOSError(f'Semantic router {stage}: {outcome}') from None
+            finally:
+                logger.info('MemOS model request: stage=%s outcome=%s elapsed=%.3fs',
+                            stage, outcome, time.monotonic() - started)
         model = self.config.get('model')
+        if not model and transport == 'codex_responses':
+            raise MemOSError('Explicit semantic router model required')
         if not model:
             models = request('/v1/models').get('data', [])
             if not models or not models[0].get('id'):
                 raise MemOSError('Semantic router did not advertise a model')
             model = models[0]['id']
-        result = request('/v1/chat/completions', {'model': model, 'messages': payload,
-                         'temperature': 0, 'stream': False,
-                         'response_format': {'type': 'json_schema', 'json_schema': {
-                             'name': 'memory_router', 'strict': True, 'schema': self._response_schema(payload)}}})
+        schema = self._response_schema(payload)
+        if transport == 'codex_responses':
+            # AIDEV-NOTE: Подписочный egress принимает только Responses, без общего ключа в профиле.
+            instructions = '\n\n'.join(row['content'] for row in payload if row['role'] == 'system')
+            messages = [{'role': row['role'], 'content': [{'type': 'input_text', 'text': row['content']}]}
+                        for row in payload if row['role'] != 'system']
+            result = request('/v1/responses', {'model': model, 'instructions': instructions,
+                             'input': messages, 'store': False, 'stream': True,
+                             'text': {'format': {'type': 'json_schema', 'name': 'memory_router',
+                                                'strict': True, 'schema': schema}}})
+        else:
+            result = request('/v1/chat/completions', {'model': model, 'messages': payload,
+                             'temperature': 0, 'stream': False,
+                             'response_format': {'type': 'json_schema', 'json_schema': {
+                                 'name': 'memory_router', 'strict': True, 'schema': schema}}})
         try:
-            content = result['choices'][0]['message']['content'].strip()
+            content = (responses_text(result) if transport == 'codex_responses'
+                       else result['choices'][0]['message']['content']).strip()
             if content.startswith('```'):
                 content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content)
             return json.loads(content)
@@ -514,6 +601,12 @@ class SemanticRouter:
             'This is searchable, not needs_topic. Use latest_topic for the most recent conversation '
             'ABOUT a specified subject or during a specified period, including a supplementary search '
             'for the latest discussion with topic/date hints. Preserve those restrictions in query. '
+            'For latest_topic, the CURRENT question must explicitly request the latest, last or newest '
+            'discussion about the subject. Mere references to an earlier/previous discussion, '
+            '"we discussed", "continue that conversation", or a deleted chat do NOT request latest_topic. '
+            'When the user names a subject and asks for its previous recommendations, information or '
+            'conversation, use evidence and preserve useful sources irrespective of date. '
+            'This does not change latest_conversation for where we last stopped overall. '
             'Do not replace a restricted latest conversation with the newest unrelated topic. '
             'Use locate_document when explicitly asked to find or read the actual earlier document, '
             'including its numbered sections, and ALL requested information belongs to that document. '
@@ -527,7 +620,10 @@ class SemanticRouter:
         if (not isinstance(result, dict) or result.get('goal') not in ('locate_document', 'evidence', 'needs_topic', 'latest_conversation', 'latest_topic')
                 or not isinstance(result.get('query', query), str) or not result.get('query', query).strip()):
             raise MemOSError('Semantic recall goal is invalid')
-        return {'goal': result['goal'], 'query': result.get('query', query).strip()}
+        # Without recent context there is no trusted source for resolving references.
+        # Preserve the complete question rather than a model-generated restriction.
+        planned_query = result.get('query', query).strip() if context else query
+        return {'goal': result['goal'], 'query': planned_query}
 
     def rank(self, query, candidates, *, goal=None):
         """Отобрать по смыслу только полезные свидетельства; пустая выдача допустима.
@@ -566,7 +662,7 @@ class SemanticRouter:
         references = list(dict.fromkeys(ref for _, c in indexed for ref in c['document_refs']))
         if resolver and references:
             with ThreadPoolExecutor(max_workers=min(4, len(references))) as executor:
-                metadata = dict(zip(references, executor.map(resolver, references)))
+                metadata = dict(zip(references, context_map(executor, resolver, references)))
             indexed = [(i, {**c, 'document_metadata': [metadata[ref] for ref in c['document_refs']
                                                      if metadata[ref] is not None]}) for i, c in indexed]
         if goal == 'latest_conversation':
@@ -675,12 +771,12 @@ class SemanticRouter:
                          if newest is None or dialogue_date(batch[0][1]) >= newest]
             if remaining:
                 with ThreadPoolExecutor(max_workers=min(4, len(remaining))) as executor:
-                    results.extend(executor.map(evaluate, remaining))
+                    results.extend(context_map(executor, evaluate, remaining))
         elif len(batches) == 1:
             results = [evaluate(batches[0])]
         else:
             with ThreadPoolExecutor(max_workers=min(4, len(batches))) as executor:
-                results = list(executor.map(evaluate, batches))
+                results = list(context_map(executor, evaluate, batches))
         matches = [match for result in results for match in result['matches']]
         if goal == 'latest_topic' and matches:
             latest = {i for i, _ in latest_dialogue([(m['index'], candidates[m['index']]) for m in matches])}

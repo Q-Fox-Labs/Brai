@@ -103,3 +103,24 @@ test("SSE event parser accepts owner edit/delete DTOs", () => {
  assert.deepEqual(parseEvent(Buffer.from(JSON.stringify(edited))), edited);
  assert.deepEqual(parseEvent(Buffer.from(JSON.stringify(deleted))), deleted);
 });
+
+test("Telegram timer reads and commands use the server profile scope, never browser owner",async()=>{
+ const {serviceDataScope}=await import("../../../services/auth/contracts/service-data-scope.mjs");
+ const oldMode=process.env.WEB_IDENTITY_MODE, oldNats=process.env.NATS_URL, oldOrigin=process.env.WEB_ORIGIN;
+ process.env.WEB_IDENTITY_MODE="telegram";process.env.NATS_URL="nats://fixture.invalid:4222";process.env.WEB_ORIGIN="https://fixture.example";
+ try{
+  const identity=session();identity.body.user={...identity.body.user,profileId:"profile-1",role:"user",status:"active"} as typeof identity.body.user;
+  authReply=identity;calls.length=0;
+  queryReply={...statisticsDto(),userId:serviceDataScope("profile-1")};queryHeaders=new Headers();
+  await check(await statistics(request("/api/timer/statistics")),200);
+  assert.deepEqual(calls.at(-1)?.body,{userId:serviceDataScope("profile-1")});
+  const commandId="91ae2be0-8d8f-4c50-9fd3-000000000003",timerId="91ae2be0-8d8f-4c50-9fd3-000000000002";
+  await check(await remove(request("/api/timer/delete","POST",{commandId,timerId,expectedVersion:0})),202);
+  assert.equal(calls.at(-1)?.body.userId,serviceDataScope("profile-1"));
+  const count=calls.filter(x=>x.subject.startsWith("brai.timer")).length;
+  await check(await remove(request("/api/timer/delete","POST",{commandId,timerId,expectedVersion:0,userId:ownerId})),400);
+  assert.equal(calls.filter(x=>x.subject.startsWith("brai.timer")).length,count);
+  authReply={...identity,body:{...identity.body,user:{...identity.body.user,profileId:null}}};
+  await check(await statistics(request("/api/timer/statistics")),401);
+ }finally{if(oldMode===undefined)delete process.env.WEB_IDENTITY_MODE;else process.env.WEB_IDENTITY_MODE=oldMode;if(oldNats===undefined)delete process.env.NATS_URL;else process.env.NATS_URL=oldNats;if(oldOrigin===undefined)delete process.env.WEB_ORIGIN;else process.env.WEB_ORIGIN=oldOrigin;}
+});

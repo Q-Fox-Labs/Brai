@@ -53,9 +53,48 @@ channels:
         $ref: '#/components/messages/GetResponse'
       ServiceError:
         $ref: '#/components/messages/ServiceError'
+  categoriesQuery:
+    address: brai.history.v1.query.categories-list
+    messages:
+      Request:
+        payload:
+          $ref: ./schemas/tools.schema.json#/definitions/categoriesListRequest
+      Response:
+        payload:
+          $ref: ./schemas/tools.schema.json#/definitions/categoriesListResponse
+      ServiceError:
+        $ref: '#/components/messages/ServiceError'
+  typesQuery:
+    address: brai.history.v1.query.types-list
+    messages:
+      Request:
+        payload:
+          $ref: ./schemas/tools.schema.json#/definitions/typesListRequest
+      Response:
+        payload:
+          $ref: ./schemas/tools.schema.json#/definitions/typesListResponse
+      ServiceError:
+        $ref: '#/components/messages/ServiceError'
+  typeQuery:
+    address: brai.history.v1.query.type-get
+    messages:
+      Request:
+        payload:
+          $ref: ./schemas/tools.schema.json#/definitions/typeGetRequest
+      Response:
+        payload:
+          $ref: ./schemas/tools.schema.json#/definitions/typeGetResponse
+      ServiceError:
+        $ref: '#/components/messages/ServiceError'
   serviceReply:
     address: null
     messages:
+      CategoriesResponse:
+        $ref: '#/channels/categoriesQuery/messages/Response'
+      TypesResponse:
+        $ref: '#/channels/typesQuery/messages/Response'
+      TypeResponse:
+        $ref: '#/channels/typeQuery/messages/Response'
       AppendResponse:
         $ref: '#/components/messages/AppendResponse'
       ListResponse:
@@ -65,6 +104,57 @@ channels:
       ServiceError:
         $ref: '#/components/messages/ServiceError'
 operations:
+  categoriesList:
+    action: receive
+    channel:
+      $ref: '#/channels/categoriesQuery'
+    messages:
+      - $ref: '#/channels/categoriesQuery/messages/Request'
+    reply:
+      channel:
+        $ref: '#/channels/serviceReply'
+      x-nats-reply-subject: message.reply
+      messages:
+        - $ref: '#/channels/serviceReply/messages/CategoriesResponse'
+        - $ref: '#/channels/serviceReply/messages/ServiceError'
+    bindings:
+      nats:
+        queue: service_history
+        bindingVersion: 0.1.0
+  typesList:
+    action: receive
+    channel:
+      $ref: '#/channels/typesQuery'
+    messages:
+      - $ref: '#/channels/typesQuery/messages/Request'
+    reply:
+      channel:
+        $ref: '#/channels/serviceReply'
+      x-nats-reply-subject: message.reply
+      messages:
+        - $ref: '#/channels/serviceReply/messages/TypesResponse'
+        - $ref: '#/channels/serviceReply/messages/ServiceError'
+    bindings:
+      nats:
+        queue: service_history
+        bindingVersion: 0.1.0
+  typeGet:
+    action: receive
+    channel:
+      $ref: '#/channels/typeQuery'
+    messages:
+      - $ref: '#/channels/typeQuery/messages/Request'
+    reply:
+      channel:
+        $ref: '#/channels/serviceReply'
+      x-nats-reply-subject: message.reply
+      messages:
+        - $ref: '#/channels/serviceReply/messages/TypeResponse'
+        - $ref: '#/channels/serviceReply/messages/ServiceError'
+    bindings:
+      nats:
+        queue: service_history
+        bindingVersion: 0.1.0
   append:
     action: receive
     channel:

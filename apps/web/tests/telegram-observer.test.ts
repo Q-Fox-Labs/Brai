@@ -5,19 +5,22 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 import ts from "typescript";
+import { telegramObserverEnabled } from "../server/web-config.ts";
 
 test("наблюдение доступно всем сессиям DEV, файл требует связи и владельца", async () => {
-  const keys = ["BRAI_ENVIRONMENT", "BRAI_WEB_AGENT_MODE", "BRAI_WEB_TELEGRAM_OBSERVER_ENABLED"];
+  const keys = ["BRAI_ENVIRONMENT", "BRAI_WEB_AGENT_MODE", "BRAI_WEB_TELEGRAM_OBSERVER_ENABLED", "WEB_IDENTITY_MODE"];
   const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
-  Object.assign(process.env, { BRAI_ENVIRONMENT: "dev", BRAI_WEB_AGENT_MODE: "hermes_telegram", BRAI_WEB_TELEGRAM_OBSERVER_ENABLED: "1" });
+  Object.assign(process.env, { BRAI_ENVIRONMENT: "dev", BRAI_WEB_AGENT_MODE: "hermes_telegram", BRAI_WEB_TELEGRAM_OBSERVER_ENABLED: "1", WEB_IDENTITY_MODE: "email" });
   const id = "11111111-1111-4111-8111-111111111111";
   let allowed = true, authenticated = true, owner = "owner", mime = "image/png", observedAfter = -1;
+  let sessionCalls = 0, natsCalls = 0;
   class Failure extends Error {
     status: number; code: string;
     constructor(status: number, code: string) { super(code); this.status = status; this.code = code; }
   }
   const session = { session: { id: "session" }, user: { id: "any-dev-user" } };
   const nats = { async request(subject: string, data: Uint8Array) {
+    natsCalls++;
     const input = JSON.parse(Buffer.from(data).toString());
     if (input.action === "changes") observedAfter = input.after;
     const value = input.action === "changes" ? { cursor: input.after + 3, changes: [1, 2, 3].map(offset => ({ change_seq: input.after + offset, identity: `message-${offset}` })) }
@@ -29,7 +32,7 @@ test("наблюдение доступно всем сессиям DEV, фай�
   const module = { exports: {} as Record<string, any> };
   const original = createRequire(filename);
   const dependencies: Record<string, unknown> = {
-    "./auth": { requireSession: async () => { if (!authenticated) throw new Failure(401, "UNAUTHORIZED"); return session; } },
+    "./auth": { requireSession: async () => { sessionCalls++; if (!authenticated) throw new Failure(401, "UNAUTHORIZED"); return session; } },
     "./gateway": { GatewayError: Failure, natsConnection: async () => nats },
     "./agent-artifacts": { agentResultsConnection: async () => nats },
     "../../../services/artifacts/contracts/index.mjs": { subjects: { get: "brai.artifacts.v1.get" }, validateRequest: () => true, validateResponse: () => true },
@@ -39,6 +42,7 @@ test("наблюдение доступно всем сессиям DEV, фай�
     "x-forwarded-method": "GET", "x-forwarded-uri": `/api/telegram-observer/files/${id}?message=telegram%3A123%3A44`,
   } });
   try {
+    assert.equal(telegramObserverEnabled(), true);
     assert.equal((await module.exports.observerGet(new Request("https://dev.test/api/telegram-observer/chats"))).status, 200);
     assert.equal((await module.exports.observerFileAuth(auth())).status, 200);
     mime = "audio/ogg";
@@ -66,6 +70,21 @@ test("наблюдение доступно всем сессиям DEV, фай�
     const reopened = await module.exports.observerGet(new Request("https://dev.test/api/telegram-observer/events?after=8"));
     assert.equal(reopened.status, 200);
     await reopened.body!.cancel();
+    const oldStream = await module.exports.observerGet(new Request("https://dev.test/api/telegram-observer/events?after=8"));
+    const oldReader = oldStream.body!.getReader();
+    assert.equal((await oldReader.read()).done, false);
+    process.env.WEB_IDENTITY_MODE = "telegram";
+    assert.equal(telegramObserverEnabled(), true);
+    const drain = async () => { while (!(await oldReader.read()).done) {} };
+    await Promise.race([drain(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("legacy stream stayed open")), 3000))]);
+    const previousSessions = sessionCalls, previousNats = natsCalls;
+    for (const action of ["status", "chats", "messages?chatId=123", "events"]) {
+      const response = await module.exports.observerGet(new Request(`https://dev.test/api/telegram-observer/${action}`));
+      assert.equal(response.status, 404); assert.equal(response.headers.get("Cache-Control"), "private, no-store");
+    }
+    assert.equal((await module.exports.observerFileAuth(auth())).status, 404);
+    assert.equal(sessionCalls, previousSessions); assert.equal(natsCalls, previousNats);
+    process.env.WEB_IDENTITY_MODE = "email";
     allowed = false;
     assert.equal((await module.exports.observerFileAuth(auth())).status, 404);
     allowed = true; owner = "another-owner";

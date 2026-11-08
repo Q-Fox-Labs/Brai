@@ -107,7 +107,8 @@ export function createPostgresStore(appPool: Pool, webPool: Pool): HistoryStore 
     },
     async ready() {
       try {
-        await Promise.all([appPool.query("SELECT 1 FROM history.sys_types LIMIT 1"), webPool.query("SELECT 1 FROM history.events LIMIT 1")]);
+        await Promise.all([appPool.query("SELECT 1 FROM history.sys_types LIMIT 1"), webPool.query("SELECT 1 FROM history.events LIMIT 1"),
+          webPool.query("SELECT 1 FROM history.personal_event_bindings LIMIT 1")]);
       } catch (error) { throw failure(error); }
     }
   };

@@ -1,0 +1,756 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brai.example/schemas/hermes/identity/control.schema.json",
+  "definitions": {
+    "Headers": {
+      "allOf": [
+        {
+          "$ref": "https://brai.example/schemas/auth/messages.schema.json#/definitions/Headers"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cookie",
+            "origin"
+          ],
+          "properties": {
+            "cookie": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "origin": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        }
+      ]
+    },
+    "MemoryListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "userId"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Целевой пользователь или зарезервированный __quarantine__: только чтение после проверки администратора и аудита; источники архива задаёт защищённая конфигурация."
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        },
+        "query": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "MemoryGetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "userId",
+        "memoryId"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Целевой пользователь или зарезервированный __quarantine__: только чтение после проверки администратора и аудита; источники архива задаёт защищённая конфигурация."
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        },
+        "memoryId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "ChatsListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "userId"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Целевой пользователь или зарезервированный __quarantine__: только чтение после проверки администратора и аудита; источники архива задаёт защищённая конфигурация."
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        }
+      }
+    },
+    "ChatsGetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "userId",
+        "chatId"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Целевой пользователь или зарезервированный __quarantine__: только чтение после проверки администратора и аудита; источники архива задаёт защищённая конфигурация."
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        },
+        "chatId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "order": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "asc",
+          "description": "asc: прежний стабильный снимок от начала. desc: последние сообщения и cursor по ID к более ранним; каждая страница читает свежую защищённую копию, ответ в хронологическом порядке."
+        }
+      }
+    },
+    "ArtifactsListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "userId"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Целевой пользователь или зарезервированный __quarantine__: только чтение после проверки администратора и аудита; источники архива задаёт защищённая конфигурация."
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        }
+      }
+    },
+    "ArtifactsGetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "userId",
+        "artifactId"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Целевой пользователь или зарезервированный __quarantine__: только чтение после проверки администратора и аудита; источники архива задаёт защищённая конфигурация."
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        },
+        "artifactId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "ArtifactsDownloadRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "headers",
+        "userId",
+        "artifactId"
+      ],
+      "properties": {
+        "headers": {
+          "$ref": "#/definitions/Headers"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Целевой пользователь или зарезервированный __quarantine__: только чтение после проверки администратора и аудита; источники архива задаёт защищённая конфигурация."
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 50
+        },
+        "artifactId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "MemoryItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "text",
+        "cubeId",
+        "createdAt",
+        "profileId",
+        "textTruncated",
+        "totalMemoryBytes"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "cubeId": {
+          "type": "string"
+        },
+        "createdAt": {},
+        "profileId": {
+          "type": "string"
+        },
+        "textTruncated": {
+          "type": "boolean"
+        },
+        "totalMemoryBytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "ChatItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "updatedAt"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      }
+    },
+    "ChatMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "role",
+        "text",
+        "createdAt"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "user",
+            "assistant"
+          ]
+        },
+        "text": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        }
+      }
+    },
+    "PublicArtifact": {
+      "description": "Проекция Artifact владельца Artifacts; внутренний URL отсутствует. Остальные свойства следуют схеме services/artifacts/schemas/messages.schema.json#/definitions/Artifact.",
+      "type": "object",
+      "required": [
+        "artifactId",
+        "ownerId",
+        "status",
+        "filename",
+        "mimeType"
+      ],
+      "not": {
+        "required": [
+          "internalUrl"
+        ]
+      },
+      "properties": {
+        "artifactId": {
+          "type": "string"
+        },
+        "ownerId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        }
+      }
+    },
+    "DownloadDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "filename",
+        "mimeType",
+        "sizeBytes",
+        "sha256"
+      ],
+      "properties": {
+        "artifactId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "mimeType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483648
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "MemoryListBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "nextCursor"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/MemoryItem"
+          }
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ChatsListBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "nextCursor"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ChatItem"
+          }
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ChatsGetBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "messages",
+        "nextCursor"
+      ],
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ChatMessage"
+          }
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ArtifactsListBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "nextCursor"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PublicArtifact"
+          }
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "MemoryGetBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "userId",
+        "memoryId",
+        "snapshotId",
+        "offset",
+        "totalBytes",
+        "sha256",
+        "chunkBase64",
+        "nextCursor"
+      ],
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "memoryId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "snapshotId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777216
+        },
+        "totalBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "chunkBase64": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 600000,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "MemoryListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "body",
+        "setCookies"
+      ],
+      "properties": {
+        "status": {
+          "const": 200
+        },
+        "body": {
+          "$ref": "#/definitions/MemoryListBody"
+        },
+        "setCookies": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "MemoryGetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "body",
+        "setCookies"
+      ],
+      "properties": {
+        "status": {
+          "const": 200
+        },
+        "body": {
+          "$ref": "#/definitions/MemoryGetBody"
+        },
+        "setCookies": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "ChatsListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "body",
+        "setCookies"
+      ],
+      "properties": {
+        "status": {
+          "const": 200
+        },
+        "body": {
+          "$ref": "#/definitions/ChatsListBody"
+        },
+        "setCookies": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "ChatsGetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "body",
+        "setCookies"
+      ],
+      "properties": {
+        "status": {
+          "const": 200
+        },
+        "body": {
+          "$ref": "#/definitions/ChatsGetBody"
+        },
+        "setCookies": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "ArtifactsListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "body",
+        "setCookies"
+      ],
+      "properties": {
+        "status": {
+          "const": 200
+        },
+        "body": {
+          "$ref": "#/definitions/ArtifactsListBody"
+        },
+        "setCookies": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "ArtifactsGetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "body",
+        "setCookies"
+      ],
+      "properties": {
+        "status": {
+          "const": 200
+        },
+        "body": {
+          "$ref": "#/definitions/PublicArtifact"
+        },
+        "setCookies": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    },
+    "ArtifactsDownloadResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "body",
+        "setCookies"
+      ],
+      "properties": {
+        "status": {
+          "const": 200
+        },
+        "body": {
+          "$ref": "#/definitions/DownloadDescriptor"
+        },
+        "setCookies": {
+          "type": "array",
+          "maxItems": 0
+        }
+      }
+    }
+  }
+}

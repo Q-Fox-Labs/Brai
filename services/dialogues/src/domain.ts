@@ -3,8 +3,9 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 export const limits = { messageBytes:1_048_576, requestBytes:2_097_152, responseBytes:65_024, metadataBytes:8_192 };
+/** Содержит безопасный код предметной ошибки и необязательные диагностические поля. */
 export class DialoguesFault extends Error {
-  constructor(public code:string) {super(code);}
+  constructor(public code:string, public details?:Record<string,unknown>) {super(code);}
 }
 /** Завершает операцию предметной ошибкой без исходного текста. */
 export function fail(code:string):never {throw new DialoguesFault(code);}
@@ -67,6 +68,8 @@ export function appendInput(raw:unknown):Append {
     if(seen.has(m.id))fail("DUPLICATE_MESSAGE_ID");seen.add(m.id);
     if(!["user","assistant"].includes(m.role)||!["input","commentary","final"].includes(m.kind)||((m.role==="user")!==(m.kind==="input")))fail("INVALID_ARGUMENT");
     text(m.text,limits.messageBytes,true);
+    if(Array.from(m.text as string).length>100 && m.summary===undefined)
+      throw new DialoguesFault("INVALID_ARGUMENT",{field:"summary",expected:"саммари обязательно для текста длиннее 100 символов"});
     for(const key of ["message_order","turn_order","item_order"])if(m[key]!==undefined)integer(m[key]);
     if(m.turn_status!==undefined&&!["in_progress","completed","interrupted","failed"].includes(m.turn_status))fail("INVALID_ARGUMENT");
     const source=m.source??{kind:"agent"};

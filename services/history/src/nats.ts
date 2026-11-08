@@ -10,6 +10,9 @@ import type { LoadGate } from "./load.js";
 const appendSubject = "brai.history.v1.append.*";
 const listSubject = "brai.history.v1.query.list";
 const getSubject = "brai.history.v1.query.get";
+const categoriesSubject = "brai.history.v1.query.categories-list";
+const typesSubject = "brai.history.v1.query.types-list";
+const typeSubject = "brai.history.v1.query.type-get";
 const sourcePattern = /^[a-z][a-z0-9_]{0,63}$/;
 const gameCoreStream = "BRAI_GAME_CORE_EVENTS_V1";
 const gameCoreDurable = "history_game_core_events";
@@ -78,7 +81,7 @@ export async function runNats(nc: NatsConnection, handlers: HistoryHandlers, gat
     queue: "service_history",
   });
 
-  async function handle(operation: "append" | "list" | "get", msg: ServiceMsg): Promise<void> {
+  async function handle(operation: "append" | "list" | "get" | "categoriesList" | "typesList" | "typeGet", msg: ServiceMsg): Promise<void> {
     const requestId = randomUUID();
     const started = performance.now();
     let rawSource: string | undefined;
@@ -96,7 +99,9 @@ export async function runNats(nc: NatsConnection, handlers: HistoryHandlers, gat
           if (Object.hasOwn(value, "source") || rawSource === undefined) throw new HistoryFault("INVALID_ARGUMENT");
           return handlers.appendEvent({ ...value, source: rawSource }, context);
         }
-        return operation === "list" ? handlers.listForWeb(value, context) : handlers.getForWeb(value, context);
+        if (operation === "list") return handlers.listForWeb(value, context);
+        if (operation === "get") return handlers.getForWeb(value, context);
+        return handlers[operation](value, context);
       });
       const payload = Buffer.from(JSON.stringify(result), "utf8");
       if (payload.byteLength > limits.maxResponseBytes) throw new HistoryFault("RESULT_TOO_LARGE");
@@ -113,6 +118,9 @@ export async function runNats(nc: NatsConnection, handlers: HistoryHandlers, gat
     service.addEndpoint("append", { subject: appendSubject, queue: "service_history", handler: (error, msg) => { if (!error) void handle("append", msg); } });
     service.addEndpoint("list", { subject: listSubject, queue: "service_history", handler: (error, msg) => { if (!error) void handle("list", msg); } });
     service.addEndpoint("get", { subject: getSubject, queue: "service_history", handler: (error, msg) => { if (!error) void handle("get", msg); } });
+    service.addEndpoint("categoriesList", { subject: categoriesSubject, queue: "service_history", handler: (error, msg) => { if (!error) void handle("categoriesList", msg); } });
+    service.addEndpoint("typesList", { subject: typesSubject, queue: "service_history", handler: (error, msg) => { if (!error) void handle("typesList", msg); } });
+    service.addEndpoint("typeGet", { subject: typeSubject, queue: "service_history", handler: (error, msg) => { if (!error) void handle("typeGet", msg); } });
   } catch (error) {
     await service.stop();
     throw error;

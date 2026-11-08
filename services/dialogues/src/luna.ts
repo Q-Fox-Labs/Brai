@@ -1,5 +1,5 @@
 // ABOUTME: Выполняет свёртку только через существующий Codex App Server.
-// ABOUTME: Изолирует служебные threads; неизвестный запуск сверяет по native ID.
+// ABOUTME: Выполняет временные запросы без сохранения служебных чатов.
 import {WebSocket} from 'ws';
 import {randomUUID} from 'node:crypto';
 import {DialoguesFault,summaryText} from './domain.js';
@@ -23,6 +23,8 @@ export function createLuna(socketUrl:string,cwd:string){
  let socket:WebSocket|undefined,sequence=0,connection:Promise<void>|undefined,effort:string|undefined,ready=false;
  const pending=new Map<number,{resolve:(v:any)=>void;reject:(e:Error)=>void;timer:NodeJS.Timeout}>();
  const ownThreads=new Set<string>();let config:any;
+ let busy=false;
+ let active:{thread:string;items:Map<string,any>;complete:(turn:any)=>void;fail:(error:Error)=>void}|undefined;
  async function call(method:string,params:any,timeout=15000):Promise<any>{
   if(!socket||socket.readyState!==WebSocket.OPEN)throw fault('LUNA_UNAVAILABLE');
   return new Promise((resolve,reject)=>{const id=++sequence;const timer=setTimeout(()=>{pending.delete(id);reject(fault('NATIVE_OUTCOME_UNKNOWN'));},timeout);
@@ -34,11 +36,26 @@ export function createLuna(socketUrl:string,cwd:string){
    if(!/^ws\+unix:\/.+:\/$/.test(socketUrl))throw fault('INVALID_NATIVE_SOCKET');
    socket=new WebSocket(socketUrl,{maxPayload:4*1024*1024});const ws=socket;
    ws.on('message',raw=>{try{const p=JSON.parse(raw.toString());
-    if(p.method){if(p.id!==undefined&&ownThreads.has(p.params?.threadId)){ws.send(JSON.stringify({id:p.id,error:{code:-32601,message:'DIALOGUES_TOOLS_DISABLED'}}));}return;}
+    if(p.method){
+     if(p.id!==undefined&&ownThreads.has(p.params?.threadId)){
+      ws.send(JSON.stringify({id:p.id,error:{code:-32601,message:'DIALOGUES_TOOLS_DISABLED'}}));
+      active?.fail(fault('LUNA_ISOLATION_VIOLATION'));
+     }
+     if(p.id===undefined&&active&&active.thread===p.params?.threadId){
+      const item=p.params.item;
+      if((p.method==='item/started'||p.method==='item/completed')&&item){
+       if(!['userMessage','agentMessage','reasoning'].includes(item.type))active.fail(fault('LUNA_ISOLATION_VIOLATION'));
+       else if(p.method==='item/completed')active.items.set(item.id,item);
+      }
+      if(p.method==='turn/completed')active.complete(p.params.turn);
+     }
+     return;
+    }
     const value=pending.get(p.id);if(!value)return;pending.delete(p.id);clearTimeout(value.timer);
     p.error?value.reject(Object.assign(fault('LUNA_RPC_REJECTED'),{nativeCode:p.error.code,nativeReason:/client.*[Ii]d|UUID/.test(p.error.message??'')?'CLIENT_ID_REJECTED':/environment/i.test(p.error.message??'')?'ENVIRONMENT_REJECTED':/not.*persist|ephemeral|materializ/i.test(p.error.message??'')?'EPHEMERAL_READ_UNAVAILABLE':'NATIVE_REJECTED'})):value.resolve(p.result);
    }catch{ws.terminate();}});
-   ws.on('close',()=>{if(socket===ws){effort=undefined;ready=false;}for(const [id,p]of pending){clearTimeout(p.timer);p.reject(fault('NATIVE_OUTCOME_UNKNOWN'));pending.delete(id);}});
+   ws.on('error',()=>{active?.fail(fault('LUNA_UNAVAILABLE'));});
+   ws.on('close',()=>{if(socket===ws){effort=undefined;ready=false;}active?.fail(fault('NATIVE_OUTCOME_UNKNOWN'));for(const [id,p]of pending){clearTimeout(p.timer);p.reject(fault('NATIVE_OUTCOME_UNKNOWN'));pending.delete(id);}});
    await new Promise<void>((resolve,reject)=>{ws.once('open',resolve);ws.once('error',()=>reject(fault('LUNA_UNAVAILABLE')));});
    await call('initialize',{clientInfo:{name:'brai_dialogues_summary',version:'0.2.0'},capabilities:{experimentalApi:true}});
    ws.send(JSON.stringify({method:'initialized',params:{}}));
@@ -49,39 +66,51 @@ export function createLuna(socketUrl:string,cwd:string){
    config=(await call('config/read',{includeLayers:false})).config;ready=true;
   })().catch(error=>{ready=false;socket?.terminate();throw error;}).finally(()=>{connection=undefined;});return connection;
  }
- async function readTurn(state:Execution){
-  const result=await call('thread/read',{threadId:state.native_thread_id,includeTurns:true});
-  const turns=result.thread?.turns??[];
-  return turns.find((t:any)=>t.id===state.native_turn_id)||turns.find((t:any)=>(t.items??[]).some((i:any)=>i.type==='userMessage'&&i.clientId===state.native_launch_id));
- }
- async function collect(state:Execution,save:Save){
-  for(let n=0;n<120;n++){
-   let turn;try{turn=await readTurn(state);}catch(e){throw Object.assign(fault('NATIVE_OUTCOME_UNKNOWN'),{phase:'read',nativeReason:(e as any)?.nativeReason});}
-   if(!turn)throw fault('NATIVE_OUTCOME_UNKNOWN');
-   if(turn.status==='completed'){
-    const items=turn.items??[];if(items.some((i:any)=>!['userMessage','agentMessage','reasoning'].includes(i.type)))throw fault('LUNA_ISOLATION_VIOLATION');
-    const output=items.filter((i:any)=>i.type==='agentMessage'&&(i.phase==='final_answer'||!i.phase)).map((i:any)=>i.text??'').join('\n');
-    summaryText(output);await save({...state,execution_state:'completed',result:output});return output;
-   }
-   if(['failed','interrupted'].includes(turn.status)){await save({...state,execution_state:'failed'});throw fault('LUNA_EXECUTION_FAILED');}
-   await new Promise(r=>setTimeout(r,1000));
-  }
-  throw fault('NATIVE_OUTCOME_UNKNOWN');
- }
- /** Сохраняет native IDs до платного запуска; ambiguous launch не повторяется. */
+ /** Временный запрос: готовый результат сохраняется, потерянный можно повторить. */
  async function runNative(input:string,state:Execution,save:Save){
-  await connect();if(state.native_thread_id)ownThreads.add(state.native_thread_id);if(state.execution_state==='completed'&&state.result)return summaryText(state.result);
-  if(state.execution_state==='launching'||state.execution_state==='running')return collect(state,save);
-  config=(await call('config/read',{includeLayers:false})).config;
-  const started=await call('thread/start',{model:'gpt-6-luna',allowProviderModelFallback:false,cwd,ephemeral:false,historyMode:'legacy',threadSource:'dialogues_summary',serviceName:'brai_dialogues',environments:[],dynamicTools:[],
-   approvalPolicy:'never',sandbox:'read-only',baseInstructions:summaryInstructions,developerInstructions:'Только служебная свёртка. Проектные правила и роль компаньона не применяются.',config:isolatedThreadConfig(config)});
-  if(started.model!=='gpt-6-luna')throw fault('LUNA_MODEL_MISMATCH');
-  const thread=started.thread.id;ownThreads.add(thread);
-  const next={native_thread_id:thread,native_launch_id:randomUUID(),native_turn_id:null,execution_state:'launching'};
-  await save(next);
-  let turn;try{turn=await call('turn/start',{threadId:thread,model:'gpt-6-luna',effort,environments:[],clientUserMessageId:next.native_launch_id,input:[{type:'text',text:input}]});}
-  catch(e){if(e instanceof DialoguesFault&&e.code==='LUNA_RPC_REJECTED'){await save({...next,execution_state:'rejected'});throw e;}throw fault('NATIVE_OUTCOME_UNKNOWN');}
-  const active={...next,native_turn_id:turn.turn.id,execution_state:'running'};await save(active);return collect(active,save);
+  if(state.execution_state==='completed'&&state.result)return summaryText(state.result);
+  if(busy)throw fault('LUNA_BUSY');
+  busy=true;
+  let thread:string|undefined,turnId:string|undefined,timer:NodeJS.Timeout|undefined;
+  try{
+   await connect();
+   const started=await call('thread/start',{model:'gpt-6-luna',allowProviderModelFallback:false,cwd,ephemeral:true,historyMode:'legacy',threadSource:'dialogues_summary',serviceName:'brai_dialogues',environments:[],dynamicTools:[],
+    approvalPolicy:'never',sandbox:'read-only',baseInstructions:summaryInstructions,developerInstructions:'Только служебная свёртка. Проектные правила и роль компаньона не применяются.',config:isolatedThreadConfig(config)});
+   thread=started.thread.id;ownThreads.add(thread!);
+   if(started.model!=='gpt-6-luna')throw fault('LUNA_MODEL_MISMATCH');
+   if(started.thread.ephemeral!==true)throw fault('LUNA_PERSISTENCE_VIOLATION');
+   // AIDEV-NOTE: Подписка готова до turn/start: completed может опередить RPC-ответ.
+   const done=new Promise<any>((resolve,reject)=>{
+    active={thread:thread!,items:new Map(),complete:resolve,fail:reject};
+    timer=setTimeout(()=>reject(fault('LUNA_EXECUTION_TIMEOUT')),120000);
+   });
+   void done.catch(()=>{});
+   await save({execution_state:'running'});
+   const launched=await call('turn/start',{threadId:thread,model:'gpt-6-luna',effort,environments:[],clientUserMessageId:randomUUID(),input:[{type:'text',text:input}]});
+   turnId=launched.turn.id;
+   const turn=await done;
+   if(turn.id!==turnId||turn.status!=='completed')throw fault('LUNA_EXECUTION_FAILED');
+   const items=active!.items;
+   for(const item of turn.items??[])if(!items.has(item.id))items.set(item.id,item);
+   if([...items.values()].some(i=>!['userMessage','agentMessage','reasoning'].includes(i.type)))throw fault('LUNA_ISOLATION_VIOLATION');
+   const output=[...items.values()].filter(i=>i.type==='agentMessage'&&(i.phase==='final_answer'||!i.phase)).map(i=>i.text??'').join('\n');
+   summaryText(output);
+   await save({execution_state:'completed',result:output});
+   turnId=undefined;
+   return output;
+  }finally{
+   if(timer)clearTimeout(timer);
+   active=undefined;
+   if(thread&&socket?.readyState===WebSocket.OPEN){
+    if(turnId)await call('turn/interrupt',{threadId:thread,turnId},5000).catch(()=>{});
+    await call('thread/unsubscribe',{threadId:thread},5000).catch(()=>{});
+   }
+   ownThreads.clear();
+   // AIDEV-NOTE: Последний subscriber освобождает ephemeral thread; история не создаётся.
+   const ws=socket;socket=undefined;ready=false;
+   if(ws&&ws.readyState!==WebSocket.CLOSED)await new Promise<void>(resolve=>{ws.once('close',resolve);ws.terminate();});
+   busy=false;
+  }
  }
  /** Completed результат используется полностью, без повторного сжатия ради размера. */
  async function run(input:string,state:Execution,save:Save){const result=await runNative(input,state,save);return summaryText(result);}
@@ -92,5 +121,5 @@ export function createLuna(socketUrl:string,cwd:string){
   if(!result.includes('37'))throw fault('LUNA_PROBE_FAILED');
   return {model:'gpt-6-luna',effort,completed:true};
  }
- return {run,probe,async close(){socket?.close();}};
+ return {run,probe,async close(){active?.fail(fault('LUNA_UNAVAILABLE'));socket?.terminate();}};
 }

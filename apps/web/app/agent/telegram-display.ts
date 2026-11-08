@@ -31,3 +31,8 @@ export function updateTelegramMessage<T extends { identity: string; telegram_id?
   return previous.filter((item, position) => position === index || !value.telegram_id || item.telegram_id !== value.telegram_id || item.direction !== value.direction)
     .map(item => item.identity === previous[index].identity ? value : item);
 }
+
+/** Служебные события остаются в журнале и не становятся репликами разговора. */
+export function isTelegramConversationMessage(message: { message_type?: string }): boolean {
+  return message.message_type !== "service";
+}

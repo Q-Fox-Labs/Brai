@@ -39,7 +39,7 @@ class ConnectTests(unittest.TestCase):
         self.run_connect('--apply')
         self.assertTrue((self.home / 'plugins/memos-rest/provider.py').is_file())
         self.assertIn(str(self.home), (self.home / 'plugins/codex-cli-search/README.txt').read_text())
-        self.assertIn('Ты — Hermes Agent', (self.home / 'SOUL.md').read_text())
+        self.assertIn('Ты — Brai', (self.home / 'SOUL.md').read_text())
         self.assertEqual(stat.S_IMODE((self.home / 'SOUL.md').stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE((self.home / 'scripts/silero_voice.py').stat().st_mode), stat.S_IMODE((EXT / 'scripts/silero_voice.py').stat().st_mode))
         self.assertTrue((self.home / 'skills/media/youtube-content/scripts/video_workflow.py').is_file())

@@ -1,6 +1,6 @@
 # Инструкции пользовательского агента
 
-SOUL.md — штатная точка входа Hermes. В начале сессии полностью прочитай этот индекс, [BASE.md](BASE.md) и личный ROUTING.md по указанным в SOUL.md установленным путям. Затем загружай только подходящие задаче инструкции. При обрезке дочитай файл до конца.
+Системный загрузчик личного профиля подключает этот индекс и [BASE.md](BASE.md) независимо от пользовательских файлов. USER.md и SOUL.md содержат личные сведения и предпочтения; агент пользователя может менять их по его поручению. В начале сессии полностью прочитай личный `${HERMES_HOME}/usercustom/userdata/instructions/ROUTING.md`. Затем загружай подходящие задаче инструкции по этому индексу. При обрезке дочитай файл до конца.
 
 Устройство источников и пользовательских дополнений — в [ARCHITECTURE.md](ARCHITECTURE.md). Настройки экземпляра, имя и доступность сервисов проверяй в действующем профиле; они не наследуются с текстами продукта.
 
@@ -12,6 +12,7 @@ SOUL.md — штатная точка входа Hermes. В начале сес�
 | Изменение инструкций, промпта, навыка или персональной замены | [INSTRUCTION_CHANGES.md](policies/INSTRUCTION_CHANGES.md) |
 | Установка ПО, настройка системы и служб | [SYSTEM_OPERATIONS.md](policies/SYSTEM_OPERATIONS.md) |
 | Использование имени или представление от лица владельца | [OWNER_IDENTITY.md](policies/OWNER_IDENTITY.md) |
+| Каждый публичный ход при подключённых Диалогах | [DIALOGUES.md](policies/DIALOGUES.md) |
 | Запись, исправление, удаление или передача памяти | [MEMORY_POLICY.md](policies/MEMORY_POLICY.md) |
 | Pause/resume памяти, SQL-права или восстановление | [MEMORY_OPERATIONS.md](policies/MEMORY_OPERATIONS.md) |
 | Приём и хранение секретов, форма Telegram | [SECRETS.md](policies/SECRETS.md) |
@@ -25,6 +26,8 @@ SOUL.md — штатная точка входа Hermes. В начале сес�
 
 - [codex](skills/autonomous-ai-agents/codex/SKILL.md)
 - [hermes-agent](skills/autonomous-ai-agents/hermes-agent/SKILL.md)
+- [art-director](skills/creative/art-director/SKILL.md) — для постеров, афиш, баннеров и другой графики; прочитай файл по ссылке.
+- [context-gifs](skills/creative/context-gifs/SKILL.md) — уместная GIF, мем, объясняющая анимация и настройка их отключения.
 - [reply-feedback-learning](skills/creative/reply-feedback-learning/SKILL.md)
 - [youtube-content](skills/media/youtube-content/SKILL.md)
 - [memos-memory](skills/note-taking/memos-memory/SKILL.md)

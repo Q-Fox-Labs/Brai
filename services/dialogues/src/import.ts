@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { appendInput,canonical,digest } from "./domain.js";
+import { createLuna } from "./luna.js";
 type Snapshot={thread_id:string;start_id:string;cutoff_id:string;messages:any[];sha256:string;source_bytes:number};
 const sha=(s:string)=>createHash("sha256").update(s,"utf8").digest("hex");
 /** Выбирает только публичные записи после точной границы, без hidden/tool содержимого. */
@@ -49,53 +50,96 @@ export async function snapshot(file:string,thread:string,start:string):Promise<S
   if(!matched||!found||!messages.length||messages[0].id!==start)throw new Error("SOURCE_BOUNDARY_MISSING");
   return {thread_id:thread,start_id:start,cutoff_id:messages.at(-1).id,messages,sha256:sha(canonical(messages)),source_bytes:(await stat(file)).size};
 }
-/** Записывает один фиксированный снимок и проверяет каждый исходный текст; выводит только числа/хеши. */
+/** Импортирует фиксированный снимок через новый MCP и проверяет исходные тексты. */
 export async function importSnapshot(s:Snapshot,url:string,token:string) {
-  const client=new Client({name:"dialogues-explicit-import",version:"1"});
+  const client=new Client({name:"dialogues-explicit-import",version:"2"});
   await client.connect(new StreamableHTTPClientTransport(new URL(url),{requestInit:{headers:{Authorization:"Bearer "+token}}}));
+  const round=randomUUID();
+  const context={consumer_id:"import:"+s.sha256,context_instance_id:"import:"+s.sha256+":"+round};
+  let luna:ReturnType<typeof createLuna>|undefined;
   try {
-    async function ids(){
-      const seen=new Set<string>();let cursor:string|undefined;
-      for(let page=0;page<10000;page++){
-        const r:any=await client.callTool({name:"dialogues_context_get",arguments:cursor?{cursor}:{dialogue_id:s.thread_id}});
-        if(r.isError||!r.structuredContent)throw new Error("IMPORT_CONTEXT_FAILED");
-        const x=r.structuredContent;
-        for(const d of x.dialogues)for(const t of d.turns)for(const m of t.messages)seen.add(m.id);
+    async function call(action:string,args:Record<string,unknown>){
+      const r:any=await client.callTool({name:"dialogues_exchange",arguments:{action,arguments:args,context}});
+      if(r.isError||!r.structuredContent)throw new Error("IMPORT_EXCHANGE_FAILED");
+      const result=r.structuredContent;let page=result.context;
+      if(result.context_error){
+        if(result.context_error.code!=="CONTEXT_DEFERRED")throw new Error("IMPORT_CONTEXT_FAILED");
+        const deferred:any=await client.callTool({name:"dialogues_exchange",arguments:{action:"page",arguments:result.context_error.arguments}});
+        if(deferred.isError||!deferred.structuredContent)throw new Error("IMPORT_CONTEXT_FAILED");
+        page=deferred.structuredContent;
+      }
+      const delivery=page?.delivery_id;
+      while(page?.continuation_cursor){
+        const x:any=await client.callTool({name:"dialogues_exchange",arguments:{action:"page",arguments:{request_id:result.context_request_id,consumer_id:context.consumer_id,context_instance_id:context.context_instance_id,continuation_cursor:page.continuation_cursor}}});
+        if(x.isError||!x.structuredContent)throw new Error("IMPORT_CONTEXT_FAILED");page=x.structuredContent;
+      }
+      if(delivery){
+        const ack:any=await client.callTool({name:"dialogues_context_ack",arguments:{request_id:"import-ack:"+round+":"+sha(String(args.request_id)),...context,delivery_id:delivery}});
+        if(ack.isError||!ack.structuredContent?.acknowledged)throw new Error("IMPORT_ACK_FAILED");
+      }
+      return result;
+    }
+    async function ids(label:string){
+      const seen=new Set<string>();let cursor:string|undefined,index=0;
+      for(;;){
+        const x=await call("history",{request_id:"import-history:"+s.sha256+":"+round+":"+label+":"+index++,dialogue_id:s.thread_id,...(cursor?{cursor}:{})});
+        for(const item of x.items??[])if(item.type==="message")seen.add(item.id);
         if(!x.continuation_cursor)return seen;cursor=x.continuation_cursor;
       }
-      throw new Error("IMPORT_CONTEXT_LIMIT");
     }
-    const before=await ids();
-    let batches=0;
-    for(let i=0;i<s.messages.length;) {
+    const before=await ids("before");
+    let batches=0,inserted=0;
+    const prepared=[];
+    for(const source of s.messages){
+      const m={...source};
+      if(Array.from(m.text as string).length>100&&!m.summary&&before.has(m.id)){
+        let offset=0,part=0,summary="";
+        for(;;){
+          const x=await call("read",{request_id:"import-summary:"+s.sha256+":"+round+":"+sha(m.id)+":"+part++,dialogue_id:s.thread_id,message_id:m.id,target:"message_summary",offset,limit:8192});
+          summary+=x.text;if(x.next_offset===null)break;offset=x.next_offset;
+        }
+        m.summary=summary;
+      }
+      if(Array.from(m.text as string).length>100&&!m.summary){
+        if(!luna){
+          const socket=process.env.DIALOGUES_CODEX_SOCKET_URL,cwd=process.env.DIALOGUES_SUMMARY_CWD;
+          if(!socket||!cwd)throw new Error("IMPORT_SUMMARIZER_REQUIRED");
+          luna=createLuna(socket,cwd);await luna.probe();
+        }
+        const chars=Array.from(m.text as string);let summary="";
+        for(let offset=0;offset<chars.length;offset+=12000)
+          summary=await luna.run(JSON.stringify({previous_summary:summary,original_fragment:chars.slice(offset,offset+12000).join(""),message_complete:offset+12000>=chars.length}),{},async()=>{});
+        m.summary=summary;
+      }
+      prepared.push(m);
+    }
+    for(let i=0;i<prepared.length;){
       const messages:any[]=[];
-      for(;i<s.messages.length&&messages.length<25;i++){
-        const next=[...messages,s.messages[i]];
+      for(;i<prepared.length&&messages.length<25;i++){
+        const next=[...messages,prepared[i]];
         const candidate={request_id:"import-"+s.sha256+"-"+batches,dialogue:{id:s.thread_id,channel:"codex",title:"Игра после истока"},messages:next};
         try{appendInput(candidate);}catch{if(!messages.length)throw new Error("SOURCE_MESSAGE_LIMIT");break;}
-        messages.push(s.messages[i]);
+        messages.push(prepared[i]);
       }
       const request={request_id:"import-"+s.sha256+"-"+batches,dialogue:{id:s.thread_id,channel:"codex",title:"Игра после истока"},messages};
-      const result:any=await client.callTool({name:"dialogues_messages_append",arguments:request});
-      if(result.isError)throw new Error("IMPORT_WRITE_FAILED");
-      if((result.structuredContent?.messages??[]).length!==messages.length)throw new Error("IMPORT_RECEIPT_MISMATCH");
-      batches++;
+      const result=await call("import",request);
+      if((result.messages??[]).length!==messages.length)throw new Error("IMPORT_RECEIPT_MISMATCH");
+      inserted+=result.messages.filter((m:any)=>!m.replayed).length;batches++;
     }
     for(const m of s.messages) {
-      let offset=0,text="";
+      let offset=0,text="",part=0;
       for(;;){
-        const r:any=await client.callTool({name:"dialogues_message_get",arguments:{dialogue_id:s.thread_id,message_id:m.id,offset,limit:8192}});
-        if(r.isError||!r.structuredContent)throw new Error("IMPORT_READ_FAILED");
-        const x=r.structuredContent;
+        const x=await call("read",{request_id:"import-read:"+s.sha256+":"+round+":"+sha(m.id)+":"+part++,dialogue_id:s.thread_id,message_id:m.id,offset,limit:8192});
         if(x.role!==m.role||x.kind!==m.kind||x.turn_id!==m.turn_id||x.message_order!==String(m.message_order)||x.source.record_index!==m.source.record_index||x.sha256!==sha(m.text))throw new Error("IMPORT_METADATA_MISMATCH");
         text+=x.text;if(x.next_offset===null)break;offset=x.next_offset;
       }
       if(text!==m.text)throw new Error("IMPORT_TEXT_MISMATCH");
     }
-    const after=await ids();
-    return {thread_id:s.thread_id,start_id:s.start_id,cutoff_id:s.cutoff_id,messages:s.messages.length,batches,source_sha256:s.sha256,verified_texts:s.messages.length,inserted:s.messages.filter(m=>!before.has(m.id)&&after.has(m.id)).length,messages_before:before.size,messages_after:after.size};
-  } finally{await client.close();}
+    const after=await ids("after");
+    return {thread_id:s.thread_id,start_id:s.start_id,cutoff_id:s.cutoff_id,messages:s.messages.length,batches,source_sha256:s.sha256,verified_texts:s.messages.length,inserted,messages_before:before.size,messages_after:after.size};
+  } finally{await luna?.close();await client.close();}
 }
+
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href) {
   try {
     const [action,file,thread,start]=process.argv.slice(2);

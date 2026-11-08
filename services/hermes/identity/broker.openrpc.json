@@ -1,0 +1,1336 @@
+{
+  "openrpc": "1.3.2",
+  "info": {
+    "title": "Brai Hermes identity broker",
+    "version": "1.0.0",
+    "description": "Unix JSON-RPC 2.0, one UTF-8 NDJSON frame per connection; singleton or sequential batch of 1..16 requests. Notifications produce no response. SO_PEERCRED chooses caller role for every batch item. Frame at most 2 MiB, 32 concurrently admitted connections; control pending at most 32. Initial frame deadline 5s; authorization 3s, bootstrap/configuration 35s, file operations 1800s. Disconnect/timeout does not prove cancellation; no automatic mutation replay. Worker methods reject uid/owner parameters. See ../files/CONTRACT.md for stable inode, root snapshot, per-user cache and ingress-copy requirements. Login delivery requires loginDeliveryStatePath: root-owned regular SQLite file mode 0600 inside root-owned parent directories without group/other write. Broker creates a missing database mode 0600; existing unsafe files or symlink paths are rejected. maxLoginReceipts defaults to 1000000, can be raised by operator, and never evicts existing receipts."
+  },
+  "methods": [
+    {
+      "name": "authorize",
+      "description": "Root-only admission check; user and profile must remain active.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "allowed"
+          ],
+          "properties": {
+            "allowed": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "identity.resolve",
+      "description": "Только trusted ingress. telegramId в результате — фактический связанный аккаунт запроса; authorTelegramId — стабильный автор UID-профиля. Отвязанный аккаунт не проходит свежий Auth.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "identity.invite-redeem",
+      "description": "Trusted ingress-only invitation provisioning. Unknown outcome must be reconciled without blind replay.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        },
+        {
+          "name": "code",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "name": "name",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "ingress.admit",
+      "description": "Register trusted Telegram route/turn/input before user RPC. inputId is SHA-256 of actual message identity and current text/media/timestamp supplied only by ingress, never by model. Same input preserves request/outcome; a new actual input resets login suppression and uses a distinct stable login requestId. Legacy omission is scoped to turnId. Competing active turn/binding is rejected.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        },
+        {
+          "name": "turnId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        {
+          "name": "chatId",
+          "required": true,
+          "schema": {
+            "type": [
+              "string",
+              "integer"
+            ]
+          }
+        },
+        {
+          "name": "privateChat",
+          "required": true,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "name": "inputId",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        {
+          "name": "threadId",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Тема исходного личного Telegram запроса; задаётся только доверенным ingress."
+          }
+        },
+        {
+          "name": "linkConsent",
+          "required": false,
+          "description": "Computed only from the trusted new user message; never accepted from the model. Broker requires a pending delivered warning for that account and topic.",
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "name": "expectedUid",
+          "required": false,
+          "description": "Trusted ingress pins the resolved worker UID before admission; alias rebinding must fail before reserving another owner turn.",
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "unlinkConsent",
+          "required": false,
+          "description": "Exact account ID parsed from the trusted new user confirmation, never supplied by worker/model.",
+          "schema": {
+            "type": "string",
+            "pattern": "^([1-9][0-9]{0,19})?$"
+          }
+        },
+        {
+          "name": "messageId",
+          "required": false,
+          "description": "Trusted original Telegram message ID. Confirmation requires a strictly later message than the delivered offer; editing an old message cannot confirm.",
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "ingress.status",
+      "description": "Trusted ingress-only status of a registered active owner turn.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "turnId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "suppressFinal"
+          ],
+          "properties": {
+            "suppressFinal": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "ingress.close",
+      "description": "Trusted ingress-only release of the exact registered turn.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "turnId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "closed"
+          ],
+          "properties": {
+            "closed": {
+              "const": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "ingress.prepare",
+      "description": "Trusted ingress-only. Copy stable files owned by ingressUid from configured ingressReadRoots into selected owner home/media. Paths must belong to the registered uid/turnId; worker cannot call.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "turnId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "name": "paths",
+          "required": true,
+          "schema": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "string",
+              "pattern": "^/"
+            }
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "paths"
+          ],
+          "properties": {
+            "paths": {
+              "type": "array",
+              "maxItems": 100,
+              "items": {
+                "type": "string",
+                "pattern": "^/"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "ingress.artifact",
+      "description": "Trusted ingress-only. Recheck Artifacts owner and copy verified bytes into ingressDeliveryRoot/<uid>-<artifactId>/<filename>; original root cache path and permissions remain private.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "turnId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "name": "artifactId",
+          "required": true,
+          "schema": {
+            "$ref": "../trusted.openrpc.json#/components/schemas/Uuid"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "tools.list",
+      "description": "Worker catalog bound to SO_PEERCRED; owner cannot be supplied.",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "tools"
+          ],
+          "properties": {
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "tools.call",
+      "description": "Worker tool call bound to SO_PEERCRED. publish_file/fetch_file use dedicated bounded files ports.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        {
+          "name": "args",
+          "required": true,
+          "schema": {
+            "type": "object"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "ingress.profiles",
+      "paramStructure": "by-name",
+      "description": "Only trusted ingress UID; returns active registry profiles after fresh Auth authorization, without transcripts or credentials. Used for persistent worker supervision.",
+      "params": [],
+      "result": {
+        "name": "profiles",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "profiles"
+          ],
+          "properties": {
+            "profiles": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "uid",
+                  "userId",
+                  "profileId",
+                  "telegramId",
+                  "status",
+                  "home"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "ingress.delivery-artifact",
+      "description": "Только trusted ingress. Свежий Auth проверяет стабильного владельца UID; выдача owner-bound bytes для отдельно проверенного маршрута proactive/UI доставки, без требования входящего turn.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "artifactId",
+          "required": true,
+          "schema": {
+            "$ref": "../trusted.openrpc.json#/components/schemas/Uuid"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "files.configuration",
+      "description": "Worker bootstrap only. UID from SO_PEERCRED and root-owned runtime mapping must match registry userId/profileId/home. Active profiles require current Auth. Provisioning profiles may receive only their nonsecret own configuration before startup health/activation; all data and tools remain denied. Blocked/disabled profiles are denied. Private data roots are home/workspace/files and home/results; secrets are absent.",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "files.publish",
+      "description": "Worker-only root snapshot publication. Exact params path/requestId, no uid/owner. Source must be a stable regular single-link inode owned by worker in home/{workspace,results,media}; at most 64 MiB. Result localPath/markdown point to a verified home/results copy. Same requestId preserves Artifacts idempotency; no transport retries.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        {
+          "name": "requestId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "artifacts.publish",
+      "description": "Worker-only root snapshot publication. Exact params path/requestId, no uid/owner. Source must be a stable regular single-link inode owned by worker in home/{workspace,results,media}; at most 64 MiB. Result localPath/markdown point to a verified home/results copy. Same requestId preserves Artifacts idempotency; no transport retries.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^/"
+          }
+        },
+        {
+          "name": "requestId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "files.fetch",
+      "description": "Worker-only owner/ready validation and verified cache copy to home/results. Never returns the root publisher path.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "artifactId",
+          "required": true,
+          "schema": {
+            "$ref": "../trusted.openrpc.json#/components/schemas/Uuid"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "artifacts.fetch",
+      "description": "Worker-only owner/ready validation and verified cache copy to home/results. Never returns the root publisher path.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "artifactId",
+          "required": true,
+          "schema": {
+            "$ref": "../trusted.openrpc.json#/components/schemas/Uuid"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "files.get",
+      "description": "Worker-only current-owner Artifacts metadata; ownerId and internalUrl omitted.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "artifactId",
+          "required": true,
+          "schema": {
+            "$ref": "../trusted.openrpc.json#/components/schemas/Uuid"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "files.list",
+      "description": "Worker-only ready artifacts of the current owner; ownerId and internalUrl omitted.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "limit",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "offset",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "files.prepare",
+      "description": "Worker-only owner validation of every ordered item. Preserves duplicate artifact IDs, captions and delivery mode.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "mode",
+          "required": true,
+          "schema": {
+            "enum": [
+              "files",
+              "album"
+            ]
+          }
+        },
+        {
+          "name": "items",
+          "required": true,
+          "schema": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "required": [
+                "artifactId"
+              ],
+              "properties": {
+                "artifactId": {
+                  "$ref": "../trusted.openrpc.json#/components/schemas/Uuid"
+                },
+                "caption": {
+                  "type": "string",
+                  "maxLength": 65536
+                },
+                "presentation": {
+                  "enum": [
+                    "photo",
+                    "video",
+                    "audio",
+                    "document",
+                    "voice",
+                    "animation"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "login.send",
+      "description": "Worker-only code delivery for the currently registered private trusted input. Serialized per UID; root-only SQLite loginDeliveryStatePath persists unknown in a FULL synchronous commit before control/Telegram write and stores only requestId/outcome. Replay, timeout, cancellation, crash, close/reopen or restart never re-send the same recorded input. New real input uses a new stable requestId and Auth invalidates the prior code. Late completion cannot suppress a newer input. maxLoginReceipts defaults to 1000000; capacity blocks new login attempts without evicting old receipts or blocking ordinary input admission. No code or user text is stored or returned.",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "status",
+            "suppressFinal"
+          ],
+          "properties": {
+            "status": {
+              "type": "string"
+            },
+            "suppressFinal": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "identity.link-redeem",
+      "description": "Trusted ingress only. Personal Telegram account linking; never available to the model. No automatic mutation retry.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "code",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/TelegramResolveResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "telegram.link",
+      "description": "Agent account-link workflow. First send the full warning; require a new trusted confirmation in the same private account before command issuance. Secrets never enter worker. Unknown delivery is not retried.",
+      "paramStructure": "by-name",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "status",
+            "phase",
+            "suppressFinal"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "sent",
+                "failed",
+                "unknown"
+              ]
+            },
+            "phase": {
+              "enum": [
+                "offer",
+                "command"
+              ]
+            },
+            "suppressFinal": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "telegram.unlink",
+      "description": "Agent-only unlink workflow. Fresh delivered warning and new trusted confirmation pin the exact account and origin for five minutes. Equal accounts; admin retains at least one contact channel, other users may remove all. No automatic mutation retry.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "target",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "current",
+              "other"
+            ]
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "status",
+            "phase",
+            "suppressFinal"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "sent",
+                "failed",
+                "unknown"
+              ]
+            },
+            "phase": {
+              "enum": [
+                "offer",
+                "confirm"
+              ]
+            },
+            "suppressFinal": {
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "admin-last-channel",
+                "account-unavailable"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "dialogues.authorize",
+      "paramStructure": "by-name",
+      "description": "Служебный UID из SO_PEERCRED; актуальный Auth, без аргументов владельца.",
+      "params": [],
+      "result": {
+        "name": "principal",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "userId",
+            "profileId"
+          ],
+          "properties": {
+            "userId": {
+              "type": "string"
+            },
+            "profileId": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "dialogues.summarize-stream",
+      "paramStructure": "by-name",
+      "description": "Только служебный UID. Двунаправленный NDJSON: сервер ready или busy; клиент кадры {id,text}, затем {id,end:true}; сервер chunk с byte offset и completed с totalBytes/SHA-256. До 65536 байт на кадр, один поток суммаризации, deadline 170 секунд, backpressure. Полный input/result остаётся только в персональном процессе и модельном контейнере с memory=256MiB. Общий root broker держит ограниченные буферы; весь поток в памяти не собирает.",
+      "params": [],
+      "result": {
+        "name": "frame",
+        "schema": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "ready",
+                "busy",
+                "chunk",
+                "completed"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "totalBytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "components": {
+    "errors": {
+      "ParseError": {
+        "code": -32700,
+        "message": "Parse error"
+      },
+      "InvalidRequest": {
+        "code": -32600,
+        "message": "Invalid Request"
+      },
+      "MethodNotFound": {
+        "code": -32601,
+        "message": "Method not found"
+      },
+      "InvalidParams": {
+        "code": -32602,
+        "message": "Invalid params"
+      },
+      "Unavailable": {
+        "code": -32001,
+        "message": "Request unavailable"
+      }
+    }
+  }
+}

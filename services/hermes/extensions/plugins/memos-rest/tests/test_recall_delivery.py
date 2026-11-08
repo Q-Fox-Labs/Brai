@@ -1,4 +1,4 @@
-# ABOUTME: Проверяет явные ошибки памяти и завершение запоздавшего поиска Hermes.
+# ABOUTME: Проверяет тихий поиск памяти, ошибки и завершение запоздавшего поиска.
 # ABOUTME: Использует native MemoryManager и синтетический provider без сети и данных пользователя.
 import threading
 import unittest
@@ -37,7 +37,7 @@ class Provider:
 
 
 class RecallDeliveryTests(unittest.TestCase):
-    def test_real_turn_dispatch_emits_failure_notice_and_preserves_model_status(self):
+    def test_real_turn_dispatch_keeps_failure_for_model_without_notice(self):
         provider = Provider()
         def failure(*args, **kwargs):
             raise ConnectionError('synthetic transport failure')
@@ -48,9 +48,35 @@ class RecallDeliveryTests(unittest.TestCase):
         agent = SimpleNamespace(_memory_manager=manager, _user_turn_count=1,
                                 session_id='synthetic-turn', _emit_status=emitted.append)
         text = _memory_turn_start_and_prefetch(agent, 'Find the earlier massage report')
-        self.assertEqual(emitted, [manager.describe_recall()])
-        self.assertIn('Память не прочитана', emitted[0])
+        self.assertEqual(emitted, [])
         self.assertIn('retrieval failed for this turn', text)
+
+    def test_real_turn_dispatch_keeps_memory_without_notice(self):
+        provider = Provider()
+        provider.release.set()
+        manager = MemoryManager()
+        manager.add_provider(provider)
+        emitted = []
+        agent = SimpleNamespace(_memory_manager=manager, _user_turn_count=1,
+                                session_id='synthetic-turn', _emit_status=emitted.append)
+        text = _memory_turn_start_and_prefetch(agent, 'Find the earlier massage report')
+        self.assertEqual(emitted, [])
+        self.assertIn('Verified synthetic memory', text)
+        self.assertIn('recalled 1 memory', manager.describe_recall())
+
+    def test_missing_topic_keeps_model_context_without_notice(self):
+        provider = Provider()
+        provider.prefetch = lambda *args, **kwargs: 'Memory was not searched: no subject.'
+        provider.recall_status = lambda: SimpleNamespace(summary='🧠 Нужна тема для поиска воспоминаний')
+        manager = MemoryManager()
+        manager.add_provider(provider)
+        emitted = []
+        agent = SimpleNamespace(_memory_manager=manager, _user_turn_count=1,
+                                session_id='synthetic-turn', _emit_status=emitted.append)
+        text = _memory_turn_start_and_prefetch(agent, 'Please continue our conversation')
+        self.assertEqual(emitted, [])
+        self.assertIn('Memory was not searched', text)
+        self.assertIn('Нужна тема', manager.describe_recall())
 
     def test_timeout_running_and_late_completion_cannot_claim_success(self):
         provider = Provider()

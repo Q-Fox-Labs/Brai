@@ -1,0 +1,958 @@
+{
+  "openrpc": "1.3.2",
+  "info": {
+    "title": "Brai Hermes identity control private RPC",
+    "version": "1.0.0",
+    "description": "Только доверенный родительский broker; stdin/stdout UTF-8 JSON-RPC 2.0, один JSON документ на строку, без секретов в stdout и stderr. До 2162688 байт на запрос, не более 64 одновременных запросов и 64 элементов batch. Клиент сопоставляет id; timeout/disconnect не отменяет работу. Сроки задаёт вызывающий broker; неизвестный исход записи не повторяется вслепую. Callback состояния не передаётся RPC. Код входа и Telegram token никогда не возвращаются."
+  },
+  "methods": [
+    {
+      "name": "identity.resolve",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]{1,20}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/TelegramResolveResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "identity.invite-redeem",
+      "paramStructure": "by-name",
+      "description": "Имеет побочный эффект; после разрыва повтор не выполнять вслепую.",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]{1,20}$"
+          }
+        },
+        {
+          "name": "code",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          }
+        },
+        {
+          "name": "name",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/TelegramResolveResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "identity.profile-ready",
+      "paramStructure": "by-name",
+      "description": "Промежуточная операция provisioning; повтор только по контракту Auth.",
+      "params": [
+        {
+          "name": "userId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        {
+          "name": "profileId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/TelegramResolveResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "authorize",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/ActivePrincipal"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "identity.revalidate",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "oneOf": [
+            {
+              "$ref": "#/components/schemas/ActivePrincipal"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "active"
+              ],
+              "properties": {
+                "active": {
+                  "const": false
+                }
+              }
+            }
+          ]
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "login.send",
+      "paramStructure": "by-name",
+      "description": "Передаёт код только напрямую в Telegram. При неизвестном исходе не повторять автоматически.",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        },
+        {
+          "name": "privateChat",
+          "required": true,
+          "schema": {
+            "type": "boolean",
+            "description": "false отклоняется как denied до выдачи кода."
+          }
+        },
+        {
+          "name": "requestId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        {
+          "name": "threadId",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Тема исходного личного Telegram запроса; задаётся только доверенным ingress."
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "sent",
+                "denied",
+                "unavailable",
+                "failed",
+                "unknown"
+              ]
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "tools.list",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "tools"
+          ],
+          "properties": {
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name",
+                  "inputSchema"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "inputSchema": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "tools.call",
+      "paramStructure": "by-name",
+      "description": "Вызывает только каталог текущего owner. Повторы определяет вызываемая операция.",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "name",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        {
+          "name": "args",
+          "required": true,
+          "schema": {
+            "type": "object"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {}
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "files.configuration",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "files.get",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "args",
+          "required": true,
+          "schema": {
+            "type": "object"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "files.list",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "args",
+          "required": true,
+          "schema": {
+            "type": "object"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "files.prepare",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "args",
+          "required": true,
+          "schema": {
+            "type": "object"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "artifacts.publish",
+      "paramStructure": "by-name",
+      "description": "Публикация snapshot; не повторять вслепую после неизвестного исхода.",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        {
+          "name": "requestId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "artifacts.fetch",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "artifactId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "identity.link-redeem",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "code",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/TelegramResolveResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ],
+      "description": "Trusted ingress only. Personal Telegram account linking; never available to the model. No automatic mutation retry."
+    },
+    {
+      "name": "telegram.link",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "phase",
+          "required": true,
+          "schema": {
+            "enum": [
+              "offer",
+              "command"
+            ]
+          }
+        },
+        {
+          "name": "threadId",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "sent",
+                "failed",
+                "unknown",
+                "unavailable",
+                "denied"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ],
+      "description": "Agent account-link workflow. First send the full warning; require a new trusted confirmation in the same private account before command issuance. Secrets never enter worker. Unknown delivery is not retried."
+    },
+    {
+      "name": "telegram.unlink",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "threadId",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        {
+          "name": "target",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "current",
+              "other"
+            ]
+          }
+        },
+        {
+          "name": "phase",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "offer",
+              "confirm"
+            ]
+          }
+        },
+        {
+          "name": "targetTelegramId",
+          "required": false,
+          "description": "Pinned by broker after delivered offer; required for confirm.",
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "sent",
+                "failed",
+                "unknown",
+                "unavailable",
+                "denied"
+              ]
+            },
+            "reason": {
+              "enum": [
+                "admin-last-channel",
+                "account-unavailable"
+              ]
+            },
+            "targetTelegramId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,19}$"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ],
+      "description": "Agent-only unlink workflow. Fresh delivered warning and new trusted confirmation pin the exact account and origin for five minutes. Equal accounts; admin retains at least one contact channel, other users may remove all. No automatic mutation retry."
+    },
+    {
+      "name": "identity.lifecycle-claim",
+      "description": "Только root broker. Постоянная операция Auth, lease и поколение проверяются Auth.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "workerId",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleClaimRequest/properties/workerId"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleClaimResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "identity.lifecycle-renew",
+      "description": "Только root broker. Постоянная операция Auth, lease и поколение проверяются Auth.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleRenewRequest/properties/operationId"
+          }
+        },
+        {
+          "name": "leaseToken",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleRenewRequest/properties/leaseToken"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleAcceptedResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "identity.lifecycle-complete",
+      "description": "Только root broker. Постоянная операция Auth, lease и поколение проверяются Auth.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "operationId",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteRequest/properties/operationId"
+          }
+        },
+        {
+          "name": "leaseToken",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteRequest/properties/leaseToken"
+          }
+        },
+        {
+          "name": "success",
+          "required": true,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteRequest/properties/success"
+          }
+        },
+        {
+          "name": "errorCode",
+          "required": false,
+          "schema": {
+            "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteRequest/properties/errorCode"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/LifecycleCompleteResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    }
+  ],
+  "components": {
+    "schemas": {
+      "ActivePrincipal": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "active",
+          "userId",
+          "profileId",
+          "role"
+        ],
+        "properties": {
+          "active": {
+            "const": true
+          },
+          "userId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "profileId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "role": {
+            "enum": [
+              "admin",
+              "user"
+            ]
+          }
+        }
+      },
+      "MemoryDetailChunk": {
+        "$ref": "./schemas/control.schema.json#/definitions/MemoryGetBody"
+      }
+    },
+    "errors": {
+      "RequestFailed": {
+        "code": -32603,
+        "message": "Request failed"
+      },
+      "InvalidParams": {
+        "code": -32602,
+        "message": "Invalid params"
+      }
+    }
+  }
+}

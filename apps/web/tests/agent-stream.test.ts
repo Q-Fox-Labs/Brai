@@ -22,7 +22,8 @@ const base: NativeSnapshot = {
 };
 const session = { user: { id: "user-fixture", email: "sse@example.test", emailVerified: true }, session: { id: "session-fixture", userId: "user-fixture" } };
 
-function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = false, mapped = false) {
+function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = false, mapped = false, telegramMode = false) {
+  const currentSession = { ...session, user: { ...session.user, role: "admin", status: "active" } };
   let callback: (error: Error | null, message: { data: Uint8Array }) => void;
   let stopped = false, statusFailures = 0, ready = true, allowed = true;
   let accountLimits: AgentLimits = { state: "ready", revision: 1, observedAt: 1, windows: [{ slot: "primary", remainingPercent: 70, windowDurationMins: 10080, resetsAt: null }] };
@@ -50,7 +51,7 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = f
     "../lib/agent/stream": { encodeFrame },
     "./web-config": { disabledAgentResponse: () => null },
     "./gateway": { natsConnection: async () => nc, GatewayError: class extends Error {} },
-    "./auth": { checkOrigin() {}, requireTimerSession: async () => { if (!allowed) throw new Error("revoked"); return session; } },
+    "./auth": { telegramIdentity: () => telegramMode, checkOrigin() {}, requireTimerSession: async () => { if (!allowed) throw new Error("revoked"); return currentSession; } },
   };
   new Function("require", "module", "exports", "setInterval", "clearInterval", output)(
     (name: string) => overrides[name] ?? require(name), module, module.exports,
@@ -72,6 +73,7 @@ function fixture(initial: NativeSnapshot = base, holdOpen = false, multiplex = f
     failStatus(times: number) { statusFailures = times; },
     unavailable() { ready = false; },
     revoke() { allowed = false; },
+    demote() { currentSession.user.role = "user"; },
     setLimits(value: AgentLimits) { accountLimits = value; },
     async tick() { for (const fn of intervals.values()) await fn(); },
     get stopped() { return stopped; },
@@ -188,6 +190,17 @@ test("SSE immediately closes on revoked session or confirmed executor unavailabi
   }
 });
 
+test("Telegram Agent SSE closes when the administrator is demoted", async () => {
+  const f = fixture(base, false, false, false, true);
+  try {
+    const response = await f.response;
+    assert.equal(response.status, 200);
+    const reader = response.body!.getReader();
+    await next(reader);
+    f.demote(); await f.tick();
+    assert.equal(f.stopped, true);
+  } finally { f.close(); }
+});
 
 test("one account stream filters unavailable projects and transmits compact standard deltas", async () => {
   const f = fixture(large(0), false, true);

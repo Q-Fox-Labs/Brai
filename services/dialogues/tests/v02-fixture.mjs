@@ -75,7 +75,7 @@ export async function v02Checks(t,owner,app){
   let page=first,items=[];
   do{items.push(...page.items);if(!page.continuation_cursor)break;page=await api.pull('pages',{...args,continuation_cursor:page.continuation_cursor});assert.ok(Buffer.byteLength(JSON.stringify(page))<=65024);}while(true);
   assert.equal(items.filter(x=>x.type==='message').length,50);assert.equal(items.filter(x=>x.type==='dialogue_summary').length,55);
-  assert.ok(items.some(x=>x.type==='message_representation'&&x.truncated&&x.next_offset===1024));
+  assert.ok(items.some(x=>x.type==='message_representation'&&!x.truncated&&x.text==='😀'.repeat(4000)));
   await api.ack('pages',{request_id:rid(),consumer_id:'page-reader',context_instance_id:'ctx',delivery_id:first.delivery_id});
  });
  await t.test('v0.2: summaries >64KiB persisted, frozen fragments reassemble exactly, legacy fallback',async()=>{

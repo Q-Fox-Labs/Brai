@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Markdown from "./markdown";
 import WorkspaceFrame from "../shell/workspace-frame";
-import { emptyTelegramMessage, telegramText, updateTelegramMessage } from "./telegram-display";
+import { emptyTelegramMessage, isTelegramConversationMessage, telegramText, updateTelegramMessage } from "./telegram-display";
 import "./telegram-observer.css";
 
 type Chat = { chat_id: string; thread_id: string; chat_type: string; chat_name: string | null; last_text: string; last_at: string | null; last_row: number };
@@ -55,7 +55,7 @@ export default function TelegramAgentEntry({ username, active = true, enabled = 
     <section className="w-full rounded-2xl border bg-card p-8 text-card-foreground shadow-sm sm:p-10">
       <p className="text-sm font-medium text-muted-foreground">Brai Agent</p>
       <h1 className="mt-2 text-2xl font-semibold tracking-tight">Продолжайте в Telegram</h1>
-      <p className="mt-3 max-w-xl text-sm leading-6 text-muted-foreground">Откройте рабочий чат Brai в Telegram и отправьте сообщение боту{username ? ` @${username}` : ""}. Hermes продолжит разговор в этом чате.</p>
+      <p className="mt-3 max-w-xl text-sm leading-6 text-muted-foreground">Откройте рабочий чат Brai в Telegram и отправьте сообщение боту{username ? ` @${username}` : ""}. Brai продолжит разговор в этом чате.</p>
     </section>
   </main></WorkspaceFrame>;
   return <TelegramObserver userId={userId} username={username} active={active} />;
@@ -107,7 +107,7 @@ function TelegramObserver({ username, active, userId }: { username: string | nul
           try {
             const value = JSON.parse(event.data) as Message;
             refreshChats();
-            if (!selectedRef.current || keyOf(selectedRef.current) !== keyOf(value)) return;
+            if (!selectedRef.current || keyOf(selectedRef.current) !== keyOf(value) || !isTelegramConversationMessage(value)) return;
             setMessages(previous => {
               const updated = updateTelegramMessage(previous, value);
               if (updated) return updated;
@@ -179,7 +179,7 @@ function TelegramObserver({ username, active, userId }: { username: string | nul
         {!selected ? <div className="tg-empty"><span className="tg-empty-mark">✦</span><h2>Выберите чат</h2><p>Здесь появятся сообщения и файлы из Telegram.</p></div> :
           <div className="tg-timeline">{before !== null && <button className="tg-older" type="button" disabled={loading} onClick={() => { void older(); }}>Показать более ранние</button>}
             {loading && !messages.length && <p className="tg-muted" role="status">Загружаем сообщения…</p>}
-            {messages.map(message => <article className="tg-message" data-direction={message.direction} key={message.identity}>
+            {messages.filter(isTelegramConversationMessage).map(message => <article className="tg-message" data-direction={message.direction} key={message.identity}>
               <div className="tg-message-meta"><strong>{message.author_name || (message.direction === "out" ? "Brai" : selected && !selected.chat_id.startsWith("-") ? chatName(selected) : "Отправитель не указан")}</strong><time>{time(message.occurred_at)}</time>{message.edited_at && <span>изменено</span>}</div>
               {telegramText(message.text, message.attachments) && <Markdown text={telegramText(message.text, message.attachments)} />}
               {message.attachments.length > 0 && <div className="tg-attachments">{message.attachments.map(item => <TelegramAttachment key={item.artifactId} message={message} item={item} />)}</div>}

@@ -88,7 +88,7 @@ test("схемы событий и ответов сохраняют точну�
 test("все ссылки AsyncAPI разрешаются в компилируемые схемы Draft-07", async () => {
   const asyncapi = await readFile(resolve(here, "../asyncapi.yaml"), "utf8");
   const refs = [...asyncapi.matchAll(/\$ref:\s+\.\/schemas\/([^#\s]+\.json)#\/definitions\/([A-Za-z0-9_-]+)/g)];
-  assert.equal(refs.length, 8, "AsyncAPI должен публиковать семь DTO и схему параметра source");
+  assert.equal(refs.length, 14, "AsyncAPI должен публиковать семь прежних DTO, шесть DTO справочников и параметр source");
 
   const Ajv = AjvImport.default ?? AjvImport;
   const addFormats = formatsImport.default ?? formatsImport;

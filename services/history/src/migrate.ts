@@ -26,6 +26,7 @@ export async function migrate(pool: Pool, ownerRole: string, appRole: string, we
     // AIDEV-NOTE: Повтор всегда сверяет закреплённые seed ID/code/category; журнал не скрывает повреждённый seed.
     await client.query(readFileSync(new URL("../migrations/001.sql", import.meta.url), "utf8"));
     await client.query(readFileSync(new URL("../migrations/002-game-core-source.sql", import.meta.url), "utf8"));
+    await client.query(readFileSync(new URL("../migrations/003-personal-attribution.sql", import.meta.url), "utf8"));
     const schemaOwner = (await client.query("SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname='history'")).rows[0]?.owner;
     const wrongTableOwner = (await client.query("SELECT 1 FROM pg_class WHERE relnamespace='history'::regnamespace AND relowner<>(SELECT oid FROM pg_roles WHERE rolname=$1)", [ownerRole])).rowCount;
     if (schemaOwner !== ownerRole || wrongTableOwner) throw new Error("HISTORY_REQUIRES_MIGRATION_OWNER");
@@ -45,7 +46,10 @@ export async function migrate(pool: Pool, ownerRole: string, appRole: string, we
     await client.query("DROP POLICY IF EXISTS history_web_read ON history.events");
     await client.query(`CREATE POLICY history_internal_read ON history.events FOR SELECT TO ${quote(appRole)} USING(true)`);
     await client.query(`CREATE POLICY history_internal_append ON history.events FOR INSERT TO ${quote(appRole)} WITH CHECK(true)`);
-    await client.query(`CREATE POLICY history_web_read ON history.events FOR SELECT TO ${quote(webRole)} USING(scope_type='user' AND scope_id=NULLIF(current_setting('app.user_id',true),''))`);
+    await client.query(`GRANT SELECT ON history.personal_event_bindings TO ${quote(webRole)}`);
+    await client.query("DROP POLICY IF EXISTS history_personal_read ON history.personal_event_bindings");
+    await client.query(`CREATE POLICY history_personal_read ON history.personal_event_bindings FOR SELECT TO ${quote(webRole)} USING(scope_id=NULLIF(current_setting('app.user_id',true),''))`);
+    await client.query(`CREATE POLICY history_web_read ON history.events FOR SELECT TO ${quote(webRole)} USING((scope_type='user' AND scope_id=NULLIF(current_setting('app.user_id',true),'')) OR EXISTS(SELECT 1 FROM history.personal_event_bindings b WHERE b.source=events.source AND b.id=events.id AND b.scope_id=NULLIF(current_setting('app.user_id',true),'')))`);
     await client.query("COMMIT");
   } catch (error) { await client.query("ROLLBACK").catch(() => {}); throw error; }
   finally { client.release(); }

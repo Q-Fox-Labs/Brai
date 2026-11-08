@@ -1,5 +1,6 @@
 // ABOUTME: Разветвляет Core NATS signals в ограниченные авторизованные SSE потоки.
 // ABOUTME: Подписка предшествует bootstrap; каждый frame и heartbeat заново проверяют сессию.
+import { isServiceDataScope } from "../../../services/auth/contracts/service-data-scope.mjs";
 export const MAX_ALERT_CLIENTS = 128, MAX_ALERT_QUEUE = 64;
 /** Не хранит уведомления; сигнал null предназначен всем аккаунтам. */
 export class AlertsHub {
@@ -11,7 +12,7 @@ export class AlertsHub {
   return () => { this.clients.delete(client); };
  }
  /** Доставляет только владельцу личного сигнала либо всем для общей записи. */
- broadcast(userId: string | null) { for (const client of this.clients) if (userId === null || client.userId === userId) client.changed(); }
+ broadcast(userId: string | null) { for (const client of this.clients) if ((userId === null && !isServiceDataScope(client.userId)) || client.userId === userId) client.changed(); }
  /** Закрывает все потоки при отзыве данной сессии в текущем процессе. */
  invalidate(sessionId: string) { for (const client of [...this.clients]) if (client.sessionId === sessionId) client.close(); }
  /** Потеря брокера завершает все потоки, требуя браузерной сверки после reconnect. */

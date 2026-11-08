@@ -35,9 +35,9 @@ test('real PostgreSQL storage contract',async t=>{
    await owner.query('DROP SCHEMA history CASCADE');
   });
   await t.test('fresh seed and repeat create exactly three subject tables and 72 audits',async()=>{
-   await migrateNow();assert.equal(await count('sys_categories'),14);assert.equal(await count('sys_types'),58);assert.equal(await count('events'),72);assert.equal(await count('migrations'),1);
+   await migrateNow();assert.equal(await count('sys_categories'),14);assert.equal(await count('sys_types'),58);assert.equal(await count('events'),72);assert.equal(await count('migrations'),3);
    const tables=(await owner.query("SELECT tablename FROM pg_tables WHERE schemaname='history' ORDER BY tablename")).rows.map(r=>r.tablename);
-   assert.deepEqual(tables,['events','migrations','sys_categories','sys_types']);
+   assert.deepEqual(tables,['events','migrations','personal_event_bindings','personal_transfers','sys_categories','sys_types']);
    assert.equal((await owner.query("SELECT count(*)::integer AS n FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid WHERE c.oid='history.events'::regclass AND a.attnum>0 AND NOT a.attisdropped")).rows[0].n,11);
    const fixture=await core.typeCreate({event_id:randomUUID(),category_id:1,code:'new_fixture_type',name:'Новый',description:'ручной'});
    await core.categoryUpdate({event_id:randomUUID(),id:1,name:'Ручное имя',description:'Ручное описание'});
@@ -154,7 +154,8 @@ test('real PostgreSQL storage contract',async t=>{
    const aborted=new AbortController();aborted.abort();await assert.rejects(core.listForWeb({user_id:'user-a'},{deadlineAt:performance.now()+1000,signal:aborted.signal}),fault('DEADLINE_EXCEEDED'));
   });
   await t.test('unavailable database is a safe public error',async()=>{
-   const dead=new Pool({connectionString:urls[1].replace(':15479/',':1/'),connectionTimeoutMillis:300});
+   const unavailable=new URL(urls[1]);unavailable.port='1';
+   const dead=new Pool({connectionString:unavailable.href,connectionTimeoutMillis:300});
    try{await assert.rejects(createPostgresStore(dead,web).transaction(null,undefined,async tx=>tx.event('fixture',randomUUID())),fault('DATABASE_UNAVAILABLE'));}finally{await dead.end();}
   });
  }finally{await Promise.all([owner.end(),app.end(),web.end(),isolatedWeb.end()]);}

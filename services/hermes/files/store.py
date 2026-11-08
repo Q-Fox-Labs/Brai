@@ -96,6 +96,8 @@ class FileStore:
                 CREATE TABLE IF NOT EXISTS tasks (identity TEXT PRIMARY KEY, operation TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS jobs (identity TEXT PRIMARY KEY, operation TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS cleanup_scopes (operation TEXT NOT NULL, scope TEXT NOT NULL, PRIMARY KEY(operation,scope));
+                CREATE TABLE IF NOT EXISTS workspace_bindings (operation TEXT PRIMARY KEY, workspace TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS conversation_workspaces (workspace TEXT PRIMARY KEY);
             """)
             owners = [row[0] for row in db.execute("SELECT owner FROM settings")]
             if owners and owners != [owner]:
@@ -340,11 +342,22 @@ class FileStore:
             return self.fetch(artifact_id(candidate.parent.name))
         return self.publish(path, [identity, "revision", digest.hexdigest()] if row else identity)
 
+    def bind_workspace(self, operation, identity):
+        """Bind one turn to its authenticated conversation workspace."""
+        with self.db() as db:
+            workspace = key([self.owner, identity])
+            db.execute("INSERT OR IGNORE INTO conversation_workspaces VALUES (?)", (workspace,))
+            db.execute("INSERT INTO workspace_bindings VALUES (?,?)", (operation, workspace))
+
     def workspace(self, operation):
-        """Создать временный cwd; операция не получает постоянного каталога пользовательских файлов."""
-        path = self.work / key([self.owner, operation])
+        """Создать изолированный cwd операции или привязанной беседы."""
+        with self.db() as db:
+            row = db.execute("SELECT workspace FROM workspace_bindings WHERE operation=?", (operation,)).fetchone() if isinstance(operation, str) else None
+        path = self.work / (row[0] if row else key([self.owner, operation]))
         path.mkdir(mode=0o700, exist_ok=True)
-        if path.resolve() != path:
+        info = path.lstat()
+        if (path.resolve() != path or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077):
             raise FileError("UNSAFE_WORKSPACE")
         return path
 
@@ -404,12 +417,14 @@ class FileStore:
                 shutil.rmtree(work, ignore_errors=False) if work.exists() else None
             with self.db() as db:
                 originals = [row[0] for row in db.execute("SELECT path FROM items WHERE artifact IS NOT NULL UNION SELECT path FROM publications WHERE confirmed=1")]
+                retained = [self.work / row[0] for row in db.execute("SELECT workspace FROM conversation_workspaces")]
             # AIDEV-NOTE: allowedReadRoots не даёт права удаления. Только специально
             # объявленные временные каталоги; старые пользовательские пути миграции сохраняются.
             for original in originals:
                 path = Path(original)
                 if (original not in pending and path.is_absolute() and path.exists() and not path.is_symlink()
                         and path.is_file() and not path.is_relative_to(self.cache)
+                        and not any(path.resolve().is_relative_to(root) for root in retained)
                         and any(path.resolve().is_relative_to(root) for root in self.temporary_roots)
                         and not any(path.resolve().is_relative_to(root) for root in self.service_roots)):
                     path.unlink()

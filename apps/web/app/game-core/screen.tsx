@@ -24,11 +24,12 @@ function statusOptions(kind: "element" | "move") {
 }
 
 /** Загружает личную карту; переданный набор оставляет компонент пригодным для проверки. */
-export default function GameCoreScreen({ userId, dataset }: { userId: string; dataset?: BoardData }) {
+export default function GameCoreScreen({ userId, dataset, disabled = false }: { userId: string; dataset?: BoardData; disabled?: boolean }) {
  const [loaded, setLoaded] = useState<BoardData | null>(dataset ?? null);
  const [error, setError] = useState("");
  const [retry, setRetry] = useState(0);
  useEffect(() => {
+  if (disabled) return;
   if (dataset) { setLoaded(dataset); setError(""); return; }
   const controller = new AbortController(); setLoaded(null); setError("");
   void fetch("/api/game-core", { cache: "no-store", signal: controller.signal }).then(async response => {
@@ -38,7 +39,8 @@ export default function GameCoreScreen({ userId, dataset }: { userId: string; da
    if (!controller.signal.aborted) setError(reason instanceof Error && reason.message === "Сессия завершена. Войдите снова." ? reason.message : "Не удалось загрузить карту.");
   });
   return () => controller.abort();
- }, [dataset, retry, userId]);
+ }, [dataset, retry, userId, disabled]);
+ if (disabled) return <main className="game-core-screen" aria-label="Карта Элементов"><p className="game-core-empty" role="status">Элементы пока недоступны для личного аккаунта. Работа с Браем доступна в Telegram.</p></main>;
  if (!dataset && error) return <main className="game-core-screen" aria-label="Карта Элементов"><p className="game-core-empty" role="alert">{error}</p><button type="button" onClick={() => setRetry(value => value + 1)}>Повторить</button></main>;
  if (!loaded) return <main className="game-core-screen" aria-label="Карта Элементов"><p className="game-core-empty" role="status">Загружаем карту…</p></main>;
  return <GameCoreBoard userId={userId} dataset={presentBoard(loaded)} onDataChange={setLoaded} />;

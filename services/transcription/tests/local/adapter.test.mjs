@@ -74,10 +74,10 @@ function lineReader(stream, label, diagnostic = () => '') {
   });
   return {
     ready,
-    next() {
+    next(timeoutMs = 2000) {
       if (ready.length) return Promise.resolve(ready.shift());
       return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}; stderr=${diagnostic()}`)), 2000);
+        const timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}; stderr=${diagnostic()}`)), timeoutMs);
         pending.push((value) => { clearTimeout(timer); resolve(value); });
       });
     },
@@ -288,7 +288,9 @@ test('real child keeps health and cancel responsive while execute is pending', a
   t.after(() => { if (child.exitCode === null) child.kill(); });
   const input = request();
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 'execute', method: 'execute', params: input }) + '\n');
-  assert.equal(await events.next(), 'invoke-started');
+  // AIDEV-NOTE: Первый ответ включает холодный запуск Node при параллельном прогоне.
+  // Проверки health/cancel после запуска сохраняют прежний срок 2 секунды.
+  assert.equal(await events.next(10000), 'invoke-started');
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 'overload', method: 'execute', params: input }) + '\n');
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 'health', method: 'health', params: {} }) + '\n');
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 'cancel', method: 'cancel', params: { requestId: input.requestId, operationId: input.operationId } }) + '\n');
@@ -320,7 +322,7 @@ test('production child starts without local-ai config and reports honest unavail
   const output = lineReader(child.stdout, 'production stdout', () => stderr);
   t.after(() => { if (child.exitCode === null) child.kill(); });
   child.stdin.write('{broken\n');
-  const parse = JSON.parse(await output.next());
+  const parse = JSON.parse(await output.next(10000));
   assert.equal(parse.error.code, -32700);
   assert.equal(parse.id, null);
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 'health', method: 'health', params: {} }) + '\n');

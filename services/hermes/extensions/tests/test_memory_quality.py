@@ -7,6 +7,9 @@ import types
 import threading
 import unittest
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
+import urllib.error
 
 ROOT = Path(__file__).resolve().parents[1] / 'plugins/memos-rest'
 PACKAGE = types.ModuleType('isolated_memory_quality')
@@ -21,6 +24,99 @@ class QualityContractTests(unittest.TestCase):
 
     def setUp(self):
         self.router = router_module.SemanticRouter({}, router_module.Catalog(Path('/nonexistent-neutral-home')))
+
+    def test_router_reports_http_status_without_exposing_response_or_credentials(self):
+        self.router.config = {'base_url': 'http://127.0.0.1:19362', 'model': 'gpt-6-luna'}
+        error = urllib.error.HTTPError('http://127.0.0.1:19362/v1/chat/completions',
+                                       504, 'private diagnostic', {}, None)
+        with patch.object(router_module.urllib.request.OpenerDirector, 'open', side_effect=error):
+            with self.assertRaisesRegex(router_module.MemOSError, 'HTTP 504') as caught:
+                self.router._http([{'role': 'user', 'content': '{"recall_goal_query":"neutral"}'}])
+        self.assertNotIn('private diagnostic', str(caught.exception))
+
+    def test_shared_budget_shrinks_across_stages_and_rejects_work_after_expiry(self):
+        client = router_module.remaining_timeout.__globals__
+        clock = [100.0]
+        with patch.object(router_module.time, 'monotonic', side_effect=lambda: clock[0]):
+            with self.assertRaisesRegex(router_module.MemOSError, 'deadline'):
+                with client['recall_budget'](5):
+                    self.assertEqual(client['remaining_timeout'](90), 5)
+                    clock[0] += 4
+                    with client['recall_budget'](90):
+                        self.assertEqual(client['remaining_timeout'](90), 1)
+                    clock[0] += 2
+                    client['remaining_timeout'](90)
+        self.assertEqual(client['remaining_timeout'](90), 90)
+
+    def test_parallel_workers_inherit_budget_without_leaking_to_other_searches(self):
+        client = router_module.remaining_timeout.__globals__
+        with client['recall_budget'](1):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                limits = list(client['context_map'](executor, lambda _: client['remaining_timeout'](90), range(4)))
+        self.assertTrue(all(0 < value <= 1 for value in limits))
+        self.assertEqual(client['remaining_timeout'](90), 90)
+
+    def test_router_passes_remaining_budget_and_stage_to_bridge(self):
+        client = router_module.remaining_timeout.__globals__
+        self.router.config = {'base_url': 'http://127.0.0.1:19362', 'model': 'gpt-6-luna'}
+        requests = []
+        def opened(request, *, timeout):
+            requests.append((request, timeout))
+            from io import BytesIO
+            return BytesIO(json.dumps({'choices':[{'message':{'content':'{"goal":"needs_topic","query":"neutral"}'}}]}).encode())
+        with patch.object(router_module.urllib.request.OpenerDirector, 'open', side_effect=opened):
+            with client['recall_budget'](2):
+                self.router.plan('neutral')
+        request, timeout = requests[0]
+        self.assertTrue(0 < timeout <= 2)
+        self.assertEqual(float(request.get_header('X-memos-timeout-seconds')), timeout)
+        self.assertEqual(request.get_header('X-memos-stage'), 'plan')
+
+    def test_subscription_router_uses_responses_and_preserves_schema_and_budget(self):
+        from io import BytesIO
+        self.router.config = {'base_url': 'http://127.0.0.1:18080/model/v1',
+                              'model': 'gpt-6.1-sol', 'transport': 'codex_responses'}
+        answer = {'goal': 'evidence', 'query': 'neutral'}
+        result = {'status': 'completed', 'output': [{'type': 'message', 'role': 'assistant',
+                  'content': [{'type': 'output_text', 'text': json.dumps(answer)}]}]}
+        stream = ('data: ' + json.dumps({'type': 'response.completed', 'response': result}) + '\n\n').encode()
+        calls = []
+        def opened(request, *, timeout):
+            calls.append((request, timeout))
+            return BytesIO(stream)
+        with patch.object(router_module.urllib.request.OpenerDirector, 'open', side_effect=opened):
+            with router_module.remaining_timeout.__globals__['recall_budget'](2):
+                self.assertEqual(self.router.plan('neutral'), answer)
+        self.assertEqual(len(calls), 1)
+        request, timeout = calls[0]
+        body = json.loads(request.data)
+        self.assertEqual(request.full_url, 'http://127.0.0.1:18080/model/v1/responses')
+        self.assertFalse(body['store'])
+        self.assertTrue(body['stream'])
+        self.assertTrue(body['instructions'])
+        self.assertEqual(body['text']['format']['type'], 'json_schema')
+        self.assertTrue(body['text']['format']['strict'])
+        self.assertTrue(0 < timeout <= 2)
+        self.assertEqual(request.get_header('X-memos-stage'), 'plan')
+        self.assertNotIn('temperature', body)
+        self.assertNotIn('messages', body)
+
+    def test_subscription_router_rejects_partial_failed_and_refused_results(self):
+        from io import BytesIO
+        self.router.config = {'base_url': 'http://127.0.0.1:18080/model/v1',
+                              'model': 'gpt-6.1-sol', 'transport': 'codex_responses'}
+        cases = [b'', b'data: {"type":"response.output_text.delta","delta":"{}"}\n\n']
+        for kind in ('error', 'response.failed', 'response.incomplete'):
+            cases.append(('data: ' + json.dumps({'type': kind}) + '\n\n').encode())
+        for output in ([], [{'type': 'message', 'role': 'assistant', 'content': [{'type': 'refusal', 'refusal': 'private'}]}]):
+            cases.append(('data: ' + json.dumps({'type': 'response.completed', 'response': {
+                'status': 'completed', 'output': output}}) + '\n\n').encode())
+        for stream in cases:
+            with self.subTest(stream=stream), patch.object(router_module.urllib.request.OpenerDirector, 'open',
+                    side_effect=lambda *a, **kw: BytesIO(stream)):
+                with self.assertRaises(router_module.MemOSError) as caught:
+                    self.router.plan('neutral')
+                self.assertNotIn('private', str(caught.exception))
 
     def test_long_plain_source_does_not_backtrack_for_a_document_path(self):
         self.assertEqual(router_module.document_references('x' * 100000 + ' report.pdf'), ['report.pdf'])

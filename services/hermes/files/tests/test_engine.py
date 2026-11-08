@@ -339,101 +339,451 @@ class EngineTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(pending,{})
                 self.assertEqual(tasks,{})
 
-    async def test_actual_busy_gateway_queues_album_continuation_before_interrupt(self):
-        """Фото/видео/документы того же набора не прерывают даже подготовку первого хода."""
-        event=await self.album_event()
-        scope={}
-        function('gateway/run_inbound.py',['_hm_busy_slash_or_photo','_hm_handle_running_session_message'],scope)
-        queued=[]
-        runner=SimpleNamespace(_hm_merge_pending_for_source=lambda *a,**kw:queued.append((a,kw)))
-        runner._hm_busy_slash_or_photo=MethodType(scope['_hm_busy_slash_or_photo'],runner)
-        ports={'brai_files':native,'hermes_cli.commands':module(resolve_command=lambda _:None),
-               'gateway.run':module(_AGENT_PENDING_SENTINEL=object())}
-        self.assertTrue(native.should_queue_inbound_set(event))
+    def edit_allowed(self, adapter, message):
+        """Предоставить enum канала при проверке действующего runtime guard."""
+        with patch.dict(sys.modules,{'gateway.platforms.event':module(MessageType=SimpleNamespace(TEXT='text'))}):
+            return native.active_telegram_edit(adapter,message)
+
+    def steering_runner(self, source, *, preparing=False):
+        """Реальный steer движка; подменены только канальные и модельные порты."""
+        scope = {'_ic_lock': lambda a, _: a._pending_steer_lock,
+                 '_ic_slot': lambda a, _, name: getattr(a, name)}
+        function('agent/interrupt_control.py', ['steer'], scope)
+        agent = SimpleNamespace(_pending_steer=None, _pending_steer_lock=threading.Lock())
+        agent.steer = MethodType(scope['steer'], agent)
+        ctx = SimpleNamespace(source=source, inbound_message_id='initial', session_key='session')
+        turn = SimpleNamespace(agent=agent, ctx=None if preparing else ctx, event=None, started_ts=1, busy_ack_ts=0)
+        state = SimpleNamespace(turn=turn)
+        runner = SimpleNamespace(_peek_session_state=lambda _:state, _session_state=lambda _:state,
+            _is_user_authorized_for_source=lambda _:True, _admit_bot_message_for_source=lambda _:True,
+            _steer_text_with_origin=lambda text,event:'message=' + str(event.message_id) + '\n' + text,
+            _effective_busy_input_mode=lambda _:'interrupt', _draining=False,
+            _delivery_adapter_for=lambda _:object(),
+            _queue_or_replace_pending_event=lambda *a:self.fail('Unexpected next-turn queue'),
+            _hm_merge_pending_for_source=lambda *a,**kw:self.fail('Unexpected next-turn merge'))
+        if not preparing:
+            native.bind_steer_turn(agent, runner, ctx)
+        return runner, agent, turn, ctx
+
+    async def _check_busy_entrypoint(self, primary):
+        """Проверить поступление текста и файлов в один настоящий steer."""
+        event = await self.album_event()
+        event.internal = False
+        event.allow_gateway_control = True
+        event.message_type = 'photo'
+        event.get_command = lambda:None
+        runner,agent,turn,ctx = self.steering_runner(event.source)
+        async def approval(*a):return False
+        runner._route_plaintext_approval_while_busy = approval
+        scope = {'MessageType':SimpleNamespace(TEXT='text')}
+        path = 'gateway/run_busy.py' if primary else 'gateway/run_inbound.py'
+        name = '_handle_active_session_busy_message' if primary else '_hm_busy_slash_or_photo'
+        function(path,[name],scope)
+        ports = {'brai_files':native,'gateway.run':module(_AGENT_PENDING_SENTINEL=object()),
+                 'hermes_cli.commands':module(resolve_command=lambda _:None)}
+        routing_spec=importlib.util.spec_from_file_location('real_image_routing',ENGINE/'agent/image_routing.py')
+        routing=importlib.util.module_from_spec(routing_spec);routing_spec.loader.exec_module(routing)
+        ports['agent.image_routing']=routing
         try:
             with patch.dict(sys.modules,ports):
-                for phase in ['preparing','committed']:
-                    if phase=='committed':native.commit_inbound(event.source,event.message_id)
-                    late=SimpleNamespace(source=event.source,message_id='11',media_urls=[],
-                        metadata={'_brai_artifacts':event.metadata['_brai_artifacts'][-1:]},get_command=lambda:None)
-                    try:
-                        self.assertTrue(native.should_queue_inbound_set(late))
-                        for kind in ['photo','video','document']:
-                            late.message_type=kind
-                            self.assertIsNone(await scope['_hm_handle_running_session_message'](runner,late,late.source,'session'))
-                    finally:
-                        native.release_event(late)
-            self.assertEqual(len(queued),6)
-            self.assertTrue(all(kw=={'merge_text':True} for _,kw in queued))
+                if primary:self.assertTrue(await scope[name](runner,event,'session'))
+                else:self.assertEqual(await scope[name](runner,event,event.source,'session'),(True,None))
+                guidance=SimpleNamespace(source=event.source,message_id='later',text='Уточнение маршрута',
+                    media_urls=[],media_types=[],metadata={},internal=False)
+                self.assertTrue(await native.steer_active_input(runner,guidance,'session'))
+            payload=agent._pending_steer
+            self.assertIn('Уточнение маршрута',payload)
+            self.assertEqual(len(payload.images),2)
+            self.assertTrue(all(p['image_url']['url'].startswith('data:image/png;base64,') for p in payload.images))
+            content=native.steer_content(payload,'marker '+payload)
+            self.assertEqual(len(content),3)
+            self.assertIn('Уточнение маршрута',content[0]['text'])
+            runner._session_key_for_source=lambda _:'session'
+            self.assertTrue(self.edit_allowed(SimpleNamespace(gateway_runner=runner,
+                _build_message_event=lambda *a:SimpleNamespace(source=event.source)),SimpleNamespace(message_id='later')))
+            with self.store.db() as db:
+                self.assertEqual(len(json.loads(db.execute('SELECT admitted FROM groups ORDER BY rowid LIMIT 1').fetchone()[0])),2)
+            # Повтор тех же фото не добавляется к steer второй раз.
+            with patch.dict(sys.modules,ports):
+                self.assertTrue(await native.steer_active_input(runner,event,'session'))
+            self.assertIs(agent._pending_steer,payload)
         finally:
+            native.release_steer_inputs(agent)
             native.release_event(event)
-        native.release_event(event)  # Освобождение идемпотентно.
-        fresh=SimpleNamespace(source=event.source,message_id='99',text='fresh file',
-            raw_message=SimpleNamespace(media_group_id=None),media_urls=[str(self.input_file())],media_types=['text/plain'],metadata={})
-        await native.accept_event(fresh,admit=False)
-        self.assertFalse(native.should_queue_inbound_set(fresh))
-        native.release_event(fresh)
 
-    async def test_primary_busy_entrypoint_queues_albums_without_interrupt_or_ack(self):
-        """Реальный busy handler BaseAdapter ставит набор в FIFO без steer/interrupt/ack."""
-        event = await self.album_event()
-        scope = {'MessageType': SimpleNamespace(TEXT='text'), 'os': os,
-                 'time': __import__('time'), 'logger': SimpleNamespace(debug=lambda *a:None)}
-        function('gateway/run_busy.py', ['_handle_active_session_busy_message'], scope)
-        queued, interrupted, acknowledged, steered = [], [], [], []
-        async def approval(*args):return False
-        async def resolve(*args):
-            steered.append(args)
-            return SimpleNamespace(effective_mode='interrupt', redirected=False, steered=False,
-                                   demoted_for_subagents=False, demoted_for_compression=False)
-        async def interrupt(*args):interrupted.append(args)
-        async def ack(*args):acknowledged.append(args)
-        state = SimpleNamespace(turn=SimpleNamespace(agent=object(), busy_ack_ts=0))
-        runner = SimpleNamespace(_is_user_authorized_for_source=lambda s:True,
-            _admit_bot_message_for_source=lambda s:True, _effective_busy_input_mode=lambda s:'interrupt',
-            _draining=False, _route_plaintext_approval_while_busy=approval,
-            _delivery_adapter_for=lambda s:object(),
-            _queue_or_replace_pending_event=lambda key,ev:queued.append((key,ev)),
-            _peek_session_state=lambda key:state, _session_state=lambda key:state,
-            _resolve_busy_steer_or_redirect=resolve, _interrupt_running_agent_for_busy_event=interrupt,
-            _compose_busy_ack_message=lambda *a,**kw:'busy interrupt', _send_busy_ack_reply=ack)
-        event.internal=False
-        event.allow_gateway_control=True
-        ports={'brai_files':native,'gateway.run':module(_AGENT_PENDING_SENTINEL=object())}
+    async def test_primary_busy_entrypoint_steers_text_and_images(self):
+        await self._check_busy_entrypoint(True)
+
+    async def test_secondary_busy_entrypoint_steers_text_and_images(self):
+        await self._check_busy_entrypoint(False)
+
+    async def test_single_photos_steer_immediately_after_artifacts_without_debounce(self):
+        """Отдельные реальные фото после Artifacts сразу идут в steer, не ждут сборки."""
+        template=await self.album_event()
+        source=template.source
+        paths=[]
+        for i,value in enumerate(template.media_urls):
+            path=self.input/('single-'+str(i)+'.png');path.write_bytes(Path(value).read_bytes());paths.append(str(path))
+        native.release_event(template)
+        runner,agent,turn,ctx=self.steering_runner(source)
+        runner._session_key_for_source=lambda _:'session'
+        routing_spec=importlib.util.spec_from_file_location('real_image_routing',ENGINE/'agent/image_routing.py')
+        routing=importlib.util.module_from_spec(routing_spec);routing_spec.loader.exec_module(routing)
+        scope={};function('plugins/platforms/telegram/adapter.py',['_route_photo_event'],scope)
+        adapter=SimpleNamespace(gateway_runner=runner,_drop_unresolved=lambda _:False,_accept_update=lambda:None,
+            _pending_photo_batches={},_photo_batch_key=lambda *a:'unused',
+            _enqueue_photo_event=lambda *a:self.fail('Ready photo entered debounce'),
+            _queue_media_group_event=lambda *a:self.fail('Standalone photo became an album'))
+        events=[SimpleNamespace(source=source,message_id=str(101+i),text='Подпись '+str(i),
+            raw_message=SimpleNamespace(media_group_id=None),media_urls=[path],media_types=['image/png'],
+            metadata={},internal=False) for i,path in enumerate(paths)]
         try:
-            with patch.dict(sys.modules,ports), patch.dict(os.environ,{'HERMES_GATEWAY_BUSY_ACK_ENABLED':'true'}):
-                for kind in ['photo','video','document']:
-                    event.message_type=kind
-                    self.assertTrue(await scope['_handle_active_session_busy_message'](runner,event,'session'))
-                image=self.input/'fresh.jpg'
-                image.write_bytes(b'synthetic image')
-                fresh=SimpleNamespace(source=event.source,message_id='fresh-photo',text='',
-                    raw_message=SimpleNamespace(media_group_id=None),media_urls=[str(image)],
-                    media_types=['image/jpeg'],metadata={},internal=False,allow_gateway_control=True,message_type='photo')
-                try:
-                    await native.accept_event(fresh,admit=False)
-                    self.assertTrue(await scope['_handle_active_session_busy_message'](runner,fresh,'session'))
-                    original_source=fresh.source
-                    fresh.source=SimpleNamespace(**{**vars(original_source),'platform':'discord'})
-                    self.assertFalse(native.should_queue_inbound_set(fresh))
-                    fresh.source=original_source
-                finally:
-                    native.release_event(fresh)
-                self.assertEqual(queued,[('session',event)]*3+[('session',fresh)])
-                self.assertEqual((steered,interrupted,acknowledged),([],[],[]))
-                # Вход без условия очереди сохраняет обычную политику занятой сессии.
-                with patch.object(native,'should_queue_inbound_set',return_value=False):
-                    await scope['_handle_active_session_busy_message'](runner,event,'session')
-                self.assertEqual(len(interrupted),1)
-                self.assertEqual(len(acknowledged),1)
-                # Обработка подтверждений по-прежнему предшествует очереди файлов.
-                async def handled_approval(*args):return True
-                runner._route_plaintext_approval_while_busy=handled_approval
-                before=len(queued)
-                await scope['_handle_active_session_busy_message'](runner,event,'session')
-                self.assertEqual(len(queued),before)
+            with patch.dict(sys.modules,{'brai_files':native,'agent.image_routing':routing}):
+                before=sum(name=='files.publish' for name,_ in self.backend.calls)
+                for i,event in enumerate(events):
+                    await scope['_route_photo_event'](adapter,event.raw_message,event)
+                    self.assertEqual(sum(name=='files.publish' for name,_ in self.backend.calls),before+i+1)
+                    self.assertEqual(len(agent._pending_steer.images),i+1)
+                    self.assertFalse(await native.capture_authorized(adapter,event))
+                    self.assertTrue(event.metadata['_brai_steered'])
         finally:
-            native.release_event(event)
+            native.release_steer_inputs(agent)
+            for event in events:native.release_event(event)
+
+    async def test_real_album_is_assembled_before_one_multimodal_steer(self):
+        """media_group_id удерживает пакет, готовый альбом передаётся в текущий ход один раз."""
+        template=await self.album_event();source=template.source;paths=[]
+        for i,value in enumerate(template.media_urls):
+            path=self.input/('album-'+str(i)+'.png');path.write_bytes(Path(value).read_bytes());paths.append(str(path))
+        native.release_event(template)
+        runner,agent,turn,ctx=self.steering_runner(source)
+        runner._session_key_for_source=lambda _:'session'
+        routing_spec=importlib.util.spec_from_file_location('real_image_routing',ENGINE/'agent/image_routing.py')
+        routing=importlib.util.module_from_spec(routing_spec);routing_spec.loader.exec_module(routing)
+        scope={};function('plugins/platforms/telegram/adapter.py',['_route_photo_event'],scope)
+        collected=[]
+        async def collect(group,event):collected.append(event)
+        adapter=SimpleNamespace(gateway_runner=runner,_drop_unresolved=lambda _:False,
+            _accept_update=lambda:None,_queue_media_group_event=collect)
+        events=[SimpleNamespace(source=source,message_id=str(201+i),text='Подпись '+str(i),
+            raw_message=SimpleNamespace(media_group_id='actual-album'),media_urls=[path],media_types=['image/png'],
+            metadata={},internal=False) for i,path in enumerate(paths)]
+        try:
+            with patch.dict(sys.modules,{'brai_files':native,'agent.image_routing':routing}):
+                for event in events:await scope['_route_photo_event'](adapter,event.raw_message,event)
+                self.assertEqual(collected,events);self.assertIsNone(agent._pending_steer)
+                self.assertEqual(len(turn._brai_preparing_inputs),1)
+                self.assertFalse(next(iter(turn._brai_preparing_inputs.values())).is_set())
+                # Настоящий native merge сохраняет состав и подписи целого пакета.
+                merge={};function('plugins/platforms/telegram/adapter.py',['_merge_into_pending'],merge)
+                adapter._merge_caption=lambda a,b:a+'\n'+b
+                pending={}
+                for event in collected:merge['_merge_into_pending'](adapter,pending,'album',event)
+                album=pending['album']
+                self.assertTrue(await native.steer_active_input(runner,album,'session'))
+                self.assertEqual(len(agent._pending_steer.images),2)
+                self.assertIn('Подпись 0',agent._pending_steer);self.assertIn('Подпись 1',agent._pending_steer)
+                self.assertTrue(next(iter(turn._brai_preparing_inputs.values())).is_set())
+        finally:
+            native.release_steer_inputs(agent)
+            for event in events:native.release_event(event)
+
+    async def test_failed_artifact_publication_never_reaches_steer(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source)
+        runner._session_key_for_source=lambda _:'session'
+        event=SimpleNamespace(source=source,message_id='file',text='Документ',
+            raw_message=SimpleNamespace(media_group_id=None),media_urls=[str(self.input_file())],
+            media_types=['text/plain'],metadata={},internal=False)
+        self.backend.fail_publish=True
+        with self.assertRaises(FileError):
+            await native.capture(SimpleNamespace(gateway_runner=runner),event)
+        self.assertIsNone(agent._pending_steer)
+        self.assertFalse(getattr(turn,'_brai_steer_events',[]))
+
+    async def test_actual_text_handler_steers_without_text_debounce(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source)
+        runner._session_key_for_source=lambda _:'session'
+        event=SimpleNamespace(source=source,message_id='new-text',text='Уточнение',
+            media_urls=[],media_types=[],metadata={},internal=False,get_command=lambda:None)
+        async def noop(*a):return None
+        async def build(*a):return event
+        adapter=SimpleNamespace(gateway_runner=runner,_effective_update_message=lambda _:SimpleNamespace(text='Уточнение'),
+            _is_user_authorized_from_message=lambda _:True,_gate_or_observe=lambda *a:True,
+            _ensure_forum_commands=noop,_build_triggered_event=build,_accept_update=lambda:None,
+            _enqueue_text_event=lambda _:self.fail('Busy text entered debounce'))
+        scope={'MessageType':SimpleNamespace(TEXT='text')}
+        function('plugins/platforms/telegram/adapter.py',['_handle_text_message'],scope)
+        with patch.dict(sys.modules,{'brai_files':native}):
+            await scope['_handle_text_message'](adapter,object(),None)
+        self.assertIn('Уточнение',agent._pending_steer)
+        native.clear_steer_turn(turn)
+
+    async def test_media_reserves_current_turn_before_download_and_releases_on_cancel(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source)
+        runner._session_key_for_source=lambda _:'session'
+        msg=SimpleNamespace(caption=None,sticker=None,photo=None,voice=None,audio=None,video=None,
+            document=object(),media_group_id=None)
+        event=SimpleNamespace(source=source,message_id='downloading',raw_message=msg,metadata={})
+        entered=asyncio.Event()
+        async def download(*a):
+            entered.set()
+            await asyncio.Event().wait()
+        adapter=SimpleNamespace(gateway_runner=runner,_is_user_authorized_from_message=lambda _:True,
+            _should_process_message=lambda _:True,_media_message_type=lambda _:'document',
+            _build_message_event=lambda *a,**kw:event,_apply_telegram_group_observe_attribution=lambda value:value,
+            _cache_inbound_document=download)
+        scope={};function('plugins/platforms/telegram/adapter.py',['_handle_media_message'],scope)
+        with patch.dict(sys.modules,{'brai_files':native}):
+            task=asyncio.create_task(scope['_handle_media_message'](adapter,SimpleNamespace(message=msg,update_id=1),None))
+            await asyncio.wait_for(entered.wait(),2)
+            self.assertFalse(next(iter(turn._brai_preparing_inputs.values())).is_set())
+            self.assertFalse(agent._brai_steer_closed)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):await task
+            self.assertTrue(next(iter(turn._brai_preparing_inputs.values())).is_set())
+        native.clear_steer_turn(turn)
+
+    async def test_adapter_guard_accepts_steer_before_gateway_claim(self):
+        """Реальный guard занят, но медленный admission ещё не установил started_ts."""
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source,preparing=True)
+        turn.started_ts=0;turn.agent=None
+        runner._session_key_for_source=lambda _:'session'
+        entered,unblock=asyncio.Event(),asyncio.Event()
+        async def background(event,session_key):
+            entered.set()
+            await unblock.wait()
+        scope={'asyncio':asyncio}
+        function('gateway/platforms/base.py',['_start_session_processing','_track_session_task','_release_session_guard'],scope)
+        adapter=SimpleNamespace(gateway_runner=runner,_active_sessions={},_session_tasks={},
+            _background_tasks=set(),_expected_cancelled_tasks=set(),_process_message_background=background)
+        for name in scope.keys() & {'_start_session_processing','_track_session_task','_release_session_guard'}:
+            setattr(adapter,name,MethodType(scope[name],adapter))
+        native.install_adapter(adapter)
+        initial=SimpleNamespace(source=source,message_id='initial',text='Альбом',internal=False,
+            metadata={},get_command=lambda:None)
+        guidance=SimpleNamespace(source=source,message_id='later',text='Уточнение',internal=False,
+            metadata={},media_urls=[],media_types=[])
+        self.assertTrue(adapter._start_session_processing(initial,'session'))
+        task=adapter._session_tasks['session']
+        try:
+            await asyncio.wait_for(entered.wait(),2)
+            self.assertEqual(turn.started_ts,0)
+            self.assertTrue(await native.steer_active_input(runner,guidance,'session'))
+            self.assertTrue(self.edit_allowed(SimpleNamespace(gateway_runner=runner,
+                _build_message_event=lambda *a:SimpleNamespace(source=source)),SimpleNamespace(message_id='later')))
+            guidance.text='Уточнение после правки'
+            guidance.raw_message=SimpleNamespace(edit_date=object())
+            self.assertTrue(await native.steer_active_input(runner,guidance,'session'))
+            file=SimpleNamespace(source=source,message_id='file',text='Документ',internal=False,
+                metadata={},media_urls=[str(self.input_file())],media_types=['text/plain'],
+                raw_message=SimpleNamespace(media_group_id=None))
+            self.assertTrue(await native.capture(adapter,file))
+            self.assertIsNone(agent._pending_steer)
+            turn.started_ts=1;turn.event=initial
+            with patch.dict(sys.modules,{'brai_files':native}):
+                native.bind_steer_turn(agent,runner,ctx)
+            self.assertIn('Уточнение после правки',agent._pending_steer)
+            self.assertIn('новая редакция заменяет прежнюю',agent._pending_steer)
+            self.assertIn('artifactId=',agent._pending_steer)
+            self.assertFalse(self.edit_allowed(SimpleNamespace(gateway_runner=runner,
+                _build_message_event=lambda *a:SimpleNamespace(source=source)),SimpleNamespace(message_id='old')))
+        finally:
+            unblock.set();await task
+            adapter._release_session_guard('session')
+            native.clear_steer_turn(turn)
+
+    async def test_preclaim_guard_release_does_not_leak_inputs_to_next_turn(self):
+        """Ошибка admission освобождает вход; старый guard не управляет следующим ходом."""
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source,preparing=True)
+        turn.started_ts=0;turn.agent=None
+        runner._session_key_for_source=lambda _:'session'
+        scope={};function('gateway/platforms/base.py',['_release_session_guard'],scope)
+        first,second=asyncio.Event(),asyncio.Event()
+        adapter=SimpleNamespace(gateway_runner=runner,_active_sessions={'session':first})
+        adapter._start_session_processing=lambda *a,**kw:True
+        adapter._release_session_guard=MethodType(scope['_release_session_guard'],adapter)
+        native.install_adapter(adapter)
+        initial=SimpleNamespace(source=source,message_id='initial',internal=False,get_command=lambda:None)
+        adapter._start_session_processing(initial,'session')
+        event=SimpleNamespace(source=source,message_id='later',text='Уточнение',internal=False,
+            metadata={},media_urls=[],media_types=[])
+        self.assertTrue(await native.steer_active_input(runner,event,'session'))
+        ready=native.reserve_steer_input(runner,event)
+        self.assertFalse(ready.is_set())
+        adapter._release_session_guard('session',guard=second)
+        self.assertIsNotNone(native.active_steer_turn(runner,'session'))
+        adapter._release_session_guard('session',guard=first)
+        self.assertIsNone(native.active_steer_turn(runner,'session'))
+        self.assertTrue(ready.is_set())
+        self.assertTrue(await native.steer_active_input(runner,event,'session'))
+        self.assertEqual(turn._brai_pending_steers,[])
+        adapter._active_sessions['session']=second
+        self.assertIsNone(native.active_steer_turn(runner,'session'))
+        adapter._start_session_processing(initial,'session')
+        with patch.dict(sys.modules,{'brai_files':native}):native.bind_steer_turn(agent,runner,ctx)
+        self.assertIsNone(agent._pending_steer)
+        native.clear_steer_turn(turn)
+
+    def test_edit_lookup_uses_actual_telegram_route_in_forums_and_profiles(self):
+        """Настоящие auth и input builders дают разные ключи форума; edit должен найти input."""
+        platform=SimpleNamespace(TELEGRAM=SimpleNamespace(value='telegram'),WHATSAPP=object(),SLACK=object())
+        scope={'Platform':platform,'MessageEvent':SimpleNamespace,'expand_link_entities':lambda m:m.text,
+            '_session_key_namespace':lambda profile:'agent:'+(profile or 'main'),
+            '_canonical_participant':lambda source:source.user_id}
+        function('plugins/platforms/telegram/adapter.py',
+            ['_source_from_message_for_auth','_build_message_event','_normalize_chat_type'],scope)
+        function('gateway/session.py',['build_session_key'],scope)
+        def source(**values):
+            defaults={'profile':None,'prospective_thread_id':None,'scope_id':None,'user_id_alt':None}
+            return SimpleNamespace(**{**defaults,**values})
+        ports={'gateway.session':module(SessionSource=source),
+            'gateway.platforms.base':module(resolve_channel_prompt=lambda *a:None),
+            'plugins.platforms.telegram.telegram_context':module(group_identity_prompt=lambda *a:None)}
+        cases=[('supergroup',True,1312,True,None),('supergroup',True,None,False,None),
+            ('supergroup',True,1312,True,'secondary'),('private',False,None,False,None),
+            ('private',False,7,True,None),('group',False,None,False,None)]
+        for chat_type,is_forum,thread,is_topic,profile in cases:
+            with self.subTest(chat_type=chat_type,thread=thread,profile=profile),patch.dict(sys.modules,ports):
+                message=SimpleNamespace(chat=SimpleNamespace(id=-10042,type=chat_type,is_forum=is_forum,title='Test'),
+                    from_user=SimpleNamespace(id=2,is_bot=False,username='test',full_name='Test'),
+                    message_thread_id=thread,is_topic_message=is_topic,message_id=1455,text='Цвет: зелёный',date=None)
+                adapter=SimpleNamespace(config=SimpleNamespace(extra={}),_chat_type_str=lambda chat:chat.type,
+                    _effective_message_thread_id=lambda m:str(m.message_thread_id or 1) if m.chat.is_forum
+                        else str(m.message_thread_id) if m.is_topic_message and m.message_thread_id is not None else None,
+                    _resolve_topic_binding=lambda *a:(None,None),_reply_context=lambda m:(None,None),
+                    build_source=lambda **kw:source(platform=platform.TELEGRAM,profile=profile,**kw))
+                adapter._normalize_chat_type=scope['_normalize_chat_type']
+                for name in ['_source_from_message_for_auth','_build_message_event']:
+                    setattr(adapter,name,MethodType(scope[name],adapter))
+                initial=adapter._build_message_event(message,'text')
+                key=lambda value:scope['build_session_key'](value,profile=value.profile)
+                route=key(initial.source)
+                runner,agent,turn,ctx=self.steering_runner(initial.source)
+                state=SimpleNamespace(turn=turn)
+                runner._peek_session_state=lambda candidate:state if candidate==route else None
+                runner._session_key_for_source=key
+                turn._brai_input_ids.add(native._steer_identity(initial.source,message.message_id))
+                adapter.gateway_runner=runner
+                self.assertTrue(self.edit_allowed(adapter,message))
+                message.message_id=999
+                self.assertFalse(self.edit_allowed(adapter,message))
+                message.message_id=1455;message.from_user.id=3
+                self.assertFalse(self.edit_allowed(adapter,message))
+                message.from_user.id=2;agent._brai_steer_closed=True
+                self.assertFalse(self.edit_allowed(adapter,message))
+                native.clear_steer_turn(turn)
+
+    async def test_input_during_agent_preparation_is_steered_before_final(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source,preparing=True)
+        event=SimpleNamespace(source=source,message_id='later',text='Новое условие',
+            media_urls=[],media_types=[],metadata={},internal=False)
+        self.assertTrue(await native.steer_active_input(runner,event,'session'))
+        self.assertIsNone(agent._pending_steer)
+        with patch.dict(sys.modules,{'brai_files':native}):native.bind_steer_turn(agent,runner,ctx)
+        self.assertIn('Новое условие',agent._pending_steer)
+        scope={};function('agent/turn_iteration_prep.py',['_inject_steer_after_newest_tool_result'],scope)
+        messages=[{'role':'user','content':'Исходное поручение'}]
+        ports={'agent.prompt_builder':module(steer_user_row=lambda text:{'role':'user','content':text}),
+            'agent.message_metadata':module(append_message=lambda rows,row:rows.append(row))}
+        with patch.dict(sys.modules,ports):
+            scope['_inject_steer_after_newest_tool_result'](agent,messages,agent._pending_steer)
+        self.assertIn('Новое условие',messages[-1]['content'])
+        native.clear_steer_turn(turn)
+
+    def test_late_steer_defers_actual_final_response_without_persisting_a_draft(self):
+        """Реальный finish_text_response возвращает continue, затем ровно один финал."""
+        from dataclasses import make_dataclass
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source)
+        fields=['action','active_system_prompt','final_response','_turn_exit_reason','_preflight_compression_blocked',
+            'codex_ack_continuations','truncated_response_parts','length_continue_retries',
+            '_pending_verification_response','_pending_verification_response_previewed','api_call_count','result']
+        scope={'logger':__import__('logging').getLogger('steer-test'), 'FinalResponseVerdict':make_dataclass('Verdict',[(n,object) for n in fields]),
+            'answer_in_reasoning_capability':lambda _:False,'STOP_PATH_MIN_CHARS':10000,
+            'is_runaway_repetition':lambda _:False,'_EPHEMERAL_SCAFFOLDING_FLAGS':(),
+            'append_message':lambda messages,row:messages.append(row),
+            'apply_stop_gates':lambda *a,**kw:SimpleNamespace(continue_turn=False,
+                pending_verification_response=None,pending_verification_response_previewed=False)}
+        function('agent/turn_final_response.py',['finish_text_response'],scope)
+        prompt={'format_steer_marker':lambda text:'STEER:'+text,'STEER_DISPLAY_KIND':'steer'}
+        function('agent/prompt_builder.py',['steer_user_row'],prompt)
+        helpers=module(intent_ack_continuation_mode=lambda _:'off',looks_like_degenerate_final=lambda *a,**kw:False,
+            promoted_reasoning_announces_action=lambda _:False,tool_results_this_turn=lambda _:0,
+            trailing_continue_intent=lambda _:False)
+        ports={'brai_files':native,'agent.prompt_builder':module(steer_user_row=prompt['steer_user_row']),
+            'agent.message_metadata':module(append_message=scope['append_message']),
+            'agent.conversation_loop':module(_CODEX_ACK_CONTINUATION_NUDGE='',_DEGENERATE_FINAL_NUDGE='',
+                _DROPPED_TOOLCALL_NUDGE_CONTENT='',_join_truncated_parts=lambda _:''),
+            'agent.agent_runtime_helpers':helpers,
+            'agent.turn_finalizer':module(apply_llm_output_transform=lambda a,text,**kw:(text,False,None))}
+        agent._has_content_after_think_block=lambda _:True
+        agent._emit_pending_fallback_notice=agent._clear_status_buffer=lambda:None
+        agent._strip_think_blocks=lambda text:text
+        agent._build_assistant_message=lambda message,reason:{'role':'assistant','content':message.content}
+        agent._flush_messages_to_session_db=lambda *a:None
+        agent.quiet_mode=True;agent.valid_tool_names=set()
+        kwargs=dict(assistant_message=SimpleNamespace(content='Общий ответ',tool_calls=[]),response=None,
+            finish_reason='stop',messages=[],api_messages=[],conversation_history=[],api_call_count=1,
+            user_message='Исходное поручение',active_system_prompt='',final_response=None,_turn_exit_reason='',
+            _preflight_compression_blocked=False,codex_ack_continuations=0,truncated_response_parts=[],
+            length_continue_retries=0,_pending_verification_response=None,
+            _pending_verification_response_previewed=False,effective_task_id='task')
+        with patch.dict(sys.modules,ports):
+            self.assertTrue(agent.steer('Позднее уточнение'))
+            first=scope['finish_text_response'](agent,**kwargs)
+            self.assertEqual(first.action,'continue');self.assertIsNone(first.final_response)
+            self.assertEqual([row['role'] for row in kwargs['messages']],['user'])
+            second=scope['finish_text_response'](agent,**kwargs)
+            self.assertEqual(second.action,'break')
+            self.assertEqual([row['role'] for row in kwargs['messages']],['user','assistant'])
+            self.assertFalse(agent.steer('После фиксации финала'))
+        native.clear_steer_turn(turn)
+
+    def test_edits_belong_to_exact_active_turn_and_sender(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source)
+        runner._session_key_for_source=lambda _:'session'
+        turn.event=SimpleNamespace(source=source,message_id='initial')
+        adapter=SimpleNamespace(gateway_runner=runner,_build_message_event=lambda *a:SimpleNamespace(source=source))
+        self.assertTrue(self.edit_allowed(adapter,SimpleNamespace(message_id='initial')))
+        self.assertFalse(self.edit_allowed(adapter,SimpleNamespace(message_id='old')))
+        foreign=SimpleNamespace(**{**vars(source),'user_id':'another'})
+        adapter._build_message_event=lambda *a:SimpleNamespace(source=foreign)
+        self.assertFalse(self.edit_allowed(adapter,SimpleNamespace(message_id='initial')))
+        adapter._build_message_event=lambda *a:SimpleNamespace(source=source)
+        agent._brai_steer_closed=True
+        self.assertFalse(self.edit_allowed(adapter,SimpleNamespace(message_id='initial')))
+        native.clear_steer_turn(turn)
+        self.assertFalse(turn._brai_input_ids)
+
+    async def test_final_waits_for_an_accepted_album_and_stop_releases_waiter(self):
+        source=SimpleNamespace(platform='telegram',chat_id='1',thread_id='topic',user_id='2')
+        runner,agent,turn,ctx=self.steering_runner(source)
+        runner._session_key_for_source=lambda _:'session'
+        event=SimpleNamespace(source=source,message_id='album-item',raw_message=SimpleNamespace(media_group_id='album'))
+        ready=native.reserve_steer_input(runner,event)
+        ports={'agent.prompt_builder':module(steer_user_row=lambda text:{'role':'user','content':text}),
+            'agent.message_metadata':module(append_message=lambda rows,row:rows.append(row)), 'brai_files':native}
+        with patch.dict(sys.modules,ports):
+            messages=[]
+            result=asyncio.create_task(asyncio.to_thread(native.continue_final_steer,agent,messages))
+            await asyncio.sleep(0.03)
+            self.assertFalse(result.done());self.assertFalse(agent._brai_steer_closed)
+            self.assertTrue(agent.steer('Готовый альбом'))
+            ready.set()
+            self.assertTrue(await asyncio.wait_for(result,2))
+            self.assertEqual(messages[-1]['content'],'Готовый альбом')
+            # Новая генерация не принимает отложенный вход прежнего хода.
+            old_generation=turn._brai_steer_generation
+            native.clear_steer_turn(turn)
+            self.assertIsNot(turn._brai_steer_generation,old_generation)
+            self.assertFalse(native.continue_final_steer(agent,[]))
 
     async def test_actual_gateway_rewrite_releases_original_and_replaced_event(self):
         """dataclasses.replace не теряет cleanup при успехе, ошибке и отмене."""
