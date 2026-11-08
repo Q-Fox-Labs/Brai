@@ -36,6 +36,10 @@ export async function adminAction(pool:Pool,secret:string,actor:string,operation
     const count=await client.query("SELECT count(*)::integer AS count FROM brai_identity WHERE role='admin' AND status='active'");
     if(count.rows[0].count<=1){await client.query("COMMIT");return {status:409,body:{code:"LAST_ADMIN"}};}
    }
+   if(nextRole==="admin"&&nextStatus==="active"){
+    const channels=await client.query("SELECT 1 FROM sys_telegram_account WHERE user_id=$1 LIMIT 1",[target]);
+    if(!channels.rowCount){await client.query("COMMIT");return {status:409,body:{code:"CONTACT_REQUIRED"}};}
+   }
    await client.query("UPDATE brai_identity SET role=$2,status=$3 WHERE user_id=$1",[target,nextRole,nextStatus]);
    if(nextStatus!=="active")await client.query("DELETE FROM sys_telegram_link WHERE user_id=$1",[target]);
   }

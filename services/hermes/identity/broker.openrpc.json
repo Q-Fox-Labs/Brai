@@ -218,6 +218,24 @@
             "type": "integer",
             "minimum": 1
           }
+        },
+        {
+          "name": "unlinkConsent",
+          "required": false,
+          "description": "Exact account ID parsed from the trusted new user confirmation, never supplied by worker/model.",
+          "schema": {
+            "type": "string",
+            "pattern": "^([1-9][0-9]{0,19})?$"
+          }
+        },
+        {
+          "name": "messageId",
+          "required": false,
+          "description": "Trusted original Telegram message ID. Confirmation requires a strictly later message than the delivered offer; editing an old message cannot confirm.",
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
         }
       ],
       "result": {
@@ -1008,44 +1026,6 @@
       ]
     },
     {
-      "name": "identity.unlink",
-      "description": "Trusted ingress only. Personal Telegram account linking; never available to the model. No automatic mutation retry.",
-      "paramStructure": "by-name",
-      "params": [
-        {
-          "name": "telegramId",
-          "required": true,
-          "schema": {
-            "type": "string",
-            "pattern": "^[1-9][0-9]{0,19}$"
-          }
-        }
-      ],
-      "result": {
-        "name": "result",
-        "schema": {
-          "$ref": "../../auth/schemas/messages.schema.json#/definitions/TelegramUnlinkResponse"
-        }
-      },
-      "errors": [
-        {
-          "$ref": "#/components/errors/ParseError"
-        },
-        {
-          "$ref": "#/components/errors/InvalidRequest"
-        },
-        {
-          "$ref": "#/components/errors/MethodNotFound"
-        },
-        {
-          "$ref": "#/components/errors/InvalidParams"
-        },
-        {
-          "$ref": "#/components/errors/Unavailable"
-        }
-      ]
-    },
-    {
       "name": "telegram.link",
       "description": "Agent account-link workflow. First send the full warning; require a new trusted confirmation in the same private account before command issuance. Secrets never enter worker. Unknown delivery is not retried.",
       "paramStructure": "by-name",
@@ -1075,6 +1055,77 @@
             },
             "suppressFinal": {
               "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "telegram.unlink",
+      "description": "Agent-only unlink workflow. Fresh delivered warning and new trusted confirmation pin the exact account and origin for five minutes. Equal accounts; admin retains at least one contact channel, other users may remove all. No automatic mutation retry.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "target",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "current",
+              "other"
+            ]
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "status",
+            "phase",
+            "suppressFinal"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "sent",
+                "failed",
+                "unknown"
+              ]
+            },
+            "phase": {
+              "enum": [
+                "offer",
+                "confirm"
+              ]
+            },
+            "suppressFinal": {
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "admin-last-channel",
+                "account-unavailable"
+              ]
             }
           },
           "additionalProperties": false

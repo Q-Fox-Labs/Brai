@@ -57,8 +57,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(resolver.turns, {})
 
     async def test_link_commands_are_private_transport_operations_without_agent_dispatch(self):
-        for text, method, result in [('/start link_' + 'a' * 43, 'identity.link-redeem', {'user': {'id': 'owner'}}),
-                                     ('/unlink', 'identity.unlink', {'unlinked': True})]:
+        for text, method, result in [('/start link_' + 'a' * 43, 'identity.link-redeem', {'user': {'id': 'owner'}})]:
             with self.subTest(command=method):
                 update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text=text),
                             effective_user=NS(id=456, is_bot=False), effective_chat=NS(id=456, type='private'))
@@ -70,6 +69,27 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(broker.await_args.args[1]['telegramId'], '456')
                 adapter.send.assert_awaited_once()
 
+    async def test_raw_unlink_only_explains_agent_workflow_without_revoking(self):
+        update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text='/unlink'),
+                    effective_user=NS(id=123, is_bot=False), effective_chat=NS(id=123, type='private'))
+        adapter = NS(send=AsyncMock())
+        with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
+            self.assertFalse(await runtime.admit_update(update, adapter))
+        broker.assert_not_awaited()
+        self.assertIn('подтверждение', adapter.send.await_args.args[1])
+
+    async def test_unlink_consent_contains_only_exact_human_confirmed_account_id(self):
+        for text, expected in [('Подтверждаю отвязку Telegram-аккаунта 123', '123'),
+                               ('Подтверждаю отвязку Telegram-аккаунта 456!', '456'),
+                               ('Да', ''), ('Отвяжи аккаунт 123', ''),
+                               ('В архиве: Подтверждаю отвязку Telegram-аккаунта 123', '')]:
+            incoming = event()
+            incoming.text = text
+            broker = AsyncMock(side_effect=[{}, {'paths': ['/user/a']}])
+            with patch.object(runtime, 'broker_call', broker):
+                await runtime.Resolver(NS()).prepare(profile(), incoming)
+            self.assertEqual(broker.await_args_list[0].args[1]['unlinkConsent'], expected)
+
     async def test_malformed_link_secrets_never_reach_broker_or_agent(self):
         for secret in ['short', 'a' * 44, 'a' * 43 + '\nextra']:
             update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text='/start link_' + secret),
@@ -80,9 +100,9 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
             broker.assert_not_awaited()
             self.assertNotIn(secret, adapter.send.await_args.args[1])
 
-    async def test_linked_accounts_share_worker_but_keep_separate_bridges(self):
+    async def test_linked_accounts_share_one_bridge_and_worker(self):
         resolver = runtime.Resolver(NS())
-        primary = {**profile(), 'primaryTelegramId': '123'}
+        primary = {**profile(), 'authorTelegramId': '123'}
         alias = {**primary, 'telegramId': '456'}
         with patch.object(runtime, 'broker_call', AsyncMock(side_effect=[primary, alias])):
             first = await resolver(NS(user_id='123'))

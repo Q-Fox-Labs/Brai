@@ -250,7 +250,17 @@
       }
     },
     "TelegramUnlinkRequest": {
-      "$ref": "#/definitions/TelegramResolveRequest"
+      "type":"object","additionalProperties":false,"required":["telegramId","targetTelegramId"],
+      "properties":{"telegramId":{"type":"string","pattern":"^[0-9]{1,20}$"},"targetTelegramId":{"type":"string","pattern":"^[0-9]{1,20}$"}}
+    },
+    "IdentityGetRequest": {
+      "type":"object","additionalProperties":false,"required":["userId"],
+      "properties":{"userId":{"type":"string","minLength":1,"maxLength":128}}
+    },
+    "IdentityGetResponse": {
+      "type":"object","additionalProperties":false,"required":["user","telegramIds"],
+      "properties":{"user":{"anyOf":[{"$ref":"#/definitions/IdentityUser"},{"type":"null"}]},
+        "telegramIds":{"type":"array","uniqueItems":true,"items":{"type":"string","pattern":"^[1-9][0-9]{0,19}$"}}}
     },
     "TelegramLinkIssueResponse": {
       "anyOf": [

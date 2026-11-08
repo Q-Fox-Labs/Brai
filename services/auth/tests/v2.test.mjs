@@ -40,6 +40,11 @@ test("published DTO schemas accept valid requests and reject extra fields",()=>{
  validate("TelegramLinkRedeemRequest",{telegramId:"123",code:"a".repeat(43)});
  validate("TelegramLinkIssueResponse",{code:"a".repeat(43),expiresAt:"2030-01-01"});
  validate("TelegramUnlinkResponse",{unlinked:true});
+ validate("TelegramUnlinkRequest",{telegramId:"123",targetTelegramId:"456"});
+ validate("IdentityGetRequest",{userId:"owner"});
+ validate("IdentityGetResponse",{user:null,telegramIds:[]});
+ assert.throws(()=>validate("TelegramUnlinkRequest",{telegramId:"123"}),/Invalid/);
+ assert.throws(()=>validate("IdentityGetRequest",{userId:"owner",telegramId:"456"}),/Invalid/);
  assert.throws(()=>validate("TelegramLinkRedeemRequest",{telegramId:"123",code:"a".repeat(43),userId:"foreign"}),/Invalid/);
  validate("AdminEmptyRequest",{headers:{origin:cfg.origin},body:{}});
  validate("AdminRoleRequest",{headers:{origin:cfg.origin},body:{userId:"u1",role:"admin"}});

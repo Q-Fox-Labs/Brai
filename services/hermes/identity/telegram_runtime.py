@@ -87,13 +87,7 @@ async def admit_update(update, adapter):
         await adapter.send(telegram, text)
         return False
     if re.fullmatch(r'/unlink(?:@[A-Za-z0-9_]+)?', raw):
-        try:
-            result = await broker_call('identity.unlink', {'telegramId': telegram})
-            text = ('Этот аккаунт отключён от профиля. Память и файлы сохранены; входы на сайт отозваны.'
-                    if result.get('unlinked') else 'Основной аккаунт отключить этой командой нельзя; доступ и данные сохранены.')
-        except Exception:
-            text = 'Результат отключения неизвестен. Проверьте доступ обычным сообщением.'
-        await adapter.send(telegram, text)
+        await adapter.send(telegram, 'Попросите агента отвязать этот или другой ваш аккаунт. Он объяснит последствия и запросит подтверждение.')
         return False
     try:
         await broker_call('identity.resolve', {'telegramId': telegram})
@@ -148,15 +142,15 @@ class Resolver:
                 current['workerTurnId'] = turn_id
             async def ended(turn_id):
                 await self.end(profile, turn_id)
-            bridge = Bridge(profile['userId'], profile.get('primaryTelegramId', profile['telegramId']), uid, profile['workerSocket'],
+            bridge = Bridge(profile['userId'], profile.get('authorTelegramId', profile['telegramId']), uid, profile['workerSocket'],
                             deliver, prepare, on_turn_start=started, on_turn_end=ended,
-                            worker_telegram_id=profile.get('primaryTelegramId', profile['telegramId']))
+                            worker_telegram_id=profile.get('authorTelegramId', profile['telegramId']))
             bridge.profile_id = profile.get('profileId')
             self.bridges[uid] = bridge
         bridge = self.bridges[uid]
         if (bridge.owner != profile['userId'] or bridge.profile_id != profile.get('profileId')
                 or bridge.worker_uid != uid or bridge.socket_path != profile['workerSocket']
-                or bridge.worker_telegram_id != str(profile.get('primaryTelegramId', profile['telegramId']))):
+                or bridge.worker_telegram_id != str(profile.get('authorTelegramId', profile['telegramId']))):
             raise PermissionError('Worker identity changed')
         bridge.telegram_ids.add(str(profile['telegramId']))
         return bridge
@@ -182,8 +176,11 @@ class Resolver:
                              for item in inputs]}
         input_id = hashlib.sha256(json.dumps(origin, ensure_ascii=False, sort_keys=True,
                                             separators=(',', ':')).encode()).hexdigest()
-        await broker_call('ingress.admit', {'inputId': input_id, 'expectedUid': uid, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
+        unlink = re.fullmatch(r'подтверждаю отвязку telegram-аккаунта ([1-9][0-9]{0,19})',
+                              (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!'))
+        await broker_call('ingress.admit', {'inputId': input_id, 'messageId': str(event.message_id), 'expectedUid': uid, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
             'privateChat': getattr(event.source, 'chat_type', '') == 'dm', 'turnId': turn['id'],
+            'unlinkConsent': unlink[1] if unlink else '',
             'linkConsent': (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!') in
                 ('подтверждаю привязку моего второго аккаунта',),
             **({'threadId': int(route[1])} if route[1] else {})})

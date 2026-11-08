@@ -71,6 +71,19 @@ class ToolClientTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             tool_client.handle('tools/call', {'name': tool['name'], 'arguments': {'confirmed': True}})
 
+    def test_unlink_tool_never_accepts_model_confirmation_or_foreign_id(self):
+        with patch.object(tool_client, 'broker_call', return_value={'tools': []}):
+            tools = tool_client.handle('tools/list', {})['tools']
+        tool = next(t for t in tools if t['name'] == 'brai_telegram_unlink_account')
+        self.assertEqual(tool['inputSchema']['properties']['target']['enum'], ['current', 'other'])
+        for args in [{'target': '123'}, {'target': 'current', 'confirmed': True}, {}]:
+            with self.assertRaises(ValueError):
+                tool_client.handle('tools/call', {'name': tool['name'], 'arguments': args})
+        with patch.object(tool_client, 'broker_call', return_value={'status': 'sent', 'phase': 'offer', 'suppressFinal': True}) as call:
+            result = tool_client.handle('tools/call', {'name': tool['name'], 'arguments': {'target': 'other'}})
+        call.assert_called_once_with('telegram.unlink', {'target': 'other'})
+        self.assertIn('подтверждении', result['content'][0]['text'])
+
     def test_login_never_exposes_broker_payload(self):
         with patch.object(tool_client, 'broker_call', return_value={'status':'sent', 'suppressFinal':True, 'code':'secret'}):
             result = tool_client.handle('tools/call', {'name':'brai_login', 'arguments':{}})

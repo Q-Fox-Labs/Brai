@@ -90,6 +90,15 @@ channels:
       request:
         payload:
           $ref: "./schemas/messages.schema.json#/definitions/TelegramLinkRedeemRequest"
+  identityGet:
+    address: brai.auth.v2.identity-get
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/IdentityGetRequest"
   telegramUnlink:
     address: brai.auth.v2.telegram-unlink
     bindings:
@@ -237,6 +246,9 @@ channels:
   v2Replies:
     address: null
     messages:
+      identityDetails:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/IdentityGetResponse"
       linkIssued:
         payload:
           $ref: "./schemas/messages.schema.json#/definitions/TelegramLinkIssueResponse"
@@ -259,6 +271,19 @@ channels:
       response:
         $ref: "#/components/messages/Response"
 operations:
+  identityGet:
+    action: receive
+    channel:
+      $ref: "#/channels/identityGet"
+    messages:
+      - $ref: "#/channels/identityGet/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/identityDetails"
   sendCode:
     action: receive
     channel:

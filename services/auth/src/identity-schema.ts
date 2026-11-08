@@ -16,40 +16,41 @@ export async function migrateIdentity(pool:Pool) {
  );
  COMMENT ON TABLE brai_identity IS 'Роли и внешние идентификаторы пользователей Auth';
  COMMENT ON COLUMN brai_identity.user_id IS 'Идентификатор пользователя Better Auth';
- COMMENT ON COLUMN brai_identity.telegram_id IS 'Идентификатор отправителя Telegram';
+ COMMENT ON COLUMN brai_identity.telegram_id IS 'Стабильный внутренний автор памяти; текущие аккаунты хранятся отдельно';
  COMMENT ON COLUMN brai_identity.profile_id IS 'Идентификатор профиля';
  COMMENT ON COLUMN brai_identity.role IS 'Роль доступа';
  COMMENT ON COLUMN brai_identity.status IS 'Состояние учётной записи';
  COMMENT ON COLUMN brai_identity.created_at IS 'Время создания';
- CREATE TABLE IF NOT EXISTS sys_telegram_account (
+ DO $migration$ BEGIN
+ IF to_regclass('sys_telegram_account') IS NULL THEN
+ CREATE TABLE sys_telegram_account (
   telegram_id text PRIMARY KEY CHECK (telegram_id ~ '^[1-9][0-9]{0,19}$'),
   user_id text NOT NULL REFERENCES brai_identity(user_id) ON DELETE CASCADE,
   created_at timestamptz NOT NULL DEFAULT now()
  );
+ INSERT INTO sys_telegram_account(telegram_id,user_id)
+ SELECT telegram_id,user_id FROM brai_identity WHERE telegram_id IS NOT NULL;
+ END IF;
+ END $migration$;
  COMMENT ON TABLE sys_telegram_account IS 'Проверенные Telegram-аккаунты одного пользователя Auth';
  COMMENT ON COLUMN sys_telegram_account.telegram_id IS 'Уникальный Telegram ID аккаунта';
  COMMENT ON COLUMN sys_telegram_account.user_id IS 'Канонический владелец профиля';
  COMMENT ON COLUMN sys_telegram_account.created_at IS 'Время привязки аккаунта';
  CREATE INDEX IF NOT EXISTS sys_telegram_account_user ON sys_telegram_account(user_id);
- INSERT INTO sys_telegram_account(telegram_id,user_id)
- SELECT telegram_id,user_id FROM brai_identity WHERE telegram_id IS NOT NULL ON CONFLICT DO NOTHING;
- DO $migration$ BEGIN
-  IF EXISTS (SELECT 1 FROM brai_identity i JOIN sys_telegram_account a ON a.telegram_id=i.telegram_id WHERE a.user_id<>i.user_id)
-  THEN RAISE EXCEPTION 'Telegram account ownership conflict'; END IF;
- END $migration$;
- CREATE OR REPLACE FUNCTION sys_register_primary_telegram() RETURNS trigger LANGUAGE plpgsql AS $function$
+ CREATE OR REPLACE FUNCTION sys_register_telegram_author() RETURNS trigger LANGUAGE plpgsql AS $function$
  BEGIN
   IF TG_OP='UPDATE' AND OLD.telegram_id IS NOT NULL AND NEW.telegram_id IS DISTINCT FROM OLD.telegram_id
-  THEN RAISE EXCEPTION 'Primary Telegram identity is immutable'; END IF;
+  THEN RAISE EXCEPTION 'Memory author identity is immutable'; END IF;
   IF NEW.telegram_id IS NOT NULL AND (TG_OP='INSERT' OR NEW.telegram_id IS DISTINCT FROM OLD.telegram_id) THEN
    INSERT INTO sys_telegram_account(telegram_id,user_id) VALUES(NEW.telegram_id,NEW.user_id);
   END IF;
   RETURN NEW;
  END $function$;
- REVOKE ALL ON FUNCTION sys_register_primary_telegram() FROM PUBLIC;
+ REVOKE ALL ON FUNCTION sys_register_telegram_author() FROM PUBLIC;
  DROP TRIGGER IF EXISTS sys_register_primary_telegram ON brai_identity;
- CREATE TRIGGER sys_register_primary_telegram AFTER INSERT OR UPDATE OF telegram_id ON brai_identity
- FOR EACH ROW WHEN (NEW.telegram_id IS NOT NULL) EXECUTE FUNCTION sys_register_primary_telegram();
+ DROP TRIGGER IF EXISTS sys_register_telegram_author ON brai_identity;
+ CREATE TRIGGER sys_register_telegram_author AFTER INSERT OR UPDATE OF telegram_id ON brai_identity
+ FOR EACH ROW WHEN (NEW.telegram_id IS NOT NULL) EXECUTE FUNCTION sys_register_telegram_author();
  CREATE TABLE IF NOT EXISTS sys_telegram_link (
   user_id text PRIMARY KEY REFERENCES brai_identity(user_id) ON DELETE CASCADE,
   digest text NOT NULL UNIQUE, expires_at timestamptz NOT NULL,

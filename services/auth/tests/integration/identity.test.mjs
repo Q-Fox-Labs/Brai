@@ -14,7 +14,7 @@ import { createAuth } from "../../dist/auth.js";
 import { migrateIdentity } from "../../dist/identity-schema.js";
 import { issueCode, consumeCode } from "../../dist/login-code.js";
 import { adminAction } from "../../dist/admin.js";
-import { provision, profileReady, redeemInvite, resolveTelegram, issueTelegramLink, redeemTelegramLink, unlinkTelegram } from "../../dist/identity.js";
+import { provision, profileReady, redeemInvite, resolveTelegram, getIdentity, issueTelegramLink, redeemTelegramLink, unlinkTelegram } from "../../dist/identity.js";
 
 const value=process.env.AUTH_TEST_OWNER_URL;
 if(!value)throw new Error("Explicit AUTH_TEST_OWNER_URL required");
@@ -74,14 +74,15 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   assert.equal((await pool.query('SELECT count(*) FROM sys_telegram_account WHERE user_id=$1',[multi.id])).rows[0].count,'2');
   await migrateIdentity(pool);
   assert.deepEqual(await resolveTelegram(pool,alias),multi);
+  assert.deepEqual(await provision(runtime,secret,{requestId:randomUUID(),telegramId:alias,userId:multi.id,profileId:multi.profileId,role:'user',status:'active'}),multi);
   const aliasCode=await issueCode(runtime,secret,alias);
   assert.equal(await consumeCode(pool,secret,aliasCode.code,'alias-client'),multi.id);
   assert.ok(await issueCode(runtime,secret,'10005'));
   assert.ok(await issueCode(runtime,secret,alias));
   assert.equal(await issueCode(runtime,secret,'10005'),null);
-  assert.equal(await unlinkTelegram(runtime,'10005'),false);
+  assert.equal(await unlinkTelegram(runtime,'10005','10002'),false);
   await pool.query('INSERT INTO "session"(id,token,"userId","expiresAt","createdAt","updatedAt") VALUES($1,$2,$3,now()+interval \'1 hour\',now(),now())',[randomUUID(),'alias-session-fixture',multi.id]);
-  assert.equal(await unlinkTelegram(runtime,alias),true);
+  assert.equal(await unlinkTelegram(runtime,alias,alias),true);
   assert.equal(await resolveTelegram(pool,alias),null);
   assert.equal(await redeemTelegramLink(runtime,secret,alias,link.code),null);
   assert.equal((await pool.query('SELECT count(*) FROM "session" WHERE "userId"=$1',[multi.id])).rows[0].count,'0');
@@ -101,6 +102,46 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   assert.equal((await resolveTelegram(pool,'20004')).status,'blocked');
   await adminAction(pool,secret,owner,'status-set',{userId:multi.id,status:'active'});
   assert.equal(await redeemTelegramLink(runtime,secret,'20004',current.code),null);
+  const equal=await provision(runtime,secret,{requestId:randomUUID(),telegramId:'30001',role:'user',status:'active',profileId:'fixture-equal'});
+  const equalLink=await issueTelegramLink(runtime,secret,'30001');
+  assert.ok(await redeemTelegramLink(runtime,secret,'30002',equalLink.code));
+  assert.equal(await issueTelegramLink(runtime,secret,'30002'),null);
+  // Просроченная по состоянию, но ещё непогашенная команда не обходит заполненный лимит.
+  await pool.query("UPDATE sys_telegram_link SET consumed_by=NULL,consumed_at=NULL WHERE user_id=$1",[equal.id]);
+  assert.equal(await redeemTelegramLink(runtime,secret,'30003',equalLink.code),null);
+  assert.equal(await unlinkTelegram(runtime,'30002','30001'),true);
+  assert.equal(await resolveTelegram(runtime,'30001'),null);
+  assert.deepEqual(await resolveTelegram(runtime,'30002'),equal);
+  await migrateIdentity(pool);await migrateIdentity(pool);
+  assert.equal(await resolveTelegram(runtime,'30001'),null);
+  assert.ok(await issueCode(runtime,secret,'30002'));
+  const detachedLink=await issueTelegramLink(runtime,secret,'30002');
+  assert.equal(await unlinkTelegram(runtime,'30002','30002'),true);
+  assert.deepEqual(await getIdentity(runtime,equal.id),{user:equal,telegramIds:[]});
+  assert.equal(await resolveTelegram(runtime,'30002'),null);
+  assert.equal(await redeemTelegramLink(runtime,secret,'30003',detachedLink.code),null);
+  await migrateIdentity(pool);
+  assert.deepEqual((await getIdentity(runtime,equal.id)).telegramIds,[]);
+  const reused=await provision(runtime,secret,{requestId:randomUUID(),telegramId:'30001',role:'user',status:'active',profileId:'fixture-reused-account'});
+  assert.notEqual(reused.id,equal.id);
+  assert.notEqual(reused.telegramId,equal.telegramId);
+  assert.deepEqual(await resolveTelegram(runtime,'30001'),reused);
+  assert.deepEqual((await getIdentity(runtime,reused.id)).telegramIds,['30001']);
+  await migrateIdentity(pool);
+  assert.deepEqual((await getIdentity(runtime,equal.id)).telegramIds,[]);
+  assert.deepEqual(await resolveTelegram(runtime,'30001'),reused);
+  assert.equal((await adminAction(runtime,secret,owner,'role-set',{userId:equal.id,role:'admin'})).body.code,'CONTACT_REQUIRED');
+  assert.equal(await unlinkTelegram(runtime,'10001','10001'),false);
+  const adminLink=await issueTelegramLink(runtime,secret,'10001');
+  assert.ok(await redeemTelegramLink(runtime,secret,'40001',adminLink.code));
+  const removals=await Promise.all([
+   unlinkTelegram(runtime,'40001','10001'),unlinkTelegram(runtime,'10001','40001')
+  ]);
+  assert.equal(removals.filter(Boolean).length,1);
+  const adminAccount=(await getIdentity(runtime,owner)).telegramIds[0];
+  assert.equal((await getIdentity(runtime,owner)).telegramIds.length,1);
+  assert.equal(await unlinkTelegram(runtime,adminAccount,adminAccount),false);
+  assert.ok(await issueCode(runtime,secret,adminAccount));
   const last=await Promise.all([
    adminAction(pool,secret,owner,"role-set",{userId:owner,role:"user"}),
    adminAction(pool,secret,owner,"status-set",{userId:owner,status:"blocked"})

@@ -56,6 +56,9 @@ class FakeControl:
                                  "status": "inactive"}}
             return {"user": {"id": profile["userId"], "profileId": profile["profileId"],
                              "telegramId": profile["telegramId"], "status": "active"}}
+        if method == "telegram.unlink":
+            return {"status": getattr(self, "unlink_status", "sent"),
+                    "targetTelegramId": params.get("targetTelegramId", "333444" if params["target"] == "other" else params["telegramId"])}
         if method == "telegram.link":
             return {"status": getattr(self, "link_status", "sent"), "code": "synthetic-secret-must-not-escape"}
         if method == "login.send":
@@ -96,7 +99,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(primary['uid'], alias['uid'])
         self.assertEqual(primary['profileId'], alias['profileId'])
         self.assertEqual(alias['telegramId'], '333444')
-        self.assertEqual(alias['primaryTelegramId'], '111222')
+        self.assertEqual(alias['authorTelegramId'], '111222')
         await self.broker.call(INGRESS_UID, 'ingress.admit', {
             'telegramId': '333444', 'chatId': '333444', 'privateChat': True, 'turnId': 'alias-turn'})
         result = await self.broker.call(WORKER_UID, 'login.send', {})
@@ -109,7 +112,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_account_link_requires_delivered_warning_then_new_same_account_confirmation(self):
         original = {'telegramId': '111222', 'chatId': '111222', 'privateChat': True,
-                    'turnId': 'offer-turn', 'inputId': 'a' * 64}
+                    'turnId': 'offer-turn', 'inputId': 'a' * 64, 'messageId': '101'}
         await self.broker.call(INGRESS_UID, 'ingress.admit', original)
         first = await self.broker.call(WORKER_UID, 'telegram.link', {})
         self.assertEqual(first, {'status': 'sent', 'phase': 'offer', 'suppressFinal': True})
@@ -117,7 +120,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(method == 'telegram.link' for method, _, _ in self.control.calls), 1)
         await self.broker.call(INGRESS_UID, 'ingress.close', {'uid': WORKER_UID, 'turnId': 'offer-turn'})
         await self.broker.call(INGRESS_UID, 'ingress.admit', {**original,
-            'turnId': 'confirm-turn', 'inputId': 'b' * 64, 'linkConsent': True})
+            'turnId': 'confirm-turn', 'inputId': 'b' * 64, 'messageId': '102', 'linkConsent': True})
         final = await self.broker.call(WORKER_UID, 'telegram.link', {})
         self.assertEqual(final, {'status': 'sent', 'phase': 'command', 'suppressFinal': True})
         self.assertNotIn('code', final)
@@ -132,7 +135,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
                 self.broker.turns.clear()
                 self.broker.link_offers.clear()
                 original = {'telegramId': '111222', 'chatId': '111222', 'privateChat': True,
-                            'turnId': changed, 'inputId': (format(index + 1, 'x') * 64)}
+                            'turnId': changed, 'inputId': (format(index + 1, 'x') * 64), 'messageId': '201'}
                 await self.broker.call(INGRESS_UID, 'ingress.admit', original)
                 await self.broker.call(WORKER_UID, 'telegram.link', {})
                 if changed == 'expired':
@@ -143,13 +146,13 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
                 await self.broker.call(INGRESS_UID, 'ingress.admit', {**original, 'telegramId': account,
                     'chatId': account, 'turnId': changed + '-next',
                     'inputId': original['inputId'] if changed == 'replayed' else 'd' * 64,
-                    'linkConsent': changed != 'no'})
+                    'messageId': '202', 'linkConsent': changed != 'no'})
                 result = await self.broker.call(WORKER_UID, 'telegram.link', {})
                 self.assertEqual(result['phase'], 'offer')
 
     async def test_unknown_warning_is_not_repeated_or_treated_as_consent(self):
         original = {'telegramId': '111222', 'chatId': '111222', 'privateChat': True,
-                    'turnId': 'unknown-offer', 'inputId': 'e' * 64}
+                    'turnId': 'unknown-offer', 'inputId': 'e' * 64, 'messageId': '301'}
         self.control.link_status = 'unknown'
         await self.broker.call(INGRESS_UID, 'ingress.admit', original)
         first = await self.broker.call(WORKER_UID, 'telegram.link', {})
@@ -160,13 +163,72 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         await self.broker.call(INGRESS_UID, 'ingress.close', {'uid': WORKER_UID, 'turnId': 'unknown-offer'})
         self.control.link_status = 'sent'
         await self.broker.call(INGRESS_UID, 'ingress.admit', {**original,
-            'turnId': 'after-unknown', 'inputId': 'f' * 64, 'linkConsent': True})
+            'turnId': 'after-unknown', 'inputId': 'f' * 64, 'messageId': '302', 'linkConsent': True})
         self.assertEqual((await self.broker.call(WORKER_UID, 'telegram.link', {}))['phase'], 'offer')
 
     async def test_account_link_rejects_forged_tool_confirmation_arguments(self):
         with self.assertRaises(PermissionError):
             await self.broker.call(WORKER_UID, 'telegram.link', {'confirmed': True})
         self.assertFalse(any(method == 'telegram.link' for method, _, _ in self.control.calls))
+
+    async def test_unlink_pins_target_and_requires_new_trusted_consent(self):
+        original = {'telegramId': '111222', 'chatId': '111222', 'privateChat': True,
+                    'turnId': 'unlink-offer', 'inputId': '1' * 64, 'messageId': '401'}
+        await self.broker.call(INGRESS_UID, 'ingress.admit', original)
+        offer = await self.broker.call(WORKER_UID, 'telegram.unlink', {'target': 'other'})
+        self.assertEqual(offer['phase'], 'offer')
+        await self.broker.call(WORKER_UID, 'telegram.unlink', {'target': 'other'})
+        self.assertEqual(sum(m == 'telegram.unlink' for m, _, _ in self.control.calls), 1)
+        await self.broker.call(INGRESS_UID, 'ingress.close', {'uid': WORKER_UID, 'turnId': original['turnId']})
+        await self.broker.call(INGRESS_UID, 'ingress.admit', {**original,
+            'turnId': 'unlink-confirm', 'inputId': '2' * 64, 'messageId': '402', 'unlinkConsent': '333444'})
+        result = await self.broker.call(WORKER_UID, 'telegram.unlink', {'target': 'other'})
+        self.assertEqual(result, {'status': 'sent', 'phase': 'confirm', 'suppressFinal': True})
+        params = [p for m, p, _ in self.control.calls if m == 'telegram.unlink'][-1]
+        self.assertEqual(params['targetTelegramId'], '333444')
+        self.assertFalse(self.broker.unlink_offers)
+        await self.broker.call(WORKER_UID, 'telegram.unlink', {'target': 'other'})
+        self.assertEqual(sum(m == 'telegram.unlink' for m, _, _ in self.control.calls), 2)
+
+    async def test_unlink_rejects_wrong_id_account_topic_expiry_replay_and_unknown(self):
+        self.control.aliases['333444'] = '111222'
+        for index, changed in enumerate(['id', 'account', 'topic', 'expired', 'no', 'replayed', 'unknown', 'link-consent', 'edited']):
+            with self.subTest(changed=changed):
+                self.broker.turns.clear()
+                self.broker.unlink_offers.clear()
+                self.control.unlink_status = 'unknown' if changed == 'unknown' else 'sent'
+                original = {'telegramId': '111222', 'chatId': '111222', 'privateChat': True,
+                            'turnId': changed, 'inputId': format(index + 3, 'x') * 64, 'messageId': '501'}
+                await self.broker.call(INGRESS_UID, 'ingress.admit', original)
+                await self.broker.call(WORKER_UID, 'telegram.unlink', {'target': 'current'})
+                if changed == 'expired':
+                    self.broker.unlink_offers[WORKER_UID]['expires'] = 0
+                if changed == 'unknown':
+                    self.assertFalse(self.broker.unlink_offers)
+                    await self.broker.call(WORKER_UID, 'telegram.unlink', {'target': 'current'})
+                await self.broker.call(INGRESS_UID, 'ingress.close', {'uid': WORKER_UID, 'turnId': changed})
+                account = '333444' if changed == 'account' else '111222'
+                self.control.unlink_status = 'sent'
+                await self.broker.call(INGRESS_UID, 'ingress.admit', {**original,
+                    'telegramId': account, 'chatId': account, 'turnId': changed + '-next',
+                    'inputId': original['inputId'] if changed == 'replayed' else 'd' * 64,
+                    'threadId': 7 if changed == 'topic' else None,
+                    'messageId': '501' if changed == 'edited' else '502',
+                    'linkConsent': changed == 'link-consent',
+                    'unlinkConsent': '999999' if changed == 'id' else '' if changed in ('no', 'link-consent') else '111222'})
+                result = await self.broker.call(WORKER_UID, 'telegram.unlink', {'target': 'current'})
+                self.assertEqual(result['phase'], 'offer')
+
+    async def test_unlink_cannot_be_called_by_ingress_or_with_model_confirmation(self):
+        for actor, method, params in [
+            (INGRESS_UID, 'identity.unlink', {'telegramId': '111222'}),
+            (INGRESS_UID, 'telegram.unlink', {'target': 'current'}),
+            (WORKER_UID, 'telegram.unlink', {'target': 'current', 'confirmed': True}),
+            (WORKER_UID, 'telegram.unlink', {'target': '999999'}),
+        ]:
+            with self.assertRaises(PermissionError):
+                await self.broker.call(actor, method, params)
+        self.assertFalse(any(m == 'telegram.unlink' for m, _, _ in self.control.calls))
 
     async def test_worker_cannot_manage_telegram_account_bindings(self):
         for method in ['identity.link-issue', 'identity.link-redeem', 'identity.unlink']:
@@ -540,7 +602,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
                 try:
                     await restarted.call(INGRESS_UID, 'ingress.admit', {
                         'telegramId': '111222', 'chatId': '111222', 'privateChat': True,
-                        'turnId': 'after-restart', 'inputId': 'a' * 64})
+                        'turnId': 'after-restart', 'inputId': 'a' * 64, 'messageId': '101'})
                     self.assertEqual(restarted.turns[WORKER_UID]['requestId'], first_id)
                     self.assertEqual(await restarted.call(WORKER_UID, 'login.send', {}),
                                      {'status': 'sent', 'suppressFinal': True})
@@ -574,7 +636,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
             try:
                 await restarted.call(INGRESS_UID, 'ingress.admit', {
                     'telegramId': '111222', 'chatId': '111222', 'privateChat': True,
-                    'turnId': 'restart-turn', 'inputId': 'a' * 64})
+                    'turnId': 'restart-turn', 'inputId': 'a' * 64, 'messageId': '101'})
                 self.assertEqual(await restarted.call(WORKER_UID, 'login.send', {}),
                                  {'status': 'unknown', 'suppressFinal': False})
                 self.assertFalse(any(method == 'login.send' for method, params, timeout in self.control.calls))
@@ -599,7 +661,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
     def test_trusted_input_identity_schema_and_private_state_path(self):
         params = {'telegramId': '111222', 'chatId': '111222', 'privateChat': True, 'turnId': 't'}
         broker_module.validate_params('ingress.admit', params)
-        broker_module.validate_params('ingress.admit', {**params, 'inputId': 'a' * 64})
+        broker_module.validate_params('ingress.admit', {**params, 'inputId': 'a' * 64, 'messageId': '101'})
         for invalid in ('', 'a' * 63, 'z' * 64, 1, None):
             with self.subTest(inputId=invalid), self.assertRaises(ValueError):
                 broker_module.validate_params('ingress.admit', {**params, 'inputId': invalid})
