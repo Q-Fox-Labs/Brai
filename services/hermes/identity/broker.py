@@ -182,7 +182,7 @@ class ControlPort:
         request_id = self.counter
         future = asyncio.get_running_loop().create_future()
         self.pending[request_id] = future
-        payload = json.dumps({'jsonrpc': '2.0', 'id': request_id, 'method': method, 'params': params}).encode() + b'\n'
+        payload = json.dumps({'jsonrpc': '2.0', 'id': request_id, 'method': method, 'params': params}, ensure_ascii=False).encode() + b'\n'
         try:
             async with self.write_lock:
                 self.process.stdin.write(payload)

@@ -1,6 +1,7 @@
 # ABOUTME: Проверяет UID-bound JSON-RPC broker и привилегированные файловые границы.
 # ABOUTME: Использует временные fixtures без модели, сети и live-профилей.
 import asyncio
+import json
 from contextlib import suppress
 from pathlib import Path
 import os
@@ -549,6 +550,23 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
         self.profile['status'] = 'blocked'
         with self.assertRaises(PermissionError):
             await self.broker.call(WORKER_UID, 'files.configuration', {})
+
+    async def test_large_unicode_crosses_real_private_control_without_ascii_expansion(self):
+        node = shutil.which('node')
+        self.assertIsNotNone(node)
+        source = (Path(__file__).resolve().parents[1] / 'control.mjs').as_uri()
+        program = ("import {servePrivateRpc} from " + json.dumps(source) + ";"
+            "const control={invokeTool:async(uid,name,args)=>({bytes:Buffer.byteLength(args.text)})};"
+            "await servePrivateRpc({control},process.stdin,process.stdout);")
+        port = broker_module.ControlPort([node, '--input-type=module', '-e', program], '/unused')
+        await port.start()
+        try:
+            for text in ('a' * 400000, 'я' * 400000, '🧠' * 200000):
+                result = await port.call('tools.call', {'uid': WORKER_UID,
+                    'name': 'dialogues_exchange', 'args': {'text': text}})
+                self.assertEqual(result, {'bytes': len(text.encode())})
+        finally:
+            await port.close()
 
     async def test_control_reserves_authorization_capacity_when_tool_calls_are_full(self):
         control = broker_module.ControlPort([], '/unused')
