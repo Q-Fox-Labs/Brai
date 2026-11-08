@@ -83,6 +83,16 @@ class Worker:
             from tools.registry import registry
             if registry.get_entry('mcp__brai__brai_login') is None:
                 raise RpcError(-32603, 'Worker login tool unavailable')
+            if os.environ.get('BRAI_DIALOGUES_REQUIRED') == '1':
+                # Проверяется установленный файл профиля, который читает native GatewayRunner.
+                from hermes_cli.config import load_config_readonly
+                prompt = load_config_readonly().get('agent', {}).get('system_prompt', '')
+                if not all(value in prompt for value in ('mcp__brai__dialogues_exchange',
+                        'mcp__brai__dialogues_context_ack', 'context_request_id', 'finish')):
+                    raise RpcError(-32603, 'Worker Dialogues instruction unavailable')
+                for name in ('mcp__brai__dialogues_exchange', 'mcp__brai__dialogues_context_ack'):
+                    if registry.get_entry(name) is None:
+                        raise RpcError(-32603, 'Worker Dialogues tool unavailable')
             self.tools_ready = True
 
     async def health(self, require_tools=False):

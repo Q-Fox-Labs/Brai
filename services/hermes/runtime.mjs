@@ -60,7 +60,7 @@ export async function connectMcpEndpoint(endpoint, { timeout = 12_000, callTimeo
   let current, opening, closed = false;
   const clients = new Set(), disconnectedClients = new WeakSet();
   const transport = createTransport ?? (() => new StreamableHTTPClientTransport(new URL(endpoint.url), {
-    requestInit: { headers: endpoint.token ? { Authorization: `Bearer ${endpoint.token}` } : {} },
+    requestInit: { headers: {...(endpoint.token ? { Authorization: `Bearer ${endpoint.token}` } : {}),...(endpointName==='dialogues'?{'x-brai-user-id':endpoint.userId,'x-brai-profile-id':endpoint.profileId}:{})} },
   }));
   async function client(deadline) {
     if (closed) throw fault('CANCELLED');
@@ -102,7 +102,7 @@ export async function connectMcpEndpoint(endpoint, { timeout = 12_000, callTimeo
         // Ответы владельца isError распаковываются снаружи и не повторяются.
         const recoverable = error.code === 400 || error.code === 404 || error.code >= 500 && error.code <= 599
           || error.code === undefined && error.name !== 'AbortError' || disconnected;
-        const retry = repeatable && !attempt && recoverable && !signal?.aborted && !closed && Date.now() < deadline;
+        const retry = (repeatable || endpointName === 'dialogues' && error.code === 404) && !attempt && recoverable && !signal?.aborted && !closed && Date.now() < deadline;
         const httpStatus = Number.isInteger(error.code) && error.code >= 400 && error.code <= 599 ? error.code : undefined;
         if (httpStatus || recoverable) console.error(JSON.stringify({ event: 'hermes_mcp_transport_failure', endpoint: endpointName,
           phase: selected ? 'request' : 'connect', ...(httpStatus ? { httpStatus } : {}), retry: Boolean(retry) }));
@@ -136,7 +136,8 @@ export async function connectPorts(config) {
   }
   try {
     const endpoints = {};
-    for (const name of ['gameCore', 'history', 'transcription']) {
+    for (const name of ['gameCore', 'history', 'transcription', 'dialogues']) {
+      if(name==='dialogues'&&config.dialogues?.enabled!==true)continue;
       if (config[name]?.enabled === false) continue;
       const endpoint = config[name];
       const endpointClient = await connectMcpEndpoint(endpoint, { timeout, callTimeout: config.longRequestTimeoutMs ?? 300_000, endpointName: name });
@@ -153,7 +154,9 @@ export async function connectPorts(config) {
     return {
       async list(name) { return (await endpoints[name].list()).tools; },
       async mcp(name, tool, args, signal) {
-        return unwrap(await endpoints[name].call(tool, args, signal), { planning: name === 'gameCore' && tool.startsWith('game_core_planning_') });
+        const response=await endpoints[name].call(tool,args,signal);
+        if(name==='dialogues')return response;
+        return unwrap(response, { planning: name === 'gameCore' && tool.startsWith('game_core_planning_') });
       },
       async request(subject, payload, signal, requestTimeout = timeout) {
         signal?.throwIfAborted();
@@ -200,6 +203,7 @@ export async function createBraiTools(config, ports) {
     properties: { text: voiceDefinition.inputSchema.properties.text }, required: ['text'] };
   const validateVoiceInput = compileInput(voiceInputSchema);
   const endpointTools = new Map([['gameCore', gameCoreNames], ['history', historyNames], ['transcription', transcriptionNames], ['publisher', new Set(['publish_file', 'fetch_file'])]]);
+  if(config.dialogues?.enabled===true)endpointTools.set('dialogues',new Set(['dialogues_exchange','dialogues_context_ack']));
   const gameCoreEnabled = config.gameCore?.enabled !== false;
   if (!gameCoreEnabled) endpointTools.delete('gameCore');
   if (config.history?.enabled === false) endpointTools.delete('history');
@@ -270,7 +274,7 @@ export async function createBraiTools(config, ports) {
       // AIDEV-NOTE: Старый каталог загруженной сессии не может обойти выключение владельцем.
       if (!gameCoreEnabled && name.startsWith('game_core_')) throw fault('GAME_CORE_DISABLED');
       if (name === 'local_ai_invoke_synthesize' && typeof args.text === 'string' && /[^А-Яа-яЁё\s.,!?;:—–\-…«»"'()]/u.test(args.text)) throw fault('VOICE_TEXT_REQUIRES_CYRILLIC');
-      if (Buffer.byteLength(JSON.stringify(args)) > MAX_REQUEST_BYTES) throw fault('REQUEST_TOO_LARGE');
+      if (Buffer.byteLength(JSON.stringify(args)) > (name==='dialogues_exchange'||name==='dialogues_context_ack'?2*1024*1024-4096:MAX_REQUEST_BYTES)) throw fault('REQUEST_TOO_LARGE');
       if (active >= 8) throw fault('OVERLOADED');
       active++;
       let mutation = false;
@@ -317,6 +321,14 @@ export async function createBraiTools(config, ports) {
             if (move.kind !== 'operation' || move.executor === 'human') throw fault('FORBIDDEN');
           }
           mutation = name === 'publish_file' || /(?:_create|_revise|_reclassify|_expand_repeat|_link|_activate|_claim|_complete|_fail|_submit|_cancel|_set|_bind|_build|_apply|_skip)$/.test(name);
+          if(upstream.endpoint==='dialogues'){
+            try{return await ports.mcp(upstream.endpoint,name,args,signal);}
+            catch(error){
+              const forbidden=error.code===401||error.code===403;
+              const diagnostic=forbidden?{code:'FORBIDDEN',applied:false}:{code:'OUTCOME_UNKNOWN'};
+              return {isError:true,content:[{type:'text',text:JSON.stringify({...diagnostic,request_id:args.arguments?.request_id??args.request_id,next_action:forbidden?'Проверьте доступ':'Сначала проверьте состояние и прежний request_id; не повторяйте запись вслепую'})}]};
+            }
+          }
           return await ports.mcp(upstream.endpoint, name, args, signal);
         }
         const definition = natsTools.find(tool => tool.name === name);

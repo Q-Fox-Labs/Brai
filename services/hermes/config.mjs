@@ -30,6 +30,11 @@ export function validateConfig(value, trustedOwnerId) {
     endpoint(value.gameCore);
     if (value.gameCore.ownerId !== value.ownerId) invalid();
   }
+  if(value.dialogues?.enabled!==false&&value.dialogues!==undefined){
+    endpoint(value.dialogues);
+    if(value.dialogues.enabled!==true||value.dialogues.userId!==value.ownerId||typeof value.dialogues.profileId!=='string'||!value.dialogues.profileId)invalid();
+    if(new URL(value.dialogues.url).pathname!=='/mcp')invalid();
+  }
   if (!object(value.publisher) || typeof value.publisher.configPath !== 'string' || !isAbsolute(value.publisher.configPath) ||
     value.publisher.entrypoint !== undefined && (typeof value.publisher.entrypoint !== 'string' || !isAbsolute(value.publisher.entrypoint))) invalid();
   for (const [name, maximum] of [['requestTimeoutMs', 60_000], ['longRequestTimeoutMs', 1_800_000]]) {

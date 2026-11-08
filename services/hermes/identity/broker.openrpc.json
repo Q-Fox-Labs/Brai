@@ -1148,6 +1148,71 @@
           "$ref": "#/components/errors/Unavailable"
         }
       ]
+    },
+    {
+      "name": "dialogues.authorize",
+      "paramStructure": "by-name",
+      "description": "Служебный UID из SO_PEERCRED; актуальный Auth, без аргументов владельца.",
+      "params": [],
+      "result": {
+        "name": "principal",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "userId",
+            "profileId"
+          ],
+          "properties": {
+            "userId": {
+              "type": "string"
+            },
+            "profileId": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "dialogues.summarize-stream",
+      "paramStructure": "by-name",
+      "description": "Только служебный UID. Двунаправленный NDJSON: сервер ready или busy; клиент кадры {id,text}, затем {id,end:true}; сервер chunk с byte offset и completed с totalBytes/SHA-256. До 65536 байт на кадр, один поток суммаризации, deadline 170 секунд, backpressure. Полный input/result остаётся только в персональном процессе и модельном контейнере с memory=256MiB. Общий root broker держит ограниченные буферы; весь поток в памяти не собирает.",
+      "params": [],
+      "result": {
+        "name": "frame",
+        "schema": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "ready",
+                "busy",
+                "chunk",
+                "completed"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "totalBytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          }
+        }
+      }
     }
   ],
   "components": {

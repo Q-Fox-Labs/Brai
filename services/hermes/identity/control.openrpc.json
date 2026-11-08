@@ -3,7 +3,7 @@
   "info": {
     "title": "Brai Hermes identity control private RPC",
     "version": "1.0.0",
-    "description": "Только доверенный родительский broker; stdin/stdout UTF-8 JSON-RPC 2.0, один JSON документ на строку, без секретов в stdout и stderr. До 32768 байт на запрос, не более 64 одновременных запросов и 64 элементов batch. Клиент сопоставляет id; timeout/disconnect не отменяет работу. Сроки задаёт вызывающий broker; неизвестный исход записи не повторяется вслепую. Callback состояния не передаётся RPC. Код входа и Telegram token никогда не возвращаются."
+    "description": "Только доверенный родительский broker; stdin/stdout UTF-8 JSON-RPC 2.0, один JSON документ на строку, без секретов в stdout и stderr. До 2162688 байт на запрос, не более 64 одновременных запросов и 64 элементов batch. Клиент сопоставляет id; timeout/disconnect не отменяет работу. Сроки задаёт вызывающий broker; неизвестный исход записи не повторяется вслепую. Callback состояния не передаётся RPC. Код входа и Telegram token никогда не возвращаются."
   },
   "methods": [
     {

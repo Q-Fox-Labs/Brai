@@ -27,6 +27,8 @@ test("MCP предоставляет только обмен и ACK; stdio во�
  const projectTmp=fileURLToPath(new URL('../../../tmp/',import.meta.url));await mkdir(projectTmp,{recursive:true});
  const dir=await mkdtemp(join(projectTmp,'dialogues-mcp-')),token=join(dir,'synthetic-token');await writeFile(token,cfg.token,{mode:0o600});
  try{
+  const health=await (await fetch(new URL('/health',listener.url))).json();
+  assert.equal(health.ready,true);assert.deepEqual(health.tools.slice().sort(),['dialogues_context_ack','dialogues_exchange']);
   assert.equal((await fetch(listener.url,{method:'POST'})).status,401);
   await client.connect(new StreamableHTTPClientTransport(url,{requestInit:{headers:{Authorization:'Bearer '+cfg.token}}}));
   const listed=(await client.listTools()).tools;

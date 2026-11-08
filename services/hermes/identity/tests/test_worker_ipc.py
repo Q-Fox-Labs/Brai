@@ -2,6 +2,7 @@
 # ABOUTME: Тесты не обращаются к настоящему Telegram и пользовательской памяти.
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -155,6 +156,9 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
         }
         from unittest.mock import AsyncMock, Mock
         discovery = AsyncMock()
+        modules['hermes_cli'] = types.ModuleType('hermes_cli')
+        modules['hermes_cli.config'] = types.ModuleType('hermes_cli.config')
+        modules['hermes_cli.config'].load_config_readonly = lambda: json.loads((Path(os.environ['HERMES_HOME']) / 'config.yaml').read_text())
         modules['gateway.run']._discover_gateway_mcp_tools = discovery
         modules['tools.registry'] = types.ModuleType('tools.registry')
         entry = Mock(return_value=object())
@@ -180,9 +184,17 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
                 await worker.dispatch({'source':source, 'text':'hello', 'message_id':'0'}, 'owner')
             self.assertEqual(worker.adapter._session_tasks, {})
             entry.return_value = object()
+            with tempfile.TemporaryDirectory() as profile_home, patch.dict(os.environ, {'BRAI_DIALOGUES_REQUIRED': '1', 'HERMES_HOME': profile_home}):
+                path = Path(profile_home) / 'config.yaml'
+                path.write_text(json.dumps({'agent': {'system_prompt': 'incomplete'}}))
+                with self.assertRaisesRegex(RpcError, 'instruction unavailable'):
+                    await worker.health(require_tools=True)
+                path.write_text(json.dumps({'agent': {'system_prompt':
+                    'mcp__brai__dialogues_exchange mcp__brai__dialogues_context_ack context_request_id finish'}}))
+                self.assertTrue((await worker.health(require_tools=True))['ready'])
             self.assertTrue((await worker.health(require_tools=True))['ready'])
-            self.assertEqual(discovery.await_count, 3)
-            entry.assert_called_with('mcp__brai__brai_login')
+            self.assertEqual(discovery.await_count, 4)
+            self.assertIn(unittest.mock.call('mcp__brai__brai_login'), entry.call_args_list)
             started = await worker.dispatch({'source':source, 'text':'hello', 'message_id':'1'}, 'owner')
             self.assertTrue(started['accepted'])
             self.assertTrue((await worker.dispatch({'source':source, 'text':'steer', 'message_id':'2'}, 'owner'))['accepted'])
@@ -190,7 +202,7 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await worker.cancel(started['turn_id'], 'owner'))['state'], 'stopped')
             receipt = await worker.adapter.send('x', 'text')
             self.assertTrue(receipt.success)
-            self.assertEqual(discovery.await_count, 3)
+            self.assertEqual(discovery.await_count, 4)
             with self.assertRaises(RpcError):
                 await worker.dispatch({'source':dict(source, user_id='999'), 'text':'bad', 'message_id':'3'}, 'owner')
 
