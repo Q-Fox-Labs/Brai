@@ -6,7 +6,7 @@ import Link, { navigateWorkspace } from "./workspace-link";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent as ReactTouchEvent } from "react";
 import { motion, useMotionValue, useSpring, useTransform, type MotionValue } from "motion/react";
-import { ChevronDown, ChevronUp, Ellipsis, Network, SquareTerminal, Target, ListChecks, Timer, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Ellipsis, Network, SquareTerminal, Target, ListChecks, Timer, ShieldCheck, X } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { BraiBrandIcon } from "@/components/ui/brai-brand-icon";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -120,7 +120,7 @@ export default function AppNavigation({ email, timerElapsed, admin = false, show
       <Link className="brai-rail-brand" href={showAgent ? "/agent" : "/"} aria-label={showAgent ? "Brai — Агент" : "Brai"}><BraiBrandIcon /></Link>
       <nav className="brai-rail-links" aria-label="Разделы Brai">
         {visibleRoutes.map(route => <RouteLink key={route.href} route={route} current={pathname === route.href} compact timerElapsed={timerElapsed} />)}
-        {admin && <a className="brai-navigation-link is-compact" href="/admin" aria-label="Админка"><span className="brai-navigation-label">Админка</span></a>}
+        {admin && <a className={"brai-navigation-link is-compact" + (pathname === "/admin" ? " is-current" : "")} href="/admin" aria-label="Админка" aria-current={pathname === "/admin" ? "page" : undefined}><span className="brai-navigation-icon" aria-hidden="true"><ShieldCheck /></span><span className="brai-navigation-label">Админка</span></a>}
       </nav>
       <div className="brai-rail-footer"><AlertsBell /><ThemeButton /><ProfileMenu email={email} onLogout={onLogout} open={profileOpen} setOpen={setProfileOpen} /></div>
     </aside>
