@@ -219,6 +219,7 @@
         {
           "name": "payload",
           "required": true,
+          "description": "Файловые действия принимают artifact descriptor владельца. send_voice дополнительно принимает необязательный is_voice:boolean; true сохраняет голосовую подачу до native transport. Неподтверждённая доставка не возвращает успешную квитанцию.",
           "schema": {
             "type": "object"
           }

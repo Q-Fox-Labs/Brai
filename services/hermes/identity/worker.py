@@ -29,6 +29,7 @@ class Worker:
         self.runner_factory = runner_factory
         self.peer = self.runner = self.adapter = None
         self.active = {}
+        self.typing = {}
         self.tools_ready = False
         self.tools_lock = asyncio.Lock()
 
@@ -50,6 +51,10 @@ class Worker:
                 if self.runner:
                     await self.runner.stop()
             finally:
+                for task in self.typing.values():
+                    task.cancel()
+                await asyncio.gather(*self.typing.values(), return_exceptions=True)
+                self.typing.clear()
                 self.adapter = self.runner = self.peer = None
 
     async def start(self, peer):
@@ -130,21 +135,33 @@ class Worker:
             raise RpcError(-32602, 'Message ID required')
         key = self.adapter._event_session_key(message)
         before = self.adapter._session_tasks.get(key)
-        await self.ensure_tools()
-        await self.adapter.handle_message(message)
-        task = self.adapter._session_tasks.get(key)
-        token = None
-        if message._gateway_accepted and task is not None and task is not before:
-            token = uuid.uuid4().hex
-            self.active[token] = (key, task, source.to_dict())
-            task.add_done_callback(lambda done: self._turn_finished(token, done))
-        return {'accepted': bool(message._gateway_accepted), 'turn_id': token}
+        typing = self.adapter.start_turn_typing(message)
+        try:
+            await self.ensure_tools()
+            await self.adapter.handle_message(message)
+            task = self.adapter._session_tasks.get(key)
+            token = None
+            if message._gateway_accepted and task is not None and task is not before:
+                token = uuid.uuid4().hex
+                self.active[token] = (key, task, source.to_dict())
+                if typing is not None:
+                    self.typing[token] = typing
+                task.add_done_callback(lambda done: self._turn_finished(token, done))
+                typing = None
+            return {'accepted': bool(message._gateway_accepted), 'turn_id': token}
+        finally:
+            if typing is not None:
+                typing.cancel()
+                await asyncio.gather(typing, return_exceptions=True)
 
     def _turn_finished(self, token, done):
         """Сообщить ingress точный завершённый ход без повторной доставки."""
         if self.active.get(token, (None, None))[1] is not done:
             return
         self.active.pop(token, None)
+        typing = self.typing.pop(token, None)
+        if typing is not None:
+            typing.cancel()
         peer = self.peer
         if peer is not None and not peer.closed:
             async def notify():

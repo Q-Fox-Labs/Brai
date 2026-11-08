@@ -278,6 +278,7 @@
       "services/hermes/tests/telegram-observer.test.mjs",
       "services/hermes/identity/tests/memory_client.test.mjs",
       "services/hermes/identity/tests/test_worker_ipc.py",
+      "services/hermes/identity/tests/test_worker_delivery.py",
       "services/hermes/identity/tests/test_worker_permissions.py",
       "services/hermes/identity/tests/test_telegram_runtime.py",
       "services/hermes/identity/tests/test_login.py",

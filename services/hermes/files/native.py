@@ -1093,7 +1093,7 @@ async def send_set(adapter, chat_id, items, mode, metadata=None, identity=None):
         nonlocal announced
         explain = (fallback or platform != 'telegram' and kind == 'album') and not announced
         announced = announced or explain
-        if platform == 'telegram':
+        if platform == 'telegram' and not getattr(adapter, 'file_delivery_via_ipc', False):
             return await telegram_sender(adapter, chat_id, metadata, kind, prepared, explain)
         if explain:
             notice = await adapter.send(chat_id, 'Файлы набора будут отправлены отдельно в исходном порядке.', metadata=metadata)
@@ -1106,6 +1106,8 @@ async def send_set(adapter, chat_id, items, mode, metadata=None, identity=None):
                                  'audio': ('send_voice', 'audio_path'), 'voice': ('send_voice', 'audio_path'), 'animation': ('send_animation', 'animation_url'), 'document': ('send_document', 'file_path')}[item['presentation']]
                 target = getattr(adapter, method)
                 arguments = {'chat_id': chat_id, field: item['localPath'], 'metadata': metadata}
+                if item['presentation'] == 'voice':
+                    arguments['is_voice'] = True
                 if 'caption' in inspect.signature(target).parameters:
                     arguments['caption'] = item.get('caption') or None
                 elif item.get('caption'):
@@ -1253,6 +1255,10 @@ def install_adapter(adapter):
                     data.get('content') or '', result, identity=str(identity or uuid.uuid4()))
             return result
         adapter.send = observe_text
+    # AIDEV-NOTE: Личный адаптер публикует файлы и передаёт descriptor в ingress.
+    # Повторная Telegram-обёртка здесь потребовала бы отсутствующий bot/token.
+    if getattr(adapter, 'file_delivery_via_ipc', False):
+        return
     for name, field in [('send_image_file', 'image_path'), ('send_image', 'image_url'), ('send_video', 'video_path'),
                         ('send_document', 'file_path'), ('send_voice', 'audio_path'), ('send_animation', 'animation_url'),
                         ('send_multiple_images', 'images')]:
@@ -1276,6 +1282,7 @@ def install_adapter(adapter):
                 if field == 'file_path':
                     items = [{**item, 'presentation': 'document'} for item in items]
                 return await send_set(adapter, data['chat_id'], items, mode, data.get('metadata'))
+            wrapped._brai_file_transport = original
             return wrapped
         setattr(adapter, name, wrap(original, field))
 

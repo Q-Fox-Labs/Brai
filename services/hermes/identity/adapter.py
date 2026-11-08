@@ -1,6 +1,7 @@
 # ABOUTME: Адаптер Hermes передаёт сообщения и результаты доставки доверенному ingress.
 # ABOUTME: Не хранит Telegram token и не отправляет произвольные пути через границу.
 """Создание адаптера отложено до загрузки закреплённого Hermes."""
+import asyncio
 from .ipc import RpcError
 
 
@@ -11,6 +12,8 @@ def make_adapter(config, platform, peer, publish_file):
     class IpcAdapter(BasePlatformAdapter):
         """Сохранить native вызовы и вернуть только фактический результат ingress."""
         supports_async_delivery = False
+        # AIDEV-NOTE: Личный процесс передаёт файлы ingress и не содержит Telegram bot.
+        file_delivery_via_ipc = True
 
         def bind_source(self, source):
             """Запомнить только подтверждённый ingress контекст текущего пользователя."""
@@ -52,6 +55,29 @@ def make_adapter(config, platform, peer, publish_file):
             if not result.success:
                 raise RuntimeError(result.error)
 
+        def _start_typing_refresh(self, event, interrupt_event, metadata):
+            # AIDEV-NOTE: Worker обновляет индикатор до конца всей native task,
+            # включая инструменты и доставку; внутренние pause/interrupt короче.
+            return None
+
+        def start_turn_typing(self, event):
+            """Обновлять typing каждые две секунды до отмены владельцем native task."""
+            if not getattr(self.config, 'typing_indicator', True):
+                return None
+            metadata = {'thread_id': event.source.thread_id} if event.source.thread_id else None
+            return asyncio.create_task(self._keep_turn_typing(event.source.chat_id, metadata))
+
+        async def _keep_turn_typing(self, chat_id, metadata):
+            try:
+                while True:
+                    try:
+                        await asyncio.wait_for(self.send_typing(chat_id, metadata=metadata), timeout=1.5)
+                    except (TimeoutError, RuntimeError):
+                        pass  # Временный отказ индикатора не отменяет ответ.
+                    await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                pass
+
         async def _file(self, action, chat_id, path, caption, reply_to, metadata, **kwargs):
             try:
                 descriptor = await publish_file(path)
@@ -71,7 +97,8 @@ def make_adapter(config, platform, peer, publish_file):
             return await self._file('send_video', chat_id, video_path, caption, reply_to, metadata)
 
         async def send_voice(self, chat_id, audio_path, caption=None, reply_to=None, metadata=None, **kwargs):
-            return await self._file('send_voice', chat_id, audio_path, caption, reply_to, metadata)
+            return await self._file('send_voice', chat_id, audio_path, caption, reply_to, metadata,
+                                    is_voice=bool(kwargs.get('is_voice')))
 
         async def send_image(self, chat_id, image_url, caption=None, reply_to=None, metadata=None):
             return await self._action('send_image', dict(chat_id=chat_id, image_url=image_url, caption=caption, reply_to=reply_to, metadata=metadata))

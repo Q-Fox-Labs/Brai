@@ -109,6 +109,7 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self, user_id):
                 self.user_id, self.platform, self.is_bot = user_id, Platform.TELEGRAM, False
                 self.chat_id, self.chat_name, self.chat_type = 'x', None, 'dm'
+                self.thread_id = None
             @classmethod
             def from_dict(cls, value):
                 return cls(value['user_id'])
@@ -121,6 +122,7 @@ class WorkerLifecycleTest(unittest.IsolatedAsyncioTestCase):
                 self._gateway_accepted = False
         class Base:
             def __init__(self, config, platform):
+                self.config = config
                 self._session_tasks = {}
             async def handle_message(self, event):
                 event._gateway_accepted = True

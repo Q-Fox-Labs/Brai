@@ -131,6 +131,9 @@ class Bridge:
         for file_action in _FILES:
             allowed_keys[file_action] = {'chat_id', 'artifact', 'caption', 'reply_to', 'metadata'}
         allowed_keys['send_document'].add('file_name')
+        allowed_keys['send_voice'].add('is_voice')
+        if action == 'send_voice' and 'is_voice' in payload and type(payload['is_voice']) is not bool:
+            raise RpcError(-32602, 'Invalid voice flag')
         if set(payload) - allowed_keys[action]:
             raise RpcError(-32602, 'Unexpected delivery fields')
         if action in _FILES:

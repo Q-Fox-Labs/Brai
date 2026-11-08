@@ -201,6 +201,11 @@ class Resolver:
         method = getattr(self.adapter, action, None)
         if not callable(method):
             raise ValueError('Native delivery unavailable')
+        if action in ('send_image_file', 'send_document', 'send_video', 'send_voice'):
+            # AIDEV-NOTE: Файл уже опубликован владельцем и проверен broker.
+            # Повторная публикация через общий FileStore ingress смешала бы владельцев.
+            # Вызываем только сохранённый штатный транспорт, не произвольный метод worker.
+            method = getattr(method, '_brai_file_transport', method)
         result = await method(**values)
         if action == 'send_typing' and result is None:
             return {'success': True}
