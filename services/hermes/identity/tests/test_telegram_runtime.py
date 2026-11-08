@@ -37,7 +37,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text=text),
                                 effective_user=NS(id=123, is_bot=False),
                                 effective_chat=NS(id=chat_id, type=chat_type))
-                    adapter = NS(send=AsyncMock())
+                    adapter = NS(send=AsyncMock(return_value={'success': True}))
                     with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
                         self.assertFalse(await runtime.admit_update(update, adapter))
                     broker.assert_not_awaited()
@@ -61,7 +61,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
             with self.subTest(command=method):
                 update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text=text),
                             effective_user=NS(id=456, is_bot=False), effective_chat=NS(id=456, type='private'))
-                adapter = NS(send=AsyncMock())
+                adapter = NS(send=AsyncMock(return_value={'success': True}))
                 with patch.object(runtime, 'broker_call', AsyncMock(return_value=result)) as broker:
                     self.assertFalse(await runtime.admit_update(update, adapter))
                 self.assertEqual(broker.await_count, 1)
@@ -69,10 +69,75 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(broker.await_args.args[1]['telegramId'], '456')
                 adapter.send.assert_awaited_once()
 
+    async def test_control_replies_keep_the_source_private_topic(self):
+        cases = [('/start link_' + 'a' * 43, {'user': {'id': 'owner'}}),
+                 ('/start link_' + 'a' * 43, {}),
+                 ('/start link_short', {}), ('/unlink', {})]
+        for text, response in cases:
+            with self.subTest(command=text[:12], accepted=bool(response)):
+                update = NS(effective_message=NS(sender_chat=None, business_connection_id=None,
+                            text=text, message_thread_id=73), effective_user=NS(id=456, is_bot=False),
+                            effective_chat=NS(id=456, type='private'))
+                adapter = NS(send=AsyncMock(return_value={'success': True}))
+                with patch.object(runtime, 'broker_call', AsyncMock(return_value=response)):
+                    self.assertFalse(await runtime.admit_update(update, adapter))
+                self.assertEqual(adapter.send.await_args.args[0], '456')
+                self.assertEqual(adapter.send.await_args.kwargs, {'metadata': {'message_thread_id': 73}})
+
+    async def test_link_reply_without_topic_does_not_invent_one(self):
+        update = NS(effective_message=NS(sender_chat=None, business_connection_id=None,
+                    text='/start link_' + 'a' * 43), effective_user=NS(id=456, is_bot=False),
+                    effective_chat=NS(id=456, type='private'))
+        adapter = NS(send=AsyncMock(return_value={'success': True}))
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={'user': {'id': 'owner'}})):
+            self.assertFalse(await runtime.admit_update(update, adapter))
+        self.assertEqual(adapter.send.await_args.kwargs, {})
+
+    async def test_failed_link_reply_is_observed_without_redeeming_or_sending_again(self):
+        secret = 'a' * 43
+        update = NS(effective_message=NS(sender_chat=None, business_connection_id=None,
+                    text='/start link_' + secret, message_thread_id=73),
+                    effective_user=NS(id=456, is_bot=False), effective_chat=NS(id=456, type='private'))
+        adapter = NS(send=AsyncMock(return_value={'success': False, 'error': secret, 'retryable': True}))
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={'user': {'id': 'owner'}})) as broker:
+            with self.assertLogs(runtime.__name__, level='WARNING') as logs:
+                self.assertFalse(await runtime.admit_update(update, adapter))
+        broker.assert_awaited_once()
+        adapter.send.assert_awaited_once()
+        self.assertIn('status=unconfirmed', logs.output[0])
+        self.assertNotIn(secret, ''.join(logs.output))
+
+    async def test_exception_in_link_reply_logs_only_type_and_never_retries(self):
+        secret = 'b' * 43
+        update = NS(effective_message=NS(sender_chat=None, business_connection_id=None,
+                    text='/start link_' + secret, message_thread_id=73),
+                    effective_user=NS(id=456, is_bot=False), effective_chat=NS(id=456, type='private'))
+        adapter = NS(send=AsyncMock(side_effect=RuntimeError('secret ' + secret)))
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={'user': {'id': 'owner'}})) as broker:
+            with self.assertLogs(runtime.__name__, level='WARNING') as logs:
+                self.assertFalse(await runtime.admit_update(update, adapter))
+        broker.assert_awaited_once()
+        adapter.send.assert_awaited_once()
+        self.assertIn('error=RuntimeError', logs.output[0])
+        self.assertNotIn(secret, ''.join(logs.output))
+
+    async def test_notices_are_scoped_to_topic_and_failed_delivery_does_not_throttle(self):
+        runtime._notices.clear()
+        adapter = NS(send=AsyncMock(side_effect=[{'success': False}, {'success': True}, {'success': True}]))
+        first, second = NS(message_thread_id=73), NS(message_thread_id=74)
+        with self.assertLogs(runtime.__name__, level='WARNING'):
+            await runtime._notice(adapter, '456', first, 'notice')
+        await runtime._notice(adapter, '456', first, 'notice')
+        await runtime._notice(adapter, '456', first, 'notice')
+        await runtime._notice(adapter, '456', second, 'notice')
+        self.assertEqual(adapter.send.await_count, 3)
+        self.assertEqual([call.kwargs['metadata']['message_thread_id'] for call in adapter.send.await_args_list], [73, 73, 74])
+        runtime._notices.clear()
+
     async def test_raw_unlink_only_explains_agent_workflow_without_revoking(self):
         update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text='/unlink'),
                     effective_user=NS(id=123, is_bot=False), effective_chat=NS(id=123, type='private'))
-        adapter = NS(send=AsyncMock())
+        adapter = NS(send=AsyncMock(return_value={'success': True}))
         with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
             self.assertFalse(await runtime.admit_update(update, adapter))
         broker.assert_not_awaited()
@@ -94,7 +159,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         for secret in ['short', 'a' * 44, 'a' * 43 + '\nextra']:
             update = NS(effective_message=NS(sender_chat=None, business_connection_id=None, text='/start link_' + secret),
                         effective_user=NS(id=456, is_bot=False), effective_chat=NS(id=456, type='private'))
-            adapter = NS(send=AsyncMock())
+            adapter = NS(send=AsyncMock(return_value={'success': True}))
             with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
                 self.assertFalse(await runtime.admit_update(update, adapter))
             broker.assert_not_awaited()
@@ -160,7 +225,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['identity_inputs'], [{'path':'/user/a','itemId':'55:0','caption':'hello','groupId':'album'}])
 
     async def test_response_cannot_cross_to_another_account_of_same_owner(self):
-        adapter = NS(send=AsyncMock())
+        adapter = NS(send=AsyncMock(return_value={'success': True}))
         resolver = runtime.Resolver(adapter)
         resolver.turns[101] = {'id': 'current', 'route': ('456', '')}
         with patch.object(runtime, 'broker_call', AsyncMock()) as broker:
@@ -176,7 +241,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await resolver.deliver(profile(), 'someone-else', 'send', {'chat_id':'123'})
 
     async def test_login_suppression_sends_nothing(self):
-        adapter = NS(send=AsyncMock())
+        adapter = NS(send=AsyncMock(return_value={'success': True}))
         resolver = runtime.Resolver(adapter)
         resolver.turns[101] = {'id':'t', 'route':('123','')}
         with patch.object(runtime, 'broker_call', AsyncMock(return_value={'suppressFinal':True})):
@@ -203,7 +268,7 @@ class TelegramRuntimeTest(unittest.IsolatedAsyncioTestCase):
                 broker.assert_not_awaited()
 
     async def test_invalid_invite_cannot_be_redeemed(self):
-        adapter = NS(send=AsyncMock())
+        adapter = NS(send=AsyncMock(return_value={'success': True}))
         update = NS(effective_message=NS(sender_chat=None,business_connection_id=None,text='/start bad'),
                     effective_user=NS(id=123,is_bot=False,full_name='User'), effective_chat=NS(id=123,type='private'))
         broker = AsyncMock(side_effect=PermissionError('denied'))

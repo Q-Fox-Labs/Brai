@@ -6,6 +6,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import datetime
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -19,6 +20,7 @@ from .ingress import Bridge
 MAX_FRAME = 2 * 1024 * 1024
 _resolvers = {}
 _notices = {}
+_logger = logging.getLogger(__name__)
 
 
 async def broker_call(method, params, timeout=15):
@@ -49,15 +51,36 @@ async def broker_call(method, params, timeout=15):
         await writer.wait_closed()
 
 
-async def _notice(adapter, chat, text):
+async def _control_reply(adapter, chat, message, text):
+    """Ответить в исходную тему; сообщить исход без содержимого, кодов и повтора."""
+    thread = getattr(message, 'message_thread_id', None)
+    if thread is not None and (type(thread) is not int or thread < 1):
+        _logger.warning('telegram_control_reply status=invalid_route')
+        return False
+    options = {'metadata': {'message_thread_id': thread}} if thread is not None else {}
+    try:
+        result = _receipt(await adapter.send(str(chat), text, **options))
+    except Exception as error:
+        # AIDEV-NOTE: Текст исключения может содержать Bot API token или команду.
+        _logger.warning('telegram_control_reply status=unknown error=%s', type(error).__name__)
+        return False
+    if result.get('success') is not True:
+        _logger.warning('telegram_control_reply status=unconfirmed')
+        return False
+    _logger.info('telegram_control_reply status=sent')
+    return True
+
+
+async def _notice(adapter, chat, message, text):
+    """Ограничить подтверждённые уведомления отдельно для каждой темы личного чата."""
     now = time.monotonic()
-    key = str(chat)
+    key = (str(chat), str(getattr(message, 'message_thread_id', None) or ''))
     if now - _notices.get(key, -100) < 30:
         return
     if len(_notices) > 1000:
         _notices.clear()
-    _notices[key] = now
-    await adapter.send(str(chat), text)
+    if await _control_reply(adapter, chat, message, text):
+        _notices[key] = now
 
 
 async def admit_update(update, adapter):
@@ -76,7 +99,7 @@ async def admit_update(update, adapter):
     link = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+link_(.*)', raw, flags=re.DOTALL)
     if link:
         if not re.fullmatch(r'[A-Za-z0-9_-]{43}', link[1]):
-            await adapter.send(telegram, 'Команда привязки неполная или неверная. Попросите агента подключить второй аккаунт и получите новую команду.')
+            await _control_reply(adapter, telegram, message, 'Команда привязки неполная или неверная. Попросите агента подключить второй аккаунт и получите новую команду.')
             return False
         try:
             result = await broker_call('identity.link-redeem', {'telegramId': telegram, 'code': link[1]})
@@ -84,10 +107,10 @@ async def admit_update(update, adapter):
                     if result.get('user') else 'Не удалось привязать аккаунт. Код истёк, использован или аккаунт уже принадлежит другому профилю.')
         except Exception:
             text = 'Результат привязки не подтверждён. Напишите обычное сообщение, чтобы проверить доступ.'
-        await adapter.send(telegram, text)
+        await _control_reply(adapter, telegram, message, text)
         return False
     if re.fullmatch(r'/unlink(?:@[A-Za-z0-9_]+)?', raw):
-        await adapter.send(telegram, 'Попросите агента отвязать этот или другой ваш аккаунт. Он объяснит последствия и запросит подтверждение.')
+        await _control_reply(adapter, telegram, message, 'Попросите агента отвязать этот или другой ваш аккаунт. Он объяснит последствия и запросит подтверждение.')
         return False
     try:
         await broker_call('identity.resolve', {'telegramId': telegram})
@@ -101,12 +124,12 @@ async def admit_update(update, adapter):
         try:
             await broker_call('identity.invite-redeem', {'telegramId': telegram, 'code': invitation[1],
                 'name': str(getattr(user, 'full_name', '') or 'Пользователь')[:120]}, timeout=700)
-            await _notice(adapter, telegram, 'Профиль готов. Администраторы этого сервиса могут просматривать вашу переписку, память и файлы. Напишите, с чем помочь. Для входа на сайт попросите меня прислать код.')
+            await _notice(adapter, telegram, message, 'Профиль готов. Администраторы этого сервиса могут просматривать вашу переписку, память и файлы. Напишите, с чем помочь. Для входа на сайт попросите меня прислать код.')
         except Exception:
-            await _notice(adapter, telegram, 'Приглашение не удалось активировать. Проверьте его или обратитесь к владельцу.')
+            await _notice(adapter, telegram, message, 'Приглашение не удалось активировать. Проверьте его или обратитесь к владельцу.')
         return False
     if str(getattr(chat, 'id', '')) == telegram:
-        await _notice(adapter, telegram, 'Для доступа нужно приглашение владельца. Попросите прислать приглашение и отправьте полученную команду в этот чат.')
+        await _notice(adapter, telegram, message, 'Для доступа нужно приглашение владельца. Попросите прислать приглашение и отправьте полученную команду в этот чат.')
     return False
 
 
