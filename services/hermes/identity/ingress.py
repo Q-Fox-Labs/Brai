@@ -2,6 +2,7 @@
 # ABOUTME: Перед доставкой заново проверяет владельца, маршрут и тип действия.
 """Подключение вызывается доверенным ingress после нативной проверки отправителя."""
 import asyncio
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from .ipc import MAX_FRAME, Peer, RpcError, peer_uid
 from .scope import UNSCOPED, request_scope
@@ -12,15 +13,19 @@ _FILES = {'send_image_file', 'send_document', 'send_video', 'send_voice', 'send_
 
 class Bridge:
     """Доверенный мост одного владельца к единственному системному UID."""
-    def __init__(self, owner, telegram_id, worker_uid, socket_path, deliver, prepare_event, on_turn_end=None, on_turn_start=None, authorize_delivery=None, telegram_api=None, require_scope=False):
+    def __init__(self, owner, telegram_id, worker_uid, socket_path, deliver, prepare_event, on_turn_end=None, on_turn_start=None, worker_telegram_id=None):
         if not isinstance(owner, str) or not owner or not str(telegram_id).isdecimal() or type(worker_uid) is not int:
             raise ValueError('invalid worker binding')
         self.owner, self.telegram_id, self.worker_uid = owner, str(telegram_id), worker_uid
         self.socket_path, self.deliver, self.prepare_event = socket_path, deliver, prepare_event
+        self.telegram_ids = {str(telegram_id)}
+        self.worker_telegram_id = str(worker_telegram_id or telegram_id)
+        if not self.worker_telegram_id.isdecimal():
+            raise ValueError('invalid worker Telegram identity')
         self.on_turn_end = on_turn_end
         self.on_turn_start = on_turn_start
-        self.authorize_delivery, self.telegram_api = authorize_delivery, telegram_api
-        self.require_scope = require_scope
+        self.authorize_delivery, self.telegram_api = None, None
+        self.require_scope = False
         self.known_turns, self.early_ends = set(), set()
         self.dispatch_inflight = 0
         self.peer = self.task = None
@@ -28,6 +33,8 @@ class Bridge:
         self.routes = set()
         self.received = set()
         self.sent = set()
+        if not self.worker_telegram_id.isascii():
+            raise ValueError('invalid worker Telegram identity')
 
     async def connect(self):
         """Соединиться с worker и проверить его UID по данным ядра."""
@@ -43,46 +50,67 @@ class Bridge:
             self.task = asyncio.create_task(self.peer.run())
             return self.peer
 
-    async def dispatch(self, event):
-        """Отправить ранее допущенное событие без общего transcript/history."""
+    def configure_delivery(self, *, authorize_delivery=None, telegram_api=None, require_scope=False):
+        """Подключить доверенные порты до открытия IPC-соединения."""
+        if self.peer is not None:
+            raise RuntimeError('Delivery ports already connected')
+        self.authorize_delivery, self.telegram_api = authorize_delivery, telegram_api
+        self.require_scope = require_scope
+        return self
+
+    @asynccontextmanager
+    async def _dispatch_scope(self, event):
         source = event.source
-        if source.platform.value != 'telegram' or str(source.user_id) != self.telegram_id or source.is_bot:
+        if source.platform.value != 'telegram' or str(source.user_id) not in self.telegram_ids or source.is_bot:
             raise PermissionError('Event owner mismatch')
-        # Подключение не резервирует допуск; preparation уже входит в dispatch fence.
         peer = await self.connect()
         self.dispatch_inflight += 1
-        turn_id = None
+        scope = {'turn_id': None}
         try:
-            data = await self.prepare_event(event)
-            if not isinstance(data, dict):
-                raise ValueError('Event preparation failed')
-            data['source'] = source.to_dict()
-            data.pop('reply_to_text', None)
-            route = (str(source.chat_id), str(source.thread_id or ''))
-            self.routes.add(route)
-            if event.message_id:
-                self.received.add((route, str(event.message_id)))
-            result = await peer.call('dispatch', {'event': data, 'owner': self.owner})
-            if not isinstance(result, dict) or type(result.get('accepted')) is not bool:
-                raise ConnectionError('Invalid dispatch receipt')
-            turn_id = result.get('turn_id')
-            if turn_id is not None:
-                if not isinstance(turn_id, str) or not turn_id:
-                    raise ConnectionError('Invalid turn identity')
-                if self.on_turn_start is not None:
-                    await self.on_turn_start(turn_id)
-                self.known_turns.add(turn_id)
-                if turn_id in self.early_ends:
-                    self.early_ends.remove(turn_id)
-                    asyncio.get_running_loop().call_soon(lambda: asyncio.create_task(self._close_turn(turn_id)))
+            yield peer, scope
         finally:
             self.dispatch_inflight -= 1
             if self.dispatch_inflight == 0:
                 for finished in list(self.early_ends & self.known_turns):
                     self.early_ends.remove(finished)
                     await self._close_turn(finished)
-                if turn_id is None and not self.known_turns and self.on_turn_end is not None:
+                if scope['turn_id'] is None and not self.known_turns and self.on_turn_end is not None:
                     await self.on_turn_end(None)
+
+    async def dispatch(self, event):
+        async with self._dispatch_scope(event) as (peer, scope):
+            return await self._dispatch(event, peer, scope)
+
+    async def _dispatch(self, event, peer, scope):
+        """Отправить ранее допущенное событие без общего transcript/history."""
+        source = event.source
+        data = await self.prepare_event(event)
+        if not isinstance(data, dict):
+            raise ValueError('Event preparation failed')
+        data['source'] = source.to_dict()
+        # AIDEV-NOTE: Внутри профиля автор канонический; исходный личный chat_id
+        # сохраняет Telegram-аккаунт и отдельную native session. Права задаёт Auth.
+        data['source']['user_id'] = self.worker_telegram_id
+        # Не переносить текст другого пользователя или общий групповой контекст.
+        data.pop('reply_to_text', None)
+        route = (str(source.chat_id), str(source.thread_id or ''))
+        self.routes.add(route)
+        if event.message_id:
+            self.received.add((route, str(event.message_id)))
+        result = await peer.call('dispatch', {'event': data, 'owner': self.owner})
+        if not isinstance(result, dict) or type(result.get('accepted')) is not bool:
+            raise ConnectionError('Invalid dispatch receipt')
+        turn_id = result.get('turn_id')
+        scope['turn_id'] = turn_id
+        if turn_id is not None:
+            if not isinstance(turn_id, str) or not turn_id:
+                raise ConnectionError('Invalid turn identity')
+            if self.on_turn_start is not None:
+                await self.on_turn_start(turn_id)
+            self.known_turns.add(turn_id)
+            if turn_id in self.early_ends:
+                self.early_ends.remove(turn_id)
+                asyncio.get_running_loop().call_soon(lambda: asyncio.create_task(self._close_turn(turn_id)))
         return result
 
     async def _close_turn(self, turn_id):
@@ -216,7 +244,7 @@ def install(runner, adapter, resolve_bridge):
         bridge = await resolve_bridge(source)
         if bridge is None:
             return
-        if not isinstance(bridge, Bridge) or bridge.telegram_id != sender:
+        if not isinstance(bridge, Bridge) or sender not in bridge.telegram_ids:
             raise PermissionError('No owner binding')
         token = _authorized_telegram.set(sender)
         try:

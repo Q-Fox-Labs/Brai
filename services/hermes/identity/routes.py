@@ -34,7 +34,7 @@ class RouteLedger:
     def owner(profile):
         """Смена binding автоматически лишает новый профиль прежних транспортных прав."""
         return json.dumps([profile['uid'], profile['userId'], profile.get('profileId'),
-                           str(profile['telegramId'])], separators=(',', ':'))
+                           str(profile.get('authorTelegramId', profile['telegramId']))], separators=(',', ':'))
 
     def admit(self, profile, route, metadata, message_id=None):
         """Запомнить маршрут только после реального broker ingress.admit."""

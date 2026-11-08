@@ -278,7 +278,8 @@
       "services/hermes/identity/schemas/control.schema.json",
       "services/hermes/identity/parent_runner.py",
       "services/hermes/identity/control.openrpc.json",
-      "services/hermes/identity/asyncapi.yaml"
+      "services/hermes/identity/asyncapi.yaml",
+      "services/hermes/identity/lifecycle.py"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
@@ -308,6 +309,7 @@
       "services/hermes/identity/tests/test_worker_ipc.py",
       "services/hermes/identity/tests/test_worker_delivery.py",
       "services/hermes/identity/tests/test_worker_system.py",
+      "services/hermes/identity/tests/test_lifecycle.py",
       "services/hermes/identity/tests/test_worker_permissions.py",
       "services/hermes/identity/tests/test_telegram_runtime.py",
       "services/hermes/identity/tests/test_login.py",
@@ -672,6 +674,7 @@
       "services/hermes/identity/parent_runner.py",
       "services/hermes/identity/control.openrpc.json",
       "services/hermes/identity/asyncapi.yaml",
+      "services/hermes/identity/lifecycle.py",
       "services/hermes/extensions/scripts/context_gif.py",
       "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md"
     ],

@@ -328,20 +328,20 @@ class NativeInteractiveTest(unittest.IsolatedAsyncioTestCase):
             if params.get('method') == 'send_message':
                 message_id = 41 + len(self.prompts)
                 self.prompts[message_id] = payload['text']
-                return {'message_id': message_id, 'date': 1, 'chat': {'id': int(payload['chat_id']), 'type': 'supergroup'}, 'text': payload['text']}
+                return {'message_id': message_id, 'date': 1, 'chat': {'id': int(payload['chat_id']), 'type': 'private'}, 'text': payload['text']}
             if params.get('method') in {'edit_message_text', 'edit_message_reply_markup'}:
-                return {'message_id': payload['message_id'], 'date': 1, 'chat': {'id': payload['chat_id'], 'type': 'supergroup'}, 'text': payload.get('text', '')}
+                return {'message_id': payload['message_id'], 'date': 1, 'chat': {'id': payload['chat_id'], 'type': 'private'}, 'text': payload.get('text', '')}
             return True
         self.adapter = make_adapter(NS(typing_indicator=False), 'telegram', NS(call=call), AsyncMock())
 
-    def update(self, data, *, user=123, message_id=41, chat=-55):
+    def update(self, data, *, user=123, message_id=41, chat=123):
         return {'update_id': 9, 'callback_query': {'id': 'callback-one', 'chat_instance': 'group', 'data': data,
             'from': {'id': user, 'is_bot': False, 'first_name': 'Owner'},
             'message': {'message_id': message_id, 'date': 1, 'text': self.prompts.get(message_id, 'Question'),
-                'from': {'id': 900, 'is_bot': True}, 'chat': {'id': chat, 'type': 'supergroup'}, 'message_thread_id': 77}}}
+                'from': {'id': 900, 'is_bot': True}, 'chat': {'id': chat, 'type': 'private'}, 'message_thread_id': 77}}}
 
-    async def test_clarification_choice_and_wrong_group_clicker(self):
-        result = await self.adapter.send_clarify('-55', 'Choose', ['A', 'B'], 'clarify', 'session', {'thread_id': '77'})
+    async def test_clarification_choice_and_wrong_private_clicker(self):
+        result = await self.adapter.send_clarify('123', 'Choose', ['A', 'B'], 'clarify', 'session', {'thread_id': '77'})
         self.assertTrue(result.success)
         self.assertEqual(result.message_id, '41')
         self.assertEqual(self.adapter._clarify_state, {'clarify': 'session'})
@@ -359,7 +359,7 @@ class NativeInteractiveTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([params['method'] for _, params in self.calls], ['send_message', 'answer_callback_query', 'edit_message_text'])
 
     async def test_clarification_other_keeps_pending_entry_until_typed_answer(self):
-        await self.adapter.send_clarify('-55', 'Choose', ['A'], 'clarify', 'session')
+        await self.adapter.send_clarify('123', 'Choose', ['A'], 'clarify', 'session')
         clarify = ModuleType('tools.clarify_gateway')
         awaiting = []
         clarify.mark_awaiting_text = lambda identifier: awaiting.append(identifier) or True
@@ -385,8 +385,21 @@ class NativeInteractiveTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(context)
         self.assertEqual(self.calls, [])
 
+    async def test_second_account_keeps_actual_callback_actor_and_scoped_native_auth(self):
+        selected = AsyncMock(return_value='Selected')
+        await self.adapter.send_choice_picker('456', 'Reasoning', [{'label': 'High', 'value': 'high'}], 'alias-session', selected)
+        self.adapter._is_callback_user_authorized = lambda user_id, **kwargs: self.adapter.is_interactive_actor(user_id)
+        await self.adapter.handle_interactive(self.update('cp:0', user=456, chat=456), telegram_id='456')
+        selected.assert_awaited_once_with('456', 'high')
+        self.assertFalse(self.adapter.is_interactive_actor('456'))
+        rejected = self.update('cp:0', user=456, chat=-55)
+        rejected['callback_query']['message']['chat']['type'] = 'supergroup'
+        with self.assertRaises(PermissionError):
+            await self.adapter.handle_interactive(rejected, telegram_id='456')
+        self.assertFalse(self.adapter.is_interactive_actor('456'))
+
     async def test_exec_approval_uses_native_resolution_once(self):
-        prompt = NS(chat_id='-55', text='Approve command', metadata={'thread_id': '77'},
+        prompt = NS(chat_id='123', text='Approve command', metadata={'thread_id': '77'},
             session_key='session', actions=[('Once', 'once', ''), ('Deny', 'deny', '')])
         self.assertTrue((await self.adapter._send_exec_approval_prompt(prompt)).success)
         approval = ModuleType('tools.approval')
@@ -400,16 +413,16 @@ class NativeInteractiveTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_choice_and_model_menus_keep_private_callbacks(self):
         selected = AsyncMock(return_value='Selected')
-        self.assertTrue((await self.adapter.send_choice_picker('-55', 'Reasoning',
+        self.assertTrue((await self.adapter.send_choice_picker('123', 'Reasoning',
             [{'label': 'High', 'value': 'high'}], 'session', selected)).success)
         await self.adapter.handle_interactive(self.update('cp:0'), telegram_id='123')
-        selected.assert_awaited_once_with('-55', 'high')
+        selected.assert_awaited_once_with('123', 'high')
         switched = AsyncMock(return_value='Switched')
-        self.assertTrue((await self.adapter.send_model_picker('-55', [{'slug': 'local'}],
+        self.assertTrue((await self.adapter.send_model_picker('123', [{'slug': 'local'}],
             'old', 'local', 'session', switched)).success)
-        self.adapter._model_picker_state['-55'].update(model_list=['new'], selected_provider='local')
+        self.adapter._model_picker_state['123'].update(model_list=['new'], selected_provider='local')
         await self.adapter.handle_interactive(self.update('mc:0', message_id=42), telegram_id='123')
-        switched.assert_awaited_once_with('-55', 'new', 'local')
+        switched.assert_awaited_once_with('123', 'new', 'local')
         self.assertEqual(self.adapter._model_picker_state, {})
         await self.adapter.connect()
         self.assertTrue(self.adapter._running)

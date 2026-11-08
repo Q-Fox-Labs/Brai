@@ -1,3 +1,5 @@
+// ABOUTME: Проверяет Python broker и постоянные операции доступа Hermes.
+// ABOUTME: Запускает только синтетические тесты без системных служб.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -10,6 +12,7 @@ const root = resolve(directory, '../../../..');
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'brai-broker-tests-'));
 
 try {
+ for (const pattern of ['test_broker.py', 'test_lifecycle.py']) {
   const result = spawnSync('python3', [
     '-B',
     '-m',
@@ -18,7 +21,7 @@ try {
     '-s',
     'services/hermes/identity/tests',
     '-p',
-    'test_broker.py',
+    pattern,
   ], {
     cwd: root,
     encoding: 'utf8',
@@ -31,6 +34,7 @@ try {
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 0, result.stdout + '\n' + result.stderr);
   process.stdout.write(result.stdout);
+ }
 } finally {
   rmSync(fixtureRoot, { recursive: true, force: true });
 }

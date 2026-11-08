@@ -2,6 +2,7 @@
 # ABOUTME: Не хранит Telegram token и не отправляет произвольные пути через границу.
 """Создание адаптера отложено до загрузки закреплённого Hermes."""
 import asyncio
+from contextvars import ContextVar
 from .ipc import RpcError
 from .scope import delivery_scope
 from .telegram_proxy import BotProxy
@@ -20,6 +21,11 @@ def make_adapter(config, platform, peer, publish_file):
         def __init__(self, config):
             super().__init__(config)
             self._bot = BotProxy(peer)
+            self._interactive_actor = ContextVar('brai_identity_interactive_actor', default=None)
+
+        def is_interactive_actor(self, user_id):
+            """Допустить actual actor только внутри подтверждённого Root callback."""
+            return self._interactive_actor.get() == str(user_id)
 
         async def handle_interactive(self, update, *, telegram_id):
             """Исполнить native callback только для подтверждённого владельца worker."""
@@ -35,19 +41,25 @@ def make_adapter(config, platform, peer, publish_file):
                     or str(user.get('id', '')) != str(telegram_id)):
                 raise PermissionError('Interactive owner mismatch')
             native = Update.de_json(update, self._bot)
-            if callback:
-                message = getattr(native.callback_query, 'message', None)
-                if message is None or not getattr(message, 'message_id', None):
-                    raise PermissionError('Callback message required')
-                if str(getattr(native.callback_query, 'data', '') or '').startswith('brai:'):
-                    handler = getattr(self, '_brai_human_callback', None)
-                    if not callable(handler):
-                        raise PermissionError('Human callback unavailable')
-                    await handler(native, None)
+            token = self._interactive_actor.set(str(telegram_id))
+            try:
+                if callback:
+                    message = getattr(native.callback_query, 'message', None)
+                    if (message is None or not getattr(message, 'message_id', None)
+                            or str(getattr(message, 'chat_id', '')) != str(telegram_id)
+                            or getattr(getattr(message, 'chat', None), 'type', None) != 'private'):
+                        raise PermissionError('Private callback message required')
+                    if str(getattr(native.callback_query, 'data', '') or '').startswith('brai:'):
+                        handler = getattr(self, '_brai_human_callback', None)
+                        if not callable(handler):
+                            raise PermissionError('Human callback unavailable')
+                        await handler(native, None)
+                    else:
+                        await self._handle_callback_query(native, None)
                 else:
-                    await self._handle_callback_query(native, None)
-            else:
-                await self._handle_inline_query(native, None)
+                    await self._handle_inline_query(native, None)
+            finally:
+                self._interactive_actor.reset(token)
             return {'accepted': True}
 
         def bind_source(self, source):

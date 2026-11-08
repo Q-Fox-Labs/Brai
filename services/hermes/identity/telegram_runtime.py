@@ -68,10 +68,28 @@ async def admit_update(update, adapter):
     user = getattr(update, 'effective_user', None)
     chat = getattr(update, 'effective_chat', None)
     if (message is None or user is None or chat is None or getattr(user, 'is_bot', False)
+            or getattr(chat, 'type', None) != 'private' or str(chat.id) != str(user.id)
             or getattr(message, 'sender_chat', None) or getattr(message, 'business_connection_id', None)):
         return False
     telegram = str(getattr(user, 'id', ''))
     if not re.fullmatch(r'[1-9][0-9]{0,19}', telegram):
+        return False
+    raw = (getattr(message, 'text', '') or '').strip()
+    link = re.fullmatch(r'/start(?:@[A-Za-z0-9_]+)?\s+link_(.*)', raw, flags=re.DOTALL)
+    if link:
+        if not re.fullmatch(r'[A-Za-z0-9_-]{43}', link[1]):
+            await adapter.send(telegram, 'Команда привязки неполная или неверная. Попросите агента подключить второй аккаунт и получите новую команду.')
+            return False
+        try:
+            result = await broker_call('identity.link-redeem', {'telegramId': telegram, 'code': link[1]})
+            text = ('Аккаунт подключён к вашему профилю. Память и файлы общие, беседа отдельная.'
+                    if result.get('user') else 'Не удалось привязать аккаунт. Код истёк, использован или аккаунт уже принадлежит другому профилю.')
+        except Exception:
+            text = 'Результат привязки не подтверждён. Напишите обычное сообщение, чтобы проверить доступ.'
+        await adapter.send(telegram, text)
+        return False
+    if re.fullmatch(r'/unlink(?:@[A-Za-z0-9_]+)?', raw):
+        await adapter.send(telegram, 'Попросите агента отвязать этот или другой ваш аккаунт. Он объяснит последствия и запросит подтверждение.')
         return False
     try:
         await broker_call('identity.resolve', {'telegramId': telegram})
@@ -92,7 +110,6 @@ async def admit_update(update, adapter):
     if str(getattr(chat, 'id', '')) == telegram:
         await _notice(adapter, telegram, 'Для доступа нужно приглашение владельца. Попросите прислать приглашение и отправьте полученную команду в этот чат.')
     return False
-
 
 def _receipt(value):
     if isinstance(value, dict):
@@ -149,7 +166,7 @@ class Resolver:
             async with semaphore:
                 try:
                     from types import SimpleNamespace
-                    bridge = await self(SimpleNamespace(user_id=str(profile['telegramId'])))
+                    bridge = self._bridge(profile)
                     peer = await bridge.connect()
                     await peer.call('health', {'require_tools': True}, timeout=240)
                 except (Exception, asyncio.CancelledError) as error:
@@ -171,10 +188,26 @@ class Resolver:
     async def __call__(self, source):
         """Выбрать worker по актуальному Auth, не по параметрам модели."""
         profile = await broker_call('identity.resolve', {'telegramId': str(source.user_id)})
+        return self._bridge(profile)
+
+    def _bridge(self, profile):
+        """Настроить scope/UI delivery общего account-bound транспорта."""
+        bridge = self._account_bridge(profile)
+        if not bridge.require_scope:
+            author = str(profile.get('authorTelegramId', profile['telegramId']))
+            binding = {**profile, 'telegramId': author, 'authorTelegramId': author}
+            bridge.configure_delivery(
+                authorize_delivery=lambda action, payload: self.authorize_delivery(binding, action, payload),
+                telegram_api=lambda owner, method, payload, scope_id: self.telegram_api(binding, owner, method, payload, scope_id),
+                require_scope=True)
+        return bridge
+
+    def _account_bridge(self, profile):
+        """Закрепить единственный канал worker за стабильным владельцем UID."""
         uid = profile['uid']
         if uid not in self.bridges:
             async def prepare(event):
-                return await self.prepare(profile, event)
+                return await self.prepare({**profile, 'telegramId': str(event.source.user_id)}, event)
             async def deliver(owner, action, payload):
                 return await self.deliver(profile, owner, action, payload)
             async def started(turn_id):
@@ -186,20 +219,34 @@ class Resolver:
                 current['workerTurnId'] = turn_id
             async def ended(turn_id):
                 await self.end(profile, turn_id)
-            bridge = Bridge(profile['userId'], profile['telegramId'], uid, profile['workerSocket'],
+            bridge = Bridge(profile['userId'], profile.get('authorTelegramId', profile['telegramId']), uid, profile['workerSocket'],
                             deliver, prepare, on_turn_start=started, on_turn_end=ended,
-                            authorize_delivery=lambda action, payload: self.authorize_delivery(profile, action, payload),
-                            telegram_api=lambda owner, method, payload, scope_id: self.telegram_api(profile, owner, method, payload, scope_id),
-                            require_scope=True)
+                            worker_telegram_id=profile.get('authorTelegramId', profile['telegramId']))
+            bridge.profile_id = profile.get('profileId')
             self.bridges[uid] = bridge
         bridge = self.bridges[uid]
-        if (bridge.owner != profile['userId'] or bridge.telegram_id != str(profile['telegramId'])
-                or bridge.worker_uid != uid or bridge.socket_path != profile['workerSocket']):
+        if (bridge.owner != profile['userId'] or bridge.profile_id != profile.get('profileId')
+                or bridge.worker_uid != uid or bridge.socket_path != profile['workerSocket']
+                or bridge.worker_telegram_id != str(profile.get('authorTelegramId', profile['telegramId']))):
             raise PermissionError('Worker identity changed')
+        bridge.telegram_ids.add(str(profile['telegramId']))
         return bridge
 
+    async def _account(self, profile, telegram_id):
+        """Проверить фактический канал через Auth, сохранив стабильного автора."""
+        if not re.fullmatch(r'[1-9][0-9]{0,19}', str(telegram_id)):
+            raise PermissionError('Only private Telegram chats are supported')
+        active = await broker_call('identity.resolve', {'telegramId': str(telegram_id)})
+        if (str(active['telegramId']) != str(telegram_id)
+                or self.ledger.owner(active) != self.ledger.owner(profile)):
+            raise PermissionError('Owner binding changed')
+        return active
+
     async def prepare(self, profile, event):
-        """Скопировать media в личный профиль и исключить общий reply-контекст."""
+        """Допустить только личный чат владельца и скопировать его media в профиль."""
+        if (getattr(event.source, 'chat_type', '') != 'dm'
+                or str(event.source.chat_id) != str(profile['telegramId'])):
+            raise PermissionError('Only private Telegram chats are supported')
         uid = profile['uid']
         route = (str(event.source.chat_id), str(event.source.thread_id or ''))
         turn = self.turns.get(uid)
@@ -219,8 +266,13 @@ class Resolver:
                              for item in inputs]}
         input_id = hashlib.sha256(json.dumps(origin, ensure_ascii=False, sort_keys=True,
                                             separators=(',', ':')).encode()).hexdigest()
-        await broker_call('ingress.admit', {'inputId': input_id, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
+        unlink = re.fullmatch(r'подтверждаю отвязку telegram-аккаунта ([1-9][0-9]{0,19})',
+                              (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!'))
+        await broker_call('ingress.admit', {'inputId': input_id, 'messageId': str(event.message_id), 'expectedUid': uid, 'telegramId': str(profile['telegramId']), 'chatId': route[0],
             'privateChat': getattr(event.source, 'chat_type', '') == 'dm', 'turnId': turn['id'],
+            'unlinkConsent': unlink[1] if unlink else '',
+            'linkConsent': (getattr(event, 'text', '') or '').strip().casefold().rstrip('.!') in
+                ('подтверждаю привязку моего второго аккаунта',),
             **({'threadId': int(route[1])} if route[1] else {})})
         self.ledger.admit(profile, route, turn['metadata'], str(event.message_id))
         fields = ('text', 'user_name', 'message_id', 'media_urls', 'media_types',
@@ -254,7 +306,7 @@ class Resolver:
         route = (str(payload.get('chat_id') or ''),
                  str(metadata.get('thread_id') or metadata.get('message_thread_id') or ''))
         known = self.ledger.metadata(profile, route)
-        if known is None and route != (str(profile['telegramId']), ''):
+        if known is None and (route[1] or not re.fullmatch(r'[1-9][0-9]{0,19}', route[0])):
             raise PermissionError('Unknown owner conversation')
         if payload.get('reply_to') and not self.ledger.owns(profile, route, payload['reply_to']):
             raise PermissionError('Unauthorized owner reply')
@@ -264,35 +316,41 @@ class Resolver:
 
     async def delivery_context(self, profile, owner, payload):
         """Различить native turn, callback и намеренную фоновую доставку."""
-        if owner != profile['userId']:
-            raise PermissionError('Owner mismatch')
         scope_id = request_scope.get()
         turn = self.turns.get(profile['uid'])
-        supplied = payload.get('metadata') or {}
-        if not isinstance(supplied, dict):
+        if not isinstance(payload.get('metadata') or {}, dict):
             raise ValueError('Invalid metadata')
+        if scope_id is not UNSCOPED and not (turn is not None and scope_id == turn['id']):
+            return await self._background_delivery_context(profile, owner, payload, scope_id)
+        uid = profile['uid']
+        if owner != profile['userId'] or uid not in self.turns:
+            raise PermissionError('No active owner turn')
+        metadata = payload.get('metadata') or {}
+        route = (str(payload.get('chat_id') or ''),
+                 str(metadata.get('thread_id') or metadata.get('message_thread_id') or ''))
+        if route != self.turns[uid]['route']:
+            raise PermissionError('Delivery outside current conversation')
+        state = await broker_call('ingress.status', {'uid': uid, 'turnId': self.turns[uid]['id']})
+        metadata = dict(turn.get('metadata') or ({'thread_id': route[1]} if route[1] else {}))
+        def current():
+            if self.turns.get(uid) is not turn:
+                raise PermissionError('Owner turn changed')
+        current()
+        return route, metadata, turn, current, bool(state.get('suppressFinal'))
+
+    async def _background_delivery_context(self, profile, owner, payload, scope_id):
+        """Проверить callback/proactive маршрут без истекающего native хода."""
+        if owner != profile['userId']:
+            raise PermissionError('Owner mismatch')
+        supplied = payload.get('metadata') or {}
         route = (str(payload.get('chat_id') or ''),
                  str(supplied.get('thread_id') or supplied.get('message_thread_id') or ''))
-        if scope_id is UNSCOPED or turn is not None and scope_id == turn['id']:
-            if turn is None:
-                raise PermissionError('No active owner turn')
-            if route != turn['route']:
-                raise PermissionError('Not the active conversation')
-            metadata = dict(turn.get('metadata') or ({'thread_id': route[1]} if route[1] else {}))
-            def current():
-                if self.turns.get(profile['uid']) is not turn:
-                    raise PermissionError('Owner turn changed')
-            state = await broker_call('ingress.status', {'uid': profile['uid'], 'turnId': turn['id']})
-            current()
-            return route, metadata, turn, current, bool(state.get('suppressFinal'))
         grant = self.interactive_scopes.get(scope_id) if isinstance(scope_id, str) else None
         if scope_id is not None and (not grant or grant['owner'] != self.ledger.owner(profile)
                 or grant['expires'] <= time.monotonic() or grant['route'] != route):
             raise PermissionError('Expired or foreign delivery scope')
         checked_route, metadata = self.authorize_delivery(profile, 'send', payload)
-        active = await broker_call('identity.resolve', {'telegramId': str(profile['telegramId'])})
-        if self.ledger.owner(active) != self.ledger.owner(profile):
-            raise PermissionError('Owner binding changed')
+        await self._account(profile, route[0])
         def current():
             if grant is not None and (self.interactive_scopes.get(scope_id) is not grant
                     or grant['expires'] <= time.monotonic()):
@@ -301,16 +359,16 @@ class Resolver:
 
     async def deliver(self, profile, owner, action, payload):
         """Доставить только проверенные сообщения и артефакты текущего владельца и маршрута."""
-        uid = profile['uid']
         route, metadata, turn, current, suppress = await self.delivery_context(profile, owner, payload)
         if suppress:
             return {'success': True}
         if action == 'send_draft':
-            if route[0] != str(profile['telegramId']):
+            if not re.fullmatch(r'[1-9][0-9]{0,19}', route[0]):
                 raise PermissionError('Drafts require owner private chat')
             supports = getattr(self.adapter, 'supports_draft_streaming', None)
             if not callable(supports) or not supports('dm', metadata):
                 return {'success': False, 'error': 'Draft transport unavailable'}
+        uid = profile['uid']
         file_actions = ('send_image_file', 'send_document', 'send_video', 'send_voice', 'send_animation')
         if action == 'send_file_set' or action in file_actions:
             from files.native import telegram_sender, validate_telegram, presentation
@@ -387,7 +445,6 @@ class Resolver:
         telegram = str(getattr(user, 'id', '') or '')
         if not re.fullmatch(r'[1-9][0-9]{0,19}', telegram) or getattr(user, 'is_bot', True):
             raise PermissionError('Invalid interactive sender')
-        profile = await broker_call('identity.resolve', {'telegramId': telegram})
         query = getattr(update, 'callback_query', None)
         inline = getattr(update, 'inline_query', None)
         if query is not None and inline is None:
@@ -395,7 +452,11 @@ class Resolver:
             if (message is None or getattr(message, 'sender_chat', None)
                     or getattr(message, 'business_connection_id', None)):
                 raise PermissionError('Invalid callback message')
-            chat = str(getattr(getattr(message, 'chat', None), 'id', '') or '')
+            chat_info = getattr(message, 'chat', None)
+            chat = str(getattr(chat_info, 'id', '') or '')
+            if getattr(chat_info, 'type', None) != 'private' or chat != telegram:
+                raise PermissionError('Only private Telegram callbacks are supported')
+            profile = await broker_call('identity.resolve', {'telegramId': telegram})
             resolve_thread = getattr(self.adapter, '_effective_message_thread_id', None)
             thread = resolve_thread(message) if callable(resolve_thread) else getattr(message, 'message_thread_id', None)
             route = (chat, str(thread or ''))
@@ -404,6 +465,7 @@ class Resolver:
             query_id = str(getattr(query, 'id', '') or '')
             kind = 'callback'
         elif inline is not None and query is None:
+            profile = await broker_call('identity.resolve', {'telegramId': telegram})
             route = (telegram, '')
             query_id = str(getattr(inline, 'id', '') or '')
             kind = 'inline'
@@ -428,12 +490,14 @@ class Resolver:
             raise PermissionError('Too many interactive scopes')
         scope_id = uuid.uuid4().hex
         self.interactive_scopes[scope_id] = {'owner': self.ledger.owner(profile),
-            'route': route, 'queryId': query_id, 'kind': kind, 'expires': now + 300}
+            'route': route, 'actorTelegramId': str(profile['telegramId']),
+            'queryId': query_id, 'kind': kind, 'expires': now + 300}
         from types import SimpleNamespace
         bridge = await self(SimpleNamespace(user_id=str(profile['telegramId'])))
         peer = await bridge.connect()
         result = await peer.call('interactive', {'update': update.to_dict(),
-                                'owner': profile['userId'], 'scope_id': scope_id})
+                                'owner': profile['userId'], 'scope_id': scope_id,
+                                'actor_telegram_id': str(profile['telegramId'])})
         if not isinstance(result, dict) or result.get('accepted') is not True:
             raise PermissionError('Interactive dispatch unconfirmed')
         return result
@@ -468,9 +532,7 @@ class Resolver:
             if (not grant or grant['owner'] != self.ledger.owner(profile) or grant['kind'] != kind
                     or grant['expires'] <= time.monotonic() or values.get(key) != grant['queryId']):
                 raise PermissionError('Foreign interactive query')
-            active = await broker_call('identity.resolve', {'telegramId': str(profile['telegramId'])})
-            if self.ledger.owner(active) != self.ledger.owner(profile):
-                raise PermissionError('Owner binding changed')
+            await self._account(profile, grant.get('actorTelegramId', grant['route'][0]))
             if kind == 'inline':
                 values['is_personal'] = True
                 values['cache_time'] = 0

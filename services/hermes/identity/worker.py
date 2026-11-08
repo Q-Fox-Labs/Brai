@@ -6,6 +6,7 @@ import asyncio
 import errno
 import json
 import os
+import re
 import signal
 import socket
 import stat
@@ -113,7 +114,7 @@ class Worker:
             and not source.is_bot)
         self.runner._make_adapter_auth_check = lambda platform, profile_name=None: (
             lambda user_id, *args, **kwargs: platform == Platform.TELEGRAM
-            and str(user_id) == self.telegram_id)
+            and (str(user_id) == self.telegram_id or self.adapter.is_interactive_actor(user_id)))
         # AIDEV-NOTE: Native сохраняет wiring/connect/recovery. Подменяется только transport.
         def adapter_factory(platform, platform_config):
             if platform != Platform.TELEGRAM or peer.closed:
@@ -208,16 +209,17 @@ class Worker:
         return {'ready': True, 'operational': self.operational.is_set(),
                 'userId': self.user_id, 'telegramId': self.telegram_id}
 
-    async def interactive(self, update, owner, scope_id):
+    async def interactive(self, update, owner, scope_id, actor_telegram_id):
         """Передать проверенное интерактивное событие owner-bound адаптеру."""
         if (owner != self.user_id or not isinstance(update, dict)
-                or not isinstance(scope_id, str) or not 1 <= len(scope_id) <= 128):
+                or not isinstance(scope_id, str) or not 1 <= len(scope_id) <= 128
+                or not isinstance(actor_telegram_id, str) or not re.fullmatch(r'[1-9][0-9]{0,19}', actor_telegram_id)):
             raise RpcError(-32602, 'Invalid interactive event')
         await self.ensure_tools()
         from .scope import delivery_scope
         token = delivery_scope.set(scope_id)
         try:
-            await self.adapter.handle_interactive(update, telegram_id=self.telegram_id)
+            await self.adapter.handle_interactive(update, telegram_id=actor_telegram_id)
             return {'accepted': True}
         finally:
             delivery_scope.reset(token)

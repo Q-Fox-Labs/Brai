@@ -55,7 +55,7 @@
     },
     {
       "name": "identity.resolve",
-      "description": "Trusted ingress-only Telegram identity → active UID/profile; never available to workers.",
+      "description": "Только trusted ingress. telegramId в результате — фактический связанный аккаунт запроса; authorTelegramId — стабильный автор UID-профиля. Отвязанный аккаунт не проходит свежий Auth.",
       "paramStructure": "by-name",
       "params": [
         {
@@ -200,6 +200,41 @@
             "minimum": 1,
             "maximum": 9007199254740991,
             "description": "Тема исходного личного Telegram запроса; задаётся только доверенным ingress."
+          }
+        },
+        {
+          "name": "linkConsent",
+          "required": false,
+          "description": "Computed only from the trusted new user message; never accepted from the model. Broker requires a pending delivered warning for that account and topic.",
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "name": "expectedUid",
+          "required": false,
+          "description": "Trusted ingress pins the resolved worker UID before admission; alias rebinding must fail before reserving another owner turn.",
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "unlinkConsent",
+          "required": false,
+          "description": "Exact account ID parsed from the trusted new user confirmation, never supplied by worker/model.",
+          "schema": {
+            "type": "string",
+            "pattern": "^([1-9][0-9]{0,19})?$"
+          }
+        },
+        {
+          "name": "messageId",
+          "required": false,
+          "description": "Trusted original Telegram message ID. Confirmation requires a strictly later message than the delivered offer; editing an old message cannot confirm.",
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
           }
         }
       ],
@@ -527,6 +562,100 @@
         "name": "result",
         "schema": {
           "type": "object"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "ingress.profiles",
+      "paramStructure": "by-name",
+      "description": "Only trusted ingress UID; returns active registry profiles after fresh Auth authorization, without transcripts or credentials. Used for persistent worker supervision.",
+      "params": [],
+      "result": {
+        "name": "profiles",
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "profiles"
+          ],
+          "properties": {
+            "profiles": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "uid",
+                  "userId",
+                  "profileId",
+                  "telegramId",
+                  "status",
+                  "home"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "ingress.delivery-artifact",
+      "description": "Только trusted ingress. Свежий Auth проверяет стабильного владельца UID; выдача owner-bound bytes для отдельно проверенного маршрута proactive/UI доставки, без требования входящего turn.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        {
+          "name": "artifactId",
+          "required": true,
+          "schema": {
+            "$ref": "../trusted.openrpc.json#/components/schemas/Uuid"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../trusted.openrpc.json#/components/schemas/FileResult"
         }
       },
       "errors": [
@@ -945,34 +1074,155 @@
       ]
     },
     {
-      "name": "ingress.profiles",
+      "name": "identity.link-redeem",
+      "description": "Trusted ingress only. Personal Telegram account linking; never available to the model. No automatic mutation retry.",
       "paramStructure": "by-name",
-      "description": "Only trusted ingress UID; returns active registry profiles after fresh Auth authorization, without transcripts or credentials. Used for persistent worker supervision.",
+      "params": [
+        {
+          "name": "telegramId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[1-9][0-9]{0,19}$"
+          }
+        },
+        {
+          "name": "code",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{43}$"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/TelegramResolveResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "telegram.link",
+      "description": "Agent account-link workflow. First send the full warning; require a new trusted confirmation in the same private account before command issuance. Secrets never enter worker. Unknown delivery is not retried.",
+      "paramStructure": "by-name",
       "params": [],
       "result": {
-        "name": "profiles",
+        "name": "result",
         "schema": {
           "type": "object",
-          "additionalProperties": false,
           "required": [
-            "profiles"
+            "status",
+            "phase",
+            "suppressFinal"
           ],
           "properties": {
-            "profiles": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "required": [
-                  "uid",
-                  "userId",
-                  "profileId",
-                  "telegramId",
-                  "status",
-                  "home"
-                ]
-              }
+            "status": {
+              "enum": [
+                "sent",
+                "failed",
+                "unknown"
+              ]
+            },
+            "phase": {
+              "enum": [
+                "offer",
+                "command"
+              ]
+            },
+            "suppressFinal": {
+              "type": "boolean"
             }
+          },
+          "additionalProperties": false
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/ParseError"
+        },
+        {
+          "$ref": "#/components/errors/InvalidRequest"
+        },
+        {
+          "$ref": "#/components/errors/MethodNotFound"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        },
+        {
+          "$ref": "#/components/errors/Unavailable"
+        }
+      ]
+    },
+    {
+      "name": "telegram.unlink",
+      "description": "Agent-only unlink workflow. Fresh delivered warning and new trusted confirmation pin the exact account and origin for five minutes. Equal accounts; admin retains at least one contact channel, other users may remove all. No automatic mutation retry.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "target",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "current",
+              "other"
+            ]
           }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "status",
+            "phase",
+            "suppressFinal"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "sent",
+                "failed",
+                "unknown"
+              ]
+            },
+            "phase": {
+              "enum": [
+                "offer",
+                "confirm"
+              ]
+            },
+            "suppressFinal": {
+              "type": "boolean"
+            },
+            "reason": {
+              "enum": [
+                "admin-last-channel",
+                "account-unavailable"
+              ]
+            }
+          },
+          "additionalProperties": false
         }
       },
       "errors": [

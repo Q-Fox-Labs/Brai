@@ -13,7 +13,7 @@ function setup(overrides = {}) {
     calls.push(op);
     if (op === 'session') return { status: 200, body: { user: { id: 'admin', role: 'admin', status: 'active' }, session: {} } };
     if (op === 'admin-audit') return { status: 200 };
-    if (op === 'telegram-resolve') return { user: { id: 'u1', profileId: 'p1', telegramId: '42', status: 'active' } };
+    if (op === 'telegram-resolve' || op === 'identity-get') return { user: { id: 'u1', profileId: 'p1', telegramId: '42', status: 'active' } };
     if (op === 'telegram-code-issue') return { code: '123456789ABC', origin: 'https://brai.example', expiresAt: 'later' };
   };
   const control = new Control({ origin: headers.origin, cursorKey: 'x'.repeat(32), registry, authCall,
@@ -31,6 +31,44 @@ test('audit precedes read and cursor is bound to target', async () => {
   assert.notEqual(bad.status, 200);
 });
 
+test('fresh role reaches each private runtime and history after canonical Telegram unlink', async () => {
+  const roles = [];
+  let role = 'admin';
+  const owner = { userId: 'u1', profileId: 'p1', telegramId: '42', status: 'active' };
+  const registry = async () => ({ version: 1, profiles: { '1001': owner } });
+  const authCall = async (method, args) => {
+    assert.equal(method, 'identity-get');
+    assert.deepEqual(args, { userId: 'u1' });
+    return { user: { id: 'u1', profileId: 'p1', telegramId: '42', status: 'active', role },
+             telegramIds: ['84'] };
+  };
+  const catalog = [{ name: 'timer_snapshot_get' }, { name: 'history_categories_list' },
+                   { name: 'transcription_settings_set' }];
+  const control = new Control({ origin: 'https://example.test', cursorKey: 'x'.repeat(32),
+    registry, authCall,
+    perUserRuntime: async profile => {
+      roles.push(profile.role);
+      return { listTools: async () => catalog, callTool: async () => ({ ok: true }),
+               filesConfiguration: async () => ({ ownerId: profile.userId }) };
+    },
+    historyCall: async (profile, name) => {
+      assert.equal(profile.role, role);
+      assert.equal(profile.telegramId, '42');
+      return { name };
+    } });
+  const { privateCall } = await import('../control.mjs');
+  const runtime = { control, registry, authCall };
+  await control.invokeTool(1001, 'timer_snapshot_get', {});
+  await control.invokeTool(1001, 'history_categories_list', {});
+  assert.equal((await privateCall(runtime, 'tools.list', { uid: 1001 })).tools.length, 3);
+  await privateCall(runtime, 'files.configuration', { uid: 1001 });
+  role = 'user';
+  const listed = await privateCall(runtime, 'tools.list', { uid: 1001 });
+  assert.equal(listed.tools.some(tool => tool.name === 'transcription_settings_set'), false);
+  await assert.rejects(control.invokeTool(1001, 'transcription_settings_set', {}), /FORBIDDEN/);
+  assert.deepEqual(roles, ['admin', 'admin', 'admin', 'admin', 'user', 'user']);
+});
+
 test('denied session or audit does not read', async () => {
   let read = false;
   const { control } = setup({ authCall: async op => op === 'session' ? { status: 200, body: { user: { role: 'user', status: 'active' }, session: {} } } : { status: 200 }, memoryRead: async () => { read = true; } });
@@ -45,6 +83,37 @@ test('login sends only to bound private owner and returns no secret', async () =
   assert.deepEqual(await control.sendLogin({ uid: 1001, telegramId: '42', privateChat: true, requestId: 'r' }), { status: 'sent' });
   assert.equal(calls[2].telegramId, '42');
   assert.match(calls[2].message, /123456789ABC/);
+});
+
+test('linked account receives its own login code after Auth confirms canonical owner', async () => {
+  const { control, calls } = setup();
+  assert.deepEqual(await control.sendLogin({ uid: 1001, telegramId: '84', privateChat: true, requestId: 'alias' }), { status: 'sent' });
+  assert.equal(calls[2].telegramId, '84');
+  const foreign = setup({ authCall: async () => ({ user: { id: 'other', profileId: 'other', telegramId: '84', status: 'active' } }) });
+  assert.deepEqual(await foreign.control.sendLogin({ uid: 1001, telegramId: '84', privateChat: true, requestId: 'foreign' }), { status: 'denied' });
+  assert.equal(foreign.calls.length, 0);
+});
+
+test('account link warning precedes issue and secret is delivered only to source account', async () => {
+  const calls = [], delivered = [], secret = 'a'.repeat(43);
+  const authCall = async (operation, input) => {
+    calls.push(operation);
+    if (operation === 'telegram-resolve') return { user: { id: 'u1', profileId: 'p1', telegramId: '42', status: 'active' } };
+    if (operation === 'telegram-link-issue') return { code: secret, expiresAt: 'later' };
+  };
+  const { control } = setup({ authCall, telegramSend: async value => { delivered.push(value); return { ok: true }; } });
+  const input = { uid: 1001, telegramId: '84', threadId: 7 };
+  assert.deepEqual(await control.sendAccountLink({ ...input, phase: 'offer' }), { status: 'sent' });
+  assert.deepEqual(calls, ['telegram-resolve']);
+  assert.match(delivered[0].message, /всей вашей памяти/);
+  assert.match(delivered[0].message, /другому человеку/);
+  assert.match(delivered[0].message, /Подтверждаете/);
+  const result = await control.sendAccountLink({ ...input, phase: 'command' });
+  assert.deepEqual(result, { status: 'sent' });
+  assert.equal(JSON.stringify(result).includes(secret), false);
+  assert.equal(delivered[1].telegramId, '84');
+  assert.equal(delivered[1].threadId, 7);
+  assert.match(delivered[1].message, new RegExp('/start link_' + secret));
 });
 
 test('login preserves trusted DM topic and rejects invalid topics before issuing a code', async () => {
@@ -204,4 +273,45 @@ test('archive requires active admin, successful audit and complete protected con
   assert.equal(reads, 0);
   await assert.rejects(missingConfig.invokeTool(995, 'timer_snapshot_get', {}), /FORBIDDEN/);
   assert.deepEqual(await missingConfig.sendLogin({ uid: 995, telegramId: '42', privateChat: true, requestId: 'r' }), { status: 'denied' });
+});
+
+test('unlink warning pins first account, removes it only on confirmed call and blocks admin last channel', async () => {
+  const delivered = [], calls = [];
+  let accounts = ['42','84'], role = 'user';
+  const user = () => ({ id:'u1', profileId:'p1', telegramId:'42', status:'active', role });
+  const authCall = async (op, input) => {
+    calls.push([op,input]);
+    if (op === 'telegram-resolve') return {user:accounts.includes(input.telegramId) ? user() : null};
+    if (op === 'identity-get') return {user:user(),telegramIds:[...accounts]};
+    if (op === 'telegram-unlink') { accounts = accounts.filter(id=>id!==input.targetTelegramId); return {unlinked:true}; }
+  };
+  const {control} = setup({authCall,telegramSend:async value=>{delivered.push(value);return {ok:true};}});
+  const input = {uid:1001,telegramId:'84',target:'other'};
+  assert.deepEqual(await control.sendAccountUnlink({...input,phase:'offer'}), {status:'sent',targetTelegramId:'42'});
+  assert.match(delivered[0].message,/Подтверждаю отвязку Telegram-аккаунта 42/);
+  assert.equal(calls.some(([op])=>op==='telegram-unlink'),false);
+  assert.equal((await control.sendAccountUnlink({...input,phase:'confirm',targetTelegramId:'42'})).status,'sent');
+  assert.deepEqual(accounts,['84']);
+  assert.deepEqual(await control.invokeTool(1001,'timer_snapshot_get',{}).catch(error=>error.message),'SOURCE_UNAVAILABLE');
+  role = 'admin';
+  assert.deepEqual(await control.sendAccountUnlink({...input,target:'current',phase:'offer'}),{status:'denied',reason:'admin-last-channel'});
+  role = 'user';
+  assert.equal((await control.sendAccountUnlink({...input,target:'current',phase:'offer'})).status,'sent');
+  assert.match(delivered.at(-1).message,/последний подключённый канал/);
+  assert.equal((await control.sendAccountUnlink({...input,target:'current',phase:'confirm',targetTelegramId:'84'})).status,'sent');
+  assert.deepEqual(accounts,[]);
+  assert.equal((await control.sendAccountUnlink({...input,target:'current',phase:'offer'})).status,'denied');
+});
+
+test('authorization uses stable owner even after the original Telegram account is disconnected', async () => {
+  const {privateCall} = await import('../control.mjs');
+  const calls = [];
+  const runtime = {control:{},registry,authCall:async (op,input)=>{
+    calls.push([op,input]);
+    return op==='identity-get' ? {user:{id:'u1',profileId:'p1',telegramId:'42',status:'active',role:'user'},telegramIds:['84']} : {user:null};
+  }};
+  assert.equal((await privateCall(runtime,'authorize',{uid:1001})).active,true);
+  assert.deepEqual(calls,[['identity-get',{userId:'u1'}]]);
+  const direct = await privateCall(runtime,'identity.unlink',{telegramId:'84'}).catch(error=>error.message);
+  assert.equal(direct,'METHOD_NOT_FOUND');
 });
