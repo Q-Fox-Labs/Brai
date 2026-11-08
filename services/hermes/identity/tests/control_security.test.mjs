@@ -135,3 +135,25 @@ test('revalidation reports a confirmed role change', async () => {
   assert.equal((await handlePrivateRpc(runtime, req)).result.role, 'user');
   assert.deepEqual(changes, [{ userId: 'u1', profileId: 'p1', status: 'active', role: 'user' }]);
 });
+
+test('prepared restore exposes only its own bootstrap configuration', async () => {
+  const bound = { userId: 'restore-user', profileId: 'restore-profile', telegramId: '123', status: 'provisioning' };
+  let status = 'provisioning', bootstraps = 0;
+  const runtime = {
+    registry: async () => ({ version: 1, profiles: { '1001': bound } }),
+    authCall: async () => ({ user: { id: bound.userId, profileId: bound.profileId, telegramId: bound.telegramId, status, role: 'user' } }),
+    control: { bootstrapFilesConfiguration: async candidate => {
+      assert.equal(candidate.userId, bound.userId);
+      assert.equal(candidate.profileId, bound.profileId);
+      assert.equal(candidate.status, 'provisioning');
+      bootstraps++;
+      return { ownerId: bound.userId };
+    } },
+  };
+  const call = method => handlePrivateRpc(runtime, { jsonrpc: '2.0', id: 1, method, params: { uid: 1001 } });
+  assert.deepEqual((await call('files.configuration')).result, { ownerId: bound.userId });
+  assert.ok((await call('tools.list')).error);
+  status = 'blocked'; bound.status = 'blocked';
+  assert.ok((await call('files.configuration')).error);
+  assert.equal(bootstraps, 1);
+});

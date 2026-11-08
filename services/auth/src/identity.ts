@@ -2,7 +2,9 @@
 // ABOUTME: Доверенный запрос не может создать первого администратора по сети.
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { authLimit } from "./login-code.js";
-import type { Pool, PoolClient } from "pg";
+import type { Pool } from "pg";
+import { insertIdentity } from "./identity-record.js";
+import { lifecycleLock, requestLifecycle } from "./lifecycle.js";
 import type { IdentityUser, ProvisionRequest } from "./identity-types.js";
 
 const selectUser=`SELECT u.id,u.name,i.role,i.status,i.telegram_id AS "telegramId",i.profile_id AS "profileId"
@@ -25,7 +27,7 @@ export async function provision(pool:Pool,secret:string,input:ProvisionRequest):
  const fingerprint=createHmac("sha256",secret).update(JSON.stringify(canonical)).digest("hex");
  try {
   await client.query("BEGIN");
-  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('brai-identity-provision',0))");
+  await lifecycleLock(client);
   const previous=await client.query(`SELECT r.fingerprint,${selectUser.slice(7)} JOIN brai_identity_request r ON r.user_id=i.user_id WHERE r.request_id=$1`,[input.requestId]);
   if(previous.rowCount){if(previous.rows[0].fingerprint!==fingerprint)throw new Error("Request conflict");const {fingerprint:_,...user}=previous.rows[0];await client.query("COMMIT");return user;}
   if(input.role==='admin') {const admins=await client.query("SELECT 1 FROM brai_identity WHERE role='admin' AND status='active' LIMIT 1");if(!admins.rowCount)throw new Error("Owner bootstrap required");}
@@ -47,8 +49,11 @@ export async function profileReady(pool:Pool,userId:string,profileId:string):Pro
  const client=await pool.connect();
  try{
   await client.query("BEGIN");
+  await lifecycleLock(client);
+  const managed=await client.query("SELECT state FROM brai_user_operation WHERE user_id=$1 ORDER BY generation DESC LIMIT 1",[userId]);
   const current=await client.query("SELECT profile_id,status FROM brai_identity WHERE user_id=$1 FOR UPDATE",[userId]);
-  if(!current.rowCount||current.rows[0].status==="blocked"||(current.rows[0].profile_id&&current.rows[0].profile_id!==profileId)){await client.query("COMMIT");return null;}
+  if(!current.rowCount||(managed.rowCount&&(current.rows[0].status!=="active"||managed.rows[0].state!=="succeeded"))||current.rows[0].status==="blocked"||(current.rows[0].profile_id&&current.rows[0].profile_id!==profileId)){await client.query("COMMIT");return null;}
+  if(managed.rowCount){const result=await client.query(selectUser+" WHERE i.user_id=$1",[userId]);await client.query("COMMIT");return result.rows[0]??null;}
   await client.query("UPDATE brai_identity SET profile_id=$2,status='active' WHERE user_id=$1",[userId,profileId]);
   const result=await client.query(selectUser+" WHERE i.user_id=$1",[userId]);
   await client.query("COMMIT");return result.rows[0]??null;
@@ -59,7 +64,7 @@ export async function redeemInvite(pool:Pool,secret:string,telegramId:string,cod
  const client=await pool.connect(), digest=createHmac("sha256",secret).update("invite:"+code).digest("hex");
  try{
   await client.query("BEGIN");
-  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('brai-identity-provision',0))");
+  await lifecycleLock(client);
   const invite=await client.query("SELECT id,consumed_by,revoked_at,expires_at FROM brai_invite WHERE digest=$1 FOR UPDATE",[digest]);
   if(!invite.rowCount||invite.rows[0].revoked_at){await client.query("COMMIT");return null;}
   const existing=await client.query(selectUser+" JOIN sys_telegram_account a ON a.user_id=i.user_id WHERE a.telegram_id=$1",[telegramId]);
@@ -73,9 +78,22 @@ export async function redeemInvite(pool:Pool,secret:string,telegramId:string,cod
    const refreshed:IdentityUser|undefined=current.rows[0];
    return refreshed&&refreshed.status!=='blocked'&&refreshed.profileId?refreshed:null;
   };
+  const queueProfile=async(user:IdentityUser):Promise<IdentityUser|null>=>{
+   if(user.status!=='provisioning')return user;
+   const latest=(await client.query('SELECT request_id,kind,state FROM brai_user_operation WHERE user_id=$1 ORDER BY generation DESC LIMIT 1',[user.id])).rows[0];
+   if(latest&&latest.kind==='prepare'&&['pending','running'].includes(latest.state))return user;
+   const prefix='invite:'+invite.rows[0].id+':';
+   // AIDEV-NOTE: Старое приглашение не отменяет terminal admin-решение или чужую ошибку.
+   if(latest&&!(latest.state==='failed'&&latest.request_id.startsWith(prefix)))return null;
+   const generation=(await client.query('SELECT lifecycle_generation FROM brai_identity WHERE user_id=$1',[user.id])).rows[0].lifecycle_generation+1;
+   const queued=await requestLifecycle(client,user.id,'invite-profile',{requestId:prefix+generation,userId:user.id});
+   if(queued.status!==200)throw new Error('Invite lifecycle unavailable');
+   return (await client.query(selectUser+' WHERE i.user_id=$1',[user.id])).rows[0]??null;
+  };
   if(invite.rows[0].consumed_by){
    const user=previous&&previous.id===invite.rows[0].consumed_by?await ensureProfile(previous):null;
-   await client.query("COMMIT");return user;
+   const queued=user?await queueProfile(user):null;
+   await client.query("COMMIT");return queued;
   }
   if((invite.rows[0].expires_at as Date).getTime()<=Date.now()){await client.query("COMMIT");return null;}
   let user=previous?await ensureProfile(previous):null;
@@ -86,7 +104,8 @@ export async function redeemInvite(pool:Pool,secret:string,telegramId:string,cod
    user=await insertIdentity(client,{id,name:userName,role:"user",status:"provisioning",telegramId,profileId});
   }
   await client.query("UPDATE brai_invite SET consumed_at=now(),consumed_by=$2 WHERE id=$1",[invite.rows[0].id,user.id]);
-  await client.query("COMMIT");return user;
+  const queued=await queueProfile(user);
+  await client.query("COMMIT");return queued;
  }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
 }
 
@@ -113,7 +132,7 @@ export async function redeemTelegramLink(pool:Pool,secret:string,telegramId:stri
  const client=await pool.connect(),digest=createHmac("sha256",secret).update("telegram-link:"+code).digest("hex");
  try {
   await client.query("BEGIN");
-  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('brai-identity-provision',0))");
+  await lifecycleLock(client);
   const global=await authLimit(client,secret,"telegram-link-redeem:global",300);
   const local=await authLimit(client,secret,`telegram-link-redeem:${telegramId}`,10);
   if(!global||!local){await client.query("COMMIT");return null;}
@@ -145,7 +164,7 @@ export async function unlinkTelegram(pool:Pool,telegramId:string,targetTelegramI
  const client=await pool.connect();
  try {
   await client.query("BEGIN");
-  await client.query("SELECT pg_advisory_xact_lock(hashtextextended('brai-identity-provision',0))");
+  await lifecycleLock(client);
   const found=await client.query(selectUser+" JOIN sys_telegram_account a ON a.user_id=i.user_id WHERE a.telegram_id=$1 AND i.status='active' FOR UPDATE OF i",[telegramId]);
   const user:IdentityUser|undefined=found.rows[0];
   if(!user){await client.query("COMMIT");return false;}
@@ -153,27 +172,14 @@ export async function unlinkTelegram(pool:Pool,telegramId:string,targetTelegramI
   // AIDEV-NOTE: Здесь учитываются все реализованные каналы связи; сейчас подключён только Telegram.
   if(!accounts.rows.some(row=>row.telegram_id===targetTelegramId)||(user.role==="admin"&&accounts.rows.length<=1)){await client.query("COMMIT");return false;}
   await client.query("DELETE FROM sys_telegram_account WHERE telegram_id=$1 AND user_id=$2",[targetTelegramId,user.id]);
+  // AIDEV-NOTE: Уже погашенный код не должен создать новую действующую сессию после отвязки.
+  await client.query("UPDATE brai_identity SET lifecycle_generation=lifecycle_generation+1 WHERE user_id=$1",[user.id]);
   await client.query('DELETE FROM "session" WHERE "userId"=$1',[user.id]);
   await client.query("DELETE FROM brai_login_code WHERE user_id=$1",[user.id]);
   await client.query("DELETE FROM sys_telegram_link WHERE user_id=$1",[user.id]);
   await client.query("INSERT INTO brai_identity_audit(id,actor_id,target_id,action) VALUES($1,$2,$2,'telegram-unlink')",[randomUUID(),user.id]);
   await client.query("COMMIT");return true;
  }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
-}
-
-/** Сохраняет автора памяти отдельно от повторно используемого внешнего аккаунта. Вызывается под provision-lock. */
-async function insertIdentity(client:PoolClient,user:IdentityUser&{telegramId:string}):Promise<IdentityUser> {
- const telegramId=user.telegramId;let author=telegramId;
- while((await client.query("SELECT 1 FROM brai_identity WHERE telegram_id=$1 UNION ALL SELECT 1 FROM sys_telegram_account WHERE telegram_id=$1",[author])).rowCount){
-  author="9"+randomBytes(8).readBigUInt64BE().toString().padStart(20,"0").slice(-19);
- }
- await client.query("INSERT INTO brai_identity(user_id,telegram_id,profile_id,role,status) VALUES($1,$2,$3,$4,$5)",[user.id,author,user.profileId,user.role,user.status]);
- if(author!==telegramId){
-  // AIDEV-NOTE: Триггер обслуживает первоначальную регистрацию; синтетический автор не является каналом доступа.
-  await client.query("DELETE FROM sys_telegram_account WHERE telegram_id=$1 AND user_id=$2",[author,user.id]);
-  await client.query("INSERT INTO sys_telegram_account(telegram_id,user_id) VALUES($1,$2)",[telegramId,user.id]);
- }
- return {...user,telegramId:author};
 }
 
 function asSyntheticEmail(id:string):string {

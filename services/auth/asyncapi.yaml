@@ -243,6 +243,60 @@ channels:
       request:
         payload:
           $ref: "./schemas/messages.schema.json#/definitions/AdminAuditRequest"
+  usersAdd:
+    address: brai.auth.v2.users-add
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminAddRequest"
+  usersRevoke:
+    address: brai.auth.v2.users-revoke
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminRevokeRequest"
+  usersOperationGet:
+    address: brai.auth.v2.users-operation-get
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/AdminOperationRequest"
+  lifecycleClaim:
+    address: brai.auth.v2.lifecycle-claim
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/LifecycleClaimRequest"
+  lifecycleRenew:
+    address: brai.auth.v2.lifecycle-renew
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/LifecycleRenewRequest"
+  lifecycleComplete:
+    address: brai.auth.v2.lifecycle-complete
+    bindings:
+      nats:
+        bindingVersion: "0.1.0"
+    messages:
+      request:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/LifecycleCompleteRequest"
   v2Replies:
     address: null
     messages:
@@ -255,6 +309,15 @@ channels:
       unlinked:
         payload:
           $ref: "./schemas/messages.schema.json#/definitions/TelegramUnlinkResponse"
+      lifecycleClaim:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/LifecycleClaimResponse"
+      lifecycleRenew:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/LifecycleAcceptedResponse"
+      lifecycleComplete:
+        payload:
+          $ref: "./schemas/messages.schema.json#/definitions/LifecycleCompleteResponse"
       identity:
         payload:
           $ref: "./schemas/messages.schema.json#/definitions/TelegramResolveResponse"
@@ -596,6 +659,84 @@ operations:
         $ref: "#/channels/v2Replies"
       messages:
         - $ref: "#/channels/v2Replies/messages/web"
+  usersAdd:
+    action: receive
+    channel:
+      $ref: "#/channels/usersAdd"
+    messages:
+      - $ref: "#/channels/usersAdd/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  usersRevoke:
+    action: receive
+    channel:
+      $ref: "#/channels/usersRevoke"
+    messages:
+      - $ref: "#/channels/usersRevoke/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  usersOperationGet:
+    action: receive
+    channel:
+      $ref: "#/channels/usersOperationGet"
+    messages:
+      - $ref: "#/channels/usersOperationGet/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/web"
+  lifecycleClaim:
+    action: receive
+    channel:
+      $ref: "#/channels/lifecycleClaim"
+    messages:
+      - $ref: "#/channels/lifecycleClaim/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/lifecycleClaim"
+  lifecycleRenew:
+    action: receive
+    channel:
+      $ref: "#/channels/lifecycleRenew"
+    messages:
+      - $ref: "#/channels/lifecycleRenew/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/lifecycleRenew"
+  lifecycleComplete:
+    action: receive
+    channel:
+      $ref: "#/channels/lifecycleComplete"
+    messages:
+      - $ref: "#/channels/lifecycleComplete/messages/request"
+    reply:
+      address:
+        location: "$message.header#/replyTo"
+      channel:
+        $ref: "#/channels/v2Replies"
+      messages:
+        - $ref: "#/channels/v2Replies/messages/lifecycleComplete"
 components:
   messages:
     SendCodeRequest:

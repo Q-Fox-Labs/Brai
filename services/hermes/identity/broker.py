@@ -17,6 +17,7 @@ import time
 import uuid
 
 from .memory_registry import load_registry
+from .lifecycle import LifecycleRunner
 try:
     from ..files.identity import OwnerFiles
 except ImportError:
@@ -276,23 +277,26 @@ class Broker:
         if method == 'identity.invite-redeem' and ingress:
             if set(params) - {'telegramId', 'code', 'name'}:
                 raise ValueError('Invalid invitation')
+            if not self.config.get('accessCommand'):
+                raise PermissionError('Provisioning unavailable')
             lock = self.locks.setdefault(str(params.get('telegramId')), asyncio.Lock())
             async with lock:
                 result = await self.control.call(method, params)
                 user = result.get('user')
-                if not isinstance(user, dict) or user.get('status') != 'provisioning':
+                if not isinstance(user, dict) or user.get('status') not in ('provisioning', 'active'):
                     raise PermissionError('Invitation unavailable')
-                command = self.config.get('provisionCommand')
-                if not isinstance(command, list) or not command or not Path(command[0]).is_absolute():
-                    raise PermissionError('Provisioning unavailable')
-                child = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-                    env={'PATH': '/usr/local/bin:/usr/bin:/bin'})
-                await asyncio.wait_for(child.communicate(json.dumps({'user': user}).encode()), 180)
-                if child.returncode != 0:
-                    raise PermissionError('Provisioning failed')
-                await self.control.call('identity.profile-ready', {'userId': user['id'], 'profileId': user['profileId']})
-                return await self.resolve(str(params['telegramId']))
+                # AIDEV-NOTE: Приглашение использует ту же постоянную очередь Auth.
+                # Прямой subprocess после ожидания lock мог запускать уже отозванный профиль.
+                for _ in range(90):
+                    current = (await self.control.call('identity.resolve', {
+                        'telegramId': str(params['telegramId'])})).get('user')
+                    if (not isinstance(current, dict) or current.get('id') != user['id']
+                            or current.get('status') == 'blocked'):
+                        raise PermissionError('Invitation unavailable')
+                    if current.get('status') == 'active':
+                        return await self.resolve(str(params['telegramId']))
+                    await asyncio.sleep(2)
+                raise TimeoutError('Invitation provisioning pending')
         if method in ('ingress.admit', 'ingress.status', 'ingress.close', 'ingress.prepare', 'ingress.artifact') and ingress:
             if method == 'ingress.admit':
                 profile = await self.resolve(params.get('telegramId'))
@@ -644,6 +648,8 @@ async def serve(config):
     control = ControlPort(config['controlCommand'], config['controlConfigPath'])
     await control.start()
     broker = Broker(config, control)
+    lifecycle = (asyncio.create_task(LifecycleRunner(control, config['accessCommand']).run())
+                 if config.get('accessCommand') else None)
     slots = asyncio.Semaphore(32)
     async def accept(reader, writer):
         try:
@@ -685,6 +691,9 @@ async def serve(config):
     finally:
         server.close()
         await server.wait_closed()
+        if lifecycle is not None:
+            lifecycle.cancel()
+            await asyncio.gather(lifecycle, return_exceptions=True)
         await control.close()
         if broker.login_state is not None:
             broker.login_state.close()

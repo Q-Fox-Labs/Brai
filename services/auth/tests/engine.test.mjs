@@ -71,10 +71,11 @@ test('Telegram mode disables email and issues cookie without a JSON token',async
  const now=new Date();let consumed=false;
  const client={async query(sql){
   if(sql.includes('INSERT INTO brai_auth_limit'))return {rows:[{count:1}]};
-  if(sql.includes('DELETE FROM brai_login_code')){if(consumed)return {rows:[]};consumed=true;return {rows:[{user_id:'user1'}]};}
+  if(sql.includes('DELETE FROM brai_login_code')){if(consumed)return {rows:[]};consumed=true;return {rows:[{user_id:'user1',lifecycle_generation:0}]};}
+  if(sql.startsWith('UPDATE "session" s SET brai_generation='))return {rowCount:1,rows:[{id:'session'}]};
   return {rows:[]};
  },release(){}};
- const configured=createAuth({...cfg,identityMode:'telegram'},{connect:async()=>client});
+ const configured=createAuth({...cfg,identityMode:'telegram'},{connect:async()=>client,query:async()=>({rowCount:1,rows:[{id:'session'}]})});
  const db={user:[{id:'user1',name:'Test',email:'user1@identity.brai.invalid',emailVerified:false,createdAt:now,updatedAt:now}],session:[],verification:[],account:[],rateLimit:[]};
  const auth=betterAuth({...configured.options,database:memoryAdapter(db)});
  const call=(path,origin=cfg.origin)=>auth.handler(new Request(cfg.origin+'/api/auth'+path,{method:'POST',headers:{origin,'content-type':'application/json','x-forwarded-for':'192.0.2.1'},body:JSON.stringify({code:'0123-4567-89AB'})}));

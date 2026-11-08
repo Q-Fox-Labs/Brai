@@ -5,7 +5,7 @@ export type Role = "admin" | "user";
 export type Status = "provisioning" | "active" | "blocked";
 export interface IdentityUser {
  id:string; name:string; role:Role; status:Status;
- telegramId:string|null; profileId:string|null; email?:string;
+ telegramId:string|null; profileId:string|null; telegramIds?:string[]; email?:string;
 }
 export interface HeadersInput {
  cookie?:string; origin?:string; "user-agent"?:string;

@@ -539,6 +539,11 @@ export async function privateCall(runtime, method, params) {
         !/^[1-9][0-9]{0,19}$/.test(params.telegramId ?? '') || !/^[A-Za-z0-9_-]{43}$/.test(params.code ?? '')) throw new Error('INVALID_ARGUMENT');
     return authCall('telegram-link-redeem',params);
   }
+  if (['identity.lifecycle-claim', 'identity.lifecycle-renew', 'identity.lifecycle-complete'].includes(method)) {
+    // AIDEV-NOTE: Эти методы доступны только stdin root broker, не Unix API worker.
+    const operation = method.slice('identity.'.length);
+    return authCall(operation, params);
+  }
   if (method === 'identity.resolve') return authCall('telegram-resolve', { telegramId: params.telegramId });
   if (method === 'identity.invite-redeem') return authCall('invite-redeem', { telegramId: params.telegramId, code: params.code, ...(params.name === undefined ? {} : { name: params.name }) });
   if (method === 'identity.profile-ready') {
