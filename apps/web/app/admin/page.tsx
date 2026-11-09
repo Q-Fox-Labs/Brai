@@ -10,6 +10,6 @@ export const metadata = { title: "Админка · Brai" };
 export default async function AdminPage() {
  const session = await loadAccountSession(await headers());
  if (session.status !== "authenticated") redirect("/auth");
- if (session.user.role !== "admin" || session.user.status !== "active") redirect("/");
+ if ((session.user.role !== "creator" && session.user.role !== "admin") || session.user.status !== "active") redirect("/");
  return <Account initialSession={session} agentMode={webAgentMode()} telegramBotUsername={hermesTelegramBotUsername()} telegramObserverEnabled={telegramObserverEnabled()} />;
 }

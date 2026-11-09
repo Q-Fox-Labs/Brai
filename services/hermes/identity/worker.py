@@ -103,10 +103,15 @@ class Worker:
         """Подготовить bootstrap; полный native startup ждёт active Auth."""
         os.environ['HERMES_EXEC_ASK'] = '1'
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            from .native_policy import install
+            install()
             self._install_telegram_profile()
         from gateway.run import GatewayRunner
         from gateway.config import Platform, PlatformConfig
         self.runner = self.runner_factory() if self.runner_factory else GatewayRunner()
+        if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
+            from .native_policy import revalidate_startup
+            revalidate_startup()
         if getattr(self.runner.config, 'multiplex_profiles', False):
             raise RuntimeError('worker cannot multiplex profiles')
         self.tools_ready = False
@@ -150,7 +155,8 @@ class Worker:
     async def _operational_ready(self, runner):
         """Подтвердить native startup вместе с MCP и scheduler."""
         from tools.registry import registry
-        if registry.get_entry('mcp__brai__brai_login') is None:
+        from .native_policy import guest_mode
+        if not guest_mode() and registry.get_entry('mcp__brai__brai_login') is None:
             raise RpcError(-32603, 'Worker login tool unavailable')
         if os.environ.get('BRAI_IDENTITY_MODE') == 'worker':
             human = sys.modules.get('_brai_identity_human')
@@ -168,6 +174,10 @@ class Worker:
             for name in ('mcp__brai__dialogues_exchange', 'mcp__brai__dialogues_context_ack'):
                 if registry.get_entry(name) is None:
                     raise RpcError(-32603, 'Worker Dialogues tool unavailable')
+        if guest_mode():
+            from .native_policy import permitted, catalog_permitted
+            if registry.get_entry('mcp__brai__create_text_file') is None or not catalog_permitted('mcp__brai__create_text_file') or catalog_permitted('terminal') or catalog_permitted('mcp__brai__brai_login'):
+                raise RpcError(-32603, 'Worker role policy unavailable')
         self.tools_ready = True
         self.operational.set()
 
@@ -231,7 +241,8 @@ class Worker:
             raise RpcError(-32603, 'Worker not ready')
         if require_tools:
             await self.ensure_tools()
-        return {'ready': True, 'operational': self.operational.is_set(),
+        from .native_policy import role_state
+        return {'role': role_state(), 'rolePolicyVersion': 1, 'ready': True, 'operational': self.operational.is_set(),
                 'userId': self.user_id, 'telegramId': self.telegram_id}
 
     async def interactive(self, update, owner, scope_id, actor_telegram_id):
@@ -255,6 +266,9 @@ class Worker:
         from gateway.session import SessionSource
         if owner != self.user_id or not isinstance(event, dict):
             raise RpcError(-32602, 'Invalid owner or event')
+        from .native_policy import guest_mode
+        if guest_mode() and str(event.get('text', '')).lstrip().startswith('/') and str(event.get('text', '')).split()[0].split('@')[0] not in ('/stop', '/cancel'):
+            raise RpcError(-32603, 'Эта команда недоступна для гостя')
         source = SessionSource.from_dict(event['source'])
         if source.platform.value != 'telegram' or str(source.user_id) != self.telegram_id or source.is_bot:
             raise RpcError(-32602, 'Invalid source')

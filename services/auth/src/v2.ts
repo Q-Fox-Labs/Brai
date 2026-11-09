@@ -11,10 +11,10 @@ import { getIdentity, issueTelegramLink, profileReady, provision, redeemInvite, 
 const id=z.string().min(1).max(128);
 const telegramId=z.string().regex(/^[0-9]{1,20}$/);
 const adminTelegramId=z.string().regex(/^[1-9][0-9]{0,19}$/);
-const role=z.enum(["admin","user"]), status=z.enum(["provisioning","active","blocked"]);
+const role=z.enum(["creator","admin","user","guest"]), inviteRole=z.enum(["user","guest"]), status=z.enum(["provisioning","active","blocked"]);
 const headersSchema=z.strictObject({cookie:z.string().max(16384).optional(),origin:z.string().max(16384).optional(),"user-agent":z.string().max(16384).optional(),"x-forwarded-for":z.string().max(16384).optional(),"sec-fetch-site":z.string().max(16384).optional()});
 const trusted={
- "lifecycle-claim":z.strictObject({workerId:id}),
+ "lifecycle-claim":z.strictObject({workerId:id,rolePolicyVersion:z.literal(1).optional()}),
  "lifecycle-renew":z.strictObject({operationId:id,leaseToken:id}),
  "lifecycle-complete":z.strictObject({operationId:id,leaseToken:id,success:z.boolean(),errorCode:z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).optional()}),
  "telegram-resolve":z.strictObject({telegramId}),
@@ -28,12 +28,12 @@ const trusted={
  "invite-redeem":z.strictObject({telegramId,code:z.string().regex(/^[A-Za-z0-9_-]{43}$/),name:z.string().min(1).max(200).optional()})
 };
 const admin={
- "users-add":z.strictObject({requestId:id,telegramId:adminTelegramId}),
+ "users-add":z.strictObject({requestId:id,telegramId:adminTelegramId,role:inviteRole.optional()}),
  "users-revoke":z.strictObject({requestId:id,userId:id}),
  "users-operation-get":z.strictObject({requestId:id}),
  "users-list":z.strictObject({}),"users-get":z.strictObject({userId:id}),
- "role-set":z.strictObject({userId:id,role}),"status-set":z.strictObject({userId:id,status,requestId:id.optional()}),
- "sessions-revoke":z.strictObject({userId:id}),"invite-create":z.strictObject({}),
+ "role-set":z.strictObject({userId:id,role,requestId:id.optional()}),"status-set":z.strictObject({userId:id,status,requestId:id.optional()}),
+ "sessions-revoke":z.strictObject({userId:id}),"invite-create":z.strictObject({role:inviteRole.optional()}),
  "invite-list":z.strictObject({}),"invite-revoke":z.strictObject({inviteId:id}),
  "admin-audit":z.strictObject({userId:id,action:z.enum(["memory.list","memory.read","chats.list","chats.read","artifacts.list","artifacts.read","personal.read"])})
 };
@@ -46,7 +46,7 @@ export async function sessionIdentity(pool:Pool,cfg:Config,handler:Handler,heade
  if(!response.ok)return null;
  const session=await response.json() as {user?:{id?:unknown},session?:{id?:unknown}}|null;
  if(typeof session?.user?.id!=="string"||typeof session.session?.id!=="string")return null;
- const result=await pool.query('SELECT u.id,u.name,i.role,i.status,i.telegram_id AS "telegramId",i.profile_id AS "profileId" FROM brai_identity i JOIN "user" u ON u.id=i.user_id JOIN "session" s ON s."userId"=i.user_id WHERE i.user_id=$1 AND i.status=\'active\' AND s.id=$2 AND s.brai_generation=i.lifecycle_generation AND s."expiresAt">now()',[session.user.id,session.session.id]);
+ const result=await pool.query('SELECT u.id,u.name,i.role,i.status,i.telegram_id AS "telegramId",i.profile_id AS "profileId" FROM brai_identity i JOIN "user" u ON u.id=i.user_id JOIN "session" s ON s."userId"=i.user_id WHERE i.user_id=$1 AND i.status=\'active\' AND i.role IN (\'creator\',\'admin\',\'user\') AND s.id=$2 AND s.brai_generation=i.lifecycle_generation AND s."expiresAt">now()',[session.user.id,session.session.id]);
  return result.rows[0]?{...result.rows[0],sessionId:session.session.id}:null;
 }
 /** Исполняет валидированный запрос; секреты не попадают в ошибки транспорта. */

@@ -30,7 +30,8 @@
     "services/hermes/identity/synthesize.py",
     "services/hermes/identity/media.py",
     "services/hermes/identity/network.py",
-    "services/hermes/identity/search.py"
+    "services/hermes/identity/search.py",
+    "services/hermes/identity/native_policy.py"
   ],
   "inputs": {
     "build": [],
@@ -281,7 +282,9 @@
       "services/hermes/identity/parent_runner.py",
       "services/hermes/identity/control.openrpc.json",
       "services/hermes/identity/asyncapi.yaml",
-      "services/hermes/identity/lifecycle.py"
+      "services/hermes/identity/lifecycle.py",
+      "services/hermes/identity/native_policy.py",
+      "services/hermes/identity/tool-policy.json"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
@@ -347,7 +350,13 @@
       "services/hermes/identity/tests/test_memory_spool.py",
       "services/hermes/tests/dialogues-port.test.mjs",
       "services/hermes/tests/dialogues-summary.test.mjs",
-      "services/hermes/identity/tests/test_worker_artifact_read.py"
+      "services/hermes/identity/tests/test_worker_artifact_read.py",
+      "services/hermes/identity/tests/roles.sol.test.mjs",
+      "services/hermes/identity/tests/roles_regression.test.mjs",
+      "services/hermes/identity/tests/test_roles_admission.py",
+      "services/hermes/identity/tests/test_roles_cron.py",
+      "services/hermes/identity/tests/test_roles_files.py",
+      "services/hermes/identity/tests/test_roles_native.py"
     ]
   },
   "dependencies": [
@@ -686,6 +695,8 @@
       "services/hermes/identity/control.openrpc.json",
       "services/hermes/identity/asyncapi.yaml",
       "services/hermes/identity/lifecycle.py",
+      "services/hermes/identity/native_policy.py",
+      "services/hermes/identity/tool-policy.json",
       "services/hermes/extensions/scripts/context_gif.py",
       "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md"
     ],

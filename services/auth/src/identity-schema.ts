@@ -10,10 +10,12 @@ export async function migrateIdentity(pool:Pool) {
  CREATE TABLE IF NOT EXISTS brai_identity (
   user_id text PRIMARY KEY REFERENCES "user"(id) ON DELETE CASCADE,
   telegram_id text UNIQUE, profile_id text UNIQUE,
-  role text NOT NULL CHECK (role IN ('admin','user')),
+  role text NOT NULL CHECK (role IN ('creator','admin','user','guest')),
   status text NOT NULL CHECK (status IN ('provisioning','active','blocked')),
   created_at timestamptz NOT NULL DEFAULT now()
  );
+ ALTER TABLE brai_identity DROP CONSTRAINT IF EXISTS brai_identity_role_check;
+ ALTER TABLE brai_identity ADD CONSTRAINT brai_identity_role_check CHECK (role IN ('creator','admin','user','guest'));
  COMMENT ON TABLE brai_identity IS 'Роли и внешние идентификаторы пользователей Auth';
  COMMENT ON COLUMN brai_identity.user_id IS 'Идентификатор пользователя Better Auth';
  COMMENT ON COLUMN brai_identity.telegram_id IS 'Стабильный внутренний автор памяти; текущие аккаунты хранятся отдельно';
@@ -82,6 +84,8 @@ export async function migrateIdentity(pool:Pool) {
   created_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz NOT NULL,
   revoked_at timestamptz, consumed_at timestamptz, consumed_by text REFERENCES brai_identity(user_id)
  );
+ ALTER TABLE brai_invite ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user' CHECK(role IN ('user','guest'));
+ COMMENT ON COLUMN brai_invite.role IS 'Назначенная при создании приглашения роль; погашение её не выбирает';
  COMMENT ON TABLE brai_invite IS 'Одноразовые приглашения без открытого секрета';
  COMMENT ON COLUMN brai_invite.id IS 'Идентификатор приглашения';
  COMMENT ON COLUMN brai_invite.digest IS 'HMAC секрета';
@@ -102,6 +106,14 @@ export async function migrateIdentity(pool:Pool) {
   id text PRIMARY KEY, actor_id text NOT NULL, target_id text NOT NULL, action text NOT NULL,
   occurred_at timestamptz NOT NULL DEFAULT now()
  );
+ ALTER TABLE brai_identity_audit ADD COLUMN IF NOT EXISTS old_role text;
+ ALTER TABLE brai_identity_audit ADD COLUMN IF NOT EXISTS new_role text;
+ ALTER TABLE brai_identity_audit ADD COLUMN IF NOT EXISTS request_id text;
+ ALTER TABLE brai_identity_audit ADD COLUMN IF NOT EXISTS generation integer;
+ COMMENT ON COLUMN brai_identity_audit.old_role IS 'Роль до административного перехода; null для старых и иных событий';
+ COMMENT ON COLUMN brai_identity_audit.new_role IS 'Назначенная роль после перехода';
+ COMMENT ON COLUMN brai_identity_audit.request_id IS 'Идемпотентный ID lifecycle-операции';
+ COMMENT ON COLUMN brai_identity_audit.generation IS 'Поколение доступа операции';
  COMMENT ON TABLE brai_identity_audit IS 'Аудит административных действий Auth';
  COMMENT ON COLUMN brai_identity_audit.id IS 'Идентификатор события';
  COMMENT ON COLUMN brai_identity_audit.actor_id IS 'Идентификатор администратора';
@@ -116,6 +128,13 @@ export async function migrateIdentity(pool:Pool) {
  COMMENT ON COLUMN brai_owner_bootstrap.user_id IS 'Идентификатор первого владельца';
 
  ALTER TABLE brai_identity ADD COLUMN IF NOT EXISTS lifecycle_generation integer NOT NULL DEFAULT 0;
+ DO $runtime_migration$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='brai_identity' AND column_name='applied_generation' AND table_schema=current_schema()) THEN
+ ALTER TABLE brai_identity ADD COLUMN applied_generation integer NOT NULL DEFAULT 0;
+ UPDATE brai_identity SET applied_generation=lifecycle_generation;
+ END IF;
+ END $runtime_migration$;
+ COMMENT ON COLUMN brai_identity.applied_generation IS 'Подтверждённое поколение runtime; no-op не требует перестройки профиля';
  ALTER TABLE "session" ADD COLUMN IF NOT EXISTS brai_generation integer NOT NULL DEFAULT 0;
  COMMENT ON COLUMN "session".brai_generation IS 'Поколение доступа Auth при входе; старые сессии не восстанавливаются после revoke';
  COMMENT ON COLUMN brai_identity.lifecycle_generation IS 'Монотонное поколение административных заданий пользователя';
@@ -127,6 +146,8 @@ export async function migrateIdentity(pool:Pool) {
   activate_on_success boolean NOT NULL, error_code text, worker_id text, lease_token text, lease_expires_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(user_id,generation)
  );
+ ALTER TABLE brai_user_operation ADD COLUMN IF NOT EXISTS required_policy_version integer NOT NULL DEFAULT 0 CHECK(required_policy_version IN (0,1));
+ COMMENT ON COLUMN brai_user_operation.required_policy_version IS 'Минимальная политика runtime; старый worker не получает guest и смену роли';
  CREATE INDEX IF NOT EXISTS brai_user_operation_queue ON brai_user_operation(created_at,id) WHERE state IN ('pending','running');
  COMMENT ON TABLE brai_user_operation IS 'Долговечные административные задания окружений Auth; повтор запроса не возобновляет доступ';
  COMMENT ON COLUMN brai_user_operation.id IS 'UUID операции';

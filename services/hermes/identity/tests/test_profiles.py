@@ -14,7 +14,7 @@ class ProfileTests(unittest.TestCase):
     """Проверить входы Auth и исключить наследование общей среды."""
 
     def profile(self):
-        return profile_for_user({'id': 'user-a', 'profileId': '11111111-1111-4111-8111-111111111111',
+        return profile_for_user({'id': 'user-a', 'role': 'user', 'profileId': '11111111-1111-4111-8111-111111111111',
                                  'telegramId': '123', 'status': 'provisioning'},
                                 profile_root='/var/lib/brai-dev/identity/profiles')
 

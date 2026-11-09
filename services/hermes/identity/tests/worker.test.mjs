@@ -10,9 +10,12 @@ import assert from 'node:assert/strict';
 const here = dirname(fileURLToPath(import.meta.url));
 test('Python worker modules and regression tests are declared in the component', () => {
   const component = JSON.parse(readFileSync(join(here, '../../component.json'), 'utf8'));
+  const modules = new Set(['native_policy.py']);
   for (const entry of readdirSync(join(here, '..'), { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith('.py')) continue;
-    const path = 'services/hermes/identity/' + entry.name;
+    if (entry.isFile() && entry.name.endsWith('.py')) modules.add(entry.name);
+  }
+  for (const name of modules) {
+    const path = 'services/hermes/identity/' + name;
     assert.ok(component.inputs.runtime.includes(path), 'Missing runtime input: ' + path);
     assert.ok(component.delivery.files.includes(path), 'Missing delivered module: ' + path);
   }

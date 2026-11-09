@@ -39,7 +39,7 @@ class WorkerConfigTest(unittest.TestCase):
 
 class ToolClientTest(unittest.TestCase):
     def test_native_sdk_null_params_are_supported(self):
-        with patch.object(tool_client, 'broker_call', return_value={'tools': []}):
+        with patch.object(tool_client, 'broker_call', return_value={'role': 'user', 'tools': []}):
             result = tool_client.handle('tools/list', None)
         self.assertTrue(any(item['name'] == 'brai_login' for item in result['tools']))
         self.assertEqual(tool_client.handle('ping', None), {})
@@ -48,7 +48,7 @@ class ToolClientTest(unittest.TestCase):
                 tool_client.handle('tools/list', bad)
 
     def test_login_catalog_requires_explicit_request_in_private_telegram(self):
-        with patch.object(tool_client, 'broker_call', return_value={'tools': []}):
+        with patch.object(tool_client, 'broker_call', return_value={'role': 'user', 'tools': []}):
             result = tool_client.handle('tools/list', {})
         login = next(item for item in result['tools'] if item['name'] == 'brai_login')
         self.assertIn('явной просьбе', login['description'])
@@ -57,7 +57,7 @@ class ToolClientTest(unittest.TestCase):
         self.assertFalse(login['inputSchema']['additionalProperties'])
 
     def test_account_tools_accept_only_full_text_confirmation_without_model_selected_owner(self):
-        with patch.object(tool_client, "broker_call", return_value={"tools": []}):
+        with patch.object(tool_client, "broker_call", return_value={"role": "user", "tools": []}):
             catalog = tool_client.handle("tools/list", {})["tools"]
         link = next(t for t in catalog if t["name"] == "brai_telegram_link_account")
         unlink = next(t for t in catalog if t["name"] == "brai_telegram_unlink_account")
@@ -265,4 +265,4 @@ class HealthTest(unittest.IsolatedAsyncioTestCase):
             await worker.health()
         worker.runner = object()
         worker.adapter = object()
-        self.assertEqual(await worker.health(), {'ready':True, 'operational':False, 'userId':'owner', 'telegramId':'123'})
+        self.assertEqual(await worker.health(), {'role':None, 'rolePolicyVersion':1, 'ready':True, 'operational':False, 'userId':'owner', 'telegramId':'123'})

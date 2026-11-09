@@ -10,9 +10,10 @@ import { InviteCommand } from "./invite-command";
 import { mergeChatPage } from "./chat-pages";
 import { loadMemoryDetail } from "./memory-detail";
 import "./styles.css";
+type Role = "creator" | "admin" | "user" | "guest";
 type Operation = { id: string; requestId: string; kind: "prepare" | "stop"; state: "pending" | "running" | "succeeded" | "failed" | "cancelled"; errorCode?: string | null };
-type User = { id: string; name: string; role: "admin" | "user"; status: "active" | "blocked" | "provisioning"; telegramId: string | null; telegramIds?: string[]; profileId: string | null; lifecycle?: Operation | null };
-type RequestRecord = { requestId: string; operation: "users-add" | "users-revoke" | "status-set"; telegramId?: string; userId?: string; status?: "active" };
+type User = { id: string; name: string; role: Role; status: "active" | "blocked" | "provisioning"; telegramId: string | null; telegramIds?: string[]; profileId: string | null; lifecycle?: Operation | null };
+type RequestRecord = { requestId: string; operation: "users-add" | "users-revoke" | "status-set" | "role-set"; telegramId?: string; userId?: string; status?: "active"; role?: Role };
 const REQUESTS_KEY = "brai-admin-access-requests";
 const inProgress = (operation?: Operation | null) => operation?.state === "pending" || operation?.state === "running";
 function userStatus(user: User) {
@@ -22,7 +23,9 @@ function userStatus(user: User) {
  if (user.status === "blocked") return op?.kind === "stop" && op.state === "succeeded" ? "Доступ отозван, процесс остановлен" : "Доступ отозван";
  return user.status === "provisioning" ? "Подготовка" : "Активен";
 }
-type Invite = { id: string; expiresAt: string; revokedAt: string | null; consumedAt: string | null; code?: string };
+const ROLE_NAMES: Record<Role, string> = { creator: "Создатель", admin: "Администратор", user: "Пользователь", guest: "Гость" };
+const ROLE_CHOICES: Role[] = ["creator", "admin", "user", "guest"];
+type Invite = { role: "user" | "guest"; id: string; expiresAt: string; revokedAt: string | null; consumedAt: string | null; code?: string };
 async function call(operation: string, input: Record<string, string> = {}, write = false) {
  const response = await fetch(write ? "/api/admin" : `/api/admin?${new URLSearchParams({ operation, ...input })}`, write ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operation, ...input }) } : { cache: "no-store" });
  const body = await response.json();
@@ -30,12 +33,12 @@ async function call(operation: string, input: Record<string, string> = {}, write
  return body;
 }
 /** Управляет аккаунтами; выбранная цель всегда передаётся явно. */
-export default function AdminScreen({ userId }: { userId: string }) {
+export default function AdminScreen({ userId, actorRole }: { userId: string; actorRole: "creator" | "admin" }) {
  const [users, setUsers] = useState<User[]>([]), [invites, setInvites] = useState<Invite[]>([]), [selected, setSelected] = useState<string | null>(null);
  const [section, setSection] = useState<"users" | "data" | "invites">("users");
  const [userFilter, setUserFilter] = useState<"all" | "available" | "revoked">("available");
  const [detail, setDetail] = useState<unknown>(null), [error, setError] = useState(""), [code, setCode] = useState("");
- const [telegramId, setTelegramId] = useState(""), [requests, setRequests] = useState<RequestRecord[]>([]), [busy, setBusy] = useState(false);
+ const [telegramId, setTelegramId] = useState(""), [newUserRole, setNewUserRole] = useState<"user" | "guest">("user"), [inviteRole, setInviteRole] = useState<"user" | "guest">("user"), [requests, setRequests] = useState<RequestRecord[]>([]), [busy, setBusy] = useState(false);
  const requestsRef = useRef<RequestRecord[]>([]);
  const [accessError, setAccessError] = useState<{ requestId: string; message: string } | null>(null);
  const [loadError, setLoadError] = useState("");
@@ -81,9 +84,13 @@ export default function AdminScreen({ userId }: { userId: string }) {
   } catch { setAccessError({ requestId: record.requestId, message: "Результат запроса не подтверждён. Проверяем текущее состояние." }); }
   finally { setBusy(false); }
  }
- async function access(operation: RequestRecord["operation"], input: { telegramId?: string; userId?: string; status?: "active" }) {
+ async function access(operation: RequestRecord["operation"], input: { telegramId?: string; userId?: string; status?: "active"; role?: Role }) {
   if (busy) return;
   if (operation === "users-add" && (!input.telegramId || !/^[1-9][0-9]{0,19}$/.test(input.telegramId))) { setError("Введите положительный Telegram ID: до 20 цифр, без ведущих нулей."); return; }
+  if (operation === "role-set") {
+   const target = input.userId ? users.find(user => user.id === input.userId) : undefined;
+   if (!target || !input.role || (input.role === "creator" && actorRole !== "creator") || (target.role === "creator" && actorRole !== "creator")) { setError("Эту роль нельзя назначить из текущей сессии."); return; }
+  }
   if (requestsRef.current.some(item => item.operation === operation && (input.telegramId ? item.telegramId === input.telegramId : item.userId === input.userId))) { setError("Результат предыдущего запроса ещё не подтверждён. Дождитесь проверки."); return; }
   const record: RequestRecord = { requestId: crypto.randomUUID(), operation, ...input };
   saveRequests([...requestsRef.current, record]); setBusy(true); setError("");
@@ -112,19 +119,19 @@ export default function AdminScreen({ userId }: { userId: string }) {
  const page = rawPage?.items ? { nextCursor: rawPage.nextCursor, items: rawPage.items.map(item => ({ ...item, id: item.id || item.artifactId || "", title: item.title || item.filename })) } : null;
  const visibleUsers = users.filter(user => user.id !== ARCHIVE_TARGET);
  function userCard(user: User) { const contacts = user.telegramIds ?? (user.telegramId ? [user.telegramId] : []); return <article key={user.id} className="admin-user-card">
-  <p><strong>{user.name || "Пользователь"}</strong> · Telegram: {contacts.length ? contacts.join(", ") : "нет подключённых аккаунтов"} · Профиль: {user.profileId ?? "—"}</p><p>Роль: {user.role === "admin" ? "администратор" : "пользователь"} · Статус: {userStatus(user)}</p>
+  <p><strong>{user.name || "Пользователь"}</strong> · Telegram: {contacts.length ? contacts.join(", ") : "нет подключённых аккаунтов"} · Профиль: {user.profileId ?? "—"}</p><p>Роль: {ROLE_NAMES[user.role]} · Статус: {userStatus(user)}</p>
   <div className="flex flex-wrap gap-3"><button type="button" onClick={() => { selection.current++; setSelected(user.id); setDetail(null); setSection("data"); }}>Открыть данные</button>
-   <button type="button" onClick={() => void mutate("role-set", { userId: user.id, role: user.role === "admin" ? "user" : "admin" })}>{user.role === "admin" ? "Сделать пользователем" : "Сделать администратором"}</button>
-   {user.status === "blocked" ? <button type="button" disabled={busy || inProgress(user.lifecycle)} onClick={() => void access("status-set", { userId: user.id, status: "active" })}>Восстановить доступ</button> : <button type="button" disabled={busy} onClick={() => { if (window.confirm("Доступ к боту и сайту будет закрыт. Переписка, память и файлы сохранятся")) void access("users-revoke", { userId: user.id }); }}>Отозвать доступ</button>}
-   {user.lifecycle?.kind === "prepare" && user.lifecycle.state === "failed" && <button type="button" disabled={busy} onClick={() => void access("status-set", { userId: user.id, status: "active" })}>Повторить подготовку</button>}
-   {user.lifecycle?.kind === "stop" && user.lifecycle.state === "failed" && <button type="button" disabled={busy} onClick={() => { if (window.confirm("Доступ к боту и сайту будет закрыт. Переписка, память и файлы сохранятся")) void access("users-revoke", { userId: user.id }); }}>Повторить отзыв</button>}
-   <button type="button" onClick={() => void mutate("sessions-revoke", { userId: user.id })}>Завершить сессии</button></div></article>; }
+   {user.role === "creator" && actorRole === "admin" ? <span>Создатель</span> : <select aria-label={`Роль пользователя ${user.name || user.id}`} value={user.role} disabled={busy || inProgress(user.lifecycle)} onChange={event => void access("role-set", { userId: user.id, role: event.target.value as Role })}>{(actorRole === "creator" ? ROLE_CHOICES : ROLE_CHOICES.filter(role => role !== "creator")).map(role => <option key={role} value={role}>{ROLE_NAMES[role]}</option>)}</select>}
+   {(user.role !== "creator" || actorRole === "creator") && (user.status === "blocked" ? <button type="button" disabled={busy || inProgress(user.lifecycle)} onClick={() => void access("status-set", { userId: user.id, status: "active" })}>Восстановить доступ</button> : <button type="button" disabled={busy} onClick={() => { if (window.confirm("Доступ к боту и сайту будет закрыт. Переписка, память и файлы сохранятся")) void access("users-revoke", { userId: user.id }); }}>Отозвать доступ</button>)}
+   {(user.role !== "creator" || actorRole === "creator") && user.lifecycle?.kind === "prepare" && user.lifecycle.state === "failed" && <button type="button" disabled={busy} onClick={() => void access("status-set", { userId: user.id, status: "active" })}>Повторить подготовку</button>}
+   {(user.role !== "creator" || actorRole === "creator") && user.lifecycle?.kind === "stop" && user.lifecycle.state === "failed" && <button type="button" disabled={busy} onClick={() => { if (window.confirm("Доступ к боту и сайту будет закрыт. Переписка, память и файлы сохранятся")) void access("users-revoke", { userId: user.id }); }}>Повторить отзыв</button>}
+   {(user.role !== "creator" || actorRole === "creator") && <button type="button" onClick={() => void mutate("sessions-revoke", { userId: user.id })}>Завершить сессии</button>}</div></article>; }
  return <WorkspaceFrame section="admin" userId={userId} title={{ users: "Пользователи", data: "Данные", invites: "Приглашения" }[section]} railTitle="Админка" rail={<nav className="admin-section-nav" aria-label="Разделы админки"><button type="button" data-frame-close-rail aria-current={section === "users" ? "page" : undefined} onClick={() => setSection("users")}>Пользователи</button><button type="button" data-frame-close-rail aria-current={section === "data" ? "page" : undefined} onClick={() => setSection("data")}>Данные</button><button type="button" data-frame-close-rail aria-current={section === "invites" ? "page" : undefined} onClick={() => setSection("invites")}>Приглашения</button></nav>}><main className="admin-screen">
   {error && <p role="alert">{error}</p>}
   {loadError && <p role="alert">{loadError}</p>}
   {accessError && <p role="alert">{accessError.message}</p>}
   {section === "users" && <div className="admin-section"><section className="space-y-3"><div className="admin-section-heading"><div><h2>Пользователи</h2><p>Управление доступом и ролями</p></div><span>{visibleUsers.length}</span></div>
-   <form className="admin-add-user" onSubmit={event => { event.preventDefault(); void access("users-add", { telegramId }); }}><label htmlFor="telegram-id">Telegram ID</label><div><input id="telegram-id" inputMode="numeric" value={telegramId} onChange={event => setTelegramId(event.target.value)} maxLength={20} autoComplete="off" /><button type="submit" disabled={busy}>Дать доступ</button></div></form>
+   <form className="admin-add-user" onSubmit={event => { event.preventDefault(); void access("users-add", { telegramId, role: newUserRole }); }}><label htmlFor="telegram-id">Telegram ID</label><div><input id="telegram-id" inputMode="numeric" value={telegramId} onChange={event => setTelegramId(event.target.value)} maxLength={20} autoComplete="off" /><select aria-label="Роль нового пользователя" value={newUserRole} onChange={event => setNewUserRole(event.target.value as "user" | "guest")}><option value="user">Пользователь</option><option value="guest">Гость</option></select><button type="submit" disabled={busy}>Дать доступ</button></div></form>
    <div className="admin-user-filters" role="group" aria-label="Фильтр пользователей"><button type="button" aria-pressed={userFilter === "all"} onClick={() => setUserFilter("all")}>Все</button><button type="button" aria-pressed={userFilter === "available"} onClick={() => setUserFilter("available")}>С доступом</button><button type="button" aria-pressed={userFilter === "revoked"} onClick={() => setUserFilter("revoked")}>Доступ отозван</button></div>
    {requests.map(record => <div key={record.requestId} className="admin-request"><p role="status">Проверяем результат запроса {record.telegramId || record.userId}. Если проверка не находит операцию, можно повторить запрос.</p><button type="button" disabled={busy} onClick={() => void retryRequest(record)}>Проверить и повторить</button></div>)}
    {userFilter !== "revoked" && visibleUsers.filter(user => user.status !== "blocked").map(userCard)}
@@ -137,7 +144,7 @@ export default function AdminScreen({ userId }: { userId: string }) {
   {selected && <section className="admin-data"><h2>Данные: {selected === ARCHIVE_TARGET ? "Архив до разделения" : users.find(user => user.id === selected)?.name || "Пользователь"}</h2><nav className="admin-tabs" aria-label="Данные выбранного источника"><button type="button" aria-pressed={view.startsWith("admin-memory")} onClick={() => void inspect("admin-memory-list")}>Память</button><button type="button" aria-pressed={view.startsWith("admin-chat")} onClick={() => void inspect("admin-chats-list")}>Чаты</button><button type="button" aria-pressed={view.startsWith("admin-artifacts")} onClick={() => void inspect("admin-artifacts-list")}>Файлы</button></nav>{page?.items ? <><ul className="admin-items">{page.items.map(item => <li key={item.id}><button type="button" onClick={() => void inspect(view === "admin-memory-list" ? "admin-memory-get" : view === "admin-chats-list" ? "admin-chat-get" : "admin-artifacts-get", { [view === "admin-memory-list" ? "memoryId" : view === "admin-chats-list" ? "chatId" : "artifactId"]: item.id })}>{item.title || item.text || item.id}</button></li>)}</ul>{!page.items.length && <p className="admin-empty">Здесь пока нет записей.</p>}{page.nextCursor && <button type="button" onClick={() => void inspect(view, { cursor: page.nextCursor! })}>Следующая страница</button>}</> : detail !== null ? <AdminDetail value={detail} view={view} userId={selected} /> : <p className="admin-empty">Выберите раздел, чтобы открыть данные.</p>}</section>}
   {selected && chatId && chatCursor && <button type="button" onClick={() => void inspect("admin-chat-get", { chatId, cursor: chatCursor })}>Загрузить ещё сообщения</button>}
   </div>}
-  {section === "invites" && <section className="admin-section"><div className="admin-section-heading"><div><h2>Приглашения</h2><p>Создание и отзыв приглашений</p></div></div><button type="button" onClick={() => void mutate("invite-create")}>Создать приглашение</button>{code && <InviteCommand key={code} code={code} />}
-   {invites.map(invite => <p key={invite.id}>{invite.id} · до {invite.expiresAt} · {invite.revokedAt ? "отозвано" : invite.consumedAt ? "использовано" : "действует"} {!invite.revokedAt && !invite.consumedAt && <button type="button" onClick={() => void mutate("invite-revoke", { inviteId: invite.id })}>Отозвать</button>}</p>)}</section>}
+  {section === "invites" && <section className="admin-section"><div className="admin-section-heading"><div><h2>Приглашения</h2><p>Создание и отзыв приглашений</p></div></div><label>Роль приглашённого <select value={inviteRole} onChange={event => setInviteRole(event.target.value as "user" | "guest")}><option value="user">Пользователь</option><option value="guest">Гость</option></select></label><button type="button" onClick={() => void mutate("invite-create", { role: inviteRole })}>Создать приглашение</button>{code && <InviteCommand key={code} code={code} />}
+   {invites.map(invite => <p key={invite.id}>{ROLE_NAMES[invite.role]} · {invite.id} · до {invite.expiresAt} · {invite.revokedAt ? "отозвано" : invite.consumedAt ? "использовано" : "действует"} {!invite.revokedAt && !invite.consumedAt && <button type="button" onClick={() => void mutate("invite-revoke", { inviteId: invite.id })}>Отозвать</button>}</p>)}</section>}
  </main></WorkspaceFrame>;
 }

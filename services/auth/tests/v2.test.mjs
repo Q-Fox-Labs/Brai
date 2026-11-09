@@ -9,7 +9,7 @@ const good={headers:{origin:cfg.origin,cookie:"session=fixture"},body:{}};
 const handler=async()=>Response.json({user:{id:"u1"},session:{id:"s1"}});
 function fixture({role="admin",session=true}={}){
  let calls=0;
- const client={async query(sql){calls++;if(sql.includes('FROM "session"'))return {rowCount:session?1:0,rows:[]};if(sql.includes("role='admin'"))return {rowCount:role==="admin"?1:0,rows:[]};if(sql.startsWith("SELECT u.id"))return {rowCount:1,rows:[{id:"u1",name:"Fixture",role,status:"active",telegramId:"100",profileId:"p1"}]};return {rowCount:0,rows:[]};},release(){}};
+ const client={async query(sql){calls++;if(sql.includes('FROM "session"'))return {rowCount:session?1:0,rows:[]};if(sql.includes("role IN ('creator','admin')"))return {rowCount:["creator","admin"].includes(role)?1:0,rows:[{role}]};if(sql.startsWith("SELECT u.id"))return {rowCount:1,rows:[{id:"u1",name:"Fixture",role,status:"active",telegramId:"100",profileId:"p1"}]};return {rowCount:0,rows:[]};},release(){}};
  return {pool:{async query(){calls++;return {rows:[{id:"u1",name:"Fixture",role,status:"active",telegramId:"100",profileId:"p1"}]};},async connect(){return client;}},get calls(){return calls;}};
 }
 test("web admin requires allowed origin, current session and admin role",async()=>{
@@ -20,6 +20,8 @@ test("web admin requires allowed origin, current session and admin role",async()
  assert.equal((await v2("users-list",good,cfg,revoked.pool,handler)).status,401);
  const ordinary=fixture({role:"user"});
  assert.equal((await v2("users-list",good,cfg,ordinary.pool,handler)).status,403);
+ const creator=fixture({role:"creator"});
+ assert.equal((await v2("users-list",good,cfg,creator.pool,handler)).status,200);
  const list=await v2("users-list",good,cfg,f.pool,handler);
  assert.equal(list.status,200);assert.deepEqual(list.body.users.map(u=>u.id),["u1"]);
  await assert.rejects(()=>v2("role-set",{headers:good.headers,body:{userId:"u1",role:"superuser"}},cfg,f.pool,handler),/Invalid/);

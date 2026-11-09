@@ -103,8 +103,9 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
  }
  async function perUserRuntime(profile) {
   if(stopped)invalid();
-  const {uid,entry,tools,publisher,shared}=validateProfile(profile,'active');
-  const signature=JSON.stringify([entry,tools,publisher,shared,profile.role]), existing=cache.get(uid);
+  const phase=profile.bootstrap===true?'provisioning':'active';
+  const {uid,entry,tools,publisher,shared}=validateProfile(profile,phase);
+  const signature=JSON.stringify([entry,tools,publisher,shared,profile.role,profile.generation,phase]), existing=cache.get(uid);
   if(existing?.signature===signature)return existing.promise;
   if(existing){cache.delete(uid);const old=await existing.promise.catch(()=>null);await old?.close();}
   const promise=(async()=>{
@@ -118,7 +119,7 @@ export function createRuntimeAdapters(config,{readProtected=readProtectedJSON,st
     const endpoint=shared?.transcription;
     const transcription=endpoint&&endpoint.enabled!==false
      ? transcriptionFactory({userId:entry.userId,profileId:entry.profileId},endpoint,
-        {isAdmin:async()=>profile.role==='admin'}) : null;
+        {isAdmin:async()=>['creator','admin'].includes(profile.role)}) : null;
      runtime=await createBraiTools({...tools,history:{enabled:true},
       ...(transcription?{transcription:{enabled:true}}:{})},{
       ...ports,

@@ -7,6 +7,36 @@
   },
   "methods": [
     {
+      "name": "identity.get",
+      "summary": "Прочитать актуальную идентичность Auth по стабильному userId для root lifecycle; не доступен Unix worker.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "userId",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../../auth/schemas/messages.schema.json#/definitions/IdentityGetResponse"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
       "name": "identity.resolve",
       "paramStructure": "by-name",
       "params": [
@@ -136,6 +166,56 @@
         "name": "result",
         "schema": {
           "$ref": "#/components/schemas/ActivePrincipal"
+        }
+      },
+      "errors": [
+        {
+          "$ref": "#/components/errors/RequestFailed"
+        },
+        {
+          "$ref": "#/components/errors/InvalidParams"
+        }
+      ]
+    },
+    {
+      "name": "permissions.bootstrap",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "uid",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "type": "object",
+          "required": [
+            "role",
+            "generation",
+            "backgroundsSuspended",
+            "staged"
+          ],
+          "properties": {
+            "role": {
+              "$ref": "#/components/schemas/ActivePrincipal/properties/role"
+            },
+            "generation": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "backgroundsSuspended": {
+              "type": "boolean"
+            },
+            "staged": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
         }
       },
       "errors": [
@@ -288,6 +368,7 @@
         "schema": {
           "type": "object",
           "required": [
+            "role",
             "tools"
           ],
           "properties": {
@@ -311,6 +392,9 @@
                   }
                 }
               }
+            },
+            "role": {
+              "$ref": "#/components/schemas/ActivePrincipal/properties/role"
             }
           }
         }
@@ -950,6 +1034,10 @@
           "role"
         ],
         "properties": {
+          "generation": {
+            "type": "integer",
+            "minimum": 0
+          },
           "active": {
             "const": true
           },
@@ -965,8 +1053,10 @@
           },
           "role": {
             "enum": [
+              "creator",
               "admin",
-              "user"
+              "user",
+              "guest"
             ]
           }
         }

@@ -14,7 +14,7 @@ const writes = new Set(["users-add", "users-revoke", "role-set", "status-set", "
 async function handle(request: Request) {
  try {
   const session = await requireSession(request);
-  if (session.user.role !== "admin" || session.user.status !== "active") throw new GatewayError(403, "FORBIDDEN");
+  if ((session.user.role !== "creator" && session.user.role !== "admin") || session.user.status !== "active") throw new GatewayError(403, "FORBIDDEN");
   if (request.method !== "GET") checkOrigin(request);
   const value = request.method === "GET" ? Object.fromEntries(new URL(request.url).searchParams) : await readBoundedJson(request, 4096, 5000);
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new GatewayError(400, "INVALID_ARGUMENT");

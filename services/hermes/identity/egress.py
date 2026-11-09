@@ -579,12 +579,14 @@ async def _handle(reader, writer, registry_loader, config_loader, dial, resolve_
     try:
         sock = writer.get_extra_info("socket")
         _, uid, _ = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-        _profile(registry_loader(), uid)
+        profile = _profile(registry_loader(), uid)
         config = config_loader()
         if not isinstance(config, dict):
             raise Rejected(503)
         denied = set(config.get("deniedAddresses", []))
         method, target, headers, body = await _read_request(reader)
+        if profile.get("role") == "guest" and not (target.startswith("/model/") or target.startswith("/image/") or target.startswith("/gif/")):
+            raise Rejected(403)
         if method == "CONNECT":
             host, port = _authority(target)
             if port != 443 or body:

@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "roles": [
+    "creator",
+    "admin",
+    "user",
+    "guest"
+  ],
+  "managers": [
+    "creator",
+    "admin"
+  ],
+  "guestRemote": [
+    "dialogues_exchange",
+    "dialogues_context_ack",
+    "files_get",
+    "files_list",
+    "files_prepare"
+  ],
+  "guestClient": [
+    "create_text_file",
+    "read_text_file",
+    "fetch_file"
+  ],
+  "guestNative": [
+    "memos_search",
+    "memos_remember",
+    "memos_read",
+    "memos_forget",
+    "memos_status",
+    "memos_replace"
+  ],
+  "adminTools": [
+    "local_ai_models_install",
+    "local_ai_models_configure",
+    "local_ai_models_load",
+    "local_ai_models_unload",
+    "local_ai_models_remove",
+    "local_ai_cancel",
+    "transcription_settings_set"
+  ]
+}

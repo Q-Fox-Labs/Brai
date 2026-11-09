@@ -6,7 +6,7 @@ import { Pool } from "pg";
 import { z } from "zod";
 
 const id=z.string().min(1).max(128);
-const item=z.strictObject({userId:id,telegramId:z.string().regex(/^[0-9]{1,20}$/),profileId:id.nullable(),role:z.enum(["admin","user"]),status:z.enum(["provisioning","active","blocked"])});
+const item=z.strictObject({userId:id,telegramId:z.string().regex(/^[0-9]{1,20}$/),profileId:id.nullable(),role:z.enum(["creator","admin","user","guest"]),status:z.enum(["provisioning","active","blocked"])});
 const path=process.env.AUTH_IMPORT_FILE, databaseURL=process.env.AUTH_DATABASE_URL, owner=process.env.AUTH_OWNER_ROLE;
 if(!path||!databaseURL||!owner)throw new Error("Import configuration required");
 const fd=openSync(path,constants.O_RDONLY|constants.O_NOFOLLOW);let raw:string;

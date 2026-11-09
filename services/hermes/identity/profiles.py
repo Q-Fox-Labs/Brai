@@ -93,9 +93,11 @@ def registry(plan, accounts, *, active=False):
             raise ValueError('Missing or conflicting operating-system account')
         uid = account['uid']
         uids.add(uid)
-        fields = ('userId', 'profileId', 'telegramId', 'username', 'home',
+        fields = ('role', 'userId', 'profileId', 'telegramId', 'username', 'home',
                   'homeScope', 'memoryEpoch', 'authorId', 'cubes')
         result[str(uid)] = {key: profile[key] for key in fields}
+        result[str(uid)]['generation'] = profile.get('generation', 0)
+        result[str(uid)]['backgroundsSuspended'] = profile.get('backgroundsSuspended', profile.get('role') == 'guest')
         result[str(uid)].update(status='active' if active else 'provisioning',
                                 workerSocket=profile['home'] + '/control/worker.sock')
     return {'version': 1, 'profiles': result}
@@ -157,6 +159,22 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
                                   'сервис сам пришлёт одноразовый код и точный адрес в личный Telegram. '
                                   'Для выдачи кода не требуется открывать сайт, искать письмо или кнопку.'},
     }
+    role = profile.get('role', 'user')
+    if role not in ('creator','admin','user','guest'):
+        raise ValueError('Unknown role')
+    config['agent']['system_prompt'] += {
+        'creator': ' Ваша роль — создатель. Административные возможности доступны; исполнитель разработки появится на этапе 2. Нового серверного доступа эта роль не даёт.',
+        'admin': ' Ваша роль — администратор. Отдельный Docker администратора ещё не установлен.',
+        'user': ' Ваша роль — пользователь.',
+        'guest': ' Ваша роль — гость. Доступны диалог, личная память и собственные артефакты. Для точного текстового файла используй mcp__brai__create_text_file; для чтения — mcp__brai__read_text_file. Исполнение кода, браузер, задания, настройка плагинов и вход на сайт недоступны. Не предлагай обход ограничений или подтверждение запрещённой операции.',
+    }[role]
+    if role == 'guest':
+        config['agent']['system_prompt'] = config['agent']['system_prompt'].replace(
+            'По просьбе войти на наш сайт Brai вызови mcp__brai__brai_login: сервис сам пришлёт одноразовый код и точный адрес в личный Telegram. Для выдачи кода не требуется открывать сайт, искать письмо или кнопку.', '')
+        config['skills'] = {'external_dirs': [], 'disabled': True}
+        config['cron'] = {'enabled': False}
+        config['hooks'] = {}
+        config['delegation'] = {'enabled': False}
     if dialogues:
         config['agent']['system_prompt'] += (
             ' Диалоги обязательны на каждом публичном ходе. До разбора поручения вызови '
@@ -178,7 +196,7 @@ def native_profile(profile, *, relay_port=18080, instructions_root, model, stt_m
 
 def profile_for_user(user, *, profile_root):
     """Подготовить один профиль приглашения; назначение роли остаётся в Auth."""
-    if not isinstance(user, dict) or user.get('status') != 'provisioning':
+    if not isinstance(user, dict) or user.get('role') not in ('creator','admin','user','guest') or not (user.get('status') == 'provisioning' or user.get('status') == 'active' and user.get('role') in ('creator','admin')):
         raise ValueError('Provisioning user required')
     user_id = _identifier(user.get('id'))
     profile_id = user.get('profileId')
@@ -188,7 +206,7 @@ def profile_for_user(user, *, profile_root):
     if not telegram.isascii() or not telegram.isdecimal() or str(int(telegram)) != telegram or int(telegram) <= 0:
         raise ValueError('Invalid Telegram identity')
     home = _path(profile_root) + '/' + profile_id
-    return {'userId': user_id, 'profileId': profile_id, 'telegramId': telegram,
+    return {'generation': user.get('preparingGeneration', user.get('appliedGeneration', user.get('generation', 0)) if user.get('status') == 'active' else user.get('generation', 0)), 'role': user['role'], 'userId': user_id, 'profileId': profile_id, 'telegramId': telegram,
             'username': 'braiu-' + _digest(user_id)[:20], 'home': home,
             'homeScope': _digest(home),
             'memoryEpoch': _digest(['brai-user-memory-v1', user_id, profile_id]),
@@ -230,7 +248,7 @@ def worker_unit(profile, *, engine_root, runtime_root, python, ingress_uid,
         '[Unit]', 'Description=Brai personal Hermes ' + profile['profileId'],
         'After=' + ' '.join(prefix + name + '.service' for name in ('broker', 'memory', 'egress')),
         'Requires=' + ' '.join(prefix + name + '.service' for name in ('broker', 'memory', 'egress')),
-        'Wants=brai-hermes-' + instance + '-browser-' + profile['profileId'] + '.service',
+        *([] if profile.get('role') == 'guest' else ['Wants=brai-hermes-' + instance + '-browser-' + profile['profileId'] + '.service']),
         '[Service]', 'Type=simple', 'User=' + user, 'Group=' + user,
         'WorkingDirectory=' + home + '/workspace',
         'Environment=HOME=' + home, 'Environment=HERMES_HOME=' + home,

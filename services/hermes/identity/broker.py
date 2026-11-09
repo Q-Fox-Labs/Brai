@@ -25,6 +25,8 @@ try:
 except ImportError:
     from files.identity import OwnerFiles
 
+TOOL_POLICY = json.loads((Path(__file__).with_name('tool-policy.json')).read_text())
+
 MAX_FRAME = 2 * 1024 * 1024 + 65536
 
 
@@ -242,7 +244,9 @@ class Broker:
         if (principal.get('userId') != profile['userId'] or
                 principal.get('profileId') != profile['profileId']):
             raise PermissionError('Principal mismatch')
-        return profile
+        if principal.get('role') not in TOOL_POLICY['roles']:
+            raise PermissionError('Role unavailable')
+        return {**profile, 'role': principal['role'], 'generation': principal.get('generation', 0)}
 
     async def resolve(self, telegram_id):
         """Найти только действующую связь Telegram → системный профиль."""
@@ -579,7 +583,52 @@ class Broker:
                 # AIDEV-NOTE: Startup проверяется до активации. Здесь доступна лишь несекретная
                 # конфигурация своего профиля; данные и инструменты требуют active Auth.
                 return await self.files.configuration(peer_uid, bootstrap)
+        if method == 'permissions.bootstrap' and not params:
+            return await self.control.call(method, {'uid': peer_uid})
+        if method == 'tools.list' and not params:
+            return await self.control.call(method, {'uid': peer_uid})
+        if method == 'native.catalog' and set(params) == {'name'} and isinstance(params['name'], str):
+            state = await self.control.call('permissions.bootstrap', {'uid': peer_uid})
+            name = params['name']
+            allowed = state['role'] != 'guest' or name in TOOL_POLICY['guestNative']
+            if name.startswith('mcp__brai__'):
+                short = name.removeprefix('mcp__brai__')
+                catalog = await self.control.call('tools.list', {'uid': peer_uid})
+                allowed = any(tool.get('name') == short for tool in catalog['tools']) or (
+                    short in TOOL_POLICY['guestClient'] if state['role'] == 'guest' else short in (
+                    'create_text_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_link_account','brai_telegram_unlink_account'))
+            current = await self.control.call('permissions.bootstrap', {'uid': peer_uid})
+            return {'allowed': allowed and current == state, 'role': state['role'], 'generation': state['generation']}
         profile = await self.authorize(peer_uid)
+        if method == 'permissions.get' and not params:
+            return {key: profile[key] for key in ('role', 'generation')}
+        if method == 'native.authorize' and set(params) == {'name'} and isinstance(params['name'], str):
+            name = params['name']
+            allowed = profile['role'] != 'guest' or name in TOOL_POLICY['guestNative']
+            if name.startswith('mcp__brai__'):
+                short = name.removeprefix('mcp__brai__')
+                catalog = await self.control.call('tools.list', {'uid': peer_uid})
+                allowed = any(tool.get('name') == short for tool in catalog['tools']) or (
+                    short in TOOL_POLICY['guestClient'] if profile['role'] == 'guest' else short in (
+                    'create_text_file','read_text_file','fetch_file','publish_file','brai_login','brai_telegram_link_account','brai_telegram_unlink_account'))
+            current = await self.authorize(peer_uid)
+            if any(current[key] != profile[key] for key in ('role','generation')):
+                allowed = False
+            return {'allowed': allowed, 'role': profile['role'], 'generation': profile['generation']}
+        if profile['role'] == 'guest' and method in ('login.send','telegram.link','telegram.unlink','artifacts.publish'):
+            raise PermissionError('Role denied')
+        if method == 'files.create-text':
+            result = await self.files.create_text(peer_uid, profile, params)
+            current = await self.authorize(peer_uid)
+            if any(current[key] != profile[key] for key in ('role','generation')):
+                raise PermissionError('Access changed')
+            return result
+        if method == 'files.read-text':
+            result = await self.files.read_text(peer_uid, profile, params)
+            current = await self.authorize(peer_uid)
+            if any(current[key] != profile[key] for key in ('role','generation')):
+                raise PermissionError('Access changed')
+            return result
         if method in ('telegram.link', 'telegram.unlink') and (request_turn is None or self.turns.get(peer_uid) is not request_turn):
             raise PermissionError('Owner turn changed')
         if method == 'tools.list' and not params:
@@ -593,7 +642,7 @@ class Broker:
         if method == 'files.configuration' and not params:
             return await self.files.configuration(peer_uid, profile)
         if method in ('artifacts.publish', 'files.publish'):
-            return await self.files.publish(peer_uid, profile, params)
+            return await self.files.publish(peer_uid, profile, params, admitted=profile['role'] == 'guest')
         if method in ('artifacts.fetch', 'files.fetch'):
             return await self.files.fetch(peer_uid, profile, params)
         if method in ('files.get', 'files.list', 'files.prepare'):
@@ -768,6 +817,12 @@ PARAMETERS = {
     'ingress.prepare': ({'uid', 'turnId', 'paths'}, set()),
     'ingress.artifact': ({'uid', 'turnId', 'artifactId'}, set()),
     'ingress.open-artifact': ({'uid', 'artifactId'}, {'turnId', 'inputId'}),
+    'permissions.bootstrap': (set(), set()),
+    'permissions.get': (set(), set()),
+    'native.authorize': ({'name'}, set()),
+    'native.catalog': ({'name'}, set()),
+    'files.create-text': ({'filename','content','requestId'}, set()),
+    'files.read-text': ({'artifactId'}, set()),
     'tools.list': (set(), set()),
     'tools.call': ({'name', 'args'}, set()),
     'ingress.profiles': (set(), set()),
