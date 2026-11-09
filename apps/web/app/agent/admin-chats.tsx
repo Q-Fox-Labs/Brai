@@ -130,7 +130,7 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
     </button>)}{!chats.length && !listError && !denied && <p className="tg-empty-list">Чаты появятся здесь после первого сообщения.</p>}</div>
   </aside>}>
     <section className="tg-main" aria-label="Переписка"><header className="tg-header">{selected && <ParticipantAvatar chat={selected} />}<div><strong>{selected ? title(selected) : "Переписка"}</strong><span>{selected ? chatParticipant(selected) + " · " : ""}Только просмотр</span></div></header>
-      {(listError || messageError || denied) && <p className="tg-error" role="status">{denied ? "Просмотр всех чатов доступен только активным администраторам." : messageError || listError}</p>}
+      {(listError || messageError || denied) && <p className="tg-error" role="status">{denied ? "Сервер отклонил доступ к чатам. Обновите страницу; если ошибка повторится, проверьте доступ к разделу." : messageError || listError}</p>}
       <div ref={scroll} className="tg-conversation" onScroll={event => { const el = event.currentTarget; follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; if (follow.current) setNewCount(0); }}>
         {!selected ? <div className="tg-empty"><h2>Выберите чат</h2><p>Здесь появятся переписки с агентом.</p></div> : <div className="tg-timeline">
           {shown.cursor && <button type="button" className="tg-older" disabled={loading} onClick={() => { void older(); }}>Показать более ранние</button>}
