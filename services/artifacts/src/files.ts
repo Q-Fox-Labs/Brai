@@ -47,6 +47,46 @@ export async function createFileStore(root:string):Promise<ArtifactFiles> {
         await handle?.close().catch(()=>{});await removeTemp(name).catch(()=>{});throw storageError(error);
       }
     },
+    /** Fsync части предшествует checkpoint БД; лишний хвост после сбоя удаляется перед следующим append. */
+    async append(name,source,offset,length,signal){
+      const handle=await open(join(temporary,temp(name)),constants.O_RDWR|constants.O_NOFOLLOW);
+      let received=0,validPrefix=false;const hash=createHash("sha256"),iterator=source[Symbol.asyncIterator]();
+      const next=()=>new Promise<IteratorResult<Uint8Array>>((resolve,reject)=>{
+        const stop=()=>{signal?.removeEventListener("abort",stop);reject(new ArtifactError("STORAGE_UNAVAILABLE"));};
+        if(signal?.aborted){stop();return;}signal?.addEventListener("abort",stop,{once:true});
+        Promise.resolve().then(()=>iterator.next()).then(value=>{signal?.removeEventListener("abort",stop);resolve(value);},error=>{signal?.removeEventListener("abort",stop);reject(error);});
+      });
+      try{
+        const stat=await handle.stat();
+        if(!stat.isFile()||stat.size<offset)throw new ArtifactError("STORAGE_UNAVAILABLE");
+        validPrefix=true;await handle.truncate(offset);
+        for(;;){
+          const item=await next();if(item.done)break;const packet=item.value;
+          signal?.throwIfAborted();
+          if(!(packet instanceof Uint8Array)||received+packet.byteLength>length)throw new ArtifactError("INVALID_ARGUMENT");
+          hash.update(packet);
+          for(let cursor=0;cursor<packet.byteLength;){
+            const {bytesWritten}=await handle.write(packet,cursor,Math.min(65536,packet.byteLength-cursor),offset+received+cursor);
+            if(!bytesWritten)throw new ArtifactError("STORAGE_UNAVAILABLE");cursor+=bytesWritten;
+          }
+          received+=packet.byteLength;
+        }
+        signal?.throwIfAborted();
+        if(received!==length)throw new ArtifactError("INVALID_ARGUMENT");
+        await handle.sync();return hash.digest("hex");
+      }catch(error){try{Promise.resolve(iterator.return?.()).catch(()=>{});}catch{}if(validPrefix){await handle.truncate(offset).catch(()=>{});await handle.sync().catch(()=>{});}throw storageError(error);}
+      finally{await handle.close();}
+    },
+    /** Потоковая сверка сохраняет ограниченную память даже для большого оригинала. */
+    async inspectTemp(name){
+      const handle=await open(join(temporary,temp(name)),constants.O_RDONLY|constants.O_NOFOLLOW);
+      try{
+        if(!(await handle.stat()).isFile())throw new ArtifactError("STORAGE_UNAVAILABLE");
+        const hash=createHash("sha256"),buffer=Buffer.alloc(65536);let sizeBytes=0;
+        while(true){const {bytesRead}=await handle.read(buffer,0,buffer.length,null);if(!bytesRead)break;sizeBytes+=bytesRead;hash.update(buffer.subarray(0,bytesRead));}
+        return {sizeBytes,sha256:hash.digest("hex")};
+      }finally{await handle.close();}
+    },
     /** link публикует полный fsync-нутый inode и никогда не заменяет существующий ID. */
     async publish(artifactId:string,publication:Publication){
       try{

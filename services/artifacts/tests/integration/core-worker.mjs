@@ -11,10 +11,12 @@ const files=await createFileStore(process.env.ARTIFACTS_TEST_ROOT);
 const mode=process.env.ARTIFACTS_TEST_MODE;
 if(mode==="crash-after-publish"||mode==="crash-before-publish"){const publish=files.publish;files.publish=async(...args)=>{if(mode==="crash-after-publish")await publish(...args);process.exit(47);};}
 if(mode==="crash-after-unlink"){const remove=files.remove;files.remove=async(...args)=>{await remove(...args);process.exit(48);};}
-const core=createArtifactsCore({store:createPostgresStore(pool),files,config:{uploadBaseURL:"http://fixture",internalBaseURL:"http://internal",externalBaseURL:"https://share.invalid",maxUploadBytes:1048576,staleTempAgeMs:1000,reconcileBatchSize:2}});
+const core=createArtifactsCore({store:createPostgresStore(pool),files,config:{uploadBaseURL:"http://fixture",internalBaseURL:"http://internal",externalBaseURL:"https://share.invalid",maxUploadBytes:mode.startsWith("resume-")?3*1048576:1048576,staleTempAgeMs:mode.startsWith("resume-")?300000:1000,reconcileBatchSize:2}});
 try{
   let result;
-  if(mode.includes("upload")||mode.includes("publish"))result=await core.upload(payload.token,(async function*(){if(payload.marker){await writeFile(payload.marker,"started");await new Promise(resolve=>setTimeout(resolve,300));}yield Buffer.from(payload.value??"worker upload");})());
+  if(mode==="resume-part")result=await core.uploadChunk(payload.token,payload.input,(async function*(){yield Buffer.alloc(payload.length,payload.fill);})());
+  else if(mode==="resume-status")result=await core.uploadStatus(payload.token);
+  else if(mode.includes("upload")||mode.includes("publish"))result=await core.upload(payload.token,(async function*(){if(payload.marker){await writeFile(payload.marker,"started");await new Promise(resolve=>setTimeout(resolve,300));}yield Buffer.from(payload.value??"worker upload");})());
   else if(mode==="crash-after-unlink")result=await core.execute("delete",payload);
   else result=await core.execute(mode,payload);
   console.log(JSON.stringify({result}));

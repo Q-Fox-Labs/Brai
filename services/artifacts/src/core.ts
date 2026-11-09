@@ -1,6 +1,6 @@
 // ABOUTME: Реализует жизненный цикл artifacts через явные порты хранения.
 // ABOUTME: Не зависит от PostgreSQL, файловой системы и транспорта.
-import {randomUUID,randomBytes} from "node:crypto";
+import {randomUUID,randomBytes,createHash} from "node:crypto";
 import type {Artifact, ArtifactReference, ReferenceScope, ReferenceQueryScope, ReferenceAttachment, ArtifactOutputBinding, OutputBindRequest, OutputQueryScope} from "../contracts/index.mjs";
 import type {ArtifactsStore,ArtifactFiles,StoreSession,ArtifactRecord,Metadata,ListInput,LinkRecord,StoreItems} from "./ports.js";
 import {ArtifactError,storageError} from "./errors.js";
@@ -195,18 +195,39 @@ export function createArtifactsCore({store,files,config,now=Date.now}:CoreOption
     if(resultBytes(result)>maxResultBytes)throw new ArtifactError("PAYLOAD_TOO_LARGE");
     return result;
   }
+  /** Завершает полностью подтверждённый префикс также из фоновой сверки, без браузера. */
+  async function finishResumable(session:StoreSession,record:ArtifactRecord){
+    const partial=record.resumable;
+    if(!partial||partial.offset!==partial.totalBytes)return;
+    const inspected=await files.inspectTemp(partial.tempName);
+    if(inspected.sizeBytes!==partial.totalBytes)throw new ArtifactError("STORAGE_UNAVAILABLE");
+    record.publication={tempName:partial.tempName,...inspected};await save(session,record);
+    await files.publish(record.artifact.artifactId,record.publication);
+    record.artifact.status="ready";record.artifact.sizeBytes=inspected.sizeBytes;record.artifact.sha256=inspected.sha256;
+    delete record.publication;await save(session,record);
+  }
   async function recover(session:StoreSession,record:ArtifactRecord):Promise<"ready"|"failed"|undefined> {
     if(record.artifact.status!=="pending"&&record.artifact.status!=="failed")return;
     if(record.publication){
-      const published=await files.inspect(record.artifact.artifactId);
+      let published=await files.inspect(record.artifact.artifactId);
+      if(!published&&record.resumable&&record.resumable.offset===record.resumable.totalBytes){
+        const temporary=await files.inspectTemp(record.publication.tempName);
+        if(temporary.sizeBytes===record.publication.sizeBytes&&temporary.sha256===record.publication.sha256){
+          await files.publish(record.artifact.artifactId,record.publication);published=temporary;
+        }
+      }
       if(published&&published.sizeBytes===record.publication.sizeBytes&&published.sha256===record.publication.sha256){
         record.artifact.status="ready";record.artifact.sizeBytes=published.sizeBytes;record.artifact.sha256=published.sha256;record.artifact.internalUrl=base(config.internalBaseURL)+"/files/"+record.artifact.artifactId;
         const temp=record.publication.tempName;delete record.publication;await save(session,record);await files.removeTemp(temp);return "ready";
       }
       // AIDEV-NOTE: Неизвестные опубликованные байты не удаляем при сверке.
-      const temp=record.publication.tempName;delete record.publication;record.artifact.status="failed";await save(session,record);await files.removeTemp(temp);return "failed";
+      const temp=record.publication.tempName;delete record.publication;delete record.resumable;record.artifact.status="failed";await save(session,record);await files.removeTemp(temp);return "failed";
     }
-    if(record.artifact.status==="pending"&&Date.parse(record.artifact.updatedAt)<=now()-config.staleTempAgeMs){record.artifact.status="failed";await save(session,record);return "failed";}
+    if(record.resumable&&record.resumable.offset===record.resumable.totalBytes){await finishResumable(session,record);return "ready";}
+    if(record.artifact.status==="pending"&&Date.parse(record.artifact.updatedAt)<=now()-config.staleTempAgeMs){
+      const partial=record.resumable;delete record.resumable;record.artifact.status="failed";await save(session,record);
+      if(partial)await files.removeTemp(partial.tempName);return "failed";
+    }
   }
   /** Сохраняет ограниченный поток; успех только после публикации файла и записи ready. */
   async function upload(uploadToken:string,source:AsyncIterable<Uint8Array>,signal?:AbortSignal):Promise<Artifact> {
@@ -215,6 +236,7 @@ export function createArtifactsCore({store,files,config,now=Date.now}:CoreOption
       const record=await required(session,found.artifact.artifactId);
       await recover(session,record);
       if(record.artifact.status!=="pending"&&record.artifact.status!=="failed")throw conflict();
+      if(record.resumable)throw conflict();
       const combined=signal?AbortSignal.any([signal,lockSignal]):lockSignal;
       combined.throwIfAborted();
       let publication;
@@ -229,6 +251,41 @@ export function createArtifactsCore({store,files,config,now=Date.now}:CoreOption
       record.artifact.status="ready";record.artifact.sizeBytes=publication.sizeBytes;record.artifact.sha256=publication.sha256;record.artifact.internalUrl=base(config.internalBaseURL)+"/files/"+record.artifact.artifactId;
       delete record.publication;await save(session,record);return view(record);
     }))!;
+  }
+  const chunkBytes=1048576,emptyChain="0".repeat(64);
+  const uploadView=(record:ArtifactRecord)=>({offset:record.artifact.status==="ready"?record.artifact.sizeBytes!:record.resumable?.offset??0,totalBytes:record.resumable?.totalBytes??record.artifact.sizeBytes,chain:record.resumable?.chain??emptyChain,chunkBytes,ready:record.artifact.status==="ready"});
+  async function uploadRecord<T>(uploadToken:string,work:(session:StoreSession,record:ArtifactRecord,signal:AbortSignal)=>Promise<T>):Promise<T>{
+    const found=await locked([],session=>session.uploading(uploadToken));if(!found)throw new ArtifactError("NOT_FOUND");
+    return (await locked([key(found.artifact.artifactId)],async(session,signal)=>{
+      const record=await required(session,found.artifact.artifactId);await recover(session,record);
+      if(!["pending","failed","ready"].includes(record.artifact.status))throw conflict();
+      return work(session,record,signal);
+    }))!;
+  }
+  /** Возвращает только подтверждённые БД части; чтение не продлевает срок хранения. */
+  async function uploadStatus(uploadToken:string){return uploadRecord(uploadToken,async(_session,record)=>uploadView(record));}
+  /** Добавляет часть 1 MiB (последняя короче); offset/chain защищают от гонок и смешения файлов. */
+  async function uploadChunk(uploadToken:string,input:{offset:number;totalBytes:number;chain:string},source:AsyncIterable<Uint8Array>,signal?:AbortSignal){
+    if(!Number.isSafeInteger(input.totalBytes)||input.totalBytes<=0||input.totalBytes>config.maxUploadBytes)throw new ArtifactError("PAYLOAD_TOO_LARGE");
+    if(!Number.isSafeInteger(input.offset)||input.offset<0||input.offset>=input.totalBytes||input.offset%chunkBytes||!/^[0-9a-f]{64}$/.test(input.chain))throw new ArtifactError("INVALID_ARGUMENT");
+    return uploadRecord(uploadToken,async(session,record,lockSignal)=>{
+      if(record.artifact.status==="ready")throw conflict();
+      const combined=signal?AbortSignal.any([signal,lockSignal]):lockSignal;combined.throwIfAborted();
+      if(!record.resumable){
+        if(input.offset!==0||input.chain!==emptyChain)throw conflict();
+        const publication=await files.write(record.artifact.artifactId,(async function*(){})(),0,combined);
+        record.resumable={tempName:publication.tempName,totalBytes:input.totalBytes,offset:0,chain:emptyChain};
+        record.artifact.status="pending";await save(session,record);
+      }
+      const partial=record.resumable;
+      if(partial.offset!==input.offset||partial.totalBytes!==input.totalBytes||partial.chain!==input.chain)throw conflict();
+      const length=Math.min(chunkBytes,input.totalBytes-input.offset);
+      const digest=await files.append(partial.tempName,source,input.offset,length,combined);
+      partial.chain=createHash("sha256").update(Buffer.from(partial.chain+digest,"hex")).digest("hex");partial.offset+=length;
+      await save(session,record);
+      await finishResumable(session,record);
+      return uploadView(record);
+    });
   }
   /** Проверяет готовность без выдачи содержимого; неизвестные и неготовые ID закрыты. */
   async function downloadable(artifactId:string):Promise<Artifact> {
@@ -262,11 +319,11 @@ export function createArtifactsCore({store,files,config,now=Date.now}:CoreOption
     }
     for await(const temp of files.staleTemps(now()-config.staleTempAgeMs))await locked([key(temp.artifactId)],async session=>{
       const record=await session.artifact(temp.artifactId);
-      if(record?.publication?.tempName===temp.tempName)return;
+      if(record?.publication?.tempName===temp.tempName||record?.resumable?.tempName===temp.tempName)return;
       await files.removeTemp(temp.tempName);result.temps++;
     },true);
     return result;
   }
-  return {execute,upload,downloadable,shared,reconcile};
+  return {execute,upload,uploadStatus,uploadChunk,downloadable,shared,reconcile};
 }
 export type ArtifactsCore=ReturnType<typeof createArtifactsCore>;

@@ -6,7 +6,7 @@ import Link, { navigateWorkspace } from "./workspace-link";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent as ReactTouchEvent } from "react";
 import { motion, useMotionValue, useSpring, useTransform, type MotionValue } from "motion/react";
-import { ChevronDown, ChevronUp, Ellipsis, Network, SquareTerminal, Target, ListChecks, Timer, ShieldCheck, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Ellipsis, Network, SquareTerminal, Target, ListChecks, BookOpen, Timer, ShieldCheck, X } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { BraiBrandIcon } from "@/components/ui/brai-brand-icon";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -16,7 +16,7 @@ import { useMobileSheetDrag } from "./use-mobile-sheet-drag";
 import { useSoftwareKeyboardOpen } from "./use-software-keyboard-open";
 import { sectionSwipePageStyle, useLeftEdgeMenuSwipe, useSectionSwipeNavigation } from "./use-section-swipe-navigation";
 
-type Route = { href: "/" | "/agent" | "/do" | "/alerts" | "/game-core" | "/focus" | "/goals" | "/admin"; label: string; icon: "agent" | "timer" | "do" | "game-core" | "focus" | "goals" };
+type Route = { href: "/" | "/agent" | "/do" | "/alerts" | "/game-core" | "/focus" | "/goals" | "/admin" | "/diary"; label: string; icon: "agent" | "timer" | "do" | "game-core" | "focus" | "goals" | "diary" };
 type MobilePanel = "profile" | "shortcuts";
 const routes: Route[] = [
   { href: "/agent", label: "Агент", icon: "agent" },
@@ -25,6 +25,7 @@ const routes: Route[] = [
   { href: "/game-core", label: "Элементы", icon: "game-core" },
   { href: "/focus", label: "Фокус", icon: "focus" },
   { href: "/goals", label: "Цели", icon: "goals" },
+  { href: "/diary", label: "Дневник", icon: "diary" },
 ];
 const mobileQuery = "(max-width: 860px)";
 const historyMarker = "__braiNavigationPanel";
@@ -48,7 +49,7 @@ export default function AppNavigation({ email, timerElapsed, admin = false, show
   const visibleRoutes = showAgent ? routes : routes.filter(route => route.href !== "/agent");
   const activeSection = pathname === "/agent" ? "agent" : pathname === "/do" ? "do" : "timer";
   const selectSection = useCallback((section: "agent" | "timer" | "do") => { if (showAgent || section !== "agent") navigateWorkspace(section === "timer" ? "/" : `/${section}`); }, [showAgent]);
-  const dockSwipe = useSectionSwipeNavigation(activeSection, selectSection, isMobile && panel === null && pathname !== "/alerts" && pathname !== "/game-core" && pathname !== "/focus" && pathname !== "/goals");
+  const dockSwipe = useSectionSwipeNavigation(activeSection, selectSection, isMobile && panel === null && pathname !== "/alerts" && pathname !== "/game-core" && pathname !== "/focus" && pathname !== "/goals" && pathname !== "/diary");
   const currentSwipeStyle = sectionSwipePageStyle(dockSwipe.visual, "current");
   const openPanel = useCallback((next: MobilePanel, source: HTMLElement) => {
     opener.current = source;
@@ -332,6 +333,7 @@ function RouteIcon({ name }: { name: Route["icon"] }) {
   if (name === "agent") return <BraiBrandIcon />;
   if (name === "game-core") return <Network aria-hidden="true" />;
   if (name === "focus") return <Target aria-hidden="true" />;
+  if (name === "diary") return <BookOpen aria-hidden="true" />;
   if (name === "goals") return <ListChecks aria-hidden="true" />;
   if (name === "timer") return <Timer aria-hidden="true" />;
   return <SquareTerminal aria-hidden="true" />;

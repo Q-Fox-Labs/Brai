@@ -214,3 +214,20 @@ test('migration upgrades version one without modifying incoming reference ledger
   for(const row of before){const b=row.document;await app.query('INSERT INTO artifacts.artifact_output_bindings(owner_id,project_id,thread_id,item_id,document) VALUES($1,$2,$3,$4,$5)',[b.ownerId,b.projectId,b.threadId,b.itemId,b]);}
   await assert.rejects(app.query('UPDATE artifacts.artifact_output_bindings SET document=document'),e=>e.code==='42501');
 });
+
+test("resumable checkpoint persists in PostgreSQL across processes and concurrent parts serialize",async()=>{
+  const p=await prepare(),token=p.uploadUrl.split("/").at(-1),MB=1048576,totalBytes=2*MB+5;
+  const first=await worker("resume-part",{token,input:{offset:0,totalBytes,chain:"0".repeat(64)},length:MB,fill:23});
+  assert.equal(first.result.offset,MB);
+  const persisted=await worker("resume-status",{token});assert.deepEqual(persisted.result,first.result);
+  const request={token,input:{offset:MB,totalBytes,chain:first.result.chain},length:MB,fill:47};
+  const concurrent=await Promise.all([worker("resume-part",request),worker("resume-part",request)]);
+  assert.equal(concurrent.filter(r=>r.result?.offset===2*MB).length,1);
+  assert.equal(concurrent.filter(r=>r.error==="CONFLICT").length,1);
+  const second=concurrent.find(r=>r.result).result;
+  const last=await worker("resume-part",{token,input:{offset:2*MB,totalBytes,chain:second.chain},length:5,fill:99});
+  assert.equal(last.result.ready,true);
+  const bytes=Buffer.concat([Buffer.alloc(MB,23),Buffer.alloc(MB,47),Buffer.alloc(5,99)]);
+  assert.deepEqual(await readFile(join(root,"files",p.artifact.artifactId)),bytes);
+  assert.equal((await core.execute("get",{artifactId:p.artifact.artifactId})).sha256,createHash("sha256").update(bytes).digest("hex"));
+});

@@ -137,6 +137,7 @@
       "services/codeworks/tests/integration/fixture-lifecycle.mjs",
       "services/codeworks/tests/fixture-lifecycle.test.mjs",
       "services/codeworks/tests/deployment.test.mjs",
+      "services/codeworks/tests/deployment-selection.test.mjs",
       "services/codeworks/tests/cleanup.test.mjs",
       "services/codeworks/tests/cli.test.mjs",
       "services/codeworks/tests/hook.test.mjs",

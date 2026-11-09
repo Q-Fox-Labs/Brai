@@ -54,7 +54,8 @@
       "services/artifacts/ownership_migration.py",
       "services/artifacts/tests/ownership.test.mjs",
       "services/artifacts/tests/test_ownership.py",
-      "services/artifacts/tests/ownership-delivery.test.mjs"
+      "services/artifacts/tests/ownership-delivery.test.mjs",
+      "services/artifacts/tests/resumable.test.mjs"
     ]
   },
   "dependencies": [],

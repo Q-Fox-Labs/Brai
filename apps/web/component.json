@@ -260,10 +260,22 @@
       "apps/web/app/api/telegram-observer/[...path]/route.ts",
       "apps/web/app/api/telegram-observer/file-auth/route.ts",
       "apps/web/server/telegram-observer.ts",
+      "apps/web/app/api/diary/entry/route.ts",
+      "apps/web/app/api/diary/file/route.ts",
+      "apps/web/app/api/diary/materials/route.ts",
+      "apps/web/app/api/diary/route.ts",
+      "apps/web/app/api/diary/upload/route.ts",
+      "apps/web/app/diary/CONTRACT.md",
+      "apps/web/app/diary/page.tsx",
+      "apps/web/app/diary/screen.tsx",
+      "apps/web/app/diary/styles.css",
+      "apps/web/app/diary/types.ts",
+      "apps/web/server/diary-http.ts",
       "apps/web/app/agent/admin-chats.tsx",
       "apps/web/app/agent/admin-chat-client.ts",
       "apps/web/app/api/admin/route.ts",
-      "apps/web/server/admin-download.ts"
+      "apps/web/server/admin-download.ts",
+      "apps/web/app/diary/upload.ts"
     ],
     "checks": [
       "apps/web/tests/account-render.test.ts",
@@ -322,7 +334,9 @@
       "apps/web/tests/admin-chat-client.test.ts",
       "apps/web/tests/admin-auth.test.ts",
       "apps/web/tests/admin-download.test.ts",
-      "apps/web/tests/admin-chats-render.test.ts"
+      "apps/web/tests/admin-chats-render.test.ts",
+      "apps/web/tests/diary-render.test.ts",
+      "apps/web/tests/diary-upload.test.ts"
     ]
   },
   "dependencies": [
@@ -385,6 +399,13 @@
       "delivery": [
         "services/alerts/schemas"
       ]
+    },
+    {
+      "id": "diary",
+      "inputs": [
+        "services/diary/contracts/**"
+      ],
+      "delivery": []
     }
   ],
   "commands": {
