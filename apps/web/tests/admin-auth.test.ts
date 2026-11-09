@@ -139,5 +139,11 @@ test("real Control reproduces the preview refusal and accepts the same admin coo
   role="user";
   assert.equal((await mod.exports.GET(new Request(preview+"/api/admin?operation=admin-chats-list&userId=target",{headers:{cookie}}))).status,403);
   assert.equal(reads,1);assert.equal(audits,1);
+  role="admin";
+  for (const [environment,allowedPreview] of [["prod",preview],["dev","https://other-preview.example.test"]]) {
+   process.env.BRAI_ENVIRONMENT=environment;process.env.WEB_SSO_PREVIEW_ORIGINS=allowedPreview;
+   const denied=await mod.exports.GET(new Request(preview+"/api/admin?operation=admin-chats-list&userId=target",{headers:{cookie}}));
+   assert.equal(denied.status,403);assert.equal(reads,1);assert.equal(audits,1);
+  }
  } finally {ownerControl=null;role="admin";names.forEach((name,i)=>{if(saved[i]===undefined)delete process.env[name];else process.env[name]=saved[i];});}
 });
