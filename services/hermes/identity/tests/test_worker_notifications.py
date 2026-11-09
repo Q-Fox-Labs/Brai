@@ -387,7 +387,7 @@ class NativeNotificationTest(unittest.IsolatedAsyncioTestCase):
         async def operation(route, metadata):
             value = await chunks(adapter, route[0], ['head', 'tail'] if partial_mode else ['body'],
                                  [], None, metadata, (Exception, BadRequest, TimeoutError))
-            return vars(value)
+            return runtime._receipt(value)
         result = await topics.deliver(profile(), '123', operation, text=True)
         self.assertTrue(result['success'])
         self.assertEqual(calls, [('body', 7), ('body', 8)])

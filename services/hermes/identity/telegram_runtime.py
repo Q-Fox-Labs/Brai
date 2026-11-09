@@ -169,6 +169,11 @@ def _receipt(value):
     receipt = {key: data[key] for key in ('success', 'message_id', 'error', 'retryable', 'retry_after', 'continuation_message_ids', 'error_kind') if key in data}
     # Native Telegram _send_chunks хранит все части в raw_response; наружу передаём только ID.
     raw = data.get('raw_response')
+    if isinstance(raw, dict) and any(raw.get(key) for key in (
+            'partial_overflow', 'delivered_chunks', 'delivered_message_ids', 'last_message_id')):
+        # AIDEV-NOTE: Не терять доказательство частичной доставки при очистке metadata.
+        # Сам текст недоставленных частей через ingress не возвращается.
+        receipt['raw_response'] = {'partial_overflow': True}
     parts = raw.get('message_ids') if isinstance(raw, dict) else None
     if isinstance(parts, list):
         existing = receipt.get('continuation_message_ids', [])
