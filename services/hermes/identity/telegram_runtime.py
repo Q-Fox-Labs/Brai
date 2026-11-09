@@ -17,6 +17,7 @@ import uuid
 
 from .ingress import Bridge
 from .routes import RouteLedger
+from .notifications import NotificationTopics
 from .scope import UNSCOPED, request_scope
 
 MAX_FRAME = 2 * 1024 * 1024
@@ -183,6 +184,7 @@ class Resolver:
         self.adapter, self.runner = adapter, runner
         self.bridges, self.turns = {}, {}
         self.ledger = ledger if ledger is not None else RouteLedger()
+        self.notifications = NotificationTopics(self.ledger, lambda: self.adapter._bot, self._account)
         self.interactive_scopes = {}
         self.supervisor = None
         self.closed = False
@@ -431,6 +433,23 @@ class Resolver:
             supports = getattr(self.adapter, 'supports_draft_streaming', None)
             if not callable(supports) or not supports('dm', metadata):
                 return {'success': False, 'error': 'Draft transport unavailable'}
+        notification = (payload.get('metadata') or {}).get('_brai_notifications') is True
+        if notification:
+            if (request_scope.get() is not None or turn is not None or route[1]
+                    or payload.get('reply_to') or action not in {
+                        'send', 'send_file_set', 'send_image_file', 'send_document',
+                        'send_video', 'send_voice', 'send_animation'}):
+                raise PermissionError('Invalid notification delivery')
+            async def send_notification(target, options):
+                await self._account(profile, target[0])
+                return await self._deliver_route(profile, action, payload, target, options,
+                                                 None, current)
+            return await self.notifications.deliver(profile, route[0], send_notification,
+                                                    text=action == 'send')
+        return await self._deliver_route(profile, action, payload, route, metadata, turn, current)
+
+    async def _deliver_route(self, profile, action, payload, route, metadata, turn, current):
+        """Отправить в уже проверенный маршрут и сохранить только фактические квитанции."""
         uid = profile['uid']
         input_id = turn.get('inputId') if turn else None
         offer_id = turn.get('accountOfferId') if turn else None
