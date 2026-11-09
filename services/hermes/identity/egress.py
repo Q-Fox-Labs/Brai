@@ -715,12 +715,15 @@ async def _authorize_socket(path, uid):
 
 
 async def _check_access(uid, registry_loader, authorize):
+    """Вернуть True/False по правам либо None при недоступной проверке Auth."""
     try:
         _profile(registry_loader(), uid)
         return await asyncio.wait_for(authorize(uid), 0.4) is True
-    except Exception:
-        # AIDEV-NOTE: Любая ошибка проверки означает отказ без вывода данных брокера.
+    except Rejected:
         return False
+    except Exception:
+        # AIDEV-NOTE: Доступ закрыт; недоступность Auth не означает неверные credentials.
+        return None
 
 
 async def _watch_access(uid, registry_loader, authorize):
@@ -759,8 +762,10 @@ async def start_server(socket_path, registry_loader, config_loader, authorize, d
             async with semaphore:
                 sock = writer.get_extra_info("socket")
                 _, uid, _ = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-                if not await _check_access(uid, registry_loader, authorize):
-                    writer.write(b"HTTP/1.1 403 Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+                allowed = await _check_access(uid, registry_loader, authorize)
+                if allowed is not True:
+                    status = 403 if allowed is False else 503
+                    writer.write(f"HTTP/1.1 {status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".encode())
                     await writer.drain()
                     return
                 operation = asyncio.create_task(_handle(reader, writer, registry_loader, config_loader, dial, resolve_provider, search))
