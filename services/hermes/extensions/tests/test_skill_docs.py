@@ -112,6 +112,25 @@ class SkillDocumentationTests(unittest.TestCase):
             self.plan()
         self.assertFalse(self.home.exists())
 
+    def test_shared_text_is_not_rendered_for_a_single_owner(self):
+        self.source.write_text('Shared ' + chr(36) + '{HERMESCUSTOM_ROOT}/scripts/helper.py; ' + chr(36) + '{HERMES_HOME}')
+        self.commit()
+        entries = docs.collect(self.repository, self.revision, self.home, None, system=True)
+        raw = entries['skills/media/example/SKILL.md']['content']
+        self.assertIn(b'/opt/brai-profile/instructions/scripts/helper.py', raw)
+        self.assertIn((chr(36) + '{HERMES_HOME}').encode(), raw)
+        changes, _ = docs.plan(self.home, entries, self.revision, system=True)
+        docs.apply(self.home, changes)
+        path = self.home / 'skills/media/example/SKILL.md'
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o755)
+
+    def test_system_mode_rejects_non_root_and_adoption(self):
+        with patch.object(sys, 'argv', ['skill_docs', 'apply', '--system', '--profile-dir', str(self.home)]), patch.object(docs.os, 'geteuid', return_value=1001):
+            with self.assertRaisesRegex(ValueError, 'ROOT_OPERATION_REQUIRED'):
+                docs.main()
+        self.assertFalse(self.home.exists())
+
     def test_write_failure_restores_previously_written_files(self):
         docs.apply(self.home, self.plan())
         marker = (self.home / docs.RECEIPT).read_bytes()

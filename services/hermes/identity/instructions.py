@@ -7,19 +7,23 @@ import os
 import stat
 
 ROOT = Path('/opt/brai-profile/instructions')
-FILES = ('context.md', 'INDEX.md', 'BASE.md', 'skills/creative/context-gifs/SKILL.md')
+FILES = ('context.md', 'INDEX.md', 'BASE.md')
+SKILL = 'creative/context-gifs/SKILL.md'
+SKILLS_ROOT = Path('/opt/brai-profile/system-skills/skills')
 
 
-def read_context(root):
+def read_context(root, skills_root=None):
     """Собрать обязательные тексты; отсутствующий или пустой файл останавливает ход."""
     texts = []
-    for relative in FILES:
-        path = root / relative
+    paths = [root / relative for relative in FILES]
+    if skills_root is not None:
+        paths.append(skills_root / SKILL)
+    for path in paths:
         raw = path.read_bytes()
         if not raw or len(raw) > 262144:
             raise ValueError('SYSTEM_INSTRUCTIONS_INVALID')
         text = raw.decode('utf-8')
-        if relative.endswith('SKILL.md') and text.startswith('---\n'):
+        if path.name == 'SKILL.md' and text.startswith('---\n'):
             text = text.split('\n---\n', 1)[1]
         texts.append('Источник: ' + str(path) + '\n' + text)
     return ('[Обязательные системные инструкции Brai]\n'
@@ -31,15 +35,14 @@ def read_context(root):
 
 def system_context():
     """Проверить root-owned readonly источники и вернуть полный контекст текущего хода."""
-    for relative in FILES:
-        path = ROOT / relative
+    for path in [ROOT / relative for relative in FILES] + [SKILLS_ROOT / SKILL]:
         for item in (path, *path.parents):
             info = item.lstat()
             if info.st_uid != 0 or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode):
                 raise PermissionError('SYSTEM_INSTRUCTIONS_UNTRUSTED')
         if not path.is_file():
             raise ValueError('SYSTEM_INSTRUCTIONS_INVALID')
-    return read_context(ROOT) + personal_context(os.environ.get('HERMES_HOME', ''))
+    return read_context(ROOT, SKILLS_ROOT) + personal_context(os.environ.get('HERMES_HOME', ''))
 
 
 def personal_context(home):

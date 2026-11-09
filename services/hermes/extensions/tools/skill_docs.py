@@ -3,6 +3,8 @@
 # ABOUTME: Не меняет скрипты, модель или службы; сохраняет локальные отличия.
 """Независимое обновление документации навыков установленного профиля."""
 import argparse
+import fcntl
+import stat
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -31,7 +33,7 @@ def git(repository, *args):
     return result.stdout
 
 
-def collect(repository, revision, home, owner):
+def collect(repository, revision, home, owner, *, system=False):
     """Прочитать только UTF-8 документы конкретного коммита, без checkout."""
     if not re.fullmatch('[0-9a-f]{40}', revision):
         raise ValueError('SKILL_DOCUMENTATION_EXACT_REVISION_REQUIRED')
@@ -53,13 +55,17 @@ def collect(repository, revision, home, owner):
             raw.decode('utf-8')
             target = 'skills/' + relative.as_posix()
             personal = home / 'usercustom/userdata/skills/productivity/brai-task-workflows'
-            if relative.parts[0] == 'brai-task-workflows' and personal.is_dir():
+            if not system and relative.parts[0] == 'brai-task-workflows' and personal.is_dir():
                 target = 'usercustom/userdata/skills/productivity/' + relative.as_posix()
             if target in entries:
                 raise ValueError('SKILL_DOCUMENTATION_DUPLICATE_TARGET')
             # AIDEV-NOTE: Текст не закрепляет digest текущего кода; stable alias меняется вместе с runtime.
-            text = raw.replace(b'${HERMESCUSTOM_ROOT}', str(home / 'usercustom/hermescustom').encode())
-            entries[target] = {'source': name, 'sourceSha256': sha(raw), 'content': render(text, home, owner)}
+            if system:
+                content = raw.replace(b'${HERMESCUSTOM_ROOT}', b'/opt/brai-profile/instructions')
+            else:
+                text = raw.replace(b'${HERMESCUSTOM_ROOT}', str(home / 'usercustom/hermescustom').encode())
+                content = render(text, home, owner)
+            entries[target] = {'source': name, 'sourceSha256': sha(raw), 'content': content}
     if not entries or not any(name.endswith('/SKILL.md') for name in entries):
         raise ValueError('SKILL_DOCUMENTATION_EMPTY')
     return entries
@@ -76,7 +82,7 @@ def read_receipt(home):
     return value
 
 
-def verify(home):
+def verify(home, *, system=False):
     """Проверить тексты по квитанции без Git, записи и вызова модели."""
     receipt = read_receipt(home)
     if receipt is None:
@@ -84,13 +90,23 @@ def verify(home):
     for name, row in receipt['files'].items():
         if not name.startswith(('skills/', 'usercustom/userdata/skills/productivity/brai-task-workflows/')):
             raise ValueError('SKILL_DOCUMENTATION_TARGET_INVALID')
-        if sha(destination_safe(home, Path(name)).read_bytes()) != row['installedSha256']:
+        path = destination_safe(home, Path(name))
+        if system:
+            for parent in (path, *path.parents):
+                info = parent.lstat()
+                if info.st_uid != 0 or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode):
+                    raise ValueError('SYSTEM_SKILLS_UNTRUSTED')
+                if parent.is_relative_to(home) and stat.S_ISDIR(info.st_mode) and info.st_mode & 0o555 != 0o555:
+                    raise ValueError('SYSTEM_SKILLS_UNREADABLE')
+            if path.stat().st_mode & 0o444 != 0o444:
+                raise ValueError('SYSTEM_SKILLS_UNREADABLE')
+        if sha(path.read_bytes()) != row['installedSha256']:
             raise ValueError('SKILL_DOCUMENTATION_LOCAL_CHANGE')
     return {'verified': True, 'revision': receipt['revision'], 'documents': len(receipt['files']),
             'overrides': [name for name, row in receipt['files'].items() if row['override']]}
 
 
-def plan(home, entries, revision, adopt=False):
+def plan(home, entries, revision, adopt=False, *, system=False):
     """Проверить весь набор до записи; при первичном переносе сохранить отличия."""
     receipt = read_receipt(home)
     previous = receipt['files'] if receipt else {}
@@ -107,8 +123,8 @@ def plan(home, entries, revision, adopt=False):
                 raise ValueError('SKILL_DOCUMENTATION_ADOPTION_REQUIRED: ' + name)
             override = True
         after = before if override else desired
-        if before != after:
-            mode = target.stat().st_mode & 0o777 if before is not None else 0o600
+        mode = 0o644 if system else (target.stat().st_mode & 0o777 if before is not None else 0o600)
+        if before != after or (target.exists() and target.stat().st_mode & 0o777 != mode):
             changes.append((target, name, before, after, mode))
         files[name] = {'source': entry['source'], 'sourceSha256': entry['sourceSha256'],
                        'installedSha256': sha(after), 'override': override}
@@ -128,7 +144,15 @@ def plan(home, entries, revision, adopt=False):
 
 def atomic(path, raw, mode):
     """Атомарно заменить один файл в уже проверенном назначении."""
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    missing = []
+    directory = path.parent
+    while not directory.exists():
+        missing.append(directory)
+        directory = directory.parent
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o755 if mode == 0o644 else 0o700)
+    if mode == 0o644:
+        for directory in missing:
+            directory.chmod(0o755)
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.skill-doc-')
     try:
         with os.fdopen(fd, 'wb') as stream:
@@ -140,7 +164,7 @@ def atomic(path, raw, mode):
             os.unlink(temporary)
 
 
-def apply(home, changes):
+def apply(home, changes, *, system=False):
     """Сохранить прежние тексты и откатить свою запись при ошибке применения."""
     backup = None
     if changes:
@@ -157,7 +181,7 @@ def apply(home, changes):
                 raise ValueError('SKILL_DOCUMENTATION_CONCURRENT_CHANGE')
             atomic(target, after, mode)
             written.append((target, before, after, mode))
-        verify(home)
+        verify(home, system=system)
     except Exception:
         for target, before, after, mode in reversed(written):
             if target.read_bytes() != after:
@@ -179,21 +203,42 @@ def main():
     parser.add_argument('--revision')
     parser.add_argument('--owner-name')
     parser.add_argument('--adopt-existing', action='store_true')
+    parser.add_argument('--system', action='store_true')
     args = parser.parse_args()
     home = Path(args.profile_dir).absolute()
+    if args.system:
+        if os.geteuid() != 0 or args.adopt_existing:
+            raise ValueError('SYSTEM_SKILLS_ROOT_OPERATION_REQUIRED')
+        for parent in (home, *home.parents):
+            if parent == home and not parent.exists():
+                continue
+            info = parent.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                raise ValueError('SYSTEM_SKILLS_UNTRUSTED')
+        if args.action == 'apply':
+            os.umask(0o022)
+            home.mkdir(mode=0o755, exist_ok=True)
     if args.action == 'verify':
-        result = verify(home)
+        result = verify(home, system=args.system)
     else:
         if not args.source_root or not args.revision:
             parser.error('--source-root и --revision обязательны')
-        entries = collect(Path(args.source_root), args.revision, home, args.owner_name)
-        changes, receipt = plan(home, entries, args.revision, args.adopt_existing)
+        entries = collect(Path(args.source_root), args.revision, home, args.owner_name, system=args.system)
+        changes, receipt = plan(home, entries, args.revision, args.adopt_existing, system=args.system)
         result = {'changed': [row[1] for row in changes], 'revision': args.revision,
                   'documents': len(receipt['files']),
                   'overrides': [name for name, row in receipt['files'].items() if row['override']],
                   'applied': args.action == 'apply'}
         if args.action == 'apply':
-            result['backup'] = apply(home, changes)
+            lock_path = destination_safe(home, Path('docs/skill-documentation.lock'))
+            lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with open(lock_path, 'a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                # Пересчитываем план после ожидания, чтобы не применить старую квитанцию.
+                changes, receipt = plan(home, entries, args.revision, args.adopt_existing, system=args.system)
+                result['changed'] = [row[1] for row in changes]
+                result['backup'] = apply(home, changes, system=args.system)
+                verify(home, system=args.system)
     print(json.dumps(result, ensure_ascii=False))
 
 

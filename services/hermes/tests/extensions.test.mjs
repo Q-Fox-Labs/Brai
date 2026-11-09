@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { buildOutputInventory } from '../../codeworks/components/cli.mjs';
 
-test('delivery includes every extension file and the GIF skill', () => {
+test('delivery includes every extension file and keeps skill documentation separate', () => {
   const root = fileURLToPath(new URL('../../../', import.meta.url));
   const component = JSON.parse(readFileSync(new URL('../component.json', import.meta.url), 'utf8'));
   const manifest = JSON.parse(readFileSync(new URL('../extensions/manifest.json', import.meta.url), 'utf8'));
@@ -17,7 +17,7 @@ test('delivery includes every extension file and the GIF skill', () => {
     assert.ok(delivered.has(path), `Missing delivered extension: ${path}`);
   }
   const skill = 'docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md';
-  assert.ok(delivered.has(skill), `Missing delivered skill: ${skill}`);
+  assert.ok(!delivered.has(skill), 'Skill documentation must be installed independently');
 });
 
 test('extensions connect and codex owner', { timeout: 60000 }, () => {

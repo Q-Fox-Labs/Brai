@@ -160,7 +160,6 @@
       "services/hermes/extensions/native/approval_conversation.py",
       "services/hermes/extensions/patches/conversational-approvals.patch",
       "services/hermes/extensions/scripts/context_gif.py",
-      "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md",
       "services/hermes/identity/CONTROL.md",
       "services/hermes/identity/login.py",
       "services/hermes/identity/runtime.mjs",
@@ -281,7 +280,8 @@
       "services/hermes/identity/tests/memory_spool.test.mjs",
       "services/hermes/identity/tests/test_memory_spool.py",
       "services/hermes/tests/dialogues-port.test.mjs",
-      "services/hermes/tests/dialogues-summary.test.mjs"
+      "services/hermes/tests/dialogues-summary.test.mjs",
+      "services/hermes/identity/tests/test_system_skills_native.py"
     ]
   },
   "dependencies": [
@@ -555,8 +555,7 @@
       "services/hermes/identity/control.openrpc.json",
       "services/hermes/identity/asyncapi.yaml",
       "services/hermes/identity/lifecycle.py",
-      "services/hermes/extensions/scripts/context_gif.py",
-      "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md"
+      "services/hermes/extensions/scripts/context_gif.py"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",
