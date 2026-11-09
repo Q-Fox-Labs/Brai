@@ -74,7 +74,8 @@
       "services/auth/tests/integration/telegram-lifecycle.test.mjs",
       "services/auth/tests/email.roles.sol.test.mjs",
       "services/auth/tests/integration/00-roles-regression.test.mjs",
-      "services/auth/tests/integration/roles-revocation.test.mjs"
+      "services/auth/tests/integration/roles-revocation.test.mjs",
+      "services/auth/tests/integration/email-role-generation.test.mjs"
     ]
   },
   "dependencies": [],

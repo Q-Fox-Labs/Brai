@@ -1,6 +1,8 @@
 // ABOUTME: Применяет роли и поколения Auth также к альтернативному email-входу.
 // ABOUTME: Непривязанные email-аккаунты сохраняют прежний вход; guest не получает cookie.
 import type { Pool } from "pg";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import type { Config } from "./config.js";
 import { lifecycleLock } from "./lifecycle.js";
 import { sessionIdentity } from "./v2.js";
@@ -52,3 +54,33 @@ export async function confirmEmailSession(pool:Pool,cfg:Config,handler:Handler,h
 /** Извлекает cookie только в памяти сервера для проверки ответа официального движка. */
 export function responseCookies(setCookies:string[]){return new Headers({cookie:setCookies.map(value=>value.split(';')[0]).join('; ')});}
 
+
+const emailGrants=new AsyncLocalStorage<EmailGrant>();
+/** Передать неизменное поколение запроса официальному callback без общего mutable state. */
+export function withEmailGrant<T>(grant:EmailGrant,callback:()=>Promise<T>){return emailGrants.run(grant,callback);}
+const otpKey=(email:string)=>'sign-in-otp-'+email.trim().toLowerCase();
+const otpHash=(otp:string)=>createHash('sha256').update(otp).digest('base64url');
+/** Привязать именно созданный библиотекой hash к поколению до передачи письма. */
+export async function stampEmailCode(pool:Pool,email:string,otp:string){
+ const grant=emailGrants.getStore();
+ if(!grant?.linked)return;
+ const client=await pool.connect();let valid=false;
+ try{
+  await client.query('BEGIN');await lifecycleLock(client);
+  const row=(await client.query('SELECT i.role,i.status,i.lifecycle_generation,u.email FROM brai_identity i JOIN "user" u ON u.id=i.user_id WHERE i.user_id=$1 FOR UPDATE OF i',[grant.userId])).rows[0];
+  valid=grant.allowed&&row?.status==='active'&&roles.includes(row.role)&&row.lifecycle_generation===grant.generation&&row.email.toLowerCase()===email.toLowerCase();
+  if(valid){
+   const stamped=await client.query(`UPDATE verification SET brai_generation=$3 WHERE identifier=$1 AND split_part(value,':',1)=$2 RETURNING id`,[otpKey(email),otpHash(otp),grant.generation]);
+   valid=!!stamped.rowCount;
+  }else await client.query(`DELETE FROM verification WHERE identifier=$1 AND split_part(value,':',1)=$2`,[otpKey(email),otpHash(otp)]);
+  await client.query('COMMIT');
+ }catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}
+ if(!valid)throw new Error('Email access changed');
+}
+/** Неподтверждённый или прежний OTP не получает новое поколение при погашении. */
+export async function permitsEmailCode(pool:Pool,email:unknown,otp:unknown,grant:EmailGrant){
+ if(!grant.linked)return true;
+ if(!grant.allowed||typeof email!=='string'||typeof otp!=='string')return false;
+ const row=await pool.query(`SELECT 1 FROM verification WHERE id=(SELECT id FROM verification WHERE identifier=$1 ORDER BY "createdAt" DESC LIMIT 1) AND identifier=$1 AND split_part(value,':',1)=$2 AND brai_generation=$3 AND "expiresAt">now()`,[otpKey(email),otpHash(otp),grant.generation]);
+ return !!row.rowCount;
+}

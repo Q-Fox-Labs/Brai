@@ -136,6 +136,8 @@ export async function migrateIdentity(pool:Pool) {
  END $runtime_migration$;
  COMMENT ON COLUMN brai_identity.applied_generation IS 'Подтверждённое поколение runtime; no-op не требует перестройки профиля';
  ALTER TABLE "session" ADD COLUMN IF NOT EXISTS brai_generation integer NOT NULL DEFAULT 0;
+ ALTER TABLE verification ADD COLUMN IF NOT EXISTS brai_generation integer;
+ COMMENT ON COLUMN verification.brai_generation IS 'Поколение допуска связанного email OTP; NULL не даёт вход в связанный профиль';
  COMMENT ON COLUMN "session".brai_generation IS 'Поколение доступа Auth при входе; старые сессии не восстанавливаются после revoke';
  COMMENT ON COLUMN brai_identity.lifecycle_generation IS 'Монотонное поколение административных заданий пользователя';
  CREATE TABLE IF NOT EXISTS brai_user_operation (

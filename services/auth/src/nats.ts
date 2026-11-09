@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import type { Pool } from "pg";
 import type { Config } from "./config.js";
 import { bridge,subjects,type Operation } from "./bridge.js";
-import { captureEmailGrant, confirmEmailSession, permitsWebSession, responseCookies } from "./web-access.js";
+import { captureEmailGrant, confirmEmailSession, permitsWebSession, responseCookies, withEmailGrant, permitsEmailCode } from "./web-access.js";
 import { sessionIdentity,v2,v2Subjects } from "./v2.js";
 /** Подключается только с явно настроенными NATS credentials и собственным inbox. */
 export function connectNats(cfg:Config){return connect({servers:cfg.natsServers,user:cfg.natsUser,pass:cfg.natsPassword,authenticator:cfg.natsCredsFile?credsAuthenticator(readFileSync(cfg.natsCredsFile)):undefined,tls:cfg.natsCAFile?{caFile:cfg.natsCAFile}:undefined,inboxPrefix:"_INBOX.brai_auth",maxReconnectAttempts:-1,timeout:5000,name:"brai_auth"});}
@@ -21,11 +21,14 @@ export async function runNats(nc:NatsConnection,cfg:Config,handler:(request:Requ
    try{let response;
     if(Object.hasOwn(v2Subjects,name))response=await v2(name,request,cfg,pool,handler);
     else {
-     const data=request as {headers:HeadersInit;body?:{email?:unknown}};
+     const data=request as {headers:HeadersInit;body?:{email?:unknown;otp?:unknown}};
      const emailGrant=cfg.identityMode!=="telegram"&&["send-code","verify-code"].includes(name)?await captureEmailGrant(pool,data.body?.email):null;
      if(emailGrant&&!emailGrant.allowed){msg.respond(Buffer.from(JSON.stringify({status:403,body:{error:"FORBIDDEN"},setCookies:[]})));return;}
      if(name==="sso-issue"&&!await permitsWebSession(pool,cfg,handler,new Headers(data.headers))){msg.respond(Buffer.from(JSON.stringify({status:403,body:{error:"INVALID_SSO"},setCookies:[]})));return;}
-     response=await bridge(name as Operation,request,cfg.origin,handler,cfg);
+     if(emailGrant&&name==='verify-code'&&!await permitsEmailCode(pool,data.body?.email,data.body?.otp,emailGrant)){
+      msg.respond(Buffer.from(JSON.stringify({status:401,body:{error:"UNAUTHORIZED"},setCookies:[]})));return;
+     }
+     response=emailGrant?await withEmailGrant(emailGrant,()=>bridge(name as Operation,request,cfg.origin,handler,cfg)):await bridge(name as Operation,request,cfg.origin,handler,cfg);
      if(emailGrant&&name==="verify-code"&&response.status===200&&!await confirmEmailSession(pool,cfg,handler,responseCookies(response.setCookies),emailGrant))response={status:401,body:{error:"UNAUTHORIZED"},setCookies:[]};
      if(cfg.identityMode!=="telegram"&&name==="session"&&response.body&&!await permitsWebSession(pool,cfg,handler,new Headers(data.headers)))response.body=null;
      if(cfg.identityMode==="telegram"&&name==="session"&&response.body){

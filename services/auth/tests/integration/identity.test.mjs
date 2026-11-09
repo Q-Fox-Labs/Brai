@@ -115,6 +115,7 @@ test("registry, codes, invitations and last admin survive concurrent requests",a
   await pool.query("UPDATE sys_telegram_link SET consumed_by=NULL,consumed_at=NULL WHERE user_id=$1",[equal.id]);
   assert.equal(await redeemTelegramLink(runtime,secret,'30003',equalLink.code),null);
   assert.equal(await unlinkTelegram(runtime,'30002','30001'),true);
+  equal.generation+=1;
   assert.equal(await resolveTelegram(runtime,'30001'),null);
   assert.deepEqual(await resolveTelegram(runtime,'30002'),equal);
   await migrateIdentity(pool);await migrateIdentity(pool);
