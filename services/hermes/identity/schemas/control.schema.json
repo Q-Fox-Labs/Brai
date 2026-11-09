@@ -332,6 +332,9 @@
         },
         "updatedAt": {
           "type": "string"
+        },
+        "participant": {
+          "$ref": "#/definitions/TelegramProfile"
         }
       }
     },
@@ -484,6 +487,13 @@
               "type": "null"
             }
           ]
+        },
+        "profiles": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/definitions/TelegramProfile"
+          }
         }
       }
     },
@@ -749,6 +759,39 @@
         "setCookies": {
           "type": "array",
           "maxItems": 0
+        }
+      }
+    },
+    "TelegramProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "telegramId",
+        "name"
+      ],
+      "properties": {
+        "telegramId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "username": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "avatar": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 32800,
+          "pattern": "^data:image/jpeg;base64,[A-Za-z0-9+/=]+$"
         }
       }
     }

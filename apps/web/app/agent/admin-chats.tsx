@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from "react";
 import WorkspaceFrame from "../shell/workspace-frame";
 import Markdown from "./markdown";
-import { AdminChatError, adminChatKey, latestAdminChat, loadAdminChats, mergeAdminMessages, readAdminChat, type AdminChat, type ChatMessage } from "./admin-chat-client";
+import { AdminChatError, chatParticipant, adminChatKey, latestAdminChat, loadAdminChats, mergeAdminMessages, readAdminChat, type AdminChat, type ChatMessage } from "./admin-chat-client";
 import "./telegram-observer.css";
 
 type History = { key: string; messages: ChatMessage[]; cursor: string | null };
@@ -12,7 +12,16 @@ const emptyHistory = (key = ""): History => ({ key, messages: [], cursor: null }
 function time(value: string) {
   return Number.isNaN(Date.parse(value)) ? "" : new Intl.DateTimeFormat("ru", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
-function title(chat: AdminChat) { return chat.title || chat.owner.name || "Чат Telegram"; }
+function title(chat: AdminChat) { return chat.title || chatParticipant(chat) || "Чат Telegram"; }
+/** Миниатюра хранится у Brai; браузер не обращается к Telegram. */
+function ParticipantAvatar({ chat }: { chat: AdminChat }) {
+  const avatar = chat.participant?.avatar;
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [avatar]);
+  return <span className="tg-avatar" aria-hidden="true">{avatar && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(avatar) && !failed
+    ? <img src={avatar} alt="" width={40} height={40} loading="lazy" onError={() => setFailed(true)} />
+    : Array.from(chat.participant?.name || chat.participant?.username || chat.owner.name || "П")[0]}</span>;
+}
 
 /** Показывает опубликованные файлы через повторную проверку владельца и MIME на сервере. */
 export function AdminMessageBody({ message, owner }: { message: ChatMessage; owner: string }) {
@@ -117,17 +126,17 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
     <header className="tg-sidebar-head"><h1>Чаты</h1><span className="tg-live" data-state={connected ? "live" : "loading"}><i />{connected ? "В эфире" : "Подключение"}</span></header>
     <p className="tg-subtitle">Все пользователи · только просмотр</p>
     <div className="tg-chat-list">{chats.map(chat => <button type="button" className="tg-chat" data-frame-close-rail data-selected={selectedKey === adminChatKey(chat)} key={adminChatKey(chat)} onClick={() => setSelected(chat)}>
-      <span className="tg-avatar" aria-hidden="true">{(chat.owner.name || "П").slice(0, 1)}</span><span className="tg-chat-copy"><strong>{title(chat)}</strong><span>{chat.owner.name || chat.owner.telegramId || "Пользователь"} · {time(chat.updatedAt)}</span></span>
+      <ParticipantAvatar chat={chat} /><span className="tg-chat-copy"><strong>{title(chat)}</strong><span>{chatParticipant(chat)} · {time(chat.updatedAt)}</span></span>
     </button>)}{!chats.length && !listError && !denied && <p className="tg-empty-list">Чаты появятся здесь после первого сообщения.</p>}</div>
   </aside>}>
-    <section className="tg-main" aria-label="Переписка"><header className="tg-header"><div><strong>{selected ? title(selected) : "Переписка"}</strong><span>{selected ? (selected.owner.name || "Пользователь") + " · " : ""}Только просмотр</span></div></header>
+    <section className="tg-main" aria-label="Переписка"><header className="tg-header">{selected && <ParticipantAvatar chat={selected} />}<div><strong>{selected ? title(selected) : "Переписка"}</strong><span>{selected ? chatParticipant(selected) + " · " : ""}Только просмотр</span></div></header>
       {(listError || messageError || denied) && <p className="tg-error" role="status">{denied ? "Просмотр всех чатов доступен только активным администраторам." : messageError || listError}</p>}
       <div ref={scroll} className="tg-conversation" onScroll={event => { const el = event.currentTarget; follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; if (follow.current) setNewCount(0); }}>
         {!selected ? <div className="tg-empty"><h2>Выберите чат</h2><p>Здесь появятся переписки с агентом.</p></div> : <div className="tg-timeline">
           {shown.cursor && <button type="button" className="tg-older" disabled={loading} onClick={() => { void older(); }}>Показать более ранние</button>}
           {loading && !shown.messages.length && <p className="tg-muted" role="status">Загружаем сообщения…</p>}
-          {shown.messages.map(message => <article className="tg-message" data-direction={message.role === "user" ? "in" : "out"} key={message.id}>
-            <div className="tg-message-meta"><strong>{message.role === "assistant" ? "Brai" : selected.owner.name || "Пользователь"}</strong><time>{time(message.createdAt)}</time></div><AdminMessageBody message={message} owner={selected.owner.id} />
+          {shown.messages.filter(message => message.text.trim()).map(message => <article className="tg-message" data-direction={message.role === "user" ? "in" : "out"} key={message.id}>
+            <div className="tg-message-meta"><strong>{message.role === "assistant" ? "Brai" : chatParticipant(selected)}</strong><time>{time(message.createdAt)}</time></div><AdminMessageBody message={message} owner={selected.owner.id} />
           </article>)}
         </div>}
       </div>

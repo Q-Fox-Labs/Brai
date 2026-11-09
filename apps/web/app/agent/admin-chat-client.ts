@@ -1,7 +1,14 @@
 // ABOUTME: Читает чаты разных профилей через существующие административные операции Web.
 // ABOUTME: Сохраняет владельца в ключах и дочитывает пропущенные сообщения после разрыва связи.
 export type ChatOwner = { id: string; name: string; profileId?: string | null; telegramId?: string | null };
-export type AdminChat = { id: string; title: string; updatedAt: string; owner: ChatOwner };
+export type TelegramProfile = { telegramId: string | null; name: string; username?: string | null; avatar?: string | null };
+export type AdminChat = { id: string; title: string; updatedAt: string; owner: ChatOwner; participant?: TelegramProfile };
+/** Имя именно аккаунта диалога, включая второй подключённый Telegram. */
+export function chatParticipant(chat: AdminChat): string {
+  const person = chat.participant;
+  if (person?.name || person?.username) return [person.name, person.username ? "@" + person.username : ""].filter(Boolean).join(" · ");
+  return person?.telegramId || chat.owner.name || chat.owner.telegramId || "Пользователь";
+}
 export type ChatMessage = { id: string; role: "user" | "assistant"; text: string; createdAt: string };
 export type ChatPage = { messages: ChatMessage[]; nextCursor: string | null };
 
@@ -30,8 +37,11 @@ export async function loadAdminChats(previous: AdminChat[], signal: AbortSignal)
       try {
         let cursor: string | null = null;
         do {
-          const page: { items: Omit<AdminChat, "owner">[]; nextCursor: string | null } = await chatQuery("admin-chats-list", { userId: owner.id, ...(cursor ? { cursor } : {}) }, signal);
-          items.push(...page.items.map(item => ({ ...item, owner })));
+          const page: { items: Omit<AdminChat, "owner">[]; profiles?: TelegramProfile[]; nextCursor: string | null } = await chatQuery("admin-chats-list", { userId: owner.id, ...(cursor ? { cursor } : {}) }, signal);
+          items.push(...page.items.map(item => {
+            const profile = page.profiles?.find(profile => profile.telegramId === item.participant?.telegramId);
+            return { ...item, owner, participant: profile ? { ...item.participant, ...profile, name: profile.name || item.participant?.name || "" } : item.participant };
+          }));
           cursor = page.nextCursor;
         } while (cursor);
         chats.push(...items);
@@ -45,14 +55,19 @@ export async function loadAdminChats(previous: AdminChat[], signal: AbortSignal)
   return { chats: chats.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || adminChatKey(a).localeCompare(adminChatKey(b))), unavailable };
 }
 /** Открывает свежую страницу либо продолжает к более ранним сообщениям того же чата. */
-export function readAdminChat(chat: AdminChat, signal: AbortSignal, cursor?: string): Promise<ChatPage> {
-  return chatQuery("admin-chats-get", { userId: chat.owner.id, chatId: chat.id, order: "desc", ...(cursor ? { cursor } : {}) }, signal);
+export async function readAdminChat(chat: AdminChat, signal: AbortSignal, cursor?: string): Promise<ChatPage> {
+  let page: ChatPage;
+  do {
+    page = await chatQuery("admin-chats-get", { userId: chat.owner.id, chatId: chat.id, order: "desc", ...(cursor ? { cursor } : {}) }, signal);
+    cursor = page.nextCursor ?? undefined;
+  } while (!page.messages.length && cursor);
+  return page;
 }
 /** Дочитывает разрыв больше одной страницы, не перечитывая уже загруженную историю. */
 export async function latestAdminChat(chat: AdminChat, lastId: string | undefined, signal: AbortSignal): Promise<ChatPage> {
   let page = await readAdminChat(chat, signal);
   const messages = [...page.messages];
-  while (lastId && page.nextCursor && page.messages.length && BigInt(page.messages[0].id) > BigInt(lastId)) {
+  while (lastId && page.nextCursor && (!page.messages.length || BigInt(page.messages[0].id) > BigInt(lastId))) {
     page = await readAdminChat(chat, signal, page.nextCursor);
     messages.unshift(...page.messages);
   }

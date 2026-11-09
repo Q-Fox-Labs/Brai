@@ -2,7 +2,7 @@
 // ABOUTME: Использует синтетические ответы существующего HTTP API без реальных пользователей.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { AdminChatError, adminChatKey, latestAdminChat, loadAdminChats, mergeAdminMessages, type AdminChat, type ChatMessage } from "../app/agent/admin-chat-client.ts";
+import { AdminChatError, chatParticipant, adminChatKey, latestAdminChat, loadAdminChats, mergeAdminMessages, type AdminChat, type ChatMessage } from "../app/agent/admin-chat-client.ts";
 const chat: AdminChat = { id: "same", title: "Чат", updatedAt: "2026-11-08T00:00:00Z", owner: { id: "u1", name: "Анна", profileId: "p1" } };
 const message = (id: number): ChatMessage => ({ id: String(id), role: "user", text: "Сообщение " + id, createdAt: "2026-11-08T00:00:00Z" });
 
@@ -50,4 +50,20 @@ test("revoked access fails the whole refresh and never returns a partial user co
   }) as typeof fetch;
   await assert.rejects(loadAdminChats([chat],new AbortController().signal),(error:unknown)=>error instanceof AdminChatError&&error.status===403);
  } finally { globalThis.fetch=saved; }
+});
+
+test("empty internal pages do not hide the latest human messages",async()=>{
+ const saved=globalThis.fetch;let calls=0;
+ try{
+  globalThis.fetch=(async(input:string|URL|Request)=>{
+   calls++;const q=new URL(String(input),"https://fixture.test").searchParams;
+   return Response.json(q.get("cursor")==="second"?{messages:[message(2)],nextCursor:null}:{messages:[],nextCursor:"second"});
+  }) as typeof fetch;
+  const result=await latestAdminChat(chat,"1",new AbortController().signal);
+  assert.equal(calls,2);assert.deepEqual(result.messages.map(m=>m.id),["2"]);
+ }finally{globalThis.fetch=saved;}
+});
+test("linked Telegram accounts keep their own name and username",()=>{
+ assert.equal(chatParticipant({...chat,participant:{telegramId:"456",name:"Борис",username:"boris"}}),"Борис · @boris");
+ assert.equal(chatParticipant({...chat,participant:{telegramId:"456",name:""}}),"456");
 });
