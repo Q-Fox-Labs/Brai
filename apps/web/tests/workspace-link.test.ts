@@ -24,6 +24,14 @@ test("workspace click changes address once; current section keeps its history en
   assert.equal(prevented, 2);
 });
 
+test("admin link switches within the existing workspace", () => {
+  paths.length = 0; browser.location.pathname = "/agent";
+  let prevented = false;
+  module.exports.default({ href: "/admin" }).props.onClick({ button: 0, preventDefault: () => { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.deepEqual(paths, ["/admin"]);
+});
+
 test("modified, cancelled, download and new-tab clicks retain native link behavior", () => {
   paths.length = 0; browser.location.pathname = "/";
   for (const event of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }, { defaultPrevented: true }]) {

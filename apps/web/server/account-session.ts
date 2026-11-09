@@ -22,5 +22,6 @@ export async function loadAccountSession(headers: Headers): Promise<AccountSessi
 }
 /** Возвращает разрешённые поля идентичности без данных сессии. */
 export function publicUser(user: Awaited<ReturnType<typeof requireSession>>["user"]): AccountUser {
- return telegramIdentity() ? { id: user.id, name: user.name?.trim() || "Пользователь", role: user.role, status: user.status, telegramId: user.telegramId ?? null, profileId: user.profileId ?? null, agentOwnerId: user.role === "admin" && user.status === "active" ? user.id : null } : { id: user.id, email: user.email };
+ const identity = telegramIdentity() || (user.role !== undefined && user.status !== undefined);
+ return identity ? { id: user.id, name: user.name?.trim() || "Пользователь", role: user.role, status: user.status, telegramId: user.telegramId ?? null, profileId: user.profileId ?? null, agentOwnerId: user.role === "admin" && user.status === "active" ? user.id : null } : { id: user.id, email: user.email };
 }

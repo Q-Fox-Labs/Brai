@@ -6,7 +6,7 @@ import Link, { navigateWorkspace } from "./workspace-link";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type TouchEvent as ReactTouchEvent } from "react";
 import { motion, useMotionValue, useSpring, useTransform, type MotionValue } from "motion/react";
-import { ChevronDown, ChevronUp, Ellipsis, Network, SquareTerminal, Target, ListChecks, Timer, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Ellipsis, Network, SquareTerminal, Target, ListChecks, Timer, ShieldCheck, X } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { BraiBrandIcon } from "@/components/ui/brai-brand-icon";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -16,7 +16,7 @@ import { useMobileSheetDrag } from "./use-mobile-sheet-drag";
 import { useSoftwareKeyboardOpen } from "./use-software-keyboard-open";
 import { sectionSwipePageStyle, useLeftEdgeMenuSwipe, useSectionSwipeNavigation } from "./use-section-swipe-navigation";
 
-type Route = { href: "/" | "/agent" | "/do" | "/alerts" | "/game-core" | "/focus" | "/goals"; label: string; icon: "agent" | "timer" | "do" | "game-core" | "focus" | "goals" };
+type Route = { href: "/" | "/agent" | "/do" | "/alerts" | "/game-core" | "/focus" | "/goals" | "/admin"; label: string; icon: "agent" | "timer" | "do" | "game-core" | "focus" | "goals" };
 type MobilePanel = "profile" | "shortcuts";
 const routes: Route[] = [
   { href: "/agent", label: "Агент", icon: "agent" },
@@ -120,7 +120,7 @@ export default function AppNavigation({ email, timerElapsed, admin = false, show
       <Link className="brai-rail-brand" href={showAgent ? "/agent" : "/"} aria-label={showAgent ? "Brai — Агент" : "Brai"}><BraiBrandIcon /></Link>
       <nav className="brai-rail-links" aria-label="Разделы Brai">
         {visibleRoutes.map(route => <RouteLink key={route.href} route={route} current={pathname === route.href} compact timerElapsed={timerElapsed} />)}
-        {admin && <a className="brai-navigation-link is-compact" href="/admin" aria-label="Админка"><span className="brai-navigation-label">Админка</span></a>}
+        {admin && <Link className={"brai-navigation-link is-compact" + (pathname === "/admin" ? " is-current" : "")} href="/admin" aria-label="Админка" aria-current={pathname === "/admin" ? "page" : undefined}><span className="brai-navigation-icon" aria-hidden="true"><ShieldCheck /></span><span className="brai-navigation-label">Админка</span></Link>}
       </nav>
       <div className="brai-rail-footer"><AlertsBell /><ThemeButton /><ProfileMenu email={email} onLogout={onLogout} open={profileOpen} setOpen={setProfileOpen} /></div>
     </aside>
@@ -234,7 +234,7 @@ function MobilePanel({ panel, email, admin, routes, onClose, onLogout, onNavigat
       <div className="brai-mobile-panel-grip" aria-hidden="true" />
       <header className="brai-mobile-panel-heading"><span>Brai</span><button type="button" aria-label="Закрыть панель" onClick={() => closeSheet()}><X /></button></header>
       <nav className="brai-mobile-panel-routes" aria-label="Разделы Brai">{routes.map(route => <RouteLink key={route.href} route={route} current={pathname === route.href} mobile
-        onNavigate={event => navigateFromPanel(event, route.href, closeSheet, onNavigate)} />)}{admin && <a href="/admin">Админка</a>}</nav>
+        onNavigate={event => navigateFromPanel(event, route.href, closeSheet, onNavigate)} />)}{admin && <Link href="/admin" className="brai-navigation-link is-mobile" onClick={event => navigateFromPanel(event, "/admin", closeSheet, onNavigate)}><span className="brai-navigation-icon" aria-hidden="true"><ShieldCheck /></span><span className="brai-navigation-label">Админка</span></Link>}</nav>
       <div className="brai-mobile-panel-account"><Avatar className="brai-profile-avatar"><AvatarFallback className="bg-primary text-xs font-semibold text-primary-foreground">{email.trim().slice(0, 1).toLocaleUpperCase("ru-RU") || "?"}</AvatarFallback></Avatar><span>{email}</span></div>
       <div className="brai-mobile-panel-actions"><AlertsBell onClick={event => navigateFromPanel(event, "/alerts", closeSheet, onNavigate)} /><ThemeButton /><button className="brai-mobile-logout" type="button" onClick={() => closeSheet(() => onLogoutRef.current())}>Выйти</button></div>
     </aside> : <aside ref={sheet.sheetRef} className="brai-mobile-shortcut-sheet" style={sheet.sheetStyle} role="dialog" aria-modal="true" aria-label="Быстрые настройки" tabIndex={-1}
