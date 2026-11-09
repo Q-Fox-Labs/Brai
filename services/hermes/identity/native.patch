@@ -45,7 +45,7 @@
 @@ -5566,34 +5585,26 @@
          slot_until[str(normalize_telegram_chat_id(chat_id))] = (
              asyncio.get_running_loop().time() + max(0.0, budget))
- 
+
 -    async def send_typing(self, chat_id: str, metadata: Optional[dict[str, Any]] = None) -> None:
 -        """Send typing indicator."""
 -        if not self._bot or self._typing_in_cooldown(chat_id):
