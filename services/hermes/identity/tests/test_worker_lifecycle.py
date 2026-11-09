@@ -169,6 +169,37 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await worker.stop_runtime()
 
+    async def test_reconnect_waits_for_closed_bootstrap_peer_drain(self):
+        worker = Worker(os.getuid() + 1, 'owner', '123', AsyncMock())
+        worker._startup_gate = self.gate(worker)
+        worker.peer = NS(closed=True)
+        worker.peer_released.clear()
+        with tempfile.TemporaryDirectory() as directory, patch(
+                'identity.worker.peer_uid', return_value=worker.ingress_uid):
+            server = await asyncio.start_unix_server(worker.serve_connection,
+                                                     path=directory + '/worker.sock')
+            reader, writer = await asyncio.open_unix_connection(directory + '/worker.sock')
+            client = Peer(reader, writer, {})
+            reading = asyncio.create_task(client.run())
+            call = asyncio.create_task(client.call('health', {'require_tools': True}, timeout=2))
+            try:
+                await asyncio.sleep(.02)
+                self.assertFalse(call.done())
+                self.assertIsNone(worker.runner)
+                worker.peer = None
+                worker.peer_released.set()
+                receipt = await call
+                self.assertTrue(receipt['operational'])
+                self.assertEqual(self.calls.count('native_start'), 1)
+            finally:
+                writer.close()
+                await reading
+                await asyncio.gather(call, return_exceptions=True)
+                if worker.peer is not None:
+                    await asyncio.wait_for(worker.peer_released.wait(), 2)
+                server.close()
+                await server.wait_closed()
+
     async def test_secondary_operator_health_preserves_the_active_ingress_and_runtime(self):
         worker = await self.worker()
         primary = NS(closed=False)
