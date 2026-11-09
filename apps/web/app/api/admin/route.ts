@@ -6,6 +6,7 @@ import { failure } from "@/server/http";
 import { adminDownload } from "@/server/admin-download";
 import { readBoundedJson } from "@/server/request-body";
 import { readAdminPersonal } from "@/server/admin-personal";
+import { ssoConfig } from "@/server/sso";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 const reads = new Set(["users-list", "users-get", "users-operation-get", "invite-list", "admin-memory-list", "admin-memory-get", "admin-chats-list", "admin-chats-get", "admin-artifacts-list", "admin-artifacts-get", "admin-artifacts-download", "admin-personal-get"]);
@@ -24,6 +25,13 @@ async function handle(request: Request) {
   const headers = Object.fromEntries(["cookie", "origin"].flatMap(name => { const item = request.headers.get(name); return item ? [[name, item]] : []; }));
   if (!headers.origin && request.method === "GET") headers.origin = new URL(process.env.WEB_ORIGIN ?? request.url).origin;
   const bridge = operation.startsWith("admin-");
+  const sso = bridge ? ssoConfig() : null;
+  if (sso?.role === "preview") {
+   if (headers.origin !== sso.origin) throw new GatewayError(403, "ORIGIN");
+   // AIDEV-NOTE: Общий Control проверяет origin DEV; адрес превью уже проверен Web.
+   // Cookie администратора сохраняется для повторной проверки сессии и аудита владельцем.
+   headers.origin = sso.hub;
+  }
   if (bridge && (typeof input.userId !== "string" || !input.userId)) throw new GatewayError(400, "INVALID_ARGUMENT");
   if (preview !== undefined && (operation !== "admin-artifacts-download" || preview !== "1")) throw new GatewayError(400, "INVALID_ARGUMENT");
   if (bridge && typeof input.limit === "string") {
