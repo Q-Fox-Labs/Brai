@@ -120,6 +120,27 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(str(self.cache), str(result))
         self.assertEqual(self.calls[0], ('artifacts.fetch', {'uid': self.uid, 'artifactId': self.aid}))
 
+    async def test_missing_ingress_directory_fails_before_artifacts_fetch(self):
+        """Отсутствующий каталог выдаёт точную причину до сетевой операции."""
+        with self.assertRaisesRegex(RuntimeError, 'INGRESS_DELIVERY_ROOT_UNAVAILABLE') as failure:
+            await self.port.fetch(self.uid, self.profile, {'artifactId': self.aid}, ingress=True)
+        self.assertIsInstance(failure.exception.__cause__, FileNotFoundError)
+        self.assertEqual(failure.exception.__cause__.errno, 2)
+        self.assertEqual(self.calls, [])
+
+    def test_ingress_readiness_rejects_symlink_and_public_directory(self):
+        delivery = self.root / 'delivery'
+        delivery.symlink_to(self.home, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, 'INGRESS_DELIVERY_ROOT_UNAVAILABLE'):
+            self.port.validate_ingress()
+        delivery.unlink()
+        delivery.mkdir(mode=0o755)
+        delivery.chmod(0o755)
+        with self.assertRaisesRegex(RuntimeError, 'INGRESS_DELIVERY_ROOT_UNAVAILABLE'):
+            self.port.validate_ingress()
+        delivery.chmod(0o700)
+        self.port.validate_ingress()
+
     async def test_ingress_receives_readable_copy_without_exposing_root_cache(self):
         (self.root / 'delivery').mkdir(mode=0o700)
         original = identity.open_file

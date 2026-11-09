@@ -76,15 +76,43 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.port.stop()
         self.temp.cleanup()
 
-    def adapter(self, deliver, publish=None):
+    def adapter(self, deliver, publish=None, *, sent=()):
         bridge = Bridge('owner', '123', 101, '/unused', deliver, None)
         bridge.routes.add(('123', '77'))
+        for message_id in sent:
+            bridge.sent.add((('123', '77'), str(message_id)))
         class Peer:
             async def call(self, method, params):
                 return await bridge.send(**params)
         async def publish_file(path):
             return {'artifact_id': self.files.publish(path, 'ipc-publish')['artifactId']}
         return make_adapter(NS(typing_indicator=True), 'telegram', Peer(), publish or publish_file)
+
+    async def test_final_edit_uses_current_dispatch_topic_without_duplicate_send(self):
+        calls = []
+        async def deliver(owner, action, payload):
+            calls.append((action, payload))
+            self.assertEqual(payload['metadata'], {'thread_id': '77'})
+            return {'success': True, 'message_id': '42'}
+        worker = self.adapter(deliver, sent=['42'])
+        worker.bind_source(NS(chat_id='123', thread_id='77', chat_name='', chat_type='dm'))
+        result = await worker.edit_message('123', '42', 'Ответ', finalize=True)
+        self.assertTrue(result.success)
+        self.assertEqual([action for action, _ in calls], ['edit_message'])
+
+    async def test_parallel_dispatch_contexts_keep_their_own_topic(self):
+        calls = []
+        class Peer:
+            async def call(inner, method, params):
+                calls.append(params['payload'])
+                return {'success': True, 'message_id': '42'}
+        worker = make_adapter(NS(), 'telegram', Peer(), None)
+        async def dispatch(thread):
+            worker.bind_source(NS(chat_id='123', thread_id=thread, chat_name='', chat_type='dm'))
+            await asyncio.sleep(0)
+            await worker.edit_message('123', '42', thread, finalize=True)
+        await asyncio.gather(dispatch('77'), dispatch('88'))
+        self.assertEqual([(p['content'], p['metadata']['thread_id']) for p in calls], [('77', '77'), ('88', '88')])
 
     async def test_voice_crosses_owner_boundary_with_original_bytes_and_receipt(self):
         path = self.input / 'speech.ogg'

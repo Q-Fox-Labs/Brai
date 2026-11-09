@@ -1166,11 +1166,14 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_actual_unix_listener_accepts_notifications_without_response(self):
         socket_path = TEMP_ROOT / ("broker-" + str(os.getpid()) + ".sock")
+        delivery = Path(tempfile.mkdtemp(dir=TEMP_ROOT))
+        delivery.chmod(0o700)
         config = {
             "controlCommand": [sys.executable, "-c", "import time; time.sleep(60)"],
             "controlConfigPath": "synthetic-control-config",
             "socketPath": str(socket_path),
-            "ingressUid": INGRESS_UID,
+            "ingressUid": WORKER_UID,
+            "ingressDeliveryRoot": str(delivery),
             "stagingRoot": self.config["stagingRoot"],
             "registryPath": "unused-registry",
         }
@@ -1211,6 +1214,7 @@ class BrokerSecurityTests(unittest.IsolatedAsyncioTestCase):
             serving.cancel()
             with suppress(asyncio.CancelledError):
                 await serving
+            delivery.rmdir()
 
 
 if __name__ == "__main__":

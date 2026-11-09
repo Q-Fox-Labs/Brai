@@ -838,7 +838,12 @@ async def rpc_request(broker, uid, request):
             try:
                 result = await broker.call(uid, method, params)
                 response = {'jsonrpc': '2.0', 'id': identifier, 'result': result}
-            except Exception:
+            except Exception as error:
+                cause = error.__cause__ or error
+                # Только тип и errno: исходный текст может содержать ключ или данные владельца.
+                sys.stderr.write(json.dumps({'event': 'identity_request_failed', 'method': method,
+                    'error': type(error).__name__, 'cause': type(cause).__name__,
+                    'errno': getattr(cause, 'errno', None)}) + '\n')
                 response = rpc_error(identifier, -32001, 'Request unavailable')
     return None if notification else response
 
@@ -867,6 +872,7 @@ async def rpc_frame(broker, uid, raw):
 
 async def serve(config):
     """Запустить ограниченный Unix listener и закрыть его по сигналу."""
+    OwnerFiles(config, None, protected_json).validate_ingress()
     control = ControlPort(config['controlCommand'], config['controlConfigPath'])
     await control.start()
     broker = Broker(config, control)
