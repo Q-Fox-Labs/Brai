@@ -24,4 +24,5 @@ WITH legs AS (
 INSERT INTO codeworks.pull_requests(workspace_id,project_id,repository,branch,target,pr_number)
 SELECT DISTINCT w.id,w.project_id,lower(p.config#>>'{github,repository}'),leg->>'branch',leg->>'target',(leg->>'pr_number')::bigint
 FROM legs JOIN codeworks.workspaces w ON w.id=legs.workspace_id JOIN codeworks.projects p ON p.id=w.project_id
-WHERE leg->>'pr_number' ~ '^[1-9][0-9]*$' AND p.config#>>'{github,repository}' IS NOT NULL;
+-- AIDEV-NOTE: Удалённая область может иметь несколько прежних PR; новой рабочей привязки ей не нужно.
+WHERE w.removed_at IS NULL AND leg->>'pr_number' ~ '^[1-9][0-9]*$' AND p.config#>>'{github,repository}' IS NOT NULL;
