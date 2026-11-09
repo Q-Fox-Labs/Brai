@@ -61,6 +61,12 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         self.port = patch.dict(sys.modules, {'gateway.platforms.base': self.base, 'brai_files': native,
             'plugins.platforms.telegram.adapter': telegram_adapter})
         self.port.start()
+        async def receive(params, **kwargs):
+            self.assertEqual(params['uid'], self.profile['uid'])
+            artifact = self.files.fetch(params['artifactId'])
+            return artifact, open(artifact['localPath'], 'rb')
+        self.reader = patch.object(runtime, 'receive_artifact', receive)
+        self.reader.start()
 
     def native_function(self, relative, class_name, name, scope):
         """Исполнить точное тело установленного native метода без модели и сети."""
@@ -73,6 +79,7 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
         return scope[name]
 
     def tearDown(self):
+        self.reader.stop()
         self.port.stop()
         self.temp.cleanup()
 
@@ -286,6 +293,57 @@ class DeliveryTest(unittest.IsolatedAsyncioTestCase):
                 await bridge.send('send_voice', {'chat_id': route, 'metadata': {'thread_id': '77'},
                     'artifact': {'artifact_id': 'owned'}, 'is_voice': flag})
         bridge.deliver.assert_not_awaited()
+
+    def patched_typing(self, adapter):
+        # Исполняется точное полное тело метода из поставляемого native delta.
+        from types import MethodType
+        import textwrap
+        lines = (Path(__file__).parents[1] / 'native.patch').read_text().splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith('+    async def send_typing('))
+        body = []
+        for line in lines[start:]:
+            if not line.startswith('+') or line.startswith('+++'):
+                break
+            body.append(line[1:])
+        scope = {'normalize_telegram_chat_id': int, 'logger': runtime._logger}
+        exec('from __future__ import annotations\n' + textwrap.dedent('\n'.join(body)), scope)
+        return MethodType(scope['send_typing'], adapter)
+
+    async def test_typing_reaches_native_bot_api_in_original_topic(self):
+        from unittest.mock import Mock
+        bot = NS(send_chat_action=AsyncMock())
+        adapter = NS(_bot=bot, _typing_in_cooldown=lambda chat: False,
+            _message_thread_id_for_typing=lambda thread: int(thread) if thread else None,
+            _metadata_thread_id=lambda metadata: metadata.get('thread_id'),
+            _telegram_typing_cooldown_until={}, _is_transient_typing_error=lambda error: False,
+            _record_typing_cooldown=Mock())
+        adapter.send_typing = self.patched_typing(adapter)
+        resolver = runtime.Resolver(adapter)
+        resolver.turns[101] = {'id': 'turn', 'route': ('123', '77'),
+            'metadata': {'thread_id': '77', 'telegram_dm_topic_reply_fallback': True}}
+        async def deliver(owner, action, payload):
+            return await resolver.deliver(self.profile, owner, action, payload)
+        worker = self.adapter(deliver)
+        with patch.object(runtime, 'broker_call', AsyncMock(return_value={})):
+            result = await worker.send_typing('123', metadata={'thread_id': '77'})
+        self.assertIsNone(result)
+        bot.send_chat_action.assert_awaited_once_with(chat_id=123, action='typing', message_thread_id=77)
+
+    async def test_native_typing_failure_never_falls_back_to_general_chat(self):
+        from unittest.mock import Mock
+        bot = NS(send_chat_action=AsyncMock(side_effect=RuntimeError('message thread not found secret-token')))
+        adapter = NS(_bot=bot, _typing_in_cooldown=lambda chat: False,
+            _message_thread_id_for_typing=lambda thread: int(thread),
+            _metadata_thread_id=lambda metadata: metadata['thread_id'],
+            _telegram_typing_cooldown_until={}, _is_transient_typing_error=lambda error: True,
+            _record_typing_cooldown=Mock())
+        send_typing = self.patched_typing(adapter)
+        with self.assertLogs(runtime._logger, level='WARNING') as logs:
+            await send_typing('123', {'thread_id': '77', 'telegram_dm_topic_reply_fallback': True})
+        bot.send_chat_action.assert_awaited_once_with(chat_id=123, action='typing', message_thread_id=77)
+        adapter._record_typing_cooldown.assert_called_once()
+        self.assertIn('reason=message thread not found', logs.output[0])
+        self.assertNotIn('secret-token', logs.output[0])
 
     async def test_typing_survives_native_pause_and_stops_on_cancel(self):
         ticks = []

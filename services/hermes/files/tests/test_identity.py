@@ -120,26 +120,31 @@ class FileIdentityTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(str(self.cache), str(result))
         self.assertEqual(self.calls[0], ('artifacts.fetch', {'uid': self.uid, 'artifactId': self.aid}))
 
-    async def test_missing_ingress_directory_fails_before_artifacts_fetch(self):
-        """Отсутствующий каталог выдаёт точную причину до сетевой операции."""
-        with self.assertRaisesRegex(RuntimeError, 'INGRESS_DELIVERY_ROOT_UNAVAILABLE') as failure:
-            await self.port.fetch(self.uid, self.profile, {'artifactId': self.aid}, ingress=True)
-        self.assertIsInstance(failure.exception.__cause__, FileNotFoundError)
-        self.assertEqual(failure.exception.__cause__.errno, 2)
-        self.assertEqual(self.calls, [])
+    async def test_ingress_opens_exact_inode_without_delivery_copy(self):
+        original = identity.open_file
+        with patch.object(identity, 'open_file', side_effect=lambda root, path, uid: original(root, path, self.uid)):
+            metadata, fd = await self.port.open_ingress(self.uid, self.profile, self.aid)
+        try:
+            self.assertEqual(os.fstat(fd).st_ino, self.cached.stat().st_ino)
+            self.assertEqual(os.read(fd, 100), b'report')
+            with self.assertRaises(OSError):
+                os.write(fd, b'foreign')
+            self.assertNotIn('localPath', metadata)
+            self.assertFalse((self.root / 'delivery').exists())
+        finally:
+            os.close(fd)
 
-    def test_ingress_readiness_rejects_symlink_and_public_directory(self):
-        delivery = self.root / 'delivery'
-        delivery.symlink_to(self.home, target_is_directory=True)
-        with self.assertRaisesRegex(RuntimeError, 'INGRESS_DELIVERY_ROOT_UNAVAILABLE'):
-            self.port.validate_ingress()
-        delivery.unlink()
-        delivery.mkdir(mode=0o755)
-        delivery.chmod(0o755)
-        with self.assertRaisesRegex(RuntimeError, 'INGRESS_DELIVERY_ROOT_UNAVAILABLE'):
-            self.port.validate_ingress()
-        delivery.chmod(0o700)
-        self.port.validate_ingress()
+    async def test_ingress_hash_mismatch_and_foreign_owner_deny_descriptor(self):
+        original_fd = identity.open_file(self.cache, self.cached, self.uid)
+        self.result['sha256'] = '0' * 64
+        with patch.object(self.port, 'open_cache', return_value=original_fd):
+            with self.assertRaises(PermissionError):
+                await self.port.open_ingress(self.uid, self.profile, self.aid)
+        with self.assertRaises(OSError):
+            os.fstat(original_fd)
+        with patch.object(self.control, 'call', side_effect=PermissionError('Foreign artifact')):
+            with self.assertRaises(PermissionError):
+                await self.port.open_ingress(self.uid, self.profile, self.aid)
 
     async def test_ingress_receives_readable_copy_without_exposing_root_cache(self):
         (self.root / 'delivery').mkdir(mode=0o700)

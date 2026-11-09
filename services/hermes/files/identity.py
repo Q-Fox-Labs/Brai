@@ -122,18 +122,6 @@ class OwnerFiles:
     def __init__(self, config, control, config_reader=None):
         self.config, self.control, self.config_reader = config, control, config_reader
 
-    def validate_ingress(self):
-        """Проверить готовность приватного каталога копий до принятия медиа-операции."""
-        try:
-            fd = open_directory(self.config['ingressDeliveryRoot'], self.config['ingressUid'])
-            try:
-                if os.fstat(fd).st_mode & 0o077:
-                    raise PermissionError('Ingress delivery directory must be private')
-            finally:
-                os.close(fd)
-        except OSError as error:
-            raise RuntimeError('INGRESS_DELIVERY_ROOT_UNAVAILABLE') from error
-
     def runtime(self, uid, profile):
         """Перечитать root-owned runtime mapping, включая новые приглашённые профили."""
         if not self.config.get('runtimeProfilesPath'):
@@ -226,8 +214,6 @@ class OwnerFiles:
         """Подтвердить owner у Artifacts; ingress получает свою проверенную копию."""
         if set(params) != {'artifactId'}:
             raise ValueError('Invalid fetch')
-        if ingress:
-            self.validate_ingress()
         aid = str(uuid.UUID(params['artifactId']))
         result = await self.control.call('artifacts.fetch', {'uid': uid, 'artifactId': aid}, timeout=1800)
         if result.get('artifactId') != aid:
@@ -242,6 +228,27 @@ class OwnerFiles:
                 os.close(fd)
             return {**result, 'localPath': path, 'markdown': '[file](<' + path + '>)'}
         return self.materialize(uid, profile, result)
+
+    async def open_ingress(self, uid, profile, artifact_id):
+        """Открыть конкретный owner-bound артефакт; права каталогов не меняются."""
+        try:
+            from ..identity.artifact_read import FIELDS, verify
+        except ImportError:
+            from identity.artifact_read import FIELDS, verify
+        aid = str(uuid.UUID(artifact_id))
+        result = await self.control.call('artifacts.fetch', {'uid': uid, 'artifactId': aid}, timeout=120)
+        if result.get('artifactId') != aid:
+            raise PermissionError('Artifact mismatch')
+        fd = self.open_cache(uid, result, profile)
+        try:
+            if os.fstat(fd).st_mode & 0o022:
+                raise PermissionError('Writable artifact cache')
+            metadata = {key: result[key] for key in FIELDS}
+            await verify(fd, metadata)
+            return metadata, fd
+        except BaseException:
+            os.close(fd)
+            raise
 
     async def prepare_ingress(self, uid, profile, paths):
         """Перенести уже скачанные файлы ingress в media проверенного профиля."""
