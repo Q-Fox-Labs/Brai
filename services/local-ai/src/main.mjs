@@ -32,7 +32,7 @@ const ALLOWED_CHILD_ENV = new Set([
   'TRANSFORMERS_OFFLINE', 'HF_HUB_DISABLE_TELEMETRY', 'PYTHONNOUSERSITE',
   'OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'TOKENIZERS_PARALLELISM', 'LD_LIBRARY_PATH',
 ]);
-const AUDIO_MIME_TYPES = ['audio/wav', 'audio/flac', 'audio/mpeg', 'audio/ogg'];
+const AUDIO_MIME_TYPES = ['audio/wav', 'audio/flac', 'audio/mpeg', 'audio/ogg', 'audio/mp4', 'audio/x-m4a'];
 
 function invalid(field) { throw new TypeError(`LOCAL_AI_CONFIG_INVALID:${field}`); }
 function object(value, field, keys) {

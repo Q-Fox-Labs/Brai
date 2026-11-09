@@ -1,5 +1,5 @@
 # ABOUTME: Проверяет строгие контейнеры FFmpeg и нормализацию входного аудио.
-# ABOUTME: Проверки WAV/FLAC/MP3/OGG и playlist используют системный FFmpeg.
+# ABOUTME: Проверки WAV/FLAC/MP3/OGG/M4A и playlist используют системный FFmpeg.
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class AudioBoundaryTests(unittest.TestCase):
             original_wav = root / "fixture.wav"
             _write_wave(original_wav)
             sources: dict[str, Path] = {"wav": original_wav}
-            for extension, codec in (("flac", "flac"), ("mp3", "libmp3lame"), ("ogg", "libvorbis")):
+            for extension, codec in (("flac", "flac"), ("mp3", "libmp3lame"), ("ogg", "libvorbis"), ("m4a", "aac")):
                 source = root / f"fixture.{extension}"
                 run(
                     ["ffmpeg", "-nostdin", "-v", "error", "-i", str(original_wav), "-c:a", codec, "-y", str(source)],
@@ -74,6 +74,16 @@ class AudioBoundaryTests(unittest.TestCase):
                             normalized.stat().st_size,
                             math.ceil(60 * 16000) * 2 + runner.DECODE_HEADER_BYTES,
                         )
+
+    def test_mov_with_video_is_not_accepted_as_m4a(self) -> None:
+        """Отклонить контейнер MOV с видео, несмотря на расширенный demuxer whitelist."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "video.mp4"
+            run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                 "color=c=black:s=16x16:r=1", "-t", "1", "-c:v", "mpeg4", str(path)],
+                check=True, stdout=DEVNULL, stderr=DEVNULL, timeout=15)
+            with self.assertRaises(runner.RpcFault):
+                runner._audio_duration(path, 60.0)
 
     def test_longform_boundaries_follow_decoded_frames_instead_of_source_metadata(self) -> None:
         """Принять реальную границу PCM после resampling и округления исходного ffprobe."""

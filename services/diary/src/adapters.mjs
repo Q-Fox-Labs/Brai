@@ -56,10 +56,11 @@ export function createAdapters(cfg,nc){
   return value;
  }
  return {authenticate,active,prepared,
+  async transcriptionStatus(e){return transcription(e,'request.submit',{clientIdempotencyKey:e.id,audioArtifactId:e.audioArtifactId,requestedModel:null,deadlineAt:null});},
   async artifact(e){return (await prepared(e)).artifact;},
   async file(e){const a=(await prepared(e)).artifact;if(a.status!=='ready')throw new DiaryFault('NOT_READY',409);const url=new URL(a.internalUrl);if(url.origin!==cfg.artifactsInternalOrigin||url.pathname!=='/files/'+id(a.artifactId)||url.username||url.password||url.search||url.hash)throw new DiaryFault('BAD_REPLY',502);return {artifact:a,url:url.href};},
   async transcribe(e){
-   const submitted=await transcription(e,'request.submit',{clientIdempotencyKey:e.id,audioArtifactId:e.audioArtifactId,requestedModel:null,deadlineAt:null});
+   const submitted=await transcription(e,'request.submit',{clientIdempotencyKey:e.transcriptionRetry?.key??e.id,audioArtifactId:e.audioArtifactId,requestedModel:null,deadlineAt:null});
    const record=submitted.request??submitted;
    if(['failed','outcome_unknown','cancelled'].includes(record.taskState))throw new DiaryFault('TRANSCRIPTION_FAILED',409);
    const response=await transcription(e,'result.get',{requestId:record.requestId});
