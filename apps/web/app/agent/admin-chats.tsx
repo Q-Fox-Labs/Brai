@@ -3,12 +3,11 @@
 // ABOUTME: Опрос читает Hermes через административный API и не отправляет сообщения пользователям.
 import { useEffect, useRef, useState } from "react";
 import WorkspaceFrame from "../shell/workspace-frame";
-import Markdown from "./markdown";
+import TelegramRichMessage from "./telegram-rich";
 import { AdminChatError, chatParticipant, adminChatKey, latestAdminChat, loadAdminChats, mergeAdminMessages, readAdminChat, type AdminChat, type ChatMessage } from "./admin-chat-client";
-import { adminChatDisplayText } from "./admin-chat-display";
 import "./telegram-observer.css";
 
-type History = { key: string; messages: ChatMessage[]; cursor: string | null };
+type History = { key: string; messages: ChatMessage[]; cursor: string | null; updatesCursor?: string };
 const emptyHistory = (key = ""): History => ({ key, messages: [], cursor: null });
 function time(value: string) {
   return Number.isNaN(Date.parse(value)) ? "" : new Intl.DateTimeFormat("ru", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
@@ -24,22 +23,21 @@ function ParticipantAvatar({ chat }: { chat: AdminChat }) {
     : Array.from(chat.participant?.name || chat.participant?.username || chat.owner.name || "П")[0]}</span>;
 }
 
-/** Показывает опубликованные файлы через повторную проверку владельца и MIME на сервере. */
+/** Показывает фактический text/caption Telegram без Markdown и преобразований строки. */
 export function AdminMessageBody({ message, owner }: { message: ChatMessage; owner: string }) {
-  message = { ...message, text: adminChatDisplayText(message.text, message.role) };
-  const files: { id: string; label: string; name: string; url: string }[] = [];
-  const text = message.text.replace(/(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]+`)|(?<![\\!])!?\[([^\]\n]*)\]\(<?\/(?:[^<>\n)]*\/)?(?:results|artifacts)\/([0-9a-f-]{36})\/([^<>\n)]+)>?\)/gi, (match, code: string | undefined, label: string, id: string, name: string) => {
-    if (code) return match;
-    const url = "/api/admin?" + new URLSearchParams({ operation: "admin-artifacts-download", userId: owner, artifactId: id });
-    if (!files.some(file => file.id === id)) files.push({ id, label: label || name, name, url });
-    return "";
+  const files = message.attachments ?? [], asDocument = message.messageType === "document";
+  const fileUrl = (id: string, preview = false) => "/api/admin?" + new URLSearchParams({
+    operation: "admin-artifacts-download", userId: owner, artifactId: id, ...(preview ? { preview: "1" } : {})
   });
-  return <>{text.trim() && <Markdown text={text} />}{files.length > 0 && <div className="tg-attachments">{files.map(file => <figure key={file.id}>
-    {/\.(?:png|jpe?g|webp|gif)$/i.test(file.name) && <a href={file.url} download><img src={file.url + "&preview=1"} alt={file.label} loading="lazy" /></a>}
-    {/\.(?:ogg|opus|mp3|m4a|wav|webm)$/i.test(file.name) && <audio controls preload="none" src={file.url + "&preview=1"} />}
-    {/\.mp4$/i.test(file.name) && <video controls preload="metadata" src={file.url + "&preview=1"} />}
-    <figcaption><a href={file.url} download>{file.label}</a></figcaption>
-  </figure>)}</div>}</>;
+  return <>{message.richMessage ? <TelegramRichMessage value={message.richMessage} hasAttachments={files.length > 0} /> : message.text.length > 0 && <div className="tg-text">{message.text}</div>}
+    {files.length > 0 && <div className="tg-attachments">{files.map(file => <figure key={file.artifactId}>
+      {!asDocument && file.mimeType.startsWith("image/") && <a href={fileUrl(file.artifactId, true)} target="_blank" rel="noopener noreferrer"><img src={fileUrl(file.artifactId, true)} alt={file.filename} loading="lazy" /></a>}
+      {!asDocument && file.mimeType.startsWith("audio/") && <audio controls preload="none" src={fileUrl(file.artifactId, true)} />}
+      {!asDocument && file.mimeType.startsWith("video/") && <video controls preload="metadata" src={fileUrl(file.artifactId, true)} />}
+      {(asDocument || !file.mimeType.startsWith("image/") && !file.mimeType.startsWith("audio/")) && <figcaption><a href={fileUrl(file.artifactId)} download>{file.filename}</a></figcaption>}
+    </figure>)}</div>}
+    {!files.length && message.attachmentState === "pending" && <p className="tg-muted">Вложение пока недоступно.</p>}
+  </>;
 }
 
 /** Сохраняет историю и прокрутку; скрытый раздел не опрашивает сервер, потеря прав очищает экран. */
@@ -96,11 +94,11 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
     const refresh = async () => {
       try {
         const previous = historyRef.current;
-        const page = await latestAdminChat(chat, previous.messages.at(-1)?.id, controller.signal);
+        const page = await latestAdminChat(chat, previous.messages.at(-1)?.id, controller.signal, previous.updatesCursor);
         if (controller.signal.aborted || deniedRef.current) return;
         const current = historyRef.current;
-        if (!follow.current) setNewCount(count => count + page.messages.filter(message => adminChatDisplayText(message.text, message.role).trim() && !current.messages.some(old => old.id === message.id)).length);
-        saveHistory({ key: selectedKey, messages: mergeAdminMessages(current.messages, page.messages), cursor: current.messages.length ? current.cursor : page.nextCursor });
+        if (!follow.current) setNewCount(count => count + page.messages.filter(message => !message.deleted && (message.text.length > 0 || !!message.richMessage || !!message.attachments?.length || message.attachmentState === "pending") && !current.messages.some(old => old.id === message.id)).length);
+        saveHistory({ key: selectedKey, messages: mergeAdminMessages(current.messages, page.messages), cursor: current.messages.length ? current.cursor : page.nextCursor, updatesCursor: page.updatesCursor ?? current.updatesCursor });
         setMessageError(""); setConnected(true);
       } catch (error) {
         if (!controller.signal.aborted) { setConnected(false); if (!reject(error)) setMessageError("Не удалось обновить переписку. Повторяем подключение."); }
@@ -118,7 +116,7 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
       const page = await readAdminChat(selected, controller.signal, shown.cursor);
       if (controller.signal.aborted || deniedRef.current) return;
       follow.current = false;
-      saveHistory({ key: selectedKey, messages: mergeAdminMessages(historyRef.current.messages, page.messages), cursor: page.nextCursor });
+      saveHistory({ key: selectedKey, messages: mergeAdminMessages(historyRef.current.messages, page.messages), cursor: page.nextCursor, updatesCursor: historyRef.current.updatesCursor });
       setMessageError("");
       requestAnimationFrame(() => { if (container && !controller.signal.aborted) container.scrollTop += container.scrollHeight - height; });
     } catch (error) { if (!controller.signal.aborted && !reject(error)) setMessageError("Не удалось загрузить более ранние сообщения. Попробуйте ещё раз."); }
@@ -137,8 +135,9 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
         {!selected ? <div className="tg-empty"><h2>Выберите чат</h2><p>Здесь появятся переписки с агентом.</p></div> : <div className="tg-timeline">
           {shown.cursor && <button type="button" className="tg-older" disabled={loading} onClick={() => { void older(); }}>Показать более ранние</button>}
           {loading && !shown.messages.length && <p className="tg-muted" role="status">Загружаем сообщения…</p>}
-          {shown.messages.filter(message => adminChatDisplayText(message.text, message.role).trim()).map(message => <article className="tg-message" data-direction={message.role === "user" ? "in" : "out"} key={message.id}>
-            <div className="tg-message-meta"><strong>{message.role === "assistant" ? "Brai" : chatParticipant(selected)}</strong><time>{time(message.createdAt)}</time></div><AdminMessageBody message={message} owner={selected.owner.id} />
+          {!loading && !shown.messages.length && <p className="tg-muted" role="status">Точная копия прежней переписки отсутствует. Новые сообщения появятся здесь автоматически. Ранее сохранённые файлы доступны в <a href="/admin">Админке</a>.</p>}
+          {shown.messages.filter(message => !message.deleted && (message.text.length > 0 || !!message.richMessage || !!message.attachments?.length || message.attachmentState === "pending")).map(message => <article className="tg-message" data-direction={message.role === "user" ? "in" : "out"} key={message.id}>
+            <div className="tg-message-meta"><strong>{message.role === "assistant" ? "Brai" : [message.authorName, message.authorUsername ? "@" + message.authorUsername : ""].filter(Boolean).join(" · ") || chatParticipant(selected)}</strong><time>{time(message.createdAt)}</time></div><AdminMessageBody message={message} owner={selected.owner.id} />
           </article>)}
         </div>}
       </div>

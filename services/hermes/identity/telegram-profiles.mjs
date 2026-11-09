@@ -41,7 +41,7 @@ export function createTelegramProfiles({ path, info, download, requireRoot = tru
       if (old && (old.retry_at === 0 || old.retry_at > Date.now())) return JSON.parse(old.data);
       const value = await info('getChat', id);
       if (String(value?.id) !== id || value.type !== 'private') throw new Error('INVALID_PROFILE');
-      const clean = part => typeof part === 'string' ? part.replace(/[\p{Cc}\p{Cf}]/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 128) : '';
+      const clean = part => typeof part === 'string' ? part.slice(0, 256) : '';
       const profile = { telegramId: id, name: clean([value.first_name, value.last_name].filter(x => typeof x === 'string').join(' ')),
         username: /^[A-Za-z0-9_]{1,32}$/.test(value.username ?? '') ? value.username : null, avatar: null };
       let retry = 0;

@@ -282,7 +282,9 @@
       "services/hermes/identity/parent_runner.py",
       "services/hermes/identity/control.openrpc.json",
       "services/hermes/identity/asyncapi.yaml",
-      "services/hermes/identity/lifecycle.py"
+      "services/hermes/identity/lifecycle.py",
+      "services/hermes/identity/chat_journal.py",
+      "services/hermes/identity/telegram-chat-read.mjs"
     ],
     "checks": [
       "services/hermes/memos/embedding/adapter.test.mjs",
@@ -349,7 +351,9 @@
       "services/hermes/identity/tests/memory_spool.test.mjs",
       "services/hermes/identity/tests/test_memory_spool.py",
       "services/hermes/tests/dialogues-port.test.mjs",
-      "services/hermes/tests/dialogues-summary.test.mjs"
+      "services/hermes/tests/dialogues-summary.test.mjs",
+      "services/hermes/identity/tests/test_chat_journal.py",
+      "services/hermes/identity/tests/telegram-chat-read.test.mjs"
     ]
   },
   "dependencies": [
@@ -690,7 +694,9 @@
       "services/hermes/identity/asyncapi.yaml",
       "services/hermes/identity/lifecycle.py",
       "services/hermes/extensions/scripts/context_gif.py",
-      "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md"
+      "docs/user-agent/instructions/hermes/skills/creative/context-gifs/SKILL.md",
+      "services/hermes/identity/chat_journal.py",
+      "services/hermes/identity/telegram-chat-read.mjs"
     ],
     "entrypoints": [
       "services/hermes/tools.mjs",

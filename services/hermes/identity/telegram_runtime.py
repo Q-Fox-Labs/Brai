@@ -2,6 +2,7 @@
 # ABOUTME: Авторизует update до media и не помещает коды входа в историю.
 """Только транспорт Telegram; пользовательский агент исполняется в другом UID."""
 import asyncio
+from contextlib import nullcontext
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 import hashlib
@@ -139,7 +140,13 @@ async def admit_update(update, adapter):
         await _control_reply(adapter, telegram, message, 'Попросите агента отвязать этот или другой ваш аккаунт. Он объяснит последствия и запросит подтверждение.')
         return False
     try:
-        await broker_call('identity.resolve', {'telegramId': telegram})
+        profile = await broker_call('identity.resolve', {'telegramId': telegram})
+        resolver = _resolvers.get(id(adapter))
+        if resolver is not None and resolver.journal is not None:
+            try:
+                await asyncio.to_thread(resolver.journal.incoming, profile, message, chat, user)
+            except Exception:
+                _logger.warning('BRAI_TELEGRAM_JOURNAL_WRITE_FAILED')
         return True
     except Exception:
         pass
@@ -178,9 +185,10 @@ def _receipt(value):
 
 
 class Resolver:
-    """Хранит только транспорт и проверенные связи без общего transcript."""
-    def __init__(self, adapter, runner=None, ledger=None):
+    """Хранит проверенные маршруты; журнал Telegram изолирован по личному профилю."""
+    def __init__(self, adapter, runner=None, ledger=None, journal=None):
         self.adapter, self.runner = adapter, runner
+        self.journal = journal
         self.bridges, self.turns = {}, {}
         self.ledger = ledger if ledger is not None else RouteLedger()
         self.interactive_scopes = {}
@@ -191,6 +199,8 @@ class Resolver:
     def retire(self):
         """Исключить старый resolver из синхронной перезагрузки plugin."""
         self.retired = True
+        if self.journal is not None and self.journal.restore is not None:
+            self.journal.restore()
 
     def start(self):
         """Держать native lifetime всех active профилей без нового сообщения."""
@@ -202,6 +212,8 @@ class Resolver:
         if self.closed:
             return
         self.closed = True
+        if self.journal is not None and self.journal.restore is not None:
+            self.journal.restore()
         if _resolvers.get(id(self.adapter)) is self:
             _resolvers.pop(id(self.adapter))
         if self.supervisor is not None:
@@ -247,6 +259,8 @@ class Resolver:
 
     def _bridge(self, profile):
         """Настроить scope/UI delivery общего account-bound транспорта."""
+        if self.journal is not None:
+            self.journal.routes[str(profile['telegramId'])] = profile
         bridge = self._account_bridge(profile)
         if not bridge.require_scope:
             author = str(profile.get('authorTelegramId', profile['telegramId']))
@@ -473,8 +487,9 @@ class Resolver:
                 current()
                 # Только media API receipt означает доставку файла. Native text fallback
                 # после ошибки не может превратиться в успешный голосовой ответ.
-                ids = await telegram_sender(self.adapter, payload['chat_id'], metadata, kind, prepared,
-                                            fallback, reply_to=payload.get('reply_to'))
+                with self.journal.scope(profile, prepared, route[1]) if self.journal is not None else nullcontext():
+                    ids = await telegram_sender(self.adapter, payload['chat_id'], metadata, kind, prepared,
+                                                fallback, reply_to=payload.get('reply_to'))
                 if (not isinstance(ids, list) or len(ids) != len(prepared)
                         or any(type(value) not in (int, str) or not str(value).isdecimal()
                                or int(value) <= 0 for value in ids)):
@@ -494,7 +509,8 @@ class Resolver:
         if not callable(method):
             raise ValueError('Native delivery unavailable')
         current()
-        result = await method(**values)
+        with self.journal.scope(profile, thread=route[1]) if self.journal is not None else nullcontext():
+            result = await method(**values)
         if action == 'send_typing' and result is None:
             return {'success': True}
         receipt = _receipt(result)
@@ -677,7 +693,8 @@ class Resolver:
         operation = getattr(bot, method, None)
         if not callable(operation):
             raise RuntimeError('Trusted Telegram UI unavailable')
-        result = await operation(**values)
+        with self.journal.scope(profile, thread=route[1]) if self.journal is not None else nullcontext():
+            result = await operation(**values)
         if method.startswith('answer_') or method == 'delete_message':
             if result is not True:
                 raise ValueError('Unconfirmed Telegram UI operation')
@@ -705,5 +722,7 @@ def create_resolver(adapter, runner):
     key = id(adapter)
     if key not in _resolvers or _resolvers[key].retired:
         home = Path(os.environ['HERMES_HOME'])
-        _resolvers[key] = Resolver(adapter, runner, RouteLedger(home / 'identity-delivery.sqlite'))
+        from .chat_journal import IdentityJournal
+        journal = IdentityJournal(home / 'identity-chats')
+        _resolvers[key] = Resolver(adapter, runner, RouteLedger(home / 'identity-delivery.sqlite'), journal)
     return _resolvers[key]

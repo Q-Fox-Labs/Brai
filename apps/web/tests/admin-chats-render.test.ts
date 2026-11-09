@@ -1,5 +1,5 @@
-// ABOUTME: Проверяет опубликованные файлы в административной переписке.
-// ABOUTME: Примеры кода не становятся вложениями; каждый URL содержит выбранного владельца.
+// ABOUTME: Проверяет точный Telegram текст и независимые изображения, аудио и документы.
+// ABOUTME: Каждый файловый адрес остаётся за административной проверкой владельца.
 import assert from "node:assert/strict";
 import {readFileSync} from "node:fs";
 import {createRequire} from "node:module";
@@ -7,32 +7,44 @@ import {test} from "node:test";
 import {createElement, type ComponentType} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import ts from "typescript";
-import {adminChatDisplayText} from "../app/agent/admin-chat-display.ts";
+import type {ChatMessage} from "../app/agent/admin-chat-client.ts";
 const file=new URL("../app/agent/admin-chats.tsx",import.meta.url),require=createRequire(file);
 const output=ts.transpileModule(readFileSync(file,"utf8"),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX}}).outputText;
-const mod={exports:{} as {AdminMessageBody:ComponentType<{message:{id:string;role:"assistant";text:string;createdAt:string};owner:string}>}};
+const mod={exports:{} as {AdminMessageBody:ComponentType<{message:ChatMessage;owner:string}>}};
 new Function("require","module","exports",output)((name:string)=>{
- if(name.endsWith(".css")||name==="./admin-chat-client")return {};
- if(name==="./admin-chat-display")return {adminChatDisplayText};
- if(name==="./markdown")return {default:({text}:{text:string})=>createElement("pre",null,text)};
- if(name.startsWith("../"))return {};
+ if(name==="./telegram-rich"){const richFile=new URL("../app/agent/telegram-rich.tsx",import.meta.url), rich={exports:{}}; const code=ts.transpileModule(readFileSync(richFile,"utf8"),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX}}).outputText; new Function("require","module","exports",code)(require,rich,rich.exports);return rich.exports;}
+ if(name.endsWith(".css")||name==="./admin-chat-client"||name.startsWith("../"))return {};
  return require(name);
 },mod,mod.exports);
-const id="11111111-1111-4111-8111-111111111111",link="![Изображение](</home/test/results/"+id+"/image.png>)";
-const render=(text:string)=>renderToStaticMarkup(createElement(mod.exports.AdminMessageBody,{owner:"target-owner",message:{id:"1",role:"assistant",text,createdAt:"2026-11-08"}}));
-test("published media use the admin owner check and do not expose a local file URL",()=>{
- const html=render("Готово. "+link);
- assert.match(html,/Готово/);assert.match(html,/userId=target-owner/);assert.match(html,/artifactId=11111111/);assert.match(html,/preview=1/);
- assert.ok(!html.includes("/home/test"));assert.ok(html.includes("<img"));
+const id="11111111-1111-4111-8111-111111111111";
+const render=(message:Partial<ChatMessage>)=>renderToStaticMarkup(createElement(mod.exports.AdminMessageBody,{owner:"target-owner",message:{id:"1",role:"assistant",text:"",createdAt:"2026-11-08",...message}}));
+test("actual Telegram text is never parsed, trimmed or rewritten",()=>{
+ const text='  **буквальный текст**\n[[audio_as_voice]]\nMEDIA:/example/command\n  ';
+ const html=render({text});
+ assert.ok(html.includes(text));assert.ok(!html.includes("<audio"));assert.ok(!html.includes("<strong"));
 });
-test("fenced, escaped and inline code references stay text without network media",()=>{
- const tick=String.fromCharCode(96);
- for(const text of ["~~~\n"+link+"\n~~~",tick.repeat(3)+"\n"+link+"\n"+tick.repeat(3),tick+link+tick,"\\"+link]){
-  const html=render(text);assert.ok(!html.includes("<img"));assert.ok(!html.includes("preview=1"));assert.ok(html.includes("/home/test/results/"));
+test("image audio video and document refs use MIME and preserve an empty caption",()=>{
+ const html=render({attachments:[
+  {artifactId:id,filename:"image.bin",mimeType:"image/png"},
+  {artifactId:"22222222-2222-4222-8222-222222222222",filename:"voice.bin",mimeType:"audio/ogg"},
+  {artifactId:"33333333-3333-4333-8333-333333333333",filename:"video.bin",mimeType:"video/mp4"},
+  {artifactId:"44444444-4444-4444-8444-444444444444",filename:"report.docx",mimeType:"application/octet-stream"}]});
+ for(const value of ["<img","<audio","<video","report.docx","userId=target-owner","preview=1"])assert.ok(html.includes(value));
+ assert.ok(!html.includes("/private/"));assert.ok(!html.includes("tg-text"));
+});
+test("two independently delivered errors retain their exact text",()=>{
+ for(const text of ["❌ custom rejected the request: HTTP 403","🔑 Подключение отклонено\n\nКод: auth"]){
+  assert.ok(render({text}).includes(text));
  }
+ assert.equal(render({text:"",attachments:[]}),"");
 });
-test("delivery commands never render private paths or invent delivered attachments",()=>{
- const html=render('Вот ответ.\n\n[[audio_as_voice]]\nMEDIA:"/private/profile/results/.delivery/opaque/0-voice.ogg"');
- assert.match(html,/Вот ответ/);assert.doesNotMatch(html,/MEDIA:|audio_as_voice|private|delivery|<audio|preview=1/);
- assert.equal(render('[[as_document]]\nMEDIA:"/private/report.docx"'),"");
+
+test("actual RichMessage blocks retain text, tables and formatting without interpreting HTML",()=>{
+ const html=render({richMessage:{blocks:[
+  {type:"paragraph",text:["  Точный ",{type:"bold",text:"ответ"},"  "]},
+  {type:"table",cells:[[{text:"Колонка"},{text:"Значение"}],[{text:"А"},{text:"Б"}]]},
+  {type:"paragraph",text:{type:"url",text:"<script>literal</script>",url:"javascript:alert(1)"}}
+ ]}});
+ assert.match(html,/<strong>ответ<\/strong>/);assert.match(html,/<table>/);assert.match(html,/Колонка/);
+ assert.ok(html.includes("&lt;script&gt;literal&lt;/script&gt;"));assert.ok(!html.includes("href="));assert.ok(!html.includes("<script>"));
 });
