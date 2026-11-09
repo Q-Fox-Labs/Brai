@@ -42,7 +42,10 @@
              self._register_handlers(self._app)
              await self._initialize_app_with_retries(builder)
              await self._app.start()
-@@ -5569,28 +5588,20 @@
+@@ -5566,34 +5585,26 @@
+         slot_until[str(normalize_telegram_chat_id(chat_id))] = (
+             asyncio.get_running_loop().time() + max(0.0, budget))
+
 -    async def send_typing(self, chat_id: str, metadata: Optional[dict[str, Any]] = None) -> None:
 -        """Send typing indicator."""
 -        if not self._bot or self._typing_in_cooldown(chat_id):
@@ -91,6 +94,9 @@
 +            logger.warning("telegram_typing_failed error=%s thread_id=%s reason=%s",
 +                           type(error).__name__, message_thread_id, reason)
 +
+     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
+         """Get information about a Telegram chat."""
+         if not self._bot:
 --- a/gateway/run.py
 +++ b/gateway/run.py
 @@ -5623,6 +5623,17 @@
