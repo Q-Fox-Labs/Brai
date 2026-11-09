@@ -229,6 +229,27 @@ class OwnerFiles:
             return {**result, 'localPath': path, 'markdown': '[file](<' + path + '>)'}
         return self.materialize(uid, profile, result)
 
+    async def open_ingress(self, uid, profile, artifact_id):
+        """Открыть конкретный owner-bound артефакт; права каталогов не меняются."""
+        try:
+            from ..identity.artifact_read import FIELDS, verify
+        except ImportError:
+            from identity.artifact_read import FIELDS, verify
+        aid = str(uuid.UUID(artifact_id))
+        result = await self.control.call('artifacts.fetch', {'uid': uid, 'artifactId': aid}, timeout=120)
+        if result.get('artifactId') != aid:
+            raise PermissionError('Artifact mismatch')
+        fd = self.open_cache(uid, result, profile)
+        try:
+            if os.fstat(fd).st_mode & 0o022:
+                raise PermissionError('Writable artifact cache')
+            metadata = {key: result[key] for key in FIELDS}
+            await verify(fd, metadata)
+            return metadata, fd
+        except BaseException:
+            os.close(fd)
+            raise
+
     async def prepare_ingress(self, uid, profile, paths):
         """Перенести уже скачанные файлы ingress в media проверенного профиля."""
         if not isinstance(paths, list) or len(paths) > 100 or any(not isinstance(p, str) for p in paths):

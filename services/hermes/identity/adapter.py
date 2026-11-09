@@ -2,6 +2,7 @@
 # ABOUTME: Не хранит Telegram token и не отправляет произвольные пути через границу.
 """Создание адаптера отложено до загрузки закреплённого Hermes."""
 import asyncio
+import logging
 from contextvars import ContextVar
 from .ipc import RpcError
 from .scope import delivery_scope
@@ -22,6 +23,7 @@ def make_adapter(config, platform, peer, publish_file):
             super().__init__(config)
             self._bot = BotProxy(peer)
             self._interactive_actor = ContextVar('brai_identity_interactive_actor', default=None)
+            self._delivery_source = ContextVar('brai_identity_delivery_source', default=None)
 
         def is_interactive_actor(self, user_id):
             """Допустить actual actor только внутри подтверждённого Root callback."""
@@ -67,6 +69,7 @@ def make_adapter(config, platform, peer, publish_file):
             if not hasattr(self, '_brai_chats'):
                 self._brai_chats = {}
             self._brai_chats[str(source.chat_id)] = {'name': source.chat_name or '', 'type': source.chat_type}
+            self._delivery_source.set((str(source.chat_id), getattr(source, 'thread_id', None)))
 
         async def get_chat_info(self, chat_id):
             """Вернуть только известный из подтверждённого входа чат."""
@@ -97,13 +100,21 @@ def make_adapter(config, platform, peer, publish_file):
                     raise ValueError('invalid send result')
                 fields = ('success', 'message_id', 'error', 'raw_response', 'retryable', 'retry_after', 'continuation_message_ids', 'error_kind')
                 return SendResult(**{key: value[key] for key in fields if key in value})
-            except (ConnectionError, TimeoutError, RpcError, ValueError):
+            except (ConnectionError, TimeoutError, RpcError, ValueError) as error:
+                logging.getLogger(__name__).warning(
+                    'identity_delivery_failed action=%s error=%s rpc_code=%s',
+                    name, type(error).__name__, getattr(error, 'code', None))
                 return SendResult(success=False, error='Ingress delivery unavailable or outcome unknown')
 
         async def send(self, chat_id, content, reply_to=None, metadata=None):
             return await self._action('send', dict(chat_id=chat_id, content=content, reply_to=reply_to, metadata=metadata))
 
         async def edit_message(self, chat_id, message_id, content, *, finalize=False, metadata=None):
+            # AIDEV-NOTE: Native финализатор не передаёт тему. Контекст dispatch
+            # наследуется его задачами и не смешивает параллельные разговоры.
+            source = self._delivery_source.get()
+            if metadata is None and source is not None and source[0] == str(chat_id):
+                metadata = {'thread_id': source[1]} if source[1] else None
             return await self._action('edit_message', dict(chat_id=chat_id, message_id=message_id, content=content, finalize=finalize, metadata=metadata))
 
         def supports_draft_streaming(self, chat_type=None, metadata=None):

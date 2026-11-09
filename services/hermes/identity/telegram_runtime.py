@@ -17,6 +17,7 @@ import time
 import uuid
 
 from .ingress import Bridge
+from .artifact_read import receive_artifact, transcode_voice
 from .routes import RouteLedger
 from .scope import UNSCOPED, request_scope
 
@@ -456,16 +457,15 @@ class Resolver:
             else:
                 items = [{'artifact': payload['artifact'], 'caption': payload.get('caption') or ''}]
                 kind, fallback = 'single', False
-            prepared, converted = [], []
+            prepared, opened = [], []
             try:
                 for item in items:
-                    artifact = await broker_call('ingress.artifact' if turn else 'ingress.delivery-artifact',
+                    artifact, stream = await receive_artifact(
                         {'uid': uid, **({'turnId': turn['id']} if turn else {}),
+                         **({'inputId': input_id} if input_id else {}),
                          'artifactId': item['artifact']['artifact_id']}, timeout=120)
+                    opened.append(stream)
                     current()
-                    path = artifact.get('localPath')
-                    if not isinstance(path, str) or not path.startswith('/'):
-                        raise ValueError('Invalid artifact')
                     view = item.get('presentation') or presentation(artifact)
                     if action == 'send_document':
                         view = 'document'
@@ -474,14 +474,11 @@ class Resolver:
                     elif action == 'send_voice' and payload.get('is_voice'):
                         view = 'voice'
                         if artifact['mimeType'] not in ('audio/ogg', 'audio/opus', 'audio/mpeg', 'audio/mp4'):
-                            from gateway.platforms.base import transcode_to_ogg_opus
-                            converted_path = await asyncio.to_thread(transcode_to_ogg_opus, path)
-                            if not converted_path or converted_path == path:
-                                raise ValueError('Voice conversion unavailable')
-                            converted.append(converted_path)
-                            path = converted_path
-                            artifact = {**artifact, 'mimeType': 'audio/ogg', 'sizeBytes': Path(path).stat().st_size}
-                    prepared.append({'localPath': path, 'file': artifact,
+                            stream = await transcode_voice(stream)
+                            opened.append(stream)
+                            artifact = {**artifact, 'mimeType': 'audio/ogg',
+                                        'sizeBytes': stream.getbuffer().nbytes}
+                    prepared.append({'readHandle': stream, 'file': artifact,
                         'caption': item['caption'], 'presentation': view})
                 validate_telegram(prepared)
                 current()
@@ -500,8 +497,8 @@ class Resolver:
                 return {'success': True, 'message_id': ids[-1], 'continuation_message_ids': ids[:-1],
                         'raw_response': {'message_ids': ids}}
             finally:
-                for path in converted:
-                    Path(path).unlink(missing_ok=True)
+                for stream in opened:
+                    stream.close()
         if action == 'send_image':
             raise PermissionError('Publish local media first')
         values = {**payload, 'metadata': metadata}

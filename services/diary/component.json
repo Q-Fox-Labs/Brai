@@ -9,7 +9,8 @@
   "executableSources": [
     "services/diary/src/main.mjs",
     "services/diary/src/migrate.mjs",
-    "services/diary/src/stdio-proxy.mjs"
+    "services/diary/src/stdio-proxy.mjs",
+    "services/diary/src/retry-transcription.mjs"
   ],
   "inputs": {
     "build": [],
@@ -25,10 +26,13 @@
       "services/diary/src/domain.mjs",
       "services/diary/src/luna.mjs",
       "services/diary/src/adapters.mjs",
+      "services/diary/src/retry-transcription.mjs",
+      "services/diary/src/recovery.mjs",
       "services/diary/src/store.mjs",
       "services/diary/src/http.mjs"
     ],
     "checks": [
+      "services/diary/tests/recovery.test.mjs",
       "services/diary/tests/domain.test.mjs",
       "services/diary/tests/postgres.integration.test.mjs",
       "services/diary/tests/proxy.test.mjs"
@@ -75,7 +79,8 @@
     "entrypoints": [
       "services/diary/src/main.mjs",
       "services/diary/src/migrate.mjs",
-      "services/diary/src/stdio-proxy.mjs"
+      "services/diary/src/stdio-proxy.mjs",
+      "services/diary/src/retry-transcription.mjs"
     ],
     "smokeImports": [
       "services/diary/src/domain.mjs"

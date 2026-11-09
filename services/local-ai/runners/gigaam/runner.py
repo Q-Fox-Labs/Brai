@@ -31,7 +31,8 @@ MODEL_ID = "gigaam-v3-e2e-ctc"
 MODEL_REVISION = "cec030b4c4f35d928e4a9044a3bdb29ebd499fac"
 MAX_AUDIO_SECONDS = 25.0
 PINNED_MODEL_SOURCE_SHA256 = "269be43b635b1e510115baa2a843c5cbaa052e8adf0be30dc133a2ba5b5f2d86"
-ALLOWED_AUDIO_FORMATS = "wav,flac,mp3,ogg"
+# AIDEV-NOTE: FFprobe сообщает MOV aliases для M4A; разрешён только локальный file protocol.
+ALLOWED_AUDIO_FORMATS = "wav,flac,mp3,ogg,mov,mp4,m4a,3gp,3g2,mj2"
 DECODE_SAMPLE_RATE = 16_000
 DECODE_CHANNELS = 1
 DECODE_SAMPLE_BYTES = 2
