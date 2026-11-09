@@ -99,7 +99,7 @@ export async function closeRelease(db,op,project,workspace,{flowGit,github,recon
   // AIDEV-NOTE: Execution guard области исключает повтор Activity; Ansible имеет отдельную защиту своего rollout ID.
   for(const leg of [r.details.primary,r.details.backport].filter(Boolean)){
     if(leg.pr_attempted&&!leg.pr_number){
-      const pr=await github.find(project,leg,{state:'all',workspaceId:workspace.id,head:leg.head});
+      const pr=await github.find(project,leg,{state:'all',head:leg.head});
       if(!pr)return {status:'awaiting_reconciliation',reason:'PR_CREATE_UNCERTAIN'};
       leg.pr_number=pr.number;
     }

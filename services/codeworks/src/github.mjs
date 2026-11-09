@@ -63,13 +63,13 @@ export function createGitHub({run=command,registryFactory=createRegistry,evidenc
   }
   return {
     /** Ищет единственный PR в выбранном состоянии по всем страницам. */
-    async find(project,leg,{state='open',workspaceId,head}={}) {
+    async find(project,leg,{state='open',head}={}) {
       const owner=project.github.repository.split('/')[0];
       const matches=[];
       for(let page=1;page<=100;page++) {
         const prs=await api(project,'pulls?state='+state+'&per_page=100&head='+encodeURIComponent(owner+':'+leg.branch)+'&base='+encodeURIComponent(leg.target)+'&page='+page);
         if(!Array.isArray(prs))throw new Fault('GITHUB_UNAVAILABLE');
-        matches.push(...prs.filter(pr=>!workspaceId||(pr.body?.includes('Codeworks workspace '+workspaceId+';')&&pr.head?.sha===head)));
+        matches.push(...prs.filter(pr=>!head||pr.head?.sha===head));
         if(matches.length>1)throw new Fault('PR_AMBIGUOUS','Multiple pull requests match the branch and target.');
         if(prs.length<100)return matches[0]??null;
       }

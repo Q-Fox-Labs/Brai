@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { createGit } from './git.mjs';
 import { createFlowGit } from './git-flow.mjs';
 import { createGitHub } from './github.mjs';
+import {createPullRequests} from './pull-requests.mjs';
 import { advanceRelease, advanceSync } from './release.mjs';
 import { measureReleaseStep, recordReleaseState } from './release-timing.mjs';
 import { Fault,safeFault } from './errors.mjs';
@@ -205,7 +206,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
       if(op.kind==='sync'){
         const details=op.result??{};
         const save=async value=>db.query('UPDATE codeworks.operations SET result=$2,updated_at=now() WHERE id=$1',[op.id,value]);
-        const outcome=await advanceSync({project,workspace:w,operation:op,details},{git:flowGit,github,inspect:(...a)=>git.inspect(...a),save,checkpoint});
+        const outcome=await advanceSync({project,workspace:w,operation:op,details},{git:flowGit,github,pullRequests:createPullRequests(db),inspect:(...a)=>git.inspect(...a),save,checkpoint});
         await finish(outcome.status,outcome.reason,details);return;
       }
       if(op.kind==='release'){
@@ -217,7 +218,7 @@ export async function runOperation(pool,operationId,git,{checkpoint=async()=>{},
         };
         let outcome;
         try {
-          outcome=await measureReleaseStep(op.id,'release.advance',()=>advanceRelease({project,workspace:w,operation:op,release},{git:flowGit,github,inspect:(...a)=>git.inspect(...a),save,evidence,checkpoint,synchronizeCheckout:sourceStep?async sha=>{
+          outcome=await measureReleaseStep(op.id,'release.advance',()=>advanceRelease({project,workspace:w,operation:op,release},{git:flowGit,github,pullRequests:createPullRequests(db),inspect:(...a)=>git.inspect(...a),save,evidence,checkpoint,synchronizeCheckout:sourceStep?async sha=>{
             const writers=(await db.query("SELECT 1 FROM codeworks.write_calls WHERE workspace_id=$1 AND state IN ('preparing','in_flight','uncertain') LIMIT 1",[w.id])).rowCount;
             if(writers)return {state:'waiting',reason:'WRITER_OUTCOME_UNKNOWN'};
             return git.synchronizeCheckout(project,w,sha);
