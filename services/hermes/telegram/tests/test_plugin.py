@@ -2234,6 +2234,67 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("не отправлен", text)
 
 
+class PrivateIdentityRouteTests(unittest.IsolatedAsyncioTestCase):
+    """Изолирует route regressions от не связанных с ними factory recovery tasks."""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="telegram-route-test-")
+        self.config = replace(mod.Config("123", Path(self.tmp.name) / "state", "/test/trusted.mjs",
+                              "/usr/local/bin/node", str(Path(self.tmp.name) / "results")),
+                              game_core_enabled=False)
+        self.bridge = FakeBridge()
+        self.plugin = mod.TelegramPlugin(self.config, self.bridge)
+        self.adapter = NS(_brai_chats={})
+        self.plugin.adapter = self.adapter
+        self.stubs = patch.dict(sys.modules, ptb_stubs())
+        self.stubs.start()
+
+    async def asyncTearDown(self):
+        self.plugin.close()
+        self.stubs.stop()
+        self.tmp.cleanup()
+
+    event = PluginTests.event
+    update = PluginTests.update
+
+    async def test_identity_worker_accepts_two_known_private_chats_for_canonical_owner(self):
+        """Root-bound DM сохраняет chat аккаунта при каноническом авторе worker."""
+        self.plugin.config = replace(self.config, identity_worker=True, game_core_enabled=False)
+        self.adapter._brai_chats = {'910001': {'type': 'dm'}, '910002': {'type': 'private'}}
+        for chat in ('910001', '910002'):
+            for kind in ('dm', 'private'):
+                source = NS(platform='telegram', user_id='123', chat_id=chat,
+                            chat_type=kind, thread_id='', is_bot=False)
+                event = self.event(source=source)
+                self.assertTrue(self.plugin._route_matches(chat, kind, '123'))
+                self.assertIsNone(await self.plugin.incoming(event))
+                self.assertIs(self.plugin.inbound_events[(chat, '', event.message_id)], event)
+                await self.plugin.guard(self.update(chat=chat, owner=123, chat_type='private'), None)
+        self.assertEqual(self.bridge.calls, [])
+
+    async def test_identity_worker_rejects_unknown_private_routes_and_foreign_senders(self):
+        """Known route не заменяет проверку автора и не делает группу личным чатом."""
+        self.plugin.config = replace(self.config, identity_worker=True, game_core_enabled=False)
+        self.adapter._brai_chats = {'910001': {'type': 'dm'}, '910002': {'type': 'supergroup'}}
+        for chat, user in (('910003', '123'), ('123', '123'), ('910001', '999'),
+                           ('910001', '910001'), ('910002', '123')):
+            event = self.event(source=NS(platform='telegram', user_id=user, chat_id=chat,
+                                        chat_type='dm', thread_id='', is_bot=False))
+            self.assertEqual(await self.plugin.incoming(event),
+                             {'action': 'skip', 'reason': 'brai-owner-route-only'})
+        self.assertEqual(self.plugin.inbound_events, {})
+        self.assertEqual(self.bridge.calls, [])
+
+    async def test_legacy_private_route_stays_self_only_with_known_adapter_metadata(self):
+        """Обычный Telegram plugin не получает identity-worker исключение."""
+        self.adapter._brai_chats = {'910001': {'type': 'dm'}}
+        self.assertFalse(self.plugin._route_matches('910001', 'dm', '123'))
+        result = await self.plugin.incoming(self.event(source=NS(
+            platform='telegram', user_id='123', chat_id='910001', chat_type='dm')))
+        self.assertEqual(result, {'action': 'skip', 'reason': 'brai-owner-route-only'})
+        self.assertTrue(self.plugin._route_matches('123', 'dm', '123'))
+
+
 class BridgeTests(unittest.TestCase):
     """Проверяет настоящий ограниченный stdio клиент с локальным Python child process."""
 

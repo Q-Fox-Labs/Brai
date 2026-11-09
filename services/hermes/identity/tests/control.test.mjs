@@ -94,26 +94,126 @@ test('linked account receives its own login code after Auth confirms canonical o
   assert.equal(foreign.calls.length, 0);
 });
 
-test('account link warning precedes issue and secret is delivered only to source account', async () => {
-  const calls = [], delivered = [], secret = 'a'.repeat(43);
-  const authCall = async (operation, input) => {
-    calls.push(operation);
-    if (operation === 'telegram-resolve') return { user: { id: 'u1', profileId: 'p1', telegramId: '42', status: 'active' } };
-    if (operation === 'telegram-link-issue') return { code: secret, expiresAt: 'later' };
-  };
-  const { control } = setup({ authCall, telegramSend: async value => { delivered.push(value); return { ok: true }; } });
-  const input = { uid: 1001, telegramId: '84', threadId: 7 };
-  assert.deepEqual(await control.sendAccountLink({ ...input, phase: 'offer' }), { status: 'sent' });
-  assert.deepEqual(calls, ['telegram-resolve']);
-  assert.match(delivered[0].message, /всей вашей памяти/);
-  assert.match(delivered[0].message, /другому человеку/);
-  assert.match(delivered[0].message, /Подтверждаете/);
-  const result = await control.sendAccountLink({ ...input, phase: 'command' });
+test('link offer returns labels and a public bot URL without delivering or issuing anything', async () => {
+  const f = accountFixture();
+  const result = await f.control.sendAccountLink({ uid: 1001, telegramId: '42', phase: 'offer', threadId: 7 });
+  assert.deepEqual(result, { status: 'needs_consent', botUrl: 'https://t.me/brai_test_bot',
+    accounts: [{ name: 'Анна Тест', username: 'anna' }] });
+  assert.equal(f.delivered.length, 0);
+  assert.equal(f.calls.some(([op]) => op === 'telegram-link-issue'), false);
+  assert.deepEqual(f.infoCalls.filter(([method]) => method === 'getChat').map(([, id]) => id), ['42']);
+});
+
+test('confirmed link sends the agent introduction before issuing a separate pre command and copy button', async () => {
+  const f = accountFixture();
+  const message = 'Перейдите во второй аккаунт и откройте этого бота.';
+  const result = await f.control.sendAccountLink({ uid: 1001, telegramId: '42', phase: 'command', message, threadId: 7 });
+  const command = '/start link_' + f.secret;
   assert.deepEqual(result, { status: 'sent' });
-  assert.equal(JSON.stringify(result).includes(secret), false);
-  assert.equal(delivered[1].telegramId, '84');
-  assert.equal(delivered[1].threadId, 7);
-  assert.match(delivered[1].message, new RegExp('/start link_' + secret));
+  assert.equal(JSON.stringify(result).includes(f.secret), false);
+  assert.equal(f.delivered.length, 2);
+  assert.equal(f.delivered[0].message, message + '\nhttps://t.me/brai_test_bot');
+  assert.equal(f.delivered[1].message, command);
+  assert.deepEqual(f.delivered[1].entities, [{ type: 'pre', offset: 0, length: command.length }]);
+  assert.deepEqual(f.delivered[1].replyMarkup, {
+    inline_keyboard: [[{ text: 'Скопировать', copy_text: { text: command } }]],
+  });
+  for (const sent of f.delivered) {
+    assert.equal(sent.telegramId, '42');
+    assert.equal(sent.threadId, 7);
+  }
+  assert.deepEqual(f.events.filter(value => ['intro', 'issue', 'command'].includes(value)), ['intro', 'issue', 'command']);
+});
+
+test('unconfirmed introduction neither issues a code nor sends or retries the machine command', async () => {
+  for (const outcome of [{ ok: false }, {}, new Error('synthetic transport detail')]) {
+    const f = accountFixture({ outcomes: [outcome] });
+    const result = await f.control.sendAccountLink({ uid: 1001, telegramId: '42', phase: 'command', message: 'Откройте второй аккаунт.' });
+    assert.equal(['failed', 'unknown'].includes(result.status), true);
+    assert.equal(f.delivered.length, 1);
+    assert.equal(f.calls.some(([op]) => op === 'telegram-link-issue'), false);
+    assert.equal(JSON.stringify(result).includes('synthetic transport detail'), false);
+    assert.equal(JSON.stringify(result).includes(f.secret), false);
+  }
+});
+
+test('model introduction cannot inject a URL mention command or invalid payload before issuing anything', async () => {
+  for (const message of ['https://t.me/another_bot', 'Откройте @another_bot', '/start forged',
+      'Перейдите\nhttps://example.test', '', '   ', 'x'.repeat(2001), null, 42]) {
+    const f = accountFixture();
+    const result = await f.control.sendAccountLink({ uid: 1001, telegramId: '42', phase: 'command', message });
+    assert.equal(result.status, 'needs_instruction');
+    assert.equal(f.delivered.length, 0);
+    assert.equal(f.calls.some(([op]) => op === 'telegram-link-issue'), false);
+  }
+});
+
+test('a refused or unknown command delivery reports one outcome without resending or exposing the secret', async () => {
+  for (const outcome of [{ ok: false }, {}, new Error('synthetic transport detail')]) {
+    const f = accountFixture({ outcomes: [{ ok: true }, outcome] });
+    const result = await f.control.sendAccountLink({ uid: 1001, telegramId: '42', phase: 'command', message: 'Откройте второй аккаунт.' });
+    assert.equal(['failed', 'unknown'].includes(result.status), true);
+    assert.equal(f.delivered.length, 2);
+    assert.equal(f.calls.filter(([op]) => op === 'telegram-link-issue').length, 1);
+    assert.equal(JSON.stringify(result).includes(f.secret), false);
+    assert.equal(JSON.stringify(result).includes('synthetic transport detail'), false);
+  }
+});
+
+test('labels cannot query an unbound account and invalid route never delivers or issues', async () => {
+  const foreign = accountFixture();
+  assert.equal((await foreign.control.sendAccountLink({ uid: 1001, telegramId: '999', phase: 'offer' })).status, 'denied');
+  assert.equal(foreign.infoCalls.length, 0);
+  for (const threadId of [0, -1, true, '73', null, 1.5]) {
+    const f = accountFixture();
+    assert.equal((await f.control.sendAccountLink({ uid: 1001, telegramId: '42', phase: 'command', message: 'Вступление', threadId })).status, 'denied');
+    assert.equal(f.delivered.length, 0);
+    assert.equal(f.calls.some(([op]) => op === 'telegram-link-issue'), false);
+  }
+});
+
+test('account labels follow current aliases rather than a disconnected memory author', async () => {
+  const f = accountFixture({ accounts: ['84'] });
+  const result = await f.control.sendAccountLink({ uid: 1001, telegramId: '84', phase: 'offer' });
+  assert.equal(result.status, 'needs_consent');
+  assert.deepEqual(result.accounts, [{ name: 'Борис', username: 'boris' }]);
+  assert.deepEqual(f.infoCalls.filter(([method]) => method === 'getChat').map(([, id]) => id), ['84']);
+});
+
+test('foreign chat metadata and malformed bot identity never become labels or destination URLs', async () => {
+  const foreign = accountFixture({ wrongChat: true });
+  const result = await foreign.control.sendAccountLink({ uid: 1001, telegramId: '42', phase: 'offer' });
+  assert.equal(result.status, 'needs_consent');
+  assert.deepEqual(result.accounts, [{ name: null, username: null }]);
+  assert.equal(JSON.stringify(result).includes('outsider'), false);
+  assert.equal(foreign.delivered.length, 0);
+  for (const badBotInfo of [{ is_bot: false, username: 'other' }, { is_bot: true, username: 'https://example.test' }]) {
+    const f = accountFixture({ badBotInfo });
+    const offer = await f.control.sendAccountLink({ uid: 1001, telegramId: '42', phase: 'offer' });
+    assert.notEqual(offer.status, 'needs_consent');
+    assert.equal(f.delivered.length, 0);
+    assert.equal(f.calls.some(([op]) => op === 'telegram-link-issue'), false);
+    assert.equal(JSON.stringify(offer).includes('https://example.test'), false);
+  }
+});
+
+test('link redemption resolves current Auth account labels and label errors never redeem twice or undo success', async () => {
+  const { privateCall } = await import('../control.mjs');
+  for (const brokenLabels of [false, true]) {
+    const f = accountFixture({ brokenLabels });
+    const result = await privateCall({ control: f.control, authCall: f.authCall, registry },
+      'identity.link-redeem', { telegramId: '84', code: f.secret });
+    assert.equal(result.user.id, 'u1');
+    assert.equal(f.calls.filter(([op]) => op === 'telegram-link-redeem').length, 1);
+    assert.deepEqual(f.accounts(), ['42', '84']);
+    assert.equal(f.delivered.length, 0);
+    assert.equal(JSON.stringify(result.accounts).includes('p1'), false);
+    assert.equal(JSON.stringify(result).includes('synthetic label failure'), false);
+    assert.equal(f.infoCalls.filter(([method]) => method === 'getChat').every(([, id]) => ['42', '84'].includes(id)), true);
+    if (!brokenLabels) assert.deepEqual(result.accounts, [
+      { name: 'Анна Тест', username: 'anna' }, { name: 'Борис', username: 'boris' },
+    ]);
+  }
 });
 
 test('login preserves trusted DM topic and rejects invalid topics before issuing a code', async () => {
@@ -275,32 +375,42 @@ test('archive requires active admin, successful audit and complete protected con
   assert.deepEqual(await missingConfig.sendLogin({ uid: 995, telegramId: '42', privateChat: true, requestId: 'r' }), { status: 'denied' });
 });
 
-test('unlink warning pins first account, removes it only on confirmed call and blocks admin last channel', async () => {
-  const delivered = [], calls = [];
-  let accounts = ['42','84'], role = 'user';
-  const user = () => ({ id:'u1', profileId:'p1', telegramId:'42', status:'active', role });
-  const authCall = async (op, input) => {
-    calls.push([op,input]);
-    if (op === 'telegram-resolve') return {user:accounts.includes(input.telegramId) ? user() : null};
-    if (op === 'identity-get') return {user:user(),telegramIds:[...accounts]};
-    if (op === 'telegram-unlink') { accounts = accounts.filter(id=>id!==input.targetTelegramId); return {unlinked:true}; }
-  };
-  const {control} = setup({authCall,telegramSend:async value=>{delivered.push(value);return {ok:true};}});
-  const input = {uid:1001,telegramId:'84',target:'other'};
-  assert.deepEqual(await control.sendAccountUnlink({...input,phase:'offer'}), {status:'sent',targetTelegramId:'42'});
-  assert.match(delivered[0].message,/Подтверждаю отвязку Telegram-аккаунта 42/);
-  assert.equal(calls.some(([op])=>op==='telegram-unlink'),false);
-  assert.equal((await control.sendAccountUnlink({...input,phase:'confirm',targetTelegramId:'42'})).status,'sent');
-  assert.deepEqual(accounts,['84']);
-  assert.deepEqual(await control.invokeTool(1001,'timer_snapshot_get',{}).catch(error=>error.message),'SOURCE_UNAVAILABLE');
-  role = 'admin';
-  assert.deepEqual(await control.sendAccountUnlink({...input,target:'current',phase:'offer'}),{status:'denied',reason:'admin-last-channel'});
-  role = 'user';
-  assert.equal((await control.sendAccountUnlink({...input,target:'current',phase:'offer'})).status,'sent');
-  assert.match(delivered.at(-1).message,/последний подключённый канал/);
-  assert.equal((await control.sendAccountUnlink({...input,target:'current',phase:'confirm',targetTelegramId:'84'})).status,'sent');
-  assert.deepEqual(accounts,[]);
-  assert.equal((await control.sendAccountUnlink({...input,target:'current',phase:'offer'})).status,'denied');
+test('unlink offer exposes a pinned label without sending and preserves the admin last-channel rule', async () => {
+  const f = accountFixture({ accounts: ['42', '84'] });
+  const input = { uid: 1001, telegramId: '84', target: 'other' };
+  const offer = await f.control.sendAccountUnlink({ ...input, phase: 'offer' });
+  assert.equal(offer.status, 'needs_consent');
+  assert.equal(offer.targetTelegramId, '42');
+  assert.deepEqual(offer.account, { name: 'Анна Тест', username: 'anna' });
+  assert.equal(offer.lastChannel, false);
+  assert.equal(f.delivered.length, 0);
+  assert.equal(f.calls.some(([op]) => op === 'telegram-unlink'), false);
+  assert.equal((await f.control.sendAccountUnlink({ ...input, phase: 'confirm', targetTelegramId: '42' })).status, 'sent');
+  assert.deepEqual(f.accounts(), ['84']);
+  assert.equal(f.delivered.length, 1);
+  assert.equal(f.delivered[0].message.includes('p1'), false);
+  assert.equal(f.delivered[0].message.includes('42'), false);
+  f.role('admin');
+  assert.deepEqual(await f.control.sendAccountUnlink({ ...input, target: 'current', phase: 'offer' }),
+    { status: 'denied', reason: 'admin-last-channel' });
+  f.role('user');
+  const last = await f.control.sendAccountUnlink({ ...input, target: 'current', phase: 'offer' });
+  assert.equal(last.status, 'needs_consent');
+  assert.equal(last.lastChannel, true);
+  assert.equal((await f.control.sendAccountUnlink({ ...input, target: 'current', phase: 'confirm', targetTelegramId: '84' })).status, 'sent');
+  assert.deepEqual(f.accounts(), []);
+  assert.equal((await f.control.sendAccountUnlink({ ...input, target: 'current', phase: 'offer' })).status, 'denied');
+});
+
+test('unlink confirmation refuses a changed pinned account instead of selecting a replacement', async () => {
+  const f = accountFixture({ accounts: ['42', '84'] });
+  assert.equal((await f.control.sendAccountUnlink({ uid: 1001, telegramId: '84', target: 'other', phase: 'offer' })).status, 'needs_consent');
+  f.replaceAccounts(['84', '126']);
+  const result = await f.control.sendAccountUnlink({ uid: 1001, telegramId: '84', target: 'other', phase: 'confirm', targetTelegramId: '42' });
+  assert.equal(result.status, 'denied');
+  assert.deepEqual(f.accounts(), ['84', '126']);
+  assert.equal(f.calls.some(([op]) => op === 'telegram-unlink'), false);
+  assert.equal(f.delivered.length, 0);
 });
 
 test('authorization uses stable owner even after the original Telegram account is disconnected', async () => {
@@ -315,3 +425,40 @@ test('authorization uses stable owner even after the original Telegram account i
   const direct = await privateCall(runtime,'identity.unlink',{telegramId:'84'}).catch(error=>error.message);
   assert.equal(direct,'METHOD_NOT_FOUND');
 });
+
+function accountFixture(options = {}) {
+  const calls = [], delivered = [], infoCalls = [], events = [], outcomes = [...(options.outcomes ?? [])];
+  const secret = 'a'.repeat(43);
+  let accounts = [...(options.accounts ?? ['42'])], role = 'user';
+  const user = () => ({ id: 'u1', profileId: 'p1', telegramId: '42', status: 'active', role });
+  const authCall = async (operation, input) => {
+    calls.push([operation, input]);
+    if (operation === 'telegram-resolve') return { user: accounts.includes(input.telegramId) ? user() : null };
+    if (operation === 'identity-get') return { user: user(), telegramIds: [...accounts] };
+    if (operation === 'telegram-link-issue') { events.push('issue'); return { code: secret, expiresAt: 'later' }; }
+    if (operation === 'telegram-link-redeem') { if (!accounts.includes(input.telegramId)) accounts.push(input.telegramId); return { user: user() }; }
+    if (operation === 'telegram-unlink') { accounts = accounts.filter(id => id !== input.targetTelegramId); return { unlinked: true }; }
+  };
+  const telegramInfo = async (method, id) => {
+    infoCalls.push([method, id]);
+    if (method === 'getMe') return options.badBotInfo ?? { is_bot: true, username: 'brai_test_bot' };
+    assert.equal(method, 'getChat');
+    assert.equal(accounts.includes(id), true, 'only currently linked Auth IDs may be queried');
+    if (options.brokenLabels) throw new Error('synthetic label failure');
+    if (options.wrongChat) return { id: '999', type: 'private', first_name: 'outsider', username: 'outsider' };
+    return { id, type: 'private', ...(id === '42'
+      ? { first_name: 'Анна', last_name: 'Тест', username: 'anna' }
+      : { first_name: 'Борис', username: 'boris' }) };
+  };
+  const telegramSend = async value => {
+    delivered.push(value);
+    events.push(value.message.startsWith('/start link_') ? 'command' : 'intro');
+    const result = outcomes.length ? outcomes.shift() : { ok: true };
+    if (result instanceof Error) throw result;
+    return result;
+  };
+  const { control } = setup({ authCall, telegramInfo, telegramSend });
+  return { control, authCall, secret, calls, delivered, infoCalls, events,
+    accounts: () => [...accounts], role: value => { role = value; },
+    replaceAccounts: value => { accounts = [...value]; } };
+}
