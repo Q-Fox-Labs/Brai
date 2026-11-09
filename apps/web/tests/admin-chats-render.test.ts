@@ -7,11 +7,13 @@ import {test} from "node:test";
 import {createElement, type ComponentType} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import ts from "typescript";
+import {adminChatDisplayText} from "../app/agent/admin-chat-display.ts";
 const file=new URL("../app/agent/admin-chats.tsx",import.meta.url),require=createRequire(file);
 const output=ts.transpileModule(readFileSync(file,"utf8"),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX}}).outputText;
 const mod={exports:{} as {AdminMessageBody:ComponentType<{message:{id:string;role:"assistant";text:string;createdAt:string};owner:string}>}};
 new Function("require","module","exports",output)((name:string)=>{
  if(name.endsWith(".css")||name==="./admin-chat-client")return {};
+ if(name==="./admin-chat-display")return {adminChatDisplayText};
  if(name==="./markdown")return {default:({text}:{text:string})=>createElement("pre",null,text)};
  if(name.startsWith("../"))return {};
  return require(name);
@@ -28,4 +30,9 @@ test("fenced, escaped and inline code references stay text without network media
  for(const text of ["~~~\n"+link+"\n~~~",tick.repeat(3)+"\n"+link+"\n"+tick.repeat(3),tick+link+tick,"\\"+link]){
   const html=render(text);assert.ok(!html.includes("<img"));assert.ok(!html.includes("preview=1"));assert.ok(html.includes("/home/test/results/"));
  }
+});
+test("delivery commands never render private paths or invent delivered attachments",()=>{
+ const html=render('Вот ответ.\n\n[[audio_as_voice]]\nMEDIA:"/private/profile/results/.delivery/opaque/0-voice.ogg"');
+ assert.match(html,/Вот ответ/);assert.doesNotMatch(html,/MEDIA:|audio_as_voice|private|delivery|<audio|preview=1/);
+ assert.equal(render('[[as_document]]\nMEDIA:"/private/report.docx"'),"");
 });

@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import WorkspaceFrame from "../shell/workspace-frame";
 import Markdown from "./markdown";
 import { AdminChatError, chatParticipant, adminChatKey, latestAdminChat, loadAdminChats, mergeAdminMessages, readAdminChat, type AdminChat, type ChatMessage } from "./admin-chat-client";
+import { adminChatDisplayText } from "./admin-chat-display";
 import "./telegram-observer.css";
 
 type History = { key: string; messages: ChatMessage[]; cursor: string | null };
@@ -25,6 +26,7 @@ function ParticipantAvatar({ chat }: { chat: AdminChat }) {
 
 /** Показывает опубликованные файлы через повторную проверку владельца и MIME на сервере. */
 export function AdminMessageBody({ message, owner }: { message: ChatMessage; owner: string }) {
+  message = { ...message, text: adminChatDisplayText(message.text, message.role) };
   const files: { id: string; label: string; name: string; url: string }[] = [];
   const text = message.text.replace(/(```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)|`[^`\n]+`)|(?<![\\!])!?\[([^\]\n]*)\]\(<?\/(?:[^<>\n)]*\/)?(?:results|artifacts)\/([0-9a-f-]{36})\/([^<>\n)]+)>?\)/gi, (match, code: string | undefined, label: string, id: string, name: string) => {
     if (code) return match;
@@ -97,7 +99,7 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
         const page = await latestAdminChat(chat, previous.messages.at(-1)?.id, controller.signal);
         if (controller.signal.aborted || deniedRef.current) return;
         const current = historyRef.current;
-        if (!follow.current) setNewCount(count => count + page.messages.filter(message => !current.messages.some(old => old.id === message.id)).length);
+        if (!follow.current) setNewCount(count => count + page.messages.filter(message => adminChatDisplayText(message.text, message.role).trim() && !current.messages.some(old => old.id === message.id)).length);
         saveHistory({ key: selectedKey, messages: mergeAdminMessages(current.messages, page.messages), cursor: current.messages.length ? current.cursor : page.nextCursor });
         setMessageError(""); setConnected(true);
       } catch (error) {
@@ -135,7 +137,7 @@ export default function AdminChats({ userId, active, onUnauthorized }: { userId:
         {!selected ? <div className="tg-empty"><h2>Выберите чат</h2><p>Здесь появятся переписки с агентом.</p></div> : <div className="tg-timeline">
           {shown.cursor && <button type="button" className="tg-older" disabled={loading} onClick={() => { void older(); }}>Показать более ранние</button>}
           {loading && !shown.messages.length && <p className="tg-muted" role="status">Загружаем сообщения…</p>}
-          {shown.messages.filter(message => message.text.trim()).map(message => <article className="tg-message" data-direction={message.role === "user" ? "in" : "out"} key={message.id}>
+          {shown.messages.filter(message => adminChatDisplayText(message.text, message.role).trim()).map(message => <article className="tg-message" data-direction={message.role === "user" ? "in" : "out"} key={message.id}>
             <div className="tg-message-meta"><strong>{message.role === "assistant" ? "Brai" : chatParticipant(selected)}</strong><time>{time(message.createdAt)}</time></div><AdminMessageBody message={message} owner={selected.owner.id} />
           </article>)}
         </div>}
